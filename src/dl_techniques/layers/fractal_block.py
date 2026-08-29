@@ -25,10 +25,11 @@ from typing import Tuple, Optional, Any, Dict
 
 from ..utils.logger import logger
 from .standard_blocks import ConvBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fractal_block")
 class FractalBlock(keras.layers.Layer):
     """
     Recursive fractal block implementing the fractal expansion rule for FractalNet.

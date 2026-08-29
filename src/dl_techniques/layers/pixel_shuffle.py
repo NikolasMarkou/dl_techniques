@@ -52,6 +52,7 @@ The operation preserves all information while changing memory layout.
 import keras
 from keras import ops
 from typing import Optional, Tuple, Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -60,7 +61,7 @@ from typing import Optional, Tuple, Any, Dict
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.pixel_shuffle")
 class PixelShuffle(keras.layers.Layer):
     """Pixel shuffle for reducing spatial tokens in vision transformers.
 

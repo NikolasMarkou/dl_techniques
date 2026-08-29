@@ -42,11 +42,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.logit_norm")
 class LogitNorm(keras.layers.Layer):
     """L2-normalize logits, then divide by a fixed temperature.
 

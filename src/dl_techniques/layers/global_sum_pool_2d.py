@@ -16,10 +16,11 @@ References:
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.global_sum_pool_2d")
 class GlobalSumPooling2D(keras.layers.Layer):
     """
     Global sum pooling operation for 2D spatial data.

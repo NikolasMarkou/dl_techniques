@@ -31,12 +31,13 @@ Reference:
 import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class BaseActivation(keras.layers.Layer):
     """Common base for the activation layers in this module.
 
@@ -127,7 +128,7 @@ class BaseActivation(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class GELU(BaseActivation):
     """Exact GELU: ``x * 0.5 * (1 + erf(x / sqrt(2)))``.
 
@@ -181,7 +182,7 @@ class GELU(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class SiLU(BaseActivation):
     """SiLU, also called Swish: ``x * sigmoid(x)``.
 
@@ -219,7 +220,7 @@ class SiLU(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class ExpandedActivation(BaseActivation):
     """Base for the gate-widening variants; owns the trainable ``alpha``.
 
@@ -359,7 +360,7 @@ class ExpandedActivation(BaseActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class xATLU(ExpandedActivation):
     """Expanded ArcTan Linear Unit: an arctan gate with trainable width.
 
@@ -424,7 +425,7 @@ class xATLU(ExpandedActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class xGELU(ExpandedActivation):
     """Expanded GELU: the erf gate with trainable width.
 
@@ -487,7 +488,7 @@ class xGELU(ExpandedActivation):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class xSiLU(ExpandedActivation):
     """Expanded SiLU: the sigmoid gate with trainable width.
 
@@ -566,7 +567,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     return keras.ops.elu(x) + 1.0 + keras.backend.epsilon()
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.expanded_activations")
 class EluPlusOne(BaseActivation):
     """Layer wrapper around :func:`elu_plus_one_plus_epsilon`.
 

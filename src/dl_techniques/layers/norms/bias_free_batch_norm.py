@@ -118,11 +118,12 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.bias_free_batch_norm")
 class BiasFreeBatchNorm(keras.layers.Layer):
     """Variance-only, fixed-statistic normalization; degree-1 homogeneous at inference.
 

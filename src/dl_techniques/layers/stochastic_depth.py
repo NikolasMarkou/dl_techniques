@@ -63,11 +63,12 @@ from typing import Optional, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.stochastic_depth")
 class StochasticDepth(keras.layers.Layer):
     """
     Stochastic Depth regularization for deep networks.

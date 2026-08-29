@@ -20,10 +20,11 @@ channels-first for the transform and permuted back afterwards.
 
 import keras
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fft_layers")
 class FFTLayer(keras.layers.Layer):
     """
     Apply 2D Fast Fourier Transform and output concatenated real/imaginary parts.
@@ -149,7 +150,7 @@ class FFTLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fft_layers")
 class IFFTLayer(keras.layers.Layer):
     """
     Apply 2D Inverse FFT to concatenated real/imaginary parts.

@@ -84,6 +84,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 
 from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -110,7 +111,7 @@ AggregationMethod = Literal['concat', 'add', 'multiply', 'weighted_sum']
 # Main Configurable Pooling Layer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sequence_pooling.sequence_pooling")
 class SequencePooling(keras.layers.Layer):
     """Configurable pooling layer supporting multiple strategies for sequences.
 

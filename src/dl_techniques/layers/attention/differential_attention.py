@@ -108,11 +108,12 @@ from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 
 from .common import apply_attention_mask, compute_attention_scale
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.differential_attention")
 class DifferentialMultiHeadAttention(keras.layers.Layer):
     """
     Differential multi-head attention with pluggable normalization and optional QK-norm.

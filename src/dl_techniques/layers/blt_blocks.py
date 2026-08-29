@@ -226,6 +226,7 @@ from .transformers.transformer import TransformerLayer
 from .embedding.positional_embedding import PositionalEmbedding
 from ..utils.masking import create_mask
 from ..utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -264,7 +265,7 @@ def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.blt")
+@register_dl_technique("dl_techniques.blt")
 class ByteTokenizer(keras.layers.Layer):
     """
     Converts text to byte tokens for BLT processing.
@@ -380,7 +381,7 @@ class ByteTokenizer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class EntropyModel(keras.layers.Layer):
     """
     Small causal transformer for computing next-byte entropy.
@@ -560,7 +561,7 @@ class EntropyModel(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class DynamicPatcher(keras.layers.Layer):
     """
     Creates dynamic patches based on entropy thresholding.
@@ -905,7 +906,7 @@ class DynamicPatcher(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class PatchPooling(keras.layers.Layer):
     """
     Pools byte representations within patches to create patch representations.
@@ -1175,7 +1176,7 @@ class PatchPooling(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class LocalEncoder(keras.layers.Layer):
     """
     Local Encoder for BLT that processes bytes within their patches.
@@ -1362,7 +1363,7 @@ class LocalEncoder(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class GlobalTransformer(keras.layers.Layer):
     """
     Global Transformer for BLT that processes patch sequences.
@@ -1496,7 +1497,7 @@ class GlobalTransformer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class LocalDecoder(keras.layers.Layer):
     """
     Local Decoder for BLT that generates next byte predictions.

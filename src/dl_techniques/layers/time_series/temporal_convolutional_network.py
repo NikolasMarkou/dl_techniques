@@ -4,10 +4,11 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.temporal_convolutional_network")
 class TemporalBlock(layers.Layer):
     """
     A single residual block for the Temporal Convolutional Network.
@@ -199,7 +200,7 @@ class TemporalBlock(layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.temporal_convolutional_network")
 class TemporalConvNet(layers.Layer):
     """
     Temporal Convolutional Network (TCN) encoder.

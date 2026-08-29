@@ -25,6 +25,7 @@ from ...norms import create_normalization_layer, NormalizationType
 from ...sequence_pooling import SequencePooling
 
 from .task_types import NLPTaskType, NLPTaskConfig
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -40,7 +41,7 @@ _DELEGATED_POOLING_STRATEGIES = ('cls', 'mean', 'max', 'last')
 # Base NLP Head Class
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class BaseNLPHead(keras.layers.Layer):
     """
     Base class for all NLP task heads.
@@ -400,7 +401,7 @@ class BaseNLPHead(keras.layers.Layer):
 # Text Classification Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextClassificationHead(BaseNLPHead):
     """
     Head for text classification tasks.
@@ -508,7 +509,7 @@ class TextClassificationHead(BaseNLPHead):
 # Token Classification Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TokenClassificationHead(BaseNLPHead):
     """
     Head for token-level classification tasks.
@@ -633,7 +634,7 @@ class TokenClassificationHead(BaseNLPHead):
 # Question Answering Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class QuestionAnsweringHead(BaseNLPHead):
     """
     Head for extractive question answering.
@@ -753,7 +754,7 @@ class QuestionAnsweringHead(BaseNLPHead):
 # Text Similarity Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextSimilarityHead(BaseNLPHead):
     """
     Head for text similarity and semantic matching tasks.
@@ -954,7 +955,7 @@ class TextSimilarityHead(BaseNLPHead):
 # Text Generation Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextGenerationHead(BaseNLPHead):
     """
     Head for text generation tasks.
@@ -1052,7 +1053,7 @@ class TextGenerationHead(BaseNLPHead):
 # Multiple Choice Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class MultipleChoiceHead(BaseNLPHead):
     """
     Head for multiple choice tasks.
@@ -1164,7 +1165,7 @@ class MultipleChoiceHead(BaseNLPHead):
 # Multi-Task NLP Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class MultiTaskNLPHead(keras.layers.Layer):
     """
     Multi-task head that combines multiple task-specific NLP heads.

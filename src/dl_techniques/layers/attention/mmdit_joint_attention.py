@@ -51,11 +51,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.mmdit_joint_attention")
 class MMDiTJointAttention(keras.layers.Layer):
     """
     SD3 MMDiT dual-stream joint attention (image + text).

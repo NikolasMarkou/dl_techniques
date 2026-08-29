@@ -80,6 +80,7 @@ from .common import (
     compute_attention_scale,
     validate_head_divisibility
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -106,7 +107,7 @@ from .common import (
 _MASK_NEG = -1e9
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.ideogram4_attention")
 class Ideogram4Attention(keras.layers.Layer):
     """Ideogram4 packed self-attention with QK-norm, mRoPE, and a segment mask.
 

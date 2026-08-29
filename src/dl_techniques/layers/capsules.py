@@ -82,11 +82,12 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations.squash import SquashLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.capsules")
 class PrimaryCapsule(keras.layers.Layer):
     """Primary capsule layer that converts CNN features into capsule vectors.
 
@@ -308,7 +309,7 @@ class PrimaryCapsule(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.capsules")
 class RoutingCapsule(keras.layers.Layer):
     """Capsule layer with iterative dynamic routing between capsules.
 
@@ -580,7 +581,7 @@ class RoutingCapsule(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.capsules")
 class CapsuleBlock(keras.layers.Layer):
     """Complete capsule block combining dynamic routing with optional regularization.
 

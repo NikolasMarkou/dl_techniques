@@ -24,11 +24,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.forecasting_layers")
 class NaiveResidual(layers.Layer):
     """
     Structural implementation of the Naive Benchmark Principle.
@@ -158,7 +159,7 @@ class NaiveResidual(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.forecasting_layers")
 class ForecastabilityGate(layers.Layer):
     """
     Learnable gate for weighing deep predictions versus naive forecasts.
@@ -366,7 +367,7 @@ class ForecastabilityGate(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.forecasting_layers")
 class ConformalQuantileHead(layers.Layer):
     """
     Output layer designed for Conformalized Quantile Regression (CQR).

@@ -14,6 +14,7 @@ Reference:
 import keras
 from keras import ops, layers
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -26,7 +27,7 @@ MIN_LIKELIHOOD_PARAM: float = 1e-6
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class ScaleLayer(keras.layers.Layer):
     """
     Applies item-dependent scaling to inputs and inverse scaling to outputs.
@@ -157,7 +158,7 @@ class ScaleLayer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class GaussianLikelihoodHead(keras.layers.Layer):
     """
     Computes Gaussian likelihood parameters (mean, std) from hidden states.
@@ -297,7 +298,7 @@ class GaussianLikelihoodHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class NegativeBinomialLikelihoodHead(keras.layers.Layer):
     """
     Computes Negative Binomial likelihood parameters (mu, alpha) from hidden states.
@@ -436,7 +437,7 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class DeepARCell(keras.layers.Layer):
     """
     Autoregressive recurrent cell for DeepAR.

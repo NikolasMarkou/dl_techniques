@@ -85,10 +85,11 @@ from typing import Optional, Union, Tuple, List, Any, Dict
 # ---------------------------------------------------------------------
 
 from .squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.multi_level_feature_compilation")
 class MLFCLayer(keras.layers.Layer):
     """Multi Level Feature Compilation (MLFC) Layer.
 

@@ -38,11 +38,12 @@ Mathematics:
 
 import keras
 from typing import Optional, Tuple, Dict, Any, List
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.mask_token")
 class MaskTokenApply(keras.layers.Layer):
     """Replace masked positions of ``(B, L, D)`` with a learnable mask token.
 

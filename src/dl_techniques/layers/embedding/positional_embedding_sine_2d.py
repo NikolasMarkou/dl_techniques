@@ -52,10 +52,11 @@ from typing import Optional, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.positional_embedding_sine_2d")
 class PositionEmbeddingSine2D(keras.layers.Layer):
     """Build a fixed 2D sinusoidal position code for a feature map.
 

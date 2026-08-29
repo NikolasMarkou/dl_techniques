@@ -60,10 +60,11 @@ from typing import Optional, Tuple, Union, Any, Dict
 
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.multi_head_attention")
 class MultiHeadAttention(keras.layers.Layer):
     """
     Multi-head self-attention, as a facade over the shared cross-attention engine.

@@ -63,11 +63,12 @@ from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.attention.factory import create_attention_layer
 from dl_techniques.layers.activations.factory import resolve_activation_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.adaln_zero")
 class AdaLNZeroConditionalBlock(keras.layers.Layer):
     """Transformer block with AdaLN-zero conditioning and causal self-attention.
 

@@ -75,10 +75,11 @@ from typing import Optional, Union, Dict, Any, Tuple, Literal
 from .hrm_reasoning_module import HierarchicalReasoningModule
 from .hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 from ..embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.reasoning.hrm_reasoning_core")
 class HierarchicalReasoningCore(keras.layers.Layer):
     """
     Stateful hierarchical reasoning core for multi-step cognitive tasks.

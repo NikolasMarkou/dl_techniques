@@ -76,6 +76,7 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -125,7 +126,7 @@ def _canonical_input_shape(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class LearnableLogicOperator(keras.layers.Layer):
     """
     A learnable choice among 18 soft logic gates.

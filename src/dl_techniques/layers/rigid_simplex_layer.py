@@ -86,10 +86,11 @@ from typing import Optional, Tuple, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.rigid_simplex_layer")
 class RigidSimplexLayer(keras.layers.Layer):
     """
     Project inputs onto a rigid Simplex with learnable rotation and scaling.

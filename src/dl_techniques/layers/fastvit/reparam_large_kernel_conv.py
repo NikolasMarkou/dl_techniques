@@ -71,6 +71,7 @@ from ..mobile_one_block import (
     conv_output_size,
 )
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -89,7 +90,7 @@ _REFERENCE_SE_USE_BIAS = True
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.reparam_large_kernel_conv")
 class ReparamLargeKernelConv(keras.layers.Layer):
     """FastViT reparameterizable large-kernel convolution.
 

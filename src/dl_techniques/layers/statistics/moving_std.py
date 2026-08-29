@@ -31,11 +31,12 @@ from typing import Tuple, Union, List, Optional, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.moving_std")
 class MovingStd(keras.layers.Layer):
     """
     Applies a 2D moving standard deviation filter to input images for texture analysis.

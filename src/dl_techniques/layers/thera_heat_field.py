@@ -64,6 +64,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers import LinearUpInitializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # THERA argument defaults (from the reference ``args/train.py``).
@@ -79,7 +80,7 @@ DEFAULT_COMPONENTS_INIT_SCALE: float = 16.0
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.thera_heat_field")
 class ThermalActivation(keras.layers.Layer):
     """THERA thermal activation: a phase-shifted sine with a heat-decay envelope.
 
@@ -249,7 +250,7 @@ class ThermalActivation(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.thera_heat_field")
 class HeatField(keras.layers.Layer):
     """THERA spatially-varying neural heat field evaluated at query coordinates.
 

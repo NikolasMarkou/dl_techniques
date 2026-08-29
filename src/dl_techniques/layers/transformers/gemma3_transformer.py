@@ -66,11 +66,12 @@ from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.activations import gelu_tanh
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.gemma3_transformer")
 class Gemma3TransformerBlock(keras.layers.Layer):
     """
     Gemma 3 transformer block with sandwich normalization.

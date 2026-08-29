@@ -65,6 +65,7 @@ import numpy as np
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Vocabulary
@@ -233,7 +234,7 @@ def decode_ascii(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.tokenizers.ascii_char")
 class ASCIICharTokenizer(keras.layers.Layer):
     """
     Character-level ASCII tokenizer layer.

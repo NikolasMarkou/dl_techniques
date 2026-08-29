@@ -20,11 +20,12 @@ from typing import Optional, Union, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.bias_free_conv1d")
 class BiasFreeConv1D(keras.layers.Layer):
     """Bias-free 1D convolutional layer with optional batch normalization and activation.
 
@@ -235,7 +236,7 @@ class BiasFreeConv1D(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.bias_free_conv1d")
 class BiasFreeResidualBlock1D(keras.layers.Layer):
     """Bias-free residual block for 1D convolutions with skip connections.
 

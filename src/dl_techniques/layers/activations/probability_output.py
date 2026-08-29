@@ -35,6 +35,7 @@ from .sparsemax import Sparsemax
 from .thresh_max import ThreshMax
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
 from .routing_probabilities import RoutingProbabilitiesLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # Type alias for supported probability types
@@ -53,7 +54,7 @@ ProbabilityType = Literal[
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.probability_output")
 class ProbabilityOutput(keras.layers.Layer):
     """Config-driven wrapper that delegates to one probability layer.
 

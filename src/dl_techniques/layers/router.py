@@ -78,10 +78,11 @@ from keras import layers, initializers, regularizers, ops
 # ---------------------------------------------------------------------
 
 from .transformers.transformer import TransformerLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.router")
 class RouterLayer(keras.layers.Layer):
     """Dynamic router wrapping a TransformerLayer for adaptive computation.
 

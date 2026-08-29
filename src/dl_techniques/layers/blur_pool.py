@@ -72,11 +72,12 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blur_pool")
 class BlurPool2D(keras.layers.Layer):
     """Anti-aliased depthwise downsampling with a fixed binomial blur.
 

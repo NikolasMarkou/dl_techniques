@@ -111,11 +111,12 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.vector_quantizer_rotation_trick")
 class VectorQuantizerRotationTrick(keras.layers.Layer):
     """Vector Quantizer with Rotation Trick gradient + multi-head codebook.
 

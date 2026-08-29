@@ -84,6 +84,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -141,7 +142,7 @@ def _butterfly_apply(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.orthogonal_butterfly")
 class OrthogonalButterfly(keras.layers.Layer):
     """Structured, exactly-orthogonal ``d x d`` linear layer (butterfly Givens).
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -50,7 +51,7 @@ from dl_techniques.constraints.value_range_constraint import ValueRangeConstrain
 _GAMMA_FLOOR = 1e-3
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.energy_layer_norm")
 class EnergyLayerNorm(keras.layers.Layer):
     """Energy Transformer layer normalization, with a scalar gamma and a vector delta.
 

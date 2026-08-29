@@ -1,5 +1,6 @@
 import keras
 from typing import List, Dict, Any, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -50,7 +51,7 @@ def _get_graph_feature(x: keras.KerasTensor, k: int) -> keras.KerasTensor:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.point_cloud_autoencoder")
 class PointCloudAutoencoder(keras.layers.Layer):
     """DGCNN-based autoencoder for point cloud feature extraction.
 
@@ -280,7 +281,7 @@ class PointCloudAutoencoder(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.point_cloud_autoencoder")
 class CorrespondenceNetwork(keras.layers.Layer):
     """
     Correspondence network estimating point-to-GMM soft assignments.

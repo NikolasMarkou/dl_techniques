@@ -15,11 +15,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class DownsampleAndSkip(keras.layers.Layer):
     """Produce ``(skip, downsampled)`` for one encoder junction.
 

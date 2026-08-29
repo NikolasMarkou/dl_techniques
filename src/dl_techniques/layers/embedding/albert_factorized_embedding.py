@@ -48,10 +48,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.albert_factorized_embedding")
 class AlbertFactorizedEmbedding(keras.layers.Layer):
     """Factorized token embedding via a learnable bottleneck projection.
 

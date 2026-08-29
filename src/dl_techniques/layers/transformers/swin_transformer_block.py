@@ -125,6 +125,7 @@ from dl_techniques.utils.tensors import window_reverse, window_partition
 from ..ffn import SwinMLP
 from ..stochastic_depth import StochasticDepth
 from ..attention.window_attention import WindowAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -143,7 +144,7 @@ _PADDING_FILL_VALUE: float = 0.0
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.swin_transformer_block")
 class SwinTransformerBlock(keras.layers.Layer):
     """
     Swin Transformer Block with windowed multi-head self-attention.

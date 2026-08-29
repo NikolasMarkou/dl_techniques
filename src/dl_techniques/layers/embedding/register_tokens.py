@@ -39,11 +39,12 @@ Interface contract:
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.register_tokens")
 class RegisterTokens(keras.layers.Layer):
     """Produce ``num_tokens`` independent learnable tokens for a batch.
 

@@ -66,10 +66,11 @@ from typing import Optional, Any, Tuple, Union, Dict, Literal
 from ..ffn import FFNType
 from ..norms import NormalizationType
 from .transformer import TransformerLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.eomt_transformer")
 class EomtTransformer(keras.layers.Layer):
     """
     Configurable Encoder-only Mask Transformer layer for vision segmentation.

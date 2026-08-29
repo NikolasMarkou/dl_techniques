@@ -85,6 +85,7 @@ References:
 import keras
 from keras import ops, initializers, regularizers, constraints
 from typing import Optional, Union, Tuple, Dict, Any, Literal
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -94,7 +95,7 @@ SAEVariant = Literal['relu', 'topk', 'batch_topk', 'jumprelu', 'gated']
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sparse_autoencoder")
 class SparseAutoencoder(keras.layers.Layer):
     """
     Sparse Autoencoder layer with multiple sparsity enforcement variants.

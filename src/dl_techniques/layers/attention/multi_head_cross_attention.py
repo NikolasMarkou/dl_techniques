@@ -92,11 +92,12 @@ from .common import (
     compute_attention_scale,
     validate_head_divisibility
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.multi_head_cross_attention")
 class MultiHeadCrossAttention(keras.layers.Layer):
     """
     Unified multi-head attention: cross- or self-attention, pluggable normalization.

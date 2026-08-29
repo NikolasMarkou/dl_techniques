@@ -57,6 +57,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -91,7 +92,7 @@ def _is_list_of_shapes(s: Any) -> bool:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.perceiver_attention")
 class PerceiverAttention(keras.layers.Layer):
     """
     Perceiver-style asymmetric cross-attention, as a facade over the shared engine.

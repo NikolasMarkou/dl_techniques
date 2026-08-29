@@ -28,10 +28,11 @@ References:
 
 import keras
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.hard_sigmoid")
 class HardSigmoid(keras.layers.Layer):
     """Hard-sigmoid activation: ``ReLU6(x + 3) / 6``.
 

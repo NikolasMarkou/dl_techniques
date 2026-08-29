@@ -91,6 +91,7 @@ from .common import (
     mask_dtype,
     validate_head_divisibility,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 #: Diagnostic for an ``attention_mask`` whose rank this layer cannot dispatch on.
@@ -108,7 +109,7 @@ _UNSUPPORTED_MASK_RANK = (
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.ring_attention")
 class RingAttention(keras.layers.Layer):
     """
     Ring Attention: exact attention computed blockwise with an online softmax.

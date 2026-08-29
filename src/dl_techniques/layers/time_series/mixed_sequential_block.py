@@ -61,6 +61,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # DECISION plan-2026-08-17T183311-79c63e38/D-011
 # Caller-supplied `attention_args` keys this block is allowed to SCOPE to the
@@ -78,7 +79,7 @@ _CONDITIONAL_ATTENTION_ARG_KEYS: Tuple[str, ...] = ('window_size',)
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.mixed_sequential_block")
 class MixedSequentialBlock(keras.layers.Layer):
     """
     Hybrid sequential block combining LSTM and self-attention for time series.

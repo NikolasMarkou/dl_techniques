@@ -22,10 +22,11 @@ from typing import  Optional, Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from .universal_inverted_bottleneck import UniversalInvertedBottleneck
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.inverted_residual_block")
 class InvertedResidualBlock(UniversalInvertedBottleneck):
     """Inverted residual block, the core building block for MobileNetV2.
 

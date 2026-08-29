@@ -63,11 +63,12 @@ References:
 
 import keras
 from typing import Tuple, Optional, Any, Literal
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.spatial_layer")
 class SpatialLayer(keras.layers.Layer):
     """
     Spatial coordinate grid generator for injecting positional information into models.

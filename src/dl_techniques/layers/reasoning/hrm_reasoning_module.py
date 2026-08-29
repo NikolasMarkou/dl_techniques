@@ -52,11 +52,12 @@ from ..transformers import (
     NormalizationPositionType,
     FFNType
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.reasoning.hrm_reasoning_module")
 class HierarchicalReasoningModule(keras.layers.Layer):
     """
     Configurable multi-layer reasoning module with input injection.

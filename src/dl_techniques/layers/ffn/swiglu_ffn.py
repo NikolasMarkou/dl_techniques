@@ -48,11 +48,12 @@ from typing import Optional, Any, Dict, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.swiglu_ffn")
 class SwiGLUFFN(keras.layers.Layer):
     """
     SwiGLU feed-forward network.

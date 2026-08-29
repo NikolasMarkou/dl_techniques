@@ -71,6 +71,7 @@ PyTorch reference, ported faithfully::
 import keras
 import numpy as np
 from typing import Any, Dict, Optional, Sequence, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -86,7 +87,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 _SINUSOID_SCALE: float = 1e4
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class ScalarSinusoidalEmbedding(keras.layers.Layer):
     """Embed one scalar per token, then refine it with a SiLU MLP.
 

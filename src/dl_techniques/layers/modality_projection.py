@@ -66,11 +66,12 @@ from typing import Optional, Tuple, Union, Any, Dict
 
 from ..utils.logger import logger
 from .pixel_shuffle import PixelShuffle
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.modality_projection")
 class ModalityProjection(keras.layers.Layer):
     """Modality projection layer for Vision-Language Models.
 

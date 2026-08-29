@@ -61,11 +61,12 @@ References:
 
 import keras
 from typing import Optional, Dict, Any, Union, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.bitlinear_layer")
 class BitLinear(keras.layers.Layer):
     """Bit-aware linear layer for quantization-aware training.
 

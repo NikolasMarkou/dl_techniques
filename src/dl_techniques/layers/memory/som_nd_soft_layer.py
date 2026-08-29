@@ -286,11 +286,12 @@ from typing import Tuple, Optional, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.som_nd_soft_layer")
 class SoftSOMLayer(keras.layers.Layer):
     """
     Differentiable Soft Self-Organizing Map layer for end-to-end training.

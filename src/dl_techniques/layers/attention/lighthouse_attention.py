@@ -159,6 +159,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Module-level static pyramid helpers (pure Python / numpy).
@@ -307,7 +308,7 @@ def _compute_mandatory_indices(
 # pass, and don't relax a red test to look green. See decisions.md D-009, D-003.
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.lighthouse_attention")
 class LighthouseAttention(keras.layers.Layer):
     """Lighthouse Attention — coarse-to-fine pyramid + top-K causal SDPA.
 

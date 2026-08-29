@@ -51,6 +51,7 @@ from keras import initializers, regularizers, activations
 from .reparam_large_kernel_conv import ReparamLargeKernelConv
 from ..mobile_one_block import MobileOneBlock
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -65,7 +66,7 @@ _LKC_GROUP_SIZE = 1
 _LKC_SMALL_KERNEL = 3
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.patch_embed")
 class FastVitPatchEmbed(keras.layers.Layer):
     """FastViT patch embedding: a convolutional ``/stride`` downsample + rewidening.
 

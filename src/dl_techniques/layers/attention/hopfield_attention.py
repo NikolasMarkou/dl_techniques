@@ -124,11 +124,12 @@ from .common import apply_attention_mask
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.hopfield_attention")
 class HopfieldAttention(keras.layers.Layer):
     """
     Modern Hopfield Network with iterative attention-based pattern retrieval.

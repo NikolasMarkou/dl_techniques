@@ -81,11 +81,12 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.attention_routing_capsule")
 class AttentionRoutingCapsule(keras.layers.Layer):
     """
     Single-step attention-routing capsule layer.
@@ -602,7 +603,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.attention_routing_capsule")
 class CapsuleBlockV2(keras.layers.Layer):
     """
     Capsule block: :class:`AttentionRoutingCapsule` plus optional dropout and norm.

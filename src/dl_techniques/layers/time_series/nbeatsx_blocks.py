@@ -27,10 +27,11 @@ from keras import ops, layers
 
 from .nbeats_blocks import NBeatsBlock
 from .temporal_convolutional_network import TemporalConvNet
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.nbeatsx_blocks")
 class ExogenousBlock(NBeatsBlock):
     """
     N-BEATSx exogenous block incorporating external covariates.

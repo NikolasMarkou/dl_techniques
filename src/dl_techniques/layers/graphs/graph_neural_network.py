@@ -90,10 +90,11 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 
 from ..ffn.mlp import MLPBlock
 from ..norms.rms_norm import RMSNorm
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.graph_neural_network")
 class GraphNeuralNetworkLayer(keras.layers.Layer):
     """Configurable multi-paradigm Graph Neural Network layer.
 

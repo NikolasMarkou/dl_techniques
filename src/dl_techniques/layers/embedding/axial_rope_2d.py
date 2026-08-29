@@ -61,11 +61,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.axial_rope_2d")
 class AxialRoPE2D(keras.layers.Layer):
     """Rotate post-head-split ``q``/``k`` by a token's 2D grid position.
 

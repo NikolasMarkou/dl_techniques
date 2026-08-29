@@ -79,10 +79,11 @@ from typing import Optional, Union, Tuple, Any, List
 # ---------------------------------------------------------------------
 
 from .squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.res_path")
 class ResPath(keras.layers.Layer):
     """Residual path for bridging the semantic gap in U-Net skip connections.
 

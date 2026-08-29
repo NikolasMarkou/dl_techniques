@@ -54,11 +54,12 @@ from typing import Any, Dict, Optional, Union, Tuple, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.zero_centered_adaptive_band_rms_norm")
 class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     """Center, normalize by the root mean square, then scale by an adaptive band factor.
 

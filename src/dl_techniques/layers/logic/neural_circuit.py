@@ -68,6 +68,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from .logic_operators import LearnableLogicOperator
 from .arithmetic_operators import LearnableArithmeticOperator
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -113,7 +114,7 @@ def _resolve_gate_entropy_coefficient(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class CircuitDepthLayer(keras.layers.Layer):
     """
     One circuit stage: parallel logic and arithmetic experts, fused.
@@ -911,7 +912,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class LearnableNeuralCircuit(keras.layers.Layer):
     """
     A stack of ``circuit_depth`` ``CircuitDepthLayer`` stages.

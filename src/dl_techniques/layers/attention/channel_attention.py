@@ -67,10 +67,11 @@ from typing import Optional, Union, Dict, Any, Tuple
 
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import resolve_activation_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.channel_attention")
 class ChannelAttention(keras.layers.Layer):
     """
     Channel attention from CBAM: score which channels matter.

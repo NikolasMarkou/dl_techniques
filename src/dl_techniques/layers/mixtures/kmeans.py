@@ -96,6 +96,7 @@ from .base import (
     resolve_initializer_arg,
     resolve_prototype_initializer,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -120,7 +121,7 @@ _RESET_CENTROID_SCALE = 0.1
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mixtures.kmeans")
 class KMeansLayer(BaseMixtureLayer):
     """Differentiable K-means layer with momentum and centroid repulsion.
 

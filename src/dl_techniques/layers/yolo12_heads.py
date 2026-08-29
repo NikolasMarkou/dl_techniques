@@ -61,11 +61,12 @@ from ..utils.logger import logger
 from ..initializers import clone_initializer
 from .yolo12_blocks import ConvBlock
 from .squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_heads")
 class YOLOv12DetectionHead(keras.layers.Layer):
     """
     YOLOv12 detection head with separate classification and regression branches.
@@ -376,7 +377,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_heads")
 class YOLOv12SegmentationHead(keras.layers.Layer):
     """
     Segmentation head for YOLOv12 multitask learning.
@@ -807,7 +808,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_heads")
 class YOLOv12ClassificationHead(keras.layers.Layer):
     """
     Classification head for YOLOv12 multitask learning.

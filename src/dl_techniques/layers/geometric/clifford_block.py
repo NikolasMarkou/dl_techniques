@@ -336,6 +336,7 @@ import keras
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -534,7 +535,7 @@ def _left_padded_shape(
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_block")
 class SparseRollingGeometricProduct(keras.layers.Layer):
     """Sparse rolling realisation of the Clifford geometric product.
 
@@ -793,7 +794,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_block")
 class GatedGeometricResidual(keras.layers.Layer):
     """Gated Geometric Residual (GGR) update.
 
@@ -1007,7 +1008,7 @@ class GatedGeometricResidual(keras.layers.Layer):
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_block")
 class CliffordNetBlock(keras.layers.Layer):
     """Full isotropic CliffordNet block (no FFN).
 
@@ -1955,7 +1956,7 @@ class CliffordNetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_block")
 class CausalCliffordNetBlock(CliffordNetBlock):
     """Causal (autoregressive) variant of :class:`CliffordNetBlock`.
 

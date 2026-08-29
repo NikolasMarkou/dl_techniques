@@ -38,11 +38,12 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.quantile_head_variable_io")
 class QuantileSequenceHead(keras.layers.Layer):
     """
     Sequence-wise quantile prediction head for probabilistic forecasting.

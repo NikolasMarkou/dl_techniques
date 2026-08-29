@@ -30,10 +30,11 @@ from typing import Optional, Union, Dict, Any, Tuple
 from dl_techniques.utils.logger import logger
 from .norms import create_normalization_layer
 from .activations import create_activation_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.depthwise_separable_block")
 class DepthwiseSeparableBlock(keras.layers.Layer):
     """
     Configurable depthwise separable convolution block.

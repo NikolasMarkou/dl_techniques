@@ -10,10 +10,11 @@ decoder uses Euclidean distance in accordance with the sHGCN simplifications.
 
 import keras
 from typing import List, Any, Union, Tuple, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.fermi_diract_decoder")
 class FermiDiracDecoder(keras.layers.Layer):
     """Fermi-Dirac decoder for edge probability prediction.
 

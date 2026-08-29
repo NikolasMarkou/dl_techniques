@@ -56,11 +56,12 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 
 from .gaussian_filter import GaussianFilter
 from .blur_pool import BlurPool2D
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.laplacian_filter")
 class LaplacianFilter(keras.layers.Layer):
     """Laplacian filter layer using Difference of Gaussians for edge detection.
 
@@ -233,7 +234,7 @@ class LaplacianFilter(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.laplacian_filter")
 class AdvancedLaplacianFilter(keras.layers.Layer):
     """Advanced Laplacian filter with multiple implementation methods.
 
@@ -489,7 +490,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.laplacian_filter")
 class LaplacianPyramidLevel(keras.layers.Layer):
     """Explicit, signal-level Laplacian pyramid split/merge for one level.
 

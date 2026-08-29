@@ -73,6 +73,7 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -83,7 +84,7 @@ SparsityMode = Literal['none', 'top_k', 'threshold']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.progressive_focused_attention")
 class ProgressiveFocusedAttention(keras.layers.Layer):
     """
     Windowed self-attention with progressive focusing from previous layers.

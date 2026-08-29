@@ -48,6 +48,7 @@ import keras
 import numpy as np
 from keras import ops
 from typing import Dict, Optional, Tuple, Any, List, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -56,7 +57,7 @@ EPSILON_CONSTANT = 1e-6
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.normalizing_flow")
 class AffineCouplingLayer(keras.layers.Layer):
     """
     Affine coupling transformation layer for normalizing flows with conditional context.
@@ -350,7 +351,7 @@ class AffineCouplingLayer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.normalizing_flow")
 class NormalizingFlowLayer(keras.layers.Layer):
     """
     Conditional normalizing flow layer using stacked affine coupling transformations.

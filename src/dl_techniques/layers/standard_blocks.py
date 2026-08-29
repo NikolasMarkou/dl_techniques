@@ -55,11 +55,12 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 from .norms import create_normalization_layer
 from .activations import create_activation_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.standard_blocks")
+@register_dl_technique("dl_techniques.standard_blocks", legacy_alias=False)
 class ConvBlock(keras.layers.Layer):
     """
     Configurable convolutional block with normalization, activation, and optional pooling.
@@ -300,7 +301,7 @@ class ConvBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.standard_blocks")
 class DenseBlock(keras.layers.Layer):
     """
     Configurable dense block with normalization, activation, and optional dropout.
@@ -521,7 +522,7 @@ class DenseBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.standard_blocks")
 class ResidualDenseBlock(keras.layers.Layer):
     """
     Dense block with residual connection and configurable normalization/activation.
@@ -732,7 +733,7 @@ class ResidualDenseBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.standard_blocks")
 class BasicBlock(keras.layers.Layer):
     """
     Basic ResNet block with two 3x3 convolutions.
@@ -969,7 +970,7 @@ class BasicBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.standard_blocks")
 class BottleneckBlock(keras.layers.Layer):
     """
     Bottleneck ResNet block with 1x1, 3x3, 1x1 convolutions.

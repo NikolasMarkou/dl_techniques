@@ -52,6 +52,7 @@ References:
 
 import keras
 from typing import Optional, Any, Tuple, Literal, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -60,7 +61,7 @@ RopeType = Literal['global', 'local']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.dual_rotary_position_embedding")
 class DualRotaryPositionEmbedding(keras.layers.Layer):
     """Two RoPE table pairs in one layer, selected per call.
 

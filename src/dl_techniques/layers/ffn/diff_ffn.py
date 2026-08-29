@@ -83,10 +83,11 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.diff_ffn")
 class DifferentialFFN(keras.layers.Layer):
     """
     Differential feed-forward network with two subtracted pathways.

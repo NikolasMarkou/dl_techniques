@@ -120,10 +120,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.hierarchical_codebook_embedding")
 class HierarchicalCodebookEmbedding(keras.layers.Layer):
     """Sum K small codebook lookups into one token embedding.
 

@@ -17,11 +17,12 @@ sequence for a given task.
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sequence_pooling.attention_pooling")
 class AttentionPooling(keras.layers.Layer):
     """Attention-based pooling that learns to weight sequence elements.
 

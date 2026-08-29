@@ -64,6 +64,7 @@ from .attention_block import FastVitAttentionBlock
 from .patch_embed import FastVitPatchEmbed
 from .rep_conditional_pos_enc import RepConditionalPosEnc
 from .rep_mixer import FastVitRepMixerBlock, _REFERENCE_LAYER_SCALE_INIT
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -72,7 +73,7 @@ from .rep_mixer import FastVitRepMixerBlock, _REFERENCE_LAYER_SCALE_INIT
 _TOKEN_MIXERS = ('repmixer', 'attention')
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.stage")
 class FastVitStage(keras.layers.Layer):
     """One FastViT stage: optional downsample, optional RepCPE, then ``depth`` blocks.
 

@@ -31,11 +31,12 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.basis_function")
 class BasisFunction(keras.layers.Layer):
     """Swish activation, written as ``b(x) = x / (1 + exp(-x))``.
 

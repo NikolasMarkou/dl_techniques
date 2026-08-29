@@ -67,11 +67,12 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from .hanc_layer import HANCLayer
 from .squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.hanc_block")
 class HANCBlock(keras.layers.Layer):
     """Hierarchical Aggregation of Neighborhood Context (HANC) Block.
 

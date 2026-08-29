@@ -16,11 +16,12 @@ pooling and full attention pooling.
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sequence_pooling.weighted_pooling")
 class WeightedPooling(keras.layers.Layer):
     """Learnable position-weighted pooling for sequences.
 

@@ -26,11 +26,12 @@ from .ffn import create_ffn_layer, FFNType
 from .stochastic_depth import StochasticDepth
 from .norms import create_normalization_layer, NormalizationType
 from .attention.fnet_fourier_transform import FNetFourierTransform
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fnet_encoder_block")
 class FNetEncoderBlock(keras.layers.Layer):
     """
     Complete FNet encoder block with Fourier mixing and feed-forward components.

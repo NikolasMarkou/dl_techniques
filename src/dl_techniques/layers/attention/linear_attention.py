@@ -87,6 +87,7 @@ from keras import ops, layers, initializers, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +103,7 @@ _FORBIDDEN_FEATURE_MAPS = ('elu_plus_one', 'exp', 'softmax')
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.linear_attention")
 class LinearAttention(keras.layers.Layer):
     """Bias-free, degree-1-homogeneous linear (O(N)) attention (Miyasawa-compliant).
 

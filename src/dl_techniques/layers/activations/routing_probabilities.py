@@ -108,6 +108,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.utils.logger import logger
 
 from .common import axis_is_in_range, normalize_axis
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -246,7 +247,7 @@ def _compute_validity_masks(
 # One class with a `mode` flag, not two classes and not a base plus two
 # subclasses. The axis handling, the tree build and the slice/renormalize are
 # identical in both modes, so this keeps them in one place.
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.routing_probabilities")
 class RoutingProbabilitiesLayer(keras.layers.Layer):
     """
     Hierarchical routing layer: N class probabilities from log2(N) decisions.

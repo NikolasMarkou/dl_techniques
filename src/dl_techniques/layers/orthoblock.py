@@ -68,11 +68,12 @@ from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.binary_preference import BinaryPreferenceRegularizer
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.orthoblock")
 class OrthoBlock(keras.layers.Layer):
     """Structured feature learning block with orthogonal regularization and gating.
 

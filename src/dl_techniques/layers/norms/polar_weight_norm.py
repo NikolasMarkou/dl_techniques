@@ -126,6 +126,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Recursive Cartesian <-> Polar transform (paper Definition 1 / Algorithm 1)
@@ -314,7 +315,7 @@ def polar_decode(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.polar_weight_norm")
 class PolarWeightNorm(keras.layers.Layer):
     """Dense layer whose kernel is stored in polar coordinates.
 

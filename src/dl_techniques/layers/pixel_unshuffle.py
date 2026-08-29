@@ -32,11 +32,12 @@ from keras import initializers, layers, ops, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.pixel_unshuffle")
 class PixelUnshuffle2D(keras.layers.Layer):
     """Lossless space-to-depth downsampling with optional 1x1 projection.
 
@@ -226,7 +227,7 @@ class PixelUnshuffle2D(keras.layers.Layer):
 # round-trip). The reshape->transpose(0,1,3,2,4,5)->reshape order is the
 # inverse of PixelUnshuffle2D.call and is pinned by the round-trip test in
 # tests/test_layers/test_pixel_shuffle_2d.py. See decisions.md D-002.
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.pixel_unshuffle")
 class PixelShuffle2D(keras.layers.Layer):
     """Lossless depth-to-space upsampling (pixel-shuffle), NHWC.
 

@@ -77,10 +77,11 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.gated_mlp")
 class GatedMLP(keras.layers.Layer):
     """
     Gated MLP layer built from three 1x1 convolutions.

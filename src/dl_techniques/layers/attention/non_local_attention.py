@@ -110,10 +110,11 @@ from dl_techniques.utils.activation_serialization import (
 )
 
 from .common import compute_attention_scale, mask_dtype
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.non_local_attention")
 class NonLocalAttention(keras.layers.Layer):
     """Non-local self-attention layer for capturing long-range spatial dependencies.
 

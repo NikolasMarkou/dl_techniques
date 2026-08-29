@@ -59,6 +59,7 @@ from typing import Optional, Union, List, Dict, Any, Tuple, Literal, Callable
 from dl_techniques.layers.ffn import create_ffn_layer, FFNType
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for fusion strategies
@@ -85,7 +86,7 @@ FusionStrategy = Literal[
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fusion.multimodal_fusion")
 class MultiModalFusion(keras.layers.Layer):
     """Fuse two or more modalities into one representation.
 

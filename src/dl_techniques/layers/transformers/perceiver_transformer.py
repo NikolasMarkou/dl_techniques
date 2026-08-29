@@ -67,11 +67,12 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # ---------------------------------------------------------------------
 
 from ..attention.perceiver_attention import PerceiverAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.perceiver_transformer")
 class PerceiverTransformerLayer(keras.layers.Layer):
     """
     Complete Perceiver transformer block with cross-attention.

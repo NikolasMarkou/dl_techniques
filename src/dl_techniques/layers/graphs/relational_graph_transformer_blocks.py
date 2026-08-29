@@ -31,6 +31,7 @@ from ..ffn import create_ffn_layer
 from ...initializers import clone_initializer
 from ..transformers import TransformerLayer
 from ..norms import create_normalization_layer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -77,7 +78,7 @@ SUMMARY_BROADCAST_SCALE: float = 0.1
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.relational_graph_transformer_blocks")
 class LightweightGNNLayer(keras.layers.Layer):
     """Lightweight GCN layer for structural positional encoding.
 
@@ -252,7 +253,7 @@ class LightweightGNNLayer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.relational_graph_transformer_blocks")
 class RELGTTokenEncoder(keras.layers.Layer):
     """Multi-element tokenisation encoder for heterogeneous graph nodes.
 
@@ -555,7 +556,7 @@ class RELGTTokenEncoder(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.relational_graph_transformer_blocks")
 class RELGTTransformerBlock(keras.layers.Layer):
     """Hybrid local-global Transformer block for relational graph processing.
 

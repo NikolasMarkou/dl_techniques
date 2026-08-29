@@ -58,12 +58,13 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.zero_centered_band_rms_norm")
 class ZeroCenteredBandRMSNorm(keras.layers.Layer):
     """Center over the axis, normalize by the root mean square, then scale in a band.
 

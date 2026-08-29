@@ -92,11 +92,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.entity_graph_refinement")
 class EntityGraphRefinement(keras.layers.Layer):
     """Entity-graph refinement layer for learning relational structure from embeddings.
 

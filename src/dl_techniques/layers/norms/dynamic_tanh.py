@@ -25,11 +25,12 @@ from keras import ops, constraints, initializers, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.dynamic_tanh")
 class DynamicTanh(keras.layers.Layer):
     """Apply ``weight * tanh(alpha * x) + bias`` with a learnable scalar ``alpha``.
 

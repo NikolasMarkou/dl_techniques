@@ -59,6 +59,7 @@ from keras import layers, initializers, regularizers, activations
 # ---------------------------------------------------------------------
 
 from .squeeze_excitation import SqueezeExcitation
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -182,7 +183,7 @@ def conv_output_size(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mobile_one_block")
 class MobileOneBlock(keras.layers.Layer):
     """MobileOne building block with structural reparameterization.
 

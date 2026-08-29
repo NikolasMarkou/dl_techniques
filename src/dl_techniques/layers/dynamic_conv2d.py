@@ -15,11 +15,12 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict, List
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.dynamic_conv2d")
 class DynamicConv2D(keras.layers.Layer):
     """
     Dynamic 2D Convolution with attention over convolution kernels.

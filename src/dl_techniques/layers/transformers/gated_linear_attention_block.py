@@ -66,6 +66,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -104,7 +105,7 @@ def _inclusive_causal_mask(size: int, dtype: str) -> keras.KerasTensor:
     return ops.cast(ops.logical_not(blocked), dtype)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.gated_linear_attention_block")
 class GatedLinearAttentionBlock(keras.layers.Layer):
     """
     Recurrent sequence-mixing block with a gated outer-product state.

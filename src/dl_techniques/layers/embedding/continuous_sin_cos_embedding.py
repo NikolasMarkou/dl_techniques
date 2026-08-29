@@ -60,11 +60,12 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.continuous_sin_cos_embedding")
 class ContinuousSinCosEmbed(keras.layers.Layer):
     """Embed an ``ndim``-dimensional continuous coordinate as sin/cos.
 

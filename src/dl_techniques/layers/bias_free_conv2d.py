@@ -30,6 +30,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from ..utils.logger import logger
 from .norms.bias_free_batch_norm import BiasFreeBatchNorm
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -94,7 +95,7 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.bias_free_conv2d")
 class BiasFreeConv2D(keras.layers.Layer):
     """Bias-free 2D convolutional layer with optional batch normalization and activation.
 
@@ -372,7 +373,7 @@ class BiasFreeConv2D(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.bias_free_conv2d")
 class BiasFreeResidualBlock(keras.layers.Layer):
     """Bias-free residual block for 2D convolutions with skip connections.
 

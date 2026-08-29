@@ -92,10 +92,11 @@ from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.initializers.identity_plus_noise import IdentityPlusNoise
 
 from .common import validate_head_divisibility
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.wave_field_attention")
 class WaveFieldAttention(keras.layers.Layer):
     """
     Multi-head wave-field attention via FFT-based damped-wave convolution.

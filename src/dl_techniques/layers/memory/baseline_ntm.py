@@ -40,13 +40,14 @@ from .ntm_interface import (
     circular_convolution,
     sharpen_weights,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # NTMMemory
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMMemory(BaseMemory):
     """
     Standard NTM Memory Matrix.
@@ -199,7 +200,7 @@ class NTMMemory(BaseMemory):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMReadHead(BaseHead):
     """
     Standard NTM Read Head.
@@ -507,7 +508,7 @@ class NTMReadHead(BaseHead):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMWriteHead(BaseHead):
     """
     Standard NTM Write Head.
@@ -772,7 +773,7 @@ class NTMWriteHead(BaseHead):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMController(BaseController):
     """
     Controller network for the Neural Turing Machine.
@@ -957,7 +958,7 @@ class NTMController(BaseController):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMCell(keras.layers.Layer):
     """
     Core NTM Cell for processing a single timestep.
@@ -1359,7 +1360,7 @@ class NTMCell(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NeuralTuringMachine(BaseNTM):
     """
     Complete Neural Turing Machine Layer.

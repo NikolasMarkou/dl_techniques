@@ -10,10 +10,11 @@ coefficients at each level, halving spatial resolution per dimension.
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.haar_wavelet_decomposition")
 class HaarWaveletDecomposition(keras.layers.Layer):
     """
     Perform Haar Discrete Wavelet Transform (DWT) decomposition.

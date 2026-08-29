@@ -55,10 +55,11 @@ each inspired by a specific region of the insect brain:
 import keras
 import numpy as np
 from typing import Optional, Tuple, Union, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mothnet_blocks")
 class AntennalLobeLayer(keras.layers.Layer):
     """Antennal Lobe layer implementing competitive inhibition for contrast enhancement.
 
@@ -232,7 +233,7 @@ class AntennalLobeLayer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mothnet_blocks")
 class MushroomBodyLayer(keras.layers.Layer):
     """Mushroom Body layer implementing high-dimensional sparse random projection.
 
@@ -446,7 +447,7 @@ class MushroomBodyLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mothnet_blocks")
 class HebbianReadoutLayer(keras.layers.Layer):
     """Hebbian readout layer implementing local correlation-based learning.
 

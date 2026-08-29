@@ -19,11 +19,12 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from .swin_transformer_block import SwinTransformerBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.swin_conv_block")
 class SwinConvBlock(keras.layers.Layer):
     """
     Hybrid Swin-Conv block combining transformer and convolutional paths.

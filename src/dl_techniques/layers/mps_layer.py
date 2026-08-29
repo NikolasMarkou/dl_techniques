@@ -81,10 +81,11 @@ machine learning was pioneered in several key papers:
 
 import keras
 from typing import Tuple, Optional, Union, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mps_layer")
 class MPSLayer(keras.layers.Layer):
     """Matrix Product State (MPS) layer for efficient tensor decomposition.
 

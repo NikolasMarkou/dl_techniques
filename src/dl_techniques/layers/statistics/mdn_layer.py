@@ -50,6 +50,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Constants
@@ -59,7 +60,7 @@ MIN_SIGMA_DEFAULT = 1e-3      # Default minimum sigma value
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.mdn_layer")
 class MDNLayer(keras.layers.Layer):
     """Mixture Density Network layer with separated processing paths.
 

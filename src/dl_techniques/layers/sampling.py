@@ -65,11 +65,12 @@ from typing import Tuple, Any, Dict, Literal, Optional, Union, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sampling")
 class Sampling(keras.layers.Layer):
     """Sample from a latent Normal distribution via the reparameterisation trick.
 
@@ -248,7 +249,7 @@ class Sampling(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sampling")
 class HypersphereSampling(keras.layers.Layer):
     """Sample from a thin Gaussian shell of a scaled unit hypersphere.
 
@@ -657,7 +658,7 @@ def vmf_kl_divergence(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.sampling")
 class VMFSampling(keras.layers.Layer):
     """Sample from a von Mises-Fisher posterior on the unit hypersphere.
 

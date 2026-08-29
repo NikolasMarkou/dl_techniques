@@ -50,6 +50,7 @@ from typing import Literal, Optional, Union, Tuple, Dict, Any, ClassVar, FrozenS
 # ---------------------------------------------------------------------
 
 from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -72,7 +73,7 @@ _SOFTPLUS_LINEAR_THRESHOLD = 20.0
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mixtures.radial_basis_function")
 class RBFLayer(keras.layers.Layer):
     """Radial Basis Function layer with adaptive center repulsion.
 

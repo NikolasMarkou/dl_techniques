@@ -44,10 +44,11 @@ import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.swin_mlp")
 class SwinMLP(keras.layers.Layer):
     """
     The Swin Transformer MLP block.

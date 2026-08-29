@@ -36,11 +36,12 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.relu_k")
 class ReLUK(keras.layers.Layer):
     """ReLU-k activation: ``f(x) = max(0, x)^k``.
 

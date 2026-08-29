@@ -84,6 +84,7 @@ from ..stochastic_depth import StochasticDepth
 from ..attention.factory import create_attention_layer
 from ..norms.factory import create_normalization_layer
 from .reference import REFERENCE_NORM_EPSILON
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -95,7 +96,7 @@ _REFERENCE_NORM_EPSILON = REFERENCE_NORM_EPSILON
 _REFERENCE_HEAD_DIM = 32
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.attention_block")
 class FastVitAttentionBlock(keras.layers.Layer):
     """FastViT attention block: pre-norm global self-attention + a convolutional MLP.
 

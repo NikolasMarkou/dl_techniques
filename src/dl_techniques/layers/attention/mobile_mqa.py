@@ -52,10 +52,11 @@ from typing import Tuple, Optional, Any, Dict, Union
 # ---------------------------------------------------------------------
 
 from .group_query_attention import GroupedQueryAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.mobile_mqa")
 class MobileMQA(GroupedQueryAttention):
     """
     Mobile Multi-Query Attention block with optional spatial downsampling and learnable residual.

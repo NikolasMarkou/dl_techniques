@@ -102,6 +102,7 @@ from .base import (
     resolve_initializer_arg,
     resolve_prototype_initializer,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -120,7 +121,7 @@ _VARIANCE_CEILING = 1e6
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.mixtures.gmm")
 class GMMLayer(BaseMixtureLayer):
     """Differentiable Gaussian Mixture Model layer with isometric-kernel regularization.
 

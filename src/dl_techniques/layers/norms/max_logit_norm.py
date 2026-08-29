@@ -47,11 +47,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.max_logit_norm")
 class MaxLogitNorm(keras.layers.Layer):
     """Divide logits by their L2 norm along ``axis``.
 
@@ -259,7 +260,7 @@ class MaxLogitNorm(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.max_logit_norm")
 class DecoupledMaxLogit(keras.layers.Layer):
     """Split the MaxLogit score into a cosine part and a magnitude part.
 
@@ -498,7 +499,7 @@ class DecoupledMaxLogit(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.max_logit_norm")
 class DMLPlus(keras.layers.Layer):
     """Return one half of the decoupled MaxLogit score, chosen by ``model_type``.
 

@@ -99,6 +99,7 @@ from ..embedding import create_embedding_layer
 from ..sequence_pooling import SequencePooling, PoolingStrategy
 from ..norms import create_normalization_layer, NormalizationType
 from .transformer import TransformerLayer, AttentionType, NormalizationPositionType, FFNType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -112,7 +113,7 @@ PositionalType = Literal['learned', 'rope', 'dual_rope', 'sincos']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.text_encoder")
 class TextEncoder(keras.layers.Layer):
     """
     General-purpose configurable text encoder using factory-based components.

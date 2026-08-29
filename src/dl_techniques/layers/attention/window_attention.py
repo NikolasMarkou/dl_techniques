@@ -300,6 +300,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Probability types not supported in window attention (score-level routing
@@ -318,7 +319,7 @@ _DISALLOWED_PROB_TYPES = (
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.window_attention")
 class WindowAttention(keras.layers.Layer):
     """
     Unified window-based multi-head self-attention layer.

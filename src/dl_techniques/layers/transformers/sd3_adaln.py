@@ -76,6 +76,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -129,7 +130,7 @@ def _modulate(
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.sd3_adaln")
 class AdaLayerNormZero(keras.layers.Layer):
     """SD3 6-way AdaLN-Zero modulation (attention + MLP shift/scale/gate).
 
@@ -257,7 +258,7 @@ class AdaLayerNormZero(keras.layers.Layer):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.sd3_adaln")
 class AdaLayerNormZeroX(keras.layers.Layer):
     """SD3 9-way AdaLN-Zero modulation with a dual (second) attention path.
 
@@ -395,7 +396,7 @@ class AdaLayerNormZeroX(keras.layers.Layer):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.sd3_adaln")
 class AdaLayerNormContinuous(keras.layers.Layer):
     """SD3 2-way AdaLN modulation (scale + shift, NO gate).
 

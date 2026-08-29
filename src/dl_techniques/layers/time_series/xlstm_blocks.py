@@ -30,10 +30,11 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class sLSTMCell(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) cell with exponential gating and normalizer state.
@@ -314,7 +315,7 @@ class sLSTMCell(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class sLSTMLayer(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) layer for processing sequences.
@@ -507,7 +508,7 @@ class sLSTMLayer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class mLSTMCell(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) cell with matrix memory and covariance update rule.
@@ -880,7 +881,7 @@ class mLSTMCell(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class mLSTMLayer(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) layer for processing sequences.
@@ -1085,7 +1086,7 @@ class mLSTMLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class sLSTMBlock(keras.layers.Layer):
     """
     sLSTM residual block with post-normalization architecture.
@@ -1303,7 +1304,7 @@ class sLSTMBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class mLSTMBlock(keras.layers.Layer):
     """
     mLSTM residual block with pre-up-projection architecture.

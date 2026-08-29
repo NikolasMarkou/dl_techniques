@@ -17,6 +17,7 @@ from typing import Optional, Tuple, Any, Dict
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn import create_ffn_from_config, validate_ffn_config
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -88,7 +89,7 @@ class BaseExpert(keras.layers.Layer, ABC):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.experts")
 class FFNExpert(BaseExpert):
     """
     Feed-Forward Network expert for MoE layers using the dl_techniques FFN factory.

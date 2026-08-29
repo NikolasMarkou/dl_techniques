@@ -26,6 +26,7 @@ from typing import Optional, Union, List, Tuple, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.geometry.poincare_math import PoincareMath
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -34,7 +35,7 @@ _poincare_math = PoincareMath(eps=1e-5)
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer")
 class SHGCNLayer(keras.layers.Layer):
     """Simplified Hyperbolic Graph Convolutional Layer.
 

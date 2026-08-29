@@ -71,10 +71,11 @@ from typing import List, Optional, Tuple, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.temporal_fusion")
 class TemporalFusionLayer(keras.layers.Layer):
     """
     Fuse a context-based forecast with an attention-based autoregressive forecast.

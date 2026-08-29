@@ -40,10 +40,11 @@ import keras
 from typing import Optional, Union, Any, Tuple, Callable
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.residual_block")
 class ResidualBlock(keras.layers.Layer):
     """
     Residual block: a two-layer MLP added to a learnable projection shortcut.

@@ -83,11 +83,12 @@ from .common import (
     compute_attention_scale,
     validate_head_divisibility,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.beit_attention")
 class BeitAttention(keras.layers.Layer):
     """
     BEiT multi-head self-attention with a cls-augmented relative position bias.

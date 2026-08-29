@@ -73,10 +73,11 @@ broken ``keras.ops`` rewrite.
 import keras
 import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.clahe")
 class CLAHE(keras.layers.Layer):
     """Trainable Contrast Limited Adaptive Histogram Equalization layer.
 

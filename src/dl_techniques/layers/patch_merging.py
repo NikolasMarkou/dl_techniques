@@ -43,10 +43,11 @@ References:
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.patch_merging")
 class PatchMerging(keras.layers.Layer):
     """Patch merging layer for hierarchical downsampling in Swin Transformers.
 

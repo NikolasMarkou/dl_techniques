@@ -53,11 +53,12 @@ from typing import Optional, Union, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.patch_embedding")
 class PatchEmbedding2D(keras.layers.Layer):
     """Cut an image into patches and project each patch to a vector.
 
@@ -400,7 +401,7 @@ class PatchEmbedding2D(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.patch_embedding")
 class PatchEmbedding1D(keras.layers.Layer):
     """Cut a 1D sequence into patches and project each patch to a vector.
 

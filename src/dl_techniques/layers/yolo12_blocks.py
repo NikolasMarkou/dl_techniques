@@ -47,11 +47,12 @@ The key components include:
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks", legacy_alias=False)
 class ConvBlock(keras.layers.Layer):
     """
     Standard YOLOv12 convolution block: Conv2D, BatchNorm, SiLU.
@@ -248,7 +249,7 @@ class ConvBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class AreaAttention(keras.layers.Layer):
     """
     Area Attention mechanism for YOLOv12.
@@ -519,7 +520,7 @@ class AreaAttention(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class AttentionBlock(keras.layers.Layer):
     """
     Transformer-style block with Area Attention and MLP for YOLOv12.
@@ -696,7 +697,7 @@ class AttentionBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class Bottleneck(keras.layers.Layer):
     """
     Standard bottleneck block with optional residual connection for YOLOv12.
@@ -840,7 +841,7 @@ class Bottleneck(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class C3k2Block(keras.layers.Layer):
     """
     CSP-like block with dual paths and Bottleneck layers for YOLOv12.
@@ -1027,7 +1028,7 @@ class C3k2Block(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class A2C2fBlock(keras.layers.Layer):
     """
     Attention-enhanced ELAN block with progressive feature extraction for YOLOv12.

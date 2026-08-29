@@ -18,10 +18,11 @@ from dl_techniques.utils.logger import logger
 from .experts import FFNExpert
 from .config import ExpertConfig, GatingConfig, MoEConfig
 from .gating import create_gating, compute_auxiliary_loss, compute_z_loss
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.layer")
 class MixtureOfExperts(keras.layers.Layer):
     """
     Mixture of Experts layer for sparse neural networks using FFN experts.

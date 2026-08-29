@@ -94,6 +94,7 @@ from ..attention import create_attention_layer, AttentionType
 from ..attention.factory import ATTENTION_REGISTRY
 from ..norms import create_normalization_layer, NormalizationType
 from ...initializers import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -365,7 +366,7 @@ def build_transformer_attention_required_params(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.transformer")
 class TransformerLayer(keras.layers.Layer):
     """
     Generic transformer layer with configurable attention, FFN, and normalization.

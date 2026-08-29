@@ -123,11 +123,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class TripletAttentionBranch(layers.Layer):
     """
     Single branch of the Triplet Attention mechanism.
@@ -368,7 +369,7 @@ class TripletAttentionBranch(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class TripSE1(layers.Layer):
     """
     TripSE1: Triplet Attention with Post-Fusion Squeeze-and-Excitation.
@@ -586,7 +587,7 @@ class TripSE1(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class TripSE2(layers.Layer):
     """
     TripSE2: Pre-Process Squeeze-and-Excitation.
@@ -857,7 +858,7 @@ class TripSE2(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class TripSE3(layers.Layer):
     """
     TripSE3: Parallel Squeeze-and-Excitation.
@@ -1113,7 +1114,7 @@ class TripSE3(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class _SEWeights(layers.Layer):
     """
     Internal helper: SE channel logits, pre-sigmoid, with no scaling applied.
@@ -1322,7 +1323,7 @@ class _SEWeights(layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.tripse_attention")
 class TripSE4(layers.Layer):
     """
     TripSE4: Hybrid 3D Attention with Affine Fusion.

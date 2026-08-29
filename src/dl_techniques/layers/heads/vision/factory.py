@@ -24,12 +24,13 @@ from ...attention.factory import (
 )
 from ...norms import create_normalization_layer, NormalizationType
 from .task_types import VisionTaskType, TaskConfiguration
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Base Head Class
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class BaseVisionHead(keras.layers.Layer):
     """
     Base class for all vision task heads.
@@ -257,7 +258,7 @@ class BaseVisionHead(keras.layers.Layer):
 # Detection Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DetectionHead(BaseVisionHead):
     """
     Detection head for object detection tasks.
@@ -421,7 +422,7 @@ class DetectionHead(BaseVisionHead):
 # Segmentation Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class SegmentationHead(BaseVisionHead):
     """
     Segmentation head for semantic segmentation tasks.
@@ -638,7 +639,7 @@ class SegmentationHead(BaseVisionHead):
 # Depth Estimation Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DepthEstimationHead(BaseVisionHead):
     """
     Depth estimation head for predicting depth maps.
@@ -826,7 +827,7 @@ class DepthEstimationHead(BaseVisionHead):
 # Classification Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class ClassificationHead(BaseVisionHead):
     """
     Classification head for image-level classification.
@@ -1007,7 +1008,7 @@ class ClassificationHead(BaseVisionHead):
 # Instance Segmentation Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class InstanceSegmentationHead(BaseVisionHead):
     """
     Instance segmentation head combining detection and segmentation.
@@ -1183,7 +1184,7 @@ class InstanceSegmentationHead(BaseVisionHead):
 # Enhancement Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class EnhancementHead(BaseVisionHead):
     """
     Enhancement head for image-restoration tasks (denoising, super-resolution).
@@ -1304,7 +1305,7 @@ class EnhancementHead(BaseVisionHead):
 # Multi-Task Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class MultiTaskHead(keras.layers.Layer):
     """
     Multi-task head that combines multiple task-specific heads.

@@ -67,6 +67,7 @@ import keras
 from keras import ops
 from enum import Enum
 from typing import Dict, Any, Optional, Union, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -116,7 +117,7 @@ class MultiplierType(Enum):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.layer_scale")
 class LearnableMultiplier(keras.layers.Layer):
     """Learnable element-wise multiplier for adaptive feature scaling.
 

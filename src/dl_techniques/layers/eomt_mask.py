@@ -30,10 +30,11 @@ from keras import ops, layers, initializers, regularizers, activations, constrai
 # ---------------------------------------------------------------------
 
 from .norms import create_normalization_layer, NormalizationType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.eomt_mask")
 class EomtMask(keras.layers.Layer):
     """
     Configurable mask prediction module for Encoder-only Mask Transformer (EoMT).

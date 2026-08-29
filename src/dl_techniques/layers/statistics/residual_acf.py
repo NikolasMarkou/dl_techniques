@@ -42,11 +42,12 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.residual_acf")
 class ResidualACFLayer(keras.layers.Layer):
     """
     Residual Autocorrelation Function analysis and regularization layer.

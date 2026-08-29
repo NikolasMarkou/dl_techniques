@@ -39,11 +39,12 @@ are bit-exact.
 
 import keras
 from typing import Any, Callable, Dict, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.gelu_tanh")
 def gelu_tanh(x: keras.KerasTensor) -> keras.KerasTensor:
     """Tanh-approximate GELU.
 

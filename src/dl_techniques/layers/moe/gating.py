@@ -16,6 +16,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -60,7 +61,7 @@ def _min_temperature(dtype: Any) -> float:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.gating")
 class BaseGating(keras.layers.Layer, ABC):
     """
     Abstract base class for MoE gating networks.
@@ -147,7 +148,7 @@ class BaseGating(keras.layers.Layer, ABC):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.gating")
 class LinearGating(BaseGating):
     """
     Linear gating network with optional noise and top-k expert selection.
@@ -373,7 +374,7 @@ class LinearGating(BaseGating):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.gating")
 class CosineGating(BaseGating):
     """
     Cosine similarity-based gating network for hypersphere expert routing.
@@ -630,7 +631,7 @@ class CosineGating(BaseGating):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.moe.gating")
 class SoftMoEGating(BaseGating):
     """
     Soft Mixture-of-Experts gating via differentiable slot assignment.

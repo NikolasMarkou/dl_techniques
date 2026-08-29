@@ -52,11 +52,12 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.norms.global_response_norm")
 class GlobalResponseNormalization(keras.layers.Layer):
     """Global Response Normalization for rank 2, 3 and 4 inputs.
 

@@ -95,6 +95,7 @@ from .common import (
     apply_attention_mask,
     compute_attention_scale
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -118,7 +119,7 @@ _AXIS_AGNOSTIC_PROB_TYPES: Tuple[str, ...] = (
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.capsule_routing_attention")
 class CapsuleRoutingSelfAttention(keras.layers.Layer):
     """
     Capsule Routing Self-Attention mechanism from Capsule-Transformer.

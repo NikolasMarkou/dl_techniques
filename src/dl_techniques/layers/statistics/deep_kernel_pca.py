@@ -67,10 +67,11 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.deep_kernel_pca")
 class DeepKernelPCA(keras.layers.Layer):
     """
     Deep Kernel Principal Component Analysis layer for multi-level feature extraction.

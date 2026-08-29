@@ -68,11 +68,12 @@ from typing import Optional, Union, Dict, Any, Tuple
 
 from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.convolutional_block_attention")
 class CBAM(keras.layers.Layer):
     """
     CBAM: sequential channel-then-spatial feature refinement.

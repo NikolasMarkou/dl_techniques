@@ -86,6 +86,7 @@ from .transformer import (
     FFNType
 )
 from ..sequence_pooling import SequencePooling, PoolingStrategy
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -165,7 +166,7 @@ PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.vision_encoder")
 class VisionEncoder(keras.layers.Layer):
     """
     General-purpose configurable vision encoder using factory-based components.

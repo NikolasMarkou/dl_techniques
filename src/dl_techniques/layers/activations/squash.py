@@ -38,12 +38,13 @@ from typing import Optional, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.squash")
 class SquashLayer(keras.layers.Layer):
     """Squashing non-linearity for Capsule Network vectors.
 

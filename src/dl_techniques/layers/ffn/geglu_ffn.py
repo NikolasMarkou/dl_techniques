@@ -46,11 +46,12 @@ from typing import Optional, Union, Any, Dict, Callable, Tuple
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.geglu_ffn")
 class GeGLUFFN(keras.layers.Layer):
     """
     GELU-gated linear unit feed-forward network (GeGLU).

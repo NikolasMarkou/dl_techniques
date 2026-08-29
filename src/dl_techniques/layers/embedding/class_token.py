@@ -32,11 +32,12 @@ Mathematics:
 
 import keras
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.class_token")
 class ClassTokenPrepend(keras.layers.Layer):
     """Prepend a single learnable [CLS] token to a ``(B, L, D)`` sequence.
 

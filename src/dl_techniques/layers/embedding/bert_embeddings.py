@@ -72,6 +72,7 @@ from typing import Optional, Any, Dict, Tuple
 from ..norms.rms_norm import RMSNorm
 from ..norms.band_rms import BandRMS
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Accepted enum values -- the single source of truth.
@@ -91,7 +92,7 @@ VALID_POSITION_EMBEDDING_TYPES: Tuple[str, ...] = ('learned', 'sinusoidal')
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.bert_embeddings")
 class BertEmbeddings(keras.layers.Layer):
     """BERT embedding layer combining word, position and token type embeddings.
 

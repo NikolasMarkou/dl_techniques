@@ -47,10 +47,11 @@ The operational flow is as follows:
 import keras
 from keras import ops
 from typing import Dict, List, Optional, Tuple, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.one_hot_encoding")
 class OneHotEncoding(keras.layers.Layer):
     """One-hot encoding layer for multiple categorical features.
 

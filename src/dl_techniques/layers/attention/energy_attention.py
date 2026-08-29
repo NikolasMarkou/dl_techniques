@@ -109,6 +109,7 @@ from dl_techniques.layers.attention.common import (
     mask_dtype as _mask_dtype,
     compute_attention_scale as _compute_attention_scale,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -179,7 +180,7 @@ def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
     return key_keep * query_keep
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.energy_attention")
 class EnergyAttention(keras.layers.Layer):
     """Energy Transformer multi-head energy attention (bias-free, no value matrix).
 

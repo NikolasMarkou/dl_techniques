@@ -44,10 +44,11 @@ from typing import Callable, Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, activations
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.glu_ffn")
 class GLUFFN(keras.layers.Layer):
     """
     Gated Linear Unit feed-forward network.

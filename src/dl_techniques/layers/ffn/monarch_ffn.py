@@ -57,11 +57,12 @@ from keras import initializers, regularizers, activations
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.monarch_ffn")
 class MonarchFFN(keras.layers.Layer):
     """
     Order-2 Monarch-structured Feed-Forward Network.

@@ -65,6 +65,7 @@ from ..layer_scale import LearnableMultiplier
 from ..mobile_one_block import MobileOneBlock
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 from ..stochastic_depth import StochasticDepth
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -112,7 +113,7 @@ def _create_layer_scale(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.rep_mixer")
 class FastVitRepMixer(keras.layers.Layer):
     """FastViT RepMixer token mixer: ``x + gamma * (mixer(x) - norm(x))``.
 
@@ -357,7 +358,7 @@ class FastVitRepMixer(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.rep_mixer")
 class FastVitRepMixerBlock(keras.layers.Layer):
     """FastViT RepMixer block: a RepMixer token mixer followed by a residual ConvMlp.
 

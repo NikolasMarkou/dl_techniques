@@ -179,6 +179,7 @@ from .clifford_block import (
     _resolve_activation,
     _serialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 __all__ = ["CliffordRNNCell", "CliffordRNN"]
 
@@ -201,7 +202,7 @@ _GLOBAL_MODES = ("cumulative_mean", "ema")
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_rnn")
 class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
     """Recurrent cell driven by a sparse Clifford geometric product.
 
@@ -820,7 +821,7 @@ class CliffordRNNCell(_DropoutRNNCellMixin, keras.layers.Layer):
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.clifford_rnn")
 class CliffordRNN(keras.layers.RNN):
     """Clifford geometric-algebra recurrent layer.
 

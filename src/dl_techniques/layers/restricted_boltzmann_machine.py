@@ -76,10 +76,11 @@ from keras import ops
 from keras import initializers
 from keras import regularizers
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.restricted_boltzmann_machine")
 class RestrictedBoltzmannMachine(keras.layers.Layer):
     """Restricted Boltzmann Machine layer for unsupervised feature learning.
 

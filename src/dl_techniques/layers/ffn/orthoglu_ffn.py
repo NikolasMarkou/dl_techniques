@@ -53,11 +53,12 @@ from typing import Optional, Union, Any, Dict, Callable, Tuple
 # ---------------------------------------------------------------------
 
 from ..orthoblock import OrthoBlock
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.orthoglu_ffn")
 class OrthoGLUFFN(keras.layers.Layer):
     """
     Orthogonally-regularized gated linear unit feed-forward network.

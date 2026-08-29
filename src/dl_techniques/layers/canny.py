@@ -67,10 +67,11 @@ import keras
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.canny")
 class Canny(keras.layers.Layer):
     """Multi-stage Canny edge detection layer for single-channel images.
 

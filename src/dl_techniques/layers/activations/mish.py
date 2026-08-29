@@ -31,6 +31,7 @@ References:
 import keras
 import numpy as np
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -101,7 +102,7 @@ def saturated_mish(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.mish")
 class Mish(keras.layers.Layer):
     """Mish activation: ``f(x) = x * tanh(softplus(x))``.
 
@@ -200,7 +201,7 @@ class Mish(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.mish")
 class SaturatedMish(keras.layers.Layer):
     """Mish that flattens out above a threshold, with a smooth handover.
 

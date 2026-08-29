@@ -41,10 +41,11 @@ from typing import Optional, Union, Any, Tuple, Dict
 
 from dl_techniques.regularizers.l2_custom import L2_custom
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.differentiable_step")
 class DifferentiableStep(keras.layers.Layer):
     """
     A learnable, differentiable step function, per-tensor or per-feature.

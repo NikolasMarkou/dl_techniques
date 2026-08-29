@@ -48,11 +48,12 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.attention.ideogram4_attention import Ideogram4Attention
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.ideogram4_block")
 class Ideogram4TransformerBlock(keras.layers.Layer):
     """Ideogram4 DiT block: 4-stream tanh-gated AdaLN with an RMSNorm sandwich.
 
@@ -300,7 +301,7 @@ class Ideogram4TransformerBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.ideogram4_block")
 class Ideogram4FinalLayer(keras.layers.Layer):
     """Ideogram4 DiT final layer: no-affine LayerNorm, scale-AdaLN, linear head.
 

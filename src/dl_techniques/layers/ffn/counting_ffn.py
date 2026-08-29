@@ -79,10 +79,11 @@ from typing import Literal, Tuple, Optional, Union, Any, Dict
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.counting_ffn")
 class CountingFFN(keras.layers.Layer):
     """
     Feed-forward network that counts events across a sequence.

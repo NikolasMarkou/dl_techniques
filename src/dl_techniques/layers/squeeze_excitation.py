@@ -64,11 +64,12 @@ from typing import Dict, Optional, Tuple, Union, Callable, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.squeeze_excitation")
 class SqueezeExcitation(keras.layers.Layer):
     """
     Squeeze-and-Excitation block for channel-wise feature recalibration.

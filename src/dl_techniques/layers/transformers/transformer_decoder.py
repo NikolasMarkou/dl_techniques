@@ -43,6 +43,7 @@ from .transformer import (
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
 from ...utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -52,7 +53,7 @@ NormalizationPositionType = Literal['post', 'pre']
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.transformer_decoder")
 class TransformerDecoderLayer(keras.layers.Layer):
     """Encoder-decoder transformer block: masked self-attention + cross-attention + FFN.
 

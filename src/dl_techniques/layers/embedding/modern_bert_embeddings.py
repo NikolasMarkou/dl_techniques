@@ -35,6 +35,7 @@ Mathematics:
 import keras
 from keras import ops, initializers, layers
 from typing import Optional, Any, Dict, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -44,7 +45,7 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.modern_bert_embeddings")
 class ModernBertEmbeddings(keras.layers.Layer):
     """ModernBERT embedding layer combining word and token type embeddings.
 

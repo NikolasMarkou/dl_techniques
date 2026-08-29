@@ -62,10 +62,11 @@ References:
 
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.selective_gradient_mask")
 class SelectiveGradientMask(keras.layers.Layer):
     """Selectively stop gradients based on a binary mask.
 

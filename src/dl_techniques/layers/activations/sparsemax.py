@@ -37,10 +37,11 @@ from typing import Optional, Dict, Any
 # ---------------------------------------------------------------------
 
 from .common import axis_is_in_range, normalize_axis
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.sparsemax")
 class Sparsemax(keras.layers.Layer):
     """Projects logits onto the probability simplex, producing exact zeros.
 

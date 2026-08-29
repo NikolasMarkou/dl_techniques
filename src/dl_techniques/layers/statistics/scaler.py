@@ -90,12 +90,13 @@ Where:
 import keras
 from keras import ops
 from typing import Optional, Union, Tuple, Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.scaler")
 class UnifiedScaler(keras.layers.Layer):
     """
     Unified normalization layer combining RevIN and StandardScaler capabilities.

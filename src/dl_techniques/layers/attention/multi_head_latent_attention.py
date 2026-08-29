@@ -48,11 +48,12 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput
 from .common import apply_attention_mask, compute_attention_scale
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.multi_head_latent_attention")
 class MultiHeadLatentAttention(keras.layers.Layer):
     """
     Multi-Head Latent Attention (MLA) as proposed in DeepSeek-V2.

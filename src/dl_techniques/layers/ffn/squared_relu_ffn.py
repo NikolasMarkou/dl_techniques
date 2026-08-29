@@ -47,11 +47,12 @@ from typing import Optional, Union, Any, Dict, Tuple
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.squared_relu_ffn")
 class SquaredReLUFFN(keras.layers.Layer):
     """
     Squared-ReLU (Primer) feed-forward network.

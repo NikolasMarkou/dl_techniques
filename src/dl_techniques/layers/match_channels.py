@@ -46,11 +46,12 @@ this layer follows the same backend-agnostic `keras.ops` style.
 
 import keras
 from typing import Any, Dict, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.match_channels")
 class MatchChannels(keras.layers.Layer):
     """Match an input tensor's channel count to a target, parameter-free.
 

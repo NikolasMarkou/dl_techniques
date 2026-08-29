@@ -151,10 +151,11 @@ from .common import (
     compute_attention_scale,
     validate_head_divisibility
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.performer_attention")
 class PerformerAttention(keras.layers.Layer):
     """
     Performer attention: linear complexity via FAVOR+ kernel approximation.

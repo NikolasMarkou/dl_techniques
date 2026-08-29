@@ -6,11 +6,12 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.embedding.continuous_sin_cos_embedding import ContinuousSinCosEmbed
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.geometric.supernode_pooling")
 class SupernodePooling(keras.layers.Layer):
     """Supernode pooling layer with message passing for point clouds.
 

@@ -89,6 +89,7 @@ from dl_techniques.layers.attention.energy_attention import EnergyAttention
 # rule must have exactly ONE definition, or the two ET modules drift apart the first time
 # one of them is fixed. See decisions.md D-009.
 from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_keep
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -97,7 +98,7 @@ from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_
 _VALID_ACTIVATIONS = ('relu', 'softmax')
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class HopfieldNetwork(keras.layers.Layer):
     """Energy Transformer Hopfield / associative-memory module (tied weights, bias-free).
 
@@ -595,7 +596,7 @@ class HopfieldNetwork(keras.layers.Layer):
 # done by the existing keep-bias `M` in `EnergyAttention._project`; here `A'` only ZEROS
 # `Ŵ` on non-edges (spec `⊙ A'`), which is spec fidelity, not correctness (the keep-bias
 # kills those pairs regardless). See decisions.md D-002 (and D-001 for the omega_eff use).
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class WeightedAdjacencyProjector(keras.layers.Layer):
     """Trainable per-head weighted adjacency ``Ŵ`` from tokens + a binary adjacency (eq. 25).
 
@@ -800,7 +801,7 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class EnergyTransformer(keras.layers.Layer):
     """Energy Transformer block — ``T`` steps of gradient descent on ONE scalar energy.
 

@@ -55,6 +55,7 @@ PyTorch reference (faithfully ported)::
 import keras
 import numpy as np
 from typing import Any, Dict, Optional, Sequence, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -64,7 +65,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers")
 class Ideogram4MRoPE(keras.layers.Layer):
     """Build 3D multi-axis mRoPE ``cos``/``sin`` tables for Ideogram4.
 

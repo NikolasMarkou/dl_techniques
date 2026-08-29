@@ -49,11 +49,12 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.nbeats_blocks")
 class NBeatsBlock(keras.layers.Layer):
     """
     Base N-BEATS block with a 4-layer dense stack and dual theta projection.
@@ -449,7 +450,7 @@ class NBeatsBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.nbeats_blocks")
 class GenericBlock(NBeatsBlock):
     """
     Generic N-BEATS block with learnable linear basis functions.
@@ -603,7 +604,7 @@ class GenericBlock(NBeatsBlock):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.nbeats_blocks")
 class TrendBlock(NBeatsBlock):
     """
     Trend N-BEATS block with polynomial basis functions for modeling trends.
@@ -842,7 +843,7 @@ class TrendBlock(NBeatsBlock):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.nbeats_blocks")
 class SeasonalityBlock(NBeatsBlock):
     """
     Seasonality N-BEATS block with Fourier basis functions for periodic patterns.

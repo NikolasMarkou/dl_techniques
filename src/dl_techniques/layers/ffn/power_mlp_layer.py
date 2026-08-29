@@ -54,11 +54,12 @@ from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from ..activations.relu_k import ReLUK
 from ..activations.basis_function import BasisFunction
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.power_mlp_layer")
 class PowerMLPLayer(keras.layers.Layer):
     """
     PowerMLP layer: a ReLU-k branch and a Swish branch, added together.

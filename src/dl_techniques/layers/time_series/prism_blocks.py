@@ -20,13 +20,14 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.haar_wavelet_decomposition import HaarWaveletDecomposition
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 # Frequency Band Statistics Layer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class FrequencyBandStatistics(keras.layers.Layer):
     """
     Compute summary statistics for frequency bands.
@@ -271,7 +272,7 @@ class FrequencyBandStatistics(keras.layers.Layer):
 # Frequency Band Router Layer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class FrequencyBandRouter(keras.layers.Layer):
     """
     Learnable router for computing frequency band importance weights.
@@ -463,7 +464,7 @@ class FrequencyBandRouter(keras.layers.Layer):
 # PRISM Node Layer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMNode(keras.layers.Layer):
     """
     Single PRISM node combining wavelet decomposition and adaptive weighting.
@@ -711,7 +712,7 @@ class PRISMNode(keras.layers.Layer):
 # PRISM Time Tree Layer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMTimeTree(keras.layers.Layer):
     """
     Hierarchical time decomposition with PRISM nodes at each level.
@@ -1230,7 +1231,7 @@ class PRISMTimeTree(keras.layers.Layer):
 # PRISM Layer (Main Interface)
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMLayer(keras.layers.Layer):
     """
     Main PRISM layer combining hierarchical time-frequency decomposition.

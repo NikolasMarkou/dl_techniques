@@ -99,6 +99,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -111,7 +112,7 @@ EmbeddingType = Literal['learned', 'factorized']
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.text_decoder")
 class TextDecoder(keras.layers.Layer):
     """
     General-purpose configurable text decoder built on a TransformerLayer stack.

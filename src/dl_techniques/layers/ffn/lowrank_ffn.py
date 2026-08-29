@@ -57,11 +57,12 @@ from typing import Optional, Union, Any, Dict, Tuple, Callable
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.lowrank_ffn")
 class LowRankFFN(keras.layers.Layer):
     """
     Low-rank factorized feed-forward network.

@@ -71,11 +71,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.scheduled_dropout")
 class ScheduledDropout(keras.layers.Layer):
     """Dropout whose rate is driven by a schedule over this layer's own steps.
 

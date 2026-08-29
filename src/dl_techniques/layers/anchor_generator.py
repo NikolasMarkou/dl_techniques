@@ -76,10 +76,11 @@ different scales is a direct application of the principles from:
 import keras
 from keras import ops
 from typing import Tuple, Any, Dict, List, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.anchor_generator")
 class AnchorGenerator(keras.layers.Layer):
     """Anchor generator layer for multi-scale object detection.
 

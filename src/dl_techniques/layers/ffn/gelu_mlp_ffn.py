@@ -42,11 +42,12 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.gelu_mlp_ffn")
 class GELUMLPFFN(keras.layers.Layer):
     """
     The Stable Diffusion 3 feed-forward block, with tanh-approximate GELU.

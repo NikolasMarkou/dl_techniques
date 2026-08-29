@@ -53,11 +53,12 @@ from typing import Optional, Any, Tuple, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.rotary_position_embedding")
 class RotaryPositionEmbedding(keras.layers.Layer):
     """Rotate adjacent channel pairs of ``q``/``k`` by a position angle.
 

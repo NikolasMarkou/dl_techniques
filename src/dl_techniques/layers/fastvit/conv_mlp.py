@@ -39,6 +39,7 @@ from keras import layers, initializers, regularizers, activations
 
 from ..norms.factory import create_normalization_layer
 from .reference import REFERENCE_NORM_EPSILON
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -50,7 +51,7 @@ _REFERENCE_BN_EPSILON = REFERENCE_NORM_EPSILON
 _REFERENCE_KERNEL_INIT_STDDEV = 0.02
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.fastvit.conv_mlp")
 class FastVitConvMlp(keras.layers.Layer):
     """FastViT convolutional MLP: depthwise ``k x k`` + BN, then a 1x1 inverted bottleneck.
 

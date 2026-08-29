@@ -70,10 +70,11 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.invertible_kernel_pca")
 class InvertibleKernelPCA(keras.layers.Layer):
     """
     Invertible Kernel PCA layer using Random Fourier Features approximation.
@@ -659,7 +660,7 @@ class InvertibleKernelPCA(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.statistics.invertible_kernel_pca")
 class InvertibleKernelPCADenoiser(keras.layers.Layer):
     """
     Denoising layer based on Invertible Kernel PCA.

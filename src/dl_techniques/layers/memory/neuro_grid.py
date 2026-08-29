@@ -86,11 +86,12 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.neuro_grid")
 class NeuroGrid(keras.layers.Layer):
     """Differentiable N-dimensional memory lattice with probabilistic addressing.
 

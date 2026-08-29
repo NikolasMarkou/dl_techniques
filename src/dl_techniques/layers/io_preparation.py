@@ -8,10 +8,11 @@ are commonly used in deep learning preprocessing and postprocessing steps.
 import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.io_preparation")
 class ClipLayer(keras.layers.Layer):
     """Layer that clips tensor values to a specified range.
 
@@ -110,7 +111,7 @@ class ClipLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.io_preparation")
 class NormalizationLayer(keras.layers.Layer):
     """Layer that normalizes tensor values from source range to target range.
 
@@ -248,7 +249,7 @@ class NormalizationLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.io_preparation")
 class DenormalizationLayer(keras.layers.Layer):
     """Layer that denormalizes tensor values from source range to target range.
 
@@ -384,7 +385,7 @@ class DenormalizationLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.io_preparation")
 class TensorPreprocessingLayer(keras.layers.Layer):
     """Composite preprocessing layer combining normalization and clipping.
 

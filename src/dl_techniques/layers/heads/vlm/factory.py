@@ -31,6 +31,7 @@ from ...norms.factory import create_normalization_layer
 from ....utils.logger import logger
 from ....utils.masking import MaskFactory
 from .task_types import VLMTaskConfig, VLMTaskType
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # Keras `Layer.__init__` arguments. These belong to a layer itself and must never
@@ -215,7 +216,7 @@ def _deserialize_task_config(
 # Base VLM Head Class
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class BaseVLMHead(keras.layers.Layer):
     """
     Base class for all VLM task heads, using an advanced fusion module.
@@ -667,7 +668,7 @@ class BaseVLMHead(keras.layers.Layer):
 # Image Captioning Head
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class ImageCaptioningHead(keras.layers.Layer):
     """
     An autoregressive decoder head for generating text conditioned on vision features.
@@ -1044,7 +1045,7 @@ class ImageCaptioningHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class VQAHead(keras.layers.Layer):
     """
     A multimodal fusion and classification head for Visual Question Answering.
@@ -1262,7 +1263,7 @@ class VQAHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class VisualGroundingHead(BaseVLMHead):
     """
     Head for visual grounding tasks.
@@ -1420,7 +1421,7 @@ class VisualGroundingHead(BaseVLMHead):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class ImageTextMatchingHead(BaseVLMHead):
     """
     A projection head for contrastive image-text alignment and fine-grained matching.
@@ -1620,7 +1621,7 @@ class ImageTextMatchingHead(BaseVLMHead):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class MultiTaskVLMHead(keras.layers.Layer):
     """
     Multi-task head combining multiple VLM task-specific heads.

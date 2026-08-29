@@ -108,10 +108,11 @@ from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 
 from .common import apply_attention_mask, compute_attention_scale
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.gated_attention")
 class GatedAttention(keras.layers.Layer):
     """
     Gated multi-head attention with Zero-Centered RMSNorm, partial RoPE, and sigmoid output gating.

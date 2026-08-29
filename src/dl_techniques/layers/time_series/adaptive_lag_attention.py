@@ -61,11 +61,12 @@ from typing import List, Optional, Tuple, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.adaptive_lag_attention")
 class AdaptiveLagAttentionLayer(keras.layers.Layer):
     """
     Advanced attention layer for dynamically weighting temporal lags with gating control.

@@ -77,10 +77,11 @@ References:
 import keras
 from keras import ops
 from typing import Dict, Tuple, Any, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.strong_augmentation")
 class StrongAugmentation(keras.layers.Layer):
     """
     Strong augmentation layer for consistency-based regularization.

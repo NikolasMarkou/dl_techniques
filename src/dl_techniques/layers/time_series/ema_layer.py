@@ -24,10 +24,11 @@ References:
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.ema_layer")
 class ExponentialMovingAverage(keras.layers.Layer):
     """
     Computes Exponential Moving Average over time series data.
@@ -211,7 +212,7 @@ class ExponentialMovingAverage(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.time_series.ema_layer")
 class EMASlopeFilter(keras.layers.Layer):
     """
     Computes EMA slope and generates trading signals based on slope thresholds.

@@ -63,10 +63,11 @@ References:
 
 import keras
 from typing import Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.golu")
 class GoLU(keras.layers.Layer):
     """
     Gompertz Linear Unit: element-wise self-gating with a right-skewed gate.

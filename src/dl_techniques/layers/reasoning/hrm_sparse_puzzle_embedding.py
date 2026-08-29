@@ -38,10 +38,11 @@ Internal State:
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.reasoning.hrm_sparse_puzzle_embedding")
 class SparsePuzzleEmbedding(keras.layers.Layer):
     """
     Sparse embedding layer optimized for large-scale puzzle identifier lookups.

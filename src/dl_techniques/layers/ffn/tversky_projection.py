@@ -62,6 +62,7 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -81,7 +82,7 @@ VALID_DIFFERENCE_REDUCTIONS = frozenset({'ignorematch', 'subtractmatch'})
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.tversky_projection")
 class TverskyProjectionLayer(keras.layers.Layer):
     """
     Projection layer scored by a differentiable Tversky similarity model.

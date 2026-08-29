@@ -41,10 +41,11 @@ References:
 
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.kan_linear")
 class KANLinear(keras.layers.Layer):
     """Kolmogorov-Arnold Network (KAN) linear layer with learnable activations.
 

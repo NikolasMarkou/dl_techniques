@@ -49,11 +49,12 @@ from typing import Optional, Dict, Any, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.embedding.positional_embedding")
 class PositionalEmbedding(keras.layers.Layer):
     """Add a learned absolute position vector to each token.
 

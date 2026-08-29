@@ -51,10 +51,11 @@ import keras
 import numpy as np
 from keras import ops, initializers
 from typing import List, Tuple, Optional, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.shearlet_transform")
 class ShearletTransform(keras.layers.Layer):
     """
     Multi-scale, multi-directional shearlet transform layer for enhanced time-frequency analysis.

@@ -95,10 +95,11 @@ from .blt_blocks import (
     DynamicPatcher, LocalEncoder,
     GlobalTransformer, LocalDecoder
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.blt_core")
 class ByteLatentReasoningCore(keras.layers.Layer):
     """Core hierarchical reasoning model that operates on dynamic byte patches.
 

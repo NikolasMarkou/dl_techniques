@@ -70,11 +70,12 @@ from typing import Optional, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.fnet_fourier_transform")
 class FNetFourierTransform(keras.layers.Layer):
     """
     Parameter-free token mixing by a 2D Discrete Fourier Transform.

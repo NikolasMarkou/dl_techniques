@@ -23,10 +23,11 @@ from typing import Tuple, Union, List, Optional, Sequence
 
 from ..utils.logger import logger
 from ..utils.tensors import depthwise_gaussian_kernel
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.gaussian_filter")
 class GaussianFilter(keras.layers.Layer):
     """
     Apply Gaussian blur filter to input images via depthwise convolution.

@@ -145,11 +145,12 @@ from typing import Tuple, Optional, Union, Dict, Any, Callable
 # ---------------------------------------------------------------------
 
 from .som_nd_layer import SOMLayer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.memory.som_2d_layer")
 class SOM2dLayer(SOMLayer):
     """
     2D Self-Organizing Map layer for competitive learning and topological organization.

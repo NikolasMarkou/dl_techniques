@@ -59,12 +59,13 @@ from typing import Optional, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.stochastic_gradient")
 class StochasticGradient(keras.layers.Layer):
     """
     Stochastic Gradient dropping regularization for deep networks.

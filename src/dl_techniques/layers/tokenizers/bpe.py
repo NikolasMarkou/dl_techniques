@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Optional, Any, Set
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -121,7 +122,7 @@ def train_bpe(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.tokenizers.bpe")
 class BPETokenizer(keras.layers.Layer):
     """
     Byte-Pair Encoding (BPE) tokenizer layer for Keras 3.x.
@@ -395,7 +396,7 @@ class BPETokenizer(keras.layers.Layer):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.tokenizers.bpe")
 class TokenEmbedding(keras.layers.Layer):
     """
     Token embedding layer converting token IDs to dense vectors.

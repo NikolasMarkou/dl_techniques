@@ -41,11 +41,12 @@ from typing import Optional, Union, Any, Dict, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.ffn.mlp", legacy_alias=False)
 class MLPBlock(keras.layers.Layer):
     """
     The standard Transformer MLP block.

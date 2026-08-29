@@ -68,11 +68,12 @@ from ..attention.factory import (
     assemble_attention_config,
     AttentionType,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.free_transformer")
 class BinaryMapper(keras.layers.Layer):
     """
     Samples one-hot vectors from bit logits with gradient pass-through.
@@ -342,7 +343,7 @@ class BinaryMapper(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.transformers.free_transformer")
 class FreeTransformerLayer(TransformerLayer):
     """
     Transformer layer extended with the Free Transformer C-VAE architecture.

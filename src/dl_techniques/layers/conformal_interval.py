@@ -63,11 +63,12 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.conformal_interval")
 class ConformalIntervalLayer(keras.layers.Layer):
     """Non-trainable, fixed-weights conformal prediction-interval layer.
 

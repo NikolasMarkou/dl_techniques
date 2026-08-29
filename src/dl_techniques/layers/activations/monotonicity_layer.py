@@ -30,6 +30,7 @@ References:
 import keras
 import warnings
 from typing import Optional, Literal, Tuple, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -44,7 +45,7 @@ MonotonicityMethod = Literal[
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.activations.monotonicity_layer")
 class MonotonicityLayer(keras.layers.Layer):
     """Enforces a non-decreasing ordering along one axis.
 

@@ -66,10 +66,11 @@ References:
 
 import keras
 from typing import List, Tuple, Optional, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.conditional_output_layer")
 class ConditionalOutputLayer(keras.layers.Layer):
     """Batch-wise conditional tensor selector for semi-supervised training.
 
