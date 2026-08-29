@@ -673,6 +673,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     model_group.add_argument(
         "--stochastic-depth-rate", type=float, default=defaults.stochastic_depth_rate
     )
+    model_group.add_argument(
+        "--position-embedding-type", type=str,
+        choices=["learned", "sinusoidal"],
+        default=defaults.position_embedding_type,
+        help=(
+            "Default 'sinusoidal'. A learned table inits ~40x smaller than "
+            "sinusoidal and does not grow, which left the transformer arm "
+            "unable to use position at all; see RESULTS.md."
+        ),
+    )
 
     evaluation = parser.add_argument_group("embedding evaluation")
     evaluation.add_argument(

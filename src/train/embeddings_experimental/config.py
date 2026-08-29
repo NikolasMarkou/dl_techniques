@@ -119,6 +119,23 @@ class ExperimentConfig:
     hidden_dropout_rate: float = 0.1
     stochastic_depth_rate: float = 0.0
 
+    #: How positional information is produced. ``'sinusoidal'``, NOT the
+    #: encoder's own ``'learned'`` default, and the difference is large enough
+    #: that it must be recorded per run rather than inherited silently.
+    #:
+    #: A learned table is initialized at ``initializer_range=0.02`` -- mean row
+    #: norm ~0.2 against sinusoidal's ~8 -- and measurably never grows: over
+    #: 3000 steps it SHRANK 0.1987 -> 0.1612 while the word table grew to
+    #: 0.3283. The transformer arm could not bootstrap position-dependent
+    #: attention from it and converged to a bag of characters, scoring the
+    #: unigram-plus-copy solution exactly (2.8318 measured against 2.8022
+    #: predicted). Switching this one field to sinusoidal bought 0.85 nats at
+    #: 256 context. Disabling weight decay does NOT substitute: the cause is
+    #: the initial scale of the signal, not its decay.
+    #:
+    #: See RESULTS.md section "Why the transformer arm was stuck".
+    position_embedding_type: str = "sinusoidal"
+
     # -- embedding evaluation ------------------------------------------
     run_embedding_eval: bool = True
     tfds_data_dir: str = "/media/arxwn/data0_4tb/datasets/tensorflow_datasets"
@@ -176,4 +193,5 @@ def build_model(config: ExperimentConfig) -> keras.Model:
         max_position_embeddings=config.max_seq_length,
         hidden_dropout_rate=config.hidden_dropout_rate,
         stochastic_depth_rate=config.stochastic_depth_rate,
+        position_embedding_type=config.position_embedding_type,
     )
