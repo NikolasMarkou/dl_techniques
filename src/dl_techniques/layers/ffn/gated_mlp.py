@@ -41,15 +41,22 @@ use a layer that has it. This one cannot learn any. MEASURED on a
 ``(1, 5, 5, 4)`` input with ``filters=8``: perturbing one pixel changes the
 output at that pixel and at no other, with an off-pixel delta of exactly 0.0.
 
-**Known defect: the gate and the value are the same function.** All three
-convolutions receive the SAME initializer instance, and ``conv_gate`` and
-``conv_up`` have the same shape, so they start with bit-identical kernels.
-The product ``g * v`` is symmetric in the two, so their gradients are equal
-too and they never diverge. MEASURED with the defaults: ``max|delta|`` is
-0.0 at build time and still 0.0 after 5 epochs of SGD, for the kernels and
-the biases. The layer therefore computes ``attn(conv(x))**2``, not a gate
-times a value. This is documented, not fixed - changing it changes every
-existing checkpoint.
+**The three convolutions draw from independent initializers.** Each one is
+given its own clone of ``kernel_initializer`` and ``bias_initializer``, so
+two convolutions of the same shape do not start from the same weights. This
+matters because the combine ``g * v`` is symmetric in the gate and the
+value: if the two started bit-identical their gradients would be equal too
+and they would never diverge, leaving the layer computing
+``attn(conv(x))**2`` rather than a gate times a value. That was the
+behaviour before the clones were added, MEASURED at ``max|delta|`` 0.0 at
+build and still 0.0 after 5 epochs of SGD(0.1) for the kernels and the
+biases; with the clones it is 1.1475 at build for ``filters=8`` on a
+``(1, 5, 5, 4)`` input, and 0.0432 for the biases after the same 5 epochs.
+The default ``bias_initializer`` is 'zeros', so the biases still agree at
+build - zeros are zeros - and separate only once the kernels differ.
+Passing a SEEDED initializer restores the tie on purpose: a clone of
+``GlorotUniform(seed=7)`` draws the same tensor twice, which is what a
+caller asking for a seed asked for.
 
 References:
 -   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
@@ -65,6 +72,7 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Literal, Any, Callable
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -171,11 +179,12 @@ class GatedMLP(keras.layers.Layer):
     :type filters: int
     :param use_bias: Whether the convolutions carry a bias. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the convolution kernels. The
-        same instance is passed to all three convolutions. Defaults to
+    :param kernel_initializer: Initializer for the convolution kernels. Each
+        of the three convolutions gets its own clone of it. Defaults to
         'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases. Cloned per
+        convolution the same way. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels. Defaults to None.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -199,9 +208,12 @@ class GatedMLP(keras.layers.Layer):
     :vartype filters: int
     :ivar use_bias: Whether the convolutions carry a bias.
     :vartype use_bias: bool
-    :ivar kernel_initializer: The resolved kernel initializer.
+    :ivar kernel_initializer: The resolved kernel initializer. It is the
+        source that each convolution's own clone is made from, and it is what
+        ``get_config()`` serializes.
     :vartype kernel_initializer: keras.initializers.Initializer
-    :ivar bias_initializer: The resolved bias initializer.
+    :ivar bias_initializer: The resolved bias initializer, cloned per
+        convolution the same way.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -256,12 +268,13 @@ class GatedMLP(keras.layers.Layer):
         ``build()``. ``conv_down`` has to be built by hand because it sees
         ``filters`` channels, not the input width.
 
-    Warning:
-        ``conv_gate`` and ``conv_up`` share one initializer instance and have
-        the same shape, so they start bit-identical and stay bit-identical
-        under training. See the module docstring for the measurement. Until
-        that is fixed, treat this layer as a squared activation rather than
-        as a gate.
+    Note:
+        Each convolution receives its own clone of ``kernel_initializer`` and
+        ``bias_initializer``, so ``conv_gate`` and ``conv_up`` are two
+        different functions at fresh init even though they have the same
+        shape. See the module docstring for the measurement. A SEEDED
+        initializer still gives both the same weights, which is what asking
+        for a seed means.
     """
 
     def __init__(
@@ -282,7 +295,8 @@ class GatedMLP(keras.layers.Layer):
 
         Every argument is documented on the class. ``data_format`` is
         resolved before it is checked, so passing ``None`` picks up the Keras
-        default and then that default is validated too.
+        default and then that default is validated too. Each convolution is
+        handed its own clone of the two initializers.
 
         :raises ValueError: If ``filters`` is not positive, if the resolved
             ``data_format`` is neither 'channels_first' nor 'channels_last',
@@ -323,6 +337,12 @@ class GatedMLP(keras.layers.Layer):
             )
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-004 -- clone_initializer per
+        # convolution. Do NOT pass the shared ``self.kernel_initializer``/
+        # ``self.bias_initializer`` instances here: one shared seedless instance
+        # drew bit-identical weights for conv_gate and conv_up (MEASURED
+        # max|delta| = 0.0 at build and still 0.0 after 5 epochs of SGD(0.1)),
+        # so the symmetric product ``g * v`` had no gate to speak of.
         self.conv_gate = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=(1, 1),
@@ -332,8 +352,8 @@ class GatedMLP(keras.layers.Layer):
             # Activation is applied in call(), not inside the convolution.
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="conv_gate"
@@ -348,8 +368,8 @@ class GatedMLP(keras.layers.Layer):
             # Activation is applied in call(), not inside the convolution.
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="conv_up"
@@ -364,8 +384,8 @@ class GatedMLP(keras.layers.Layer):
             # Activation is applied in call(), not inside the convolution.
             activation=None,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="conv_down"

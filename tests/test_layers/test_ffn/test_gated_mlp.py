@@ -412,5 +412,100 @@ class TestGatedMLP:
         assert result.shape == (input_tensor_2d.shape[0], input_tensor_2d.shape[1],
                                 input_tensor_2d.shape[2], 64)
 
+
+class TestGatedMLPInitializersAreNotShared:
+    """The three convolutions must not draw from one initializer instance.
+
+    ``conv_gate`` and ``conv_up`` always have the same shape and the combine
+    ``g * v`` is symmetric in them, so if they start bit-identical their
+    gradients are equal too and they never diverge -- the gating does not
+    exist. Every test here uses the DEFAULT (unseeded) initializer on
+    purpose: a seeded initializer legitimately gives ``max|delta| = 0.0``
+    even with ``clone_initializer`` in place, so a seeded guard would pass
+    both ways and prove nothing.
+    """
+
+    @staticmethod
+    def _max_delta(a, b):
+        return float(np.max(np.abs(np.array(a) - np.array(b))))
+
+    def test_gate_and_up_kernels_differ_at_build(self):
+        """Fresh init under the default initializer separates gate from up."""
+        layer = GatedMLP(filters=8)
+        layer.build((None, 5, 5, 4))
+
+        assert self._max_delta(layer.conv_gate.kernel,
+                               layer.conv_up.kernel) > 0.0
+
+    def test_conv_down_kernel_differs_when_it_can_collide(self):
+        """``conv_down`` collides with the other two only at filters == width."""
+        layer = GatedMLP(filters=4)
+        layer.build((None, 5, 5, 4))
+
+        assert layer.conv_down.kernel.shape == layer.conv_gate.kernel.shape
+        assert self._max_delta(layer.conv_gate.kernel,
+                               layer.conv_down.kernel) > 0.0
+        assert self._max_delta(layer.conv_up.kernel,
+                               layer.conv_down.kernel) > 0.0
+
+    def test_bias_initializer_instance_is_cloned_too(self):
+        """An unseeded bias initializer INSTANCE must not be shared either.
+
+        The default 'zeros' hides this: zeros are zeros whether or not the
+        instance is shared. A random bias initializer exposes it.
+        """
+        layer = GatedMLP(
+            filters=8,
+            bias_initializer=keras.initializers.RandomNormal(),
+        )
+        layer.build((None, 5, 5, 4))
+
+        assert self._max_delta(layer.conv_gate.bias,
+                               layer.conv_up.bias) > 0.0
+
+    def test_gate_and_up_stay_different_under_training(self):
+        """The separation must survive training, not just initialization.
+
+        This is the arm that makes the defect severe rather than cosmetic:
+        with a shared initializer the two kernels were still bit-identical
+        after 5 epochs of SGD(0.1), because the symmetric product gives them
+        equal gradients.
+        """
+        keras.utils.set_random_seed(0)
+        inputs = keras.Input(shape=(5, 5, 4))
+        layer = GatedMLP(filters=8)
+        model = keras.Model(
+            inputs,
+            layers.GlobalAveragePooling2D()(layer(inputs)),
+        )
+        model.compile(optimizer=keras.optimizers.SGD(0.1), loss="mse")
+
+        x = np.random.RandomState(0).randn(16, 5, 5, 4).astype("float32")
+        y = np.random.RandomState(1).randn(16, 8).astype("float32")
+        model.fit(x, y, epochs=5, batch_size=4, verbose=0)
+
+        assert self._max_delta(layer.conv_gate.kernel,
+                               layer.conv_up.kernel) > 0.0
+        assert self._max_delta(layer.conv_gate.bias,
+                               layer.conv_up.bias) > 0.0
+
+    def test_a_seeded_initializer_still_ties_the_two_convolutions(self):
+        """Anti-vacuity control: the clones do NOT override an explicit seed.
+
+        ``clone_initializer``'s documented contract is that cloning a seeded
+        initializer preserves reproducibility rather than breaking symmetry.
+        This test pins that, and it is also why the guards above must stay
+        unseeded.
+        """
+        layer = GatedMLP(
+            filters=8,
+            kernel_initializer=keras.initializers.GlorotUniform(seed=7),
+        )
+        layer.build((None, 5, 5, 4))
+
+        assert self._max_delta(layer.conv_gate.kernel,
+                               layer.conv_up.kernel) == 0.0
+
+
 if __name__ == '__main__':
     pytest.main([__file__])
