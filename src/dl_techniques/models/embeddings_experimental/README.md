@@ -21,6 +21,14 @@ reported metric is attributable to the block rather than to the plumbing.
 Adding an arm is one `BLOCK_REGISTRY` entry plus a thin leaf package. It is
 never a second copy of the encoder.
 
+**This file describes the architectures only.** The study that trains and
+compares them lives in `src/train/embeddings_experimental/`: its
+[`README.md`](../../../train/embeddings_experimental/README.md) explains the
+harness and defines every metric, and
+[`RESULTS.md`](../../../train/embeddings_experimental/RESULTS.md) carries the
+measured outcomes. The parameter counts below stay here because they are a
+property of the models rather than a result.
+
 ## Measured parameter counts
 
 At `max_position_embeddings=128`, ASCII vocabulary (101 ids):

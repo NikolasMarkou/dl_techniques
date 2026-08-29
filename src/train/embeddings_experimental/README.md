@@ -3,6 +3,14 @@
 Two-stage trainer and sweep harness for the `embeddings_experimental` model
 family.
 
+**Where things live.** Three documents, split by what question they answer:
+
+| document | answers |
+|---|---|
+| this file | how the study is run, and **what every metric means** |
+| [`RESULTS.md`](RESULTS.md) | **what a run actually measured** |
+| [`models/embeddings_experimental/README.md`](../../dl_techniques/models/embeddings_experimental/README.md) | what the **architectures** are |
+
 ```
 config.py                MODEL_REGISTRY + ExperimentConfig (the study axes)
 paths.py                 single-producer run-directory paths
@@ -48,6 +56,30 @@ correct answer among **2,067 unique paragraphs**. We embed every paragraph and
 every question, rank the paragraphs by cosine similarity to each question, and
 ask where the correct one landed. All of these read from that single rank.
 
+```python
+import numpy as np
+# 2 questions, 3 candidate paragraphs. Higher score = more similar.
+sim  = np.array([[0.9, 0.1, 0.5],      # question 0
+                 [0.2, 0.8, 0.3]])     # question 1
+gold = np.array([2, 1])                # the correct paragraph for each
+
+g      = sim[np.arange(len(gold)), gold][:, None]   # the gold score
+better = np.sum(sim >  g, axis=1)                   # how many beat it
+tied   = np.sum(sim == g, axis=1) - 1               # ties count AGAINST it
+ranks  = 1 + better + tied
+print(ranks)   # [2 1]  -> q0's answer came 2nd, q1's came 1st
+```
+
+Ties count against the gold answer on purpose. A collapsed model gives every
+pair the same score, and under a generous tie rule that would look perfect:
+
+```python
+sim, gold = np.ones((3, 3)), np.arange(3)          # every score identical
+g = sim[np.arange(3), gold][:, None]
+ranks = 1 + np.sum(sim > g, 1) + (np.sum(sim == g, 1) - 1)
+print(ranks, np.mean(ranks <= 1))   # [3 3 3] 0.0  -> scored last, not first
+```
+
 **Recall@k** — the fraction of questions whose correct paragraph appeared in the
 top `k`. Recall@1 is "how often was the right answer ranked first"; recall@10 is
 "how often was it in the top ten". Higher is better, range 0-1. It is the most
@@ -55,6 +87,15 @@ directly interpretable metric here, and it is blind to *how far* down a miss
 fell: rank 11 and rank 2000 are both misses at k=10. **Anchor:** chance is
 1/2067 = **0.048%**; the smoke run gave 1.15% (baseline) to 4.25% (best), so
 24-88x chance.
+
+```python
+ranks = np.array([1, 3, 12, 40])       # where the answer landed, 4 questions
+for k in (1, 5, 10):
+    print(k, np.mean(ranks <= k))
+# 1  0.25   one of four was ranked first
+# 5  0.50   two were in the top five
+# 10 0.50   the 12th and 40th are still misses
+```
 
 **MRR@10** (mean reciprocal rank) — average of `1/rank`, counting 0 for anything
 below rank 10. A first place contributes 1.0, second 0.5, tenth 0.1. Higher is
@@ -64,12 +105,35 @@ It is the study's **primary** endpoint because it is the standard single-number
 retrieval score and it uses more of the ranking than recall@1 alone.
 **Anchor:** 0.0246 (baseline) to 0.0647 (best).
 
+```python
+ranks, k = np.array([1, 3, 12, 40]), 10
+rr = np.where(ranks <= k, 1.0 / ranks, 0.0)
+print(rr, rr.mean())
+# [1.  0.333 0.  0.]  0.3333
+# rank 1 is worth 1.0, rank 3 only 0.333 -- unlike recall@10, which
+# scores rank 1 and rank 3 identically.
+```
+
 **nDCG@10** — implemented but deliberately **not** reported. With exactly one
 correct document it reduces to the mean of `1/log2(rank+1)`, which is another
 weighting of the same information. All three of recall@k, MRR@k and nDCG@k are
 positive-weighted sums of one underlying "recall curve", so reporting them all
 would present one measurement as three. It exists in the metrics module for
 future graded-relevance work.
+
+```python
+gain = np.where(ranks <= k, 1 / np.log2(ranks + 1), 0.0)
+print(gain, gain.mean())   # [1.  0.5  0.  0.] 0.375
+
+# Per query nDCG and MRR always agree on which rank is better, but their
+# MEANS can disagree, because they discount deep ranks differently:
+for name, r in (("A", np.array([1, 100])), ("B", np.array([2, 2]))):
+    mrr  = np.mean(np.where(r <= 100, 1 / r, 0))
+    ndcg = np.mean(np.where(r <= 100, 1 / np.log2(r + 1), 0))
+    print(name, round(mrr, 4), round(ndcg, 4))
+# A 0.505  0.5751     <- MRR prefers A
+# B 0.5    0.6309     <- nDCG prefers B
+```
 
 **median_rank / mean_rank** — the middle and average position of the correct
 paragraph, out of 2,067. Lower is better. These are the only ranking numbers
@@ -80,9 +144,22 @@ misses that would drag the mean. Reported as a diagnostic. **Anchor:** 457
 paragraph around 274th, which is exactly why the absolute retrieval numbers are
 still near the floor at this budget.
 
+```python
+ranks = np.array([1, 3, 12, 40])
+print(np.median(ranks), np.mean(ranks))   # 7.5  14.0
+# The single rank-40 miss drags the mean to 14 but moves the median only to
+# 7.5 -- which is why the median is the more stable summary.
+```
+
 **chance_recall_at_1** — `1 / pool_size`, printed beside the result so a low
 number can be told apart from a *chance-level* number. This distinction is the
 single most likely misreading of a short run.
+
+```python
+pool = 2067
+print(1 / pool, 10 / pool)   # 0.000484  0.004838
+# So recall@1 of 1.15% is ~24x chance, not "almost zero".
+```
 
 ### Classification metric — SST-2
 
@@ -93,6 +170,18 @@ encoder never receives a gradient, this measures **how linearly separable the
 embedding space already is** for sentiment, not how well the model can be
 fine-tuned. **Anchor:** the majority class is **50.92%**, so that is chance; the
 smoke run gave 58.9% to 64.0%.
+
+```python
+from sklearn.linear_model import LogisticRegression
+rng = np.random.default_rng(0)
+# Pretend embeddings where the two classes are slightly offset.
+ytr = rng.integers(0, 2, 400); Xtr = rng.standard_normal((400, 16)) + ytr[:, None] * 0.8
+yte = rng.integers(0, 2, 200); Xte = rng.standard_normal((200, 16)) + yte[:, None] * 0.8
+
+clf = LogisticRegression(max_iter=2000).fit(Xtr, ytr)   # encoder is NOT trained
+print(clf.score(Xte, yte), max(np.bincount(yte)) / len(yte))
+# 0.88  0.505   -> 88% against a 50.5% majority: the space is separable
+```
 
 **sst2_probe_cv_accuracy / sst2_probe_best_c** — the classifier's regularization
 strength `C` is chosen by 5-fold cross-validation on the *training* subsample
@@ -118,6 +207,17 @@ lower generally healthier. **Anchor:** 0.132 (convnext_v2, well spread) to 0.616
 (clifford, quite concentrated); the same baseline model measured 0.856 after
 only 5 steps and 0.429 after 3000, so it falls as training proceeds.
 
+```python
+def anisotropy(x):
+    u = x / np.linalg.norm(x, axis=1, keepdims=True)
+    n, total = len(u), u.sum(0)
+    return float((total @ total - n) / (n * (n - 1)))   # mean pairwise cosine
+
+rng = np.random.default_rng(0)
+print(anisotropy(rng.standard_normal((200, 64))))              # -0.0005  healthy
+print(anisotropy(np.tile(rng.standard_normal(64), (200, 1))))  #  1.0     collapsed
+```
+
 **effective_rank** — how many dimensions the embedding space *actually* uses,
 computed as the exponential of the entropy of the singular-value spectrum. A
 model with 128 output dimensions that only ever varies along 5 of them has an
@@ -126,12 +226,36 @@ can miss: a space can have low average pairwise cosine while still living in a
 thin subspace. Range 1 to the embedding width, higher generally healthier.
 **Anchor:** 35.5 (baseline) to 78.6 (clifford), out of a 128-wide embedding.
 
+```python
+def effective_rank(x):
+    s = np.linalg.svd(x - x.mean(0), compute_uv=False)
+    p = s / s.sum(); p = p[p > 0]
+    return float(np.exp(-(p * np.log(p)).sum()))            # exp(entropy)
+
+rng = np.random.default_rng(0)
+print(effective_rank(rng.standard_normal((200, 8))))        # 7.96  uses all 8 dims
+low = rng.standard_normal((200, 2)) @ rng.standard_normal((2, 8))
+print(effective_rank(low))                                  # 1.99  8 dims, 2 used
+```
+
 **alignment** — the average squared distance between a question and its own gold
 paragraph, after normalizing both to unit length. **Lower is better**: it asks
 "does the model put a query near its answer". Range 0 to 4. Read it only
 together with uniformity, because a model that maps *everything* to one point
 achieves perfect alignment of 0.0 and is useless. **Anchor:** 0.872 (clifford)
 to 1.446 (convnext).
+
+```python
+def unit(x): return x / np.linalg.norm(x, axis=1, keepdims=True)
+
+rng = np.random.default_rng(0)
+q    = rng.standard_normal((100, 16))
+near = q + rng.standard_normal((100, 16)) * 0.1    # answers close to questions
+far  = rng.standard_normal((100, 16))              # unrelated answers
+for name, pos in (("near", near), ("far", far)):
+    print(name, round(float(np.mean(np.sum((unit(q) - unit(pos)) ** 2, 1))), 4))
+# near 0.0114     far 2.1144      lower = query sits nearer its answer
+```
 
 **uniformity** — how evenly the embeddings spread over the unit sphere,
 `log(mean(exp(-2 * squared distance)))` over all pairs. **Lower (more negative)
@@ -144,12 +268,34 @@ uniformity (-1.420), while convnext_v2 has the worst alignment (1.445) and the
 best uniformity (-3.161). Neither is simply "better"; they sit at different
 points on that trade-off, which is also why clifford's anisotropy is highest.
 
+```python
+def uniformity(x, t=2.0):
+    u = x / np.linalg.norm(x, axis=1, keepdims=True)
+    d = ((u[:, None] - u[None, :]) ** 2).sum(-1)
+    iu = np.triu_indices(len(u), 1)
+    return float(np.log(np.exp(-t * d[iu]).mean()))
+
+rng = np.random.default_rng(0)
+print(uniformity(rng.standard_normal((200, 16))))                        # -3.51 spread
+blob = np.tile(rng.standard_normal(16), (200, 1)) + rng.standard_normal((200, 16)) * 1e-3
+print(uniformity(blob))                                                  # -0.0  collapsed
+```
+
 **embedding_norm_stats** — mean, standard deviation, min and max of the
 embedding vector lengths, plus `cos_to_centroid_mean` (how aligned the average
 embedding is with the overall centre). Purely descriptive. A large `norm_std`
 tells you cosine similarity and dot-product would rank differently, and a
 `cos_to_centroid_mean` near 1 is the "one dominant direction" degeneracy in its
 sharpest form.
+
+```python
+rng = np.random.default_rng(0)
+x = rng.standard_normal((100, 16)) * rng.uniform(0.5, 3, (100, 1))   # varied lengths
+n = np.linalg.norm(x, axis=1)
+print(round(float(n.mean()), 3), round(float(n.std()), 3))   # 6.77  3.217
+# A large spread means cosine and dot-product would rank differently,
+# because dot-product rewards simply being a longer vector.
+```
 
 **\*_pad_fraction** — the proportion of each evaluated batch that was padding
 rather than real characters. Not a quality metric: it is the *honesty* check on
@@ -158,6 +304,16 @@ were mostly padding the evaluation would partly be measuring the padding policy.
 Batches are sorted by length and padded to the batch maximum to keep this small.
 **Anchor:** 0.005 (contexts), 0.027 (questions), 0.068 (SST-2) — low enough that
 the confound is not driving the results.
+
+```python
+lengths = np.array([5, 7, 200])            # three texts in one batch
+width   = lengths.max()                    # everything padded to the longest
+print(1 - lengths.sum() / (len(lengths) * width))   # 0.6467 -> 65% padding
+
+# Sorting by length first keeps similar texts together:
+short = np.array([5, 7])
+print(1 - short.sum() / (len(short) * short.max()))  # 0.1429 -> 14% padding
+```
 
 ### Training metrics
 
@@ -173,6 +329,18 @@ frequencies, while one at 1.15 has learned a great deal of context. In the smoke
 run the transformer baseline sat at 2.838, only 0.29 nats below the
 context-free baseline, and the convolutional arms at ~1.15-1.32.
 
+```python
+V = 101
+print(np.log(V))          # 4.615 nats -- guessing uniformly at random
+
+# Knowing only how often each character occurs, with no context at all:
+p = np.array([0.18, 0.10, 0.08, 0.07, 0.07] + [0.5 / 96] * 96); p /= p.sum()
+print(-(p * np.log(p)).sum())   # 3.742 nats for these toy frequencies
+# Measured on the real corpus (1.03M characters): 3.130 nats.
+# So a model at 2.838 has learned little more than letter frequencies;
+# one at 1.153 has learned a great deal of context.
+```
+
 **contrastive_val_loss** — the SimCSE objective on held-out text: encode the
 same sentence twice with different dropout, and check the model can match the
 two copies to each other among the other sentences in the batch. Lower is
@@ -182,6 +350,23 @@ degenerate space, and it is measured in the *projection* space that is discarded
 before evaluation. It is here as an optimisation diagnostic, which is precisely
 why the SQuAD and SST-2 metrics exist.
 
+```python
+def infonce(noise, n=8, temp=0.05, seed=0):
+    rng = np.random.default_rng(seed)
+    a = rng.standard_normal((n, 8)); a /= np.linalg.norm(a, axis=1, keepdims=True)
+    b = a + rng.standard_normal((n, 8)) * noise
+    b /= np.linalg.norm(b, axis=1, keepdims=True)
+    logits = (a @ b.T) / temp                       # every view against every other
+    correct = logits[np.arange(n), np.arange(n)]    # the matching pair
+    return float(np.mean(-correct + np.log(np.exp(logits).sum(1))))
+
+print(infonce(0.1))     # 0.0431  the two views stay close -> easy
+print(infonce(3.0))     # 12.86   the views drift apart   -> hard
+print(np.log(8))        # 2.079   chance for a batch of 8
+# Note it can exceed chance: at a sharp temperature a confidently WRONG
+# match is punished far more than a random guess.
+```
+
 ### Statistical fields in the report
 
 **p_value / p_adjusted** — the raw and multiple-comparison-corrected probability
@@ -190,12 +375,34 @@ Smaller means stronger evidence; below 0.05 is the conventional threshold.
 `p_adjusted` is always ≥ `p_value` because testing many things raises the chance
 that one looks impressive by luck.
 
+```python
+p = np.array([0.001, 0.02, 0.03, 0.5]); m = len(p)
+order = np.argsort(p)
+adj = np.minimum.accumulate((p[order] * m / np.arange(1, m + 1))[::-1])[::-1]
+out = np.empty(m); out[order] = np.minimum(adj, 1)
+print(out)   # [0.004 0.04  0.04  0.5]
+# Each p is scaled by (number of tests / its rank), so testing four things
+# makes a raw 0.02 into an adjusted 0.04 -- still significant here, but
+# a raw 0.03 among 18 tests would not be.
+```
+
 **verdict** — `BETTER` / `WORSE` only for the primary endpoint and only when the
 corrected p-value clears the bar; `SECONDARY` for supporting metrics, which get
 a corrected p but never a verdict; `INDISTINGUISHABLE` when the test ran and
 found nothing; and `UNDERPOWERED` when there were too few seeds for the test to
 have rejected *whatever* the data showed. The last one is not a weaker version
 of "no difference" — it means the question was not askable with that many seeds.
+
+```python
+import math
+for m in (1, 3, 18):
+    print(m, math.ceil(1 + math.log2(m / 0.05)))
+# 1  6      uncorrected, 6 seeds is the minimum
+# 3  7      the primary family (3 arms) needs 7
+# 18 10     the secondary family needs 10
+# Below these, the test cannot return a significant result for ANY effect
+# size -- which is what UNDERPOWERED reports.
+```
 
 ## Running
 
