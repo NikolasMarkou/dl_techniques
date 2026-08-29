@@ -1,9 +1,14 @@
 """
-DeepAR Custom Layers.
+Building blocks for the DeepAR probabilistic forecaster.
 
-This module implements the core building blocks for the DeepAR probabilistic
-forecasting model, including scale handling, likelihood parameter computation,
-and the autoregressive LSTM architecture.
+Four layers live here. ``ScaleLayer`` divides inputs by a per-item scale and
+multiplies outputs back up. ``GaussianLikelihoodHead`` and
+``NegativeBinomialLikelihoodHead`` turn LSTM hidden states into the parameters
+of a predictive distribution. ``DeepARCell`` wraps a Keras ``LSTMCell`` so it
+can be driven step by step.
+
+Both likelihood heads share the module-level constant ``MIN_LIKELIHOOD_PARAM``,
+the floor applied to every parameter that has to stay strictly positive.
 
 Reference:
     DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks
@@ -18,11 +23,12 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# Floor applied to every strictly-positive likelihood parameter (sigma, mu and
-# alpha). Softplus underflows to exactly 0.0 in float32 for logits below about
-# -103, and every downstream use of these parameters -- log(sigma), division by
-# sigma, 1/alpha, lgamma(1/alpha) -- is an inf or a NaN at 0. Small enough not
-# to distort a trained model, large enough to survive float16.
+# Floor for every likelihood parameter that must stay strictly positive: the
+# Gaussian sigma, and the negative-binomial mu and alpha. Softplus underflows
+# to exactly 0.0 in float32 for logits below about -103. At 0 every downstream
+# use is an inf or a NaN: log(sigma), division by sigma, 1/alpha, and
+# lgamma(1/alpha). 1e-6 is small enough not to distort a trained model and
+# large enough to survive float16.
 MIN_LIKELIHOOD_PARAM: float = 1e-6
 
 # ---------------------------------------------------------------------
@@ -30,60 +36,67 @@ MIN_LIKELIHOOD_PARAM: float = 1e-6
 @register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class ScaleLayer(keras.layers.Layer):
     """
-    Applies item-dependent scaling to inputs and inverse scaling to outputs.
+    Divides inputs by an item-dependent scale, or multiplies outputs by it.
 
-    This layer addresses the challenge of learning from time series with widely
-    varying magnitudes by normalizing autoregressive inputs and denormalizing
-    likelihood parameters. It is critical for datasets exhibiting power-law
-    scale distributions.
+    DeepAR trains on series whose magnitudes differ by orders of magnitude.
+    This layer is how one model copes with all of them: autoregressive inputs
+    are divided by a per-item scale, and the predicted likelihood parameters
+    are multiplied back up.
 
-    Scale is computed as:
+    The scale is
+
         ``nu = mean(conditioning_range) + epsilon``
 
-    Forward scaling divides by ``nu``; inverse scaling multiplies by whatever
-    ``scale`` the caller passes. The layer itself has no per-parameter policy —
-    it applies exactly one multiplication or division — so the choice of scale
-    belongs to the call site:
+    Forward scaling divides by ``nu``. Inverse scaling multiplies by whatever
+    ``scale`` the caller passes. The layer applies exactly one division or one
+    multiplication and holds no per-parameter policy, so the call site picks
+    the scale:
 
-    - Gaussian ``mu`` **and** ``sigma``: ``nu``. The forward path divides ``z``
-      by ``nu`` exactly once, so ``mu = nu * mu~`` and ``sigma = nu * sigma~``;
-      ``sigma`` is a first-moment-scale quantity here, not a variance.
-    - Negative-binomial shape ``alpha``: ``1 / sqrt(nu)``.
-
-    This docstring said until 2026-08-15 that inverse scaling uses ``sqrt(nu)``
-    "for standard deviations in the Gaussian case". That is wrong, it was never
-    what any call site did, and the diagram three paragraphs below (``x * nu``)
-    always contradicted it. It is recorded here because a repair driven from the
-    old sentence would re-introduce a defect that has already been fixed once.
+    - Gaussian ``mu`` **and** ``sigma``: pass ``nu``. The forward path divides
+      ``z`` by ``nu`` exactly once, so ``mu = nu * mu~`` and
+      ``sigma = nu * sigma~``. Here ``sigma`` scales like a first moment, not
+      like a variance.
+    - Negative-binomial shape ``alpha``: pass ``1 / sqrt(nu)``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: x (batch, seq_len, features)
+        Input: x [B, T, F]
+        Optional input: scale [B, 1, F], passed by the caller
                     │
                     ▼
-        ┌───────────────────────────────┐
-        │  Scale Computation            │
-        │  nu = mean(x, axis=1) + eps   │
-        └──────────────┬────────────────┘
-                       │
-               ┌───────┴───────┐
-               ▼               ▼
-        ┌────────────┐  ┌─────────────┐
-        │  Forward:  │  │  Inverse:   │
-        │  x / nu    │  │  x * nu     │
-        └─────┬──────┘  └──────┬──────┘
-              │                │
-              ▼                ▼
-        Scaled Output    Descaled Output
+        ┌──────────────────────────────────┐
+        │ if scale is None and             │
+        │    scale_per_sample:             │
+        │      scale = mean(x, axis=1)+eps │
+        └───────────────────┬──────────────┘
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+        ┌───────────┐ ┌───────────┐ ┌───────────┐
+        │  forward  │ │  inverse  │ │  no scale │
+        │ x / scale │ │ x * scale │ │  x as-is  │
+        └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
+              ▼             ▼             ▼
+           Scaled       Descaled     Passthrough
 
-    :param scale_per_sample: If True, compute scale per sample in batch.
-        If False, use provided scale. Defaults to True.
+    The third leaf is reached when ``scale`` is None and ``scale_per_sample``
+    is False. The layer then returns its input untouched.
+
+    Note:
+        Do not restore ``sqrt(nu)`` for the Gaussian ``sigma``. This docstring
+        claimed that until 2026-08-15. No call site ever did it, and the
+        diagram above (``x * scale``) always contradicted it.
+
+    :param scale_per_sample: If True, compute the scale from the input when the
+        caller passes none. If False, use only the provided scale. Defaults to
+        True.
     :type scale_per_sample: bool
-    :param epsilon: Small constant for numerical stability. Defaults to 1.0.
+    :param epsilon: Constant added to the computed mean. Keeps the scale away
+        from zero for a near-empty series. Defaults to 1.0.
     :type epsilon: float
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -95,11 +108,12 @@ class ScaleLayer(keras.layers.Layer):
         """
         Initialize the ScaleLayer.
 
-        :param scale_per_sample: If True, compute scale per sample.
+        :param scale_per_sample: If True, compute the scale per sample when the
+            caller passes none.
         :type scale_per_sample: bool
-        :param epsilon: Small constant for numerical stability.
+        :param epsilon: Constant added to the computed mean.
         :type epsilon: float
-        :param kwargs: Additional arguments for Layer base class.
+        :param kwargs: Additional arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.scale_per_sample = scale_per_sample
@@ -114,19 +128,21 @@ class ScaleLayer(keras.layers.Layer):
         """
         Apply scaling or inverse scaling.
 
-        :param inputs: Input tensor to scale.
+        With no usable scale the input is returned unchanged. That happens when
+        ``scale`` is None and ``scale_per_sample`` is False.
+
+        :param inputs: Tensor to scale.
         :type inputs: keras.KerasTensor
-        :param scale: Pre-computed scale values. If None and scale_per_sample
-            is True, computes from inputs.
+        :param scale: Pre-computed scale. If None and ``scale_per_sample`` is
+            True, it is computed from ``inputs``.
         :type scale: keras.KerasTensor or None
-        :param inverse: If True, apply inverse scaling (multiply). If False,
-            apply forward scaling (divide).
+        :param inverse: If True, multiply by the scale. If False, divide by it.
         :type inverse: bool
-        :return: Scaled or inverse-scaled tensor.
+        :return: The scaled, inverse-scaled or unchanged tensor.
         :rtype: keras.KerasTensor
         """
         if scale is None and self.scale_per_sample:
-            # Compute scale as mean over sequence dimension plus epsilon
+            # Mean over the time axis, plus epsilon.
             scale = ops.mean(inputs, axis=1, keepdims=True) + self.epsilon
 
         if scale is None:
@@ -138,7 +154,16 @@ class ScaleLayer(keras.layers.Layer):
             return inputs / scale
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape equals input shape (scaling preserves dimensions)."""
+        """
+        Return the output shape, which equals the input shape.
+
+        Scaling is elementwise, so no dimension changes.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: tuple[int or None, ...]
+        :return: The same shape.
+        :rtype: tuple[int or None, ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
@@ -161,44 +186,48 @@ class ScaleLayer(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class GaussianLikelihoodHead(keras.layers.Layer):
     """
-    Computes Gaussian likelihood parameters (mean, std) from hidden states.
+    Projects hidden states to Gaussian parameters: a mean and a std deviation.
 
-    This layer projects LSTM hidden states to Gaussian distribution parameters
-    using affine transformations with appropriate activations to ensure valid
-    parameter values (positive standard deviation).
+    Two independent Dense layers read the same hidden state. One produces
+    ``mu``, the distribution mean, with no activation, so it may be negative.
+    The other produces logits for ``sigma``, the standard deviation, which
+    softplus and a floor keep strictly positive.
 
-    The mathematical operations are:
+    The operations are:
         ``mu(h) = W_mu^T h + b_mu``
         ``sigma(h) = max(softplus(W_sigma^T h + b_sigma), 1e-6)``
+
+    ``sigma`` is a standard deviation, not a variance. The negative
+    log-likelihood that consumes it takes ``log(sigma)`` and divides the
+    residual by ``sigma``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: h_t (batch, [seq_len,] hidden_dim)
+        Input: h_t [B, (T,) hidden_dim]
                     │
                     ├─────────────────────┐
                     ▼                     ▼
-            ┌──────────────┐     ┌───────────────────┐
-            │ Dense(units) │     │  Dense(units)     │
-            │  (linear)    │     │  (linear logits)  │
-            └──────┬───────┘     └────────┬──────────┘
-                   │                      │
-                   ▼                      ▼
-                mu (mean)          ┌──────────────┐
-                   │               │  Softplus    │
-                   │               │  + 1e-6 floor│
-                   │               └──────┬───────┘
-                   │                      │
-                   │                      ▼
-                   │                sigma (std > 0)
-                   │                      │
-                   ▼                      ▼
-            Output:mu, sigma
+            ┌──────────────┐     ┌──────────────────┐
+            │ Dense(units) │     │ Dense(units)     │
+            │ (no activ.)  │     │ (sigma logits)   │
+            └───────┬──────┘     └────────┬─────────┘
+                    │                     ▼
+                    │            ┌──────────────────┐
+                    │            │ softplus, then   │
+                    │            │ max(., 1e-6)     │
+                    │            └────────┬─────────┘
+                    ▼                     ▼
+              mu [B, (T,) units]   sigma > 0, same shape
+                    │                     │
+                    └──────────┬──────────┘
+                               ▼
+                    Output: (mu, sigma) tuple
 
-    :param units: Dimensionality of output (typically 1 for univariate time series).
+    :param units: Width of both outputs. Use 1 for a univariate series.
     :type units: int
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -209,14 +238,14 @@ class GaussianLikelihoodHead(keras.layers.Layer):
         """
         Initialize the GaussianLikelihoodHead.
 
-        :param units: Dimensionality of output.
+        :param units: Width of both outputs.
         :type units: int
-        :param kwargs: Additional arguments for Layer base class.
+        :param kwargs: Additional arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.units = units
 
-        # Create projection layers
+        # One Dense per distribution parameter.
         self.mu_projection = layers.Dense(
             units,
             name='mu_projection'
@@ -228,7 +257,7 @@ class GaussianLikelihoodHead(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer by explicitly building sub-layers.
+        Build both projections explicitly, then the layer itself.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple[int or None, ...]
@@ -242,24 +271,20 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             inputs: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Compute Gaussian distribution parameters from hidden states.
+        Compute the Gaussian mean and standard deviation from hidden states.
 
-        :param inputs: Hidden states from LSTM.
+        :param inputs: Hidden states from the LSTM.
         :type inputs: keras.KerasTensor
-        :return: Tuple of (mu, sigma) tensors.
+        :return: Tuple of (mu, sigma) tensors, both of width ``units``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         mu = self.mu_projection(inputs)
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-037
-        # `ops.softplus`, NOT the hand-spelled `ops.log(1.0 + ops.exp(x))`.
-        # The literal spelling overflows: a float32 logit above ~88 makes
-        # `exp` inf, so sigma is inf and the loss NaN; a logit below ~-104
-        # underflows `exp` to exactly 0, so sigma is 0, `log(sigma)` is -inf
-        # and `(target - mu) / sigma` divides by zero. `ops.softplus` is the
-        # numerically stable form. The `maximum` floor is a second, independent
-        # guard: softplus itself underflows to 0 in float32 below about -103.
-        # Do NOT "simplify" either back. See decisions.md D-037.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-037: keep `ops.softplus`
+        # and keep the `maximum` floor. Do NOT respell softplus as
+        # `ops.log(1.0 + ops.exp(x))`: a float32 logit above ~88 makes `exp`
+        # inf, so sigma is inf and the loss NaN. The floor is a second guard --
+        # softplus itself underflows to 0.0 below about -103. See D-037.
         sigma_logits = self.sigma_projection(inputs)
         sigma = ops.maximum(ops.softplus(sigma_logits), MIN_LIKELIHOOD_PARAM)
 
@@ -270,11 +295,11 @@ class GaussianLikelihoodHead(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
-        Compute output shapes for both mu and sigma.
+        Return one shape per output. Both are the input with ``units`` last.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple[int or None, ...]
-        :return: Tuple of two shapes for mu and sigma.
+        :return: The shapes of mu and sigma, which are equal.
         :rtype: tuple[tuple[int or None, ...], tuple[int or None, ...]]
         """
         output_shape = list(input_shape)
@@ -301,48 +326,54 @@ class GaussianLikelihoodHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class NegativeBinomialLikelihoodHead(keras.layers.Layer):
     """
-    Computes Negative Binomial likelihood parameters (mu, alpha) from hidden states.
+    Projects hidden states to negative-binomial parameters: a mean and a
+    dispersion.
 
-    This layer projects LSTM hidden states to Negative Binomial distribution
-    parameters, suitable for modeling count data with overdispersion. Both
-    parameters must be positive, enforced via softplus activation.
+    Use this head for count data that is overdispersed, meaning its variance
+    exceeds its mean. Two Dense layers read the same hidden state. Both outputs
+    have to be positive, so both go through softplus and the same floor.
 
-    The mathematical operations are:
+    The operations are:
         ``mu(h) = max(softplus(W_mu^T h + b_mu), 1e-6)``
         ``alpha(h) = max(softplus(W_alpha^T h + b_alpha), 1e-6)``
 
-    Distribution properties:
+    ``mu`` is the mean and ``alpha`` is the dispersion, not a shape count. The
+    distribution is:
         ``E[z] = mu``
         ``Var[z] = mu + mu^2 * alpha``
+
+    So ``alpha`` at 0 would be a Poisson. The likelihood that consumes these
+    uses ``r = 1 / alpha`` as the shape, which is why ``alpha`` must never
+    reach 0.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: h_t (batch, [seq_len,] hidden_dim)
+        Input: h_t [B, (T,) hidden_dim]
                     │
                     ├─────────────────────┐
                     ▼                     ▼
             ┌──────────────┐     ┌──────────────────┐
-            │ Dense(units) │     │  Dense(units)    │
-            │ (linear)     │     │  (linear logits) │
-            └──────┬───────┘     └────────┬─────────┘
-                   │                      │
-                   ▼                      ▼
+            │ Dense(units) │     │ Dense(units)     │
+            │ (mu logits)  │     │ (alpha logits)   │
+            └───────┬──────┘     └────────┬─────────┘
+                    ▼                     ▼
             ┌──────────────┐     ┌──────────────────┐
-            │  Softplus    │     │  Softplus        │
-            │  + 1e-6 floor│     │  + 1e-6 floor    │
-            └──────┬───────┘     └────────┬─────────┘
-                   │                      │
-                   ▼                      ▼
-              mu (mean > 0)       alpha (shape > 0)
-                   │                      │
-                   ▼                      ▼
-            Output: (mu, alpha)
+            │ softplus,    │     │ softplus,        │
+            │ max(., 1e-6) │     │ max(., 1e-6)     │
+            └───────┬──────┘     └────────┬─────────┘
+                    ▼                     ▼
+             mu > 0 (mean)        alpha > 0 (dispersion)
+             [B, (T,) units]      same shape
+                    │                     │
+                    └──────────┬──────────┘
+                               ▼
+                    Output: (mu, alpha) tuple
 
-    :param units: Dimensionality of output (typically 1 for univariate time series).
+    :param units: Width of both outputs. Use 1 for a univariate series.
     :type units: int
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(
@@ -353,14 +384,14 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
         """
         Initialize the NegativeBinomialLikelihoodHead.
 
-        :param units: Dimensionality of output.
+        :param units: Width of both outputs.
         :type units: int
-        :param kwargs: Additional arguments for Layer base class.
+        :param kwargs: Additional arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.units = units
 
-        # Create projection layers
+        # One Dense per distribution parameter.
         self.mu_projection = layers.Dense(
             units,
             name='mu_projection'
@@ -372,7 +403,7 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer by explicitly building sub-layers.
+        Build both projections explicitly, then the layer itself.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple[int or None, ...]
@@ -386,17 +417,17 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
             inputs: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Compute Negative Binomial distribution parameters from hidden states.
+        Compute the negative-binomial mean and dispersion from hidden states.
 
-        :param inputs: Hidden states from LSTM.
+        :param inputs: Hidden states from the LSTM.
         :type inputs: keras.KerasTensor
-        :return: Tuple of (mu, alpha) tensors.
+        :return: Tuple of (mu, alpha) tensors, both of width ``units``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Softplus + floor, for the reasons given at the Gaussian head
-        # (D-037). `alpha` matters more here than `sigma` does there: the
-        # negative-binomial NLL divides by it and takes `lgamma(1 / alpha)`,
-        # so an `alpha` of exactly 0 is an immediate inf.
+        # Softplus plus the floor, for the reason recorded at the anchor in
+        # GaussianLikelihoodHead.call. `alpha` matters even more than `sigma`
+        # does there: the negative-binomial loss divides by it and takes
+        # `lgamma(1 / alpha)`, so an `alpha` of exactly 0 is an immediate inf.
         mu_logits = self.mu_projection(inputs)
         mu = ops.maximum(ops.softplus(mu_logits), MIN_LIKELIHOOD_PARAM)
 
@@ -410,11 +441,11 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
-        Compute output shapes for both mu and alpha.
+        Return one shape per output. Both are the input with ``units`` last.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple[int or None, ...]
-        :return: Tuple of two shapes for mu and alpha.
+        :return: The shapes of mu and alpha, which are equal.
         :rtype: tuple[tuple[int or None, ...], tuple[int or None, ...]]
         """
         output_shape = list(input_shape)
@@ -440,46 +471,49 @@ class NegativeBinomialLikelihoodHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.deepar_blocks")
 class DeepARCell(keras.layers.Layer):
     """
-    Autoregressive recurrent cell for DeepAR.
+    One autoregressive DeepAR step, as a thin wrapper over a Keras LSTMCell.
 
-    This layer implements the core autoregressive recurrent computation of DeepAR,
-    combining the previous observation, covariates, and hidden state to produce
-    the next hidden state. It is designed to work with RNN layers.
+    ``call`` forwards its input and states straight to the LSTM cell and
+    returns what the cell returns. The recurrence DeepAR describes is
 
-    The mathematical operation is:
         ``h_t = h(h_{t-1}, z_{t-1}, x_t, Theta)``
 
-    where ``h`` is implemented as an LSTM cell.
+    but this cell does not build ``[z_{t-1}, x_t]`` itself. The caller
+    concatenates the previous observation with the covariates and passes the
+    result as one tensor. Drive the cell with ``keras.layers.RNN``, or step it
+    by hand for autoregressive sampling.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Inputs: [z_{t-1}, x_t]       States: h_{t-1}
-                    │                       │
-                    ▼                       │
-            ┌───────────────┐               │
-            │  Concatenate  │               │
-            │ [z_{t-1}, x_t]│               │
-            └───────┬───────┘               │
-                    │                       │
-                    ▼                       ▼
-            ┌───────────────────────────────────┐
-            │           LSTM Cell               │
-            │h_t = LSTM([z_{t-1}, x_t], h_{t-1})│
-            └───────────────┬───────────────────┘
-                            │
-                            ▼
-                    Output: h_t (batch, units)
-                    States: (h_t, c_t)
+        Input: x_t [B, input_dim]   States: (h_{t-1}, c_{t-1})
+                    │                        │
+                    └───────────┬────────────┘
+                                ▼
+                ┌───────────────────────────────┐
+                │ keras LSTMCell(units)         │
+                │ dropout, recurrent_dropout    │
+                └───────────────┬───────────────┘
+                                ▼
+                Output: h_t [B, units]
+                States: (h_t, c_t), each [B, units]
 
-    :param units: Number of LSTM units (hidden dimension).
+    Nothing else happens in ``call``. There is no concatenation, no projection
+    and no scaling stage inside this cell.
+
+    :param units: Number of LSTM units. This is also the hidden width.
     :type units: int
-    :param dropout_rate: Dropout rate for LSTM. Defaults to 0.0.
+    :param dropout_rate: Dropout on the LSTM inputs. Defaults to 0.0.
     :type dropout_rate: float
-    :param recurrent_dropout_rate: Recurrent dropout rate for LSTM. Defaults to 0.0.
+    :param recurrent_dropout_rate: Dropout on the recurrent connections.
+        Defaults to 0.0.
     :type recurrent_dropout_rate: float
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments for the Layer base class.
+
+    :ivar state_size: Width of one state, so ``units``. The cell itself carries
+        two states of that width, and ``get_initial_state`` returns both.
+    :vartype state_size: int
     """
 
     def __init__(
@@ -494,11 +528,11 @@ class DeepARCell(keras.layers.Layer):
 
         :param units: Number of LSTM units.
         :type units: int
-        :param dropout_rate: Dropout rate for LSTM.
+        :param dropout_rate: Dropout on the LSTM inputs.
         :type dropout_rate: float
-        :param recurrent_dropout_rate: Recurrent dropout rate for LSTM.
+        :param recurrent_dropout_rate: Dropout on the recurrent connections.
         :type recurrent_dropout_rate: float
-        :param kwargs: Additional arguments for Layer base class.
+        :param kwargs: Additional arguments for the Layer base class.
         """
         super().__init__(**kwargs)
         self.units = units
@@ -506,7 +540,7 @@ class DeepARCell(keras.layers.Layer):
         self.recurrent_dropout_rate = recurrent_dropout_rate
         self.state_size = units
 
-        # Create LSTM cell
+        # The whole computation of this cell.
         self.lstm_cell = layers.LSTMCell(
             units,
             dropout=dropout_rate,
@@ -516,7 +550,7 @@ class DeepARCell(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the cell by building the LSTM sub-layer.
+        Build the LSTM sub-layer explicitly, then the cell itself.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple[int or None, ...]
@@ -533,13 +567,17 @@ class DeepARCell(keras.layers.Layer):
         """
         Process one time step through the LSTM cell.
 
-        :param inputs: Input tensor at time t, shape ``(batch_size, input_dim)``.
+        :param inputs: Input at time t, shape ``(batch_size, input_dim)``. The
+            caller has already concatenated the previous observation with the
+            covariates.
         :type inputs: keras.KerasTensor
-        :param states: State tensors from previous time step.
+        :param states: State tensors from the previous step, ``(h, c)``.
         :type states: tuple[keras.KerasTensor, ...]
-        :param training: Whether in training mode.
+        :param training: Whether in training mode. Both dropout rates are
+            applied only when this is True.
         :type training: bool or None
-        :return: Tuple of (output, new_states).
+        :return: Tuple of (output, new_states), exactly as the LSTM cell
+            returns them.
         :rtype: tuple[keras.KerasTensor, tuple[keras.KerasTensor, ...]]
         """
         output, new_states = self.lstm_cell(inputs, states, training=training)
@@ -550,7 +588,10 @@ class DeepARCell(keras.layers.Layer):
             batch_size: Optional[int] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Get initial state for the cell.
+        Get the initial state, delegated to the LSTM cell.
+
+        Two tensors come back, the hidden state and the carry state, each of
+        shape ``(batch_size, units)``.
 
         :param batch_size: Batch size for the initial state tensors.
         :type batch_size: int or None
