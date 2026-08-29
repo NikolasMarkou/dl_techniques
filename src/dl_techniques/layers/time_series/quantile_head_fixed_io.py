@@ -1,25 +1,19 @@
 """
-Quantile prediction head for probabilistic forecasting with fixed I/O.
+Quantile prediction head for a fixed forecast horizon.
 
-This layer serves as the final output stage for a deep forecasting model,
-transforming a latent feature representation into a set of quantile
-predictions for a future time horizon. It enables probabilistic forecasting,
-which moves beyond single-point predictions to provide a richer,
-uncertainty-aware view of the future.
+This layer is the output stage of a forecasting model. It turns encoded
+features into one value per quantile for every step of a fixed horizon.
+That gives a predicted range instead of a single number.
 
-The architecture is intentionally simple: a linear projection from the
-encoder's feature space to the target space defined by the quantiles and the
-forecast horizon. It consists of a single Dense layer that maps the input
-features to a flat vector of size ``output_length * num_quantiles``, followed
-by a reshape operation to structure the output.
+The head itself is a linear map. One Dense layer projects the features to
+``output_length * num_quantiles`` values. A reshape then splits that flat
+vector into a (horizon, quantile) grid. All the non-linear work is expected
+to happen in the encoder upstream.
 
-This design assumes that the upstream encoder network is responsible for
-extracting all necessary complex, non-linear patterns from the input time
-series. This head then acts as a simple, learnable mapping from that rich
-representation to the parameters of the forecast distribution.
+An optional constraint keeps the quantiles in order. Without it the model
+can predict a 90th percentile below its own 10th percentile.
 
-The layer is designed to be trained with a quantile loss function
-(pinball loss):
+Train the layer with the pinball loss:
 
     L_tau(y, y_hat) = max((y - y_hat) * tau, (y - y_hat) * (tau - 1))
 
@@ -38,83 +32,113 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.quantile_head_fixed_io")
 class QuantileHead(keras.layers.Layer):
     """
-    Quantile prediction head for probabilistic time series forecasting.
+    Quantile prediction head for a fixed forecast horizon.
 
-    Takes encoded features and projects them to quantile predictions across a
-    specified forecast horizon via a single Dense layer followed by a reshape.
-    Optionally flattens the input sequence before projection and optionally
-    enforces non-crossing quantiles via cumulative softplus deltas.
+    Takes encoded features and projects them to quantile predictions for a
+    fixed number of future steps. The projection is a single Dense layer
+    followed by a reshape. Set ``flatten_input=True`` to feed the head a
+    whole sequence instead of one feature vector.
 
-    When ``enforce_monotonicity=True``, the network outputs raw values
-    [r_0, r_1, r_2, ...] and the final quantiles are computed as:
+    With ``enforce_monotonicity=True`` the Dense output is read as
+    [r_0, r_1, r_2, ...] and the quantiles are built from it:
 
         Q_0 = r_0
-        Q_i = Q_{i-1} + Softplus(r_i)  for i > 0
+        Q_i = Q_0 + sum_{j=1..i} Softplus(r_j)   for i > 0
 
-    This guarantees Q_0 <= Q_1 <= Q_2, preventing "crossing quantiles".
+    Softplus is positive, so each quantile is at least as large as the one
+    before it. The constraint is applied to the reshaped Dense output, not
+    to a separate delta head, and it only runs when ``num_quantiles > 1``.
+
+    Here B is the batch size, D the feature width, S the sequence length,
+    L is ``output_length`` and Q is ``num_quantiles``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: [batch, seq, feature_dim]
+        Input: [B, D], or [B, S, D] if flatten_input
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Flatten ─► [batch, seq*dim]     │ ← (if flatten_input=True)
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
+        │ Reshape [B, S*D]  (flatten only) │
+        └───────────────┬──────────────────┘
+                        ▼
         ┌──────────────────────────────────┐
-        │  Dropout(rate=dropout_rate)      │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
+        │ Dropout(dropout_rate) (rate > 0) │
+        └───────────────┬──────────────────┘
+                        ▼
         ┌──────────────────────────────────┐
-        │  Dense(output_length * Q)        │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
+        │ Dense(L * Q), linear             │
+        └───────────────┬──────────────────┘
+                        │ [B, L*Q]
+                        ▼
         ┌──────────────────────────────────┐
-        │  Reshape ─► [batch, L, Q]        │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Monotonicity Constraint         │ ← (if enforce_monotonicity=True)
-        │  Q_0 = r_0                       │
-        │  Q_i = Q_0 + cumsum(softplus(r)) │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
-        Output: [batch, output_length, num_quantiles]
+        │ Reshape (-1, L, Q)               │
+        └───────────────┬──────────────────┘
+                        │ [B, L, Q]
+              ┌─────────┴─────────┐
+              │                   │ (monotonic, Q > 1)
+              │                   ▼
+              │       ┌─────────────────────────┐
+              │       │ q0   = r[..., 0:1]      │
+              │       │ rest = r[..., 1:]       │
+              │       │ q0 + cumsum(softplus)   │
+              │       │ concat -> [B, L, Q]     │
+              │       └────────────┬────────────┘
+              ▼                    ▼
+        Output: [B, L, Q]
 
-    :param num_quantiles: Number of quantiles to predict simultaneously.
+    Dropout is created only when ``dropout_rate > 0``; otherwise that stage
+    is absent, not a no-op layer.
+
+    :param num_quantiles: Number of quantiles to predict at once. Must be
+        positive.
     :type num_quantiles: int
-    :param output_length: Length of the forecast horizon.
+    :param output_length: Length of the forecast horizon. Must be positive.
     :type output_length: int
-    :param dropout_rate: Dropout probability applied before projection.
+    :param dropout_rate: Dropout probability applied before the projection.
+        Must be in [0, 1]. A value of 0 removes the dropout layer.
         Defaults to 0.1.
     :type dropout_rate: float
-    :param use_bias: Whether to include learnable bias terms.
+    :param use_bias: Whether the Dense projection has a bias term.
         Defaults to True.
     :type use_bias: bool
-    :param flatten_input: If True, the input tensor is flattened (preserving
-        batch) before the dense projection, allowing the head to learn from
-        the full sequence history. Requires fixed sequence length.
-        Defaults to False.
+    :param flatten_input: If True, a 3D input is flattened to
+        (batch, seq * features) before the projection, so the head sees the
+        whole history. The sequence length and feature width must both be
+        known at build time. Defaults to False.
     :type flatten_input: bool
-    :param enforce_monotonicity: If True, enforces non-decreasing quantile
-        predictions (Q_i <= Q_{i+1}) via cumulative softplus deltas.
-        Defaults to False.
+    :param enforce_monotonicity: If True, quantiles are non-decreasing along
+        the last axis. Defaults to False.
     :type enforce_monotonicity: bool
-    :param kernel_initializer: Initializer for projection weights.
+    :param kernel_initializer: Initializer for the projection weights.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for projection biases.
+    :param bias_initializer: Initializer for the projection bias.
         Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        2D tensor (batch, features). With ``flatten_input=True``, a 3D
+        tensor (batch, seq_len, features) with both trailing dimensions
+        known.
+
+    Output shape:
+        3D tensor (batch, output_length, num_quantiles).
+
+    Example:
+        .. code-block:: python
+
+            head = QuantileHead(num_quantiles=3, output_length=24)
+            y = head(keras.random.normal((8, 64)))
+            # y.shape == (8, 24, 3)
+
+    Note:
+        Pass a 3D tensor only with ``flatten_input=True``. With
+        ``flatten_input=False`` the final reshape folds the sequence axis
+        into the batch axis instead of raising: a (4, 7, 16) input returns
+        (28, 5, 3), which disagrees with ``compute_output_shape``.
     """
 
     def __init__(
@@ -289,7 +313,12 @@ class QuantileHead(keras.layers.Layer):
         return (batch_size, self.output_length, self.num_quantiles)
 
     def get_config(self) -> dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_quantiles": self.num_quantiles,

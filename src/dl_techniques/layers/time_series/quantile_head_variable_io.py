@@ -1,31 +1,26 @@
 """
-Sequence-to-sequence quantile prediction head for probabilistic forecasting.
+Quantile prediction head for sequence-to-sequence forecasting.
 
-This layer serves as the output stage for deep sequence models, transforming
-encoded feature representations into quantile predictions at each time step.
-Unlike horizon-based forecasting heads that predict a fixed future window,
-this layer operates in a sequence-to-sequence manner, producing quantile
-estimates independently for each position in the input sequence.
+This layer is the output stage of a sequence model. It emits one value per
+quantile at every position of the input sequence, so the output length is
+the input length. Use it when you want an uncertainty band along a whole
+sequence rather than over a separate future horizon.
 
-The architecture follows a pointwise transformation approach: each time step
-in the input sequence is processed independently through the same learned
-projection. This ensures no cross-temporal mixing occurs in the head
-itself -- all temporal dependencies are expected to be captured by the
-upstream encoder network.
+The transform is pointwise. Each time step passes through the same Dense
+layer on its own, so the head mixes nothing across time. Every temporal
+dependency has to come from the encoder above it.
 
-When monotonicity enforcement is enabled, the layer guarantees non-crossing
-quantiles (Q_i <= Q_{i+1}) at each time step by predicting the first
-quantile directly and modeling subsequent quantiles as cumulative positive
-deltas:
+An optional constraint keeps the quantiles in order at each step. The first
+quantile is predicted directly and the rest are cumulative positive deltas:
 
-    Q_0 = raw_output[:, :, 0]
-    Q_i = Q_0 + sum(Softplus(raw_output[:, :, 1:i]))  for i > 0
+    Q_0 = raw[:, :, 0]
+    Q_i = Q_0 + sum_{j=1..i} Softplus(raw[:, :, j])   for i > 0
 
-The layer is designed to be trained with the quantile loss (pinball loss):
+Train the layer with the pinball loss:
 
     L_tau(y, y_hat) = max((y - y_hat) * tau, (y - y_hat) * (tau - 1))
 
-where tau is the quantile level (e.g., 0.1, 0.5, 0.9).
+where tau is the quantile level, for example 0.1, 0.5 or 0.9.
 
 References:
     - Koenker, R., & Bassett Jr, G. (1978). Regression Quantiles.
@@ -46,86 +41,112 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.quantile_head_variable_io")
 class QuantileSequenceHead(keras.layers.Layer):
     """
-    Sequence-wise quantile prediction head for probabilistic forecasting.
+    Quantile prediction head applied at every sequence position.
 
-    Takes a sequence of encoded features and projects each time step
-    independently to quantile predictions via a pointwise Dense layer,
-    enabling probabilistic sequence-to-sequence modeling. The Dense layer
-    is applied to each time step independently (equivalent to
-    ``TimeDistributed(Dense(...))`` but more efficient), ensuring no
-    cross-temporal mixing.
+    Takes a 3D sequence of encoded features and projects each time step to
+    quantile predictions. The projection is one Dense layer over the last
+    axis, which Keras applies per step. That is the same result as
+    ``TimeDistributed(Dense(...))`` and cheaper. Nothing is mixed across
+    time here.
 
-    When ``enforce_monotonicity=True``, the network outputs raw values
-    [r_0, r_1, r_2, ...] at each time step. The final quantiles are:
+    With ``enforce_monotonicity=True`` the Dense output at each step is read
+    as [r_0, r_1, r_2, ...] and the quantiles are built from it:
 
         Q_0 = r_0
-        Q_i = Q_0 + sum_{j=1}^{i} Softplus(r_j)  for i > 0
+        Q_i = Q_0 + sum_{j=1..i} Softplus(r_j)   for i > 0
 
-    This guarantees Q_0 <= Q_1 <= Q_2 <= ... at every sequence position,
-    preventing "crossing quantiles".
+    Softplus is positive, so quantiles never cross at any position. Each
+    step accumulates on its own. The constraint runs only when
+    ``num_quantiles > 1``.
+
+    Here B is the batch size, S the sequence length, D the feature width and
+    Q is ``num_quantiles``. The input length S is carried straight through.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: [batch, seq_len, feature_dim]
+        Input: [B, S, D]  (3D, D must be known)
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Dropout(rate=dropout_rate)      │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
+        │ Dropout(dropout_rate) (rate > 0) │
+        └───────────────┬──────────────────┘
+                        ▼
         ┌──────────────────────────────────┐
-        │  Dense(num_quantiles)            │
-        │  (applied pointwise per step)    │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────────┐
-        │  Monotonicity Constraint         │ ← (if enforce_monotonicity=True)
-        │  Q_0 = r_0                       │
-        │  Q_i = Q_0 + cumsum(softplus(r)) │
-        └──────────────┬───────────────────┘
-                       │
-                       ▼
-        Output: [batch, seq_len, num_quantiles]
+        │ Dense(Q), one step at a time     │
+        └───────────────┬──────────────────┘
+                        │ [B, S, Q]
+              ┌─────────┴─────────┐
+              │                   │ (monotonic, Q > 1)
+              │                   ▼
+              │       ┌─────────────────────────┐
+              │       │ q0   = r[..., 0:1]      │
+              │       │ rest = r[..., 1:]       │
+              │       │ q0 + cumsum(softplus)   │
+              │       │ concat -> [B, S, Q]     │
+              │       └────────────┬────────────┘
+              ▼                    ▼
+        Output: [B, S, Q]
 
-    :param num_quantiles: Number of quantiles to predict at each sequence
-        position. Must be positive.
+    Dropout is created only when ``dropout_rate > 0``; otherwise that stage
+    is absent, not a no-op layer.
+
+    :param num_quantiles: Number of quantiles predicted at each position.
+        Must be positive.
     :type num_quantiles: int
-    :param dropout_rate: Dropout probability applied before projection.
+    :param dropout_rate: Dropout probability applied before the projection.
+        Must be in [0, 1]. A value of 0 removes the dropout layer.
         Defaults to 0.1.
     :type dropout_rate: float
-    :param use_bias: Whether to include learnable bias terms in the
-        projection layer. Defaults to True.
+    :param use_bias: Whether the Dense projection has a bias term.
+        Defaults to True.
     :type use_bias: bool
-    :param enforce_monotonicity: If True, enforces non-decreasing quantile
-        predictions (Q_i <= Q_{i+1}) at each time step through a cumulative
-        softplus transformation. Defaults to False.
+    :param enforce_monotonicity: If True, quantiles are non-decreasing along
+        the last axis at every position. Defaults to False.
     :type enforce_monotonicity: bool
-    :param kernel_initializer: Initializer for projection weights.
+    :param kernel_initializer: Initializer for the projection weights.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for projection biases.
+    :param bias_initializer: Initializer for the projection bias.
         Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer applied to projection weights.
+    :param kernel_regularizer: Regularizer for the projection weights.
         Defaults to None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param bias_regularizer: Regularizer applied to projection biases.
+    :param bias_regularizer: Regularizer for the projection bias.
         Defaults to None.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :param activity_regularizer: Regularizer applied to the output activations.
+    :param activity_regularizer: Regularizer on the projection output.
         Defaults to None.
     :type activity_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kernel_constraint: Constraint applied to projection weights.
+    :param kernel_constraint: Constraint on the projection weights.
         Defaults to None.
     :type kernel_constraint: Optional[keras.constraints.Constraint]
-    :param bias_constraint: Constraint applied to projection biases.
+    :param bias_constraint: Constraint on the projection bias.
         Defaults to None.
     :type bias_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        3D tensor (batch, seq_len, features). A 2D or 4D input raises in
+        ``build``. The feature dimension must be known.
+
+    Output shape:
+        3D tensor (batch, seq_len, num_quantiles). Only the last axis
+        changes.
+
+    Example:
+        .. code-block:: python
+
+            head = QuantileSequenceHead(num_quantiles=3)
+            y = head(keras.random.normal((8, 48, 64)))
+            # y.shape == (8, 48, 3)
+
+    Note:
+        The regularizers and constraints are handed to the inner Dense
+        layer. ``activity_regularizer`` is therefore applied to the Dense
+        output, before the monotonicity step, not to the returned tensor.
     """
 
     def __init__(
@@ -314,7 +335,12 @@ class QuantileSequenceHead(keras.layers.Layer):
         return (batch_size, seq_len, self.num_quantiles)
 
     def get_config(self) -> dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_quantiles": self.num_quantiles,
