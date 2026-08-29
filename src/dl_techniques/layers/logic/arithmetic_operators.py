@@ -371,13 +371,13 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             # smooth division. Far from zero this is x1/x2 to within
             # O((eps/x2)^2). At x2=0 the value is 0 and the gradient wrt x2 is
             # bounded by |x1| / (2 * eps).
-            denom = keras.ops.add(ops.square(x2), keras.ops.cast(self.epsilon ** 2, x2.dtype))
-            return keras.ops.divide(ops.multiply(x1, x2), denom)
+            denom = keras.ops.add(keras.ops.square(x2), keras.ops.cast(self.epsilon ** 2, x2.dtype))
+            return keras.ops.divide(keras.ops.multiply(x1, x2), denom)
 
         # Legacy hard_clamp behavior — bit-exact with prior versions.
         sign_x2 = keras.ops.sign(x2)
-        sign_x2 = keras.ops.where(ops.equal(sign_x2, 0.0), keras.ops.ones_like(sign_x2), sign_x2)
-        safe_x2 = sign_x2 * keras.ops.maximum(ops.abs(x2), self.epsilon)
+        sign_x2 = keras.ops.where(keras.ops.equal(sign_x2, 0.0), keras.ops.ones_like(sign_x2), sign_x2)
+        safe_x2 = sign_x2 * keras.ops.maximum(keras.ops.abs(x2), self.epsilon)
         return keras.ops.divide(x1, safe_x2)
 
     def _safe_power(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
@@ -407,15 +407,15 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             lo, hi = self.exponent_clip_range
             mid = (lo + hi) / 2.0
             half = (hi - lo) / 2.0
-            x2_safe = keras.ops.add(mid, keras.ops.multiply(half, keras.ops.tanh(ops.divide(ops.subtract(x2, mid), half))))
+            x2_safe = keras.ops.add(mid, keras.ops.multiply(half, keras.ops.tanh(keras.ops.divide(keras.ops.subtract(x2, mid), half))))
         else:
             x2_safe = keras.ops.clip(x2, self.exponent_clip_range[0], self.exponent_clip_range[1])
         magnitude = keras.ops.power(x1_abs_safe, x2_safe)
         # sign component: +1 for non-negative bases, cos(pi*y) for negative.
-        is_negative = keras.ops.cast(ops.less(x1, 0.0), x1.dtype)
+        is_negative = keras.ops.cast(keras.ops.less(x1, 0.0), x1.dtype)
         sign_component = (
-            keras.ops.cos(ops.multiply(math.pi, x2_safe)) * is_negative
-            + (ops.cast(1.0, x1.dtype) - is_negative)
+            keras.ops.cos(keras.ops.multiply(math.pi, x2_safe)) * is_negative
+            + (keras.ops.cast(1.0, x1.dtype) - is_negative)
         )
         return keras.ops.multiply(sign_component, magnitude)
 
@@ -449,7 +449,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         """Return the effective positive temperature."""
         if self.softplus_temperature:
             # softplus(raw) is always > 0; clamp epsilon as a final guard.
-            return keras.ops.maximum(ops.softplus(self.temperature), 1e-7)
+            return keras.ops.maximum(keras.ops.softplus(self.temperature), 1e-7)
         return keras.ops.maximum(self.temperature, 1e-7)
 
     def _operation_probs(
@@ -481,9 +481,9 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             # Gumbel(0,1) = -log(-log(U(0,1))). Manual implementation since
             # keras.ops doesn't expose it directly.
             uniform = keras.random.uniform(
-                shape=ops.shape(weights), minval=1e-9, maxval=1.0
+                shape=keras.ops.shape(weights), minval=1e-9, maxval=1.0
             )
-            gumbel = keras.ops.negative(ops.log(ops.negative(ops.log(uniform))))
+            gumbel = keras.ops.negative(keras.ops.log(keras.ops.negative(keras.ops.log(uniform))))
             # Canonical form: (w + g) / T then softmax (NOT softmax(w/T) + g).
             noisy = keras.ops.add(weights, gumbel)
             if self.use_temperature:
@@ -498,7 +498,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
                 idx = keras.ops.argmax(soft, axis=-1)
                 hard = keras.ops.one_hot(idx, num_classes=self.num_operations)
                 hard = keras.ops.cast(hard, soft.dtype)
-                return keras.ops.add(soft, keras.ops.stop_gradient(ops.subtract(hard, soft)))
+                return keras.ops.add(soft, keras.ops.stop_gradient(keras.ops.subtract(hard, soft)))
             return soft
 
         # No gumbel (or deterministic=True): plain temperature-scaled softmax.
@@ -513,10 +513,10 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self, probs: keras.KerasTensor
     ) -> None:
         if self.entropy_coefficient > 0:
-            log_p = keras.ops.log(ops.add(probs, 1e-12))
-            ent = keras.ops.negative(ops.sum(ops.multiply(probs, log_p)))
+            log_p = keras.ops.log(keras.ops.add(probs, 1e-12))
+            ent = keras.ops.negative(keras.ops.sum(keras.ops.multiply(probs, log_p)))
             # Penalize HIGH entropy (push toward sharp selection).
-            self.add_loss(ops.multiply(self.entropy_coefficient, ent))
+            self.add_loss(keras.ops.multiply(self.entropy_coefficient, ent))
 
     def to_symbolic(self, top_k: int = 1, deterministic: bool = True) -> str:
         """
@@ -611,7 +611,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             # probs shape (C, N) -> (1,)*(rank-2) + (C, N).
             probs_bshape = (1,) * (rank - 2) + (self._channels, self.num_operations)
             weights = keras.ops.reshape(operation_probs, probs_bshape)
-            output = keras.ops.sum(ops.multiply(weights, stacked), axis=-1)
+            output = keras.ops.sum(keras.ops.multiply(weights, stacked), axis=-1)
         else:
             # Global: legacy path.
             stacked = keras.ops.stack(operations, axis=0)
