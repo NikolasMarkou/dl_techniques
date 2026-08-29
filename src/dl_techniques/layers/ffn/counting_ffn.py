@@ -77,6 +77,7 @@ from typing import Literal, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -201,10 +202,12 @@ class CountingFFN(keras.layers.Layer):
     :param use_bias: Whether the three Dense layers carry a bias. Defaults to
         True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for the kernels. The same instance
-        goes to all three Dense layers. Defaults to 'glorot_uniform'.
+    :param kernel_initializer: Initializer for the kernels. Each of the three
+        Dense layers gets its own clone of it. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the biases. Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the biases. Each of the three
+        Dense layers gets its own clone of it too, which only shows with a
+        non-zero initializer. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for the kernels. Defaults to None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
@@ -276,14 +279,15 @@ class CountingFFN(keras.layers.Layer):
         ``counting_scope='local'`` is the default and it is bidirectional.
         Pick 'causal' for anything autoregressive.
 
-    Warning:
-        All three Dense layers share one initializer instance. When
-        ``count_transform`` and ``gate`` end up the same shape - which happens
-        whenever the aggregated width equals the input width, for example
-        ``count_dim=8`` with a 16-wide input under the 'local' default - they
-        start with bit-identical kernels. MEASURED: ``max|delta|`` = 0.0 at
-        build time. They see different inputs, so they do diverge under
-        training, unlike the same pattern in ``gated_mlp.py``.
+    Note:
+        Each of the three Dense layers receives its own clone of
+        ``kernel_initializer`` and ``bias_initializer``, so
+        ``count_transform`` and ``gate`` start as two different functions even
+        at the shapes where they coincide - which happens whenever the
+        aggregated width equals the input width, for example ``count_dim=8``
+        with a 16-wide input under the 'local' default. A SEEDED initializer
+        still gives them the same weights, which is what asking for a seed
+        means.
     """
 
     def __init__(
@@ -341,13 +345,19 @@ class CountingFFN(keras.layers.Layer):
         self._activation_identifier = activation
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-005 -- clone_initializer
+        # per Dense. Do NOT hand the shared ``self.kernel_initializer`` /
+        # ``self.bias_initializer`` instances to these three layers: one
+        # seedless instance drew bit-identical weights for count_transform
+        # and gate whenever their shapes coincide (MEASURED max|delta| = 0.0
+        # at output_dim=16, count_dim=8, 'local', over a 16-wide input).
         # Layer to identify "countable events"
         self.key_projection = keras.layers.Dense(
             self.count_dim,
             activation="sigmoid",
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="key_projection",
@@ -363,8 +373,8 @@ class CountingFFN(keras.layers.Layer):
             self.output_dim,
             activation=self.activation,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="count_transform",
@@ -375,8 +385,8 @@ class CountingFFN(keras.layers.Layer):
             self.output_dim,
             activation="sigmoid",
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="gate",

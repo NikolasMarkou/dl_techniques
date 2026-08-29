@@ -726,3 +726,97 @@ class TestCountingFFNHasNoDeadInputDimLocal:
                                 counting_scope=scope)
             layer(sample)
             assert layer.count_transform.kernel.shape[0] == 4 * factor, scope
+
+
+class TestCountingFFNInitializersAreNotShared:
+    """The three Dense layers must not draw from one initializer instance.
+
+    ``count_transform`` and ``gate`` have the same shape whenever the
+    aggregated count width equals the input width -- ``output_dim=16`` with
+    ``count_dim=8`` under the 'local' default over a 16-wide input is the
+    smallest example. Every test here uses the DEFAULT (unseeded) kernel
+    initializer on purpose: a seeded initializer legitimately gives
+    ``max|delta| = 0.0`` even with ``clone_initializer`` in place, so a
+    seeded guard would pass both ways and prove nothing.
+    """
+
+    @staticmethod
+    def _max_delta(a, b):
+        return float(np.max(np.abs(np.array(a) - np.array(b))))
+
+    def test_count_transform_and_gate_kernels_differ_at_build(self) -> None:
+        """The reported pair, at the shape where it collides."""
+        layer = CountingFFN(output_dim=16, count_dim=8)
+        layer.build((None, 10, 16))
+
+        assert layer.count_transform.kernel.shape == layer.gate.kernel.shape
+        assert self._max_delta(layer.count_transform.kernel,
+                               layer.gate.kernel) > 0.0
+
+    def test_key_projection_kernel_differs_when_it_can_collide(self) -> None:
+        """``key_projection`` collides too, at output_dim == count_dim."""
+        layer = CountingFFN(output_dim=8, count_dim=8,
+                            counting_scope="global")
+        layer.build((None, 10, 8))
+
+        assert (layer.key_projection.kernel.shape
+                == layer.count_transform.kernel.shape)
+        assert self._max_delta(layer.key_projection.kernel,
+                               layer.count_transform.kernel) > 0.0
+
+    def test_bias_initializer_instance_is_cloned_too(self) -> None:
+        """An unseeded bias initializer INSTANCE must not be shared either.
+
+        The default 'zeros' hides this completely: zeros are zeros whether
+        or not the instance is shared. A random bias initializer exposes it.
+        """
+        layer = CountingFFN(
+            output_dim=16,
+            count_dim=8,
+            bias_initializer=keras.initializers.RandomNormal(),
+        )
+        layer.build((None, 10, 16))
+
+        assert self._max_delta(layer.count_transform.bias,
+                               layer.gate.bias) > 0.0
+
+    def test_the_pair_is_separated_after_training_too(self) -> None:
+        """Anti-vacuity control: this arm passes with AND without the clone.
+
+        ``count_transform`` and ``gate`` read different tensors, so they
+        diverge under training even when tied at init -- MEASURED: this test
+        stays green with the clones reverted. That is exactly what makes
+        C-09 an init-time correlation rather than the permanent tie
+        ``gated_mlp.py`` had, and it is recorded here so nobody reads it as
+        the guard. The build-time tests above are the guards.
+        """
+        keras.utils.set_random_seed(0)
+        inputs = keras.Input(shape=(10, 16))
+        layer = CountingFFN(output_dim=16, count_dim=8)
+        model = keras.Model(inputs, layer(inputs))
+        model.compile(optimizer=keras.optimizers.SGD(0.1), loss="mse")
+
+        x = np.random.RandomState(0).randn(16, 10, 16).astype("float32")
+        y = np.random.RandomState(1).randn(16, 10, 16).astype("float32")
+        model.fit(x, y, epochs=3, batch_size=4, verbose=0)
+
+        assert self._max_delta(layer.count_transform.kernel,
+                               layer.gate.kernel) > 0.0
+
+    def test_a_seeded_initializer_still_ties_the_two_dense_layers(self) -> None:
+        """Anti-vacuity control: the clones do NOT override an explicit seed.
+
+        ``clone_initializer``'s documented contract is that cloning a seeded
+        initializer preserves reproducibility rather than breaking symmetry.
+        This test pins that, and it is also why the guards above must stay
+        unseeded.
+        """
+        layer = CountingFFN(
+            output_dim=16,
+            count_dim=8,
+            kernel_initializer=keras.initializers.GlorotUniform(seed=7),
+        )
+        layer.build((None, 10, 16))
+
+        assert self._max_delta(layer.count_transform.kernel,
+                               layer.gate.kernel) == 0.0

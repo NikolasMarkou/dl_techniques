@@ -55,6 +55,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Callable
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -156,12 +157,13 @@ class LowRankFFN(keras.layers.Layer):
     :param use_bias: Whether the ``v1`` / ``v2`` projections carry a bias. The
         ``u1`` / ``u2`` bottlenecks never do. Defaults to True.
     :type use_bias: bool
-    :param kernel_initializer: Initializer for all four Dense kernels. One
-        resolved instance is shared by all four layers.
+    :param kernel_initializer: Initializer for all four Dense kernels. Each of
+        the four layers gets its own clone of it.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for the ``v1`` / ``v2`` biases.
-        Defaults to 'zeros'.
+    :param bias_initializer: Initializer for the ``v1`` / ``v2`` biases. Each
+        of the two gets its own clone of it, which only shows with a non-zero
+        initializer. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for all four Dense kernels.
         Defaults to None.
@@ -228,6 +230,15 @@ class LowRankFFN(keras.layers.Layer):
             y.shape                 # (2, 10, 256)
 
     Note:
+        Each of the four Dense layers receives its own clone of
+        ``kernel_initializer`` and ``bias_initializer``, so ``u1``/``u2`` and
+        ``v1``/``v2`` start as different functions at the shapes where they
+        coincide - ``u1``/``u2`` when ``hidden_dim`` equals the input width,
+        ``v1``/``v2`` when ``hidden_dim`` equals ``output_dim``. A SEEDED
+        initializer still gives them the same weights, which is what asking
+        for a seed means.
+
+    Note:
         ``self.rank`` holds the resolved integer used to size the bottlenecks.
         ``get_config()`` emits the original ``rank`` argument, which may be
         ``None``, so deserialization repeats the same resolution instead of
@@ -290,18 +301,24 @@ class LowRankFFN(keras.layers.Layer):
 
         # Sub-layers are created here, per the Keras 3 pattern. The u1/u2
         # bottlenecks are always bias-free; only v1/v2 carry the optional bias.
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-006 -- clone_initializer
+        # per Dense. Do NOT hand the shared ``self.kernel_initializer`` /
+        # ``self.bias_initializer`` instances to these four layers: one
+        # seedless instance drew bit-identical kernels for u1/u2 and for
+        # v1/v2 whenever their shapes coincide (MEASURED max|delta| = 0.0 at
+        # hidden_dim=output_dim=16, rank=4, over a 16-wide input).
         self.u1 = keras.layers.Dense(
             units=self.rank,
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="u1"
         )
         self.v1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="v1"
@@ -309,15 +326,15 @@ class LowRankFFN(keras.layers.Layer):
         self.u2 = keras.layers.Dense(
             units=self.rank,
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="u2"
         )
         self.v2 = keras.layers.Dense(
             units=self.output_dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="v2"

@@ -310,5 +310,74 @@ class TestLowRankFFNHasNoDeadActivationName:
         assert KANLinear(features=8).base_activation_name is not None
 
 
+class TestLowRankFFNInitializersAreNotShared:
+    """The four Dense layers must not draw from one initializer instance.
+
+    ``u1`` and ``u2`` have the same shape when ``hidden_dim`` equals the
+    input width; ``v1`` and ``v2`` when ``hidden_dim`` equals ``output_dim``.
+    ``hidden_dim=output_dim=16`` over a 16-wide input collides on both pairs
+    at once. Every test here uses the DEFAULT (unseeded) kernel initializer
+    on purpose: a seeded initializer legitimately gives ``max|delta| = 0.0``
+    even with ``clone_initializer`` in place, so a seeded guard would pass
+    both ways and prove nothing.
+    """
+
+    @staticmethod
+    def _max_delta(a, b):
+        return float(np.max(np.abs(np.array(a) - np.array(b))))
+
+    def test_u1_and_u2_kernels_differ_at_build(self) -> None:
+        """The bottleneck pair, at the shape where it collides."""
+        layer = LowRankFFN(hidden_dim=16, output_dim=16, rank=4)
+        layer.build((None, 10, 16))
+
+        assert layer.u1.kernel.shape == layer.u2.kernel.shape
+        assert self._max_delta(layer.u1.kernel, layer.u2.kernel) > 0.0
+
+    def test_v1_and_v2_kernels_differ_at_build(self) -> None:
+        """The output pair, at the shape where it collides."""
+        layer = LowRankFFN(hidden_dim=16, output_dim=16, rank=4)
+        layer.build((None, 10, 16))
+
+        assert layer.v1.kernel.shape == layer.v2.kernel.shape
+        assert self._max_delta(layer.v1.kernel, layer.v2.kernel) > 0.0
+
+    def test_bias_initializer_instance_is_cloned_too(self) -> None:
+        """An unseeded bias initializer INSTANCE must not be shared either.
+
+        The default 'zeros' hides this completely: zeros are zeros whether
+        or not the instance is shared. A random bias initializer exposes it.
+        ``u1``/``u2`` are bias-free, so ``v1``/``v2`` is the only pair.
+        """
+        layer = LowRankFFN(
+            hidden_dim=16,
+            output_dim=16,
+            rank=4,
+            bias_initializer=keras.initializers.RandomNormal(),
+        )
+        layer.build((None, 10, 16))
+
+        assert self._max_delta(layer.v1.bias, layer.v2.bias) > 0.0
+
+    def test_a_seeded_initializer_still_ties_the_two_pairs(self) -> None:
+        """Anti-vacuity control: the clones do NOT override an explicit seed.
+
+        ``clone_initializer``'s documented contract is that cloning a seeded
+        initializer preserves reproducibility rather than breaking symmetry.
+        This test pins that, and it is also why the guards above must stay
+        unseeded.
+        """
+        layer = LowRankFFN(
+            hidden_dim=16,
+            output_dim=16,
+            rank=4,
+            kernel_initializer=keras.initializers.GlorotUniform(seed=7),
+        )
+        layer.build((None, 10, 16))
+
+        assert self._max_delta(layer.u1.kernel, layer.u2.kernel) == 0.0
+        assert self._max_delta(layer.v1.kernel, layer.v2.kernel) == 0.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
