@@ -132,8 +132,8 @@ class SwinMLP(keras.layers.Layer):
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param bias_regularizer: Regularizer for the biases. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param activity_regularizer: Regularizer on layer outputs. Defaults to
-        None. Read the Note below before setting it.
+    :param activity_regularizer: Regularizer on this layer's own output,
+        charged exactly once. Defaults to None.
     :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
@@ -163,8 +163,9 @@ class SwinMLP(keras.layers.Layer):
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
     :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar activity_regularizer: The resolved activity regularizer, or
-        ``None``. This shadows the attribute of the same name on
-        ``keras.layers.Layer``.
+        ``None``. This is the attribute of the same name on
+        ``keras.layers.Layer``, and it is the ONLY site that charges the
+        penalty; neither Dense receives it.
     :vartype activity_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar fc1: ``Dense(hidden_dim)``, the expansion.
     :vartype fc1: keras.layers.Dense
@@ -200,14 +201,15 @@ class SwinMLP(keras.layers.Layer):
             y.shape                 # (2, 49, 96)
 
     Note:
-        ``activity_regularizer`` is charged THREE times, not once. It is
-        passed to ``fc1`` and to ``fc2``, and it is also assigned to
-        ``self.activity_regularizer``, which is the attribute
-        ``keras.layers.Layer.__call__`` reads when it adds an activity loss
-        on this layer's own output. Measured on Keras 3 with
-        ``activity_regularizer='l2'``: ``len(layer.losses) == 3``. If you
-        want one penalty, put the regularizer on the surrounding layer
-        instead.
+        ``activity_regularizer`` is charged exactly once, on this layer's
+        own output. It is stored only as ``self.activity_regularizer``, the
+        attribute ``keras.layers.Layer.__call__`` reads when it adds an
+        activity loss; it is NOT forwarded to ``fc1`` or to ``fc2``.
+        Measured on Keras 3 with ``activity_regularizer='l2'``:
+        ``len(layer.losses) == 1``, and that one value equals the
+        regularizer evaluated on the tensor ``call()`` returns. If you want
+        a penalty on the hidden projection instead, wrap ``fc1``'s output
+        yourself; this layer does not expose that placement.
 
     Note:
         Sub-layers are created in ``__init__`` and built explicitly in
@@ -258,8 +260,8 @@ class SwinMLP(keras.layers.Layer):
         :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
         :param bias_regularizer: Regularizer for both biases, or ``None``.
         :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param activity_regularizer: Activity regularizer, or ``None``. Read
-            the class Note before using it: the penalty lands three times.
+        :param activity_regularizer: Regularizer on this layer's output, or
+            ``None``. Charged once, by ``keras.layers.Layer`` itself.
         :type activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
         :param kwargs: Extra arguments for ``keras.layers.Layer``.
         :type kwargs: Any
@@ -290,6 +292,17 @@ class SwinMLP(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-009
+        # `activity_regularizer` is NOT passed to fc1 or to fc2, unlike
+        # `kernel_regularizer` and `bias_regularizer` right beside it. Do not
+        # "restore" it for symmetry with the other two: Keras charges an
+        # activity penalty once per layer that carries one, so forwarding it
+        # to either Dense adds a second and a third penalty on tensors the
+        # caller never named. MEASURED at BASE with all three sites live:
+        # len(layer.losses) == 3, values [0.19189, 0.68476, 0.19189], where
+        # 0.19189 is L2 on this layer's output and 0.68476 is L2 on fc1's.
+        # A penalty on the hidden projection is not reachable through this
+        # constructor by design. See decisions.md D-003, D-009.
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         # These are unbuilt at creation time.
         # Each Dense takes its OWN clone of both initializers; the rule and
@@ -304,7 +317,6 @@ class SwinMLP(keras.layers.Layer):
             bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
             name="fc1"
         )
 
@@ -363,7 +375,6 @@ class SwinMLP(keras.layers.Layer):
             bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
             name="fc2"
         )
 

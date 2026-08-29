@@ -524,3 +524,70 @@ class TestSwinMLPEdgeCases:
         # Both outputs should be valid
         assert not keras.ops.any(keras.ops.isnan(output1))
         assert not keras.ops.any(keras.ops.isnan(output2))
+
+class TestSwinMLPActivityRegularizerChargedOnce:
+    """Guards for C-01: ``activity_regularizer`` must be charged exactly once.
+
+    At BASE the regularizer was forwarded to ``fc1`` AND ``fc2`` AND assigned
+    to ``self.activity_regularizer``, so ``keras.layers.Layer.__call__`` added
+    a third penalty on the layer's own output. Measured ``len(losses) == 3``.
+    """
+
+    @staticmethod
+    def _build_and_call():
+        keras.utils.set_random_seed(0)
+        layer = SwinMLP(hidden_dim=8, activity_regularizer="l2")
+        x = keras.random.normal((2, 4, 6), seed=3)
+        return layer, x, layer(x)
+
+    def test_exactly_one_activity_loss(self):
+        """One penalty, not three."""
+        layer, _x, _y = self._build_and_call()
+        assert len(layer.losses) == 1, (
+            f"expected 1 activity loss, got {len(layer.losses)}: "
+            f"{[float(v) for v in layer.losses]}"
+        )
+
+    def test_the_one_loss_is_computed_on_this_layers_own_output(self):
+        """A length-only assertion would pass if the WRONG two sites were cut.
+
+        This pins the surviving penalty to the tensor ``call()`` returns, which
+        rules out the ``fc1`` site: ``fc1``'s pre-activation output has a
+        different L2 value.
+        """
+        layer, x, y = self._build_and_call()
+        l2 = keras.regularizers.get("l2")
+        on_output = float(l2(y))
+        on_fc1 = float(l2(layer.fc1(x)))
+        assert abs(on_output - on_fc1) > 1e-6, (
+            "probe is vacuous: fc1's output and the layer's output have the "
+            "same L2 value at this configuration"
+        )
+        vals = [float(v) for v in layer.losses]
+        assert any(abs(v - on_output) < 1e-6 for v in vals), (
+            f"no penalty on the layer's own output ({on_output}) among {vals}"
+        )
+        assert not any(abs(v - on_fc1) < 1e-6 for v in vals), (
+            f"a penalty on fc1's output ({on_fc1}) is still charged: {vals}"
+        )
+
+    def test_neither_dense_carries_the_activity_regularizer(self):
+        """The two forwards are gone from the sub-layers themselves."""
+        layer, _x, _y = self._build_and_call()
+        assert layer.fc1.activity_regularizer is None
+        assert layer.fc2.activity_regularizer is None
+        assert layer.activity_regularizer is not None
+
+    def test_config_round_trip_still_carries_the_regularizer(self):
+        """Removing the forwards must not disturb serialization."""
+        layer = SwinMLP(hidden_dim=8, activity_regularizer=keras.regularizers.L2(0.005))
+        cfg = layer.get_config()
+        restored = SwinMLP.from_config(cfg)
+        assert restored.activity_regularizer is not None
+        assert isinstance(restored.activity_regularizer, keras.regularizers.L2)
+        assert np.isclose(
+            float(restored.activity_regularizer.l2), 0.005
+        )
+        x = keras.random.normal((2, 4, 6), seed=3)
+        restored(x)
+        assert len(restored.losses) == 1
