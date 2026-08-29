@@ -1,31 +1,32 @@
 """
 Foundational blocks of the N-BEATS architecture.
 
-The N-BEATS block is the core computational unit of the Neural Basis Expansion
-Analysis for Time Series (N-BEATS) model. It performs a functional
-decomposition of the input time series by learning coefficients for a set of
-basis functions.
+An N-BEATS block is the core computational unit of the Neural Basis Expansion
+Analysis for Time Series (N-BEATS) model. It decomposes an input window by
+learning the coefficients of a set of basis functions.
 
-The block learns to represent the input time series in a compact, latent
-parameter space (theta). These parameters are then used as coefficients to
-generate both a forecast for the future and a backcast that reconstructs the
-input:
+The block first maps the input window to a small latent vector, theta. Theta is
+then used as the coefficient vector of a basis expansion, which produces two
+outputs: a forecast for the future window, and a backcast that reconstructs the
+input window.
+
     theta = f_theta(x)
     y = G(theta) = sum_i(theta_i * v_i)
 
-The architecture consists of two main parts:
-1.  A deep, fully-connected stack (MLP) that processes the input time series
-    and extracts a high-level feature representation.
-2.  Two linear projection heads that map this representation to separate
-    theta vectors for the backcast and forecast.
+Every block has two parts:
 
-Concrete subclasses (GenericBlock, TrendBlock, SeasonalityBlock) define
-the specific mathematical form of the basis functions (learnable linear
-transforms, polynomials, Fourier series). A key concept is the block's dual
-output of backcast and forecast. In the full N-BEATS model, the backcast is
-subtracted from the input, and the residual is passed to the next block
-("doubly residual stacking"), enabling decomposition of the time series into
-successive components.
+1.  A 4-layer fully connected stack that reads the input window and produces a
+    hidden representation.
+2.  Two linear heads that project that representation to a backcast theta and a
+    forecast theta.
+
+The subclasses choose the basis. GenericBlock learns it as a Dense matrix.
+TrendBlock uses polynomials. SeasonalityBlock uses a Fourier series.
+
+Both outputs are used. In the full N-BEATS model the backcast is subtracted from
+the input and the residual goes to the next block. This is "doubly residual
+stacking", and it is what lets a stack decompose a series into successive
+components.
 
 References:
     - Oreshkin et al. (2020). N-BEATS: Neural Basis Expansion Analysis for
@@ -59,99 +60,115 @@ class NBeatsBlock(keras.layers.Layer):
     """
     Base N-BEATS block with a 4-layer dense stack and dual theta projection.
 
-    This abstract base class implements the fundamental N-BEATS architecture:
-    a 4-layer fully connected stack followed by two linear heads that produce
-    theta coefficients for backcast and forecast generation. Concrete subclasses
-    (GenericBlock, TrendBlock, SeasonalityBlock) define the basis functions that
-    expand theta into time-domain signals.
+    This abstract base class holds the part of N-BEATS that every block shares:
+    four fully connected layers, then two linear heads that emit the theta
+    coefficients. Subclasses supply the basis that turns theta back into a time
+    series. GenericBlock learns the basis, TrendBlock uses polynomials, and
+    SeasonalityBlock uses a Fourier series.
 
-    The block approximates a function that maps an input time series x of
-    length H to a forecast y of length T in two stages:
-        theta = f_theta(x)        (MLP learns coefficients)
-        y = G(theta)              (basis expansion generates output)
+    The block maps an input window x of length ``backcast_length`` to a forecast
+    of length ``forecast_length`` in two stages:
 
-    For multivariate inputs, theta coefficients are generated per-feature.
+        theta = f_theta(x)        (the dense stack learns the coefficients)
+        y = G(theta)              (the basis expands them back to time)
+
+    Input and output are flat 2D tensors. A multivariate window is laid out as
+    ``backcast_length * input_dim`` values per row, and theta is wide enough to
+    carry one coefficient set per feature.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
         Input: (batch, backcast_length * input_dim)
-                        |
-                        v
-               +------------------+
-               | Dense1 -> [Norm] |
-               | -> [Dropout]     |
-               +--------+---------+
-                        |
-                        v
-               +------------------+
-               | Dense2 -> [Norm] |
-               | -> [Dropout]     |
-               +--------+---------+
-                        |
-                        v
-               +------------------+
-               | Dense3 -> [Norm] |
-               | -> [Dropout]     |
-               +--------+---------+
-                        |
-                        v
-               +------------------+
-               | Dense4 -> [Norm] |
-               | -> [Dropout]     |
-               +--------+---------+
-                        |
-              +---------+---------+
-              |                   |
-              v                   v
-        +------------+     +------------+
-        | Theta_back |     | Theta_fore |
-        +------+-----+     +------+-----+
-               |                   |
-               v                   v
-        _generate_backcast   _generate_forecast
-        (subclass basis)     (subclass basis)
-               |                   |
-               v                   v
-        Backcast output     Forecast output
+                          │
+                          ▼
+             ┌────────────────────────┐
+             │ Dense1 (units)         │
+             │ RMSNorm, Dropout (opt) │
+             └───────────┬────────────┘
+                         ▼
+             ┌────────────────────────┐
+             │ Dense2 (units)         │
+             │ RMSNorm, Dropout (opt) │
+             └───────────┬────────────┘
+                         ▼
+             ┌────────────────────────┐
+             │ Dense3 (units)         │
+             │ RMSNorm, Dropout (opt) │
+             └───────────┬────────────┘
+                         ▼
+             ┌────────────────────────┐
+             │ Dense4 (units)         │
+             │ RMSNorm, Dropout (opt) │
+             └───────────┬────────────┘
+                         │ (batch, units)
+             ┌───────────┴────────────┐
+             ▼                        ▼
+      ┌──────────────┐         ┌──────────────┐
+      │theta_backcast│         │theta_forecast│
+      │Dense, linear │         │Dense, linear │
+      └──────┬───────┘         └──────┬───────┘
+             │ (B, td*in_dim)         │ (B, td*out_dim)
+             ▼                        ▼
+      ┌──────────────┐         ┌──────────────┐
+      │_generate_    │         │_generate_    │
+      │  backcast    │         │  forecast    │
+      │ (subclass)   │         │ (subclass)   │
+      └──────┬───────┘         └──────┬───────┘
+             ▼                        ▼
+        backcast                 forecast
+        (B, B_len*in_dim)        (B, F_len*out_dim)
+
+    Both branches are always returned, as a tuple. RMSNorm runs only when
+    ``use_normalization`` is True and Dropout only when ``dropout_rate > 0``.
+    Here td = thetas_dim, B_len = backcast_length, F_len = forecast_length.
 
     :param units: Number of hidden units in the fully connected layers.
         Must be positive.
     :type units: int
-    :param thetas_dim: Dimensionality of the theta parameters passed to
-        basis functions. Must be positive.
+    :param thetas_dim: Number of theta coefficients per feature. The basis
+        functions expand exactly this many coefficients. Must be positive.
     :type thetas_dim: int
     :param backcast_length: Length of the input time series (lookback window).
         Must be positive.
     :type backcast_length: int
     :param forecast_length: Length of the forecast horizon. Must be positive.
     :type forecast_length: int
-    :param input_dim: Number of input features (channels).
+    :param input_dim: Number of input features (channels). Must be positive.
     :type input_dim: int
-    :param output_dim: Number of output features (channels).
+    :param output_dim: Number of output features (channels). Must be positive.
     :type output_dim: int
-    :param dropout_rate: Dropout rate (0 to 1) applied after each dense layer.
+    :param dropout_rate: Dropout rate applied after each dense layer. Must be in
+        [0, 1). At 0 no Dropout layer is created.
     :type dropout_rate: float
-    :param activation: Activation function for hidden layers.
+    :param activation: Activation for the four dense layers.
     :type activation: str or callable
-    :param use_bias: Whether to add bias to the dense layers.
+    :param use_bias: Whether the four dense layers carry a bias.
     :type use_bias: bool
     :param use_normalization: Whether to apply RMSNorm after each dense layer.
+        At False no RMSNorm layer is created.
     :type use_normalization: bool
-    :param kernel_initializer: Initializer for FC layer weights.
+    :param kernel_initializer: Initializer for the four dense layers.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param theta_initializer: Initializer for theta layers.
+    :param theta_initializer: Initializer for the two theta heads.
     :type theta_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for FC layer weights.
+    :param kernel_regularizer: Optional regularizer for the four dense layers.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
-    :param theta_regularizer: Optional regularizer for theta layer weights.
+    :param theta_regularizer: Optional regularizer for the two theta heads.
     :type theta_regularizer: keras.regularizers.Regularizer or None
     :param kwargs: Additional keyword arguments for the Layer parent class.
 
     :raises ValueError: If units, thetas_dim, backcast_length, forecast_length,
         input_dim, or output_dim are not positive, or if dropout_rate is out
         of range [0, 1).
+
+    Input shape:
+        2D tensor of shape ``(batch, backcast_length * input_dim)``.
+
+    Output shape:
+        A tuple of two 2D tensors: ``(batch, backcast_length * input_dim)`` and
+        ``(batch, forecast_length * output_dim)``.
     """
 
     def __init__(
@@ -172,6 +189,15 @@ class NBeatsBlock(keras.layers.Layer):
             theta_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the dense stack and theta heads.
+
+        See the class docstring for the full parameter list.
+
+        :raises ValueError: If units, thetas_dim, backcast_length,
+            forecast_length, input_dim or output_dim is not positive, or if
+            dropout_rate is outside [0, 1).
+        """
         super().__init__(**kwargs)
 
         # Validate inputs with enhanced checks
@@ -455,52 +481,60 @@ class GenericBlock(NBeatsBlock):
     """
     Generic N-BEATS block with learnable linear basis functions.
 
-    This block uses trainable Dense layers as basis functions, allowing the model
-    to learn arbitrary linear transformations from theta parameters to
-    backcast/forecast outputs. It provides maximum flexibility by not constraining
-    the basis functions to specific mathematical forms (unlike TrendBlock or
-    SeasonalityBlock).
+    This block uses two trainable Dense layers as its basis. The model learns the
+    map from theta to the output window instead of being given one. That makes it
+    the most flexible of the three blocks, and the least interpretable: unlike
+    TrendBlock and SeasonalityBlock, its basis has no fixed mathematical form.
 
-    The backcast basis is Dense(thetas_dim * input_dim -> backcast_len * input_dim)
-    and the forecast basis is Dense(thetas_dim * output_dim -> forecast_len * output_dim),
-    both with orthogonal initialization (gain=0.1) for stable training.
+    The backcast basis is a Dense layer from ``thetas_dim * input_dim`` to
+    ``backcast_length * input_dim``. The forecast basis is a Dense layer from
+    ``thetas_dim * output_dim`` to ``forecast_length * output_dim``. Neither uses
+    a bias. Both default to orthogonal initialization at gain 0.1, which keeps the
+    block's contribution to the residual stack small at the start of training.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
         Input: (batch, backcast_length * input_dim)
-                        |
-                        v
-               +------------------+
-               |  NBeatsBlock     |
-               |  (4 Dense +      |
-               |   2 Theta heads) |
-               +--------+---------+
-                        |
-              +---------+---------+
-              |                   |
-              v                   v
-        theta_backcast      theta_forecast
-              |                   |
-              v                   v
-        +------------+     +------------+
-        | Dense      |     | Dense      |
-        | (linear)   |     | (linear)   |
-        +------+-----+     +------+-----+
-               |                   |
-               v                   v
-        Backcast             Forecast
-        (batch, B*in_dim)    (batch, F*out_dim)
+                          │
+                          ▼
+             ┌────────────────────────┐
+             │ NBeatsBlock base       │
+             │ 4 Dense + 2 theta heads│
+             └───────────┬────────────┘
+             ┌───────────┴────────────┐
+             ▼                        ▼
+        theta_backcast           theta_forecast
+        (B, td*in_dim)           (B, td*out_dim)
+             │                        │
+             ▼                        ▼
+      ┌──────────────┐         ┌──────────────┐
+      │backcast_basis│         │forecast_basis│
+      │Dense, linear │         │Dense, linear │
+      │no bias       │         │no bias       │
+      └──────┬───────┘         └──────┬───────┘
+             ▼                        ▼
+        backcast                 forecast
+        (B, B_len*in_dim)        (B, F_len*out_dim)
 
-    :param basis_initializer: Initializer for the two basis matrices. Defaults to
-        ``Orthogonal(gain=0.1)`` — a small-gain orthogonal map, which keeps the block's
-        contribution to the residual stack small at initialization. Any Keras initializer
-        (or its string name) is honoured; this argument is read, not merely stored.
-    :type basis_initializer: str or keras.initializers.Initializer
-    :param basis_regularizer: Optional regularizer for basis matrices.
+    Both basis layers are trainable weights. Both are created from the same
+    ``basis_initializer``, so the two paths share a setting but not a weight.
+
+    :param basis_initializer: Initializer for the two basis Dense layers. Pass a
+        Keras initializer or its string name. The default ``None`` resolves to
+        ``Orthogonal(gain=0.1)``.
+    :type basis_initializer: str or keras.initializers.Initializer or None
+    :param basis_regularizer: Optional regularizer for the two basis Dense layers.
     :type basis_regularizer: keras.regularizers.Regularizer or None
     :param kwargs: Arguments passed to parent NBeatsBlock.
+
+    Input shape:
+        2D tensor of shape ``(batch, backcast_length * input_dim)``.
+
+    Output shape:
+        A tuple of ``(batch, backcast_length * input_dim)`` and
+        ``(batch, forecast_length * output_dim)``.
     """
 
     def __init__(
@@ -509,18 +543,19 @@ class GenericBlock(NBeatsBlock):
             basis_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Resolve the basis initializer and create the two basis Dense layers.
+
+        See the class docstring for the full parameter list.
+        """
         super().__init__(**kwargs)
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-072
-        # `basis_initializer` used to be validated, stored and serialized while both Dense
-        # basis layers hardcoded `Orthogonal(gain=0.1)`, so the argument had no effect.
-        # Do NOT "fix" this by giving the parameter the usual `'glorot_uniform'` default and
-        # passing it through: that silently replaces the small-gain orthogonal map the block
-        # was tuned around and changes every existing GenericBlock's initialization. The
-        # default is `None`, which resolves to the historical `Orthogonal(gain=0.1)`; an
-        # explicit value is now actually used. See decisions.md D-072.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-072: the default None resolves
+        # to Orthogonal(gain=0.1), and basis_initializer now actually reaches both
+        # basis Dense layers instead of being stored, serialized and ignored.
+        # Do NOT default it to 'glorot_uniform': that replaces the small-gain
+        # orthogonal map every existing GenericBlock was tuned around. See D-072.
         if basis_initializer is None:
-            # Small-gain orthogonal init keeps the block's residual contribution small.
             basis_initializer = keras.initializers.Orthogonal(gain=0.1)
 
         # Store configuration
@@ -609,56 +644,73 @@ class TrendBlock(NBeatsBlock):
     """
     Trend N-BEATS block with polynomial basis functions for modeling trends.
 
-    This block uses mathematically-defined polynomial basis functions to explicitly
-    model trend patterns in time series data. The polynomial degree is determined
-    by thetas_dim, and each basis function corresponds to a power of time:
-        f_0(t) = 1              (constant/level)
+    This block fixes the basis to powers of time, so it can only express a
+    polynomial trend. ``thetas_dim`` sets how many powers are available, one per
+    row of the basis matrix:
+
+        f_0(t) = 1              (constant, the level)
         f_1(t) = t              (linear trend)
         f_2(t) = t^2            (quadratic trend)
         f_{n-1}(t) = t^{n-1}   (higher-order trends)
 
-    Time is normalized to t in [-1, 1] centered at the backcast-forecast
-    transition for numerical stability. In multivariate settings, theta is
-    reshaped to (Batch, FeatureDim, Degree) and the basis matrix is
-    (Degree, Time), producing per-feature trends.
+    Time is normalized to t in [-1, 1] and centered on the boundary between the
+    backcast and forecast windows. That keeps the higher powers small enough to
+    stay numerically well behaved and makes extrapolation continuous across the
+    boundary. With ``normalize_basis`` on, every row ``d > 0`` is further divided
+    by ``sqrt(d + 1)``; the constant row is left alone.
+
+    Both basis matrices are non-trainable. Only theta learns.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
         Input: (batch, backcast_length * input_dim)
-                        |
-                        v
-               +------------------+
-               |  NBeatsBlock     |
-               |  (4 Dense +      |
-               |   2 Theta heads) |
-               +--------+---------+
-                        |
-              +---------+---------+
-              |                   |
-              v                   v
-        theta_backcast      theta_forecast
-              |                   |
-              v                   v
-        Reshape to              Reshape to
-        (B, in_dim, degree)     (B, out_dim, degree)
-              |                   |
-              v                   v
-        matmul with             matmul with
-        PolyBasis_backcast      PolyBasis_forecast
-        (degree, backcast_len)  (degree, forecast_len)
-              |                   |
-              v                   v
-        Transpose + Flatten     Transpose + Flatten
-              |                   |
-              v                   v
-        Backcast                Forecast
+                          │
+                          ▼
+             ┌────────────────────────┐
+             │ NBeatsBlock base       │
+             │ 4 Dense + 2 theta heads│
+             └───────────┬────────────┘
+             ┌───────────┴────────────┐
+             ▼                        ▼
+        theta_backcast           theta_forecast
+             │                        │
+             ▼                        ▼
+        reshape                  reshape
+        (B, in_dim, td)          (B, out_dim, td)
+             │                        │
+             ▼                        ▼
+      ┌──────────────┐         ┌──────────────┐
+      │ matmul with  │         │ matmul with  │
+      │ poly basis   │         │ poly basis   │
+      │ (td, B_len)  │         │ (td, F_len)  │
+      │ fixed weight │         │ fixed weight │
+      └──────┬───────┘         └──────┬───────┘
+             │ (B, in_dim, B_len)     │ (B, out_dim, F_len)
+             ▼                        ▼
+        transpose (0,2,1)        transpose (0,2,1)
+        then reshape             then reshape
+             │                        │
+             ▼                        ▼
+        backcast                 forecast
+        (B, B_len*in_dim)        (B, F_len*out_dim)
 
-    :param normalize_basis: Whether to normalize polynomial basis functions
-        for better numerical conditioning.
+    The two basis matrices are separate non-trainable weights, built once from
+    one shared time vector. Here td = thetas_dim, B_len = backcast_length,
+    F_len = forecast_length.
+
+    :param normalize_basis: Whether to divide each polynomial row ``d > 0`` by
+        ``sqrt(d + 1)``, which keeps the higher-degree rows on a similar scale.
     :type normalize_basis: bool
     :param kwargs: Arguments passed to parent NBeatsBlock.
+
+    Input shape:
+        2D tensor of shape ``(batch, backcast_length * input_dim)``.
+
+    Output shape:
+        A tuple of ``(batch, backcast_length * input_dim)`` and
+        ``(batch, forecast_length * output_dim)``.
     """
 
     def __init__(
@@ -666,6 +718,11 @@ class TrendBlock(NBeatsBlock):
             normalize_basis: bool = True,
             **kwargs: Any
     ) -> None:
+        """
+        Record the normalization flag and reserve the two basis matrix slots.
+
+        See the class docstring for the full parameter list.
+        """
         super().__init__(**kwargs)
 
         # Store configuration
@@ -695,10 +752,18 @@ class TrendBlock(NBeatsBlock):
 
     def _create_polynomial_basis(self) -> None:
         """
-        Create polynomial basis matrices with continuous time normalization.
+        Create the two polynomial basis matrices as non-trainable weights.
 
-        Generates non-trainable weight matrices where each row corresponds to
-        a polynomial degree evaluated over the normalized time range [-1, 1].
+        Row ``d`` of each matrix is ``t ** d``, evaluated over a single time
+        vector that is normalized to [-1, 1] and centered on the boundary between
+        the backcast and forecast windows. The vector is then split, so the two
+        matrices are continuous across that boundary. With ``normalize_basis``
+        set, every row ``d > 0`` is divided by ``sqrt(d + 1)``.
+
+        :return: Nothing. Sets ``backcast_basis_matrix`` of shape
+            ``(thetas_dim, backcast_length)`` and ``forecast_basis_matrix`` of
+            shape ``(thetas_dim, forecast_length)``.
+        :rtype: None
         """
         # Create continuous time vector for proper polynomial extrapolation
         total_length = self.backcast_length + self.forecast_length
@@ -731,38 +796,16 @@ class TrendBlock(NBeatsBlock):
 
             # Optional normalization for better conditioning
             if self.normalize_basis and degree > 0:
-                # Normalize based on the expected range of values
-                scale_factor = np.sqrt(degree + 1)  # Simple scaling based on degree
+                # Simple scaling based on degree, to keep the rows on one scale
+                scale_factor = np.sqrt(degree + 1)
                 backcast_basis[degree] /= scale_factor
                 forecast_basis[degree] /= scale_factor
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-028
-        # Both basis matrices are materialized by an INITIALIZER, never by
-        # `add_weight(initializer='zeros')` followed by `.assign()`.
-        #
-        # WHAT NOT TO DO: do NOT restore
-        #     self.backcast_basis_matrix = self.add_weight(..., initializer='zeros')
-        #     self.backcast_basis_matrix.assign(backcast_basis)
-        # Keras 3 runs a symbolic build pass inside a `StatelessScope` whenever this
-        # block is first reached from a PARENT's `call()` -- which is exactly what
-        # `NBeatsNet.call` does under `predict()`/`fit()` -- and that scope RECORDS
-        # the `.assign()` and then DISCARDS it. The weight therefore kept its
-        # `'zeros'` initializer. Because `backcast = theta @ basis_matrix`, the
-        # polynomial basis IS this block's entire output map, so an all-zero basis
-        # makes the block emit EXACTLY zero for both heads while still training and
-        # still reporting a loss. Measured on CPU 2026-08-15: a trend-only
-        # `NBeatsNet.predict()` returned a forecast that is exactly 0.0 everywhere
-        # and a residual bit-identical to its input (the doubly-residual stack
-        # degenerates to a no-op); the same model called eagerly gave basis rows of
-        # 1.0. Initializers are honoured at variable-CREATION time and so survive
-        # the stateless scope. Same defect and same fix as
-        # `layers/embedding/rotary_position_embedding.py` (D-021) and the four
-        # `layers/embedding/` siblings (D-027). See decisions.md D-028.
-        #
-        # `backcast_basis`/`forecast_basis` are NumPy arrays, so closing over them is
-        # safe: a `keras.ops` tensor computed in `build()` would belong to the
-        # symbolic pass's scratch `FuncGraph` and raise "out of scope" on the eager
-        # pass.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-028: both basis matrices are
+        # materialized by an initializer closing over the NumPy arrays above.
+        # Do NOT use add_weight(initializer='zeros') + .assign(): Keras 3 builds
+        # this block inside a StatelessScope that records the assign then discards
+        # it, and a trend-only NBeatsNet.predict() then returned exactly 0.0.
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
@@ -848,54 +891,74 @@ class SeasonalityBlock(NBeatsBlock):
     """
     Seasonality N-BEATS block with Fourier basis functions for periodic patterns.
 
-    This block uses mathematically-defined Fourier (sine/cosine) basis functions to
-    explicitly model seasonal and periodic patterns. The number of harmonics is
-    thetas_dim // 2, and each harmonic k generates a cosine and sine pair:
+    This block fixes the basis to sines and cosines, so it can only express a
+    periodic pattern. Each basis matrix has ``thetas_dim`` rows. They are filled
+    by ``thetas_dim // 2`` harmonics, each contributing a cosine row and a sine
+    row:
+
         cos(2 * pi * k * t / T)
         sin(2 * pi * k * t / T)
 
-    If thetas_dim is odd, a DC component (constant 1) is appended. Basis functions
-    are normalized based on the full (backcast + forecast) sequence energy for
-    continuity. In multivariate settings, theta is reshaped to
-    (Batch, FeatureDim, Harmonics) before applying the basis matrix.
+    Here T is ``backcast_length + forecast_length``, so a harmonic keeps one
+    period across both windows. If ``thetas_dim`` is odd, the leftover row is
+    filled with a constant 1 (the DC term). With ``normalize_basis`` on, each row
+    is divided by the norm of that harmonic over the full T-length sequence, not
+    over its own window. Using one shared norm is what keeps the backcast and
+    forecast on the same scale.
+
+    Both basis matrices are non-trainable. Only theta learns.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
         Input: (batch, backcast_length * input_dim)
-                        |
-                        v
-               +------------------+
-               |  NBeatsBlock     |
-               |  (4 Dense +      |
-               |   2 Theta heads) |
-               +--------+---------+
-                        |
-              +---------+---------+
-              |                   |
-              v                   v
-        theta_backcast      theta_forecast
-              |                   |
-              v                   v
-        Reshape to              Reshape to
-        (B, in_dim, harmonics)  (B, out_dim, harmonics)
-              |                   |
-              v                   v
-        matmul with             matmul with
-        FourierBasis_backcast   FourierBasis_forecast
-        (harmonics, B_len)      (harmonics, F_len)
-              |                   |
-              v                   v
-        Transpose + Flatten     Transpose + Flatten
-              |                   |
-              v                   v
-        Backcast                Forecast
+                          │
+                          ▼
+             ┌────────────────────────┐
+             │ NBeatsBlock base       │
+             │ 4 Dense + 2 theta heads│
+             └───────────┬────────────┘
+             ┌───────────┴────────────┐
+             ▼                        ▼
+        theta_backcast           theta_forecast
+             │                        │
+             ▼                        ▼
+        reshape                  reshape
+        (B, in_dim, td)          (B, out_dim, td)
+             │                        │
+             ▼                        ▼
+      ┌──────────────┐         ┌──────────────┐
+      │ matmul with  │         │ matmul with  │
+      │Fourier basis │         │Fourier basis │
+      │ (td, B_len)  │         │ (td, F_len)  │
+      │ fixed weight │         │ fixed weight │
+      └──────┬───────┘         └──────┬───────┘
+             │ (B, in_dim, B_len)     │ (B, out_dim, F_len)
+             ▼                        ▼
+        transpose (0,2,1)        transpose (0,2,1)
+        then reshape             then reshape
+             │                        │
+             ▼                        ▼
+        backcast                 forecast
+        (B, B_len*in_dim)        (B, F_len*out_dim)
 
-    :param normalize_basis: Whether to normalize Fourier basis functions based
-        on their full-sequence energy for better numerical stability.
+    The reshape and the matmul both use td = thetas_dim, the full row count, not
+    the harmonic count ``thetas_dim // 2``. B_len = backcast_length and
+    F_len = forecast_length.
+
+    :param normalize_basis: Whether to divide each Fourier row by its norm over
+        the full ``backcast_length + forecast_length`` sequence. A norm at or
+        below 1e-8 leaves the row unscaled.
     :type normalize_basis: bool
     :param kwargs: Arguments passed to parent NBeatsBlock.
+
+    Input shape:
+        2D tensor of shape ``(batch, backcast_length * input_dim)``.
+
+    Output shape:
+        A tuple of ``(batch, backcast_length * input_dim)`` and
+        ``(batch, forecast_length * output_dim)``.
     """
 
     def __init__(
@@ -903,6 +966,11 @@ class SeasonalityBlock(NBeatsBlock):
             normalize_basis: bool = True,
             **kwargs: Any
     ) -> None:
+        """
+        Record the normalization flag and reserve the two basis matrix slots.
+
+        See the class docstring for the full parameter list.
+        """
         super().__init__(**kwargs)
 
         # Store configuration
@@ -930,11 +998,19 @@ class SeasonalityBlock(NBeatsBlock):
 
     def _create_fourier_basis(self) -> None:
         """
-        Create Fourier basis matrices with continuous time indices.
+        Create the two Fourier basis matrices as non-trainable weights.
 
-        Generates non-trainable weight matrices containing cosine and sine
-        pairs for each harmonic, normalized by full-sequence energy when
-        normalize_basis is True.
+        Rows are filled harmonic by harmonic, a cosine row then a sine row, until
+        ``thetas_dim`` rows are used. Time indices run continuously across both
+        windows, so the forecast rows continue the backcast rows rather than
+        restarting at 0. With ``normalize_basis`` set, both rows of a harmonic are
+        divided by that harmonic's norm over the full sequence. If ``thetas_dim``
+        is odd, the last row is a constant 1.
+
+        :return: Nothing. Sets ``backcast_basis_matrix`` of shape
+            ``(thetas_dim, backcast_length)`` and ``forecast_basis_matrix`` of
+            shape ``(thetas_dim, forecast_length)``.
+        :rtype: None
         """
         # Number of harmonics (sin/cos pairs)
         num_harmonics = self.thetas_dim // 2
@@ -1006,18 +1082,15 @@ class SeasonalityBlock(NBeatsBlock):
 
         # Handle odd theta_dim: add DC component
         if self.thetas_dim % 2 == 1 and basis_idx < self.thetas_dim:
-            backcast_basis[basis_idx] = 1.0  # DC component
+            # DC component
+            backcast_basis[basis_idx] = 1.0
             forecast_basis[basis_idx] = 1.0
             basis_idx += 1
 
-        # Store as non-trainable weights. Materialized by an INITIALIZER for the
-        # same reason as `TrendBlock._create_polynomial_basis` -- see the DECISION
-        # anchor there (D-028): an `.assign()` issued during Keras 3's symbolic
-        # build pass is recorded and discarded, and since `backcast = theta @
-        # basis_matrix` the all-zero Fourier basis made this block emit exactly
-        # zero. Measured on CPU 2026-08-15: `backcast_basis_matrix[0, 0]` is
-        # 0.33333334 on a direct `.build(...)` and 0.0 through a parent layer's
-        # `call()`. NumPy arrays are closed over, never `keras.ops` tensors.
+        # Materialized by an initializer for the same reason as
+        # TrendBlock._create_polynomial_basis: an .assign() issued during Keras 3's
+        # symbolic build pass is discarded, leaving an all-zero basis and a block
+        # that emits exactly zero. See the anchor there, and decisions.md D-028.
         self.backcast_basis_matrix = self.add_weight(
             name='backcast_basis_matrix',
             shape=(self.thetas_dim, self.backcast_length),
