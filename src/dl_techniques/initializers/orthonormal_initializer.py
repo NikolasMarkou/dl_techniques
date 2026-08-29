@@ -54,11 +54,12 @@ from typing import Optional, Any, Tuple, Dict, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.orthonormal_initializer")
 class OrthonormalInitializer(keras.initializers.Initializer):
     """Custom initializer for orthonormal vectors using QR decomposition.
 

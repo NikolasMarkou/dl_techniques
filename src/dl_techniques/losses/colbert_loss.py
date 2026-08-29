@@ -59,6 +59,7 @@ import keras
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -126,7 +127,7 @@ def _reshape_to_nway(
     )
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@register_dl_technique("dl_techniques")
 class ColBERTPairwiseSoftmaxLoss(keras.losses.Loss):
     """ColBERT v1 objective: softmax cross-entropy over ``nway`` candidate scores.
 
@@ -212,7 +213,7 @@ class ColBERTPairwiseSoftmaxLoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@register_dl_technique("dl_techniques")
 class ColBERTDistillationLoss(keras.losses.Loss):
     """ColBERT v2 objective: batch-mean KL between two log-probability distributions.
 

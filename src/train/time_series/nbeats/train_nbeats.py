@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
+from dl_techniques.utils.keras_registration import register_dl_technique
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -65,7 +66,7 @@ sns.set_palette("husl")
 # call(), reproducing the EXACT same inputs->forecast forward graph as the old
 # anonymous model (training numerics unchanged, A2), while making self.model
 # isinstance-pass in BOTH the recon-off and recon-on paths. See decisions.md D-002.
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.time_series.nbeats.train_nbeats")
 class _NBeatsForecastOnly(keras.Model, ForecastMixin):
     """Forecast-only wrapper around an inner ``NBeatsNet`` (reconstruction loss
     disabled).

@@ -58,10 +58,11 @@ from typing import Dict, Any, Tuple, Optional, Union, Sequence
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.haar_wavelet_initializer")
 class HaarWaveletInitializer(keras.initializers.Initializer):
     """Haar wavelet initializer for convolutional layers.
 

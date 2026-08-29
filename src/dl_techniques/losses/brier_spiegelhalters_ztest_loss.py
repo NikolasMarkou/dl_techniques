@@ -61,11 +61,12 @@ References:
 import keras
 from keras import ops
 from typing import Dict, Optional, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.brier_spiegelhalters_ztest_loss")
 class BrierScoreLoss(keras.losses.Loss):
     """Differentiable Brier Score loss function for model calibration.
 
@@ -152,7 +153,7 @@ class BrierScoreLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.brier_spiegelhalters_ztest_loss")
 class SpiegelhalterZLoss(keras.losses.Loss):
     """Differentiable Spiegelhalter's Z-test loss function for model calibration.
 
@@ -265,7 +266,7 @@ class SpiegelhalterZLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.brier_spiegelhalters_ztest_loss")
 class CombinedCalibrationLoss(keras.losses.Loss):
     """Combined loss function using both Brier Score and Spiegelhalter's Z-test.
 
@@ -371,7 +372,7 @@ class CombinedCalibrationLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.brier_spiegelhalters_ztest_loss")
 class BrierScoreMetric(keras.metrics.Metric):
     """Brier Score metric for monitoring calibration during training.
 
@@ -459,7 +460,7 @@ class BrierScoreMetric(keras.metrics.Metric):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.brier_spiegelhalters_ztest_loss")
 class SpiegelhalterZMetric(keras.metrics.Metric):
     """Spiegelhalter Z-statistic metric for monitoring calibration during training.
 

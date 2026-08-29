@@ -24,11 +24,12 @@ from typing import Optional, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.segmentation_loss")
 @dataclass
 class LossConfig:
     """Configuration for loss function parameters.

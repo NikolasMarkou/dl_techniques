@@ -63,6 +63,7 @@ import keras
 import numpy as np
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -348,7 +349,7 @@ def _set_teacher_temp(self, value: float) -> None:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.dino_loss")
 class DINOLoss(keras.losses.Loss):
     """
     DINO consistency loss for self-supervised learning with momentum-based center.
@@ -679,7 +680,7 @@ class DINOLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.dino_loss")
 class iBOTPatchLoss(keras.losses.Loss):
     """
     iBOT masked patch prediction loss for self-supervised learning.
@@ -995,7 +996,7 @@ class iBOTPatchLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.dino_loss")
 class KoLeoLoss(keras.losses.Loss):
     """
     Kozachenko-Leonenko entropic regularizer for uniform distribution on unit sphere.

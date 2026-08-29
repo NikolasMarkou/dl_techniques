@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # =====================================================================
@@ -67,7 +68,7 @@ def _to_positive_range(
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.depth_metrics")
 class AbsRelMetric(keras.metrics.Metric):
     r"""Absolute Relative Error on valid (masked) pixels.
 
@@ -145,7 +146,7 @@ class AbsRelMetric(keras.metrics.Metric):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.depth_metrics")
 class DeltaThresholdMetric(keras.metrics.Metric):
     r"""Threshold accuracy for depth estimation.
 
@@ -229,7 +230,7 @@ class DeltaThresholdMetric(keras.metrics.Metric):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.depth_metrics")
 class SqRelMetric(keras.metrics.Metric):
     r"""Squared Relative Error on valid (masked) pixels.
 
@@ -298,7 +299,7 @@ class SqRelMetric(keras.metrics.Metric):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.depth_metrics")
 class RMSEMetric(keras.metrics.Metric):
     r"""Root Mean Squared Error on valid (masked) pixels.
 
@@ -359,7 +360,7 @@ class RMSEMetric(keras.metrics.Metric):
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.depth_metrics")
 class RMSELogMetric(keras.metrics.Metric):
     r"""Root Mean Squared Logarithmic Error on valid (masked) pixels.
 

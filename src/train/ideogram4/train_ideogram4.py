@@ -54,6 +54,7 @@ from dl_techniques.models.vision_language.ideogram4.constants import (
 )
 
 from train.common import setup_gpu, set_seeds, create_callbacks, save_config_json
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -268,7 +269,7 @@ def make_synthetic_dataset(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.train.ideogram4")
+@register_dl_technique("dl_techniques.train.ideogram4")
 class Ideogram4FlowTrainer(keras.Model):
     """Thin trainer wrapping :class:`Ideogram4Transformer`.
 

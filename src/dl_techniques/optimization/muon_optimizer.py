@@ -55,10 +55,11 @@ Citations:
 import keras
 from keras import ops
 from typing import Union, Dict, Any, Optional, List
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.muon_optimizer")
 class Muon(keras.optimizers.Optimizer):
     """
     Muon (MomentUm Orthogonalized by Newton-schulz) Optimizer.

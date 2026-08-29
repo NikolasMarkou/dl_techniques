@@ -39,10 +39,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.linear_up_initializer")
 class LinearUpInitializer(keras.initializers.Initializer):
     """Initialize 2D heat-field frequencies uniformly over a disk of radius ``pi*scale``.
 

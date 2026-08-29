@@ -65,6 +65,7 @@ import keras
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.segmentation_loss import LossConfig, SegmentationLosses
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Module-level dispatch table — single source of truth for loss names.
@@ -91,7 +92,7 @@ _LOSS_METHOD_MAP: Dict[str, str] = {
 # inside `create_loss_function` to its own module so that it can be
 # `@register_keras_serializable`-discoverable at load time without
 # `custom_objects` and so that it conforms to F-004 sibling-loss conventions.
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.segmentation_wrapper_loss")
 class SegmentationWrapperLoss(keras.losses.Loss):
     """Name-dispatched Keras `Loss` wrapping `SegmentationLosses` methods.
 

@@ -32,6 +32,7 @@ from typing import Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -39,7 +40,7 @@ from dl_techniques.utils.logger import logger
 NUM_DETECTOR_CLASSES: int = 65
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.superpoint_loss")
 class SuperPointDetectorLoss(keras.losses.Loss):
     """Interest-point detector loss: 65-class softmax cross-entropy from logits.
 
@@ -112,7 +113,7 @@ class SuperPointDetectorLoss(keras.losses.Loss):
         return super().get_config()
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.superpoint_loss")
 class SuperPointDescriptorLoss(keras.losses.Loss):
     """Descriptor hinge correspondence loss (SuperPoint paper formulation).
 

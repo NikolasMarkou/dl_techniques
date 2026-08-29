@@ -179,9 +179,10 @@ Troubleshooting:
 from typing import Optional, Dict, Any
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.clip_accuracy")
 class CLIPAccuracy(keras.metrics.Metric):
     """
     Accuracy metric for CLIP contrastive learning.
@@ -427,7 +428,7 @@ class CLIPAccuracy(keras.metrics.Metric):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.clip_accuracy")
 class CLIPRecallAtK(keras.metrics.Metric):
     """
     Recall@K metric for CLIP contrastive learning.

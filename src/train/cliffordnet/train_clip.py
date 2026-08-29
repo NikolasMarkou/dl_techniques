@@ -135,6 +135,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # Early GPU binding — MUST run before TensorFlow is imported.
@@ -217,7 +218,7 @@ class CliffordCLIPTrainConfig:
 # =============================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.cliffordnet.train_clip")
 class ContrastiveCliffordCLIP(keras.Model):
     """Thin wrapper that plugs a CLIP contrastive loss into ``fit()``.
 

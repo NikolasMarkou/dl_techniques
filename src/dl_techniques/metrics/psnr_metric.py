@@ -1,11 +1,12 @@
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.psnr_metric")
 class PsnrMetric(keras.metrics.Metric):
     """PSNR metric that evaluates only the primary output for multi-output models.
 

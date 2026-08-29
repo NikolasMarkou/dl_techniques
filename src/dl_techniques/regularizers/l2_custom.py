@@ -36,6 +36,7 @@ inverse on the optimization landscape.
 import math
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -53,7 +54,7 @@ def validate_float_arg(value, name):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.l2_custom")
 class L2_custom(keras.regularizers.Regularizer):
     """A regularizer that applies a L2 regularization penalty but also allows negative l2 (forces the weights to increase)
 

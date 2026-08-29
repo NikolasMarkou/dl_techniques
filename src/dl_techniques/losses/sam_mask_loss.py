@@ -38,6 +38,7 @@ from keras import ops
 
 from .segmentation_loss import LossConfig
 from .segmentation_wrapper_loss import SegmentationWrapperLoss
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Number of channels each adapted layout must carry.
 DICE_CHANNELS = 1
@@ -212,7 +213,7 @@ def to_focal_layout(mask_stack: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Losses
 # ---------------------------------------------------------------------------
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.sam_mask_loss")
 class SAMMaskLoss(keras.losses.Loss):
     """
     Focal + dice on SAM's ``low_res_logits``, through the two adapters.
@@ -312,7 +313,7 @@ class SAMMaskLoss(keras.losses.Loss):
         return cls(**config)
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.sam_mask_loss")
 class SAMIoULoss(keras.losses.Loss):
     """
     MSE between the predicted IoU and the IoU the prediction actually achieved.

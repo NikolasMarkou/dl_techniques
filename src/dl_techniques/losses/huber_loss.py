@@ -50,11 +50,12 @@ The Huber loss was introduced in the context of robust statistics:
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.huber_loss")
 class HuberLoss(keras.losses.Loss):
     """Huber loss for robust time series forecasting.
 

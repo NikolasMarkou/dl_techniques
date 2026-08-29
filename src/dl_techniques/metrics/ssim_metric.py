@@ -27,9 +27,10 @@ import keras
 from keras import ops
 import tensorflow as tf
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics")
 class SsimMetric(keras.metrics.Metric):
     """Structural Similarity Index Measure (SSIM) metric.
 

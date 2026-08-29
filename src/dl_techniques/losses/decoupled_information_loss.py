@@ -91,10 +91,11 @@ import keras
 from keras import ops
 from typing import Dict, Any
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.decoupled_information_loss")
 class DecoupledInformationLoss(keras.losses.Loss):
     """A decoupled information-theoretic loss combining cross-entropy with regularization.
 

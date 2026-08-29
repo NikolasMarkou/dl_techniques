@@ -2,6 +2,7 @@ import keras
 from keras import ops
 import numpy as np
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -9,7 +10,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.time_series_metrics")
 class SMAPE(keras.metrics.Metric):
     """Symmetric Mean Absolute Percentage Error metric.
 

@@ -51,10 +51,11 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------
 
 from ..layers.activations.sparsemax import Sparsemax
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.sparsemax_loss")
 class SparsemaxLoss(keras.losses.Loss):
     """
     Sparsemax loss function for training with sparse probability distributions.

@@ -60,12 +60,13 @@ from typing import Dict, Optional, Union, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # main classes
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.warmup_schedule")
 class WarmupSchedule(keras.optimizers.schedules.LearningRateSchedule):
     """Learning rate schedule with linear warmup followed by primary schedule.
 

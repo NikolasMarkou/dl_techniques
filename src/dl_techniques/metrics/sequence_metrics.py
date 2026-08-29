@@ -23,9 +23,10 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics")
 class SequenceAccuracy(keras.metrics.Metric):
     """Sequence-level accuracy metric.
 
@@ -99,7 +100,7 @@ class SequenceAccuracy(keras.metrics.Metric):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics")
 class BitErrorRate(keras.metrics.Metric):
     """Bit Error Rate (BER) metric for binary vector outputs.
 

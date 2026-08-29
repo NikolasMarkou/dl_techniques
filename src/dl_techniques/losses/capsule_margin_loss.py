@@ -56,6 +56,7 @@ import keras
 import warnings
 from keras import ops
 from typing import Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -94,7 +95,7 @@ def capsule_margin_loss(y_pred, y_true, downweight, positive_margin, negative_ma
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.capsule_margin_loss")
 class CapsuleMarginLoss(keras.losses.Loss):
     """
     Margin loss function for Capsule Networks.

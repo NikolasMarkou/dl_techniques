@@ -50,10 +50,11 @@ from typing import Dict, Union, Optional, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.constraints.value_range_constraint")
 class ValueRangeConstraint(keras.constraints.Constraint):
     """Constrains weights to be within specified minimum and maximum values.
 

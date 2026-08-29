@@ -104,6 +104,7 @@ from typing import Dict, Optional, Tuple, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -111,7 +112,7 @@ from dl_techniques.utils.logger import logger
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class ApproximationFunction(keras.layers.Layer):
     """Approximation function for transforming sigmoid outputs to near-binary values.
 
@@ -211,7 +212,7 @@ class ApproximationFunction(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class AnyLoss(keras.losses.Loss):
     """Base class for all confusion matrix-based losses in the AnyLoss framework.
 
@@ -375,7 +376,7 @@ class AnyLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class AccuracyLoss(AnyLoss):
     """Loss function that optimizes accuracy.
 
@@ -461,7 +462,7 @@ class AccuracyLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class PrecisionLoss(AnyLoss):
     """Loss function that optimizes precision.
 
@@ -544,7 +545,7 @@ class PrecisionLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class RecallLoss(AnyLoss):
     """Loss function that optimizes recall (sensitivity).
 
@@ -627,7 +628,7 @@ class RecallLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class SpecificityLoss(AnyLoss):
     """Loss function that optimizes specificity (true negative rate).
 
@@ -714,7 +715,7 @@ class SpecificityLoss(AnyLoss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class F1Loss(AnyLoss):
     """Loss function that optimizes F1 score.
 
@@ -802,7 +803,7 @@ class F1Loss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class FBetaLoss(AnyLoss):
     """Loss function that optimizes F-beta score.
 
@@ -927,7 +928,7 @@ class FBetaLoss(AnyLoss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class BalancedAccuracyLoss(AnyLoss):
     """Loss function that optimizes balanced accuracy.
 
@@ -1017,7 +1018,7 @@ class BalancedAccuracyLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class GeometricMeanLoss(AnyLoss):
     """Loss function that optimizes the geometric mean of sensitivity and specificity.
 
@@ -1103,7 +1104,7 @@ class GeometricMeanLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class YoudenJLoss(AnyLoss):
     """Loss function that optimizes Youden's J statistic.
 
@@ -1200,7 +1201,7 @@ class YoudenJLoss(AnyLoss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class MCCLoss(AnyLoss):
     """Loss function that optimizes Matthews Correlation Coefficient.
 
@@ -1304,7 +1305,7 @@ class MCCLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class CohenKappaLoss(AnyLoss):
     """Loss function that optimizes Cohen's Kappa statistic.
 
@@ -1419,7 +1420,7 @@ class CohenKappaLoss(AnyLoss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class IoULoss(AnyLoss):
     """Loss function that optimizes IoU (Intersection over Union / Jaccard Index).
 
@@ -1502,7 +1503,7 @@ class IoULoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class DiceLoss(AnyLoss):
     """Loss function that optimizes Dice coefficient.
 
@@ -1588,7 +1589,7 @@ class DiceLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class TverskyLoss(AnyLoss):
     """Loss function that optimizes Tversky Index.
 
@@ -1722,7 +1723,7 @@ class TverskyLoss(AnyLoss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class FocalTverskyLoss(AnyLoss):
     """Focal Tversky Loss for hard example mining.
 
@@ -1868,7 +1869,7 @@ class FocalTverskyLoss(AnyLoss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.any_loss")
 class WeightedCrossEntropyWithAnyLoss(AnyLoss):
     """Combines weighted binary cross-entropy with any AnyLoss-based metric.
 

@@ -63,11 +63,12 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.tri_state_preference")
 class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
     """A regularizer that encourages weights to converge to -1, 0, or 1.
 

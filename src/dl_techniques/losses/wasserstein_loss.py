@@ -203,11 +203,12 @@ from typing import Optional, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.wasserstein_loss")
 class WassersteinLoss(keras.losses.Loss):
     """Wasserstein loss for GANs.
 
@@ -301,7 +302,7 @@ class WassersteinLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.wasserstein_loss")
 class WassersteinGradientPenaltyLoss(keras.losses.Loss):
     """Wasserstein loss with gradient penalty for improved training stability.
 
@@ -425,7 +426,7 @@ def compute_gradient_penalty(
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.wasserstein_loss")
 class WassersteinDivergence(keras.losses.Loss):
     """Wasserstein divergence loss for comparing distributions.
 

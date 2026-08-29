@@ -39,9 +39,10 @@ from keras import ops
 from typing import Any, Dict
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class FlowMatchingVelocityLoss(keras.losses.Loss):
     """Velocity MSE loss for rectified-flow / flow-matching training.
 

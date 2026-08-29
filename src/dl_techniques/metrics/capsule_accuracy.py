@@ -1,11 +1,12 @@
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.capsule_accuracy")
 class CapsuleAccuracy(keras.metrics.Metric):
     """Custom accuracy metric for capsule networks based on capsule lengths.
 

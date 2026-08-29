@@ -70,6 +70,7 @@ from typing import Dict, Any, Optional, Union
 # local imports
 # ---------------------------------------------------------------------
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Constants
@@ -99,7 +100,7 @@ MODE_HIGH: str = "high"
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.entropy_regularizer")
 class EntropyRegularizer(keras.regularizers.Regularizer):
     """Custom regularizer that promotes entropy-based structure in neural network weights.
 

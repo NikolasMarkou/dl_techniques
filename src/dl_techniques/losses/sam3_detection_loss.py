@@ -97,6 +97,7 @@ import numpy as np
 import tensorflow as tf
 from keras import ops
 from scipy.optimize import linear_sum_assignment
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # The reference's own sentinel pair: an entry excluded from matching is costed
 # `INVALID_COST` and every produced pair whose cost is at or above
@@ -810,7 +811,7 @@ def sigmoid_focal_loss(truth: Any, logits: Any, alpha: float,
     return alpha_t * ops.power(1.0 - p_t, gamma) * cross_entropy
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.sam3_detection_loss")
 class Sam3DetectionLoss(keras.losses.Loss):
     """The six-term SAM 3 detection loss over one shared Hungarian assignment.
 

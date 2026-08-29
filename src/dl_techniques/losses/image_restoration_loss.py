@@ -103,10 +103,11 @@ Notes
 
 import keras
 import tensorflow as tf
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class CharbonnierLoss(keras.losses.Loss):
     """
     Charbonnier Loss (Robust L1 Loss).
@@ -163,7 +164,7 @@ class CharbonnierLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class FrequencyLoss(keras.losses.Loss):
     """
     Frequency Loss using FFT amplitude comparison.
@@ -259,7 +260,7 @@ class FrequencyLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class EdgeLoss(keras.losses.Loss):
     """
     Edge Loss via Laplacian of Gaussian approximation.
@@ -377,7 +378,7 @@ class EdgeLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class VGGLoss(keras.losses.Loss):
     """
     Perceptual Loss using VGG19 features.
@@ -501,7 +502,7 @@ class VGGLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class EnhanceLoss(keras.losses.Loss):
     """
     Deep Supervision Loss for intermediate feature outputs.
@@ -594,7 +595,7 @@ class EnhanceLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.image_restoration_loss")
 class DarkIRCompositeLoss(keras.losses.Loss):
     """
     Composite Loss for DarkIR training.

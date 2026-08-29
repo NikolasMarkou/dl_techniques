@@ -33,10 +33,11 @@ task and the task of learning when to halt.
 """
 
 import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.hrm_loss")
 class StableMaxCrossEntropy(keras.losses.Loss):
     """
     Stable max cross entropy loss as used in the original HRM.
@@ -116,7 +117,7 @@ class StableMaxCrossEntropy(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.hrm_loss")
 class HRMLoss(keras.losses.Loss):
     """
     Combined loss function for Hierarchical Reasoning Model.

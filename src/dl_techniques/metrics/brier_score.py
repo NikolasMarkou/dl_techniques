@@ -33,13 +33,14 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # BrierScore — binary / multi-label
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.brier_score")
 class BrierScore(keras.metrics.Metric):
     """Binary or multi-label Brier Score.
 
@@ -135,7 +136,7 @@ class BrierScore(keras.metrics.Metric):
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.brier_score")
 class CategoricalBrierScore(keras.metrics.Metric):
     """Multi-class Brier Score with optional sparse-label fast path.
 

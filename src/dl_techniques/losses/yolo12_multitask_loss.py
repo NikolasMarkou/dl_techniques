@@ -41,13 +41,32 @@ from dl_techniques.layers.heads.vision.task_types import (
     TaskConfiguration,
     parse_task_list
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
 # Internal, Task-Specific Loss Implementations
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="yolov12_losses")
+# DECISION plan-2026-08-29T141252-168933da/D-005
+# These four losses were the tree's ONLY registrations under a package string with no owning
+# namespace ("yolov12_losses"). That is the §2.2 hazard itself: an un-namespaced key is
+# claimable by any other library that picks the same word, and the whole point of this
+# migration is that a key names its owner. They are re-keyed onto the derived module path.
+#
+# `legacy_packages=("yolov12_losses",)` is NOT optional and NOT decorative. A pre-migration
+# archive stores the key it was SAVED under -- here `yolov12_losses>X`, never `Custom>X`,
+# because these sites were explicit and so were never bare. The default `Custom>` alias
+# therefore does not cover them; dropping this argument silently breaks every archive that
+# holds one of these four losses. Do not "simplify" it away, and do not re-key any other
+# explicit package string without adding the same argument.
+#
+# `dl_techniques.train.ideogram4` (src/train/ideogram4/train_ideogram4.py) was deliberately
+# left ALONE by the same reasoning read the other way: it is already namespaced and already
+# unique, so re-keying it would be a checkpoint-affecting change bought for nothing.
+@register_dl_technique(
+    "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
+)
 class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
     """
     Internal loss for YOLOv12 object detection.
@@ -574,7 +593,9 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable(package="yolov12_losses")
+@register_dl_technique(
+    "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
+)
 class DiceFocalSegmentationLoss(keras.losses.Loss):
     """
     Internal combined Dice and Focal Loss for segmentation.
@@ -758,7 +779,9 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable(package="yolov12_losses")
+@register_dl_technique(
+    "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
+)
 class ClassificationFocalLoss(keras.losses.Loss):
     """
     Internal Focal Loss for image-level classification.
@@ -834,7 +857,9 @@ class ClassificationFocalLoss(keras.losses.Loss):
 # Main Multi-Task Loss Orchestrator
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="yolov12_losses")
+@register_dl_technique(
+    "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
+)
 class YOLOv12MultiTaskLoss(keras.losses.Loss):
     """
     A single, "smart" loss function for YOLOv12 multi-task models.

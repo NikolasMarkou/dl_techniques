@@ -92,6 +92,7 @@ from typing import Dict, Any, Optional, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import gram_matrix
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Constants
@@ -275,7 +276,7 @@ class _SoftOrthogonalBaseRegularizer(keras.regularizers.Regularizer):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.soft_orthogonal")
 class SoftOrthogonalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
     """Implements soft orthogonality constraint regularization.
 
@@ -337,7 +338,7 @@ class SoftOrthogonalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.soft_orthogonal")
 class SoftOrthonormalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
     """Implements soft orthonormality constraint regularization.
 

@@ -21,9 +21,10 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class MultiTaskLoss(keras.losses.Loss):
     """Per-task weighted MSE loss for dictionary-based multi-output models.
 

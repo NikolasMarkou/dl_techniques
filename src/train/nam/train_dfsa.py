@@ -32,6 +32,7 @@ import numpy as np
 import tensorflow as tf
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -64,7 +65,7 @@ from train.nam.data_generator import (
 RESULT_PLACEHOLDER_ID = 21  # Token ID for re-tokenized computed values
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.nam.train_dfsa")
 class DifferentiableFSA(keras.Model):
     """
     Differentiable Finite-State Arithmetic evaluator.

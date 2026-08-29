@@ -89,6 +89,7 @@ from dl_techniques.analyzer.spectral_metrics import (
     fit_powerlaw,
     compute_detX_constraint,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -121,7 +122,7 @@ _FIT_SUCCESS: str = "success"
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.ww_pgd_optimizer")
 class WWTailConfig:
     """Scalar configuration for the WW-PGD spectral tail-projection.
 
@@ -516,7 +517,7 @@ def ww_pgd_project(
 # epoch-boundary callback wrapper
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.ww_pgd_optimizer")
 class WWPGDProjectionCallback(keras.callbacks.Callback):
     """Epoch-boundary callback running the WW-PGD spectral tail-projection.
 

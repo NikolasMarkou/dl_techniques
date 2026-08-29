@@ -51,10 +51,11 @@ The foundational work on quantile regression was introduced by:
 
 import keras
 from typing import List
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.quantile_loss")
 class MQLoss(keras.losses.Loss):
     """Mean Quantile Loss for probabilistic forecasting.
 
@@ -108,7 +109,7 @@ class MQLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.quantile_loss")
 class QuantileLoss(keras.losses.Loss):
     """
     Vectorized Mean Quantile Loss for probabilistic forecasting.

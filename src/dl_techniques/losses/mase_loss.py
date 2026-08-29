@@ -49,10 +49,11 @@ The MASE metric was proposed by:
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.mase_loss")
 class MASELoss(keras.losses.Loss):
     """Mean Absolute Scaled Error (MASE) loss.
 

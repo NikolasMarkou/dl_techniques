@@ -111,6 +111,7 @@ from dl_techniques.datasets.synthetic_shapes import (
 # (A3: no cycle -- HA's top-level imports are only train.common/dl_techniques.*)
 # reuses the exact stage-3 image I/O instead of reimplementing it.
 from train.superpoint.homographic_adaptation import _load_real_image
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -713,7 +714,7 @@ def benchmark_pipeline(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.superpoint.train_superpoint")
 class SuperPointJointModel(keras.Model):
     """Wraps a SuperPoint backbone with a joint detector+descriptor ``train_step``.
 

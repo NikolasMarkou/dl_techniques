@@ -63,10 +63,11 @@ import keras
 import warnings
 from keras import ops
 from typing import Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.goodhart_loss")
 class GoodhartAwareLoss(keras.losses.Loss):
     """
     An information-theoretic loss combining cross-entropy with regularization.

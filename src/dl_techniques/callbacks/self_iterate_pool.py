@@ -42,9 +42,10 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.callbacks.self_iterate_pool")
 class SelfIteratePoolCallback(keras.callbacks.Callback):
     """Regenerate denoiser training inputs at epoch boundaries over a RAM pool.
 

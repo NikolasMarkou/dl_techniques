@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
+from dl_techniques.utils.keras_registration import register_dl_technique
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -284,7 +285,7 @@ class AdaptiveEMADataProcessor(WindowedTimeSeriesProcessor):
 # Single-head training wrapper
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.time_series.adaptive_ema.train_adaptive_ema")
 class AdaptiveEMATrainingWrapper(keras.Model):
     """
     Wraps ``AdaptiveEMASlopeFilterModel`` to expose a single tensor output

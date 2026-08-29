@@ -31,9 +31,10 @@ from typing import Optional
 import keras
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.callbacks.noise_sigma_curriculum")
 class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
     """Widen the noise-sigma sampling range across epochs (noise curriculum).
 

@@ -163,6 +163,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # TSTConfig — frozen hyperparameter container
@@ -274,7 +275,7 @@ class TSTState:
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.common.token_superposition")
 class TSTEmbedding(keras.layers.Layer):
     """Drop-in replacement for ``keras.layers.Embedding`` with rank-3 bagged path.
 
@@ -424,7 +425,7 @@ class TSTEmbedding(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.common.token_superposition")
 class TSTCausalLMLoss(keras.losses.Loss):
     """Drop-in replacement for ``MaskedCausalLMLoss`` with rank-3 bagged path.
 

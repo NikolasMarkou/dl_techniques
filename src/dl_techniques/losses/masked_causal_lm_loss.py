@@ -39,11 +39,12 @@ References
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.masked_causal_lm_loss")
 class MaskedCausalLMLoss(keras.losses.Loss):
     """Token-level cross-entropy with an ignore index for masked positions.
 
@@ -145,7 +146,7 @@ class MaskedCausalLMLoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.masked_causal_lm_loss")
 class PrefixMaskedCausalLMLoss(MaskedCausalLMLoss):
     """Causal LM loss that also masks a variable-length prefix per sample.
 

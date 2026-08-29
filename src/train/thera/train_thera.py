@@ -43,6 +43,7 @@ Typical usage::
 
 # MPLBACKEND must be set before any matplotlib import — headless server guard.
 import os
+from dl_techniques.utils.keras_registration import register_dl_technique
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import sys
@@ -84,7 +85,7 @@ DEFAULT_COMPONENTS_INIT_SCALE = 16.0
 # =====================================================================
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.thera.train_thera")
 class TheraTrainingModel(keras.Model):
     """``keras.Model`` wrapper implementing THERA's nested-tape training step.
 

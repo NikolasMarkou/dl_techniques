@@ -82,11 +82,12 @@ from typing import Any, Dict, List, Optional, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.sgld_optimizer")
 class SGLD(keras.optimizers.Optimizer):
     """Stochastic Gradient Langevin Dynamics (SGLD) optimizer.
 

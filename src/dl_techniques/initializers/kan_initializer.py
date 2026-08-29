@@ -49,6 +49,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -57,7 +58,7 @@ _VALID_TARGETS = ("residual", "spline")
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.kan_initializer")
 class KANInitializer(keras.initializers.Initializer):
     """Variance-controlled initializer for KAN residual / spline weights.
 

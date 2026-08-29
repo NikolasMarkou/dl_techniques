@@ -33,7 +33,7 @@ Example:
     ...     ...
 """
 
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Sequence, TypeVar
 
 import keras
 
@@ -91,7 +91,11 @@ def _same_definition(existing: Any, obj: Any) -> bool:
 # ---------------------------------------------------------------------
 
 
-def register_dl_technique(package: str, legacy_alias: bool = True) -> Callable[[T], T]:
+def register_dl_technique(
+    package: str,
+    legacy_alias: bool = True,
+    legacy_packages: Sequence[str] = (),
+) -> Callable[[T], T]:
     """Register a class or function under ``package``, optionally aliasing the legacy key.
 
     :param package: Package-qualified string handed to
@@ -109,10 +113,21 @@ def register_dl_technique(package: str, legacy_alias: bool = True) -> Callable[[
         registered objects -- aliasing both sides of such a pair would recreate, in the
         legacy namespace, the exact import-order collision this migration removes.
     :type legacy_alias: bool
+    :param legacy_packages: Additional *package strings* this object was registered under
+        before the migration. Each contributes one more alias, ``f"{pkg}>{obj.__name__}"``,
+        bound exactly like the ``Custom>`` one and subject to the same collision check.
+        ``legacy_alias=True`` is simply shorthand for prepending ``"Custom"`` to this list.
+        Needed whenever a *non-bare* key is re-keyed: the pre-migration archive stores the
+        old package string, not ``Custom``, so the ``Custom>`` alias alone would not load it.
+        The tree's one user is ``losses/yolo12_multitask_loss.py``, whose four classes moved
+        off the un-namespaced ``"yolov12_losses"`` (see :sec:`2.2` -- a package string with
+        no owning namespace is the collision hazard this migration exists to remove).
+    :type legacy_packages: Sequence[str]
 
-    :raises AliasCollisionError: if ``legacy_alias`` is ``True`` and the legacy key is
-        already bound to a *different* definition. Re-executing the same definition (module
-        reloaded, or imported under a second name) is idempotent and does not raise.
+    :raises AliasCollisionError: if any alias key -- the ``Custom>`` one or a
+        ``legacy_packages`` one -- is already bound to a *different* definition. Re-executing
+        the same definition (module reloaded, or imported under a second name) is idempotent
+        and does not raise.
 
     :returns: A decorator that registers its argument and returns it unchanged.
     :rtype: Callable
@@ -141,9 +156,12 @@ def register_dl_technique(package: str, legacy_alias: bool = True) -> Callable[[
     # Do NOT replace this with a post-hoc registry walk.
     def decorator(obj: T) -> T:
         obj = keras.saving.register_keras_serializable(package=package)(obj)
-        if legacy_alias:
-            key = f"{LEGACY_ALIAS_PREFIX}>{obj.__name__}"
-            custom_objects = keras.saving.get_custom_objects()
+        # `legacy_alias=True` is exactly `legacy_packages=("Custom",)`; one loop binds both
+        # kinds so the collision check below can never apply to one and not the other.
+        prefixes = ([LEGACY_ALIAS_PREFIX] if legacy_alias else []) + list(legacy_packages)
+        custom_objects = keras.saving.get_custom_objects()
+        for prefix in prefixes:
+            key = f"{prefix}>{obj.__name__}"
             existing = custom_objects.get(key)
             # DECISION plan-2026-08-29T141252-168933da/D-002
             # Raise, do not overwrite and do not warn-and-skip. Keras itself accepts the second

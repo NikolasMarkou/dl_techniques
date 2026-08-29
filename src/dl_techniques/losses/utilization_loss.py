@@ -18,9 +18,10 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class MANNUtilizationLoss(keras.losses.Loss):
     """Encourages a Memory-Augmented Neural Network to use its memory.
 
@@ -113,7 +114,7 @@ class MANNUtilizationLoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class GNNUtilizationLoss(keras.losses.Loss):
     """Encourages a Graph Neural Network to use its entity representations.
 

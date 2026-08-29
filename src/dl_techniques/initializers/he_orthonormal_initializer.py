@@ -55,11 +55,12 @@ from typing import Optional, Any, Tuple, Dict, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.he_orthonormal_initializer")
 class HeOrthonormalInitializer(keras.initializers.Initializer):
     """Custom initializer that applies He normal initialization followed by orthonormalization.
 

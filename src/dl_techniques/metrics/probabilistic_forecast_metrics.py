@@ -29,13 +29,14 @@ and fully serializable. They mirror the ``SMAPE`` conventions in
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Probabilistic forecast metrics
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.probabilistic_forecast")
+@register_dl_technique("dl_techniques.probabilistic_forecast")
 class CoverageMetric(keras.metrics.Metric):
     """Empirical interval coverage for quantile forecasts.
 
@@ -130,7 +131,7 @@ class CoverageMetric(keras.metrics.Metric):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.probabilistic_forecast_metrics")
 class SharpnessMetric(keras.metrics.Metric):
     """Mean interval width (sharpness) for quantile forecasts.
 

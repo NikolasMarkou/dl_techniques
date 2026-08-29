@@ -1,9 +1,10 @@
 import keras
 from typing import Optional, Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.identity_plus_noise")
 class IdentityPlusNoise(keras.initializers.Initializer):
     """Initializer that returns ``eye(H) + RandomNormal(stddev, seed)``.
 

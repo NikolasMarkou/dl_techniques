@@ -61,10 +61,11 @@ from keras import ops
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.siglip_contrastive_loss")
 class SigLIPContrastiveLoss(keras.losses.Loss):
     """
     SigLIP Contrastive Loss Function.
@@ -169,7 +170,7 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
         })
         return config
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.siglip_contrastive_loss")
 class AdaptiveSigLIPLoss(keras.losses.Loss):
     """
     Adaptive SigLIP Loss with dynamic temperature scaling.
@@ -279,7 +280,7 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         })
         return config
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.siglip_contrastive_loss")
 class HybridContrastiveLoss(keras.losses.Loss):
     """
     Hybrid loss combining SigLIP with score-based objectives.

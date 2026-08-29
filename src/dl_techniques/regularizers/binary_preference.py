@@ -64,6 +64,7 @@ from typing import Dict, Any, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # Constants
@@ -81,7 +82,7 @@ STR_SCALE: str = "scale"
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.binary_preference")
 class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     """A regularizer that encourages weights to move towards binary values (0 or 1).
 

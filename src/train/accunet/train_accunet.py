@@ -38,6 +38,7 @@ from typing import List, Optional, Tuple
 
 import keras
 import matplotlib
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Force non-interactive backend before any pyplot import to support headless runs.
 matplotlib.use("Agg", force=True)
@@ -276,7 +277,7 @@ def load_oxford_pets_dataset(
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.accunet.train_accunet")
 class BinaryDiceMetric(keras.metrics.Metric):
     """Differentiable / running Dice coefficient for binary segmentation.
 

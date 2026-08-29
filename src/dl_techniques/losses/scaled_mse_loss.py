@@ -25,9 +25,10 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class ScaledMseLoss(keras.losses.Loss):
     """MSE loss with automatic target resizing for multi-scale supervision.
 

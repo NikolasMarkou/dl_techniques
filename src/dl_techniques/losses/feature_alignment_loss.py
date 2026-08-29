@@ -69,10 +69,11 @@ from typing import Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.feature_alignment_loss")
 class FeatureAlignmentLoss(keras.losses.Loss):
     """Feature alignment loss for semantic prior transfer.
 

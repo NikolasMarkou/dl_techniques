@@ -82,6 +82,7 @@ from typing import List, Optional, Sequence
 import keras
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -147,7 +148,7 @@ def _accumulate_cross_entropy(
 # BitsPerToken
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.llm_metrics")
 class BitsPerToken(keras.metrics.Metric):
     """Bits-per-token (== ``log2(perplexity)``) for CLM evaluation.
 
@@ -219,7 +220,7 @@ class BitsPerToken(keras.metrics.Metric):
 # BitsPerCharacter
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.llm_metrics")
 class BitsPerCharacter(keras.metrics.Metric):
     """Bits-per-character (== ``BitsPerToken / chars_per_token``).
 

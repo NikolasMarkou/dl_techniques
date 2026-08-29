@@ -58,10 +58,11 @@ import keras
 import numpy as np
 import warnings
 from typing import Optional, Tuple, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.hypersphere_orthogonal_initializer")
 class OrthogonalHypersphereInitializer(keras.initializers.Initializer):
     """
     Orthogonal hypersphere weight initializer with mathematical dimensionality constraints.

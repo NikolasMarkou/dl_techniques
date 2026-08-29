@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
+from dl_techniques.utils.keras_registration import register_dl_technique
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -117,7 +118,7 @@ class MDNTrainingConfig(BaseTimeSeriesTrainingConfig):
             raise ValueError("input_length must be positive")
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.time_series.mdn.train_mdn")
 class MultiTaskMDNModel(keras.Model, ForecastMixin):
     """Multi-task wrapper around MDNModel with task embeddings, Conv1D, and attention.
 

@@ -20,11 +20,12 @@ import warnings
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.clip_contrastive_loss")
 class CLIPContrastiveLoss(keras.losses.Loss):
     """
     CLIP Symmetric Contrastive Loss with configurable temperature and smoothing.

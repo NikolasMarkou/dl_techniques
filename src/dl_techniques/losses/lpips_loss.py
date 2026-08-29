@@ -72,6 +72,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -107,7 +108,7 @@ _VALID_VGG_VARIANTS = ("vgg16", "vgg19")
 # ---------------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses")
 class LPIPSLoss(keras.losses.Loss):
     """LPIPS-flavored perceptual loss using frozen VGG features.
 

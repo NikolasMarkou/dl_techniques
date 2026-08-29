@@ -58,10 +58,11 @@ from typing import Callable, Dict, Any, Optional, Sequence, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.initializers.gabor_filters_initializer")
 class GaborFiltersInitializer(keras.initializers.Initializer):
     """Gabor-filter-bank initializer for convolutional layers.
 

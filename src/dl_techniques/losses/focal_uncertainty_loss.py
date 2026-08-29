@@ -82,10 +82,11 @@ from typing import Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.focal_uncertainty_loss")
 class FocalUncertaintyLoss(keras.losses.Loss):
     """Focal Loss with uncertainty regularization for robust classification.
 

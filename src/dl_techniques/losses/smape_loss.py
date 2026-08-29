@@ -49,10 +49,11 @@ properties are discussed in:
 
 import keras
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.smape_loss")
 class SMAPELoss(keras.losses.Loss):
     """Symmetric Mean Absolute Percentage Error (SMAPE) loss.
 

@@ -127,6 +127,7 @@ from .sam_mask_loss import (
     match_mask_axis,
     to_dice_layout,
 )
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Focal contribution of one fully-gated (all-zero GT) mask row. **Exactly
 #: zero** since the focal term moved to logit space: the gate is now applied to
@@ -229,7 +230,7 @@ def _focal_from_logits(truth: Any, logits: Any, gamma: float, alpha: float) -> A
     return alpha * modulator * cross_entropy
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.sam2_video_loss")
 class SAM2GatedMaskLoss(SAMMaskLoss):
     """:class:`SAMMaskLoss` with upstream's ground-truth presence gate.
 

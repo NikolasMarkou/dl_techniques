@@ -158,10 +158,11 @@ def custom_loss_and_metrics(y_true, y_pred):
 
 import keras
 from typing import Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.perplexity_metric")
 class Perplexity(keras.metrics.Metric):
     """
     Perplexity metric for language modeling tasks.

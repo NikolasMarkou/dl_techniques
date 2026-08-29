@@ -19,13 +19,14 @@ import keras
 from keras import ops
 
 from dl_techniques.losses.yolo12_multitask_loss import YOLOv12ObjectDetectionLoss
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # Subclass rather than fork. The parent stays intact for
 # YOLOv12-model users; we override only _make_anchors.
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.clifford_detection_loss")
 class CliffordDetectionLoss(YOLOv12ObjectDetectionLoss):
     """YOLOv12 object-detection loss with configurable strides.
 

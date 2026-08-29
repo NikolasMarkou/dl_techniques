@@ -102,11 +102,12 @@ from keras import ops
 from typing import Any, Dict, List, Union
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.optimization.gefen_optimizer")
 class Gefen(keras.optimizers.Optimizer):
     """Gefen-lite (shared-v) optimizer: AdamW with a block-shared second moment.
 

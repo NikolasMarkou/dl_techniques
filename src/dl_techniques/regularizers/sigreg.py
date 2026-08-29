@@ -44,11 +44,12 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 from keras import ops
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.sigreg")
 class SIGRegLayer(keras.layers.Layer):
     """Sketch Isotropic Gaussian Regularizer as a Keras Layer.
 

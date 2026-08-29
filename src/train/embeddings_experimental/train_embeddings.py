@@ -86,6 +86,7 @@ from .config import (
     build_model,
 )
 from .data import build_packed_mlm_dataset
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -237,7 +238,7 @@ def run_mlm_stage(
 # Stage 2 -- contrastive embedding fine-tuning
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.embeddings_experimental.train_embeddings")
 class SimCSELoss(keras.losses.Loss):
     """Symmetric InfoNCE over two dropout views of the same batch.
 
@@ -290,7 +291,7 @@ class SimCSELoss(keras.losses.Loss):
         return config
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.embeddings_experimental.train_embeddings")
 class SimCSEModel(keras.Model):
     """SimCSE: two dropout views of one sentence form a positive pair.
 

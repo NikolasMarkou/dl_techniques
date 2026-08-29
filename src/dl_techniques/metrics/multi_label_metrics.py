@@ -1,10 +1,11 @@
 import keras
 import numpy as np
 from typing import Union, Optional
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.multi_label_metrics")
 class MultiLabelMetrics(keras.metrics.Metric):
     """
     Comprehensive multi-label classification metrics.

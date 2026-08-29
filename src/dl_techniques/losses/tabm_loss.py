@@ -1,6 +1,7 @@
 import keras
 from keras import ops
 from typing import Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -10,7 +11,7 @@ from typing import Union
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.tabm_loss")
 class TabMLoss(keras.losses.Loss):
     """Custom loss for TabM ensemble training.
 

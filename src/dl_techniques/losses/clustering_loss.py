@@ -74,6 +74,7 @@ from typing import Optional, Union, List, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
@@ -103,7 +104,7 @@ class ClusteringMetrics:
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.clustering_loss")
 class ClusteringLoss(keras.losses.Loss):
     """Custom loss function for clustering quality.
 

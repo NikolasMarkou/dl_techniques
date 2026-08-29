@@ -27,9 +27,10 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Union
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.primary_output_metrics")
 class PrimaryOutputAccuracy(keras.metrics.Metric):
     """Classification accuracy for the primary output of multi-output models.
 
@@ -105,7 +106,7 @@ class PrimaryOutputAccuracy(keras.metrics.Metric):
         return super().get_config()
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.metrics.primary_output_metrics")
 class PrimaryOutputTopKAccuracy(keras.metrics.Metric):
     """Top-K accuracy for the primary output of multi-output models.
 

@@ -58,11 +58,12 @@ from typing import Optional, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.regularizers.srip")
 class SRIPRegularizer(keras.regularizers.Regularizer):
     """Spectral Restricted Isometry Property (SRIP) regularizer.
 

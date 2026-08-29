@@ -15,6 +15,7 @@ based on class presence, stabilizing training for imbalanced datasets.
 import keras
 from keras import ops
 from typing import Optional, List, Union, Dict, Any
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
@@ -23,7 +24,7 @@ from typing import Optional, List, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class PerChannelBinaryLoss(keras.losses.Loss):
     """
     Wrapper that applies a binary loss function independently per channel.
@@ -192,7 +193,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class WeightedBinaryFocalLoss(keras.losses.Loss):
     """
     Binary Focal Loss with class weighting for imbalanced segmentation.
@@ -292,7 +293,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.multi_labels_loss")
 class DiceLossPerChannel(keras.losses.Loss):
     """
     Dice Loss applied per channel for multi-label segmentation.

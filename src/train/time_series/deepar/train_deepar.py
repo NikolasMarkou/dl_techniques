@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
+from dl_techniques.utils.keras_registration import register_dl_technique
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -142,7 +143,7 @@ class DeepARTrainingConfig(BaseTimeSeriesTrainingConfig):
 # force a tensor output from DeepAR.call -- that would alter the shared model's
 # contract. Compute NLL in call() + add_loss, compile with loss=None. See
 # decisions.md D-001.
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.time_series.deepar.train_deepar")
 class DeepARTrainingWrapper(keras.Model, ForecastMixin):
     """Serializable training wrapper that wires DeepAR's NLL via ``add_loss``.
 

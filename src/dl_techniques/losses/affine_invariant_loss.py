@@ -60,10 +60,11 @@ from typing import Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.losses.affine_invariant_loss")
 class AffineInvariantLoss(keras.losses.Loss):
     """Affine-invariant loss for scale-invariant depth prediction.
 

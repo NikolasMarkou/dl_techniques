@@ -74,6 +74,7 @@ from train.common.nlp import (
 )
 from train.rms_variants_train.config import ExperimentConfig, NORM_VARIANTS
 from train.rms_variants_train.seed_utils import set_seeds
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 # ---------------------------------------------------------------------
@@ -99,7 +100,7 @@ WIKI_ARTICLES_DEFAULT = 10_000
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.train.rms_variants_train.experiments.e6_clm_wiki")
 class TinyCLM(keras.Model):
     """4-layer / d=192 / 4-head causal transformer with dict-keyed output.
 
