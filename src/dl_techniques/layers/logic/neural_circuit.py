@@ -1,38 +1,53 @@
 """
-A parallelized, learnable computational block for a neural circuit.
+Shape-preserving layers that run a mix of logic and arithmetic experts.
 
-This layer represents a single, complex computational stage designed to be
-stacked in a deep "neural circuit." It departs from monolithic layers like
-convolution by creating a parallel ensemble of diverse, learnable operators
-(both logical and arithmetic) and then learning how to route information
-between them.
+Two layers live here. ``CircuitDepthLayer`` is one stage: it runs several
+``LearnableLogicOperator`` and ``LearnableArithmeticOperator`` children on
+the same input and returns their weighted sum, so the layer learns which
+operators the task wants. ``LearnableNeuralCircuit`` stacks
+``circuit_depth`` of those stages with an optional LayerNorm after each.
 
-Architecture (post plan_2026-05-13_a2b0f17b):
-    The depth layer's design is inspired by Mixture of Experts (MoE) but
-    has TWO selectable routing modes:
+Both keep the input shape. Give them any tensor of rank 2 or more and you
+get the same shape back, so they drop into the middle of a network where
+you would otherwise put a residual block.
 
-    - ``circuit_routing='output_only'`` (NEW DEFAULT):
-          ``Y = sum_i beta_i * f_i(X) [+ X]``
-      Each expert sees the full input X. Only the *output* fusion is gated
-      by the softmax-normalized combination weights ``beta``. This avoids
-      the input attenuation problem of the classic mode (each expert seeing
-      ``X / N`` on average) and makes the layer behave like a true soft-MoE.
+Two routing modes:
 
-    - ``circuit_routing='classic'``:
-          ``Y = sum_i beta_i * f_i(alpha_i * X) [+ X]``
-      The original behavior preserved for backwards compatibility with
-      models trained against the prior (attenuated) routing.
+    ``circuit_routing='output_only'`` is the default. Every expert reads
+    the full input X and only the fusion is gated:
 
-Optional features (all opt-in, default off):
+        Y = sum_i(beta_i * f_i(X)) [+ X]
 
-  - ``load_balance_coefficient`` > 0 enables Shazeer-style auxiliary loss
-    that pushes expert utilization toward uniform.
-  - ``channel_mix='dense'`` appends a learnable per-channel ``Dense`` mixing
-    layer after the fusion.
-  - ``apply_sigmoid_per_depth`` (on ``LearnableNeuralCircuit``) controls
-    where ``LearnableLogicOperator`` instances apply their input sigmoid:
-    ``'first_only'`` (default, recommended for stacking — avoids the
-    sigmoid-of-sigmoid range collapse), ``'all'`` (legacy), or ``'none'``.
+    where beta is a softmax over the combination weights.
+
+    ``circuit_routing='classic'`` also scales each expert's input by its
+    own routing weight:
+
+        Y = sum_i(beta_i * f_i(alpha_i * X)) [+ X]
+
+    where alpha is a softmax over the routing weights. Each expert then
+    sees X / N on average, so the signal shrinks as you add experts. Keep
+    this mode only to load models trained before the default changed.
+
+Extras, all off by default:
+
+    - ``gate_entropy_coefficient`` > 0 adds an auxiliary loss that pushes
+      expert use toward uniform. The old name ``load_balance_coefficient``
+      still works and raises a DeprecationWarning.
+    - ``diversity_coefficient`` > 0 adds a cosine-similarity penalty
+      between experts, so they settle on different operators.
+    - ``channel_mix='dense'`` appends a ``Dense(C)`` mixing layer after
+      the fusion.
+    - ``selection_mode='per_channel'`` learns one fusion weight vector per
+      channel instead of one for the whole tensor.
+    - ``use_layer_norm``, on the circuit only, adds a LayerNorm after
+      every depth.
+
+``apply_sigmoid_per_depth`` on ``LearnableNeuralCircuit`` says which
+depths let their logic children sigmoid their input. ``'first_only'`` is
+the default and only depth 0 does, because a sigmoid of a sigmoid keeps
+squeezing the range and a 3-deep stack converges to a constant. ``'all'``
+is the old behavior; ``'none'`` trusts the caller to stay in [0, 1].
 """
 
 import keras
@@ -54,11 +69,22 @@ def _resolve_gate_entropy_coefficient(
     load_balance_coefficient: Optional[float],
     cls_name: str,
 ) -> float:
-    """Resolve the gate-entropy coefficient honoring back-compat aliasing.
+    """
+    Resolve the gate-entropy coefficient, honoring the deprecated alias.
 
-    If only the deprecated ``load_balance_coefficient`` is passed, emit a
-    DeprecationWarning and use its value. If both are passed, the new name
-    wins. Returns the resolved float (default 0.0).
+    ``load_balance_coefficient`` is the old name for the same number. If
+    only the old name is given and it is non-zero, this warns and uses it.
+    If both are given, the new name wins. If neither is set, the result is
+    0.0, which turns the loss off.
+
+    :param gate_entropy_coefficient: The canonical argument, or ``None``.
+    :type gate_entropy_coefficient: Optional[float]
+    :param load_balance_coefficient: The deprecated alias, or ``None``.
+    :type load_balance_coefficient: Optional[float]
+    :param cls_name: Class name to name in the warning message.
+    :type cls_name: str
+    :return: The resolved coefficient, 0.0 when neither name is set.
+    :rtype: float
     """
     if (
         load_balance_coefficient is not None
@@ -83,35 +109,207 @@ def _resolve_gate_entropy_coefficient(
 @keras.saving.register_keras_serializable()
 class CircuitDepthLayer(keras.layers.Layer):
     """
-    Single depth layer of a neural circuit with parallel expert operators.
+    One circuit stage: parallel logic and arithmetic experts, fused.
 
-    Implements a MoE-inspired computational stage containing parallel logic and
-    arithmetic operator "experts" with learnable output fusion. With the
-    default ``circuit_routing='output_only'`` mode, each expert sees the full
-    input and only the output is gated by ``beta = softmax(w_combination)``:
-    ``Y = sum_i(beta_i * f_i(X)) [+ X]``.
+    The layer builds ``num_logic_ops`` ``LearnableLogicOperator`` children
+    and ``num_arithmetic_ops`` ``LearnableArithmeticOperator`` children in
+    ``__init__``. Every child runs on the input, and the output is their
+    weighted sum with weights ``beta = softmax(combination_weights)``. The
+    weights are trained, so the stage learns which experts matter.
 
-    See module docstring for the legacy ``'classic'`` mode and the load-balance
-    / channel-mix opt-ins.
+    The output has the same shape as the input, so this drops in wherever
+    a residual block would go. With ``use_residual=True``, the default,
+    the input is added back at the end.
 
-    :param num_logic_ops: Number of logic operators to run in parallel.
-    :param num_arithmetic_ops: Number of arithmetic operators to run in parallel.
-    :param use_residual: Whether to add an input-skip residual to the fusion.
-    :param logic_op_types: Optional list of logic operation types to expose.
-    :param arithmetic_op_types: Optional list of arithmetic operation types.
-    :param routing_initializer: Initializer for routing weights (only used in
-        ``circuit_routing='classic'`` mode; preserved on the layer for
-        serialization compatibility regardless).
-    :param combination_initializer: Initializer for combination weights.
-    :param circuit_routing: ``'output_only'`` (default — fixed math) or
-        ``'classic'`` (legacy attenuated input gating).
-    :param apply_sigmoid: Forwarded to inner ``LearnableLogicOperator`` instances.
-        Default ``True`` matches legacy behavior.
-    :param load_balance_coefficient: If > 0, add a Shazeer-style aux loss that
-        encourages uniform expert utilization. Default 0 (off).
-    :param channel_mix: ``'dense'`` to append a per-channel ``Dense(C, C)``
-        mixing layer; ``None`` (default) for shape-pure pointwise behavior.
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        X = inputs [B, ..., C]
+          │
+          ├────────────────────────────────────────────┐
+          ▼                                            │
+        ┌────────────────────────────────────────────┐ │
+        │ beta = softmax(combination_weights, -1)    │ │
+        │ the gate-entropy and diversity aux losses  │ │
+        │ are added here, when their coefs are > 0   │ │
+        └─────────────────────┬──────────────────────┘ │
+                              ▼                        │
+        ┌────────────────────────────────────────────┐ │
+        │ circuit_routing                            │ │
+        │   'output_only'  every expert reads X      │ │
+        │   'classic'      expert i reads            │ │
+        │                  alpha_i * X, alpha =      │ │
+        │                  softmax(routing_weights)  │ │
+        └─────────────────────┬──────────────────────┘ │
+                              ▼                        │
+        ┌────────────────────────────────────────────┐ │
+        │ N experts run in parallel on that input    │ │
+        │ N = num_logic_ops + num_arithmetic_ops     │ │
+        │ the logic children first, then arithmetic  │ │
+        └─────────────────────┬──────────────────────┘ │
+                              ▼                        │
+        ┌────────────────────────────────────────────┐ │
+        │ stack the N outputs, weight them by beta   │ │
+        │   'global'       one beta for all of C     │ │
+        │   'per_channel'  one beta per channel      │ │
+        └─────────────────────┬──────────────────────┘ │
+                              ▼                        │
+        ┌────────────────────────────────────────────┐ │
+        │ Dense(C)   only when channel_mix ==        │ │
+        │            'dense'                         │ │
+        └─────────────────────┬──────────────────────┘ │
+                              ▼                        │
+                             add ◄─────────────────────┘
+                              │   only when use_residual
+                              ▼
+                   Y = output [B, ..., C]
+
+    :param num_logic_ops: How many logic experts to run. Must be > 0.
+    :type num_logic_ops: int
+    :param num_arithmetic_ops: How many arithmetic experts to run. Must be
+        > 0.
+    :type num_arithmetic_ops: int
+    :param use_residual: Add the input back to the fused output.
+    :type use_residual: bool
+    :param logic_op_types: Gate keys passed to every logic child. ``None``
+        leaves that child on its own default set.
+    :type logic_op_types: Optional[List[str]]
+    :param arithmetic_op_types: Operation keys passed to every arithmetic
+        child. ``None`` leaves that child on its own default set.
+    :type arithmetic_op_types: Optional[List[str]]
+    :param routing_initializer: Initializer for the routing weights. Those
+        weights are created either way, but only ``'classic'`` routing
+        reads them.
+    :type routing_initializer: Union[str, keras.initializers.Initializer]
+    :param combination_initializer: Initializer for the combination
+        weights. ``"zeros"`` starts every expert equally weighted.
+    :type combination_initializer: Union[str, keras.initializers.Initializer]
+    :param circuit_routing: ``'output_only'`` (default) or ``'classic'``.
+        See the module docstring for the two formulas.
+    :type circuit_routing: str
+    :param apply_sigmoid: Passed to every logic child as its
+        ``apply_sigmoid``. ``True`` matches the old behavior.
+    :type apply_sigmoid: bool
+    :param gate_entropy_coefficient: Weight of the auxiliary loss that
+        pushes expert use toward uniform. 0 or ``None`` adds no loss.
+    :type gate_entropy_coefficient: Optional[float]
+    :param load_balance_coefficient: Deprecated name for
+        ``gate_entropy_coefficient``. Passing it warns. If both are
+        passed, the new name wins.
+    :type load_balance_coefficient: Optional[float]
+    :param channel_mix: ``'dense'`` appends a ``Dense(C)`` layer after the
+        fusion. ``None`` keeps the stage pointwise.
+    :type channel_mix: Optional[str]
+    :param force_logic_input_clip: Passed to every logic child as its
+        ``force_clip_when_no_sigmoid``. Use it when the input can leave
+        [0, 1] and ``apply_sigmoid`` is False.
+    :type force_logic_input_clip: bool
+    :param selection_mode: ``"global"`` learns one beta for the tensor,
+        ``"per_channel"`` one per channel. Passed on to the children too,
+        and ``"per_channel"`` needs a known last axis at build time.
+    :type selection_mode: str
+    :param diversity_coefficient: Weight of the pairwise cosine-similarity
+        penalty between experts. 0 adds no loss.
+    :type diversity_coefficient: float
+    :param inner_logic_kwargs: Extra arguments forwarded to every logic
+        child. Keys this layer sets itself are dropped with a warning.
+    :type inner_logic_kwargs: Optional[Dict[str, Any]]
+    :param inner_arithmetic_kwargs: Extra arguments forwarded to every
+        arithmetic child, filtered the same way.
+    :type inner_arithmetic_kwargs: Optional[Dict[str, Any]]
+    :param kwargs: Passed to ``keras.layers.Layer``.
+    :type kwargs: Any
+
+    :ivar num_logic_ops: Number of logic experts.
+    :vartype num_logic_ops: int
+    :ivar num_arithmetic_ops: Number of arithmetic experts.
+    :vartype num_arithmetic_ops: int
+    :ivar use_residual: Whether the input is added back.
+    :vartype use_residual: bool
+    :ivar logic_op_types: Gate keys given to the logic children.
+    :vartype logic_op_types: Optional[List[str]]
+    :ivar arithmetic_op_types: Operation keys given to the arithmetic
+        children.
+    :vartype arithmetic_op_types: Optional[List[str]]
+    :ivar routing_initializer: The resolved routing-weight initializer.
+    :vartype routing_initializer: keras.initializers.Initializer
+    :ivar combination_initializer: The resolved combination-weight
+        initializer.
+    :vartype combination_initializer: keras.initializers.Initializer
+    :ivar circuit_routing: ``'output_only'`` or ``'classic'``.
+    :vartype circuit_routing: str
+    :ivar apply_sigmoid: What the logic children were given.
+    :vartype apply_sigmoid: bool
+    :ivar gate_entropy_coefficient: The resolved coefficient, as a float.
+    :vartype gate_entropy_coefficient: float
+    :ivar load_balance_coefficient: Read-only alias holding the same
+        value. ``call`` still reads this name.
+    :vartype load_balance_coefficient: float
+    :ivar channel_mix: ``'dense'`` or ``None``.
+    :vartype channel_mix: Optional[str]
+    :ivar force_logic_input_clip: What the logic children were given.
+    :vartype force_logic_input_clip: bool
+    :ivar selection_mode: ``"global"`` or ``"per_channel"``.
+    :vartype selection_mode: str
+    :ivar diversity_coefficient: The stored penalty weight, as a float.
+    :vartype diversity_coefficient: float
+    :ivar inner_logic_kwargs: The filtered extra logic arguments.
+    :vartype inner_logic_kwargs: Dict[str, Any]
+    :ivar inner_arithmetic_kwargs: The filtered extra arithmetic
+        arguments.
+    :vartype inner_arithmetic_kwargs: Dict[str, Any]
+    :ivar logic_operators: The logic children, built in ``__init__``.
+    :vartype logic_operators: List[LearnableLogicOperator]
+    :ivar arithmetic_operators: The arithmetic children, built in
+        ``__init__``.
+    :vartype arithmetic_operators: List[LearnableArithmeticOperator]
+    :ivar routing_weights: Shape ``(N,)``. ``None`` until ``build``.
+    :vartype routing_weights: Optional[keras.Variable]
+    :ivar combination_weights: Shape ``(N,)`` in global mode and
+        ``(C, N)`` per channel. ``None`` until ``build``.
+    :vartype combination_weights: Optional[keras.Variable]
+
+    :raises ValueError: From the constructor if ``diversity_coefficient``
+        is negative, ``selection_mode`` or ``circuit_routing`` or
+        ``channel_mix`` is not one of its allowed values, either operator
+        count is not positive, or the resolved gate-entropy coefficient is
+        negative.
+    :raises ValueError: From ``build`` if the input rank is below 2, or
+        ``selection_mode="per_channel"`` gets an unknown last axis.
+    :raises RuntimeError: From ``to_symbolic`` before the layer is built.
+
+    Input shape:
+        A tensor of rank 2 or more, ``(batch, ..., channels)``. In
+        ``per_channel`` mode the last axis must be known.
+
+    Output shape:
+        The same shape as the input.
+
+    Example:
+        .. code-block:: python
+
+            import keras
+            from dl_techniques.layers.logic import CircuitDepthLayer
+
+            x = keras.random.normal((4, 16))
+
+            layer = CircuitDepthLayer(
+                num_logic_ops=2, num_arithmetic_ops=2
+            )
+            y = layer(x)
+            y.shape  # (4, 16)
+
+            # A wider stage that also mixes channels and reports
+            # which experts it settled on.
+            layer2 = CircuitDepthLayer(
+                num_logic_ops=3,
+                num_arithmetic_ops=1,
+                channel_mix='dense',
+                diversity_coefficient=0.01,
+            )
+            layer2(x)
+            print(layer2.to_symbolic(top_k=2))
     """
 
     def __init__(
@@ -135,9 +333,18 @@ class CircuitDepthLayer(keras.layers.Layer):
             inner_arithmetic_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the arguments and build the expert children.
+
+        The children are constructed here, not in :meth:`build`, so that a
+        caller can inspect ``logic_operators`` and ``arithmetic_operators``
+        before the layer ever runs. This layer's own weights need the
+        channel count in ``per_channel`` mode and are created in
+        :meth:`build`. The class docstring documents every parameter.
+        """
         super().__init__(**kwargs)
 
-        # H6: resolve canonical name + deprecated alias.
+        # Accept the canonical name and the deprecated alias.
         resolved_coef = _resolve_gate_entropy_coefficient(
             gate_entropy_coefficient,
             load_balance_coefficient,
@@ -180,27 +387,33 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.combination_initializer = keras.initializers.get(combination_initializer)
         self.circuit_routing = circuit_routing
         self.apply_sigmoid = apply_sigmoid
-        # H6: canonical name is gate_entropy_coefficient. The attribute
-        # load_balance_coefficient remains as a read-only alias for back-compat.
+        # gate_entropy_coefficient is the canonical name.
+        # load_balance_coefficient holds the same value as an alias, and it
+        # is the name _maybe_load_balance_loss reads.
         self.gate_entropy_coefficient = resolved_coef
-        self.load_balance_coefficient = resolved_coef  # deprecated alias
+        self.load_balance_coefficient = resolved_coef
         self.channel_mix = channel_mix
-        # C4: forwards force_clip to inner LearnableLogicOperator instances.
+        # Passed to the logic children as force_clip_when_no_sigmoid.
         self.force_logic_input_clip = force_logic_input_clip
-        # C3: selection_mode forwarded to inner experts AND used for own
-        # combination weights shape.
+        # selection_mode goes to the children and also shapes this layer's
+        # own combination weights.
         self.selection_mode = selection_mode
-        self._channels = None  # set in build() for per_channel mode
-        # M5: diversity regularizer coefficient.
+        # Set in build() for per_channel mode; stays None in global mode.
+        self._channels = None
         self.diversity_coefficient = float(diversity_coefficient)
         self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
         self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
-        # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
-        # __init__. Inner logic ops opt into legacy unary x2=x1 rebinding
-        # because CircuitDepthLayer feeds them a single tensor.
-        # DECISION plan_2026-05-13_e33114da/D-006 — wrapper-owned keys are
-        # popped from user dicts with a warning if collision detected.
+        # DECISION plan_2026-05-13_a2b0f17b/D-002 — the children are built
+        # here in __init__, and the logic ones get
+        # allow_unary_degenerate=True because this layer hands each child a
+        # single tensor. Do not move the construction into build().
+        # Owning plan dir gone; this comment is the record.
+
+        # DECISION plan_2026-05-13_e33114da/D-006 — keys this layer sets
+        # itself are dropped from inner_*_kwargs, with a warning. Do not
+        # forward them: the child would get two values for one argument.
+        # Owning plan dir gone; this comment is the record.
         logic_owned = {
             "operation_types", "apply_sigmoid", "allow_unary_degenerate",
             "force_clip_when_no_sigmoid", "selection_mode", "name",
@@ -249,10 +462,11 @@ class CircuitDepthLayer(keras.layers.Layer):
             for i in range(self.num_arithmetic_ops)
         ]
 
-        # Channel-mix sublayer is built lazily once we know the channel size.
+        # The channel-mix sublayer needs the channel count, so it waits
+        # for build().
         self._channel_mix_layer: Optional[keras.layers.Dense] = None
 
-        # Weights — created in build()
+        # Weights, created in build().
         self.routing_weights = None
         self.combination_weights = None
 
@@ -263,8 +477,18 @@ class CircuitDepthLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build own weights AND explicitly build all children (Keras 3
-        invariant for serialization — parent.build must create child state)."""
+        """
+        Create this layer's weights and build every child.
+
+        The children are built here as well. Keras 3 requires the parent to
+        create all child state during its own build, or a saved model
+        reloads with fresh child weights.
+
+        :param input_shape: Shape of the input tensor, rank 2 or more.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the rank is below 2, or
+            ``selection_mode="per_channel"`` gets an unknown last axis.
+        """
         if len(input_shape) < 2:
             raise ValueError(
                 f"CircuitDepthLayer expects rank >= 2 input, "
@@ -273,9 +497,9 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         total_operators = self.num_logic_ops + self.num_arithmetic_ops
 
-        # C3: per-channel selection shapes combination weights as
-        # (channels, total_operators). Routing weights stay 1-D since
-        # 'classic' mode predates per-channel and we don't expand that API.
+        # per_channel shapes the combination weights (channels, N). The
+        # routing weights stay 1-D: 'classic' routing predates per-channel
+        # and that API is not being widened.
         if self.selection_mode == "per_channel":
             if input_shape[-1] is None:
                 raise ValueError(
@@ -287,8 +511,8 @@ class CircuitDepthLayer(keras.layers.Layer):
         else:
             combination_shape = (total_operators,)
 
-        # Routing weights still created in 'output_only' for serialization
-        # compatibility (zero-cost; only consulted in 'classic' mode).
+        # The routing weights are created in both modes so a checkpoint
+        # from either one loads into either one. Only 'classic' reads them.
         self.routing_weights = self.add_weight(
             name="routing_weights",
             shape=(total_operators,),
@@ -322,43 +546,66 @@ class CircuitDepthLayer(keras.layers.Layer):
         self, combination_probs: keras.KerasTensor
     ) -> None:
         """
-        Shazeer (2017)-style importance regularizer aux loss.
+        Add the Shazeer (2017) importance loss, if it is switched on.
 
-        Implementation: ``coef * N * mean_over_extra_axes(sum_op(beta^2))``.
-        Equivalent (up to constant) to the CV² importance loss when N is
-        fixed — penalizes peaky combination distributions. Note: this is
-        L2 of the gate vector, NOT entropy, despite the
-        ``gate_entropy_coefficient`` field name (kept for back-compat).
+        The value is ``coef * N * mean(sum_i(beta_i^2))``, where the sum
+        runs over the expert axis and the mean over any leading axes. It
+        is the squared L2 of the gate vector, not an entropy, despite the
+        ``gate_entropy_coefficient`` name. It is smallest when beta is
+        uniform, so it pushes the layer to use every expert. Nothing is
+        added when the coefficient is 0.
 
-        # DECISION plan_2026-05-13_e33114da/D-005 — per_channel mode
-        # previously averaged probs across channels BEFORE the L2, which let
-        # per-channel-peaky distributions that average to uniform escape the
-        # regularizer (B4). Fixed by per-channel L2 then mean.
+        # DECISION plan_2026-05-13_e33114da/D-005 — take the L2 per channel
+        # first and average after. Do not average the probs across channels
+        # before the L2: per-channel-peaky rows that average to uniform
+        # then escape the penalty.
+        # Owning plan dir gone; this comment is the record.
+
+        :param combination_probs: Softmax gate probabilities, ``(N,)`` in
+            global mode and ``(C, N)`` per channel.
+        :type combination_probs: keras.KerasTensor
+        :return: Nothing. The loss is registered with ``add_loss``.
+        :rtype: None
         """
         if self.load_balance_coefficient <= 0:
             return
         n = float(self.num_logic_ops + self.num_arithmetic_ops)
-        # Per-row L2 (axis=-1 = op axis). For 1-D global (N,), this is just
-        # sum(beta^2); for per-channel (C, N), it's per-channel L2 then mean.
+        # axis=-1 is the expert axis in both shapes. For (N,) this is just
+        # sum(beta^2); for (C, N) it is a per-channel L2, averaged below.
         per_row_l2 = keras.ops.sum(keras.ops.square(combination_probs), axis=-1)
         aux = keras.ops.mean(per_row_l2) if len(combination_probs.shape) > 1 else per_row_l2
         self.add_loss(self.load_balance_coefficient * n * aux)
 
     def _maybe_diversity_loss(self) -> None:
-        """M5: pairwise cosine-similarity penalty over inner ops' operation
-        probability vectors. Encourages experts to specialize on distinct
-        operators rather than collapsing onto the same one.
+        """
+        Add the expert-diversity loss, if it is switched on.
 
-        D4 (plan_2026-05-13_e33114da): vectorized via per-arity Gram matrix.
-        Cross-arity pairs (logic vs arithmetic) have different op-space
-        dimensionality so are kept separate (matches prior behavior).
+        The value is the mean pairwise cosine similarity between the
+        experts' own operation-probability vectors. Penalizing it pushes
+        the experts onto different operators instead of all picking the
+        same one. Nothing is added when the coefficient is 0.
+
+        Logic and arithmetic experts are scored separately, because their
+        probability vectors live in op spaces of different size and cannot
+        be compared. Each group is scored with one Gram matrix rather than
+        a pair loop.
+
+        :return: Nothing. The loss is registered with ``add_loss``.
+        :rtype: None
         """
         if self.diversity_coefficient <= 0:
             return
 
         def _group_sim(ops_group: List[Any]) -> Tuple[Optional[keras.KerasTensor], int]:
-            """Compute mean pairwise cosine similarity for a same-arity group.
-            Returns (sim_tensor, pair_count) or (None, 0) if <2 experts."""
+            """
+            Sum the pairwise cosine similarities within one group.
+
+            :param ops_group: Experts sharing one op space.
+            :type ops_group: List[Any]
+            :return: The summed upper-triangle similarity and the number
+                of pairs, or ``(None, 0)`` for fewer than 2 experts.
+            :rtype: Tuple[Optional[keras.KerasTensor], int]
+            """
             if len(ops_group) < 2:
                 return None, 0
             vecs = []
@@ -367,12 +614,14 @@ class CircuitDepthLayer(keras.layers.Layer):
                 if len(p.shape) > 1:
                     p = keras.ops.mean(p, axis=0)
                 vecs.append(p)
-            stacked = keras.ops.stack(vecs, axis=0)  # (K, M)
+            # stacked is (K experts, M operations).
+            stacked = keras.ops.stack(vecs, axis=0)
             norms = keras.ops.add(
                 keras.ops.norm(stacked, axis=-1, keepdims=True), 1e-12)
             stacked = keras.ops.divide(stacked, norms)
             gram = keras.ops.matmul(stacked, keras.ops.transpose(stacked))
-            # Upper triangle sum excluding diagonal = (sum(gram) - trace) / 2.
+            # The gram matrix is symmetric with a unit diagonal, so the
+            # upper triangle is (sum(gram) - trace) / 2.
             diag = keras.ops.sum(keras.ops.multiply(gram, keras.ops.eye(len(ops_group), dtype=gram.dtype)))
             upper_sum = keras.ops.divide(keras.ops.subtract(keras.ops.sum(gram), diag), 2.0)
             k = len(ops_group)
@@ -400,18 +649,45 @@ class CircuitDepthLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the depth layer."""
+        """
+        Run every expert on the input and return their weighted sum.
+
+        **How the two selection modes fuse the N expert outputs:**
+
+        .. code-block:: text
+
+            'global'                'per_channel'
+            beta (N,)               beta (C, N)
+            stack on axis 0         stack on axis -1
+             -> (N, *x.shape)        -> (*x.shape, N)
+            reshape beta to         reshape beta to
+             (N, 1, ..., 1)          (1, ..., 1, C, N)
+            sum on axis 0           sum on axis -1
+                    │                        │
+                    └───────────┬────────────┘
+                                ▼
+                     fused, shaped like inputs
+
+            selection_mode picks the column. The channel
+            mix and the residual come after the join.
+
+        :param inputs: A tensor of rank 2 or more.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every expert.
+        :type training: Optional[bool]
+        :return: The fused output, shaped like ``inputs``.
+        :rtype: keras.KerasTensor
+        """
         combination_probs = keras.ops.softmax(self.combination_weights, axis=-1)
-        # _maybe_load_balance_loss now handles both (N,) and (C, N) shapes
-        # natively — per-channel L2 then mean (B4 fix, D-005).
+        # Both aux losses are no-ops when their coefficients are 0.
         self._maybe_load_balance_loss(combination_probs)
-        # M5: diversity regularizer.
         self._maybe_diversity_loss()
 
         all_outputs: List[keras.KerasTensor] = []
 
         if self.circuit_routing == "classic":
-            # Legacy behavior — input attenuation by softmax(routing_weights).
+            # Legacy path: each expert's input is scaled by its own
+            # softmax(routing_weights) entry before it runs.
             routing_probs = keras.ops.softmax(self.routing_weights)
             input_rank = len(keras.ops.shape(inputs))
 
@@ -424,16 +700,18 @@ class CircuitDepthLayer(keras.layers.Layer):
                 weighted_input = keras.ops.multiply(inputs, weight)
                 all_outputs.append(arithmetic_op(weighted_input, training=training))
         else:
-            # output_only — every expert sees full X; only fusion is gated.
+            # output_only: every expert reads the input unchanged, and only
+            # the fusion below is gated.
             for logic_op in self.logic_operators:
                 all_outputs.append(logic_op(inputs, training=training))
             for arithmetic_op in self.arithmetic_operators:
                 all_outputs.append(arithmetic_op(inputs, training=training))
 
-        # Vectorized weighted fusion.
+        # Weighted fusion, done as one stack-and-sum rather than a loop.
         n = self.num_logic_ops + self.num_arithmetic_ops
         if self.selection_mode == "per_channel":
-            stacked = keras.ops.stack(all_outputs, axis=-1)  # (..., C, N)
+            # stacked is (..., C, N).
+            stacked = keras.ops.stack(all_outputs, axis=-1)
             rank = len(stacked.shape)
             weight_shape = (1,) * (rank - 2) + (self._channels, n)
             weights = keras.ops.reshape(combination_probs, weight_shape)
@@ -453,14 +731,31 @@ class CircuitDepthLayer(keras.layers.Layer):
         return combined_output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Return the output shape, which equals the input shape.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def to_symbolic(self, top_k: int = 1) -> str:
-        """Return a symbolic summary of this depth layer.
+        """
+        Report which operator each expert settled on.
 
-        G2 (plan_2026-05-13_e33114da): standalone depth-level to_symbolic
-        mirroring the per-depth body of LearnableNeuralCircuit.to_symbolic.
-        Useful when CircuitDepthLayer is used outside a LearnableNeuralCircuit.
+        One line per expert naming its ``top_k`` operators with their
+        probabilities, then one line ranking the experts by their
+        combination weight. In ``per_channel`` mode the weights are
+        averaged over channels first. This works on a stage used on its
+        own, outside a ``LearnableNeuralCircuit``.
+
+        :param top_k: How many entries to keep on each line.
+        :type top_k: int
+        :return: A multi-line summary.
+        :rtype: str
+        :raises RuntimeError: If the layer is not built yet.
         """
         if not self.built:
             raise RuntimeError(
@@ -484,6 +779,17 @@ class CircuitDepthLayer(keras.layers.Layer):
         return "\n".join(lines)
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        Only the canonical ``gate_entropy_coefficient`` is emitted. A
+        config written by an older version carrying
+        ``load_balance_coefficient`` still loads, because ``__init__``
+        accepts both names.
+
+        :return: A serializable config dict.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_logic_ops": self.num_logic_ops,
@@ -495,8 +801,6 @@ class CircuitDepthLayer(keras.layers.Layer):
             "combination_initializer": keras.initializers.serialize(self.combination_initializer),
             "circuit_routing": self.circuit_routing,
             "apply_sigmoid": self.apply_sigmoid,
-            # H6: emit canonical name. Old key omitted to keep config clean;
-            # round-trip works because __init__ accepts both names.
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
             "force_logic_input_clip": self.force_logic_input_clip,
@@ -513,20 +817,192 @@ class CircuitDepthLayer(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class LearnableNeuralCircuit(keras.layers.Layer):
     """
-    Deep learnable neural circuit with stacked parallel operator layers.
+    A stack of ``circuit_depth`` ``CircuitDepthLayer`` stages.
 
-    Implements a multi-depth neural circuit where each depth level is a
-    ``CircuitDepthLayer``. ``apply_sigmoid_per_depth`` controls where the
-    inner ``LearnableLogicOperator`` instances sigmoid-normalize their input:
+    Each depth is its own ``CircuitDepthLayer`` with its own experts and
+    its own weights, and the output of one is the input of the next. With
+    ``use_layer_norm=True`` a ``LayerNormalization`` follows every depth.
+    The shape never changes, so the whole stack drops in wherever a single
+    stage would.
 
-    - ``'first_only'`` (NEW DEFAULT): only the first depth applies sigmoid.
-      Subsequent depths assume signals are already in ``[0, 1]``-ish from
-      the prior fuzzy-logic outputs. This is the recommended mode for
-      stacking — it prevents the sigmoid-of-sigmoid range collapse where
-      a 3-layer stack converges to a constant.
-    - ``'all'``: every depth applies sigmoid (legacy behavior, causes
-      stack-collapse for unbounded inputs).
-    - ``'none'``: never apply sigmoid (caller guarantees ``[0, 1]`` inputs).
+    The only setting that varies by depth is whether the logic children
+    sigmoid their input, which ``apply_sigmoid_per_depth`` controls. Its
+    default ``'first_only'`` sigmoids depth 0 and no other, because
+    stacking sigmoids narrows the range until the stack outputs a
+    constant.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        X = inputs [B, ..., C]
+                     │
+                     ▼
+        ┌────────────────────────────────────────┐
+        │ depth 0  CircuitDepthLayer             │
+        │   num_logic_ops_per_depth logic and    │
+        │   num_arithmetic_ops_per_depth arith   │
+        │   experts, fused; residual inside      │
+        └───────────────────┬────────────────────┘
+                            ▼
+        ┌────────────────────────────────────────┐
+        │ LayerNormalization                     │
+        │   only when use_layer_norm             │
+        └───────────────────┬────────────────────┘
+                            ▼
+              repeated circuit_depth times.
+              Every depth is its own layer with
+              its own weights; nothing is shared.
+                            │
+                            ▼
+        ┌────────────────────────────────────────┐
+        │ depth circuit_depth - 1                │
+        │   CircuitDepthLayer [+ LayerNorm]      │
+        └───────────────────┬────────────────────┘
+                            ▼
+             Y = output [B, ..., C]
+
+        Only apply_sigmoid differs between depths.
+        See _sigmoid_for_depth for the rule.
+
+    :param circuit_depth: How many stages to stack. Must be > 0.
+    :type circuit_depth: int
+    :param num_logic_ops_per_depth: Logic experts inside each stage. Must
+        be > 0.
+    :type num_logic_ops_per_depth: int
+    :param num_arithmetic_ops_per_depth: Arithmetic experts inside each
+        stage. Must be > 0.
+    :type num_arithmetic_ops_per_depth: int
+    :param use_residual: Passed to every stage. Each stage adds its own
+        input back; there is no residual across the whole stack.
+    :type use_residual: bool
+    :param use_layer_norm: Insert a ``LayerNormalization`` after every
+        depth, including the last.
+    :type use_layer_norm: bool
+    :param logic_op_types: Gate keys passed down to every logic child.
+    :type logic_op_types: Optional[List[str]]
+    :param arithmetic_op_types: Operation keys passed down to every
+        arithmetic child.
+    :type arithmetic_op_types: Optional[List[str]]
+    :param routing_initializer: Initializer for each stage's routing
+        weights. Only ``'classic'`` routing reads them.
+    :type routing_initializer: Union[str, keras.initializers.Initializer]
+    :param combination_initializer: Initializer for each stage's
+        combination weights.
+    :type combination_initializer: Union[str, keras.initializers.Initializer]
+    :param circuit_routing: ``'output_only'`` (default) or ``'classic'``,
+        passed to every stage.
+    :type circuit_routing: str
+    :param apply_sigmoid_per_depth: ``'first_only'`` (default), ``'all'``
+        or ``'none'``. See :meth:`_sigmoid_for_depth`.
+    :type apply_sigmoid_per_depth: str
+    :param gate_entropy_coefficient: Weight of each stage's auxiliary
+        uniform-use loss. 0 or ``None`` adds no loss.
+    :type gate_entropy_coefficient: Optional[float]
+    :param load_balance_coefficient: Deprecated name for
+        ``gate_entropy_coefficient``. Passing it warns.
+    :type load_balance_coefficient: Optional[float]
+    :param channel_mix: ``'dense'`` gives every stage a ``Dense(C)`` after
+        its fusion. ``None`` keeps the stack pointwise.
+    :type channel_mix: Optional[str]
+    :param selection_mode: ``"global"`` or ``"per_channel"``, passed to
+        every stage.
+    :type selection_mode: str
+    :param diversity_coefficient: Weight of each stage's expert-diversity
+        penalty. 0 adds no loss.
+    :type diversity_coefficient: float
+    :param inner_logic_kwargs: Extra arguments forwarded down to every
+        logic child. Keys the stage owns are dropped with a warning.
+    :type inner_logic_kwargs: Optional[Dict[str, Any]]
+    :param inner_arithmetic_kwargs: Extra arguments forwarded down to
+        every arithmetic child, filtered the same way.
+    :type inner_arithmetic_kwargs: Optional[Dict[str, Any]]
+    :param kwargs: Passed to ``keras.layers.Layer``.
+    :type kwargs: Any
+
+    :ivar circuit_depth: Number of stages.
+    :vartype circuit_depth: int
+    :ivar num_logic_ops_per_depth: Logic experts per stage.
+    :vartype num_logic_ops_per_depth: int
+    :ivar num_arithmetic_ops_per_depth: Arithmetic experts per stage.
+    :vartype num_arithmetic_ops_per_depth: int
+    :ivar use_residual: What the stages were given.
+    :vartype use_residual: bool
+    :ivar use_layer_norm: Whether ``layer_norms`` is populated.
+    :vartype use_layer_norm: bool
+    :ivar logic_op_types: Gate keys given to the logic children.
+    :vartype logic_op_types: Optional[List[str]]
+    :ivar arithmetic_op_types: Operation keys given to the arithmetic
+        children.
+    :vartype arithmetic_op_types: Optional[List[str]]
+    :ivar routing_initializer: The resolved routing-weight initializer.
+    :vartype routing_initializer: keras.initializers.Initializer
+    :ivar combination_initializer: The resolved combination-weight
+        initializer.
+    :vartype combination_initializer: keras.initializers.Initializer
+    :ivar circuit_routing: ``'output_only'`` or ``'classic'``.
+    :vartype circuit_routing: str
+    :ivar apply_sigmoid_per_depth: The stored sigmoid rule.
+    :vartype apply_sigmoid_per_depth: str
+    :ivar gate_entropy_coefficient: The resolved coefficient, as a float.
+    :vartype gate_entropy_coefficient: float
+    :ivar load_balance_coefficient: Read-only alias holding the same
+        value.
+    :vartype load_balance_coefficient: float
+    :ivar channel_mix: ``'dense'`` or ``None``.
+    :vartype channel_mix: Optional[str]
+    :ivar selection_mode: ``"global"`` or ``"per_channel"``.
+    :vartype selection_mode: str
+    :ivar diversity_coefficient: The stored penalty weight, as a float.
+    :vartype diversity_coefficient: float
+    :ivar inner_logic_kwargs: The extra logic arguments, as a dict.
+    :vartype inner_logic_kwargs: Dict[str, Any]
+    :ivar inner_arithmetic_kwargs: The extra arithmetic arguments, as a
+        dict.
+    :vartype inner_arithmetic_kwargs: Dict[str, Any]
+    :ivar circuit_layers: The stages, in order, built in ``__init__``.
+    :vartype circuit_layers: List[CircuitDepthLayer]
+    :ivar layer_norms: One norm per depth, or an empty list when
+        ``use_layer_norm`` is False.
+    :vartype layer_norms: List[keras.layers.LayerNormalization]
+
+    :raises ValueError: From the constructor if ``selection_mode`` is not
+        one of the two keys, ``circuit_depth`` or either per-depth expert
+        count is not positive, ``apply_sigmoid_per_depth`` is not one of
+        the three keys, or ``diversity_coefficient`` is negative.
+    :raises ValueError: From ``build`` if the input rank is below 2.
+    :raises RuntimeError: From ``to_symbolic`` before the layer is built.
+
+    Input shape:
+        A tensor of rank 2 or more, ``(batch, ..., channels)``. In
+        ``per_channel`` mode the last axis must be known.
+
+    Output shape:
+        The same shape as the input.
+
+    Example:
+        .. code-block:: python
+
+            import keras
+            from dl_techniques.layers.logic import (
+                LearnableNeuralCircuit,
+            )
+
+            x = keras.random.normal((4, 16))
+
+            circuit = LearnableNeuralCircuit(circuit_depth=3)
+            y = circuit(x)
+            y.shape  # (4, 16)
+
+            # Deeper, normalized between depths, and reporting the
+            # operators each depth settled on.
+            circuit2 = LearnableNeuralCircuit(
+                circuit_depth=4,
+                use_layer_norm=True,
+                apply_sigmoid_per_depth='first_only',
+            )
+            circuit2(x)
+            print(circuit2.to_symbolic())
     """
 
     def __init__(
@@ -551,9 +1027,18 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             inner_arithmetic_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the arguments and build every stage.
+
+        The stages are constructed here, one ``CircuitDepthLayer`` per
+        depth, so they can be inspected through ``circuit_layers`` before
+        the stack runs. This layer owns no weights of its own; the stages
+        create theirs in :meth:`build`. The class docstring documents
+        every parameter.
+        """
         super().__init__(**kwargs)
 
-        # H6: resolve canonical name + deprecated alias.
+        # Accept the canonical name and the deprecated alias.
         resolved_coef = _resolve_gate_entropy_coefficient(
             gate_entropy_coefficient,
             load_balance_coefficient,
@@ -593,18 +1078,23 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.circuit_routing = circuit_routing
         self.apply_sigmoid_per_depth = apply_sigmoid_per_depth
         self.gate_entropy_coefficient = resolved_coef
-        self.load_balance_coefficient = resolved_coef  # deprecated alias
+        # Alias holding the same value, kept for callers on the old name.
+        self.load_balance_coefficient = resolved_coef
         self.channel_mix = channel_mix
         self.selection_mode = selection_mode
-        # B5 fix: diversity_coefficient now reachable through the wrapper.
         self.diversity_coefficient = float(diversity_coefficient)
-        # G1 fix: inner_*_kwargs forwarded verbatim to inner ops via the
-        # child CircuitDepthLayer. Wrapper-controlled keys (operation_types,
-        # apply_sigmoid, selection_mode, force_clip_when_no_sigmoid, name)
-        # cannot be overridden — those are set by the wrapper itself.
+        # These go to the stages, which pass them on to their children.
+        # Keys a stage sets itself (operation_types, apply_sigmoid,
+        # selection_mode, force_clip_when_no_sigmoid, name) are dropped
+        # there with a warning and cannot be overridden from here.
         self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
         self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
+        # A 'first_only' stack only sigmoids depth 0, so depths >= 1 read
+        # whatever the depth below produced. An arithmetic expert or a
+        # residual add can leave [0, 1], and a logic child needs [0, 1].
+        # When that combination is set up, clipping is turned on for those
+        # depths and the caller is told.
         risky_stack = (
             self.apply_sigmoid_per_depth == "first_only"
             and self.circuit_depth >= 2
@@ -662,6 +1152,29 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         )
 
     def _sigmoid_for_depth(self, depth: int) -> bool:
+        """
+        Say whether the stage at ``depth`` sigmoids its logic inputs.
+
+        **One row per mode:**
+
+        .. code-block:: text
+
+            mode          depth 0  depth 1  depth 2  ...
+            ------------  -------  -------  -----------
+            'first_only'  sigmoid  no       no
+            'all'         sigmoid  sigmoid  sigmoid
+            'none'        no       no       no
+
+            'first_only' is the default. A sigmoid of a
+            sigmoid keeps narrowing the range, so an
+            'all' stack of 3 can settle on a constant.
+            'none' needs the caller to supply [0, 1].
+
+        :param depth: Index of the stage, starting at 0.
+        :type depth: int
+        :return: What to pass that stage as ``apply_sigmoid``.
+        :rtype: bool
+        """
         if self.apply_sigmoid_per_depth == "all":
             return True
         if self.apply_sigmoid_per_depth == "none":
@@ -670,12 +1183,24 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         return depth == 0
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build every stage and, if enabled, every norm.
+
+        This layer has no weights of its own. It builds its children
+        explicitly because Keras 3 requires the parent to create all child
+        state during its own build; otherwise a saved model reloads with
+        fresh child weights.
+
+        :param input_shape: Shape of the input tensor, rank 2 or more.
+            Every stage sees the same shape, since the shape is preserved.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the rank is below 2.
+        """
         if len(input_shape) < 2:
             raise ValueError(
                 f"LearnableNeuralCircuit expects rank >= 2 input, "
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
-        # Build sublayers explicitly per Keras 3 serialization contract.
         for circuit_layer in self.circuit_layers:
             circuit_layer.build(input_shape)
         for layer_norm in self.layer_norms:
@@ -687,6 +1212,17 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
+        """
+        Run the input through every stage in order.
+
+        :param inputs: A tensor of rank 2 or more.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every stage and
+            every norm.
+        :type training: Optional[bool]
+        :return: The output of the last stage, shaped like ``inputs``.
+        :rtype: keras.KerasTensor
+        """
         x = inputs
         for depth in range(self.circuit_depth):
             x = self.circuit_layers[depth](x, training=training)
@@ -695,15 +1231,29 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """
+        Return the output shape, which equals the input shape.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def to_symbolic(self, top_k: int = 1) -> str:
-        """Walk all depths and return a multi-line symbolic summary.
+        """
+        Report what every depth settled on, as indented text.
 
-        M1 (plan_2026-05-13_3a2f1d23): for each depth print the dominant
-        operator per inner expert plus a combination-weight ranking.
-        Delegates to CircuitDepthLayer.to_symbolic per depth (G2,
-        plan_2026-05-13_e33114da).
+        Each depth gets a ``depth N:`` header followed by that stage's own
+        summary, indented two spaces. The per-stage lines come from
+        :meth:`CircuitDepthLayer.to_symbolic`.
+
+        :param top_k: How many entries to keep on each line.
+        :type top_k: int
+        :return: A multi-line summary covering every depth.
+        :rtype: str
+        :raises RuntimeError: If the layer is not built yet.
         """
         if not self.built:
             raise RuntimeError(
@@ -718,6 +1268,17 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         return "\n".join(lines)
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        Only the canonical ``gate_entropy_coefficient`` is emitted. A
+        config written by an older version carrying
+        ``load_balance_coefficient`` still loads, because ``__init__``
+        accepts both names.
+
+        :return: A serializable config dict.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "circuit_depth": self.circuit_depth,

@@ -1,42 +1,136 @@
 """
-Factory Method for `dl_techniques.layers.logic`.
+Build any layer in `dl_techniques.layers.logic` from a string key.
 
-Provides a single, centralized entry point for creating learnable logic /
-arithmetic / circuit layers via a string identifier (`layer_type`), mirroring
-the registry-based design used in `layers/ffn/factory.py` and
-`layers/norms/factory.py`.
+``create_logic_layer("logic", ...)`` returns a fresh, unbuilt layer. The
+four keys and the class each one builds live in ``LOGIC_REGISTRY``, which
+also carries the defaults the factory fills in and the enum values it
+checks. Direct class imports keep working; this is for callers that read
+their layer type out of a config file.
 
-Architectural Overview
-----------------------
-The factory operates on a registry-based design (``LOGIC_REGISTRY``). The
-registry maps a string identifier (the ``layer_type``) to the concrete Keras
-layer class and its associated metadata: a short description, required
-parameters, optional parameters with defaults, and a recommended use-case.
+**Dispatch flow:**
 
-When called, the factory performs the following steps:
+.. code-block:: text
 
-1. **Validation**: consults the registry to validate the ``layer_type`` and
-   that all required hyperparameters are present in ``**kwargs``.
-2. **Class retrieval**: looks up the corresponding Keras layer class.
-3. **Instantiation**: merges defaults with user kwargs, filters unknown keys,
-   and constructs the layer.
+    config dict ──► create_logic_from_config()  pops config['type']
+                                 │
+                                 ▼
+      create_logic_layer(layer_type, name=None, **kwargs)
+                                 │
+                                 ▼
+    ┌──────────────────────────────────────────────────────────┐
+    │ try:                                                     │
+    │   validate_logic_config(layer_type, **kwargs)            │
+    │     ├─ layer_type not in LOGIC_REGISTRY ───────► raise   │
+    │     ├─ a required_params name is missing ──────► raise   │
+    │     ├─ a positive-int name is <= 0, or a bool ─► raise   │
+    │     ├─ a positive-float name is <= 0 ──────────► raise   │
+    │     └─ an enum_params value is not allowed ────► raise   │
+    │     │                                                    │
+    │     ▼                                                    │
+    │   cls    = LOGIC_REGISTRY[layer_type]['class']           │
+    │   valid  = required_params + optional_params names       │
+    │   params = optional_params defaults, then kwargs         │
+    │   final  = params filtered down to valid                 │
+    │            a key outside valid is DROPPED here           │
+    │     │                                                    │
+    │     ▼                                                    │
+    │   final['name'] = name   (only when name is given)       │
+    │   logger.debug, one line per parameter                   │
+    │     │                                                    │
+    │     ▼                                                    │
+    │   layer = cls(**final)                                   │
+    ├──────────────────────────────────────────────────────────┤
+    │ except (TypeError, ValueError) as e:                     │
+    │   every raise above lands here and comes back out as     │
+    │   one ValueError naming layer_type, its required params  │
+    │   and the params you passed, chained with `from e`.      │
+    └──────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+                        keras.layers.Layer
 
-This factory is intentionally narrow — it exposes only the public layer
-contracts of the `logic/` package and does **not** wrap or alter their
-behavior. Direct class imports remain fully supported.
+Note the DROPPED line. Most factories in `layers/` raise on a keyword the
+target class does not declare; this one drops it. Measured:
+``create_logic_layer("logic", bogus_key=1)`` returns a layer and says
+nothing. Check your spelling against ``get_logic_info()``, because a typo
+here costs you the setting silently.
 
-When NOT to use this factory
-----------------------------
-If you need FFN-shaped learnable logic operating on a single feature vector
-``(B, T, D) -> (B, T, D)`` use ``dl_techniques.layers.ffn.LogicFFN`` instead.
-The classes in this package operate on tensors of arbitrary rank (>= 2)
-without altering channel dimensionality.
+**The four registry keys:**
 
-References
-----------
-- Gamma et al. (1994). Design Patterns. Addison-Wesley.
-- Liu, Simonyan, Yang (2018). "DARTS: Differentiable Architecture Search".
-- Zadeh (1965). "Fuzzy sets". Information and Control.
+.. code-block:: text
+
+    type key        class                        optional  enums
+    --------------  ---------------------------  --------  -----
+    arithmetic      LearnableArithmeticOperator        18      3
+    logic           LearnableLogicOperator             14      1
+    circuit_depth   CircuitDepthLayer                  17      3
+    neural_circuit  LearnableNeuralCircuit             18      4
+
+    Every entry has an empty required_params, so every key
+    constructs with no arguments at all. The optional column
+    is len(optional_params) and every one of those has a
+    default in the registry.
+
+**What each key is for:**
+
+.. code-block:: text
+
+    type key        use case
+    --------------  ----------------------------------------
+    arithmetic      Learnable elementwise arithmetic between
+                    two same-shape tensors (or unary, with
+                    caveats — see README).
+    logic           Soft logical combination of two same-
+                    shape tensors interpreted as fuzzy truth
+                    values.
+    circuit_depth   Drop-in mid-network expert ensemble that
+                    preserves tensor shape (rank >= 2).
+    neural_circuit  Deep compositional reasoning block —
+                    shape-preserving, rank >= 2.
+
+**The values validate_logic_config checks by name:**
+
+.. code-block:: text
+
+    type key        parameter                allowed values
+    --------------  -----------------------  ----------------------
+    arithmetic      safe_divide_mode         hard_clamp, smooth
+    arithmetic      selection_mode           global, per_channel
+    arithmetic      exponent_clip_mode       hard, smooth
+    logic           selection_mode           global, per_channel
+    circuit_depth   circuit_routing          classic, output_only
+    circuit_depth   selection_mode           global, per_channel
+    circuit_depth   channel_mix              None, dense
+    neural_circuit  circuit_routing          classic, output_only
+    neural_circuit  apply_sigmoid_per_depth  all, first_only, none
+    neural_circuit  selection_mode           global, per_channel
+    neural_circuit  channel_mix              None, dense
+
+    Anything else is checked by the class itself, and the
+    error comes back wrapped.
+
+Three of the four keys reach ``LearnableArithmeticOperator``:
+``arithmetic`` builds one directly, ``circuit_depth`` builds
+``num_arithmetic_ops`` of them inside each stage, and ``neural_circuit``
+stacks those stages. That class was dead on its forward pass between
+2026-08-25 and the repair in this package's history, so those three keys
+raised ``NameError`` on the first call while ``logic`` kept working.
+
+When not to use this factory: if you want an FFN-shaped learnable logic
+block over a single feature vector, ``(B, T, D) -> (B, T, D)``, use
+``dl_techniques.layers.ffn.LogicFFN``. The classes here take a tensor of
+any rank >= 2 and give back the same shape.
+
+References:
+    - Gamma, E., Helm, R., Johnson, R., & Vlissides, J. (1994). "Design
+      Patterns". The registry-backed factory this file follows.
+
+    - Liu, H., Simonyan, K., & Yang, Y. (2018). "DARTS: Differentiable
+      Architecture Search". The soft selection the arithmetic and logic
+      layers use.
+
+    - Zadeh, L. A. (1965). "Fuzzy sets". Information and Control. The
+      source of the soft gate forms.
 """
 
 import copy
@@ -221,10 +315,15 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
 
 def get_logic_info() -> Dict[str, Dict[str, Any]]:
     """
-    Get information about all available logic layer types.
+    Return a deep copy of the whole registry.
 
-    :return: Dict mapping layer-type string to a copy of its registry entry
-        (description, required_params, optional_params, use_case).
+    Every key of every entry comes back, including ``class``, so the
+    caller can read the target class as well as the ``description``,
+    ``required_params``, ``optional_params``, ``enum_params`` and
+    ``use_case`` fields. It is a copy, so editing the result does not
+    change what the factory builds.
+
+    :return: One entry per layer type, keyed by the type string.
     :rtype: Dict[str, Dict[str, Any]]
     """
     return copy.deepcopy(LOGIC_REGISTRY)
@@ -232,13 +331,23 @@ def get_logic_info() -> Dict[str, Dict[str, Any]]:
 
 def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
     """
-    Validate `create_logic_layer` arguments before instantiation.
+    Check the arguments a ``create_logic_layer`` call would use.
+
+    This catches an unknown type, a missing required parameter, a
+    non-positive count or scale, and a value outside the allowed set of an
+    enum parameter. It checks by NAME, so a parameter this layer type does
+    not take is not checked here and is dropped later without a word. The
+    module docstring lists exactly what is checked.
 
     :param layer_type: One of the keys in ``LOGIC_REGISTRY``.
     :type layer_type: str
-    :param kwargs: Layer-specific parameters.
-    :raises ValueError: If ``layer_type`` is unknown, a required parameter is
-        missing, or a numeric constraint is violated.
+    :param kwargs: The parameters the layer would be built with.
+    :type kwargs: Any
+    :return: Nothing. It either passes or raises.
+    :rtype: None
+    :raises ValueError: If the type is unknown, a required parameter is
+        missing, a count is not a positive int, a scale is not positive, or
+        an enum value is not allowed.
     """
     if layer_type not in LOGIC_REGISTRY:
         available = sorted(LOGIC_REGISTRY.keys())
@@ -256,7 +365,7 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
             f"Required: {required}"
         )
 
-    # Common positive-int validations
+    # These names must be positive whole numbers wherever they appear.
     positive_ints = [
         "num_logic_ops",
         "num_arithmetic_ops",
@@ -273,7 +382,7 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
                     f"{name} must be a positive integer, got {value!r}"
                 )
 
-    # Positive-float validations
+    # These names must be positive numbers wherever they appear.
     positive_floats = ["temperature_init", "scaling_init", "epsilon"]
     for name in positive_floats:
         if name in kwargs and kwargs[name] is not None:
@@ -281,9 +390,9 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
 
-    # G3 (plan_2026-05-13_e33114da): enum pre-validation with helpful error.
-    # Catches typos before construction surface them through generic wrapped
-    # "Failed to create logic layer" message.
+    # Checking the enums here names the bad value. Left to the class, the
+    # same mistake comes back wrapped in the generic "Failed to create
+    # logic layer" message.
     enum_params: Dict[str, set] = info.get("enum_params", {})
     for name, allowed in enum_params.items():
         if name in kwargs and kwargs[name] not in allowed:
@@ -299,19 +408,38 @@ def create_logic_layer(
         **kwargs: Any,
 ) -> keras.layers.Layer:
     """
-    Construct a layer from `dl_techniques.layers.logic` by string type.
+    Build one layer from `dl_techniques.layers.logic` by type string.
 
-    :param layer_type: One of ``'arithmetic'``, ``'logic'``, ``'circuit_depth'``,
-        ``'neural_circuit'``.
+    Anything you do not pass takes its default from the registry entry.
+    Anything you pass that the type does not declare is dropped without a
+    warning, so check the name against ``get_logic_info()``. Every error
+    raised on the way, including one from the class constructor, comes
+    back as a single ``ValueError`` naming the type and what you passed.
+
+    :param layer_type: ``'arithmetic'``, ``'logic'``, ``'circuit_depth'``
+        or ``'neural_circuit'``.
     :type layer_type: LogicLayerType
-    :param name: Optional layer name.
+    :param name: Name for the layer. ``None`` lets Keras pick one.
     :type name: Optional[str]
-    :param kwargs: Layer-specific parameters. See ``get_logic_info()`` or the
-        individual class docstrings.
-    :return: A fresh, unbuilt Keras layer instance.
+    :param kwargs: Parameters for that layer type. See
+        ``get_logic_info()`` or the class docstring.
+    :type kwargs: Any
+    :return: A fresh, unbuilt layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: On unknown ``layer_type``, missing required parameters,
-        or any downstream construction error.
+    :raises ValueError: On an unknown type, a failed validation, or any
+        error the constructor itself raises.
+
+    Example:
+        .. code-block:: python
+
+            import keras
+            from dl_techniques.layers.logic import create_logic_layer
+
+            layer = create_logic_layer(
+                'neural_circuit', circuit_depth=2, name='circuit'
+            )
+            y = layer(keras.random.normal((4, 16)))
+            y.shape  # (4, 16)
     """
     try:
         validate_logic_config(layer_type, **kwargs)
@@ -359,13 +487,30 @@ def create_logic_layer(
 
 def create_logic_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
-    Create a logic layer from a config dict with a ``'type'`` key.
+    Build one layer from a config dict carrying a ``'type'`` key.
 
-    :param config: Dict with ``'type'`` plus layer-specific parameters.
+    The dict is copied before ``'type'`` is removed, so the caller's dict
+    is left alone. Every remaining key is passed to
+    :func:`create_logic_layer`.
+
+    :param config: ``'type'`` plus the parameters for that type.
     :type config: Dict[str, Any]
-    :return: Configured layer instance.
+    :return: A fresh, unbuilt layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: If ``config`` is not a dict or is missing ``'type'``.
+    :raises ValueError: If ``config`` is not a dict, has no ``'type'``, or
+        the underlying ``create_logic_layer`` call fails.
+
+    Example:
+        .. code-block:: python
+
+            from dl_techniques.layers.logic import (
+                create_logic_from_config,
+            )
+
+            layer = create_logic_from_config({
+                'type': 'circuit_depth',
+                'num_logic_ops': 3,
+            })
     """
     if not isinstance(config, dict):
         raise ValueError(f"config must be a dict, got {type(config)}")
