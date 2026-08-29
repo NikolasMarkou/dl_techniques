@@ -288,12 +288,14 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         Weight the lags from the context, sum them, then apply the gate.
 
         Note on ``activity_regularizer``: this method calls ``add_loss`` on the
-        output itself, and Keras 3 also applies the same regularizer in
-        ``Layer.__call__`` (``keras/src/layers/layer.py:925-928``). With an
+        output itself, and Keras 3's ``Layer.__call__`` already applies the
+        same ``activity_regularizer`` to the layer's output. With an
         ``activity_regularizer`` set, the penalty is therefore counted twice.
         Measured with ``L1(1.0)`` on a ``(2, 5)`` context and a ``(2, 4)`` lag
-        tensor: ``len(layer.losses) == 2``, both entries ``1.2843523025512695``.
-        This is a code defect, reported and left unfixed here.
+        tensor: ``len(layer.losses) == 2``, and both entries equal each other
+        and a manual ``activity_regularizer(output)`` call. The value itself
+        depends on the seed, so no figure is quoted here. This is a code
+        defect, reported and left unfixed here.
 
         :param inputs: A list of two tensors. ``inputs[0]`` is the context of
             shape ``(batch_size, context_dim)``, ``inputs[1]`` is the lag

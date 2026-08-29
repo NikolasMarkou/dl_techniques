@@ -55,7 +55,8 @@ class sLSTMCell(keras.layers.Layer):
 
     The cell carries four states per timestep: ``h_t``, ``c_t``, ``n_t`` and
     ``m_t``, each of shape ``(batch, units)``. The hidden state is
-    ``h_t = o_t * (c_t / n_t)``.
+    ``h_t = o_t * (c_t / (n_t + 1e-8))``. The ``1e-8`` is what keeps a
+    near-zero normalizer from turning the output into a NaN.
 
     **Gate equations** (per timestep t):
 
@@ -68,13 +69,18 @@ class sLSTMCell(keras.layers.Layer):
 
         c_t = f_t * c_{t-1} + i_t * z_t
         n_t = f_t * n_{t-1} + i_t
-        h_t = o_t * (c_t / n_t)
+        h_t = o_t * (c_t / (n_t + 1e-8))
 
     **Stabilization** (Equations 15-17 in paper):
 
         m_t = max(m_{t-1} + log(f_t), log(i_t))
         i_t_tilde = exp(log(i_t) - m_t)
         f_t_tilde = exp(log(f_t) + m_{t-1} - m_t)
+
+    ``log(i_t)`` is the raw input-gate pre-activation, used as is. With
+    ``forget_gate_activation='exp'`` the same is true of ``log(f_t)``. With
+    ``'sigmoid'`` the code takes ``log(sigmoid(f_proj) + 1e-8)``; the ``1e-8``
+    stops a saturated forget gate from giving ``log(0)``.
 
     **Architecture Overview:**
 
@@ -106,7 +112,7 @@ class sLSTMCell(keras.layers.Layer):
              └────────────┬─────────────┘
                           ▼
              ┌──────────────────────────┐
-             │ h_t = o * (c_t / n_t)    │
+             │ h_t = o*(c_t/(n_t+1e-8)) │
              └────────────┬─────────────┘
                           ▼
         h_t: (batch, units), plus states [h_t, c_t, n_t, m_t]
@@ -603,13 +609,19 @@ class mLSTMCell(keras.layers.Layer):
     timesteps. The stabilized form below is mathematically equivalent while the
     values stay finite:
 
-        log_f = log(sigmoid(f_proj))
+        log_f = log(sigmoid(f_proj) + 1e-8)
         m_t   = max(m_{t-1} + log_f, i_proj)            # log-domain stabilizer
         i_t   = exp(i_proj - m_t)                       # bounded in (0, 1]
         f_t   = exp(m_{t-1} + log_f - m_t)              # bounded
         C_t   = f_t * C_{t-1} + i_t * (v_t (outer) k_t^T)
         n_t   = f_t * n_{t-1} + i_t * k_t
-        h_t   = o_t * (C_t @ q_t / max(|n_t^T @ q_t|, exp(-m_t)))
+        h_t   = o_t * (C_t^T @ q_t / (max(|n_t^T @ q_t|, exp(-m_t)) + 1e-8))
+
+    ``i_proj`` is the raw input-gate pre-activation and the code uses it
+    directly as ``log(i_t)``. The two ``1e-8`` terms are in the code: one stops
+    ``log(0)`` on a saturated forget gate, the other stops a divide by zero.
+    ``C_t`` is stored as ``(key_dim, value_dim)``, so reading it back with the
+    query needs the transpose. Don't drop the ``^T``.
 
     **Architecture Overview:**
 
@@ -629,8 +641,8 @@ class mLSTMCell(keras.layers.Layer):
              └────────────┬─────────────┘
                           ▼
              ┌──────────────────────────┐
-             │ m_t = max(m_{t-1}+log f, │
-             │            log i)        │
+             │ m_t = max(m_{t-1}+log_f, │
+             │            i_proj)       │
              │ i, f rescaled by exp     │
              └────────────┬─────────────┘
                           ▼
@@ -642,8 +654,8 @@ class mLSTMCell(keras.layers.Layer):
                           ▼
              ┌──────────────────────────┐
              │ h_t = o * (C_t^T @ q_t)  │
-             │   / max(|n_t . q_t|,     │
-             │         exp(-m_t))       │
+             │  / (max(|n_t . q_t|,     │
+             │       exp(-m_t)) + 1e-8) │
              └────────────┬─────────────┘
                           ▼
         h_t: (batch, units), states [h_t, C_t, n_t, m_t]
@@ -934,9 +946,10 @@ class mLSTMCell(keras.layers.Layer):
         )
         memory_retrieval = ops.squeeze(memory_retrieval, axis=-1)
 
-        # The stabilized mLSTM denominator, max(|n_t^T @ q_t|, exp(-m_t))
-        # (Beck et al. 2024). exp(-m_t) is a floor on the divisor, so a
-        # near-zero n_t^T q_t cannot blow up the retrieval.
+        # The stabilized mLSTM denominator, max(|n_t^T @ q_t|, exp(-m_t)) +
+        # 1e-8 (Beck et al. 2024). exp(-m_t) is a floor on the divisor, so a
+        # near-zero n_t^T q_t cannot blow up the retrieval. The 1e-8 covers
+        # the case where exp(-m_t) itself underflows to zero.
         # nq, m_t3 and normalization are all (batch, heads, 1).
         # DECISION plan_2026-06-11_50891da1/D-001: keep the exp(-m_t) floor; the
         # bare `+ 1e-8` form was insufficient. See decisions.md D-001.

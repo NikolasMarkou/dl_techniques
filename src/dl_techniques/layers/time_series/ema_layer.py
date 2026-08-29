@@ -319,6 +319,13 @@ class EMASlopeFilter(keras.layers.Layer):
     The first ``Lb`` steps are lagged against padded zeros, so their "slope"
     is just ``EMA_t``. Drop or mask them before reading a signal.
 
+    Don't set ``lookback_period`` longer than the time axis. The slope
+    subtraction then raises ``InvalidArgumentError: required broadcastable
+    shapes``, not a named error, because the zero pad alone is already longer
+    than the EMA. With the default ``lookback_period=25`` this fires on any
+    sequence shorter than 25 steps. ``'ema_only'`` returns before the
+    subtraction, so it is the one mode that survives a short sequence.
+
     Input shape:
         ``(batch, time_steps)`` or ``(batch, time_steps, features)``.
 
@@ -450,6 +457,9 @@ class EMASlopeFilter(keras.layers.Layer):
             tensors for ``'signals_only'``. A dict of ``'ema'``, ``'slope'``
             and the 3 signals for ``'all'``.
         :rtype: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :raises InvalidArgumentError: From the backend, in every mode except
+            ``'ema_only'``, when ``lookback_period`` exceeds ``time_steps``.
+            The message is ``required broadcastable shapes``.
         """
         ema = self.ema_layer(inputs)
 
