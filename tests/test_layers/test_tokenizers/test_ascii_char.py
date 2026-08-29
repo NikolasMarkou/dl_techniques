@@ -278,11 +278,12 @@ class TestASCIICharTokenizer:
         assert tokenizer.vocab_size == VOCAB_SIZE
         assert tokenizer.n_vocab == VOCAB_SIZE
 
-    def test_is_registered_as_serializable(self):
-        # A bare register_keras_serializable() registers under the default
-        # "Custom" package, the same key shape BPETokenizer gets.
-        cls = keras.saving.get_registered_object("Custom>ASCIICharTokenizer")
-        assert cls is ASCIICharTokenizer
+    def test_is_registered_as_serializable(self, registration_contract):
+        # Was a lookup by the literal legacy key. That key still resolves (it is
+        # kept as an alias, and every ascii-BERT encoder archive under results/
+        # names it), but it is no longer the key a NEW save writes -- the shared
+        # predicate pins both. See MIGRATIONS.md.
+        registration_contract(ASCIICharTokenizer)
 
 
 # ---------------------------------------------------------------------

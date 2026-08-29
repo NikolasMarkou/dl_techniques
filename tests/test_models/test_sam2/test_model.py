@@ -33,6 +33,7 @@ import tensorflow as tf
 from keras import ops
 
 import dl_techniques.models.vision_language.sam.sam2.model as model_module
+from dl_techniques.utils.keras_registration import LEGACY_ALIAS_PREFIX
 from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
 from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera, hiera_block_specs
 from dl_techniques.models.vision_language.sam.sam2.mask_decoder import SAM2MaskDecoder
@@ -960,16 +961,34 @@ class TestRegisteredKeyUniqueness:
                 f"'{name}' was ALREADY registered before the SAM 2 import: "
                 f"{data['before'][name]}"
             )
-            assert len(data["after"][name]) == 1, (
-                f"'{name}' is registered {len(data['after'][name])} times: "
-                f"{data['after'][name]}"
+            # TWO keys since the 2026-08-29 registration migration, not one: the
+            # package-qualified key a new save writes, and the legacy
+            # `Custom>{name}` alias that keeps pre-migration `.keras` archives
+            # loading. Both must name the SAME class -- the probe records keys,
+            # so a third entry here is a genuine third claimant.
+            after = sorted(data["after"][name])
+            assert len(after) == 2, (
+                f"'{name}' is registered under {len(after)} keys: {after}; "
+                f"expected exactly the qualified key and its legacy alias"
             )
+            assert after[0] == f"{LEGACY_ALIAS_PREFIX}>{name}", after
+            assert after[1].startswith("dl_techniques."), after
 
-    def test_sam2_does_not_shadow_a_sam1_key(self) -> None:
-        registry = keras.saving.get_custom_objects()
-        assert registry["Custom>SAM2"] is SAM2
-        assert "Custom>SAM" in registry
-        assert registry["Custom>SAM"] is not SAM2
+    def test_sam2_does_not_shadow_a_sam1_key(
+            self, registration_contract) -> None:
+        """Kept as a LEGACY-namespace regression test -- see ``MIGRATIONS.md``.
+
+        In the package-qualified namespace ``SAM`` and ``SAM2`` could not collide
+        even if they shared a name. In the flat ``Custom>`` alias namespace that
+        every pre-migration archive reads, they still could, so that is where
+        the shadowing question is still live and where this asserts.
+        """
+        from dl_techniques.models.vision_language.sam.sam1.model import SAM
+
+        registration_contract(SAM2)
+        registration_contract(SAM)
+        assert SAM is not SAM2
+        assert SAM.__name__ != SAM2.__name__
 
     # DECISION plan-2026-08-22T035419-a11304c8/D-092
     # `test_sam1_source_is_untouched` lived here and is DELETED, under the

@@ -86,16 +86,21 @@ NUM_CLASSES = 11
 
 class TestVLMRegistration:
 
-    @pytest.mark.parametrize("name", [
-        "BaseVLMHead",
-        "ImageCaptioningHead",
-        "VQAHead",
-        "VisualGroundingHead",
-        "ImageTextMatchingHead",
-        "MultiTaskVLMHead",
-    ])
-    def test_class_registered(self, name) -> None:
-        assert keras.saving.get_registered_object(f"Custom>{name}") is not None
+    @pytest.mark.parametrize("cls", [
+        BaseVLMHead,
+        ImageCaptioningHead,
+        VQAHead,
+        VisualGroundingHead,
+        ImageTextMatchingHead,
+        MultiTaskVLMHead,
+    ], ids=lambda c: c.__name__)
+    def test_class_registered(self, cls, registration_contract) -> None:
+        # Was parametrized over NAME STRINGS and asserted only
+        # `get_registered_object(f"Custom>{name}") is not None`. Presence under a
+        # module-independent key says nothing about WHICH object is there, so it
+        # stayed green under exactly the collision it looked like it was guarding.
+        # Parametrizing over the classes lets the shared predicate assert identity.
+        registration_contract(cls)
 
 
 # ---------------------------------------------------------------------

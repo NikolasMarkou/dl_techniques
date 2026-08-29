@@ -13,7 +13,9 @@ no longer resolves. This module therefore registers each object under **both** k
 stable package-qualified one (which new saves write) and, where the bare class name is not
 shared with another registered class, the pre-migration ``Custom>ClassName`` one (which
 existing archives read). See :sec:`6.3` of the same guide for the migration-path rule, and
-``docs/`` / the shipping migration note for the reader-facing record.
+the repo-root ``MIGRATIONS.md`` for the reader-facing record: what moved, the four classes
+that get no alias, the ``yolov12_losses`` exception, and the nine archives that were
+already broken before this change by the 2026-08-24 ``models/`` reorg.
 
 Measured behaviour of the mechanism (2026-08-29, keras 3.x, this repository):
 

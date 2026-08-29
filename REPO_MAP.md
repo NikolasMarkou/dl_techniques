@@ -927,17 +927,34 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > both` and its `34 of its 35` were re-run and reproduce), and `src/dl_techniques/CLAUDE.md`'s
 > `layers/` docstring-style row (`259 of 299` -> `264 of 299`). Every other figure in that file's
 > docstring table and its printed command block was re-run in the same edit and reproduces exactly.
+>
+> **2026-08-29 — the registration migration (`MIGRATIONS.md`) moved five of these rows, and the
+> ownership split is measured, not assumed.** Re-run at this plan's base commit `5ac4f5b71` and at
+> its step-4 commit `36b27f3b3`: eight rows were red at `36b27f3b3`, of which **five turned red
+> during this plan** and are repaired here — `Python files under src/` (1048 -> **1049**), `.py in
+> src/dl_techniques/utils/` (41 -> **42**) and `layers+models share of src/ (%)` (56 -> **55**), all
+> three from the single new file `src/dl_techniques/utils/keras_registration.py`; `Library modules
+> using Sphinx :param OUTSIDE layers/attention/` (369 -> **370**), the same new file's docstring; and
+> `Files using @keras.saving.register_keras_serializable` (483 -> **16**), which is not a drift but a
+> change of meaning — the row no longer counts registrations at all, so it is relabelled and a new
+> row counts `@register_dl_technique` (**480**) beside it.
+>
+> **Three rows were ALREADY red at `5ac4f5b71` and are deliberately NOT repaired here**, because
+> absorbing another plan's debt into this diff would make the diff lie about what changed:
+> `Python files under tests/` (tabulated 1109, re-derives **1118**), `Library modules using a
+> Google-style Args: block` (224 -> **223**) and `Library modules carrying BOTH styles`
+> (17 -> **16**). They are named so the next reader does not re-diagnose them.
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1048 | `find src -name '*.py' \| wc -l` |
+| Python files under `src/` | 1049 | `find src -name '*.py' \| wc -l` |
 | Python files under `tests/` | 1109 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 300 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/models/` | 287 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/losses/` | 43 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/utils/` | 41 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/utils/` | 42 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/datasets/` | 37 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/analyzer/` | 24 | `find src/dl_techniques/analyzer -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/metrics/` | 16 | `find src/dl_techniques/metrics -name '*.py' \| wc -l` |
@@ -948,7 +965,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
 | `.py` in layers + models | 587 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
-| layers+models share of `src/` (%) | 56 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
+| layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 75 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model FAMILIES directly under `src/dl_techniques/models/` — **this is NOT the model-package count**; it read 74 and answered that question until the 2026-08-24 restructure, and the label is spelled out because re-running the command was what hid the change | 12 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
@@ -996,14 +1013,15 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files under `src/` naming `keras.callbacks.Callback` | 46 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 10 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
 | …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
-| Files using `@keras.saving.register_keras_serializable` | 483 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files using `@keras.saving.register_keras_serializable` DIRECTLY — **this is no longer the registration count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper (`MIGRATIONS.md`); the 16 that remain are docstrings, comments and the helper itself, NOT live decorators. The row below is the one that counts registrations now | 16 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files using `@register_dl_technique` (the live registration count) | 480 | `grep -rl "@register_dl_technique" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 484 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
 | Files using the central logger | 347 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
 | Files importing raw `tensorflow` | 59 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 265 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
-| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 369 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 370 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 224 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
 | Library modules carrying BOTH styles (the two sets overlap) | 17 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 10 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |

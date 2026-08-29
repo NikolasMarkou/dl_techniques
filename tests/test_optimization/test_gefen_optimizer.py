@@ -23,11 +23,15 @@ from dl_techniques.optimization.optimizer import optimizer_builder
 class TestGefenInstantiation:
     """Instantiation, default hyperparams, and range validation."""
 
-    def test_import_and_register(self):
-        """Import succeeds and the class is registered under Custom>Gefen."""
-        # Keras registers under the default 'Custom>' prefix (verified Step 1/3).
-        assert keras.saving.get_registered_object("Custom>Gefen") is not None
-        assert keras.saving.get_registered_name(Gefen) == "Custom>Gefen"
+    def test_import_and_register(self, registration_contract):
+        """Import succeeds, the key is package-qualified, the alias still resolves.
+
+        Both assertions here used to spell ``"Custom>Gefen"`` -- asserting the
+        DEFECT rather than the contract, because a ``Custom>`` key carries no
+        owner and a second ``Gefen`` in any other package would silently take it.
+        See ``MIGRATIONS.md``.
+        """
+        registration_contract(Gefen)
 
     def test_defaults(self):
         """A default Gefen carries the documented hyperparameters."""

@@ -400,17 +400,16 @@ class TestWWPGDConvReshape:
 class TestWWPGDSerialization:
     """SC6: config + callback serialize/deserialize without a live model."""
 
-    def test_registered_names_resolve(self):
-        assert keras.saving.get_registered_name(WWTailConfig) == "Custom>WWTailConfig"
-        assert (
-            keras.saving.get_registered_name(WWPGDProjectionCallback)
-            == "Custom>WWPGDProjectionCallback"
-        )
-        assert keras.saving.get_registered_object("Custom>WWTailConfig") is not None
-        assert (
-            keras.saving.get_registered_object("Custom>WWPGDProjectionCallback")
-            is not None
-        )
+    def test_registered_names_resolve(self, registration_contract):
+        """Package-qualified keys, plus the legacy aliases that keep archives loading.
+
+        These four assertions used to spell ``"Custom>WWTailConfig"`` and
+        ``"Custom>WWPGDProjectionCallback"`` -- the DEFECT, since a ``Custom>``
+        key is module-independent and any same-named class elsewhere in the tree
+        claims the identical slot. See ``MIGRATIONS.md``.
+        """
+        for cls in (WWTailConfig, WWPGDProjectionCallback):
+            registration_contract(cls)
 
     def test_config_roundtrip(self):
         cfg = WWTailConfig(

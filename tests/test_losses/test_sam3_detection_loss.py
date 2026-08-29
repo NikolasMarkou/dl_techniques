@@ -28,7 +28,6 @@ from dl_techniques.losses.sam3_detection_loss import (
     box_cxcywh_to_xyxy,
     pairwise_generalized_iou,
 )
-
 SEED = 20260805
 
 
@@ -1729,11 +1728,17 @@ class TestSwitches:
                     if name not in ("self", "kwargs")}
         assert expected <= set(Sam3DetectionLoss().get_config())
 
-    def test_the_loss_is_registered_as_serializable(self):
-        assert keras.saving.get_registered_name(
-            Sam3DetectionLoss) == "Custom>Sam3DetectionLoss"
-        assert keras.saving.get_registered_object(
-            "Custom>Sam3DetectionLoss") is Sam3DetectionLoss
+    def test_the_loss_is_registered_as_serializable(self, registration_contract):
+        """Package-qualified key, AND the legacy alias still resolving.
+
+        This used to assert ``get_registered_name(...) == "Custom>Sam3DetectionLoss"``
+        -- the DEFECT, since a ``Custom>`` key names no owner and any same-named
+        class elsewhere takes the slot. ``Sam3DetectionLoss`` is one of the 14
+        class names actually persisted in this repository's ``.keras`` archives,
+        so the alias half of `registration_contract` is load-bearing here rather
+        than hypothetical. See ``MIGRATIONS.md``.
+        """
+        registration_contract(Sam3DetectionLoss)
 
 
 # --------------------------------------------------------------------------

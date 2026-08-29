@@ -62,6 +62,101 @@ def golden_reference_device() -> str:
     return GOLDEN_REFERENCE_DEVICE
 
 
+
+# --- Registration-key contract, shared across every directory ---------------
+#
+# Centralized here for the same reason `golden_reference_device` above is: the
+# POLICY must not be restated per module. Ten test files in six directories
+# (`test_initializers`, `test_layers`, `test_layers/test_heads`,
+# `test_layers/test_logic`, `test_layers/test_tokenizers`, `test_losses`,
+# `test_models/test_sam2`, `test_optimization`) each used to spell a literal
+# `"Custom>ClassName"`, and a literal is exactly the wrong instrument: it pins
+# the string a *bare* `@keras.saving.register_keras_serializable()` mints, which
+# is MODULE-INDEPENDENT, so it silently keeps passing while two same-named
+# classes in different packages fight over one registry slot. Ten copies of a
+# spelled-out replacement would drift the same way; one predicate cannot.
+#
+# See `MIGRATIONS.md` for the tree-wide change this predicate encodes.
+def assert_package_qualified_registration(
+    cls,
+    expected_package: str = None,
+    expect_legacy_alias: bool = True,
+) -> str:
+    """Assert the two halves of this repository's registration contract.
+
+    Half one: the key a NEW save writes is package-qualified and owned by
+    `dl_techniques`, never the bare `Custom>` key. Half two: the pre-migration
+    `Custom>{name}` alias still resolves to the SAME OBJECT, which is what keeps
+    every `.keras` archive written before the migration loadable.
+
+    Identity (`is cls`) is asserted, not presence: an alias that resolves to a
+    DIFFERENT object is precisely the silent collision the migration removed, and
+    a `is not None` check cannot see it.
+
+    :param cls: the registered class or function under test.
+    :param expected_package: optional exact package string. Leave `None` to
+        assert only the SHAPE -- a module move then legitimately changes the key
+        without reddening an unrelated test.
+    :type expected_package: str or None
+    :param expect_legacy_alias: `False` for the four duplicate-name classes
+        (`ConvBlock`, `Downsample`, `MLPBlock`, `Upsample`) that deliberately get
+        NO alias on either side, because both sides would claim the same one.
+        The `Custom>` key must then resolve to nothing at all.
+    :type expect_legacy_alias: bool
+    :return: the package-qualified registry key.
+    :rtype: str
+    """
+    import keras
+    from dl_techniques.utils.keras_registration import LEGACY_ALIAS_PREFIX
+
+    name = getattr(cls, "__name__")
+    key = keras.saving.get_registered_name(cls)
+    package, separator, registered_name = key.rpartition(">")
+    assert separator == ">", (
+        f"{name} is not registered at all: get_registered_name returned {key!r}")
+    assert registered_name == name, (
+        f"{name} is registered under the name {registered_name!r}")
+    assert package != LEGACY_ALIAS_PREFIX, (
+        f"{name} still claims the bare {key!r}. That key carries no owner, so a "
+        f"same-named class in any other package takes the identical slot and the "
+        f"one imported LAST wins every deserialization of both")
+    assert package.startswith("dl_techniques"), (
+        f"{name} is registered under {package!r}, which does not name this "
+        f"project; an un-namespaced package string is the same hazard as Custom>")
+    if expected_package is not None:
+        assert package == expected_package, f"{name}: {package!r}"
+    assert keras.saving.get_registered_object(key) is cls, (
+        f"{key!r} resolves to something other than {name} -- a key collision "
+        f"silently overwrote it")
+
+    legacy = f"{LEGACY_ALIAS_PREFIX}>{name}"
+    assert legacy != key
+    resolved = keras.saving.get_registered_object(legacy)
+    if expect_legacy_alias:
+        assert resolved is cls, (
+            f"the legacy alias {legacy!r} resolves to {resolved!r}, not {name}: "
+            f"every .keras archive written before the registration migration "
+            f"names that key and would now be refused")
+    else:
+        assert resolved is None, (
+            f"{legacy!r} must stay UNCLAIMED -- {name} shares its bare name with "
+            f"another registered class, so aliasing either side recreates the "
+            f"import-order collision in the legacy namespace")
+    return key
+
+
+@pytest.fixture(scope="session")
+def registration_contract():
+    """The shared registration-key predicate; see
+    :func:`assert_package_qualified_registration`.
+
+    :return: the predicate, callable as
+        ``registration_contract(SomeLayer)`` or
+        ``registration_contract(SomeLayer, expect_legacy_alias=False)``.
+    """
+    return assert_package_qualified_registration
+
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 

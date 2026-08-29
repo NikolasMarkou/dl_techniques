@@ -52,7 +52,11 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     create_convunext_variant as bf_create_convunext_variant,
 )
-from dl_techniques.models.vision.convunext.model import create_convunext
+from dl_techniques.models.vision.convunext.model import (
+    ConvUNextStem,
+    SpatialLinearAttention,
+    create_convunext,
+)
 
 # Small everywhere: these tests measure WIRING, not capacity.
 INPUT_SHAPE: Tuple[int, int, int] = (32, 32, 1)
@@ -63,6 +67,11 @@ SMALL: Dict[str, Any] = dict(depth=2, initial_filters=8, blocks_per_level=1)
 # `test_bfconvunext_wrappers.py`; here they are used only to give the round-trip its
 # checkpoint meaning (a same-process save/load would happily resolve a MOVED key and
 # prove nothing about a graph saved yesterday).
+#
+# Since the 2026-08-29 registration migration (`MIGRATIONS.md`) the second one is the
+# LEGACY ALIAS, not the key a new save writes. It is kept, and kept as a literal, for
+# exactly the reason above: it is what a graph saved BEFORE that date names, and that
+# fact cannot be re-derived from today's source.
 STEM_REGISTRY_KEY = 'dl_techniques.bias_free_denoisers>ConvUNextStem'
 ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
 
@@ -510,12 +519,24 @@ class TestKerasRoundTrip:
         `test_bfconvunext_wrappers.py::TestRegistrarContract`; this in-process copy
         is what makes the round-trip above mean something about OLD graphs.
         """
+        # DELIBERATELY KEPT AS LITERALS after the 2026-08-29 registration
+        # migration (`MIGRATIONS.md`), which is the one case where a literal is
+        # the right instrument: these are the keys graphs saved BEFORE that date
+        # actually name, so they must not be re-derived from today's source --
+        # deriving them would make the pin follow whatever move it exists to
+        # detect. `ATTENTION_REGISTRY_KEY` is now the legacy ALIAS rather than
+        # the primary key; that changes nothing about what a stored graph names.
+        # Identity, not presence: `in registered` cannot tell the class apart
+        # from any other object that claimed the key, which for a flat `Custom>`
+        # key is the whole hazard.
         registered = keras.saving.get_custom_objects()
-        assert STEM_REGISTRY_KEY in registered, (
-            f"{STEM_REGISTRY_KEY!r} is not registered; every saved bias-free "
-            f"ConvUNext graph names it"
+        assert registered.get(STEM_REGISTRY_KEY) is ConvUNextStem, (
+            f"{STEM_REGISTRY_KEY!r} does not resolve to ConvUNextStem; every "
+            f"saved bias-free ConvUNext graph names it"
         )
-        assert ATTENTION_REGISTRY_KEY in registered, (
-            f"{ATTENTION_REGISTRY_KEY!r} is not registered; a `package=` argument "
-            f"on its bare decorator would change the key and break every saved graph"
+        assert (registered.get(ATTENTION_REGISTRY_KEY)
+                is SpatialLinearAttention), (
+            f"{ATTENTION_REGISTRY_KEY!r} does not resolve to "
+            f"SpatialLinearAttention; every graph saved before the 2026-08-29 "
+            f"registration migration names that key and would now be refused"
         )

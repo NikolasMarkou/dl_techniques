@@ -797,13 +797,36 @@ class TestSerialization:
         assert config["scalp"] == 0
         assert SAM2ImageEncoder.from_config(config).scalp == 0
 
-    def test_registered_keys_are_present_exactly_once(self) -> None:
+    def test_registered_keys_are_present_exactly_once(
+            self, registration_contract) -> None:
+        """One CLASS per name, under exactly its two keys.
+
+        This asserted ``len(matches) == 1`` until the 2026-08-29 registration
+        migration (``MIGRATIONS.md``) and it was RIGHT to: a second key ending in
+        ``>SAM2FpnNeck`` used to mean a second CLASS silently sharing the slot.
+        There are now two keys per registered object BY DESIGN -- the
+        package-qualified one and the legacy ``Custom>`` alias, both bound to the
+        same object -- so the count alone no longer discriminates. What still
+        does, and is asserted instead, is that every key ending in that name
+        resolves to the SAME class.
+
+        Worth noting how this one was found: it holds no literal ``"Custom>"``
+        string (it builds the suffix with an f-string), so the grep that located
+        the other eighteen files did not see it. Only running it did.
+        """
         registry = keras.saving.get_custom_objects()
-        for name in ("SAM2FpnNeck", "SAM2ImageEncoder"):
-            matches = [key for key in registry if key.endswith(f">{name}")]
-            assert len(matches) == 1, (
-                f"'{name}' is registered {len(matches)} times: {matches}"
+        for cls in (SAM2FpnNeck, SAM2ImageEncoder):
+            matches = [key for key in registry if key.endswith(f">{cls.__name__}")]
+            assert len(matches) == 2, (
+                f"'{cls.__name__}' is registered under {len(matches)} keys: "
+                f"{matches}; expected the qualified key and its legacy alias"
             )
+            for key in matches:
+                assert keras.saving.get_registered_object(key) is cls, (
+                    f"'{key}' resolves to something other than {cls.__name__} -- "
+                    f"a second class is sharing the name"
+                )
+            registration_contract(cls)
 
 
 class TestGraphTrace:

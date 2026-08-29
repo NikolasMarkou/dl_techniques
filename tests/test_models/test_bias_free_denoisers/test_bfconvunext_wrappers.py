@@ -215,13 +215,18 @@ REGISTRAR_CLASSES = [
 
 STEM_REGISTRY_KEY = 'dl_techniques.bias_free_denoisers>ConvUNextStem'
 
-# The OTHER key a saved bias-free ConvUNext graph names. `SpatialLinearAttention` carries a
-# BARE `@keras.saving.register_keras_serializable()` (convunext/model.py), whose key was
-# MEASURED to be module-independent on Keras 3.8.0 (decisions.md D-008) — which is why the
-# ConvUNext merge could move the class without breaking checkpoints. Adding a `package=`
-# argument "for symmetry" with `ConvUNextStem` WOULD change it, and that is the failure this
-# literal exists to catch; `bfconvunext.py` carries the same warning in prose.
+# The OTHER key a saved bias-free ConvUNext graph names. Until 2026-08-29
+# `SpatialLinearAttention` carried a BARE `@keras.saving.register_keras_serializable()`
+# (convunext/model.py), whose key was MEASURED to be module-independent on Keras 3.8.0
+# (decisions.md D-008) -- which is why the ConvUNext merge could move the class without
+# breaking checkpoints. The tree-wide registration migration (`MIGRATIONS.md`) then gave it
+# a package-qualified key AND kept this one as a legacy alias, so this literal is now a
+# LEGACY-PATH pin: it is the key every checkpoint saved before that date actually names,
+# and it is deliberately NOT derived from anything, because deriving it from today's source
+# would make it follow the very move it exists to detect. Both keys are asserted below.
 ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
+ATTENTION_QUALIFIED_KEY = 'dl_techniques.models.convunext.model>SpatialLinearAttention'
+STEM_LEGACY_KEY = 'Custom>ConvUNextStem'
 
 # The names `bfconvunext` must keep bound as module ATTRIBUTES. This is a DIFFERENT
 # contract from registry presence, and the difference is measured, not assumed: deleting
@@ -275,10 +280,11 @@ class TestRegistrarContract:
     def test_registrar_import_registers_convunext_stem(
         self, registrar_probe_result: dict
     ) -> None:
-        keys = registrar_probe_result['resolved'].get('ConvUNextStem', [])
-        assert keys == [STEM_REGISTRY_KEY], (
+        keys = sorted(registrar_probe_result['resolved'].get('ConvUNextStem', []))
+        assert keys == [STEM_LEGACY_KEY, STEM_REGISTRY_KEY], (
             f"ConvUNextStem registry keys after importing only bfconvunext: {keys}; "
-            f"expected exactly [{STEM_REGISTRY_KEY!r}]"
+            f"expected exactly [{STEM_LEGACY_KEY!r}, {STEM_REGISTRY_KEY!r}] -- the "
+            f"package-qualified key and the legacy alias the migration added"
         )
 
     def test_registrar_import_registers_spatial_linear_attention_under_the_bare_key(
@@ -292,13 +298,20 @@ class TestRegistrarContract:
         that test passed while every `.keras` graph naming the old key would have failed
         at `load_model`. This exact-match assertion is the one that went red. Keep both:
         presence is parametrized over seven classes, exactness is per-key.
+
+        UPDATED 2026-08-29 (`MIGRATIONS.md`): the class now holds TWO keys, and the
+        assertion is stronger for it. The legacy key is still required -- that half is the
+        checkpoint contract, and it is what would go RED if the alias were ever dropped
+        "for tidiness" -- and the qualified key is required alongside it, so a `package=`
+        that silently REPLACES rather than ADDS is still caught.
         """
-        keys = registrar_probe_result['resolved'].get('SpatialLinearAttention', [])
-        assert keys == [ATTENTION_REGISTRY_KEY], (
+        keys = sorted(registrar_probe_result['resolved'].get(
+            'SpatialLinearAttention', []))
+        assert keys == [ATTENTION_REGISTRY_KEY, ATTENTION_QUALIFIED_KEY], (
             "SpatialLinearAttention registry keys after importing only bfconvunext: "
-            f"{keys}; expected exactly [{ATTENTION_REGISTRY_KEY!r}]. A `package=` "
-            "argument on its decorator changes the key and silently breaks every saved "
-            "checkpoint containing this layer"
+            f"{keys}; expected exactly [{ATTENTION_REGISTRY_KEY!r}, "
+            f"{ATTENTION_QUALIFIED_KEY!r}]. Losing the first breaks every checkpoint "
+            "saved before 2026-08-29; losing the second means the migration was reverted"
         )
 
     @pytest.mark.parametrize("name", RE_EXPORTED_NAMES)

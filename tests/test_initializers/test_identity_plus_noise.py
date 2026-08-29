@@ -136,12 +136,18 @@ class TestSerialization:
         assert restored.seed == 11
         np.testing.assert_array_equal(_np(init((8, 8))), _np(restored((8, 8))))
 
-    def test_registered_name_resolves(self):
+    def test_registered_name_resolves(self, registration_contract):
         """The `custom_objects` key Keras actually looks a CLASS up by is its
-        registered name, not its bare class name (see D-014)."""
-        name = keras.saving.get_registered_name(IdentityPlusNoise)
-        assert name == "Custom>IdentityPlusNoise"
-        assert keras.saving.get_registered_object(name) is IdentityPlusNoise
+        registered name, not its bare class name (see D-014).
+
+        This used to assert ``name == "Custom>IdentityPlusNoise"``, i.e. it
+        required the DEFECT: ``Custom>`` is the module-independent key a bare
+        decorator mints, so any other ``IdentityPlusNoise`` in the tree claims
+        the identical slot. `registration_contract` (tests/conftest.py) asserts
+        both halves of the replacement -- package-qualified new key, and the
+        legacy alias still resolving to the same object. See ``MIGRATIONS.md``.
+        """
+        registration_contract(IdentityPlusNoise)
 
     def test_serialized_object_carries_the_registered_name(self):
         blob = keras.saving.serialize_keras_object(

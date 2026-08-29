@@ -132,13 +132,31 @@ class TestExportSurface:
 # ---------------------------------------------------------------------
 
 
+#: The two decorator spellings that register a class in this tree, and the
+#: positional slot each takes its package string from. ``register_dl_technique``
+#: (``src/dl_techniques/utils/keras_registration.py``) wraps the Keras decorator
+#: and REQUIRES its package positionally; the stock decorator defaults to
+#: ``"Custom"``. A sweep that knows only the stock name went blind to 744 of the
+#: tree's 744 sites the day the migration landed, and reported ZERO collisions
+#: while seeing nothing at all -- so both names are keyed here, together.
+_REGISTRATION_DECORATORS = ("register_keras_serializable", "register_dl_technique")
+
+
 def _registered_key(node: ast.ClassDef) -> Optional[str]:
     """Derive the Keras registry key for a decorated class.
 
-    Mirrors ``keras.saving.register_keras_serializable``'s own rule: the key is
-    ``f"{package}>{name}"`` with ``package`` defaulting to ``"Custom"`` and
-    ``name`` to the class's own name. Both may be given positionally or by
-    keyword.
+    Mirrors the rule the decorators themselves apply: the key is
+    ``f"{package}>{name}"``. For the stock
+    ``keras.saving.register_keras_serializable`` ``package`` defaults to
+    ``"Custom"`` and ``name`` to the class's own name, and both may be given
+    positionally or by keyword. For ``register_dl_technique`` the package is
+    mandatory and positional and there is no ``name`` argument, so the key is
+    always ``f"{package}>{node.name}"``.
+
+    Note this returns the QUALIFIED key only. The legacy ``Custom>`` alias that
+    ``register_dl_technique`` also binds is deliberately not returned: it is a
+    second key for the SAME object, so counting it as a claimant would make every
+    aliased class read as its own collision.
 
     :param node: The class definition to inspect.
     :type node: ast.ClassDef
@@ -149,21 +167,26 @@ def _registered_key(node: ast.ClassDef) -> Optional[str]:
         call = decorator if isinstance(decorator, ast.Call) else None
         target = call.func if call else decorator
         attr = getattr(target, "attr", getattr(target, "id", None))
-        if attr != "register_keras_serializable":
+        if attr not in _REGISTRATION_DECORATORS:
             continue
-        package, name = "Custom", node.name
+        package = "Custom" if attr == "register_keras_serializable" else None
+        name = node.name
         if call is not None:
             if len(call.args) >= 1 and isinstance(call.args[0], ast.Constant):
                 package = call.args[0].value
-            if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
+            if (attr == "register_keras_serializable"
+                    and len(call.args) >= 2
+                    and isinstance(call.args[1], ast.Constant)):
                 name = call.args[1].value
             for keyword in call.keywords:
                 if not isinstance(keyword.value, ast.Constant):
                     continue
                 if keyword.arg == "package":
                     package = keyword.value.value
-                elif keyword.arg == "name":
+                elif keyword.arg == "name" and attr == "register_keras_serializable":
                     name = keyword.value.value
+        if package is None:  # a non-literal package string; unkeyable, not absent
+            continue
         return f"{package}>{name}"
     return None
 
@@ -187,21 +210,37 @@ def _sweep_registered_keys() -> Dict[str, List[str]]:
 
 #: The 14 registered SAM 2 classes (``SAM2MemoryBank`` is deliberately NOT one
 #: -- it is a plain-Python state container that owns no weights, see D-026).
+#:
+#: These were spelled ``Custom>AxialRoPE2D`` and so on until the 2026-08-29
+#: registration migration (``MIGRATIONS.md``). The package prefix is derived here
+#: rather than pasted onto each of the fourteen: SAM 2 lives under
+#: ``models/vision_language/sam/sam2/``, and the key strips the ``vision_language``
+#: family and ``sam`` subfamily containers because those are a filing decision
+#: that has already been reshuffled once. Deriving it means a fifteenth class
+#: cannot be added with a subtly different prefix.
+SAM2_KEY_PREFIX = "dl_techniques.models.sam2"
 SAM2_REGISTERED_KEYS = (
-    "Custom>AxialRoPE2D",
-    "Custom>Hiera",
-    "Custom>HieraBlock",
-    "Custom>HieraMultiScaleAttention",
-    "Custom>HieraPatchEmbed",
-    "Custom>SAM2",
-    "Custom>SAM2FpnNeck",
-    "Custom>SAM2Fuser",
-    "Custom>SAM2ImageEncoder",
-    "Custom>SAM2MaskDecoder",
-    "Custom>SAM2MaskDownSampler",
-    "Custom>SAM2MemoryAttention",
-    "Custom>SAM2MemoryAttentionLayer",
-    "Custom>SAM2MemoryEncoder",
+    # NOT under the SAM 2 prefix: `AxialRoPE2D` is a shared embedding layer that
+    # SAM 2 consumes, and it was ALREADY shared before the migration. Deriving
+    # its key from SAM 2's prefix would have silently invented a key no class
+    # claims, and the test below would then have read as a missing registration.
+    "dl_techniques.layers.embedding.axial_rope_2d>AxialRoPE2D",
+) + tuple(
+    f"{SAM2_KEY_PREFIX}.{module}>{name}" for module, name in (
+        ("hiera", "Hiera"),
+        ("hiera", "HieraBlock"),
+        ("hiera", "HieraMultiScaleAttention"),
+        ("hiera", "HieraPatchEmbed"),
+        ("model", "SAM2"),
+        ("neck", "SAM2FpnNeck"),
+        ("memory_encoder", "SAM2Fuser"),
+        ("neck", "SAM2ImageEncoder"),
+        ("mask_decoder", "SAM2MaskDecoder"),
+        ("memory_encoder", "SAM2MaskDownSampler"),
+        ("memory_attention", "SAM2MemoryAttention"),
+        ("memory_attention", "SAM2MemoryAttentionLayer"),
+        ("memory_encoder", "SAM2MemoryEncoder"),
+    )
 )
 
 
@@ -252,4 +291,5 @@ class TestRepoWideRegistryUniqueness:
         Registering it would mint public surface for a class that never
         appears in a serialized config.
         """
-        assert "Custom>SAM2MemoryBank" not in keys
+        claimants = [k for k in keys if k.endswith(">SAM2MemoryBank")]
+        assert not claimants, claimants

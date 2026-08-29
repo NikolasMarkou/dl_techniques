@@ -5,8 +5,10 @@ Covers the two opportunistic bugfixes landed during the merge (SC6):
 * **EnhancementHead module-scope serialization.** The class was previously
   defined inside ``create_enhancement_head()`` (a closure-local
   ``@register_keras_serializable`` class). It is now at module scope with the
-  same name, so ``Custom>EnhancementHead`` is registered and a build via the
-  factory round-trips through ``.keras`` save/load.
+  same name, so it is registered (today under the package-qualified key
+  ``dl_techniques.layers.heads.vision.factory>EnhancementHead``, with the
+  pre-migration ``Custom>`` name kept as an alias -- see ``MIGRATIONS.md``) and
+  a build via the factory round-trips through ``.keras`` save/load.
 * **MultiTaskHead dict non-mutation.** ``_create_task_heads`` used to
   ``config.pop('task_type')`` on the caller's dict; it now copies first. We
   assert the caller's input config dict is unchanged after
@@ -52,11 +54,13 @@ def _feature_map() -> np.ndarray:
 
 class TestEnhancementHeadSerialization:
 
-    def test_registered_at_module_scope(self) -> None:
-        assert (
-            keras.saving.get_registered_object("Custom>EnhancementHead")
-            is not None
-        )
+    def test_registered_at_module_scope(self, registration_contract) -> None:
+        # Was `get_registered_object("Custom>EnhancementHead") is not None`.
+        # `is not None` could not tell the head apart from ANY other object that
+        # happened to claim the key -- which, for a bare module-independent
+        # `Custom>` key, was the whole hazard. The shared predicate asserts
+        # identity under both the qualified key and the legacy alias.
+        registration_contract(EnhancementHead)
 
     def test_create_and_roundtrip(self) -> None:
         head = create_enhancement_head(

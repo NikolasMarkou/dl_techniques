@@ -1,8 +1,18 @@
 """Repo-wide guard: no two classes may claim the same Keras serialization key.
 
 `@keras.saving.register_keras_serializable()` with no arguments registers a class under
-``"Custom>{ClassName}"``. Two classes with the SAME class name therefore claim the SAME
-key, and the one imported LAST silently overwrites the other. Nothing warns.
+the module-INDEPENDENT key ``Custom>{ClassName}``. Two classes with the SAME class name
+therefore claim the SAME key, and the one imported LAST silently overwrites the other.
+Nothing warns.
+
+SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 744 of them go
+through `dl_techniques.utils.keras_registration.register_dl_technique`, which mints a
+package-qualified key and binds the old ``Custom>{ClassName}`` as an ALIAS to the same
+object so pre-migration `.keras` archives keep loading. See `MIGRATIONS.md`. This guard is
+unchanged in intent and still the right one: an alias is a second key for the SAME object,
+which this checker's identity comparison correctly does not count as a collision, and the
+four duplicate-name pairs the alias is deliberately WITHHELD from are exactly the pairs
+that would otherwise collide in the legacy namespace.
 
 The consequence is a real serialization-correctness bug, not merely a test annoyance:
 saving a model containing the shadowed class and loading it back resolves the key to the
@@ -40,10 +50,16 @@ the `package=` arguments below exist -- do not go looking for those two modules,
 not drop a `package=` just because its collision partner is gone: the checker below is
 derived from what is importable TODAY, so it is the thing that decides, not this table.
 
-Fix: give each colliding class an explicit, distinct ``package=``. This is backward
-compatible -- a `.keras` file records ``module`` + ``class_name`` alongside
-``registered_name``, and Keras falls back to the module path when the registered key is
-absent (verified empirically before the rename).
+Fix: give each colliding class an explicit, distinct ``package=``.
+
+CORRECTED 2026-08-29. This paragraph used to end: "This is backward compatible -- a
+`.keras` file records ``module`` + ``class_name`` alongside ``registered_name``, and Keras
+falls back to the module path when the registered key is absent (verified empirically
+before the rename)." That fallback claim is FALSE for a class whose key moved. Measured
+with a control on Keras 3.8.0 (plan-2026-08-29T141252-168933da step 1): an archive written
+under ``Custom>X`` and reloaded after X was re-keyed with the alias SUPPRESSED is REFUSED
+with ``TypeError``, not silently resolved through its module path. Changing a registered
+key IS checkpoint-affecting; what makes it survivable is the legacy alias, not a fallback.
 
 This test walks every module under `dl_techniques` and asserts no key is claimed twice.
 """
@@ -101,18 +117,28 @@ def test_no_duplicate_keras_serialization_keys():
                 })
 
     # Guard the guard: if the walk registered almost nothing, the assertion below would
-    # pass vacuously. The repo registers ~700 objects; anything near zero means the walk
-    # broke and this test is not actually testing anything.
-    assert len(registry) > 100, (
-        f"only {len(registry)} objects registered -- the module walk likely failed, so "
-        f"this guard would pass vacuously"
+    # pass vacuously.
+    #
+    # The floor was ``> 100`` against a measured population of 728, i.e. ~7x headroom --
+    # so seven of every eight registrations could have vanished without this noticing.
+    # Measured 2026-08-29 after the registration migration: **1452 keys** (each aliased
+    # object holds two, the qualified key and its legacy ``Custom>`` alias). The floor is
+    # re-derived on the same 80%-of-population rule the sibling guard in
+    # `test_models/test_package_api_contract.py` uses: ``int(0.8 * 1452) == 1161``. A
+    # fifth of the tree's registrations may disappear before this guard is allowed to call
+    # itself alive; anything tighter would trip on an ordinary refactor and say nothing
+    # more about whether the walk still reaches the tree.
+    assert len(registry) > 1161, (
+        f"only {len(registry)} objects registered (measured 1452 on 2026-08-29) -- the "
+        f"module walk likely failed, so this guard would pass vacuously"
     )
 
     assert not collisions, (
         "Two classes registered under the same Keras serialization key. The one imported "
         "LAST silently wins, so saving/loading the other is broken and depends on import "
-        "order. Give each an explicit distinct `package=` in "
-        "@keras.saving.register_keras_serializable(...):\n"
+        "order. Give each an explicit distinct `package=` via "
+        "`register_dl_technique(...)`, and pass `legacy_alias=False` on BOTH sides if "
+        "they share a bare class name (see MIGRATIONS.md):\n"
         + "\n".join(
             f"  {key}\n" + "".join(f"       {c}\n" for c in sorted(classes))
             for key, classes in sorted(collisions.items())

@@ -32,6 +32,8 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from dl_techniques.utils.keras_registration import LEGACY_ALIAS_PREFIX
+
 from .model_package_discovery import leaf_packages
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "dl_techniques" / "models"
@@ -2058,20 +2060,41 @@ def _decorator_name(node: ast.expr) -> str:
     return ""
 
 
+#: Both decorator spellings that claim a registry key in this tree.
+#: ``register_dl_technique`` (``src/dl_techniques/utils/keras_registration.py``)
+#: wraps the stock Keras decorator, takes its package MANDATORILY and
+#: positionally, and has no ``name`` argument. It is keyed here beside the stock
+#: name rather than instead of it: on 2026-08-29 the migration moved all 744
+#: ``src/`` sites onto it at once, and a sweep that knew only the stock name
+#: would have gone from seeing the whole tree to seeing none of it while still
+#: reporting "0 collisions" -- a guard that passes because it looks at nothing.
+#: The ``>= 608`` population floor in ``test_the_sweep_found_registered_classes``
+#: is what turns that blindness into a failure; keep the two together.
+_REGISTRATION_DECORATORS = ("register_keras_serializable", "register_dl_technique")
+
+
 @_memo_default_roots
 def _sweep_registry_keys(roots=None, src_root=None):
-    """Every ``@register_keras_serializable`` class, by the key it claims.
+    """Every registration-decorated class, by the key it claims.
 
     Contract: returns ``(keys, counts)``. ``keys`` maps ``"<package>><name>"`` to
     the list of ``"relpath:lineno"`` claiming it; ``counts`` carries the sweep's
     population and its three measured-empty blind spots.
 
-    The key is computed the way Keras computes it: ``package`` defaults to the
-    literal string ``"Custom"`` and ``name`` to the class's own name, and both
-    are read from POSITIONAL as well as keyword decorator arguments (the Keras
-    signature is ``register_keras_serializable(package="Custom", name=None)``, so
+    The key is computed the way the decorators compute it. For the stock
+    ``register_keras_serializable`` ``package`` defaults to the literal string
+    ``"Custom"`` and ``name`` to the class's own name, and both are read from
+    POSITIONAL as well as keyword arguments (the Keras signature is
+    ``register_keras_serializable(package="Custom", name=None)``, so
     ``@register_keras_serializable("dl_techniques")`` is a legal spelling this
-    sweep must not miss).
+    sweep must not miss). For ``register_dl_technique`` the package is mandatory,
+    the first positional argument, and there is no ``name``.
+
+    Only the QUALIFIED key is returned. ``register_dl_technique`` also binds a
+    legacy ``Custom>{name}`` alias to the SAME object; counting that alias as a
+    claimant would make every aliased class read as its own collision, and would
+    re-collide all four deliberate duplicate-name pairs that the alias is
+    withheld from precisely so they do not.
     """
     roots = _REGISTRY_KEY_ROOTS if roots is None else roots
     src_root = REPO_ROOT if src_root is None else src_root
@@ -2081,6 +2104,7 @@ def _sweep_registry_keys(roots=None, src_root=None):
         "n_bare": 0,
         "n_package": 0,
         "n_named": 0,
+        "n_dl_technique": 0,
         "n_aliased_import": 0,
         "n_function_decorated": 0,
         "n_dynamic_registration": 0,
@@ -2098,7 +2122,7 @@ def _sweep_registry_keys(roots=None, src_root=None):
                 continue
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if any(
-                    _decorator_name(d) == "register_keras_serializable"
+                    _decorator_name(d) in _REGISTRATION_DECORATORS
                     for d in node.decorator_list
                 ):
                     counts["n_function_decorated"] += 1
@@ -2110,7 +2134,8 @@ def _sweep_registry_keys(roots=None, src_root=None):
             if not isinstance(node, ast.ClassDef):
                 continue
             for dec in node.decorator_list:
-                if _decorator_name(dec) != "register_keras_serializable":
+                decorator = _decorator_name(dec)
+                if decorator not in _REGISTRATION_DECORATORS:
                     continue
                 counts["n_decorated"] += 1
                 package = name = None
@@ -2119,7 +2144,7 @@ def _sweep_registry_keys(roots=None, src_root=None):
                         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                             if i == 0:
                                 package = arg.value
-                            elif i == 1:
+                            elif i == 1 and decorator == "register_keras_serializable":
                                 name = arg.value
                     for kw in dec.keywords:
                         if not (
@@ -2129,9 +2154,11 @@ def _sweep_registry_keys(roots=None, src_root=None):
                             continue
                         if kw.arg == "package":
                             package = kw.value.value
-                        elif kw.arg == "name":
+                        elif kw.arg == "name" and decorator == "register_keras_serializable":
                             name = kw.value.value
                 counts["n_package" if package else "n_bare"] += 1
+                if decorator == "register_dl_technique":
+                    counts["n_dl_technique"] += 1
                 if name:
                     counts["n_named"] += 1
                 key = f"{package or 'Custom'}>{name or node.name}"
@@ -2166,6 +2193,20 @@ class ConvUNextDownsample(keras.layers.Layer):
     pass
 '''
 
+#: The same collision written with the MIGRATION's decorator. Two explicit
+#: packages that happen to be equal still collide -- qualification narrows the
+#: namespace, it does not make a key unique by itself. Parsed, never imported.
+_INJECTED_DL_TECHNIQUE_COLLISION_SRC = '''
+@register_dl_technique("dl_techniques.probe")
+class Downsample(keras.layers.Layer):
+    pass
+
+
+@register_dl_technique("dl_techniques.probe")
+class Downsample(keras.layers.Layer):  # noqa: F811 -- a second FILE in reality
+    pass
+'''
+
 
 class TestRegistryKeysDoNotCollide:
     """No two registered classes may claim the same Keras registry key.
@@ -2191,8 +2232,8 @@ class TestRegistryKeysDoNotCollide:
       predicate matches the literal name, so ``@reg()`` is invisible: **0 today**;
     * the decorator on a ``FunctionDef`` rather than a ``ClassDef``. Keras allows
       it, and such a function competes for the same key namespace: **0 today**;
-    * a dynamic ``get_custom_objects()["Custom>X"] = X``, which registers with no
-      decorator at all: **0 today**.
+    * a dynamic ``get_custom_objects()`` item assignment, which binds a key with
+      no decorator at all: **0 today**.
     """
 
     def test_no_two_registered_classes_claim_the_same_key(self):
@@ -2205,9 +2246,19 @@ class TestRegistryKeysDoNotCollide:
         # flat `Custom>` namespace; 20+ src/train classes register there today,
         # and every one of the four duplicate class-name near-misses in the tree
         # has a leg outside `models/`. A narrower subject set is structurally
-        # blind to the family this guard exists for. Also do NOT "fix" a future
+        # blind to the family this guard exists for.
+        #
+        # SUPERSEDED IN PART, 2026-08-29 (plan-2026-08-29T141252-168933da; see
+        # `MIGRATIONS.md`). This comment used to end: "Also do NOT `fix` a future
         # collision by adding `package=`: that moves the key and breaks every
-        # existing checkpoint that stored the old registered_name (D-002).
+        # existing checkpoint that stored the old registered_name (D-002)." The
+        # premise is still true and the conclusion is now wrong. Adding
+        # `package=` does move the key -- which is exactly why all 744 `src/`
+        # sites moved onto `register_dl_technique`, whose legacy `Custom>{name}`
+        # alias keeps the OLD key resolving to the SAME object (verified against
+        # all 14 class names this repository's `.keras` archives actually
+        # contain). A BARE `package=` still breaks checkpoints; going through the
+        # helper does not. The subject-set ruling above is untouched.
         # See decisions.md D-012.
         keys, _ = _sweep_registry_keys()
         offenders = [
@@ -2230,18 +2281,32 @@ class TestRegistryKeysDoNotCollide:
         ``package=``). The floor is ``int(0.8 * 761) == 608``: a fifth of the
         repo's registered classes may disappear before this guard is allowed to
         call itself alive. A floor a few percent under 761 would trip on a
-        legitimate refactor -- Phase 4 of this plan edits these very packages --
-        and would say nothing more about whether the walk still sees the tree.
+        legitimate refactor and would say nothing more about whether the walk
+        still sees the tree.
+
+        The bare-vs-package assertion is INVERTED relative to 2026-08-20, and the
+        inversion is the point. It used to read ``n_bare >= n_package``, on the
+        measurement that the bare decorator was this repo's convention (725 vs
+        36). The 2026-08-29 migration (``MIGRATIONS.md``) made the opposite true:
+        every registration under ``src/`` now carries an explicit package, and a
+        bare one reappearing is a REGRESSION rather than the house style. The
+        assertion is kept rather than deleted because it is the only thing here
+        that would notice the tree drifting back.
         """
         keys, counts = _sweep_registry_keys()
         assert counts["n_decorated"] >= 608, (
-            f"expected ~761 @register_keras_serializable classes repo-wide, found "
+            f"expected ~761 registration-decorated classes repo-wide, found "
             f"{counts['n_decorated']}: the AST walk stopped seeing the tree ({counts})"
         )
         assert len(keys) >= 608, counts
-        assert counts["n_bare"] >= counts["n_package"], (
-            "the bare decorator is this repo's convention (725 vs 36 measured); "
-            f"an inversion means the sweep is reading something else: {counts}"
+        assert counts["n_package"] > counts["n_bare"], (
+            "an explicit `package=` is this repo's convention since the "
+            "2026-08-29 registration migration; a majority of BARE decorators "
+            f"means the tree drifted back to module-independent keys: {counts}"
+        )
+        assert counts["n_dl_technique"] > 0, (
+            "no `register_dl_technique` site found at all -- either the helper "
+            f"was removed or this sweep stopped recognising it: {counts}"
         )
 
     # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251. This test
@@ -2278,21 +2343,49 @@ class TestRegistryKeysDoNotCollide:
             )
 
     def test_predicate_fires_on_an_injected_collision(self, tmp_path):
-        """Dead-component probe: the predicate must go RED on a real collision."""
+        """Dead-component probe: the predicate must go RED on a real collision.
+
+        The expected key is BUILT from ``LEGACY_ALIAS_PREFIX`` rather than
+        spelled, so this file holds no literal ``Custom>`` string. The prefix has
+        exactly one home -- ``keras_registration.py``, where the migration's
+        alias is minted -- and the fixture below deliberately uses the BARE
+        decorator, so it claims that same prefix by Keras's own default.
+        """
         roots, src_root = _write_fixture(tmp_path, _INJECTED_REGISTRY_DEFECT_SRC)
         keys, counts = _sweep_registry_keys(roots, src_root)
         assert counts["n_decorated"] == 2, counts
         collisions = {k: v for k, v in keys.items() if len(v) > 1}
-        assert list(collisions) == ["Custom>Downsample"], keys
-        assert len(collisions["Custom>Downsample"]) == 2, collisions
+        expected = f"{LEGACY_ALIAS_PREFIX}>Downsample"
+        assert list(collisions) == [expected], keys
+        assert len(collisions[expected]) == 2, collisions
 
     def test_predicate_is_silent_on_the_fixed_twin(self, tmp_path):
         """...and must NOT fire once one of the two is prefixed."""
         roots, src_root = _write_fixture(tmp_path, _INJECTED_REGISTRY_FIXED_SRC)
         keys, counts = _sweep_registry_keys(roots, src_root)
         assert counts["n_decorated"] == 2, "the fixture must still be reached"
-        assert sorted(keys) == ["Custom>ConvUNextDownsample", "Custom>Downsample"]
+        assert sorted(keys) == [
+            f"{LEGACY_ALIAS_PREFIX}>ConvUNextDownsample",
+            f"{LEGACY_ALIAS_PREFIX}>Downsample",
+        ]
         assert not [k for k, v in keys.items() if len(v) > 1], keys
+
+    def test_the_predicate_also_sees_the_dl_technique_decorator(self, tmp_path):
+        """The migration's decorator, keyed by the SAME sweep.
+
+        Without this, `_REGISTRATION_DECORATORS` could lose its second entry and
+        every assertion above would stay green while the sweep saw none of the
+        744 real sites -- the exact blindness the population floor exists to
+        convict, proven here directly instead of only statistically.
+        """
+        roots, src_root = _write_fixture(
+            tmp_path, _INJECTED_DL_TECHNIQUE_COLLISION_SRC)
+        keys, counts = _sweep_registry_keys(roots, src_root)
+        assert counts["n_decorated"] == 2, counts
+        assert counts["n_dl_technique"] == 2, counts
+        assert counts["n_bare"] == 0, counts
+        collisions = {k: v for k, v in keys.items() if len(v) > 1}
+        assert list(collisions) == ["dl_techniques.probe>Downsample"], keys
 
 
 # ---------------------------------------------------------------------------

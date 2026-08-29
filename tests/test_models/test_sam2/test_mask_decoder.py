@@ -975,16 +975,29 @@ class TestSam1Untouched:
             f"smallest pinned magnitude {smallest}"
         )
 
-    def test_sam2_registered_key_cannot_collide_with_sam1(self):
-        """The bare registration key carries the ``SAM2`` prefix.
+    def test_sam2_registered_key_cannot_collide_with_sam1(
+            self, registration_contract):
+        """SAM 2's decoder and SAM 1's occupy different keys, in BOTH namespaces.
 
-        A duplicate bare ``@register_keras_serializable()`` OVERWRITES silently,
-        and that is the one mechanism the ``git diff`` proxy above cannot see.
+        A duplicate registration OVERWRITES silently, and that is the one
+        mechanism the ``git diff`` proxy above cannot see. This test kept its
+        LEGACY half deliberately: the two classes are now separated twice over --
+        by package in the qualified namespace, and by class name in the flat
+        ``Custom>`` alias namespace that pre-migration archives still read. The
+        alias namespace is the one where a rename could still make them collide,
+        so it is the one worth asserting. See ``MIGRATIONS.md``.
         """
-        registry = keras.saving.get_custom_objects()
-        assert registry["Custom>SAM2MaskDecoder"] is SAM2MaskDecoder
-        assert "Custom>MaskDecoder" in registry
-        assert registry["Custom>MaskDecoder"] is not SAM2MaskDecoder
+        from dl_techniques.models.vision_language.sam.sam1.mask_decoder import (
+            MaskDecoder,
+        )
+
+        registration_contract(SAM2MaskDecoder)
+        registration_contract(MaskDecoder)
+        assert MaskDecoder is not SAM2MaskDecoder
+        assert MaskDecoder.__name__ != SAM2MaskDecoder.__name__, (
+            "the two decoders share a bare class name again -- their legacy "
+            "aliases would then be one key and one of them would lose it"
+        )
 
     def test_sam1_decoder_still_produces_its_own_two_tuple(self):
         """Importing SAM 1's module here did not change its own behaviour."""

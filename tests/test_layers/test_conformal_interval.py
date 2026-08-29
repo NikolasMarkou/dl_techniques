@@ -51,16 +51,12 @@ class TestConformalIntervalLayer:
 
     # -- construction -------------------------------------------------
 
-    def test_construction(self) -> None:
+    def test_construction(self, registration_contract) -> None:
         """Layer registers, is non-trainable, and has no trainable weights."""
-        # Registered in the Keras serializable registry (default package
-        # prefix "Custom" for a bare @register_keras_serializable()).
-        assert (
-            keras.saving.get_registered_object(
-                "Custom>ConformalIntervalLayer"
-            )
-            is ConformalIntervalLayer
-        )
+        # The literal `"Custom>ConformalIntervalLayer"` this line used to spell
+        # is now only the LEGACY alias; the shared predicate checks it and the
+        # package-qualified key the layer actually registers under today.
+        registration_contract(ConformalIntervalLayer)
 
         layer = ConformalIntervalLayer()
         assert layer.trainable is False

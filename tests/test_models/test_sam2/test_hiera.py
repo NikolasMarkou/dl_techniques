@@ -680,20 +680,22 @@ class TestSerialization:
         actual = ops.convert_to_numpy(restored(images, training=False)[-1])
         assert _max_abs_diff(expected, actual) == 0.0
 
-    def test_registered_keys_are_present_exactly_once(self) -> None:
-        """A duplicate bare registration silently overwrites."""
+    def test_registered_keys_are_present_exactly_once(
+            self, registration_contract) -> None:
+        """A duplicate registration silently overwrites.
+
+        This used to assert ``key == f"Custom>{cls.__name__}"`` -- it REQUIRED
+        the bare, module-independent key that makes the silent overwrite in the
+        sentence above possible at all. It was asserting the defect.
+        `registration_contract` (tests/conftest.py) replaces it with the two
+        halves that matter: the new key is package-qualified and owned, and the
+        pre-migration ``Custom>`` alias still resolves to the SAME object so
+        SAM 2 archives written before the migration keep loading
+        (``MIGRATIONS.md``).
+        """
         for cls in (HieraPatchEmbed, HieraMultiScaleAttention, HieraBlock,
                     Hiera):
-            key = keras.saving.get_registered_name(cls)
-            assert key == f"Custom>{cls.__name__}", (
-                f"{cls.__name__} registered under '{key}' -- a bare "
-                f"`@register_keras_serializable()` uses the 'Custom' package"
-            )
-            registered = keras.saving.get_registered_object(key)
-            assert registered is cls, (
-                f"'{key}' resolves to {registered}, not {cls.__name__} -- a "
-                f"registered-key collision silently overwrote it"
-            )
+            registration_contract(cls)
 
 
 class TestGraphTrace:

@@ -480,18 +480,48 @@ class TestB7TheRegisteredNamesArePackageQualified:
     """B7. Registration-key pin. No ``.keras`` archive in this
     repository contains any of the four classes (45 archives opened on
     2026-08-29, 41 of them under ``results/``, 0 hits), so the key change
-    cannot orphan a checkpoint."""
+    cannot orphan a checkpoint.
+
+    UPDATED 2026-08-29 by the tree-wide registration migration (``MIGRATIONS.md``).
+    This class originally asserted the OPPOSITE of what it asserts now for the
+    legacy key: ``test_no_bare_custom_key_survives`` required
+    ``Custom>{name}`` to be ABSENT. That was correct only while these four were
+    the sole package-qualified sites in an otherwise bare tree -- the absence was
+    evidence that the qualification had been applied. Every registered object in
+    ``src/`` is now package-qualified AND carries a ``Custom>`` alias, granted
+    uniformly by ``register_dl_technique`` so that pre-migration archives keep
+    loading. Demanding the alias's absence here would be demanding that these four
+    opt out of a tree-wide policy for no reason: nothing else in the tree registers
+    any of these four names, so the alias cannot collide, and 0 archives name them
+    so it cannot mislead a load either. What is still worth pinning -- and is
+    pinned below -- is that the two keys are DISTINCT and resolve to the SAME
+    object, which is exactly the property that makes the alias safe.
+    """
 
     @pytest.mark.parametrize("cls", ALL_CLASSES, ids=lambda c: c.__name__)
-    def test_the_class_is_registered_under_dl_techniques_layers(self, cls):
+    def test_the_class_is_registered_under_dl_techniques_layers(self, cls,
+                                                                registration_contract):
+        """Was ``test_no_bare_custom_key_survives`` plus an exact single-key pin.
+
+        The exact package string is still asserted here -- these four are the one
+        place in the tree where it is genuinely pinned rather than derived,
+        because ``dl_techniques.layers`` was chosen by hand (B7) and not by the
+        module-path rule.
+        """
+        registration_contract(cls, expected_package="dl_techniques.layers")
+
+    @pytest.mark.parametrize("cls", ALL_CLASSES, ids=lambda c: c.__name__)
+    def test_exactly_two_keys_and_no_third_claimant(self, cls):
+        """The qualified key and its alias, and nothing else, resolve to ``cls``.
+
+        `registration_contract` checks both keys individually; this checks the
+        registry from the other direction, which is the only way a THIRD key
+        pointing at the same class would show up.
+        """
         registry = keras.saving.get_custom_objects()
         keys = sorted(k for k, v in registry.items() if v is cls)
-        assert keys == [f"dl_techniques.layers>{cls.__name__}"]
-
-    @pytest.mark.parametrize("cls", ALL_CLASSES, ids=lambda c: c.__name__)
-    def test_no_bare_custom_key_survives(self, cls):
-        registry = keras.saving.get_custom_objects()
-        assert f"Custom>{cls.__name__}" not in registry
+        assert len(keys) == 2, keys
+        assert keys[-1] == f"dl_techniques.layers>{cls.__name__}", keys
 
     def test_every_decorator_in_the_package_names_a_package(self):
         for path in SOURCE_FILES:

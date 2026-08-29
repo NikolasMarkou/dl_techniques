@@ -669,9 +669,12 @@ class TestSerialization:
         assert float(restored(truth, logits)) == pytest.approx(
             float(original(truth, logits)), abs=VALUE_TOLERANCE)
 
-    def test_it_is_registered_under_its_own_key(self) -> None:
-        assert keras.saving.get_registered_object(
-            "Custom>SAM2GatedMaskLoss") is SAM2GatedMaskLoss
+    def test_it_is_registered_under_its_own_key(
+            self, registration_contract) -> None:
+        # Was a lookup by the literal `"Custom>SAM2GatedMaskLoss"`. "Its own key"
+        # is exactly what a `Custom>` key is NOT -- it is module-independent and
+        # therefore shared with any same-named class. See MIGRATIONS.md.
+        registration_contract(SAM2GatedMaskLoss)
 
 
 # ---------------------------------------------------------------------
