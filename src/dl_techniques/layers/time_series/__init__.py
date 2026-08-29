@@ -1,10 +1,21 @@
 """
-Time Series Layers Module.
+Time series layers.
 
-This module exports a comprehensive suite of specialized layers and blocks
-for time series forecasting, signal processing, and sequence modeling.
-It includes implementations of state-of-the-art architectures (N-BEATS, xLSTM, DeepAR),
-probabilistic output heads, and scientific forecasting utilities.
+This package holds the layers used to build forecasting and sequence models.
+It covers four families: N-BEATS blocks, xLSTM cells and blocks, the PRISM
+wavelet tree, and DeepAR-style probabilistic heads. Around those sit quantile
+heads, fusion and lag-attention layers, and a few signal-processing utilities.
+
+There is no factory here. Unlike ``layers/ffn`` and ``layers/attention``, this
+package has no ``create_*_layer`` dispatcher, so import the class you want by
+name.
+
+The public surface is 33 names. ``__all__`` at the bottom of this file is the
+list of record; read it there rather than from a copy that can drift. The
+package README says what each name is for and shows runnable examples.
+
+Everything exported is a Keras layer except one: ``create_manokhin_compliant_model``
+is a builder that returns a full ``keras.Model``.
 """
 
 # ---------------------------------------------------------------------
