@@ -134,11 +134,40 @@ D-002 (net-new `ScalarSinusoidalEmbedding` +
 
 ## Maintenance notes
 
-- **House rules**: every custom layer/model uses
-  `@keras.saving.register_keras_serializable()`, `keras.ops` (backend-agnostic,
+- **House rules**: every custom layer/model registers with
+  `@register_dl_technique("dl_techniques.<module.path>")` from
+  `dl_techniques.utils.keras_registration`, and uses `keras.ops` (backend-agnostic,
   no raw TF), full `get_config()`/`from_config()` round-trip, centralized
   `dl_techniques.utils.logger` (no `print`). The transformer velocity output is
   **cast to float32** at the head regardless of mixed precision.
+- **Registration keys in this package** (measured 2026-08-29 with
+  `keras.saving.get_registered_name`):
+
+  ```python
+  import keras
+  from dl_techniques.utils.keras_registration import register_dl_technique
+
+  @register_dl_technique("dl_techniques.models.ideogram4.vae")
+  class Encoder(keras.layers.Layer):
+      ...
+  ```
+
+  | class | key |
+  |---|---|
+  | `AttnBlock`, `AutoEncoder`, `Decoder`, `Encoder`, `ResnetBlock` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>` |
+  | `Downsample`, `Upsample` (`vae.py`) | `dl_techniques.ideogram4><Class>`, with `legacy_alias=False` |
+  | `Ideogram4Transformer` (`transformer.py`) | `dl_techniques.models>Ideogram4Transformer` — a pre-existing explicit package string, deliberately left unchanged |
+
+  The package string is the defining module's dotted path with the `models/` **family**
+  directories (here `vision_language`) and subfamily containers stripped — a family is a filing
+  decision, not a namespace.
+- **`Downsample` / `Upsample` have NO legacy alias.** Each name is claimed by a second
+  registered class (`dl_techniques.pw_fnet`), so aliasing both sides would put them back on one
+  `Custom>X` key and recreate the import-order collision. `Custom>Downsample` and
+  `Custom>Upsample` resolve to **nothing** (measured 2026-08-29). Neither appears in any archive
+  in this repository. Never a bare `@keras.saving.register_keras_serializable()`: its
+  `Custom>ClassName` key is independent of `__module__`, which is exactly that collision. See
+  `MIGRATIONS.md` at the repo root.
 - **Config invariant guards** (`config.py` `__post_init__` +
   `get_ideogram4_config`): keep these intact — they prevent silent build-time
   failures downstream:

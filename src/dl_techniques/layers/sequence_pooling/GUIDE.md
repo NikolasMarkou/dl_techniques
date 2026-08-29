@@ -40,16 +40,40 @@ return pool_class(**final_params)
 - **Backend agnostic:** use `keras.ops` for all tensor manipulation (the existing
   layers use `ops.softmax`, `ops.einsum`, `ops.take_along_axis`, etc.). Never call
   `tf.*` or `torch.*` directly.
-- **Bare serialization decorator (CRITICAL):** every layer is decorated with
-  **bare** `@keras.saving.register_keras_serializable()`. Keras derives the
-  registered key as `Custom>ClassName` from the default `package="Custom"`, which
-  is **independent of `__module__`**. That is why this package could be migrated
-  out of the old flat `layers/sequence_pooling.py` without breaking a single saved
-  `.keras` file.
+- **Serialization decorator (CRITICAL):** every layer is decorated with
+  `@register_dl_technique("dl_techniques.layers.sequence_pooling.<module>")`, imported
+  from `dl_techniques.utils.keras_registration`. Measured 2026-08-29 with
+  `keras.saving.get_registered_name`:
 
-  **Do NOT add `package=` or `name=` to the decorator.** Doing so changes the key
-  (e.g. `Custom>SequencePooling` → `dl_techniques>SequencePooling`) and breaks
-  every existing save. Keep all three decorators bare, forever.
+  | class | module | key |
+  |---|---|---|
+  | `AttentionPooling` | `attention_pooling.py` | `dl_techniques.layers.sequence_pooling.attention_pooling>AttentionPooling` |
+  | `WeightedPooling` | `weighted_pooling.py` | `dl_techniques.layers.sequence_pooling.weighted_pooling>WeightedPooling` |
+  | `SequencePooling` | `sequence_pooling.py` | `dl_techniques.layers.sequence_pooling.sequence_pooling>SequencePooling` |
+
+  The package string is the defining module's dotted path. (Only under
+  `dl_techniques.models` is anything stripped — its 12 family directories and its 4
+  subfamily containers `image_restoration`, `keypoints`, `super_resolution`, `sam`,
+  because a family there is a filing decision rather than a namespace. Nothing is
+  stripped under `layers/`.)
+
+  **Do NOT use a bare `@keras.saving.register_keras_serializable()`.** Its key
+  `Custom>ClassName` comes from the default `package="Custom"` and is **independent of
+  `__module__`**, so two same-named classes anywhere in the tree claim the identical
+  registry slot and whichever module imports last silently wins every deserialization of
+  both.
+
+  **Historical note — why this file used to say the opposite.** Until 2026-08-29 all
+  three decorators here were bare, and this guide forbade `package=` on the grounds that
+  adding it would change the key and break every existing `.keras` save. **That argument
+  was correct**: on its own, adding `package=` does exactly that. It is obsolete only
+  because the migration ships a legacy alias — `register_dl_technique` binds
+  `Custom>ClassName` to the same object in addition to the qualified key, so an old archive
+  still resolves (`keras.saving.get_registered_object("Custom>SequencePooling")` returns
+  this class, measured 2026-08-29). The control is recorded in `MIGRATIONS.md`: with the
+  alias suppressed, a pre-change archive is REFUSED with `TypeError`. Keras does **not**
+  fall back to the module path stored alongside `registered_name`. The alias is
+  load-bearing, not decorative.
 
 ---
 
@@ -150,7 +174,10 @@ import keras
 from keras import ops, layers, initializers, regularizers
 
 
-@keras.saving.register_keras_serializable()   # BARE — never add package=/name=
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+
+@register_dl_technique("dl_techniques.layers.sequence_pooling.my_pooling")
 class MyPooling(keras.layers.Layer):
     def __init__(self, hidden_dim: int = 256, temperature: float = 1.0, **kwargs):
         super().__init__(**kwargs)
@@ -189,8 +216,8 @@ class MyPooling(keras.layers.Layer):
 When adding a new pooling **type** to the package, update `factory.py` and
 `__init__.py`:
 
-1. **Define the class.** New file (e.g. `my_pooling.py`) with the bare
-   `@keras.saving.register_keras_serializable()` decorator, the
+1. **Define the class.** New file (e.g. `my_pooling.py`) with the
+   `@register_dl_technique("dl_techniques.layers.sequence_pooling.my_pooling")` decorator, the
    `__init__`/`build`/`call`/`compute_output_shape`/`get_config` methods, and
    Google-style docstrings.
 2. **Add the type literal.** Extend
@@ -214,9 +241,12 @@ the `PoolingStrategy` literal and `_apply_single_strategy` (Pattern A) as well.
 
 ## 6. Common Pitfalls to Avoid
 
-1. **Adding `package=` / `name=` to the decorator.** This changes the registered
-   key from `Custom>ClassName` and breaks every existing `.keras` save. Keep all
-   decorators **bare**.
+1. **Reaching for the stock decorator, or for a bare `name=`.** Use
+   `register_dl_technique`, never `keras.saving.register_keras_serializable` directly. A
+   bare stock decorator re-creates the module-independent `Custom>ClassName` key; a stock
+   decorator with a hand-written `package=` (or a `name=`) moves the key **without** minting
+   the legacy alias, and every archive storing the old `registered_name` then stops
+   resolving — which is the breakage this section warned about before 2026-08-29.
 2. **Object-based `__all__`.** Use **string** names in `__all__`
    (`"SequencePooling"`, not `SequencePooling`). Object-based `__all__` breaks
    `from ... import *` and confuses linters (a known bug in `ffn/__init__.py`).
@@ -245,14 +275,20 @@ aliases) into a one-class-per-file package: `attention_pooling.py`,
 `weighted_pooling.py`, `sequence_pooling.py` (the facade, keeping the original
 filename), plus `factory.py` and `__init__.py`.
 
-Key invariant preserved across the migration: **serialization keys did not
-change.** Because every decorator is bare, Keras derives `Custom>ClassName`
-independently of `__module__`, so moving the classes into new modules left every
-existing `.keras` save loadable. The two transformer encoders and the existing
-test continued to import the symbols unchanged via the `__init__.py` re-export.
+Key invariant preserved across that file-split: **the loadable key did not change.** At
+the time every decorator here was bare, so Keras derived `Custom>ClassName` independently
+of `__module__` and moving the classes into new modules left every existing `.keras` save
+loadable. The two transformer encoders and the existing test continued to import the
+symbols unchanged via the `__init__.py` re-export.
+
+**That whole-tree premise expired on 2026-08-29.** No decorator in this package (or
+anywhere under `src/`) is bare now; each class carries a package-qualified key, and
+`Custom>ClassName` survives only as an alias the helper mints, which is what keeps the
+pre-2026-08-29 archives loading (`MIGRATIONS.md`).
 
 When migrating any further legacy pooling code into this package:
-1. Keep the decorator **bare** — never let the move change the registered key.
+1. Register with `register_dl_technique` and let it keep the `Custom>ClassName` alias —
+   never let the move drop a key an existing archive names.
 2. Convert RST/Sphinx docstrings to Google-style (`Args:`/`Returns:`/`Raises:`).
 3. Copy the forward-pass math **verbatim** — migration is structural, not a
    numerics rewrite.

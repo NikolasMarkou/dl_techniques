@@ -5,8 +5,32 @@ package consolidating the formerly-separate `nlp_heads/`, `vision_heads/`, and
 `vlm_heads/` packages into `nlp/`, `vision/`, `vlm/` sub-packages, each keeping
 its own `factory.py` + `task_types.py` + `README.md`. Relocated via `git mv`;
 every layer-class name is preserved verbatim, so existing `.keras` checkpoints
-stay loadable (bare `@register_keras_serializable()` registers as
-`Custom>ClassName`, independent of `__module__`).
+stay loadable.
+
+**Registration (current).** These classes register through
+`@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, from
+`dl_techniques.utils.keras_registration`:
+
+```python
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("dl_techniques.layers.heads.vision.factory")
+class EnhancementHead(BaseVisionHead):
+    ...
+```
+
+`keras.saving.get_registered_name(EnhancementHead)` resolves to
+`dl_techniques.layers.heads.vision.factory>EnhancementHead` (verified 2026-08-29). The package
+string is the defining module's dotted path; under `dl_techniques.models` the 12 family
+directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
+`super_resolution`, `sam`) are stripped, but nothing is stripped under `layers/`.
+
+**Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
+independent of `__module__`, so two same-named classes claim one slot and the last import
+silently wins. The helper additionally binds `Custom>ClassName` as a legacy alias to the same
+object — which is why the checkpoints written before 2026-08-29 (and before this package merge)
+still load. `MIGRATIONS.md` at the repo root is the record.
 
 ## Layers (22 classes, grouped by domain)
 
@@ -84,12 +108,24 @@ stay loadable (bare `@register_keras_serializable()` registers as
   (was a closure-local registered class). Class name kept EXACTLY
   `EnhancementHead` so `Custom>EnhancementHead` registration is unchanged. Do
   NOT re-nest it inside the factory.
+  *Superseded 2026-08-29: the decorator is now
+  `@register_dl_technique("dl_techniques.layers.heads.vision.factory")`, so the primary key is
+  `dl_techniques.layers.heads.vision.factory>EnhancementHead`. **The rule below it is
+  unchanged and still binding**: the legacy alias the helper mints is keyed on the bare class
+  NAME, and `keras.saving.get_registered_object("Custom>EnhancementHead")` still returns this
+  class (measured 2026-08-29). Renaming the class would drop that alias and break every
+  pre-existing archive exactly as before, so the name stays EXACTLY `EnhancementHead`.*
 - **No caller-dict mutation.** `MultiTaskHead._create_task_heads()` copies each
   per-task config dict before `pop('task_type')` (it used to mutate the caller's
   dict and break round-trips).
 - **Serialization-stable class names.** All 21 names are verbatim; no `package=`
   added to any decorator. Sub-layers created in `__init__`/`build`, `keras.ops`
   only, `dl_techniques.utils.logger` only.
+  *Superseded 2026-08-29: the "no `package=`" half no longer holds — every decorator here is
+  now `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")` and each class
+  carries a package-qualified key. It cost no archive because the helper also mints the legacy
+  `Custom>ClassName` alias (`MIGRATIONS.md`). The **class names** are still verbatim and must
+  stay so: the alias is keyed on the bare name.*
 - Public API: `from dl_techniques.layers.heads import create_head` (or per-domain
   `from dl_techniques.layers.heads.{nlp,vision,vlm} import ...`).
 - Tests: `tests/test_layers/test_heads/`.

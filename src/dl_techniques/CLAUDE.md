@@ -56,10 +56,47 @@ exception and does re-export its 7 children. `models/README.md` is the catalogue
 ## Core Conventions
 
 ### Keras 3 Patterns
-- All custom layers/models use `@keras.saving.register_keras_serializable()`
+- All custom layers/models are registered with
+  `@register_dl_technique(package="dl_techniques.<module.path>")` from
+  `dl_techniques.utils.keras_registration` — **not** with a bare
+  `@keras.saving.register_keras_serializable()`. See "Registration" below
 - Layers implement `__init__`, `build`, `call`, `get_config` (and optionally `from_config`)
 - Use `keras.ops` for backend-agnostic tensor operations — not raw TensorFlow ops
 - Models use `Dict[str, Any]` config dicts for construction parameters
+
+### Registration
+
+Every registered class or function in `src/` uses the shared helper:
+
+```python
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("dl_techniques.layers.attention.multi_head_attention")
+class MultiHeadAttention(keras.layers.Layer):
+    ...
+```
+
+`keras.saving.get_registered_name(MultiHeadAttention)` then resolves to
+`dl_techniques.layers.attention.multi_head_attention>MultiHeadAttention` (verified 2026-08-29).
+
+**The `package` string is the defining module's dotted path**, with two things stripped under
+`dl_techniques.models`: its 12 family directories (`common`, `embeddings_experimental`,
+`general_purpose`, `graph`, `language`, `memory`, `neural_computer`, `point_cloud`, `tabular`,
+`time_series`, `vision`, `vision_language`) and its 4 subfamily containers (`image_restoration`,
+`keypoints`, `super_resolution`, `sam`). Those are a filing decision, not a namespace, and they
+have already been reshuffled once — so `models/vision/resnet/model.py` registers under
+`dl_techniques.models.resnet.model`, not its full import path.
+
+**Why not the bare decorator.** A bare `@keras.saving.register_keras_serializable()` mints the key
+`Custom>ClassName`, which is **independent of the defining module**: two same-named classes
+anywhere in the tree claim the identical slot and whichever imports last silently wins every
+deserialization of both.
+
+**Legacy archives still load.** The helper also binds `Custom>ClassName` as an alias to the same
+object, which is what a pre-2026-08-29 `.keras` file reads. Four names carry `legacy_alias=False`
+and therefore have no alias. `MIGRATIONS.md` (repo root) is the record: what moved, the four
+exceptions, the `yolov12_losses` case, and the measured control.
 
 ### Code Style
 
@@ -327,7 +364,8 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
 
 ### New Layer
 1. Create file in the appropriate `layers/` subdomain
-2. Inherit from `keras.layers.Layer`, decorate with `@keras.saving.register_keras_serializable()`
+2. Inherit from `keras.layers.Layer`, decorate with
+   `@register_dl_technique("dl_techniques.layers.<subdomain>.<module>")` (see "Registration")
 3. Implement `__init__`, `build`, `call`, `get_config`
 4. If the subdomain has a `factory.py`, register the new layer type there
 5. Add tests in `tests/test_layers/`
@@ -337,7 +375,9 @@ In `tests/conftest.py` and `tests/test_layers/conftest.py`:
    `models/vision/<name>/`, `models/language/<name>/`) with `__init__.py` and model module(s) —
    never directly under `models/`, which is a family layer only. Add the package to
    `models/README.md` and to the family's `__init__.py` docstring
-2. Inherit from `keras.Model`, decorate with `@keras.saving.register_keras_serializable()`
+2. Inherit from `keras.Model`, decorate with
+   `@register_dl_technique("dl_techniques.models.<name>.<module>")` — the family directory is
+   **stripped** from the package string (see "Registration")
 3. Support variant configs (tiny/small/base/large) via factory methods where appropriate
 4. Add tests in `tests/test_models/`
 

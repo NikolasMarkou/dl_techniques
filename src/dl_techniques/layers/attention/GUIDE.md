@@ -17,7 +17,31 @@ The framework relies on centralized factories to ensure consistency, serializati
 
 ### Keras 3.0 Compliance
 *   **Separation of Concerns:** Create sub-layers in `__init__`, build them in `build()`, execute in `call()`.
-*   **Serialization:** Every layer must be decorated with `@keras.saving.register_keras_serializable()` and implement a complete `get_config()`.
+*   **Serialization:** Every layer must be decorated with
+    `@register_dl_technique("dl_techniques.layers.attention.<module>")`, imported from
+    `dl_techniques.utils.keras_registration`, and implement a complete `get_config()`.
+
+    ```python
+    import keras
+    from dl_techniques.utils.keras_registration import register_dl_technique
+
+    @register_dl_technique("dl_techniques.layers.attention.multi_head_attention")
+    class MultiHeadAttention(keras.layers.Layer):
+        ...
+    ```
+
+    `keras.saving.get_registered_name(MultiHeadAttention)` resolves to
+    `dl_techniques.layers.attention.multi_head_attention>MultiHeadAttention` (verified
+    2026-08-29). The package string is the defining module's dotted path; only under
+    `dl_techniques.models` is anything stripped (its 12 family directories and its 4 subfamily
+    containers `image_restoration`, `keypoints`, `super_resolution`, `sam`), because a family is
+    a filing decision rather than a namespace.
+
+    **Never a bare `@keras.saving.register_keras_serializable()`.** Its key is `Custom>ClassName`,
+    independent of the defining module, so two same-named classes claim one registry slot and
+    whichever imports last silently wins every deserialization of both. The helper additionally
+    binds `Custom>ClassName` as a legacy alias, which is why pre-2026-08-29 archives still load —
+    see `MIGRATIONS.md` at the repo root.
 *   **Backend Agnostic:** Use `keras.ops` for all tensor manipulations. Avoid `tf.*` or `torch.*` specific calls.
 
 ---
@@ -313,8 +337,9 @@ If the mathematical operation is fundamentally different (e.g., `RingAttention`,
 ```python
 import keras 
 from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.utils.keras_registration import register_dl_technique
 
-@keras.saving.register_keras_serializable()
+@register_dl_technique("dl_techniques.layers.attention.my_new_attention")
 class MyNewAttention(keras.layers.Layer):
     def __init__(self, dim, num_heads, prob_type="softmax", prob_config=None, **kwargs):
         super().__init__(**kwargs)

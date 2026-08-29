@@ -15,7 +15,30 @@ All activation layers must be registered in the central factory. This allows mod
 
 ### Keras 3.0 Compliance
 *   **Backend Agnostic:** Use `keras.ops` for all mathematical operations. **Absolutely no** `tf.*`, `torch.*`, or `jax.*` primitives inside the layer logic.
-*   **Serialization:** Every layer must be decorated with `@keras.saving.register_keras_serializable()` and implement a complete `get_config()`.
+*   **Serialization:** Every layer must be decorated with
+    `@register_dl_technique("dl_techniques.layers.activations.<module>")`, imported from
+    `dl_techniques.utils.keras_registration`, and implement a complete `get_config()`.
+
+    ```python
+    import keras
+    from dl_techniques.utils.keras_registration import register_dl_technique
+
+    @register_dl_technique("dl_techniques.layers.activations.golu")
+    class GoLU(keras.layers.Layer):
+        ...
+    ```
+
+    `keras.saving.get_registered_name(GoLU)` resolves to
+    `dl_techniques.layers.activations.golu>GoLU` (verified 2026-08-29). The package string is the
+    defining module's dotted path; only under `dl_techniques.models` is anything stripped (its 12
+    family directories and its 4 subfamily containers `image_restoration`, `keypoints`,
+    `super_resolution`, `sam`), because a family is a filing decision, not a namespace.
+
+    **Never a bare `@keras.saving.register_keras_serializable()`.** Its key `Custom>ClassName` is
+    independent of the defining module, so two same-named classes claim one registry slot and the
+    last import silently wins every deserialization of both. The helper additionally binds
+    `Custom>ClassName` as a legacy alias, which is why pre-2026-08-29 archives still load — see
+    `MIGRATIONS.md` at the repo root.
 *   **Stateless vs. Stateful:**
     *   If the activation has **no parameters** (e.g., `GELU`), it is stateless.
     *   If the activation **learns** (e.g., `PReLU`, `TrainableThreshMax`), it is stateful. Weights must be created in `build()`.
@@ -114,7 +137,9 @@ param_broadcast = ops.reshape(param, target_shape)
 For fixed mathematical functions (e.g., `Mish`, `HardSwish`).
 
 ```python
-@keras.saving.register_keras_serializable()
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("dl_techniques.layers.activations.my_activation")
 class MyActivation(keras.layers.Layer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -132,7 +157,9 @@ class MyActivation(keras.layers.Layer):
 For activations with trainable parameters (e.g., `DifferentiableStep`, `RoutingProbabilitiesLayer(mode="trainable")`).
 
 ```python
-@keras.saving.register_keras_serializable()
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("dl_techniques.layers.activations.trainable_activation")
 class TrainableActivation(keras.layers.Layer):
     def __init__(self, initializer='ones', **kwargs):
         super().__init__(**kwargs)
@@ -194,7 +221,7 @@ When adding a new layer, you must update `dl_techniques/layers/activations/facto
     uniform_prob = 1.0 / ops.cast(num_classes, x.dtype)
     ```
 3.  **Missing `get_config` Updates:** If you add `self.beta` in `__init__`, it **must** appear in `get_config`.
-4.  **Forgetting `@register_keras_serializable`:** This causes model loading to fail with "Unknown layer".
+4.  **Forgetting `@register_dl_technique`:** This causes model loading to fail with "Unknown layer".
 5.  **Re-implementing Standard Layers:** If Keras has an optimized kernel (like `ReLU`), use `keras.layers.ReLU` unless you are specifically modifying the logic (e.g., `ReLUK`).
 
 ---

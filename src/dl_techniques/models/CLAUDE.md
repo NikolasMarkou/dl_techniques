@@ -43,6 +43,33 @@ find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l   
   `train.py`, and a `README.md`. All models use Keras 3 with full `get_config()`
   serialization, config dicts for construction, and factories for variants.
 
+### Registration key — the family directory is STRIPPED
+
+```python
+import keras
+from dl_techniques.utils.keras_registration import register_dl_technique
+
+@register_dl_technique("dl_techniques.models.resnet.model")
+class ResNet(keras.Model):
+    ...
+```
+
+`keras.saving.get_registered_name(ResNet)` resolves to `dl_techniques.models.resnet.model>ResNet`
+(verified 2026-08-29) even though the class lives at
+`src/dl_techniques/models/vision/resnet/model.py`.
+
+The `package` string is the defining module's dotted path with the **12 family directories**
+(`common`, `embeddings_experimental`, `general_purpose`, `graph`, `language`, `memory`,
+`neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`, `vision_language`) and the
+**4 subfamily containers** (`image_restoration`, `keypoints`, `super_resolution`, `sam`) removed.
+A family is a filing decision, not a namespace — it was already reshuffled once on 2026-08-24, and
+a key derived from it would have broken every archive at that moment.
+
+**Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
+independent of the defining module, so two same-named model classes claim one slot and the last
+import silently wins. The helper still binds `Custom>ClassName` as an alias, which is why
+pre-2026-08-29 archives keep loading; `MIGRATIONS.md` at the repo root is the record.
+
 ### Docstring style — measurably mixed
 
 ```bash
@@ -99,7 +126,9 @@ universal law — see "When it does not apply".
 - **Module skeleton** — substantive module docstring (what it is, the composition rule, a
   `References:` section with real citations), then imports, then constants, then the class,
   then factories. No function definitions between classes.
-- **Class API** — `@keras.saving.register_keras_serializable()`; explicit `__init__` args, no
+- **Class API** — `@register_dl_technique("dl_techniques.models.<name>.<module>")`, imported from
+  `dl_techniques.utils.keras_registration` (never a bare
+  `@keras.saving.register_keras_serializable()`); explicit `__init__` args, no
   mutable defaults; validate config early; `build()` creates sublayers; `get_config()` round
   trips every constructor arg; `from_config()` only when it does measured real work.
 - **Variant tables** — `MODEL_VARIANTS` is the public-name registry a caller passes;
@@ -121,7 +150,7 @@ universal law — see "When it does not apply".
 - **Never re-export the deep-supervision helpers from a `models/` package.**
   `get_model_output_info` and `create_inference_model_from_training_model` live in
   `dl_techniques/utils/deep_supervision.py`. A **registrar** import (cross-package,
-  `# noqa: F401`, bound for its `@keras.saving.register_keras_serializable` side effect) is
+  `# noqa: F401`, bound for its `@register_dl_technique` registration side effect) is
   NOT a re-export, is load-bearing, and must not be swept.
 - **Never re-export a family.** See Conventions.
 
