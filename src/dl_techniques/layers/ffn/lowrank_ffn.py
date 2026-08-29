@@ -182,9 +182,6 @@ class LowRankFFN(keras.layers.Layer):
     :ivar _rank_arg: The rank as REQUESTED, possibly ``None``. This is what
         ``get_config()`` stores.
     :vartype _rank_arg: Optional[int]
-    :ivar activation_name: The activation argument exactly as passed. Kept for
-        inspection only; ``get_config()`` serializes ``activation_fn`` instead.
-    :vartype activation_name: Union[str, Callable]
     :ivar activation_fn: The resolved activation callable.
     :vartype activation_fn: Callable
     :ivar dropout_rate: The stored dropout rate.
@@ -281,7 +278,6 @@ class LowRankFFN(keras.layers.Layer):
         # serialization; resolve a concrete int for sizing the bottleneck.
         self._rank_arg = rank
         self.rank = rank if rank is not None else max(1, hidden_dim // 4)
-        self.activation_name = activation
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)

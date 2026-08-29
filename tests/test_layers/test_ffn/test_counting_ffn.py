@@ -6,6 +6,10 @@ import os
 from typing import Dict, Any
 import tensorflow as tf
 
+import ast
+import inspect
+
+from dl_techniques.layers.ffn import counting_ffn
 from dl_techniques.layers.ffn.counting_ffn import CountingFFN
 
 
@@ -678,3 +682,47 @@ class TestCountingFFNEdgeCases:
 
         position_diff = keras.ops.mean(keras.ops.abs(first_pos - last_pos))
         assert keras.ops.convert_to_numpy(position_diff) > 1e-6
+
+class TestCountingFFNHasNoDeadInputDimLocal:
+    """C-07. This guard pins a REMOVAL, not a behaviour.
+
+    `CountingFFN.__init__` computed
+    `count_transform_input_dim = self.count_dim * 2 if self.counting_scope
+    == "local" else self.count_dim` and then dropped it on the floor -- a
+    `Dense` takes only its OUTPUT width in `__init__`. `build()` recomputed
+    the identical rule as `count_input_dim`, so the scope-to-width rule
+    existed twice with only one of the two copies reachable. The second copy
+    is gone; `build()`'s is the one definition.
+
+    A behaviour test cannot see this: deleting an unread local changes no
+    output. So the guard reads the source.
+    """
+
+    _SOURCE = inspect.getsource(counting_ffn)
+
+    def test_the_dead_local_name_is_gone_from_the_module(self) -> None:
+        assert "count_transform_input_dim" not in self._SOURCE
+
+    def test_no_assignment_to_it_survives_in_the_ast(self) -> None:
+        """A grep can be fooled by a rename; ask the AST for bound names."""
+        bound = {
+            target.id
+            for node in ast.walk(ast.parse(self._SOURCE))
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        assert "count_transform_input_dim" not in bound
+
+    def test_the_surviving_rule_still_sizes_count_transform(self) -> None:
+        """Anti-vacuity: the rule must live on, in build()'s copy.
+
+        Deleting BOTH copies would also pass the two assertions above. This
+        one fails if the surviving definition is lost.
+        """
+        sample = keras.random.normal([2, 6, 8])
+        for scope, factor in (("global", 1), ("causal", 1), ("local", 2)):
+            layer = CountingFFN(output_dim=16, count_dim=4,
+                                counting_scope=scope)
+            layer(sample)
+            assert layer.count_transform.kernel.shape[0] == 4 * factor, scope

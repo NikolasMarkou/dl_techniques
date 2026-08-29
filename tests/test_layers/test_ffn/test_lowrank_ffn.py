@@ -280,5 +280,35 @@ class TestLowRankFFN:
         assert np.isfinite(output_numpy).all()
 
 
+class TestLowRankFFNHasNoDeadActivationName:
+    """C-06. This guard pins a REMOVAL, not a behaviour.
+
+    `LowRankFFN` stored `self.activation_name = activation` alongside the
+    resolved `self.activation_fn`. Nothing anywhere read it: `get_config()`
+    serializes `activation_fn`, and a repo-wide grep over `src/`, `tests/`,
+    `src/train/` and `src/applications/` found zero readers. The sibling
+    `KANLinear.base_activation_name` IS read (test_kan_linear.py:90, 109,
+    261, 263-264) and stays. A second name for one setting is a second thing
+    to keep in step, so the unread one is gone.
+    """
+
+    def test_the_dead_attribute_is_absent(self) -> None:
+        layer = LowRankFFN(hidden_dim=128, output_dim=64, activation="gelu")
+        assert not hasattr(layer, "activation_name")
+
+    def test_the_resolved_activation_survived_the_removal(self) -> None:
+        """Anti-vacuity: `activation` must still reach the layer and config."""
+        layer = LowRankFFN(hidden_dim=128, output_dim=64, activation="relu")
+        assert layer.activation_fn is keras.activations.relu
+        assert (keras.activations.get(layer.get_config()["activation"])
+                is keras.activations.relu)
+
+    def test_the_kan_twin_is_untouched(self) -> None:
+        """The removal must not have been applied to the READ sibling."""
+        from dl_techniques.layers.ffn.kan_linear import KANLinear
+
+        assert KANLinear(features=8).base_activation_name is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

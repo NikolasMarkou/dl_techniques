@@ -140,7 +140,7 @@ What each type is for:
     bilinear      identity-gated GLU variant (Shazeer 2020)
     counting      sequences where feature frequency matters
     differential  dual-pathway feature processing
-    gated_mlp     vision; cheaper stand-in for attention
+    gated_mlp     channel gating in conv nets; no token mixing
     geglu         GELU-gated transformer FFN
     gelu_tanh     SD3 / MMDiT FeedForward
     glu           gated FFN for better gradient flow
@@ -159,17 +159,17 @@ What each type is for:
     swin_mlp      Swin Transformer and vision heads
     tversky       asymmetric similarity projection, rank-2
 
-``gated_mlp``'s registry ``description`` and ``use_case`` are stale.
-They call it spatially-gated and an attention alternative. Every kernel
-in it is 1x1, so it cannot mix across positions: measured off-pixel
-delta 0.0. Both are string CONSTANTS in ``FFN_REGISTRY``, not
-docstrings, so editing them changes what ``get_ffn_info()`` returns; the
-documentation pass that found this could not make that change. The true
-description is in ``gated_mlp.py``'s module docstring.
+``gated_mlp``'s registry ``description`` and ``use_case`` no longer call
+it spatially-gated or an attention alternative. Every kernel in it is
+1x1, so it cannot mix across positions: measured off-pixel delta 0.0 on
+a ``(1, 5, 5, 4)`` input with ``filters=8``, against an on-pixel delta
+of 1.27. Both strings are CONSTANTS in ``FFN_REGISTRY``, not docstrings,
+so they are part of what ``get_ffn_info()`` returns. The full account is
+in ``gated_mlp.py``'s module docstring.
 
 Public functions:
 
-- ``get_ffn_info()`` -- a shallow copy of the registry, for callers that
+- ``get_ffn_info()`` -- a deep copy of the registry, for callers that
   enumerate types or parameters at runtime.
 - ``validate_ffn_config(ffn_type, **kwargs)`` -- runs the checks and returns
   ``None``; raises on anything it rejects.
@@ -199,6 +199,7 @@ References:
 
 """
 
+import copy
 import keras
 from typing import Dict, Any, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -321,7 +322,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'gated_mlp': {
         'class': GatedMLP,
-        'description': 'Spatially-gated MLP using 1x1 convolutions, an alternative to self-attention',
+        'description': 'Channel-wise gated linear unit built from three 1x1 convolutions, applied position-wise',
         'required_params': ['filters'],
         'output_dim_param': 'filters',
         'optional_params': {
@@ -334,7 +335,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'output_activation': 'linear',
             'data_format': None
         },
-        'use_case': 'Vision models, replacing attention with a computationally cheaper alternative'
+        'use_case': 'Convolutional feature maps needing channel gating; it mixes no spatial positions'
     },
     'geglu': {
         'class': GeGLUFFN,
@@ -669,17 +670,19 @@ def get_ffn_info() -> Dict[str, Dict[str, Any]]:
     Use this to enumerate the available types or to read a type's parameter
     schema at runtime instead of hard-coding it.
 
-    The copy is SHALLOW: the top level is a new dict and each entry is a new
-    dict, but the ``required_params`` list, the ``optional_params`` dict and the
-    ``class`` object inside an entry are the registry's own objects. Do not
-    mutate them.
+    The result is a DEEP COPY, so the caller owns it: editing the returned
+    ``required_params`` list or ``optional_params`` mapping cannot reach
+    ``FFN_REGISTRY``. The one object still shared with the registry is each
+    entry's ``class`` value, which is the layer type itself, not mutable
+    payload -- ``copy.deepcopy`` returns a class unchanged.
 
-    :return: A mapping from ``ffn_type`` to that type's registry entry, with the
-        keys ``class``, ``description``, ``required_params``,
-        ``output_dim_param``, ``optional_params`` and ``use_case``.
+    :return: A mapping from ``ffn_type`` to a private copy of that type's
+        registry entry, with the keys ``class``, ``description``,
+        ``required_params``, ``output_dim_param``, ``optional_params`` and
+        ``use_case``.
     :rtype: Dict[str, Dict[str, Any]]
     """
-    return {ffn_type: info.copy() for ffn_type, info in FFN_REGISTRY.items()}
+    return copy.deepcopy(FFN_REGISTRY)
 
 
 def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:

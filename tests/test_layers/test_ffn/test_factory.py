@@ -2461,3 +2461,95 @@ class TestModelBuiltFFNKwargDictSweep:
             )
         assert 'hiden_dim' in str(excinfo.value)
         assert STRICT_DROPPED_KEY_MARKER in str(excinfo.value)
+
+
+class TestGetFFNInfoIsolation:
+    """`get_ffn_info()` must hand out data a caller can safely edit.
+
+    C-04: the copy used to be SHALLOW, so each returned entry's
+    `required_params` list and `optional_params` dict WERE the registry's own
+    objects and a caller editing them corrupted `FFN_REGISTRY` process-wide,
+    for every later `create_ffn_layer` in that process. Measured at BASE
+    `316d0b7f9`: `get_ffn_info()['mlp']['required_params'] is
+    FFN_REGISTRY['mlp']['required_params']` was `True`, and one `append`
+    turned the registry entry into `['hidden_dim', 'output_dim', 'POISON']`.
+    """
+
+    def test_mutating_returned_optional_params_leaves_registry_unchanged(self):
+        before = dict(FFN_REGISTRY["mlp"]["optional_params"])
+        info = get_ffn_info()
+        info["mlp"]["optional_params"]["activation"] = "POISON"
+        assert FFN_REGISTRY["mlp"]["optional_params"] == before
+        assert "POISON" not in FFN_REGISTRY["mlp"]["optional_params"].values()
+
+    def test_mutating_returned_required_params_leaves_registry_unchanged(self):
+        before = list(FFN_REGISTRY["mlp"]["required_params"])
+        info = get_ffn_info()
+        info["mlp"]["required_params"].append("POISON")
+        assert FFN_REGISTRY["mlp"]["required_params"] == before
+
+    def test_nested_entries_are_not_the_registry_objects(self):
+        info = get_ffn_info()
+        for key, entry in FFN_REGISTRY.items():
+            assert info[key]["optional_params"] is not entry["optional_params"], key
+            assert info[key]["required_params"] is not entry["required_params"], key
+            # The class object itself is shared on purpose: it is the layer
+            # type, not mutable payload.
+            assert info[key]["class"] is entry["class"], key
+
+    def test_registry_still_usable_after_a_caller_mutates_the_copy(self):
+        info = get_ffn_info()
+        info["mlp"]["required_params"].append("POISON")
+        info["mlp"]["optional_params"].clear()
+        # A later construction must not see the caller's edits.
+        layer = create_ffn_layer("mlp", hidden_dim=32, output_dim=16)
+        assert layer is not None
+
+
+class TestGatedMLPRegistryStringsAreTrue:
+    """The `gated_mlp` registry strings must not claim spatial mixing.
+
+    C-11 site 1. `GatedMLP` is three 1x1 convolutions; gMLP's Spatial Gating
+    Unit, the part that replaces attention, is absent. MEASURED on a
+    `(1, 5, 5, 4)` input with `filters=8`: perturbing one pixel moves the
+    output at that pixel by 1.27 and at every other pixel by exactly 0.0.
+    The registry strings are what `get_ffn_info()` hands a caller, so a false
+    claim there is a false claim in the public API, not only in a docstring.
+    """
+
+    _BANNED = ("attention", "spatially-gated", "spatially gated")
+
+    def test_the_description_makes_no_attention_alternative_claim(self):
+        description = get_ffn_info()["gated_mlp"]["description"].lower()
+        for phrase in self._BANNED:
+            assert phrase not in description, (
+                f"gated_mlp description still claims {phrase!r}: "
+                f"{description!r}"
+            )
+
+    def test_the_use_case_makes_no_attention_alternative_claim(self):
+        use_case = get_ffn_info()["gated_mlp"]["use_case"].lower()
+        for phrase in self._BANNED:
+            assert phrase not in use_case, (
+                f"gated_mlp use_case still claims {phrase!r}: {use_case!r}"
+            )
+
+    def test_the_layer_really_cannot_mix_across_positions(self):
+        """Anti-vacuity: pin the FACT the two string tests rest on.
+
+        Without this, the string assertions above are opinion. Re-measure the
+        off-pixel delta so a future layer that DID gain token mixing would
+        make this test, not only the prose, go red.
+        """
+        keras.utils.set_random_seed(0)
+        layer = create_ffn_layer("gated_mlp", filters=8)
+        x = np.random.RandomState(0).randn(1, 5, 5, 4).astype("float32")
+        perturbed = x.copy()
+        perturbed[0, 2, 2, :] += 1.0
+        delta = np.abs(
+            keras.ops.convert_to_numpy(layer(perturbed))
+            - keras.ops.convert_to_numpy(layer(x))
+        )
+        off_pixel = np.delete(delta.reshape(-1, delta.shape[-1]), 12, axis=0)
+        assert float(delta[0, 2, 2, :].max()) > 0.0
+        assert float(off_pixel.max()) == 0.0

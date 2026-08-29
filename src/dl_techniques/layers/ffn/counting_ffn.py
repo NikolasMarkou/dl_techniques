@@ -353,12 +353,12 @@ class CountingFFN(keras.layers.Layer):
             name="key_projection",
         )
 
-        # Layer to transform aggregated counts with configurable activation
-        # Note: The actual input dimension is determined dynamically based on counting_scope
-        # For 'local' scope, we concatenate forward and backward counts (2 * count_dim)
-        # For 'global' and 'causal' scopes, it's just count_dim
-        count_transform_input_dim = self.count_dim * 2 if self.counting_scope == "local" else self.count_dim
-
+        # Layer to transform aggregated counts with configurable activation.
+        # Its INPUT width depends on counting_scope -- 2 * count_dim for
+        # 'local', which concatenates forward and backward counts, and
+        # count_dim for 'global' and 'causal'. That rule is written down once,
+        # in build()'s count_input_dim, which is where the width is actually
+        # needed; a Dense layer takes only its output width here.
         self.count_transform = keras.layers.Dense(
             self.output_dim,
             activation=self.activation,
