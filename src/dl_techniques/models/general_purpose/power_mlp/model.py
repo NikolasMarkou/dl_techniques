@@ -776,8 +776,11 @@ class PowerMLP(keras.Model):
         :return: Loaded model, ready for inference or continued training.
         :rtype: PowerMLP
         """
-        # Note: With proper @keras.saving.register_keras_serializable() decorator,
-        # custom_objects may not be strictly necessary, but we include them for robustness
+        # Note: both classes are registered via @register_dl_technique --
+        # `dl_techniques.models.power_mlp.model>PowerMLP` and
+        # `dl_techniques.layers.ffn.power_mlp_layer>PowerMLPLayer` (resolved
+        # 2026-08-29 with keras.saving.get_registered_name) -- so custom_objects
+        # may not be strictly necessary, but we include them for robustness.
         custom_objects = {
             "PowerMLP": cls,
             "PowerMLPLayer": PowerMLPLayer,

@@ -32,7 +32,7 @@ Why a registered function rather than a lambda
 ``keras.activations.serialize`` cannot serialize a ``lambda`` or a
 ``functools.partial``, and that is what every FFN layer in this package calls
 from ``get_config()``. A module-level function decorated with
-``@keras.saving.register_keras_serializable`` serializes to its registered
+``@register_dl_technique`` serializes to its registered
 name and deserializes back to the identical object, so ``.keras`` round-trips
 are bit-exact.
 """

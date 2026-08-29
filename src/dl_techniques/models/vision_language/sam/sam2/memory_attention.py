@@ -122,6 +122,12 @@ DEFAULT_DROPOUT_RATE: float = 0.1
 #      owner's `__init__` from the owner's own config, so it never appears in a
 #      serialized config dict and is never rebuilt from one. Its weights are
 #      saved and restored by attribute path like any other sub-layer.
+#
+# Updated 2026-08-29 (repo-root `MIGRATIONS.md`): the ruling is unchanged; only the
+# spelling of the decorator it forbids has moved. The prohibition now reads "do NOT
+# promote it to a public `@register_dl_technique(...)` sibling" -- the bare stock
+# decorator named above no longer appears anywhere in `src/`, and adding EITHER form
+# here would mint the public registry key this anchor exists to refuse.
 # It still carries a full `get_config()` / `compute_output_shape()` so that
 # promoting it later, if a second owner ever appears, is a one-line change.
 # See decisions.md D-008.

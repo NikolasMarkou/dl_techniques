@@ -32,7 +32,7 @@ never reset in :meth:`on_train_begin` — this is what makes resume work and wha
 lets the CLIP trainer drive two stages through one continuous timeline.
 
 This callback is intentionally NOT registered with
-``@keras.saving.register_keras_serializable``: Keras callbacks are not part of a
+``@register_dl_technique``: Keras callbacks are not part of a
 ``.keras`` archive, so none of the six originals registered and neither does
 this one.
 """

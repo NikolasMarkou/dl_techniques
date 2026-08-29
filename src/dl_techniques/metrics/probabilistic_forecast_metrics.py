@@ -23,7 +23,7 @@ These metrics are also used post-hoc (by passing realized targets and quantile
 arrays directly), so ``update_state`` / ``result`` are kept simple, correct,
 and fully serializable. They mirror the ``SMAPE`` conventions in
 ``time_series_metrics.py`` (``add_weight`` totals/count, ``keras.ops``,
-``ops.divide_no_nan``, bare ``@keras.saving.register_keras_serializable()``).
+``ops.divide_no_nan``, registration through ``register_dl_technique``).
 """
 
 import keras

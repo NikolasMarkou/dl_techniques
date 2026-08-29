@@ -22,7 +22,7 @@ time-series training scripts (``nbeats`` / ``prism`` / ``tirex`` / ``mdn``):
       ``((seq, task_id), y)`` and nbeats's ``(x, (forecast, recon))``).
 
 These are plain classes / functions (not Keras layers or models) so there is no
-``@keras.saving.register_keras_serializable()`` decoration here.
+``@register_dl_technique`` registration decoration here.
 """
 
 import os
@@ -749,9 +749,8 @@ class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
       (mixture PDF / backcast-forecast / 4D or 3D quantile bands). Abstract:
       the default raises :class:`NotImplementedError`.
 
-    Per SYSTEM.md, Keras callbacks are NOT
-    ``@keras.saving.register_keras_serializable`` — this class carries no
-    serialization decorator.
+    Per SYSTEM.md, Keras callbacks are NOT registered (no
+    ``@register_dl_technique``) — this class carries no serialization decorator.
 
     Args:
         config: A :class:`BaseTimeSeriesTrainingConfig` (or subclass). Supplies

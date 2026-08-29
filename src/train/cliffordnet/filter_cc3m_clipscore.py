@@ -62,7 +62,7 @@ from dl_techniques.utils.logger import logger
 # Checkpoints saved by ``train_clip.py`` are the BARE ``CliffordCLIP``
 # (``ContrastiveCliffordCLIP.clip_model`` is the saved object), so
 # ``{"CliffordCLIP": CliffordCLIP}`` is sufficient. The Clifford head/blocks
-# auto-register via ``@register_keras_serializable``; a bare checkpoint carries
+# auto-register via ``@register_dl_technique``; a bare checkpoint carries
 # no ``CLIPContrastiveLoss``. A future wrapper checkpoint would make
 # ``load_model`` raise a clear "Unknown object" naming the class to add here.
 _CUSTOM_OBJECTS = {"CliffordCLIP": CliffordCLIP}

@@ -87,7 +87,8 @@ Notes
 - All losses return values in [0, 1] range (normalized where necessary)
 - Supports both probability outputs and logits (``from_logits=True``)
 - Epsilon is added to confusion matrix entries for numerical stability
-- All classes are serializable via ``@keras.saving.register_keras_serializable()``
+- All classes are serializable via ``@register_dl_technique`` (the shared
+  registration helper; see repo-root ``MIGRATIONS.md``)
 
 References
 ----------

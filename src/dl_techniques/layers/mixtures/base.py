@@ -80,7 +80,11 @@ def resolve_initializer_arg(
     """
     # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
     # keras.initializers.get(value). 'orthonormal' is not a registered keras alias
-    # (OrthonormalInitializer registers as Custom>OrthonormalInitializer), so
+    # (OrthonormalInitializer registers as
+    # dl_techniques.initializers.orthonormal_initializer>OrthonormalInitializer,
+    # resolved 2026-08-29 with keras.saving.get_registered_name; it was
+    # Custom>OrthonormalInitializer when this was written, and that key is still
+    # bound as a legacy alias), so
     # get('orthonormal') raises. Keep the string and let build() resolve it via
     # resolve_prototype_initializer (which handles both the string and an
     # Initializer instance). See D-001.
@@ -400,7 +404,7 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
     3.  The abstract contract: ``call`` and the ``_n_prototypes`` property.
 
     This class is intentionally **not** decorated with
-    ``@keras.saving.register_keras_serializable()``. Only concrete, instantiable
+    ``@register_dl_technique``. Only concrete, instantiable
     layers are registered; registering an ABC would put an unconstructible entry
     in the Keras custom-object registry. Concrete subclasses carry the decorator.
 

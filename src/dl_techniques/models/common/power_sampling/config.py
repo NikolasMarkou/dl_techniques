@@ -1,7 +1,7 @@
 """Configuration for the general-purpose power-sampling inference engine.
 
 :class:`PowerSamplingConfig` is a plain ``@dataclass`` (it is *not* a Keras
-component — no ``@keras.saving.register_keras_serializable``, no ``build``/
+component — no ``@register_dl_technique`` registration, no ``build``/
 ``get_config``). It carries the sampling hyperparameters plus the tokenizer/model
 identity fields the engine needs but cannot read off a generic tokenizer.
 """

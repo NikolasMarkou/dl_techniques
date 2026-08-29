@@ -285,7 +285,7 @@ def create_callbacks(
 
 # ---------------------------------------------------------------------
 
-# NOT @keras.saving.register_keras_serializable: callbacks are never
+# NOT @register_dl_technique: callbacks are never
 # serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
 class EpochMetricsPlotCallback(keras.callbacks.Callback):
     """Accumulate per-epoch metrics and emit mid-training curve PNGs.
@@ -436,7 +436,7 @@ def read_current_lr(model: keras.Model) -> float:
         return float("nan")
 
 
-# NOT @keras.saving.register_keras_serializable: callbacks are never
+# NOT @register_dl_technique: callbacks are never
 # serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
 class LearningRateLogger(keras.callbacks.Callback):
     """Record the current learning rate into ``logs`` each epoch.

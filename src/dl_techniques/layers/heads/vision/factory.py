@@ -1196,12 +1196,21 @@ class EnhancementHead(BaseVisionHead):
 
     NOTE (module-scope, not a closure): this class was previously defined INSIDE
     ``create_enhancement_head()`` and decorated there. A closure-local
-    ``@register_keras_serializable()`` class registers fine at import time but
+    registered class registers fine at import time but
     is fragile and conceptually wrong (the registry holds a class redefined on
     every factory call). It has been lifted to module scope; the class NAME is
     kept EXACTLY ``EnhancementHead`` so the ``Custom>EnhancementHead``
     registration string is unchanged and existing checkpoints still load.
     Do NOT re-nest this inside the factory.
+
+    Updated 2026-08-29 (repo-root ``MIGRATIONS.md``): the decorator is now
+    ``@register_dl_technique("dl_techniques.layers.heads.vision.factory")``, so
+    ``get_registered_name`` resolves
+    ``dl_techniques.layers.heads.vision.factory>EnhancementHead``. The name ban
+    above is UNCHANGED and now binds for a second reason: the helper's legacy
+    ``Custom>EnhancementHead`` alias -- which is what a pre-migration checkpoint
+    reads, and which was verified 2026-08-29 to resolve to this identical class
+    -- is keyed on the bare class NAME, so a rename would drop it too.
 
     :param output_channels: Number of output channels of the enhanced image.
     :type output_channels: int

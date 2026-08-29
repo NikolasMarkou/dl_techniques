@@ -15,7 +15,7 @@ Based on:
 Key Features:
 ------------
 - **This is NOT a Keras layer.** It is a plain-Python object: no weights, no
-  ``@keras.saving.register_keras_serializable`` decorator, no ``get_config``.
+  ``@register_dl_technique`` registration decorator, no ``get_config``.
 - Everything learned lives on the top-level ``SAM2`` model:
   ``maskmem_tpos_enc``, the ``(num_maskmem, 1, 1, mem_dim)`` learned per-slot
   temporal embedding, and the ``no_mem_embed`` / ``no_obj_ptr`` no-object

@@ -135,9 +135,11 @@ def load_model_from_checkpoint(path: str) -> Tuple[WaveFieldLLM, int]:
     logger.info(f"Resuming from checkpoint: {path}")
     model = keras.models.load_model(
         path,
-        # All six classes auto-register via @register_keras_serializable;
+        # All six classes auto-register via @register_dl_technique;
         # listing them defensively protects against import-order surprises.
-        # Keys are the Keras REGISTERED names (`"Custom>WaveFieldLLM"`, ...),
+        # Keys are the Keras REGISTERED names
+        # (`"dl_techniques.models.wave_field.model>WaveFieldLLM"`, ...; resolved
+        # 2026-08-29 with get_registered_name, not copied from any doc),
         # derived rather than hard-coded: a bare class-name key can never
         # match, because `get_registered_name` returns the PACKAGE-qualified
         # name that the archive actually stores.

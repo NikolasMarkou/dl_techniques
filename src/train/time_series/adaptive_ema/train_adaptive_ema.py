@@ -356,8 +356,8 @@ class AdaptiveEMAPerformanceCallback(TimeSeriesPerformanceCallback):
       bespoke (input-domain slope semantics; it is deliberately NOT routed
       through ``_plot_ts_forecast``, which assumes a forecast-horizon target).
 
-    Per SYSTEM.md, Keras callbacks are NOT
-    ``@keras.saving.register_keras_serializable``.
+    Per SYSTEM.md, Keras callbacks are NOT registered (no
+    ``@register_dl_technique``).
     """
 
     def __init__(

@@ -4,7 +4,7 @@ Segmentation Wrapper Loss — a serializable name-dispatched Keras Loss.
 This module promotes the previously inner-class `WrappedLoss` (defined inside
 `create_loss_function` in `segmentation_loss.py`) into a first-class library
 loss that follows dl_techniques sibling-loss conventions: one-loss-per-module,
-bare `@keras.saving.register_keras_serializable()`, snake_case file with the
+registration through `@register_dl_technique`, snake_case file with the
 `_loss.py` suffix, and a PascalCase class with the `Loss` suffix.
 
 The `SegmentationWrapperLoss` selects one of the nine method-based loss
@@ -92,6 +92,12 @@ _LOSS_METHOD_MAP: Dict[str, str] = {
 # inside `create_loss_function` to its own module so that it can be
 # `@register_keras_serializable`-discoverable at load time without
 # `custom_objects` and so that it conforms to F-004 sibling-loss conventions.
+#
+# SUPERSEDED 2026-08-29 (repo-root `MIGRATIONS.md`): the ruling stands unchanged
+# -- registry discoverability at load time is still the reason this class lives in
+# its own module -- but the mechanism is now `@register_dl_technique`, which calls
+# `keras.saving.register_keras_serializable(package=...)` and additionally binds the
+# legacy `Custom>SegmentationWrapperLoss` alias.
 @register_dl_technique("dl_techniques.losses.segmentation_wrapper_loss")
 class SegmentationWrapperLoss(keras.losses.Loss):
     """Name-dispatched Keras `Loss` wrapping `SegmentationLosses` methods.

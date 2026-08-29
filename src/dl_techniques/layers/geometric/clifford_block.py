@@ -239,6 +239,19 @@ Implementation notes, known behaviours and deviations
    a ``package=`` argument.  Adding one would change the registered name from
    ``Custom>ClassName`` and break by-name loading of existing ``.keras`` files.
 
+   SUPERSEDED 2026-08-29 (the registration migration, repo-root ``MIGRATIONS.md``).
+   The ruling above is kept verbatim and its reasoning was CORRECT: on its own,
+   adding ``package=`` does exactly what it says -- it moves the key and a
+   pre-change archive stops resolving.  The decorator here is now
+   ``@register_dl_technique("dl_techniques.layers.geometric.clifford_block")``,
+   and the concern this item names is precisely why that helper mints a legacy
+   ``Custom>ClassName`` alias to the same object alongside the package-qualified
+   key.  The alias is load-bearing, not decorative: ``MIGRATIONS.md`` records the
+   control, an archive written under ``Custom>X`` and reloaded after the re-key
+   **with the alias suppressed** is REFUSED with ``TypeError``.  So what is now
+   forbidden is not ``package=`` but a *bare* ``package=`` on the stock decorator,
+   which moves the key without minting the alias.
+
 7. The image-mode context norm matches ``nn.BatchNorm2d`` in KIND ONLY.  In
    ``input_mode="image"`` the context normalization defaults to
    ``"batch_norm"``, i.e. a ``keras.layers.BatchNormalization`` built through

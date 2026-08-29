@@ -1189,7 +1189,7 @@ def evaluate_sam3(
     return metrics
 
 
-# NOT @keras.saving.register_keras_serializable: callbacks are never serialized
+# NOT @register_dl_technique: callbacks are never serialized
 # as part of a model (the `StepCheckpointCallback` precedent).
 class _Sam3EvalCallback(keras.callbacks.Callback):
     """Write :func:`evaluate_sam3`'s metrics into every epoch's ``logs``.

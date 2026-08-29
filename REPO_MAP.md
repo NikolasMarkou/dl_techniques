@@ -939,6 +939,17 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > change of meaning — the row no longer counts registrations at all, so it is relabelled and a new
 > row counts `@register_dl_technique` (**480**) beside it.
 >
+> **2026-08-29, later the same day — the prose pass moved BOTH of those two rows again, and the
+> second one had to change its command.** `Files using @keras.saving.register_keras_serializable`
+> fell 16 -> **5** as the stale mentions were retired; the 5 that remain are deliberate (four
+> superseded DECISION anchors that must name the old form to forbid it, plus the helper). The
+> `@register_dl_technique` row was the sharper lesson: its unanchored `grep -rl` counts *prose*,
+> so writing the helper's name into four docstrings pushed it 480 -> 484 without a single new
+> registration. The Value was not adjusted to fit — the COMMAND was wrong for what the row claims
+> to measure, and is now anchored at line start (`^@register_dl_technique`), re-deriving **479**.
+> The 1-file gap against the old 480 is `utils/keras_registration.py`, which mentions the helper
+> in its own docstring and registers nothing.
+>
 > **Three rows were ALREADY red at `5ac4f5b71` and are deliberately NOT repaired here**, because
 > absorbing another plan's debt into this diff would make the diff lie about what changed:
 > `Python files under tests/` (tabulated 1109, re-derives **1118**), `Library modules using a
@@ -1013,8 +1024,8 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files under `src/` naming `keras.callbacks.Callback` | 46 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 10 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
 | …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
-| Files using `@keras.saving.register_keras_serializable` DIRECTLY — **this is no longer the registration count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper (`MIGRATIONS.md`); the 16 that remain are docstrings, comments and the helper itself, NOT live decorators. The row below is the one that counts registrations now | 16 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
-| Files using `@register_dl_technique` (the live registration count) | 480 | `grep -rl "@register_dl_technique" src/dl_techniques --include=*.py \| wc -l` |
+| Files MENTIONING `@keras.saving.register_keras_serializable` — **this is not the registration count and no longer even a decorator count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper (`MIGRATIONS.md`); it then read 16, and 5 after the same day's prose pass retired the stale mentions. All 5 survivors are docstrings and comments — 4 superseded-in-place DECISION anchors that must keep naming the old form to forbid it, plus the helper itself. There are **0** live bare decorators (`grep -rc "^@keras.saving.register_keras_serializable()" src/`). The row below is the one that counts registrations | 5 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files using `@register_dl_technique` (the live registration count; anchored at line start, so prose mentions and the helper's own module do not inflate it — the unanchored form read 480 on 2026-08-29 and then 484 once four docstrings began naming the helper) | 479 | `grep -rlE "^@register_dl_technique" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 484 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
 | Files using the central logger | 347 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
 | Files importing raw `tensorflow` | 59 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |

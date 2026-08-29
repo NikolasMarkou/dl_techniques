@@ -20,7 +20,9 @@ Two public metrics:
 Both metrics:
 
 - Inherit from :class:`keras.metrics.Metric`.
-- Are ``@keras.saving.register_keras_serializable()``.
+- Are registered with ``@register_dl_technique("dl_techniques.metrics.brier_score")``
+  (the shared helper in ``dl_techniques.utils.keras_registration``; see
+  repo-root ``MIGRATIONS.md``).
 - Implement the full contract: ``update_state``, ``result``, ``reset_state``,
   ``get_config``.
 - Accept ``sample_weight``.

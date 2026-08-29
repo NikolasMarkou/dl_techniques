@@ -71,7 +71,7 @@ its context.
 - Both stateful metric and functional interfaces for different use cases
 
 **Keras Integration:**
-- Full serialization support with `@keras.saving.register_keras_serializable()`
+- Full serialization support with `@register_dl_technique("dl_techniques.metrics.perplexity_metric")`
 - Compatible with `model.compile()` metrics list
 - Proper state management for training/validation splits
 - Thread-safe accumulation across batches

@@ -95,7 +95,8 @@ If you use these loss functions in research, please cite the original DarkIR pap
 
 Notes
 -----
-- All losses are serializable via keras.saving.register_keras_serializable
+- All losses are serializable via register_dl_technique (the shared
+  registration helper; see repo-root MIGRATIONS.md)
 - Thread-safe for multi-GPU training with tf.distribute strategies
 - Compatible with mixed precision training (fp16/bf16)
 - VGG19 weights are automatically downloaded on first use (~550MB)

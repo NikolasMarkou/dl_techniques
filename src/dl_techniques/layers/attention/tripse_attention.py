@@ -1145,7 +1145,8 @@ class _SEWeights(layers.Layer):
     :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`. It
     stops one step short of it, so using it as a general SE block silently drops
     the gating. It still carries
-    ``@keras.saving.register_keras_serializable()``, because it is a real
+    ``@register_dl_technique("dl_techniques.layers.attention.tripse_attention")``,
+    because it is a real
     sub-layer of a serializable layer and must resolve when a TripSE4 ``.keras``
     checkpoint is loaded. Don't remove that decorator on the grounds that the
     class is private.

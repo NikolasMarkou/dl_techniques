@@ -31,8 +31,14 @@ from dl_techniques.utils.logger import logger
 
 # Trigger registration of the two custom classes used by saved checkpoints.
 # Without these imports `keras.saving.load_model` cannot resolve
-# `AdaptiveEMATrainingWrapper` / `AdaptiveEMASlopeFilterModel` from the
-# `Custom>` namespace embedded in the .keras config.
+# `AdaptiveEMATrainingWrapper` / `AdaptiveEMASlopeFilterModel` from the key
+# embedded in the .keras config. Resolved 2026-08-29 with
+# `keras.saving.get_registered_name`: a NEW archive records
+# `dl_techniques.train.time_series.adaptive_ema.train_adaptive_ema>AdaptiveEMATrainingWrapper`
+# and `dl_techniques.models.adaptive_ema.model>AdaptiveEMASlopeFilterModel`; an archive
+# written before 2026-08-29 records the `Custom>` spelling, which the shared
+# `register_dl_technique` helper still binds as an alias (repo-root MIGRATIONS.md).
+# Either way the resolution needs these imports to have run.
 from dl_techniques.models.time_series.adaptive_ema import AdaptiveEMASlopeFilterModel  # noqa: F401
 from train.time_series.adaptive_ema.train_adaptive_ema import AdaptiveEMATrainingWrapper  # noqa: F401
 

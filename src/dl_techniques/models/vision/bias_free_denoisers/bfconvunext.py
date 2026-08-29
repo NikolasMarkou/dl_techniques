@@ -79,6 +79,17 @@ from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F
 # whose key `Custom>SpatialLinearAttention` was MEASURED to be module-independent on
 # Keras 3.8.0 (decisions.md D-008), so the move did not change it. Do NOT add a
 # `package=` argument "for symmetry" with `ConvUNextStem` — that WOULD change the key.
+#
+# Updated 2026-08-29 (repo-root `MIGRATIONS.md`). The measurement above stands and still
+# describes the archives written before that date: they name `Custom>SpatialLinearAttention`.
+# The present-tense half no longer does. The class registers today as
+# `dl_techniques.models.convunext.model>SpatialLinearAttention` (resolved with
+# `keras.saving.get_registered_name`), through the shared `register_dl_technique` helper,
+# which is exactly what the warning above said would "change the key" — and it did. What
+# kept those archives loading is that the same helper ALSO binds `Custom>SpatialLinearAttention`
+# as an alias to the identical object (verified `a is b`, 2026-08-29). So the standing
+# prohibition is narrower than it reads: do not move this key with a bare `package=` on the
+# stock decorator, which changes it WITHOUT minting the alias.
 from dl_techniques.models.vision.convunext.model import (  # noqa: F401
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,

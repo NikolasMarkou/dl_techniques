@@ -741,8 +741,9 @@ def run_finetune_post_training_analysis(
     split, so the file can legitimately be absent after a (mis-sized) run.
 
     ``custom_objects=`` is deliberately NOT passed: ``BERT``, ``FNet`` and
-    ``TreeTransformer`` are all ``@keras.saving.register_keras_serializable()``
-    so the registry already resolves them. The two scripts disagreed about this
+    ``TreeTransformer`` are all registered via ``@register_dl_technique`` (e.g.
+    ``dl_techniques.models.bert.model>BERT``, resolved 2026-08-29) so the
+    registry already resolves them. The two scripts disagreed about this
     (bert omitted it, fnet passed it); verified by execution that both models
     round-trip bit-identically without it.
     """

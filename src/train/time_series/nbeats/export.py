@@ -32,7 +32,7 @@ import argparse
 
 import keras
 
-# Importing the N-BEATS models registers their @keras.saving.register_keras_serializable
+# Importing the N-BEATS models registers their @register_dl_technique
 # classes so keras.saving.load_model can resolve NBeatsNet / NBeatsXNet from a
 # saved .keras artifact. NBeatsNet is the model the standard trainer saves on the
 # default reconstruction-on path; NBeatsXNet is imported too in case an exogenous

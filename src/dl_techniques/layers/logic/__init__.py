@@ -5,8 +5,14 @@ Four learnable layer classes plus a string-keyed factory. Every class is
 also importable from the module it is defined in. This file only re-exports
 already decorated symbols; it registers nothing of its own, so importing
 from here and importing from the module give you the same class object.
-The four `keras.saving` keys are `Custom><ClassName>` and carry no module
-path, so renaming a class breaks saved archives while moving one does not.
+The four `keras.saving` keys are `dl_techniques.layers><ClassName>` --
+resolved 2026-08-29 with `keras.saving.get_registered_name`, not copied from
+any doc. All four modules pass that same coarse `"dl_techniques.layers"`
+package string to `register_dl_technique`, so the key still carries no
+per-module path: renaming a class breaks saved archives while moving one
+between these modules does not. Each also keeps the pre-2026-08-29
+`Custom><ClassName>` alias bound to the identical object (verified `a is b`),
+so archives written before the registration migration still load.
 
 **Architecture Overview:**
 

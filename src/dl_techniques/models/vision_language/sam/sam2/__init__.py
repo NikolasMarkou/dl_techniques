@@ -51,7 +51,15 @@ Measured caveats:
   contents are asserted in both directions -- nothing missing, nothing extra --
   by ``tests/test_models/test_sam2/test_package_surface.py``, so the surface
   cannot drift open one re-export at a time.
-- **Importing this package does NOT register** ``Custom>SAM2TrainingModel``.
+- **Importing this package does NOT register** ``SAM2TrainingModel`` under
+  EITHER of its keys -- neither the current
+  ``dl_techniques.models.sam2.training_model>SAM2TrainingModel`` nor the legacy
+  ``Custom>SAM2TrainingModel`` alias that a pre-2026-08-29 archive names.
+  RE-MEASURED 2026-08-29 in a fresh process: after ``import
+  dl_techniques.models.vision_language.sam.sam2``,
+  ``keras.saving.get_registered_object`` returns ``None`` for both keys. This is
+  a statement about import SIDE EFFECTS, not about how the key is spelled, and
+  the registration migration (repo-root ``MIGRATIONS.md``) did not change it.
   This ``__init__`` imports ``memory_bank`` and ``model`` only, never
   ``training_model``; SAM 1's and SAM 3's inits both import theirs. So a
   ``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an

@@ -40,6 +40,22 @@ from dl_techniques.utils.logger import logger
 # measured 697 bare registrations across src/, 0 colliding keys, and a changed
 # key breaks load_model for every stored .keras holding these layers (34/34
 # exact round-trip today). Repo-wide migration, not a local edit. See D-011.
+#
+# SUPERSEDED 2026-08-29 -- the repo-wide migration this anchor asked for HAPPENED
+# (repo-root MIGRATIONS.md). The ruling above is kept verbatim; only its cited
+# measurement is re-taken, because a measured claim is superseded with a new
+# measurement, not silently edited.
+#   measured 2026-08-27: 697 bare registrations across src/, 0 colliding keys
+#   measured 2026-08-29: 0 bare registrations across src/
+#                        (`grep -rc "^@keras.saving.register_keras_serializable()" src/ --include=*.py`),
+#                        744 `@register_dl_technique` sites in their place
+# Every class imported below now registers PACKAGE-QUALIFIED, e.g.
+# `dl_techniques.layers.activations.golu>GoLU`. The key-break the anchor warned
+# about did not occur, because `register_dl_technique` also binds the legacy
+# `Custom>ClassName` as an alias to the same object: all 21 registered classes
+# reachable from this package resolve under BOTH keys to the IDENTICAL object
+# (`a is b`), measured 2026-08-29. What remains forbidden is a bare `package=` on
+# the stock decorator -- that moves the key WITHOUT minting the alias.
 
 from .adaptive_softmax import AdaptiveTemperatureSoftmax
 from .basis_function import BasisFunction

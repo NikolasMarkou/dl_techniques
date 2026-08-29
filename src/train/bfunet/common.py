@@ -2383,7 +2383,7 @@ def train(
                 str(final_path),
                 round_trip_sample,
                 round_trip_pred,
-                custom_objects=None,  # all layers are @register_keras_serializable
+                custom_objects=None,  # all layers are @register_dl_technique
                 tolerance=tol,
             )
             if not ok:
