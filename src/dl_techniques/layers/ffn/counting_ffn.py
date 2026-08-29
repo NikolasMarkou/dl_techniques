@@ -6,7 +6,7 @@ This layer adds frequency information to each token. It first learns which
 blends that count back into each position. Use it when repetition,
 enumeration or relative position matters.
 
-Architectural Overview:
+**Architecture Overview:**
 Three stages:
 
 1.  **Event identification**. ``key_projection`` is a Dense layer with a
@@ -31,7 +31,7 @@ Three stages:
     between the input and the transformed counts, which is a residual-style
     blend. Otherwise the gate just scales the transformed counts.
 
-Foundational Mathematics:
+**Mathematics:**
 Let ``x_t`` be the input vector at position ``t``, and ``T`` the sequence
 length.
 

@@ -15,7 +15,7 @@ The following layers are supported by the factory system with automated paramete
 | `bilinear` | `GLUFFN` (alias) | Bilinear GLU: GLUFFN with `activation='linear'` (no gate nonlinearity, Shazeer 2020) | Identity-gated FFN variant |
 | `counting` | `CountingFFN` | Learns to count features in a sequence | Sequence processing with counting requirements |
 | `differential` | `DifferentialFFN` | Dual-pathway differential processing | Enhanced feature processing with opponent signals |
-| `gated_mlp` | `GatedMLP` | Spatially-gated MLP using 1x1 convolutions | Vision models, efficient attention alternative |
+| `gated_mlp` | `GatedMLP` | Channel-wise GLU built from three 1x1 convolutions (rank-4 NHWC/NCHW inputs). **Not gMLP**: every kernel is 1x1, so nothing mixes across spatial positions | Position-wise channel gating in vision models. Not a stand-in for attention |
 | `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing in transformers |
 | `gelu_tanh` | `GELUMLPFFN` | Two-layer MLP with tanh-approximate GELU (SD3-faithful) | Diffusion/transformer blocks needing the tanh-GELU variant |
 | `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |

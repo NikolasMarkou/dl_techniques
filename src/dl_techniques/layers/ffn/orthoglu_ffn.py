@@ -150,8 +150,11 @@ class OrthoGLUFFN(keras.layers.Layer):
         vanishes and the fixed l1 term remains, so 0.0 does not
         turn the penalty off.
 
-        Both OrthoBlocks are built with activation=None, so the
+        Both OrthoBlocks are built with activation=None, so
+        OrthoBlock's own activation stage is inert here and the
         only non-linearity in this layer is the gate activation.
+        LearnableMultiplier also carries a BinaryPreferenceRegularizer
+        (multiplier 1e-4), a second loss not drawn above.
 
     :param hidden_dim: Width of the gate and of the value, each. The input
         block projects to twice this. Must be positive.

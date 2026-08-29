@@ -334,6 +334,7 @@ class KANLinear(keras.layers.Layer):
         # weight byte-identical to the historical behaviour while still letting
         # a residual-path init scheme be wired in. Do NOT hard-code 'ones', and
         # do NOT route it through kernel_initializer, which is the spline path.
+        # That plan directory is gone, so this comment is the record.
         self.base_scaler = self.add_weight(
             name="base_scaler",
             shape=(self.input_features, self.features),
@@ -347,11 +348,20 @@ class KANLinear(keras.layers.Layer):
         # Size: grid_size + 1 interior knots + 2 * spline_order of padding
         grid_length = self.grid_size + 2 * self.spline_order + 1
 
-        # The grid's INITIAL knots come from the `initializer` below, NOT from
-        # `_set_grid_from_range`: Keras 3's StatelessScope records and DISCARDS
-        # an `.assign()` issued during build, leaving every knot 0.0. Measured
-        # on CPU 2026-08-15, grid[0] is -4.3999996 via a direct .build(...) and
-        # 0.0 via a parent's call(). Same DECISION in nbeats_blocks.py D-028.
+        # The grid's INITIAL knots come from the `initializer` below.
+        # WHAT NOT TO DO: do NOT restore
+        #     self.grid = self.add_weight(..., initializer="zeros")
+        #     self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
+        # Keras 3's StatelessScope records and DISCARDS an `.assign()` issued
+        # during a build reached from a parent layer's call(), which is every
+        # real model. Measured on CPU, keras 3.8.0, 2026-08-29: the shipped
+        # spelling gives grid[0] = -4.399999618530273 on a direct build, a
+        # functional parent and the factory path alike; the rejected spelling
+        # gives 0.0 when built from inside a parent layer's call().
+        # The RUNTIME writers `_set_grid_from_range` / `update_grid_from_samples`
+        # assign from user code in a real scope and are fine; they must keep
+        # working. Measured: `_set_grid_from_range(-1, 1)` moves grid[0] to
+        # -2.1999998. Same DECISION in nbeats_blocks.py D-028.
         self.grid = self.add_weight(
             name="grid",
             shape=(grid_length,),

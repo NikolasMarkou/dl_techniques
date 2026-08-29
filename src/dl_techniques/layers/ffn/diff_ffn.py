@@ -10,11 +10,12 @@ matters is the difference.
 The hypothesis is that giving the excitatory and the inhibitory signal their
 own weights produces more disentangled features than one shared pathway.
 
-Architectural Overview:
+**Architecture Overview:**
 
 1.  **Input decomposition**. The input ``x`` becomes two non-negative
     tensors: ``x_pos = ReLU(x)`` and ``x_neg = ReLU(-x)``. Every feature is
-    active in exactly one of the two, so the branches see disjoint signals.
+    active in at most one of the two, so the branches see disjoint signals.
+    At ``x == 0`` neither is active.
 
 2.  **Parallel branches**. ``x_pos`` and ``x_neg`` go through two branches with
     the same structure and separate weights: Dense to ``hidden_dim``,
@@ -28,7 +29,7 @@ Architectural Overview:
 4.  **Output projection**. The difference is normalized, passed through
     dropout, and projected to ``output_dim``.
 
-Foundational Mathematics:
+**Mathematics:**
 Let ``x`` be the input vector.
 
 1.  Input splitting:

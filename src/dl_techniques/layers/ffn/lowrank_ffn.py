@@ -8,7 +8,7 @@ learns `U` of shape `(d_in, rank)` and `V` of shape `(rank, d_out)` and uses
 their product `U @ V` in place of `W`. When `rank << min(d_in, d_out)` this
 cuts both the parameter count and the compute of the projection.
 
-Architectural Overview:
+**Architecture Overview:**
 The expand/contract shape is unchanged. Each projection becomes a bottleneck:
 
 1.  Expansion (factorized). The input `(..., input_dim)` reaches `hidden_dim`
@@ -26,7 +26,7 @@ The `U` projections carry no bias. A bias there is redundant: the next linear
 map `V` consumes it immediately, so it can be folded into `V`'s own bias. Only
 the `V` projections carry the optional bias.
 
-Foundational Mathematics:
+**Mathematics:**
 For an input vector `x` at a single position the layer computes:
 
 `FFN(x) = V_2(U_2(activation(V_1(U_1(x)))))`

@@ -5,17 +5,19 @@ This layer is a drop-in replacement for the standard position-wise
 Feed-Forward Network (FFN) of a Transformer. Each of the two dense projections
 is replaced by an **order-2 Monarch matrix**: a structured (sub-quadratic)
 parameterization written as the product of two block-diagonal matrices with a
-fixed reshape/permute between them, introduced by Dao et al. (2022). It keeps
-much of the expressivity of a dense matrix while cutting parameter count and
-FLOPs from ``O(n^2)`` to ``O(n^1.5)`` (at ``nblocks = sqrt(n)``), and it
-generalizes many fast-transform structures (FFT, Hadamard, and others).
+fixed reshape/permute between them, introduced by Dao et al. (2022).
 
-Architectural Overview:
+It cuts parameter count and FLOPs from ``O(n^2)`` to ``O(n^1.5)`` at
+``nblocks = sqrt(n)``, and keeps much of a dense matrix's expressivity. The
+same structure covers many fast transforms, including the FFT and the
+Hadamard transform.
+
+**Architecture Overview:**
 The block keeps the familiar expand-then-contract FFN shape. Only the two
 linear maps change: each is a Monarch map instead of a single dense kernel.
 The flow diagram is on ``MonarchFFN`` itself, beside the code that runs it.
 
-Foundational Mathematics:
+**Mathematics:**
 An order-2 Monarch linear map sends a vector of dimension ``n_in`` to a vector
 of dimension ``n_out``. Both dimensions are split into ``nblocks`` blocks
 (``b_in = n_in / nblocks``, ``b_out = n_out / nblocks``). The map is computed in
@@ -376,6 +378,7 @@ class MonarchFFN(keras.layers.Layer):
         # and factor R stays square (b_out, nblocks, nblocks). Do NOT square them
         # up with a trailing Dense; that re-adds an unstructured O(n^2) kernel.
         # The price is this guard: nblocks must divide input_dim as well.
+        # That plan directory is gone, so this comment is the record.
         if input_dim % self.nblocks != 0:
             raise ValueError(
                 f"input_dim must be divisible by nblocks, "

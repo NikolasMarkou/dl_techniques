@@ -18,7 +18,7 @@ The forward pass has four stages:
 4.  **Output projection**. A third 1x1 convolution maps the gated tensor to
     ``filters`` channels, then ``output_activation`` is applied.
 
-Foundational mathematics:
+**Mathematics:**
 For the feature vector ``x_ij`` at spatial position ``(i, j)``:
 
     g_ij = activation_attn(W_g @ x_ij + b_g)

@@ -39,10 +39,13 @@ know which layer you want and are not driving the choice from a config.
     validate_ffn_config(...)     │
       │   unknown key      ─► ValueError
       │   missing required ─► ValueError
-      │   undeclared kwarg ─► ValueError
+      │   bad value/name   ─► ValueError
       ▼                          │
     FFN_REGISTRY[key]['class']   │
       │                          │
+      ▼                          │
+    strict dropped-key check     │
+      │   undeclared kwarg ─► ValueError
       ▼                          │
     ffn_class(**final_params)    │
       │                          │

@@ -6,7 +6,7 @@ differentiable logic operations. It gives the model a bias towards
 symbolic-style reasoning: instead of one activation function, it learns how
 much of AND, OR and XOR to apply at each position.
 
-Architectural Overview:
+**Architecture Overview:**
 The layer works like a small logic circuit:
 
 1.  **Projection into operands**. A Dense layer maps the input to
@@ -28,7 +28,7 @@ The layer works like a small logic circuit:
     the weighted sum, and a final Dense layer maps the combination to
     ``output_dim``.
 
-Foundational Mathematics:
+**Mathematics:**
 Let ``x`` be the input vector.
 
 1.  The operands are produced and squashed into soft bits:
@@ -524,9 +524,9 @@ def create_logic_ffn_regularized(
     second one on the biases. The two-row preset table comparing this builder
     with ``create_logic_ffn_standard`` is in that function's docstring.
 
-    Note that this regularizes the BIASES too, which the standard Keras
-    default does not. If you only want the kernels regularized, construct
-    ``LogicFFN`` directly.
+    This regularizes the BIASES too, which the standard Keras default does
+    not. If you only want the kernels regularized, construct ``LogicFFN``
+    directly.
 
     :param output_dim: Width of the output, passed straight through.
     :type output_dim: int

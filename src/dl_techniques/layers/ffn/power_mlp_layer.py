@@ -274,7 +274,10 @@ class PowerMLPLayer(keras.layers.Layer):
         # for basis_dense. Sharing one instance with main_dense made the two
         # kernels identical at init, max|delta| exactly 0.000000e+00.
         # Do NOT pass self.kernel_initializer here, and do NOT move the clone
-        # into keras.initializers.get. See decisions.md D-057.
+        # into keras.initializers.get. A SEEDED initializer gives 0.0 either
+        # way -- that is the caller's intent, not this guard failing; check it
+        # with an unseeded one (measured 1.3751793 with the clone in place).
+        # See decisions.md D-057.
         self.basis_dense = keras.layers.Dense(
             units=self.units,
             use_bias=False,

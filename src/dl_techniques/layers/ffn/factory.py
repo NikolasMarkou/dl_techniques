@@ -159,6 +159,14 @@ What each type is for:
     swin_mlp      Swin Transformer and vision heads
     tversky       asymmetric similarity projection, rank-2
 
+``gated_mlp``'s registry ``description`` and ``use_case`` are stale.
+They call it spatially-gated and an attention alternative. Every kernel
+in it is 1x1, so it cannot mix across positions: measured off-pixel
+delta 0.0. Both are string CONSTANTS in ``FFN_REGISTRY``, not
+docstrings, so editing them changes what ``get_ffn_info()`` returns; the
+documentation pass that found this could not make that change. The true
+description is in ``gated_mlp.py``'s module docstring.
+
 Public functions:
 
 - ``get_ffn_info()`` -- a shallow copy of the registry, for callers that
@@ -494,7 +502,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': ['tokens_mlp_dim', 'channels_mlp_dim'],
         # DECISION plan-2026-07-30T140922-8af1028f/D-004: `None` is MEANINGFUL,
         # not a missing entry. MixerBlock.compute_output_shape returns the input
-        # shape unchanged (mlp_mixer_block.py:334-343), so it has no output width.
+        # shape unchanged, so this type has no output width parameter.
         # Do NOT 'fix' this to 'output_dim' (no such key) nor to 'channels_mlp_dim'
         # (the channel-mixing MLP's inner width). See decisions.md D-004.
         'output_dim_param': None,

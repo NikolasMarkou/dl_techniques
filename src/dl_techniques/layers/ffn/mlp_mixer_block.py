@@ -25,7 +25,7 @@ Dense(restore)``. ``restore`` is ``S`` for the token MLP and ``C`` for the
 channel MLP. Doing both in sequence gives every position a path to every
 other, which is the job attention would otherwise do.
 
-Foundational Mathematics:
+**Mathematics:**
 Let ``X`` be the input of shape ``(B, S, C)``, ``LN`` a per-channel layer
 normalization, ``W_*`` the MLP weight matrices and ``sigma`` the activation:
 
@@ -266,11 +266,13 @@ class MixerBlock(keras.layers.Layer):
             y.shape                 # (2, 196, 512)
 
     Note:
-        This is the only layer in ``ffn/`` that pins the input rank to 3.
-        ``TverskyProjectionLayer`` pins its own to 2; ``SwinMLP``,
-        ``KANLinear``, ``CountingFFN`` and ``LogicFFN`` only require rank 2
-        or more. The reason the rank is pinned here is the two
-        back-projections: ``token_mlp_out`` has ``units=S`` and
+        This is the only layer in ``ffn/`` that pins the input rank to 3
+        with an explicit check. ``TverskyProjectionLayer`` pins its own to 2;
+        ``SwinMLP``, ``KANLinear``, ``CountingFFN`` and ``LogicFFN`` only
+        require rank 2 or more. ``GatedMLP`` is rank 4 only, enforced by
+        Conv2D rather than by a check: a rank-3 input raises from the
+        convolution, not from a guard. The reason the rank is pinned here is
+        the two back-projections: ``token_mlp_out`` has ``units=S`` and
         ``channel_mlp_out`` has ``units=C``, so both axes are weight shapes
         and both must be statically known.
     """
