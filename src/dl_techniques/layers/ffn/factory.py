@@ -223,7 +223,11 @@ from .gated_mlp import GatedMLP
 from .orthoglu_ffn import OrthoGLUFFN
 from .power_mlp_layer import PowerMLPLayer
 from .kan_linear import KANLinear
-from .tversky_projection import TverskyProjectionLayer
+from .tversky_projection import (
+    TverskyProjectionLayer,
+    VALID_INTERSECTION_REDUCTIONS,
+    VALID_DIFFERENCE_REDUCTIONS,
+)
 from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
@@ -792,13 +796,16 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if 'epsilon' in kwargs and kwargs['epsilon'] <= 0:
             raise ValueError(f"epsilon must be positive, got {kwargs['epsilon']}")
     elif ffn_type == 'tversky':
-        valid_ir = {'product', 'min', 'mean'}
+        # The valid sets are OWNED by tversky_projection.py and imported at
+        # the top of this module; there is no copy here. The anchor at that
+        # definition carries the reasoning and the pointer.
+        valid_ir = VALID_INTERSECTION_REDUCTIONS
         if 'intersection_reduction' in kwargs and kwargs['intersection_reduction'] not in valid_ir:
             raise ValueError(
                 f"intersection_reduction must be one of {sorted(valid_ir)}, "
                 f"got '{kwargs['intersection_reduction']}'"
             )
-        valid_dr = {'ignorematch', 'subtractmatch'}
+        valid_dr = VALID_DIFFERENCE_REDUCTIONS
         if 'difference_reduction' in kwargs and kwargs['difference_reduction'] not in valid_dr:
             raise ValueError(
                 f"difference_reduction must be one of {sorted(valid_dr)}, "

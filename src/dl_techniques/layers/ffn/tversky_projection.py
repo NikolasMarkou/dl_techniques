@@ -33,10 +33,12 @@ For input `a` and prototype `p`, with `A` and `B` the feature sets they have:
 features both have. `intersection_reduction` picks the combination: the
 product, the minimum, or the mean.
 
-Both reduction names are checked by `create_ffn_layer('tversky', ...)`, which
-raises `ValueError` on a bad one. Constructing the class directly skips that
-check: a bad name survives `__init__` and `get_config()` and surfaces as a
-`NotImplementedError` from `call()`.
+Both reduction names are checked by `__init__`, which raises `ValueError`
+on a bad one before any weight exists. `create_ffn_layer('tversky', ...)`
+checks them too, against the SAME two frozensets: `validate_ffn_config`
+imports `VALID_INTERSECTION_REDUCTIONS` and `VALID_DIFFERENCE_REDUCTIONS`
+from this module rather than keeping its own copy, so the two guards cannot
+drift apart.
 
 `f(A - B)` and `f(B - A)` depend on `difference_reduction`, and the two
 settings do not measure the same thing:
@@ -60,6 +62,22 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
 from dl_techniques.initializers.clone import clone_initializer
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-08-29T043546-e97b34d8/D-010
+# These two frozensets are the SINGLE source of the valid reduction names.
+# `factory.py`'s `validate_ffn_config` imports them from here; it does NOT
+# keep its own copy. Do not re-inline the literal sets into the factory "so
+# the factory has no import" -- that is the spelling this file shipped with,
+# and it left the layer's if/elif chains and the factory's guard hand-synced,
+# so adding a reduction to one silently disagreed with the other. The import
+# direction is fixed: factory.py already imports TverskyProjectionLayer from
+# this module, so factory -> layer is an edge that exists; layer -> factory
+# exists nowhere in the package and is a cycle risk. See decisions.md D-002,
+# D-010.
+VALID_INTERSECTION_REDUCTIONS = frozenset({'product', 'min', 'mean'})
+VALID_DIFFERENCE_REDUCTIONS = frozenset({'ignorematch', 'subtractmatch'})
 
 # ---------------------------------------------------------------------
 
@@ -152,16 +170,15 @@ class TverskyProjectionLayer(keras.layers.Layer):
     :param num_features: Size of the learnable feature universe. Must be positive.
     :type num_features: int
     :param intersection_reduction: How the two saliences are combined on a
-        shared feature. One of ``'product'``, ``'min'``, ``'mean'``. NOT
-        checked by ``__init__``; a wrong value constructs and serializes fine
-        and only raises ``NotImplementedError`` when ``call()`` runs. Build
-        the layer through ``create_ffn_layer('tversky', ...)`` to get a
-        ``ValueError`` up front instead. Defaults to ``'product'``.
+        shared feature. One of ``'product'``, ``'min'``, ``'mean'`` -- the
+        members of ``VALID_INTERSECTION_REDUCTIONS``. Checked by ``__init__``,
+        which raises ``ValueError`` on anything else. Defaults to
+        ``'product'``.
     :type intersection_reduction: str
     :param difference_reduction: Which features the two difference terms
-        measure. One of ``'ignorematch'``, ``'subtractmatch'``. Same rule as
-        above: unchecked here, checked by the factory. Defaults to
-        ``'subtractmatch'``.
+        measure. One of ``'ignorematch'``, ``'subtractmatch'`` -- the members
+        of ``VALID_DIFFERENCE_REDUCTIONS``. Same rule as above: checked by
+        ``__init__``. Defaults to ``'subtractmatch'``.
     :type difference_reduction: str
     :param prototype_initializer: Initializer for the prototype matrix.
         Defaults to ``'glorot_uniform'``.
@@ -183,9 +200,13 @@ class TverskyProjectionLayer(keras.layers.Layer):
     :vartype units: int
     :ivar num_features: The stored feature-bank size.
     :vartype num_features: int
-    :ivar intersection_reduction: The stored reduction name, unvalidated.
+    :ivar intersection_reduction: The stored reduction name. Validated by
+        ``__init__``, so it is always a member of
+        ``VALID_INTERSECTION_REDUCTIONS``.
     :vartype intersection_reduction: str
-    :ivar difference_reduction: The stored reduction name, unvalidated.
+    :ivar difference_reduction: The stored reduction name. Validated by
+        ``__init__``, so it is always a member of
+        ``VALID_DIFFERENCE_REDUCTIONS``.
     :vartype difference_reduction: str
     :ivar prototype_initializer: The resolved prototype initializer.
     :vartype prototype_initializer: keras.initializers.Initializer
@@ -213,8 +234,10 @@ class TverskyProjectionLayer(keras.layers.Layer):
     :raises ValueError: If ``num_features`` is not positive.
     :raises ValueError: If the input to ``build()`` is not rank 2.
     :raises ValueError: If the last input dimension is ``None`` at build time.
-    :raises NotImplementedError: From ``call()``, if either reduction name is
-        not one of the values listed above.
+    :raises ValueError: If ``intersection_reduction`` is not a member of
+        ``VALID_INTERSECTION_REDUCTIONS``.
+    :raises ValueError: If ``difference_reduction`` is not a member of
+        ``VALID_DIFFERENCE_REDUCTIONS``.
 
     Input shape:
         2D tensor of shape ``(batch_size, input_dim)``. No other rank works.
@@ -257,11 +280,12 @@ class TverskyProjectionLayer(keras.layers.Layer):
 
         Every argument is documented on the class. No weight exists yet; all
         five weight attributes are set to ``None`` and created in ``build()``.
-        The two reduction names are NOT validated here. A wrong one is caught
-        by ``validate_ffn_config`` when the layer is built through the
-        factory, and otherwise only by ``call()``.
+        Both reduction names ARE validated here, against the module-level
+        frozensets ``validate_ffn_config`` also reads.
 
         :raises ValueError: If ``units`` or ``num_features`` is not positive.
+        :raises ValueError: If either reduction name is not a member of its
+            frozenset.
         """
         super().__init__(**kwargs)
 
@@ -270,6 +294,21 @@ class TverskyProjectionLayer(keras.layers.Layer):
             raise ValueError(f"`units` must be positive, got {units}")
         if num_features <= 0:
             raise ValueError(f"`num_features` must be positive, got {num_features}")
+
+        # Validate the two reduction names against the shared frozensets
+        # above, so a typo fails HERE rather than inside call().
+        if intersection_reduction not in VALID_INTERSECTION_REDUCTIONS:
+            raise ValueError(
+                f"intersection_reduction must be one of "
+                f"{sorted(VALID_INTERSECTION_REDUCTIONS)}, "
+                f"got '{intersection_reduction}'"
+            )
+        if difference_reduction not in VALID_DIFFERENCE_REDUCTIONS:
+            raise ValueError(
+                f"difference_reduction must be one of "
+                f"{sorted(VALID_DIFFERENCE_REDUCTIONS)}, "
+                f"got '{difference_reduction}'"
+            )
 
         # Store ALL configuration for serialization
         self.units = units
@@ -384,9 +423,13 @@ class TverskyProjectionLayer(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Similarity scores of shape ``(batch_size, units)``.
         :rtype: keras.KerasTensor
-        :raises NotImplementedError: If ``intersection_reduction`` is not
-            'product', 'min' or 'mean', or if ``difference_reduction`` is not
-            'ignorematch' or 'subtractmatch'.
+        :raises NotImplementedError: If ``intersection_reduction`` or
+            ``difference_reduction`` falls off the end of its ``if/elif``
+            chain. Both raises are still in the code, but ``__init__``
+            rejects every value that could reach them, so neither is
+            reachable through the public constructor. A direct write to
+            ``layer.intersection_reduction`` after construction bypasses the
+            constructor check and can still trigger them.
         """
         # Compute dot products to get feature presence scores.
         # inputs shape: (batch_size, input_dim)

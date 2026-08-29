@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import inspect
 import os
 import tempfile
 from typing import Any, Dict
@@ -25,6 +26,12 @@ from dl_techniques.layers.ffn import (
     create_ffn_layer,
     validate_ffn_config,
     get_ffn_info,
+)
+from dl_techniques.layers.ffn import factory as factory_module
+from dl_techniques.layers.ffn import tversky_projection as layer_module
+from dl_techniques.layers.ffn.tversky_projection import (
+    VALID_DIFFERENCE_REDUCTIONS,
+    VALID_INTERSECTION_REDUCTIONS,
 )
 
 
@@ -66,9 +73,9 @@ class TestTverskyProjectionLayer:
             TverskyProjectionLayer(**bad_kwargs)
 
     def test_init_invalid_reductions(self) -> None:
-        # The layer itself accepts the strings but `call()` raises NotImplementedError
-        # for unknown reductions. The factory-level validate_ffn_config is the
-        # authoritative gatekeeper — covered in test_factory.py.
+        # Both guards read the SAME two frozensets, which live in
+        # tversky_projection.py; the factory imports them. The layer's own
+        # __init__ guard is covered by TestTverskyReductionValidation below.
         with pytest.raises(ValueError):
             validate_ffn_config(
                 'tversky', units=4, num_features=4, intersection_reduction='nope'
@@ -140,3 +147,100 @@ class TestTverskyProjectionLayer:
         entry = info['tversky']
         assert 'units' in entry['required_params']
         assert 'num_features' in entry['required_params']
+
+
+class TestTverskyReductionValidation:
+    """Guards for C-10: the reduction names are validated at construction.
+
+    At BASE both names were stored raw. A typo constructed, survived
+    ``get_config()``, and surfaced only inside ``call()`` as
+    ``NotImplementedError`` -- not the ``ValueError`` this package uses for
+    configuration errors, and for a compiled model not until the graph trace.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_kwargs, needle",
+        [
+            ({'intersection_reduction': 'prodcut'}, 'intersection_reduction'),
+            ({'intersection_reduction': 'maximum'}, 'intersection_reduction'),
+            ({'difference_reduction': 'subtract_match'}, 'difference_reduction'),
+            ({'difference_reduction': 'ignore-match'}, 'difference_reduction'),
+        ],
+    )
+    def test_bad_reduction_raises_value_error_from_init(
+        self, bad_kwargs: Dict[str, Any], needle: str
+    ) -> None:
+        """ValueError from __init__, NOT NotImplementedError from call()."""
+        with pytest.raises(ValueError) as exc:
+            TverskyProjectionLayer(units=4, num_features=8, **bad_kwargs)
+        assert needle in str(exc.value)
+        assert list(bad_kwargs.values())[0] in str(exc.value)
+
+    def test_construction_is_what_fails_not_the_forward_pass(self) -> None:
+        """Pins the TIMING, not only the exception type.
+
+        A guard that only asserted ``pytest.raises(ValueError)`` around a
+        construct-then-call block would pass at BASE too, since
+        ``NotImplementedError`` would be raised by the call. This one proves
+        no layer object is ever produced.
+        """
+        made = []
+        try:
+            made.append(
+                TverskyProjectionLayer(
+                    units=4, num_features=8, intersection_reduction='prodcut'
+                )
+            )
+        except ValueError:
+            pass
+        assert made == [], "a layer with an invalid reduction was constructed"
+
+    def test_every_valid_name_still_constructs_and_runs(self) -> None:
+        """Anti-vacuity: the guard must not reject the supported values."""
+        x = keras.random.normal((2, 6))
+        for ir in sorted(VALID_INTERSECTION_REDUCTIONS):
+            for dr in sorted(VALID_DIFFERENCE_REDUCTIONS):
+                layer = TverskyProjectionLayer(
+                    units=4,
+                    num_features=8,
+                    intersection_reduction=ir,
+                    difference_reduction=dr,
+                )
+                y = layer(x)
+                assert y.shape == (2, 4)
+                assert not keras.ops.any(keras.ops.isnan(y))
+
+    def test_the_factory_reads_the_layers_frozensets_not_a_copy(self) -> None:
+        """SC10, static half: one object, two readers.
+
+        The executed half of SC10 -- editing the frozenset and watching BOTH
+        guards change behaviour -- is recorded in this plan's report; this
+        assertion pins the identity the executed proof depends on, so a
+        future re-inlining of a literal set into ``factory.py`` fails here.
+        """
+        assert factory_module.VALID_INTERSECTION_REDUCTIONS is (
+            layer_module.VALID_INTERSECTION_REDUCTIONS
+        )
+        assert factory_module.VALID_DIFFERENCE_REDUCTIONS is (
+            layer_module.VALID_DIFFERENCE_REDUCTIONS
+        )
+        src = inspect.getsource(factory_module.validate_ffn_config)
+        assert "{'product', 'min', 'mean'}" not in src, (
+            "factory.py has re-grown its own copy of the intersection set"
+        )
+        assert "{'ignorematch', 'subtractmatch'}" not in src, (
+            "factory.py has re-grown its own copy of the difference set"
+        )
+
+    def test_both_guards_reject_the_same_name(self) -> None:
+        """The layer guard and the factory guard agree, member for member."""
+        for bad in ['prodcut', 'maximum', '', 'PRODUCT']:
+            with pytest.raises(ValueError):
+                TverskyProjectionLayer(
+                    units=4, num_features=8, intersection_reduction=bad
+                )
+            with pytest.raises(ValueError):
+                validate_ffn_config(
+                    'tversky', units=4, num_features=4,
+                    intersection_reduction=bad,
+                )
