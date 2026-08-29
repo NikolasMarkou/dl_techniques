@@ -1,12 +1,24 @@
 """
 PRISM: Partitioned Representations for Iterative Sequence Modeling.
 
-This module implements the PRISM architecture for time-series forecasting,
-which combines hierarchical time decomposition with multi-resolution
-frequency analysis using Haar wavelets.
+PRISM is a time-series backbone. It splits a sequence into overlapping
+segments, decomposes each segment into Haar wavelet frequency bands, weights
+the bands with a learned router, and stitches the segments back together.
 
-The architecture uses a "Split-Transform-Weight-Merge" philosophy applied
-recursively to capture both global trends and local fine-grained structures.
+The pipeline is split-transform-weight-merge, applied once per tree level.
+Each level re-splits the FULL re-stitched sequence, so level ``i`` sees
+``2 ** i`` segments of the whole signal rather than the children of level
+``i - 1``.
+
+This module exports five layers, smallest first:
+
+- :class:`FrequencyBandStatistics` -- six summary statistics per band.
+- :class:`FrequencyBandRouter` -- band importance weights from those
+  statistics.
+- :class:`PRISMNode` -- wavelet decomposition plus routed recombination for
+  one segment.
+- :class:`PRISMTimeTree` -- the level loop over split, node, stitch.
+- :class:`PRISMLayer` -- the tree plus dropout, residual and output norm.
 """
 
 import keras
@@ -30,15 +42,15 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class FrequencyBandStatistics(keras.layers.Layer):
     """
-    Compute summary statistics for frequency bands.
+    Compute six summary statistics for one frequency band.
 
-    Extracts statistical features from each frequency band including mean,
-    standard deviation, min, max, and temporal derivatives (first-difference
-    mean and std). These statistics serve as input to the importance router.
+    The statistics are mean, standard deviation, min, max, and the mean and
+    standard deviation of the first difference along time. They are the input
+    the importance router scores each band on. The layer owns no weights.
 
-    Standard deviation is computed as ``sqrt(var + epsilon)`` to prevent
-    gradient explosion when processing constant sequences or zero-padded
-    regions.
+    Standard deviation is ``sqrt(var + epsilon)``, not ``ops.std``. The
+    gradient of ``ops.std`` contains ``1 / (2 * std)`` and explodes on a
+    constant sequence or a zero-padded region.
 
     **Architecture Overview:**
 
@@ -47,19 +59,50 @@ class FrequencyBandStatistics(keras.layers.Layer):
         Input: frequency band [batch, seq_len, channels]
                         │
                         ▼
-               ┌────────────────────────────────┐
-               │  Compute per-channel statistics│
-               │  mean, std, min, max           │
-               │  diff_mean, diff_std           │
-               └────────────────┬───────────────┘
-                                │
-                                ▼
+        ┌───────────────────────────────────────┐
+        │  Per-channel reduction over time      │
+        │  mean, std=sqrt(var+eps), min, max    │
+        │  diff = x[:, 1:] - x[:, :-1]          │
+        │  diff_mean, diff_std                  │
+        └───────────────────┬───────────────────┘
+                            │  [batch, channels] x 6
+                            ▼
+        ┌───────────────────────────────────────┐
+        │  Stack on a new last axis             │
+        └───────────────────┬───────────────────┘
+                            │
+                            ▼  ('static_len is None' only)
+        ┌───────────────────────────────────────┐
+        │  Zero every non-finite statistic that │
+        │  came from an all-finite series       │
+        └───────────────────┬───────────────────┘
+                            │
+                            ▼
         Output: statistics [batch, channels, 6]
 
-    :param epsilon: Small constant for numerical stability.
+    The repair stage runs only when the time axis is unknown at trace time.
+    On a statically shaped input it is skipped entirely.
+
+    :param epsilon: Constant added to the variance before the square root.
         Defaults to 1e-6.
     :type epsilon: float
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor of shape ``[batch, seq_len, channels]``.
+
+    Output shape:
+        3D tensor of shape ``[batch, channels, 6]``.
+
+    Example:
+        .. code-block:: python
+
+            stats = FrequencyBandStatistics(epsilon=1e-6)
+            out = stats(keras.random.normal((2, 16, 3)))
+            # out.shape == (2, 3, 6)
+
+    :ivar epsilon: The variance floor passed to the constructor.
+    :vartype epsilon: float
     """
 
     def __init__(
@@ -67,9 +110,19 @@ class FrequencyBandStatistics(keras.layers.Layer):
             epsilon: float = 1e-6,
             **kwargs: Any
     ) -> None:
+        """
+        Store the variance floor and the fixed statistic count.
+
+        :param epsilon: Constant added to the variance before the square root.
+            Defaults to 1e-6.
+        :type epsilon: float
+        :param kwargs: Additional arguments for the Layer base class.
+        """
         super().__init__(**kwargs)
         self.epsilon = epsilon
-        self._num_stats = 6  # mean, std, min, max, diff_mean, diff_std
+        # The six statistics, in output order: mean, std, min, max,
+        # diff_mean, diff_std.
+        self._num_stats = 6
 
     def call(
             self,
@@ -84,60 +137,41 @@ class FrequencyBandStatistics(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Training mode flag (unused).
         :type training: Optional[bool]
-        :param mask: Optional mask tensor (unused in calculation, rely on
-            numerical stability fixes for padded zeros).
+        :param mask: Optional mask tensor. Unused. Padded zeros are handled by
+            the ``sqrt(var + epsilon)`` form instead.
         :type mask: Optional[keras.KerasTensor]
         :return: Statistics tensor of shape [batch, channels, num_stats].
-            Degenerate bands are handled explicitly: a band of length 1 gets
-            ``diff_mean``/``diff_std`` of exactly ``0.0`` (the first difference
-            of a single sample is undefined), and a band of length 0 gets all
-            six statistics as ``0.0``. When the time axis is not known
-            statically (a traced graph over ``[batch, None, channels]``) the
-            same semantics are reproduced by replacing non-finite statistics
-            with ``0.0``; on a statically shaped input a genuine NaN in the data
-            still propagates.
+            Two degenerate band lengths get defined values. A band of length 1
+            gets ``diff_mean`` and ``diff_std`` of exactly ``0.0``, because the
+            first difference of a single sample does not exist. A band of
+            length 0 gets all six statistics as ``0.0``. A traced graph over
+            ``[batch, None, channels]`` reaches the same values by zeroing
+            non-finite statistics instead. On a statically shaped input a
+            genuine NaN in the data still propagates.
         :rtype: keras.KerasTensor
         """
         # DECISION plan-2026-08-18T073231-52a93f8c/D-004
-        # Degenerate band lengths are branched on the STATIC shape, with an
-        # ``is not None`` short-circuit so an unknown time axis falls through to
-        # the unguarded arithmetic below.  Bands shrink as
-        # ``segment_len // 2 ** num_wavelet_levels`` and reach 1, then 0, at
-        # configurations the model accepts; a length-1 band makes the
-        # first-difference tensor EMPTY, and ``ops.mean``/``ops.var`` over an
-        # empty axis return NaN *silently*, which the router's single joint
-        # softmax then spreads across every band.  A length-0 band additionally
-        # makes ``ops.min``/``ops.max`` raise ``InvalidArgumentError`` in eager
-        # and return +/-inf under ``tf.function`` (both measured).
-        # Do NOT rewrite this as a traced-tensor ``ops.cond`` on
-        # ``ops.shape(inputs)[1]``: this repo has measured exactly that rewrite
-        # break under ``@tf.function`` with ``OperatorNotAllowedInGraphError``
-        # (``clifford_block``'s singleton-axis check), and the static-shape form
-        # with an ``is not None`` short-circuit is the form that works.
-        # Do NOT "simplify" it by clamping or padding the slice to fake a
-        # length: that fabricates a first difference from a sample that does not
-        # exist, which is a silently wrong number rather than a defined one.
-        # The DYNAMIC time axis (``static_len is None``) falls through this
-        # branch by design and is closed separately, at the bottom of ``call``,
-        # by a value-level non-finite repair -- see the
-        # ``plan-2026-08-18T111512-29569f8b/D-001`` anchor there for why
-        # ``input_spec`` cannot close it and why the repair is confined to that
-        # path.
-        # See decisions.md D-004, D-012 (and D-002 for the threshold ruling).
+        # Branch on the STATIC length: a length-1 band gives an EMPTY diff, so
+        # mean/var are NaN silently; a length-0 band makes ops.min/ops.max raise
+        # eager and give +/-inf under tf.function (both measured). Do NOT rewrite
+        # as ops.cond on ops.shape(inputs)[1] (measured elsewhere in this repo:
+        # OperatorNotAllowedInGraphError under @tf.function) and do NOT pad the
+        # slice to fake a length. See decisions.md D-004, D-012.
         static_len = inputs.shape[1]
 
         if static_len is not None and static_len == 0:
             # Nothing is defined over an empty time axis. ``ops.sum`` over a
             # zero-length axis is exactly 0.0 and, unlike ``ops.min``/``ops.max``,
             # does not raise -- it also carries the dynamic batch dimension.
-            zeros = ops.sum(inputs, axis=1)  # [batch, channels], exact zeros
+            # Shape [batch, channels], values exactly 0.0.
+            zeros = ops.sum(inputs, axis=1)
             return ops.stack([zeros] * self._num_stats, axis=-1)
 
-        # Basic statistics along time axis
-        mean = ops.mean(inputs, axis=1)  # [batch, channels]
+        # Reductions along the time axis, each giving [batch, channels].
+        mean = ops.mean(inputs, axis=1)
 
-        # FIX: Calculate std via sqrt(var + epsilon) to prevent gradient explosion
-        # ops.std() gradients involve 1/(2*std), which explodes if std=0.
+        # Std is sqrt(var + epsilon), not ops.std: the ops.std gradient
+        # contains 1/(2*std) and explodes when std is 0.
         variance = ops.var(inputs, axis=1)
         std = ops.sqrt(variance + self.epsilon)
 
@@ -145,96 +179,49 @@ class FrequencyBandStatistics(keras.layers.Layer):
         max_val = ops.max(inputs, axis=1)
 
         if static_len is not None and static_len == 1:
-            # mean/std/min/max are well defined on a single sample; only the
+            # mean/std/min/max are well defined on a single sample. Only the
             # first difference is not, and 0.0 is its defined stand-in.
             diff_mean = ops.zeros_like(mean)
             diff_std = ops.zeros_like(mean)
         else:
-            # Temporal derivatives (first difference)
+            # First difference along time.
             diff = inputs[:, 1:, :] - inputs[:, :-1, :]
             diff_mean = ops.mean(diff, axis=1)
 
-            # FIX: Apply same stability fix to diff_std
+            # Same sqrt(var + epsilon) form as std above, for the same reason.
             diff_variance = ops.var(diff, axis=1)
             diff_std = ops.sqrt(diff_variance + self.epsilon)
 
-        # Stack statistics: [batch, channels, num_stats]
+        # Stack to [batch, channels, num_stats].
         stats = ops.stack(
             [mean, std, min_val, max_val, diff_mean, diff_std],
             axis=-1
         )
 
         # DECISION plan-2026-08-18T111512-29569f8b/D-001
-        # Dynamic-time-axis fallback.  The branch above is on the STATIC length,
-        # so under a trace with an unknown time axis -- ``TensorSpec([None, None,
-        # C])``, what an ONNX/SavedModel export or a ragged ``tf.data`` pipeline
-        # produces -- neither degenerate case is caught and the band arithmetic
-        # runs raw.  MEASURED before this fallback existed: a built
-        # ``tree_depth=3`` ``PRISMModel`` traced at ``[None, None, 7]`` returned
-        # ``nan_frac == 1.0`` while the SAME model returned ``0.0`` eager.
-        # ``input_spec`` CANNOT close this: Keras'
-        # ``assert_input_compatibility`` tests ``shape[axis] not in {value,
-        # None}``, so an unknown dimension is explicitly ACCEPTED by an ``axes``
-        # constraint (measured, not inferred).  ``ops.cond`` on
-        # ``ops.shape(inputs)[1]`` is also out -- this repo has measured that
-        # rewrite break under ``@tf.function`` with
-        # ``OperatorNotAllowedInGraphError`` (``clifford_block``).
-        # What IS graph-safe is a value-level repair, because in graph mode the
-        # degenerate cases fail *numerically* rather than raising: a length-0
-        # band gives ``ops.min``/``ops.max`` of ``+inf``/``-inf`` (in EAGER the
-        # very same call raises ``InvalidArgumentError``, which is why the static
-        # length-0 branch above must stay -- it cannot be repaired after the
-        # fact) and ``ops.mean``/``ops.var`` of NaN; a length-1 band gives NaN
-        # diff features.  Replacing every non-finite statistic with 0.0 therefore
-        # reproduces EXACTLY the semantics the static branches define, with no
-        # Python branch on a symbolic value.
-        # The ``is None`` test below is a TRACE-TIME branch on a Python object,
-        # not on a tensor value -- it is safe.
-        # Do NOT hoist this sanitization out of the ``is None`` guard to "cover
-        # both paths": on the static path a genuine NaN in user data must keep
-        # propagating, because it is a data defect the caller has to see, not
-        # something a statistics layer may silently rewrite to 0.0.  Laundering
-        # it here would make a corrupt window indistinguishable from a constant
-        # one.  Pinned by
-        # ``test_static_path_still_propagates_genuine_nan_inputs``.
-        # [SUPERSEDED IN PLACE 2026-08-19 by
-        # plan-2026-08-18T140459-7991552f/D-050 -- the repair is now CONDITIONED
-        # on the input series being finite, so the dynamic path no longer
-        # launders a genuine NaN either.  Everything above still holds; only the
-        # predicate of the ``ops.where`` moved.  See the D-050 anchor below.]
-        # See decisions.md D-001 (and D-004/D-012 of
-        # plan-2026-08-18T073231-52a93f8c for the static branch this completes).
+        # The static branch above misses an unknown time axis, so repair the
+        # degenerate cases at VALUE level here. MEASURED before this existed: a
+        # tree_depth=3 PRISMModel traced at [None, None, 7] gave nan_frac == 1.0
+        # where the SAME model gave 0.0 eager. input_spec cannot close it
+        # (assert_input_compatibility accepts None) and ops.cond on a traced shape
+        # breaks under @tf.function. Do NOT hoist the repair out of the
+        # `static_len is None` guard: a genuine NaN on the static path must keep
+        # propagating. Narrowed by D-050 below. See decisions.md D-001.
         if static_len is None:
             # DECISION plan-2026-08-18T140459-7991552f/D-050
-            # The D-001 repair above was unconditional, so on the dynamic path
-            # it rewrote EVERY non-finite statistic to 0.0 -- including the ones
-            # a genuine NaN in the caller's data produced.  MEASURED at the
-            # commit before this one, ``FrequencyBandStatistics`` on a
-            # ``[2, 16, 3]`` all-ones batch with one NaN and one +inf sample
-            # injected: the STATIC path returned 9 NaN statistics, the SAME
-            # batch through ``tf.function([None, None, 3])`` returned 0 -- the
-            # corrupt series came back as exact zeros, indistinguishable from a
-            # constant one.  That is the very laundering the comment above
-            # forbids for the static path, happening one branch over.
-            # The discriminator is NOT the shape and NOT a wider ``input_spec``
-            # (``assert_input_compatibility`` accepts ``None`` -- measured, see
-            # above and ``plans/SYSTEM.md``): it is the INPUT VALUES.  The two
-            # degenerate cases D-001 exists for -- a length-0 or length-1 band
-            # -- are properties of the LENGTH, and in both of them every sample
-            # that does exist is finite.  A non-finite statistic computed from
-            # an all-finite series is therefore a length artifact and is
-            # repaired; a non-finite statistic computed from a series that
-            # already contained a NaN/inf is a data defect and PROPAGATES.
-            # ``ops.all`` over a length-0 axis is ``True`` (the AND identity),
-            # so the length-0 case still repairs -- checked, not assumed.
-            # The reduction is per ``(batch, channel)`` on purpose: a single
-            # corrupt channel must not suppress the repair for its siblings.
-            # Do NOT "simplify" this back to the unconditional ``ops.where``.
-            # Pinned in BOTH directions by
-            # ``TestDynamicPathDoesNotLaunderGenuineNaNs``.
-            # See decisions.md D-050.
-            series_is_finite = ops.all(ops.isfinite(inputs), axis=1)  # [b, c]
-            repairable = ops.expand_dims(series_is_finite, axis=-1)   # [b, c, 1]
+            # Repair only statistics computed from an all-finite series, per
+            # (batch, channel). MEASURED at the commit before this one, a
+            # [2, 16, 3] all-ones batch with one NaN and one +inf injected: the
+            # static path returned 9 NaN statistics while the SAME batch through
+            # tf.function([None, None, 3]) returned 0 -- a corrupt series came
+            # back as exact zeros. Do NOT simplify back to an unconditional
+            # ops.where. ops.all over a length-0 axis is True, so the length-0
+            # case still repairs. See decisions.md D-050.
+
+            # Shape [batch, channels].
+            series_is_finite = ops.all(ops.isfinite(inputs), axis=1)
+            # Shape [batch, channels, 1], broadcasting over the statistic axis.
+            repairable = ops.expand_dims(series_is_finite, axis=-1)
             stats = ops.where(
                 ops.logical_and(ops.logical_not(ops.isfinite(stats)), repairable),
                 ops.zeros_like(stats),
@@ -260,7 +247,12 @@ class FrequencyBandStatistics(keras.layers.Layer):
         return (batch_size, channels, self._num_stats)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "epsilon": self.epsilon,
@@ -275,47 +267,56 @@ class FrequencyBandStatistics(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class FrequencyBandRouter(keras.layers.Layer):
     """
-    Learnable router for computing frequency band importance weights.
+    Score frequency bands and turn the scores into importance weights.
 
-    Uses a lightweight MLP to compute importance scores for different
-    frequency bands based on their statistical properties. Scores are
-    normalized via temperature-scaled softmax:
+    Each band is reduced to six statistics, layer-normalized, and scored by a
+    small MLP. The MLP is SHARED across bands: one instance is called once per
+    band, so band count does not change the parameter count. The scores are
+    concatenated and normalized jointly:
 
         weight_k = softmax(score_k / temperature)
+
+    Because the softmax is joint, a NaN score in one band would spread to
+    every band. That is why :class:`FrequencyBandStatistics` defines values for
+    degenerate band lengths instead of letting NaN through.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: [band_1, ..., band_K]
+        Input: list of K bands, band_k [B, len_k, C]
+                       │
+                       ▼  (loop over k, weights shared)
+        ┌──────────────────────────────────────┐
+        │  FrequencyBandStatistics             │
+        │            │  [B, C, 6]              │
+        │            ▼                         │
+        │  LayerNormalization (axis=-1)        │
+        │            │  [B, C, 6]              │
+        │            ▼                         │
+        │  MLP (hidden_dim, gelu, out 1)       │
+        └──────────────┬───────────────────────┘
+                       │  score_k [B, C, 1]
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Concatenate on the last axis        │
+        └──────────────┬───────────────────────┘
+                       │  [B, C, K]
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  Softmax(scores / temperature)       │
+        └──────────────┬───────────────────────┘
                        │
                        ▼
-        ┌──────────────────────────────┐
-        │  For each band:              │
-        │    FrequencyBandStatistics   │
-        │           │                  │
-        │           ▼                  │
-        │    LayerNorm(statistics)     │
-        │           │                  │
-        │           ▼                  │
-        │    MLP(stats) ─► score       │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Softmax(scores / temp)      │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        Output: weights [batch, channels, K]
+        Output: weights [B, C, K], summing to 1 over K
 
     :param hidden_dim: Hidden dimension of the router MLP.
         Defaults to 64.
     :type hidden_dim: int
-    :param temperature: Temperature for softmax scaling. Lower values
-        produce sharper distributions. Defaults to 1.0.
+    :param temperature: Divisor applied to the scores before the softmax.
+        Lower values give a sharper distribution. Defaults to 1.0.
     :type temperature: float
-    :param dropout_rate: Dropout rate for the router MLP.
+    :param dropout_rate: Dropout rate inside the router MLP.
         Defaults to 0.1.
     :type dropout_rate: float
     :param kernel_initializer: Initializer for kernel weights.
@@ -324,6 +325,33 @@ class FrequencyBandRouter(keras.layers.Layer):
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
+
+    :raises ValueError: If ``hidden_dim`` is not > 0, or ``temperature`` is
+        not > 0.
+
+    Input shape:
+        A non-empty list of 3D tensors ``[batch, band_len_k, channels]``. The
+        band lengths may differ; the channel count may not.
+
+    Output shape:
+        3D tensor of shape ``[batch, channels, num_bands]``.
+
+    Example:
+        .. code-block:: python
+
+            router = FrequencyBandRouter(hidden_dim=32, temperature=0.5)
+            bands = [keras.random.normal((2, n, 3)) for n in (16, 8, 4)]
+            w = router(bands)
+            # w.shape == (2, 3, 3)
+
+    :ivar stats_layer: The shared :class:`FrequencyBandStatistics` instance.
+    :vartype stats_layer: FrequencyBandStatistics
+    :ivar stats_norm: LayerNormalization over the statistic axis. It keeps the
+        six statistics on a common scale, which stops the softmax saturating
+        when bands carry very different magnitudes.
+    :vartype stats_norm: keras.layers.LayerNormalization
+    :ivar router_mlp: The scoring MLP, shared across all bands.
+    :vartype router_mlp: keras.layers.Layer
     """
 
     def __init__(
@@ -335,6 +363,26 @@ class FrequencyBandRouter(keras.layers.Layer):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the three sub-layers.
+
+        :param hidden_dim: Hidden dimension of the router MLP.
+            Defaults to 64.
+        :type hidden_dim: int
+        :param temperature: Divisor applied to the scores before the softmax.
+            Defaults to 1.0.
+        :type temperature: float
+        :param dropout_rate: Dropout rate inside the router MLP.
+            Defaults to 0.1.
+        :type dropout_rate: float
+        :param kernel_initializer: Initializer for kernel weights.
+            Defaults to "glorot_uniform".
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Optional regularizer for kernel weights.
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param kwargs: Additional arguments for the Layer base class.
+        :raises ValueError: If ``hidden_dim`` or ``temperature`` is not > 0.
+        """
         super().__init__(**kwargs)
 
         if hidden_dim <= 0:
@@ -348,17 +396,18 @@ class FrequencyBandRouter(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Statistics extractor
+        # One statistics instance, reused for every band.
         self.stats_layer = FrequencyBandStatistics(name=f"{self.name}_stats")
 
-        # FIX: Normalize statistics before MLP to prevent softmax overflow
-        # and handle varying scales of inputs (e.g. padded zeros vs real data).
+        # Normalize the statistics before the MLP. Bands carry very different
+        # magnitudes (padded zeros against real data), and without this the
+        # joint softmax saturates.
         self.stats_norm = layers.LayerNormalization(
             name=f"{self.name}_stats_norm",
             axis=-1
         )
 
-        # Router MLP (shared across bands)
+        # One MLP, called once per band, so the scoring weights are shared.
         self.router_mlp = create_ffn_layer(
             "mlp",
             hidden_dim=hidden_dim,
@@ -372,21 +421,26 @@ class FrequencyBandRouter(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """
-        Build the layer and initialize sub-layer weights.
+        Build the three sub-layers.
 
-        :param input_shape: List of input shapes for each frequency band.
+        Only the FIRST band shape is used. The statistics layer has no weights
+        and reduces the time axis away, so the norm and the MLP see
+        ``[batch, channels, 6]`` whatever the band lengths are.
+
+        :param input_shape: List of input shapes, one per frequency band.
         :type input_shape: List[Tuple[Optional[int], ...]]
+        :raises ValueError: If ``input_shape`` is not a non-empty list.
         """
         if not isinstance(input_shape, list) or len(input_shape) == 0:
             raise ValueError(
                 "input_shape must be a non-empty list of shapes"
             )
 
-        # Build stats layer with first band shape
+        # The statistics layer is built on the first band shape.
         first_band_shape = input_shape[0]
         self.stats_layer.build(first_band_shape)
 
-        # Build norm and router MLP
+        # The norm and the MLP both operate on the statistics shape.
         channels = first_band_shape[-1]
         stats_shape = (first_band_shape[0], channels, 6)
 
@@ -401,32 +455,30 @@ class FrequencyBandRouter(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Compute importance weights for frequency bands.
+        Score every band and normalize the scores across bands.
 
-        :param inputs: List of frequency band tensors.
+        :param inputs: List of frequency band tensors, each
+            ``[batch, band_len, channels]``.
         :type inputs: List[keras.KerasTensor]
-        :param training: Training mode flag.
+        :param training: Training mode flag, forwarded to the MLP dropout.
         :type training: Optional[bool]
-        :return: Importance weights of shape [batch, channels, num_bands].
+        :return: Importance weights of shape [batch, channels, num_bands],
+            summing to 1 over the band axis.
         :rtype: keras.KerasTensor
         """
         scores = []
         for band in inputs:
-            # Compute statistics for this band
             stats = self.stats_layer(band, training=training)
 
-            # FIX: Normalize statistics
             stats = self.stats_norm(stats)
 
-            # Get raw score from MLP
+            # Shape [batch, channels, 1].
             score = self.router_mlp(stats, training=training)
-            # score shape: [batch, channels, 1]
             scores.append(score)
 
-        # Stack scores: [batch, channels, num_bands]
+        # Shape [batch, channels, num_bands].
         scores = ops.concatenate(scores, axis=-1)
 
-        # Apply temperature-scaled softmax
         weights = ops.softmax(scores / self.temperature, axis=-1)
         return weights
 
@@ -448,7 +500,12 @@ class FrequencyBandRouter(keras.layers.Layer):
         return (batch_size, channels, num_bands)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "hidden_dim": self.hidden_dim,
@@ -467,56 +524,62 @@ class FrequencyBandRouter(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMNode(keras.layers.Layer):
     """
-    Single PRISM node combining wavelet decomposition and adaptive weighting.
+    Decompose one time segment into bands and recombine them by weight.
 
-    Processes a time segment by decomposing it into frequency bands via Haar
-    DWT, computing importance weights for each band through a learned router,
-    and reconstructing a weighted representation by interpolating all bands
-    to a common length and summing them with the computed weights.
+    The segment goes through a Haar DWT, giving one detail band per level plus
+    a final approximation band. The router scores those bands. Every band is
+    then linearly interpolated back to the input length and summed with its
+    own weight. The output has the same shape as the input, so the node is a
+    length-preserving transform, not a downsampler.
+
+    The band weight is per (batch, channel) and is broadcast over time: a
+    channel gets one weight per band for the whole segment.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: time segment [batch, seq_len, channels]
+        Input: time segment [B, seq_len, C]
                         │
                         ▼
-        ┌───────────────────────────────────┐
-        │  HaarWaveletDecomposition         │
-        │  ─► [approx, detail_1, ..., det_K]│
-        └───────────────┬───────────────────┘
-                        │
-                ┌───────┴───────┐
-                │               │
-                ▼               ▼
-        ┌──────────────┐  ┌──────────────────┐
-        │  Interpolate │  │ FrequencyBand    │
-        │  all bands   │  │ Router ─► weights│
-        │  to seq_len  │  └────────┬─────────┘
-        └──────┬───────┘           │
-               │                   │
-               └───────┬───────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Weighted sum of all bands   │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        Output: processed [batch, seq_len, channels]
+        ┌────────────────────────────────────────┐
+        │  HaarWaveletDecomposition (K levels)   │
+        └────────────────┬───────────────────────┘
+                         │ K+1 bands, band_k [B, len_k, C]
+                 ┌───────┴────────┐
+                 │                │
+                 ▼                ▼
+        ┌─────────────────┐  ┌──────────────────────┐
+        │ _interpolate_   │  │ FrequencyBandRouter  │
+        │ band to seq_len │  └──────────┬───────────┘
+        └────────┬────────┘             │ [B, C, K+1]
+                 │ [B, seq_len, C]      │
+                 └───────┬──────────────┘
+                         │
+                         ▼
+        ┌────────────────────────────────────────┐
+        │  sum_k band_k * weight[:, :, k]        │
+        │  weight broadcast over the time axis   │
+        └────────────────┬───────────────────────┘
+                         │
+                         ▼
+        Output: processed [B, seq_len, C]
 
-    :param num_wavelet_levels: Number of Haar DWT decomposition levels,
-        producing ``num_wavelet_levels + 1`` bands (one detail band per level
-        plus the final approximation band). Defaults to 3. Each level
-        floor-halves the length, so the deepest band is
-        ``seq_len // 2 ** num_wavelet_levels`` long; at 1 it is statistically
-        degenerate and at 0 the configuration is unrepresentable (see
-        :class:`FrequencyBandStatistics` and ``PRISMModel.__init__``).
+    The router reads the DECOMPOSED bands, not the raw input, so both arrows
+    out of the decomposition carry the same K+1 band tensors.
+
+    :param num_wavelet_levels: Number of Haar DWT levels. This gives
+        ``num_wavelet_levels + 1`` bands: one detail band per level plus the
+        final approximation band. Defaults to 3. Each level floor-halves the
+        length, so the deepest band is ``seq_len // 2 ** num_wavelet_levels``
+        long. At length 1 that band is statistically degenerate and at length 0
+        the configuration is unusable. See :class:`FrequencyBandStatistics` and
+        ``PRISMModel.__init__``, which rejects such combinations.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for the router MLP.
         Defaults to 64.
     :type router_hidden_dim: int
-    :param router_temperature: Temperature for router softmax.
+    :param router_temperature: Temperature for the router softmax.
         Defaults to 1.0.
     :type router_temperature: float
     :param dropout_rate: Dropout rate for the router.
@@ -528,6 +591,24 @@ class PRISMNode(keras.layers.Layer):
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor of shape ``[batch, seq_len, channels]``.
+
+    Output shape:
+        3D tensor of shape ``[batch, seq_len, channels]``, same as the input.
+
+    Example:
+        .. code-block:: python
+
+            node = PRISMNode(num_wavelet_levels=2, router_hidden_dim=32)
+            y = node(keras.random.normal((2, 32, 3)))
+            # y.shape == (2, 32, 3)
+
+    :ivar wavelet: The Haar decomposition sub-layer.
+    :vartype wavelet: HaarWaveletDecomposition
+    :ivar router: The band-scoring sub-layer.
+    :vartype router: FrequencyBandRouter
     """
 
     def __init__(
@@ -540,6 +621,28 @@ class PRISMNode(keras.layers.Layer):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the wavelet and router sub-layers.
+
+        :param num_wavelet_levels: Number of Haar DWT levels.
+            Defaults to 3.
+        :type num_wavelet_levels: int
+        :param router_hidden_dim: Hidden dimension for the router MLP.
+            Defaults to 64.
+        :type router_hidden_dim: int
+        :param router_temperature: Temperature for the router softmax.
+            Defaults to 1.0.
+        :type router_temperature: float
+        :param dropout_rate: Dropout rate for the router.
+            Defaults to 0.1.
+        :type dropout_rate: float
+        :param kernel_initializer: Initializer for kernel weights.
+            Defaults to "glorot_uniform".
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Optional regularizer for kernel weights.
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param kwargs: Additional arguments for the Layer base class.
+        """
         super().__init__(**kwargs)
 
         self.num_wavelet_levels = num_wavelet_levels
@@ -549,13 +652,13 @@ class PRISMNode(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
-        # Wavelet decomposition
+        # Haar DWT: one detail band per level plus one approximation band.
         self.wavelet = HaarWaveletDecomposition(
             num_levels=num_wavelet_levels,
             name=f"{self.name}_wavelet"
         )
 
-        # Importance router
+        # Scores the bands the decomposition above produces.
         self.router = FrequencyBandRouter(
             hidden_dim=router_hidden_dim,
             temperature=router_temperature,
@@ -568,14 +671,14 @@ class PRISMNode(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer and initialize sub-layer weights.
+        Build the wavelet layer, then the router on the band shapes it emits.
 
-        :param input_shape: Input shape tuple.
+        :param input_shape: Input shape tuple ``[batch, seq_len, channels]``.
         :type input_shape: Tuple[Optional[int], ...]
         """
         self.wavelet.build(input_shape)
 
-        # Get output shapes from wavelet
+        # The router is built on the list of band shapes, not on the input.
         band_shapes = self.wavelet.compute_output_shape(input_shape)
         self.router.build(band_shapes)
 
@@ -587,41 +690,44 @@ class PRISMNode(keras.layers.Layer):
             target_len: int
     ) -> keras.KerasTensor:
         """
-        Interpolate a frequency band to target length using linear interpolation.
+        Resample a band to ``target_len`` by linear interpolation over time.
+
+        The branch is an ``ops.cond`` on the LENGTHS, which is graph-safe,
+        rather than a Python ``if`` on a traced shape.
 
         :param band: Band tensor of shape [batch, band_len, channels].
         :type band: keras.KerasTensor
         :param target_len: Target sequence length.
         :type target_len: int
         :return: Interpolated tensor of shape [batch, target_len, channels].
+            The band is returned unchanged when it is already ``target_len``
+            long.
         :rtype: keras.KerasTensor
         """
         band_len = ops.shape(band)[1]
 
-        # If already target length, return as-is
         def do_interpolate():
-            # Linear indices for target positions
-            # Map [0, target_len-1] -> [0, band_len-1]
+            # Map target position [0, target_len-1] onto [0, band_len-1].
             target_indices = ops.cast(
                 ops.arange(target_len),
                 band.dtype
             )
-            # Safe division: max(..., 1) ensures no divide-by-zero
+            # maximum(..., 1) keeps target_len == 1 from dividing by zero.
             scale = ops.cast(band_len - 1, band.dtype) / ops.cast(
                 ops.maximum(target_len - 1, 1),
                 band.dtype
             )
             source_indices = target_indices * scale
 
-            # Floor and ceil indices
+            # The two neighbours of each source position.
             floor_idx = ops.cast(ops.floor(source_indices), "int32")
             ceil_idx = ops.minimum(floor_idx + 1, band_len - 1)
 
-            # Interpolation weights
+            # Fractional distance to the floor neighbour, shaped to broadcast
+            # over batch and channels.
             alpha = source_indices - ops.cast(floor_idx, band.dtype)
             alpha = ops.expand_dims(ops.expand_dims(alpha, 0), -1)
 
-            # Gather and interpolate
             floor_vals = ops.take(band, floor_idx, axis=1)
             ceil_vals = ops.take(band, ceil_idx, axis=1)
 
@@ -643,39 +749,36 @@ class PRISMNode(keras.layers.Layer):
             mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Process input through wavelet decomposition and weighted reconstruction.
+        Decompose, score the bands, and recombine them at the input length.
 
         :param inputs: Input tensor of shape [batch, seq_len, channels].
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
+        :param training: Training mode flag, forwarded to the wavelet and the
+            router.
         :type training: Optional[bool]
-        :param mask: Optional mask.
+        :param mask: Optional mask. Not forwarded. The bands are downsampled,
+            so a per-timestep mask does not line up with them; padded zeros are
+            absorbed by the ``sqrt(var + epsilon)`` form in
+            :class:`FrequencyBandStatistics` instead.
         :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
         """
         target_len = ops.shape(inputs)[1]
 
-        # Decompose into frequency bands
         bands = self.wavelet(inputs, training=training)
 
-        # Compute importance weights
-        # Note: Mask is not passed to wavelet bands as they are downsampled,
-        # but FrequencyBandStatistics handles potential padding stability issues
-        # internally via the std calculation fix.
+        # Shape [batch, channels, num_bands].
         weights = self.router(bands, training=training)
-        # weights shape: [batch, channels, num_bands]
 
-        # Interpolate all bands to input length and weight
         weighted_sum = ops.zeros_like(inputs)
         for i, band in enumerate(bands):
-            # Interpolate band to target length
             band_interp = self._interpolate_band(band, target_len)
 
-            # Get weight for this band: [batch, channels, 1] -> [batch, 1, channels]
+            # [batch, channels] -> [batch, 1, channels], so one weight per
+            # channel broadcasts across the whole time axis.
             band_weight = ops.expand_dims(weights[:, :, i], axis=1)
 
-            # Weight and accumulate
             weighted_sum = weighted_sum + band_interp * band_weight
 
         return weighted_sum
@@ -695,7 +798,12 @@ class PRISMNode(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "num_wavelet_levels": self.num_wavelet_levels,
@@ -715,71 +823,92 @@ class PRISMNode(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMTimeTree(keras.layers.Layer):
     """
-    Hierarchical time decomposition with PRISM nodes at each level.
+    Run a PRISM node bank over the sequence once per tree level.
 
-    Builds a binary tree over the time domain by splitting the signal into
-    overlapping segments. Each node processes its segment through wavelet
-    decomposition and adaptive weighting. Segments are stitched back together
-    using linear cross-fade blending in the overlap regions.
+    Each level splits the sequence into overlapping segments, sends each
+    segment through its own :class:`PRISMNode`, and stitches the results back
+    to full length with a linear cross-fade over the overlaps.
 
-    The traversal is a LOOP over levels, not a recursion over children: level
-    ``i`` re-splits the FULL, re-stitched sequence into ``2 ** i`` segments
-    rather than bisecting level ``i - 1``'s outputs. The deepest leaf's length
-    therefore comes from ONE application of :meth:`_segment_len` at
-    ``num_segments = 2 ** tree_depth`` -- not from ``tree_depth`` successive
-    halvings. Anything reasoning about the deepest segment (band lengths,
-    configuration validation) must use the one-shot form.
+    The traversal is a LOOP over levels, not a recursion over children. Level
+    ``i`` re-splits the FULL, re-stitched output of level ``i - 1`` into
+    ``2 ** i`` segments. It does not bisect level ``i - 1``'s segments. So the
+    deepest segment length comes from ONE call to :meth:`_segment_len` at
+    ``num_segments = 2 ** tree_depth``, not from ``tree_depth`` successive
+    halvings. Anything reasoning about the deepest segment, such as band
+    lengths or configuration validation, must use that one-shot form.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: [batch, T, channels]
+        Input: [B, T, C]
                        │
                        ▼
-        ┌──────────────────────────────────┐
-        │  Level 0: Full sequence          │
-        │    └─► PRISMNode                 │
-        └──────────────┬───────────────────┘
-                       │
+        ┌──────────────────────────────────────┐
+        │  Level 0: 1 segment (no split)       │
+        │    PRISMNode x1                      │
+        └──────────────┬───────────────────────┘
+                       │ [B, T, C]  full length again
                        ▼
-        ┌──────────────────────────────────┐
-        │  Level 1: Split ─► 2 segments    │
-        │    ├─► PRISMNode (left half)     │
-        │    └─► PRISMNode (right half)    │
-        │    Stitch with cross-fade        │
-        └──────────────┬───────────────────┘
-                       │
+        ┌──────────────────────────────────────┐
+        │  Level 1: split the WHOLE sequence   │
+        │    into 2 overlapping segments       │
+        │    PRISMNode x2                      │
+        │    stitch with cross-fade ─► [B,T,C] │
+        └──────────────┬───────────────────────┘
+                       │ [B, T, C]  full length again
                        ▼
-        ┌──────────────────────────────────┐
-        │  Level 2: Split ─► 4 segments    │
-        │    ├─► PRISMNode x4              │
-        │    Stitch with cross-fade        │
-        └──────────────┬───────────────────┘
-                       │
+        ┌──────────────────────────────────────┐
+        │  Level i: split the WHOLE sequence   │
+        │    into 2**i overlapping segments    │
+        │    PRISMNode x 2**i                  │
+        │    stitch with cross-fade ─► [B,T,C] │
+        └──────────────┬───────────────────────┘
+                       │ ... up to i == tree_depth
                        ▼
-        Output: [batch, T, channels]
+        Output: [B, T, C]
 
-    :param tree_depth: Depth of the binary time tree. Depth 0 means single
-        node (no splitting). Defaults to 2. This knob has no valid range of its
-        own: with ``overlap_ratio`` and the input length it fixes the deepest
-        segment length, which ``num_wavelet_levels`` then floor-halves down to
-        the deepest band. ``PRISMModel.__init__`` refuses combinations whose
-        deepest band would have length 0; this layer does not validate.
+    Every level re-enters at full length T. Level ``i`` never receives level
+    ``i - 1``'s segments.
+
+    **Segment geometry at one level:**
+
+    .. code-block:: text
+
+        seq_len = 96, overlap_ratio = 0.25, num_segments = 4
+        overlap_size = 6, non_overlap_len = 19, segment_len = 25
+
+        segment   start   end   length
+              0       0    25       25
+              1      19    44       25
+              2      38    63       25
+              3      57    96       39   (runs to seq_len)
+
+    The last segment is longer than its siblings, so the remainder the floor
+    division in ``non_overlap_len`` drops is still covered. Adjacent segments
+    share ``overlap_size`` positions, and the cross-fade weights over those
+    positions sum to 1.
+
+    :param tree_depth: Depth of the binary time tree. Depth 0 means one node
+        and no splitting. Defaults to 2. The knob has no valid range of its
+        own. Together with ``overlap_ratio`` and the input length it fixes the
+        deepest segment length, which ``num_wavelet_levels`` then floor-halves
+        down to the deepest band. ``PRISMModel.__init__`` rejects combinations
+        whose deepest band would have length 0. This layer does not validate.
     :type tree_depth: int
-    :param overlap_ratio: Ratio of overlap between adjacent segments.
-        Value in [0, 0.5). Defaults to 0.25.
+    :param overlap_ratio: Overlap between adjacent segments, in [0, 0.5).
+        Defaults to 0.25.
     :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels per node, producing
-        ``num_wavelet_levels + 1`` bands. Defaults to 3. Each level floor-halves
-        the band length, so the deepest band of the deepest node is
-        ``segment_len // 2 ** num_wavelet_levels`` -- this trades directly
+    :param num_wavelet_levels: Number of Haar DWT levels per node, giving
+        ``num_wavelet_levels + 1`` bands. Defaults to 3. Each level
+        floor-halves the band length, so the deepest band of the deepest node
+        is ``segment_len // 2 ** num_wavelet_levels``. This trades directly
         against ``tree_depth`` and the input length.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for router MLPs.
         Defaults to 64.
     :type router_hidden_dim: int
-    :param router_temperature: Temperature for router softmax.
+    :param router_temperature: Temperature for the router softmax.
         Defaults to 1.0.
     :type router_temperature: float
     :param dropout_rate: Dropout rate for routers.
@@ -791,6 +920,27 @@ class PRISMTimeTree(keras.layers.Layer):
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
+
+    :raises ValueError: If ``tree_depth`` is negative, or ``overlap_ratio`` is
+        outside [0, 0.5).
+
+    Input shape:
+        3D tensor of shape ``[batch, seq_len, channels]``.
+
+    Output shape:
+        3D tensor of shape ``[batch, seq_len, channels]``, same as the input.
+
+    Example:
+        .. code-block:: python
+
+            tree = PRISMTimeTree(tree_depth=2, num_wavelet_levels=2)
+            y = tree(keras.random.normal((2, 96, 3)))
+            # y.shape == (2, 96, 3)
+
+    :ivar all_nodes: Every node of every level in one FLAT list, ordered level
+        by level. A flat list is used so Keras tracks all sub-layers for
+        serialization; a nested list would lose their weights.
+    :vartype all_nodes: List[PRISMNode]
     """
 
     def __init__(
@@ -805,6 +955,35 @@ class PRISMTimeTree(keras.layers.Layer):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create every node of every level.
+
+        :param tree_depth: Depth of the binary time tree. Defaults to 2.
+        :type tree_depth: int
+        :param overlap_ratio: Overlap between adjacent segments, in [0, 0.5).
+            Defaults to 0.25.
+        :type overlap_ratio: float
+        :param num_wavelet_levels: Number of Haar DWT levels per node.
+            Defaults to 3.
+        :type num_wavelet_levels: int
+        :param router_hidden_dim: Hidden dimension for router MLPs.
+            Defaults to 64.
+        :type router_hidden_dim: int
+        :param router_temperature: Temperature for the router softmax.
+            Defaults to 1.0.
+        :type router_temperature: float
+        :param dropout_rate: Dropout rate for routers.
+            Defaults to 0.1.
+        :type dropout_rate: float
+        :param kernel_initializer: Initializer for kernel weights.
+            Defaults to "glorot_uniform".
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Optional regularizer for kernel weights.
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param kwargs: Additional arguments for the Layer base class.
+        :raises ValueError: If ``tree_depth`` is negative, or
+            ``overlap_ratio`` is outside [0, 0.5).
+        """
         super().__init__(**kwargs)
 
         if tree_depth < 0:
@@ -824,8 +1003,9 @@ class PRISMTimeTree(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.supports_masking = True
 
-        # Create PRISM nodes for each level of the tree
-        # Use a flat list so Keras tracks all layers properly for serialization
+        # One node per segment per level, in a FLAT list. Keras does not track
+        # sub-layers held in a nested list, and untracked layers lose their
+        # weights on save.
         self.all_nodes: List[PRISMNode] = []
 
         for level in range(tree_depth + 1):
@@ -843,27 +1023,14 @@ class PRISMTimeTree(keras.layers.Layer):
                 self.all_nodes.append(node)
 
     # DECISION plan-2026-08-18T073231-52a93f8c/D-001
-    # Three copies of this arithmetic had drifted apart. ``build()`` sized every
-    # node with ``(seq_len + overlap_size * (n - 1)) // n`` (note the PLUS)
-    # while both runtime sites used ``(seq_len - overlap_size * (n - 1)) // n``.
-    # They disagree on ordinary configurations -- measured at
-    # ``overlap_ratio=0.25``: ``context_len=96`` gives build 28 vs runtime 25 at
-    # level 2 and build 14 vs runtime 12 at level 3; ``context_len=256`` gives
-    # 76/68, 39/33 and 19/16 at levels 2/3/4.
-    # The RUNTIME form is NORMATIVE -- it sizes the tensors the nodes actually
-    # receive -- so this helper reproduces it and ``build()`` now follows it.
-    # Do NOT "restore" the build-time PLUS form, and do NOT "simplify away" the
-    # float round-trip in ``overlap_size``: the runtime path multiplies in the
-    # tensor's compute dtype and truncates toward zero on the cast to int32, and
-    # reproducing that truncation exactly is what keeps the two in step.
+    # One helper for the segment geometry, reproducing the RUNTIME form
+    # (seq_len - overlap_size * (n - 1)) // n. build() used a PLUS and
+    # disagreed: measured at overlap_ratio=0.25, context_len=96 gave build 28 vs
+    # runtime 25 at level 2 and build 14 vs runtime 12 at level 3. Do NOT
+    # restore the PLUS form and do NOT drop the float round-trip in
+    # overlap_size -- it reproduces the runtime truncation to int32. The span
+    # applies to segments 0..n-2; the last runs to seq_len (see D-014).
     # See decisions.md D-001.
-    #
-    # SUPERSEDED IN PART 2026-08-18 (plan-2026-08-18T140459-7991552f/D-014):
-    # this helper is still the single source of the geometry and its arithmetic
-    # is UNCHANGED, but the span it describes now applies to segments
-    # ``0 .. num_segments - 2`` only. The LAST segment is extended to end at
-    # ``seq_len`` so the remainder the floor division discards is covered; see
-    # the D-014 anchor in ``_split_with_overlap``.
     @staticmethod
     def _segment_len(
             seq_len: int,
@@ -874,11 +1041,11 @@ class PRISMTimeTree(keras.layers.Layer):
         """
         Compute the overlapping-segment geometry for one split.
 
-        Single source of truth for the segment arithmetic shared by
-        :meth:`build`, :meth:`_split_with_overlap` and
-        :meth:`_stitch_with_crossfade`. Pure Python over ints; it mirrors the
-        runtime expression exactly, including the truncating cast of
-        ``overlap_size`` to int32.
+        This is the single source of the segment arithmetic. :meth:`build`,
+        :meth:`_split_with_overlap` and :meth:`_stitch_with_crossfade` all call
+        it, so their offsets cannot drift apart. It is pure Python over ints
+        and mirrors the runtime expression exactly, including the truncating
+        cast of ``overlap_size`` to int32.
 
         :param seq_len: Length of the sequence being split.
         :type seq_len: int
@@ -890,10 +1057,11 @@ class PRISMTimeTree(keras.layers.Layer):
             compute dtype of the runtime tensor. Defaults to ``"float32"``.
         :type dtype: str
         :return: Tuple of ``(non_overlap_len, overlap_size, segment_len)``,
-            where ``segment_len == non_overlap_len + overlap_size`` and
-            segment ``i`` spans ``[i * non_overlap_len, i * non_overlap_len +
-            segment_len)`` for every ``i`` except the last, which is extended to
-            ``[i * non_overlap_len, seq_len)`` (see ``_split_with_overlap``).
+            where ``segment_len == non_overlap_len + overlap_size``. Segment
+            ``i`` spans ``[i * non_overlap_len, i * non_overlap_len +
+            segment_len)``. The last segment is the exception: it runs to
+            ``[i * non_overlap_len, seq_len)``. See
+            :meth:`_split_with_overlap`.
         :rtype: Tuple[int, int, int]
         """
         float_type = np.dtype(keras.backend.standardize_dtype(dtype)).type
@@ -910,9 +1078,13 @@ class PRISMTimeTree(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build all PRISM nodes with appropriate segment shapes.
+        Build every node at the segment shape it will be handed.
 
-        :param input_shape: Input shape tuple.
+        The last node of each level is built LONGER than its siblings, because
+        its segment runs to the end of the sequence. When the time axis is
+        unknown, every node is built with a ``None`` length instead.
+
+        :param input_shape: Input shape tuple ``[batch, seq_len, channels]``.
         :type input_shape: Tuple[Optional[int], ...]
         """
         seq_len = input_shape[1]
@@ -921,24 +1093,22 @@ class PRISMTimeTree(keras.layers.Layer):
 
         node_idx_counter = 0
 
-        # Build nodes level by level
         for level in range(self.tree_depth + 1):
             num_nodes = 2 ** level
 
-            # Determine segment shape for this level
             if seq_len is not None:
                 if num_nodes > 1:
-                    # Compute segment length with overlap. Same helper the
-                    # forward pass uses, so a node is built for exactly the
-                    # length it will be handed (see _segment_len's anchor).
+                    # The same helper the forward pass uses, so a node is built
+                    # for exactly the length it will be handed. See the
+                    # _segment_len anchor.
                     non_overlap_len, _, segment_len = self._segment_len(
                         seq_len, self.overlap_ratio, num_nodes,
                         dtype=self.compute_dtype
                     )
                     segment_shape = (batch_size, segment_len, channels)
-                    # The LAST node of the level is handed the remainder the
-                    # floor division in ``non_overlap_len`` discards, so it is
-                    # built LONGER than its siblings. See the D-014 anchor in
+                    # The LAST node of the level also gets the remainder the
+                    # floor division in non_overlap_len discards, so it is built
+                    # LONGER than its siblings. See the D-014 anchor in
                     # _split_with_overlap.
                     last_segment_shape = (
                         batch_size,
@@ -952,7 +1122,6 @@ class PRISMTimeTree(keras.layers.Layer):
                 segment_shape = (batch_size, None, channels)
                 last_segment_shape = segment_shape
 
-            # Build all nodes in this level
             for node_in_level in range(num_nodes):
                 node_shape = (
                     last_segment_shape
@@ -970,17 +1139,17 @@ class PRISMTimeTree(keras.layers.Layer):
             num_segments: int
     ) -> List[keras.KerasTensor]:
         """
-        Split input into overlapping segments.
+        Split the sequence into overlapping segments.
 
         :param x: Input tensor of shape [batch, seq_len, channels].
         :type x: keras.KerasTensor
-        :param num_segments: Number of segments to create.
+        :param num_segments: Number of segments to create. A value of 1
+            returns the input unchanged, in a one-element list.
         :type num_segments: int
         :return: List of ``num_segments`` segment tensors. The first
-            ``num_segments - 1`` are ``segment_len`` long; the last runs to the
-            end of the sequence and is therefore ``>= segment_len``, absorbing
-            the remainder discarded by the floor division in
-            ``non_overlap_len``.
+            ``num_segments - 1`` are ``segment_len`` long. The last runs to the
+            end of the sequence, so it is ``>= segment_len``: it absorbs the
+            remainder the floor division in ``non_overlap_len`` discards.
         :rtype: List[keras.KerasTensor]
         """
         if num_segments == 1:
@@ -1006,31 +1175,13 @@ class PRISMTimeTree(keras.layers.Layer):
             segment_len = non_overlap_len + overlap_size
 
         # DECISION plan-2026-08-18T140459-7991552f/D-014
-        # The LAST segment runs to the END of the sequence, not to
-        # ``start_idx + segment_len``. ``non_overlap_len`` in ``_segment_len``
-        # is a FLOOR division and the remainder it discards was reclaimed by
-        # nothing: the last segment stopped at
-        # ``num_segments * non_overlap_len + overlap_size`` and
-        # ``_stitch_with_crossfade`` zero-pads out to ``target_len``, so every
-        # trailing position came out EXACTLY 0.0 -- not attenuated, ZERO.
-        # MEASURED at HEAD (``seq_len=96``, ``overlap_ratio=0.25``, all-ones
-        # input, identity segments): ``num_segments=2`` covered exactly (the
-        # control), ``num_segments=4`` left positions 82..95 at 0.0 and
-        # ``num_segments=8`` left positions 75..95 at 0.0.
-        # This is NOT an off-by-one to be "cleaned up" back to a uniform
-        # ``end_idx = start_idx + segment_len``. The last segment is
-        # deliberately LONGER than its siblings (39 vs 25 at ``num_segments=4``,
-        # ``seq_len=96``) and ``build()`` sizes the last node of every level to
-        # match. ``PRISMNode`` carries no weight with a time dimension, so the
-        # longer node is weight-identical to its siblings.
-        # ``_stitch_with_crossfade`` needs no change: it already reads
-        # ``seg_len = ops.shape(segment)[1]`` per segment, the extension is
-        # trailing (past the last fade band, which is anchored at the NEXT
-        # segment's start and is therefore unmoved), and the last segment never
-        # fades out -- so the newly covered tail lands at weight exactly 1.0
-        # with no partner to blend against, and the weights still sum to 1
-        # everywhere. Both the static and the dynamic branch above feed this one
-        # loop, so neither path can drift from the other.
+        # The LAST segment runs to the END of the sequence, so the remainder the
+        # floor division in non_overlap_len discards is covered. MEASURED at
+        # seq_len=96, overlap_ratio=0.25, identity segments: num_segments=4 left
+        # positions 82..95 at exactly 0.0 and num_segments=8 left 75..95 at 0.0.
+        # Do NOT "clean this up" to a uniform end_idx = start_idx + segment_len:
+        # the last segment is LONGER than its siblings (39 vs 25 at
+        # num_segments=4) and build() sizes the last node to match.
         # See decisions.md D-014.
         segments = []
         for i in range(num_segments):
@@ -1049,9 +1200,16 @@ class PRISMTimeTree(keras.layers.Layer):
             target_len: int
     ) -> keras.KerasTensor:
         """
-        Stitch segments back together using linear cross-fade blending.
+        Stitch segments back to full length with a linear cross-fade.
 
-        :param segments: List of processed segment tensors.
+        Each segment is weighted, zero-padded to ``target_len`` and summed. A
+        segment fades in over its first ``overlap_size`` positions unless it is
+        the first, and fades out over its last ``overlap_size`` positions
+        unless it is the last. The two ramps are complementary, so the weights
+        sum to 1 at every position.
+
+        :param segments: List of processed segment tensors. The last one may be
+            longer than the others.
         :type segments: List[keras.KerasTensor]
         :param target_len: Target output length.
         :type target_len: int
@@ -1063,9 +1221,8 @@ class PRISMTimeTree(keras.layers.Layer):
 
         num_segments = len(segments)
 
-        # Calculate overlap parameters. Mirrors _split_with_overlap exactly --
-        # the same helper, so the stitch offsets cannot drift from the split
-        # offsets (see _segment_len's anchor).
+        # The same helper _split_with_overlap uses, so the stitch offsets
+        # cannot drift from the split offsets. See the _segment_len anchor.
         if isinstance(target_len, int):
             non_overlap_len, overlap_size, _ = self._segment_len(
                 target_len, self.overlap_ratio, num_segments,
@@ -1083,7 +1240,7 @@ class PRISMTimeTree(keras.layers.Layer):
                 target_len - overlap_size * (num_segments - 1)
             ) // num_segments
 
-        # Create output tensor
+        # The accumulator every padded segment is added into.
         batch_size = ops.shape(segments[0])[0]
         channels = ops.shape(segments[0])[-1]
         output = ops.zeros((batch_size, target_len, channels), dtype=segments[0].dtype)
@@ -1092,32 +1249,32 @@ class PRISMTimeTree(keras.layers.Layer):
             start_idx = i * non_overlap_len
             seg_len = ops.shape(segment)[1]
 
-            # Create blending weights for overlap regions
+            # Start from a flat weight of 1 and multiply the ramps in.
             weights = ops.ones((1, seg_len, 1), dtype=segment.dtype)
 
-            # Fade in at start (except first segment)
+            # Every segment but the first fades in over its leading overlap.
             if i > 0:
-                # Use arange instead of linspace to avoid symbolic tensor issues with 'num'
+                # arange, not linspace: linspace needs a static 'num' and this
+                # length can be a symbolic tensor.
                 indices = ops.cast(ops.arange(overlap_size), segment.dtype)
                 steps = ops.cast(overlap_size - 1, segment.dtype)
-                # Avoid division by zero if overlap_size is 1
+                # Guards overlap_size == 1, where steps would be 0.
                 steps = ops.maximum(steps, 1.0)
                 fade_in = indices / steps
 
                 fade_in = ops.reshape(fade_in, (1, overlap_size, 1))
 
-                # Apply fade in to first overlap_size positions
+                # Ramp over the first overlap_size positions, flat after that.
                 mask_after = ops.ones((1, seg_len - overlap_size, 1), dtype=segment.dtype)
                 fade_mask = ops.concatenate([fade_in, mask_after], axis=1)
                 weights = weights * fade_mask
 
-            # Fade out at end (except last segment)
+            # Every segment but the last fades out over its trailing overlap.
             if i < num_segments - 1:
-                # Use arange manually
                 indices = ops.cast(ops.arange(overlap_size), segment.dtype)
                 steps = ops.cast(overlap_size - 1, segment.dtype)
                 steps = ops.maximum(steps, 1.0)
-                # fade out is 1.0 -> 0.0
+                # Runs 1.0 down to 0.0, the complement of the fade in above.
                 fade_out = 1.0 - (indices / steps)
 
                 fade_out = ops.reshape(fade_out, (1, overlap_size, 1))
@@ -1126,17 +1283,13 @@ class PRISMTimeTree(keras.layers.Layer):
                 fade_mask = ops.concatenate([mask_before, fade_out], axis=1)
                 weights = weights * fade_mask
 
-            # Add weighted segment to output
             weighted_segment = segment * weights
 
-            # Construct padding
             pad_left = start_idx
             pad_right = target_len - (start_idx + seg_len)
 
-            # Pad segment to full length
-            # padding argument for pad is [[top, bottom], [left, right], ...]
-            # batch dim: [0, 0], time dim: [pad_left, pad_right], channel dim: [0, 0]
-
+            # ops.pad takes one [before, after] pair per axis: batch [0, 0],
+            # time [pad_left, pad_right], channels [0, 0].
             padded_segment = ops.pad(
                 weighted_segment,
                 [[0, 0], [pad_left, pad_right], [0, 0]]
@@ -1153,13 +1306,20 @@ class PRISMTimeTree(keras.layers.Layer):
             mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Process input through the hierarchical time tree.
+        Run split, node bank and stitch once per level.
+
+        The loop feeds each level the previous level's re-stitched output at
+        full length. Level ``i`` therefore splits the WHOLE sequence into
+        ``2 ** i`` segments; it does not subdivide level ``i - 1``'s segments.
 
         :param inputs: Input tensor of shape [batch, seq_len, channels].
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
+        :param training: Training mode flag, forwarded to every node.
         :type training: Optional[bool]
-        :param mask: Optional mask.
+        :param mask: Optional mask. Not forwarded to the nodes. A mask cannot
+            be re-stitched through a cross-fade without inventing a rule for
+            the blended positions, so zero-padded segments are left to the
+            ``sqrt(var + epsilon)`` form in :class:`FrequencyBandStatistics`.
         :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
@@ -1169,30 +1329,22 @@ class PRISMTimeTree(keras.layers.Layer):
 
         node_idx_counter = 0
 
-        # Process through each level of the tree
         for level in range(self.tree_depth + 1):
             num_segments = 2 ** level
 
-            # Get nodes for this level
+            # all_nodes is flat, so this level's nodes are a contiguous slice.
             level_nodes = self.all_nodes[node_idx_counter: node_idx_counter + num_segments]
             node_idx_counter += num_segments
 
-            # Split into segments
+            # Split the FULL current sequence, not the previous segments.
             segments = self._split_with_overlap(current, num_segments)
 
-            # Split masks if present
-            # Note: We don't propagate mask logic deeply into splitting because
-            # re-stitching masks with crossfade is ambiguous.
-            # We rely on PRISMNode's internal stability fixes (safe std) to handle
-            # zero-padded segments that might result from splitting.
-
-            # Process each segment with its corresponding node
             processed_segments = []
             for segment, node in zip(segments, level_nodes):
                 processed = node(segment, training=training)
                 processed_segments.append(processed)
 
-            # Stitch segments back together
+            # Back to full length, ready for the next level's split.
             current = self._stitch_with_crossfade(processed_segments, target_len)
 
         return current
@@ -1212,7 +1364,12 @@ class PRISMTimeTree(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "tree_depth": self.tree_depth,
@@ -1234,66 +1391,67 @@ class PRISMTimeTree(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.prism_blocks")
 class PRISMLayer(keras.layers.Layer):
     """
-    Main PRISM layer combining hierarchical time-frequency decomposition.
+    The PRISM block: time tree, dropout, optional residual, optional norm.
 
-    Provides the complete PRISM processing pipeline including optional
-    projection layers and residual connections. The input passes through the
-    PRISMTimeTree for hierarchical wavelet processing, followed by dropout,
-    an optional residual connection, and optional output layer normalization.
+    This is the layer to use in a model. It wraps :class:`PRISMTimeTree` with
+    the surrounding plumbing. There is no projection: the channel count is
+    unchanged from input to output.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Input: [batch, context_len, channels]
+        Input: [B, context_len, C] ──────────────┐
+                       │                         │
+                       ▼                         │
+        ┌──────────────────────────────┐         │
+        │  PRISMTimeTree               │         │
+        └──────────────┬───────────────┘         │
+                       │                         │
+                       ▼                         │
+        ┌──────────────────────────────┐         │
+        │  Dropout(dropout_rate)       │         │
+        └──────────────┬───────────────┘         │
+                       │                         │
+                       ▼                         │
+        ┌──────────────────────────────┐         │
+        │  x + input                   │◄────────┘
+        └──────────────┬───────────────┘  (use_residual only)
                        │
                        ▼
         ┌──────────────────────────────┐
-        │  PRISMTimeTree               │
-        │  (hierarchical wavelet       │
-        │   decomposition + routing)   │
+        │  LayerNormalization(1e-6)    │  (use_output_norm only)
         └──────────────┬───────────────┘
                        │
                        ▼
-        ┌──────────────────────────────┐
-        │  Dropout                     │
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  Residual: output + input    │ ← (if use_residual=True)
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        ┌──────────────────────────────┐
-        │  LayerNormalization          │ ← (if use_output_norm=True)
-        └──────────────┬───────────────┘
-                       │
-                       ▼
-        Output: [batch, context_len, channels]
+        Output: [B, context_len, C]
+
+    ``output_norm`` is always CREATED, even when ``use_output_norm`` is False,
+    so a checkpoint stays loadable when the flag is flipped. It is only called
+    when the flag is True.
 
     :param tree_depth: Depth of the binary time tree.
         Defaults to 2.
     :type tree_depth: int
-    :param overlap_ratio: Overlap ratio for segment splitting.
+    :param overlap_ratio: Overlap between adjacent segments, in [0, 0.5).
         Defaults to 0.25.
     :type overlap_ratio: float
-    :param num_wavelet_levels: Number of Haar DWT levels.
+    :param num_wavelet_levels: Number of Haar DWT levels per node.
         Defaults to 3.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for routers.
         Defaults to 64.
     :type router_hidden_dim: int
-    :param router_temperature: Temperature for router softmax.
+    :param router_temperature: Temperature for the router softmax.
         Defaults to 1.0.
     :type router_temperature: float
-    :param dropout_rate: Dropout rate.
-        Defaults to 0.1.
+    :param dropout_rate: Dropout rate, used both by the routers and by the
+        dropout after the tree. Defaults to 0.1.
     :type dropout_rate: float
-    :param use_residual: Whether to use residual connection.
+    :param use_residual: Add the input back after the dropout.
         Defaults to True.
     :type use_residual: bool
-    :param use_output_norm: Whether to apply output normalization.
+    :param use_output_norm: Apply the output LayerNormalization.
         Defaults to True.
     :type use_output_norm: bool
     :param kernel_initializer: Initializer for kernel weights.
@@ -1302,6 +1460,28 @@ class PRISMLayer(keras.layers.Layer):
     :param kernel_regularizer: Optional regularizer for kernel weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor of shape ``[batch, context_len, channels]``.
+
+    Output shape:
+        3D tensor of shape ``[batch, context_len, channels]``, same as the
+        input.
+
+    Example:
+        .. code-block:: python
+
+            prism = PRISMLayer(tree_depth=2, num_wavelet_levels=2)
+            y = prism(keras.random.normal((2, 96, 3)))
+            # y.shape == (2, 96, 3)
+
+    :ivar time_tree: The hierarchical wavelet stage.
+    :vartype time_tree: PRISMTimeTree
+    :ivar output_norm: Output normalization, always created and conditionally
+        applied.
+    :vartype output_norm: keras.layers.LayerNormalization
+    :ivar dropout: Dropout applied to the tree output.
+    :vartype dropout: keras.layers.Dropout
     """
 
     def __init__(
@@ -1318,6 +1498,38 @@ class PRISMLayer(keras.layers.Layer):
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the tree, norm and dropout.
+
+        :param tree_depth: Depth of the binary time tree. Defaults to 2.
+        :type tree_depth: int
+        :param overlap_ratio: Overlap between adjacent segments, in [0, 0.5).
+            Defaults to 0.25.
+        :type overlap_ratio: float
+        :param num_wavelet_levels: Number of Haar DWT levels per node.
+            Defaults to 3.
+        :type num_wavelet_levels: int
+        :param router_hidden_dim: Hidden dimension for routers.
+            Defaults to 64.
+        :type router_hidden_dim: int
+        :param router_temperature: Temperature for the router softmax.
+            Defaults to 1.0.
+        :type router_temperature: float
+        :param dropout_rate: Dropout rate. Defaults to 0.1.
+        :type dropout_rate: float
+        :param use_residual: Add the input back after the dropout.
+            Defaults to True.
+        :type use_residual: bool
+        :param use_output_norm: Apply the output LayerNormalization.
+            Defaults to True.
+        :type use_output_norm: bool
+        :param kernel_initializer: Initializer for kernel weights.
+            Defaults to "glorot_uniform".
+        :type kernel_initializer: Union[str, keras.initializers.Initializer]
+        :param kernel_regularizer: Optional regularizer for kernel weights.
+        :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+        :param kwargs: Additional arguments for the Layer base class.
+        """
         super().__init__(**kwargs)
 
         self.tree_depth = tree_depth
@@ -1332,7 +1544,7 @@ class PRISMLayer(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.supports_masking = True
 
-        # Time tree processing
+        # The hierarchical wavelet stage.
         self.time_tree = PRISMTimeTree(
             tree_depth=tree_depth,
             overlap_ratio=overlap_ratio,
@@ -1345,13 +1557,14 @@ class PRISMLayer(keras.layers.Layer):
             name=f"{self.name}_time_tree"
         )
 
-        # Output normalization (always created for weight compatibility)
+        # Created even when use_output_norm is False, so flipping the flag
+        # does not change the weight set a checkpoint expects.
         self.output_norm = layers.LayerNormalization(
             epsilon=1e-6,
             name=f"{self.name}_output_norm"
         )
 
-        # Dropout
+        # Applied to the tree output, before the residual add.
         self.dropout = layers.Dropout(
             rate=dropout_rate,
             name=f"{self.name}_dropout"
@@ -1359,9 +1572,12 @@ class PRISMLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer and initialize sub-layer weights.
+        Build the time tree and the output norm.
 
-        :param input_shape: Input shape tuple.
+        The output norm is built whatever ``use_output_norm`` says, matching
+        the fact that it is always created.
+
+        :param input_shape: Input shape tuple ``[batch, seq_len, channels]``.
         :type input_shape: Tuple[Optional[int], ...]
         """
         self.time_tree.build(input_shape)
@@ -1375,28 +1591,26 @@ class PRISMLayer(keras.layers.Layer):
             mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Apply PRISM processing to the input sequence.
+        Run the tree, then dropout, then the two optional stages.
 
         :param inputs: Input tensor of shape [batch, seq_len, channels].
         :type inputs: keras.KerasTensor
-        :param training: Training mode flag.
+        :param training: Training mode flag, forwarded to the tree and the
+            dropout.
         :type training: Optional[bool]
-        :param mask: Optional mask.
+        :param mask: Optional mask, forwarded to the tree, which does not
+            propagate it into its nodes.
         :type mask: Optional[keras.KerasTensor]
         :return: Processed tensor of shape [batch, seq_len, channels].
         :rtype: keras.KerasTensor
         """
-        # Process through time tree
         x = self.time_tree(inputs, training=training, mask=mask)
 
-        # Apply dropout
         x = self.dropout(x, training=training)
 
-        # Residual connection
         if self.use_residual:
             x = x + inputs
 
-        # Output normalization
         if self.use_output_norm:
             x = self.output_norm(x)
 
@@ -1417,7 +1631,12 @@ class PRISMLayer(keras.layers.Layer):
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """
+        Return the constructor arguments needed to rebuild this layer.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "tree_depth": self.tree_depth,
