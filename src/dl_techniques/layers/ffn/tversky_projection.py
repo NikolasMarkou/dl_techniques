@@ -1,67 +1,59 @@
 """
-A projection layer based on Tversky's contrast model of similarity.
+A Dense-like projection scored by Tversky's contrast model of similarity.
 
-This layer serves as a psychologically plausible alternative to the standard
-fully-connected (Dense) layer. Whereas a Dense layer computes similarity
-based on a geometric dot product, which is inherently symmetric, this layer
-implements a differentiable version of Amos Tversky's feature-based model.
-This allows it to capture the asymmetric nature of human similarity judgments
-(e.g., a son resembles his father more than a father resembles his son) and
-learn complex, non-linear decision boundaries within a single layer.
+A Dense layer scores an input against each of its output units with a dot
+product, which is symmetric. This layer scores it with a differentiable form
+of Tversky's contrast model instead, which is not. Asymmetry is the point: it
+lets the layer say that `a` resembles `b` more than `b` resembles `a`.
 
-Architecture:
-    The layer's core operation is to compute a similarity score between an
-    input vector and a set of learned 'prototypes'. These prototypes are
-    analogous to the weight matrix in a standard Dense layer. The final output
-    is a vector of these similarity scores.
+**This layer takes rank-2 input only**, shape `(batch_size, input_dim)`.
+`build()` raises `ValueError` on any other rank. Wrap it in `TimeDistributed`
+to apply it per token or per pixel.
 
-    This computation relies on a third component: a learnable 'feature bank'.
-    This bank defines a universe of abstract features. An object (either an
-    input or a prototype) is considered to "possess" a feature if its dot
-    product with that feature's vector is positive. This mechanism provides a
-    differentiable bridge from continuous vector representations to the discrete,
-    set-based logic of Tversky's model.
+Three weight groups
+-------------------
+- `prototypes`, shape `(units, input_dim)`. One per output unit. This is the
+  analogue of a Dense kernel.
+- `feature_bank`, shape `(num_features, input_dim)`. A learned set of feature
+  directions, shared by inputs and prototypes.
+- `theta`, `alpha`, `beta`. Three learnable scalars.
 
-    The conceptual data flow is as follows:
-    1. An input vector is received.
-    2. For each prototype, the layer determines the sets of common and
-       distinctive features between the input and the prototype.
-    3. The salience of these feature sets is measured and combined according
-       to Tversky's formula.
-    4. The resulting similarity scores for all prototypes form the output vector.
+A vector "has" feature `i` when its dot product with `feature_bank[i]` is
+positive. That dot product is also the feature's salience for that vector.
+This is the bridge from continuous vectors to Tversky's set logic, and it is
+what makes the whole thing differentiable.
 
-Foundational Mathematics:
-    The similarity `S` of an object `a` to an object `b` is defined by
-    Tversky's contrast model:
+The score
+---------
+For input `a` and prototype `p`, with `A` and `B` the feature sets they have:
 
-        S(a, b) = θ * f(A ∩ B) - α * f(A - B) - β * f(B - A)
+    S(a, p) = theta * f(A n B) - alpha * f(A - B) - beta * f(B - A)
 
-    Where:
-    - `A` and `B` are the sets of features possessed by `a` and `b`, respectively.
-    - `f(A ∩ B)` is a measure of the salience of their common features.
-    - `f(A - B)` measures the salience of features distinctive to `a`.
-    - `f(B - A)` measures the salience of features distinctive to `b`.
-    - `θ`, `α`, and `β` are learnable scalar parameters that weight the
-      importance of commonality versus distinctiveness.
+`f(A n B)` sums a per-feature combination of the two saliences over the
+features both have. `intersection_reduction` picks the combination: the
+product, the minimum, or the mean.
 
-    This implementation makes the model differentiable by defining feature
-    presence and salience in terms of vector operations. The "salience" of a
-    feature for a given object is its positive dot product value. Consequently,
-    the set-based measures are calculated as follows:
-    - `f(A ∩ B)`: An aggregation (e.g., product, min) of the salience scores
-      for all features present in *both* the input and the prototype.
-    - `f(A - B)`: An aggregation of salience scores for features present in
-      the input but *not* the prototype.
+Both reduction names are checked by `create_ffn_layer('tversky', ...)`, which
+raises `ValueError` on a bad one. Constructing the class directly skips that
+check: a bad name survives `__init__` and `get_config()` and surfaces as a
+`NotImplementedError` from `call()`.
 
-    By learning the prototypes, the feature bank, and the contrast parameters
-    (θ, α, β) simultaneously via gradient descent, the network can discover a
-    task-specific, psychologically-grounded similarity metric.
+`f(A - B)` and `f(B - A)` depend on `difference_reduction`, and the two
+settings do not measure the same thing:
+
+- `'ignorematch'` is the literal set difference. `f(A - B)` sums `a`'s
+  salience over the features `a` has and `p` does not.
+- `'subtractmatch'`, the DEFAULT, does not look at one-sided features at all.
+  It sums the salience GAP over the features both have: `f(A - B)` sums
+  `sal_a - sal_p` over the common features where `a` scores higher.
+
+Read the class docstring's block-internals diagram for the exact expressions.
+All three `f(.)` terms are non-negative; the sign of the total comes from the
+three learnable scalars, which are unconstrained.
 
 References:
-    - The core theory of similarity:
-      Tversky, A. (1977). Features of similarity. Psychological Review.
-    - The neural network implementation:
-      Doumbouya, M. K. B., et al. (2025). Tversky Neural Networks. arXiv.
+    - Tversky, A. (1977). Features of similarity. Psychological Review.
+    - Doumbouya, M. K. B., et al. (2025). Tversky Neural Networks. arXiv.
 """
 
 import keras
@@ -72,70 +64,176 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 @keras.saving.register_keras_serializable()
 class TverskyProjectionLayer(keras.layers.Layer):
     """
-    Projection layer based on a differentiable Tversky similarity model.
+    Projection layer scored by a differentiable Tversky similarity model.
 
-    This layer replaces the standard dot-product of a Dense layer with a
-    learnable, differentiable version of Tversky's contrast model. It computes
-    similarity between an input vector and a set of learned prototypes based on
-    their common and distinctive features via a learned feature bank. The
-    similarity formula is ``S(a, b) = theta * f(A ∩ B) - alpha * f(A - B) - beta * f(B - A)``,
-    where feature presence is determined by positive dot products with the
-    feature bank vectors and all parameters are learned end-to-end.
+    Instead of a dot product, this layer scores the input against each of its
+    ``units`` learned prototypes with Tversky's contrast model:
+    ``S(a, b) = theta * f(A n B) - alpha * f(A - B) - beta * f(B - A)``.
+    A vector has feature ``i`` when its dot product with ``feature_bank[i]``
+    is positive, and that dot product is the feature's salience. Prototypes,
+    feature bank and the three scalars are all learned.
 
-    .. note::
-        This layer operates on **rank-2** inputs only, i.e. shape
-        ``(batch_size, input_dim)``. ``build()`` raises ``ValueError`` for any
-        other rank. Apply it per-token (e.g. via ``TimeDistributed``) if you
-        need to project sequence/spatial tensors.
+    .. warning::
+        This layer takes **rank-2** input only, shape
+        ``(batch_size, input_dim)``. ``build()`` raises ``ValueError`` for
+        every other rank, including rank 3. Wrap it in ``TimeDistributed`` to
+        apply it per token or per pixel.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
         ┌────────────────────────────────────────┐
-        │  Input (batch_size, input_dim)         │
-        │  (rank-2 only — see note below)        │
+        │  Input [B, D]   (rank 2 ONLY)          │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
-        │  Compute feature presence scores       │
-        │  input_dots = Input @ feature_bank^T   │
+        │  Feature salience, two matmuls         │
+        │  input_dots = Input @ feat_bank^T      │
+        │                          -> [B, NF]    │
         │  proto_dots = prototypes @ feat_bank^T │
+        │                          -> [U, NF]    │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
-        │  Set operations:                       │
-        │  f(A∩B), f(A-B), f(B-A)                │
-        │  via masks + aggregation               │
+        │  Broadcast to [B, U, NF] and reduce    │
+        │  over NF: f(AnB), f(A-B), f(B-A)       │
+        │                          -> [B, U]     │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
-        │  Tversky contrast:                     │
-        │  S = θ*f(A∩B) - α*f(A-B) - β*f(B-A)    │
+        │  Tversky contrast, scalar weights      │
+        │  S = θ*f(AnB) - α*f(A-B) - β*f(B-A)    │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
-        │  Output [..., units]                   │
+        │  Output [B, U]                         │
         └────────────────────────────────────────┘
+
+        B = batch, D = input_dim, U = units,
+        NF = num_features.
+
+    **Intersection and difference reduction (block internals):**
+
+    .. code-block:: text
+
+        a = input_dots[b, :]   one input row,     [NF]
+        p = proto_dots[u, :]   one prototype row, [NF]
+        in_A = a > 0           the input HAS the feature
+        in_B = p > 0           the prototype HAS the feature
+        both = in_A AND in_B
+
+        intersection_reduction, summed over `both`:
+            'product'  f(A n B) = sum a * p
+            'min'      f(A n B) = sum min(a, p)
+            'mean'     f(A n B) = sum (a + p) / 2
+
+        difference_reduction = 'ignorematch':
+            f(A - B) = sum over (in_A AND NOT in_B) of a
+            f(B - A) = sum over (in_B AND NOT in_A) of p
+
+        difference_reduction = 'subtractmatch'  (DEFAULT):
+            f(A - B) = sum over (both AND a > p) of (a - p)
+            f(B - A) = sum over (both AND p > a) of (p - a)
+
+        S[b, u] = θ*f(AnB) - α*f(A-B) - β*f(B-A)
+
+        The two difference leaves read DIFFERENT feature sets.
+        'ignorematch' scores features only one side has.
+        'subtractmatch' ignores those and scores the gap on
+        features both sides have. Every f(.) is a sum of
+        positive terms, so all three are >= 0; θ, α and β are
+        unconstrained, so S can have either sign.
 
     :param units: Dimensionality of the output space (number of prototypes). Must be positive.
     :type units: int
     :param num_features: Size of the learnable feature universe. Must be positive.
     :type num_features: int
-    :param intersection_reduction: Aggregation for common features. One of
-        ``'product'``, ``'min'``, ``'mean'``. Defaults to ``'product'``.
+    :param intersection_reduction: How the two saliences are combined on a
+        shared feature. One of ``'product'``, ``'min'``, ``'mean'``. NOT
+        checked by ``__init__``; a wrong value constructs and serializes fine
+        and only raises ``NotImplementedError`` when ``call()`` runs. Build
+        the layer through ``create_ffn_layer('tversky', ...)`` to get a
+        ``ValueError`` up front instead. Defaults to ``'product'``.
     :type intersection_reduction: str
-    :param difference_reduction: Method for distinctive features. One of
-        ``'ignorematch'``, ``'subtractmatch'``. Defaults to ``'subtractmatch'``.
+    :param difference_reduction: Which features the two difference terms
+        measure. One of ``'ignorematch'``, ``'subtractmatch'``. Same rule as
+        above: unchecked here, checked by the factory. Defaults to
+        ``'subtractmatch'``.
     :type difference_reduction: str
-    :param prototype_initializer: Initializer for prototype vectors.
+    :param prototype_initializer: Initializer for the prototype matrix.
+        Defaults to ``'glorot_uniform'``.
     :type prototype_initializer: str or keras.initializers.Initializer
-    :param feature_initializer: Initializer for feature bank vectors.
+    :param feature_initializer: Initializer for the feature bank. Defaults to
+        ``'glorot_uniform'``.
     :type feature_initializer: str or keras.initializers.Initializer
-    :param contrast_initializer: Initializer for Tversky contrast parameters.
+    :param contrast_initializer: Initializer for the three scalars ``theta``,
+        ``alpha`` and ``beta``. All three get the SAME initializer instance,
+        but they are scalars, so they start equal by design. Defaults to
+        ``'ones'``.
     :type contrast_initializer: str or keras.initializers.Initializer
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments for Layer base class (``name``,
+        ``dtype``, and so on).
     :type kwargs: Any
+
+    :ivar units: The stored output width, i.e. the number of prototypes.
+    :vartype units: int
+    :ivar num_features: The stored feature-bank size.
+    :vartype num_features: int
+    :ivar intersection_reduction: The stored reduction name, unvalidated.
+    :vartype intersection_reduction: str
+    :ivar difference_reduction: The stored reduction name, unvalidated.
+    :vartype difference_reduction: str
+    :ivar prototype_initializer: The resolved prototype initializer.
+    :vartype prototype_initializer: keras.initializers.Initializer
+    :ivar feature_initializer: The resolved feature-bank initializer.
+    :vartype feature_initializer: keras.initializers.Initializer
+    :ivar contrast_initializer: The resolved initializer for the scalars.
+    :vartype contrast_initializer: keras.initializers.Initializer
+    :ivar prototypes: Weight of shape ``(units, input_dim)``. ``None`` until
+        ``build()`` runs.
+    :vartype prototypes: Optional[keras.Variable]
+    :ivar feature_bank: Weight of shape ``(num_features, input_dim)``.
+        ``None`` until ``build()`` runs.
+    :vartype feature_bank: Optional[keras.Variable]
+    :ivar theta: Scalar weight on the common-feature term. ``None`` until
+        ``build()`` runs.
+    :vartype theta: Optional[keras.Variable]
+    :ivar alpha: Scalar weight on ``f(A - B)``. ``None`` until ``build()``.
+    :vartype alpha: Optional[keras.Variable]
+    :ivar beta: Scalar weight on ``f(B - A)``. ``None`` until ``build()``.
+    :vartype beta: Optional[keras.Variable]
+
+    :raises ValueError: If ``units`` is not positive.
+    :raises ValueError: If ``num_features`` is not positive.
+    :raises ValueError: If the input to ``build()`` is not rank 2.
+    :raises ValueError: If the last input dimension is ``None`` at build time.
+    :raises NotImplementedError: From ``call()``, if either reduction name is
+        not one of the values listed above.
+
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``. No other rank works.
+
+    Output shape:
+        2D tensor of shape ``(batch_size, units)``.
+
+    Example:
+        .. code-block:: python
+
+            layer = TverskyProjectionLayer(units=10, num_features=32)
+            y = layer(keras.random.normal((4, 16)))
+            y.shape                 # (4, 10)
+
+            # For a sequence, apply it per token.
+            td = keras.layers.TimeDistributed(
+                TverskyProjectionLayer(units=10, num_features=32)
+            )
+            td(keras.random.normal((4, 7, 16))).shape   # (4, 7, 10)
+
+    Note:
+        The intermediate tensor has shape ``(batch, units, num_features)``.
+        Memory grows with the product of all three, so a large
+        ``num_features`` is expensive at a large batch size.
     """
 
     def __init__(
@@ -149,6 +247,17 @@ class TverskyProjectionLayer(keras.layers.Layer):
         contrast_initializer: Union[str, keras.initializers.Initializer] = 'ones',
         **kwargs: Any
     ) -> None:
+        """
+        Validate the two sizes and store the configuration.
+
+        Every argument is documented on the class. No weight exists yet; all
+        five weight attributes are set to ``None`` and created in ``build()``.
+        The two reduction names are NOT validated here. A wrong one is caught
+        by ``validate_ffn_config`` when the layer is built through the
+        factory, and otherwise only by ``call()``.
+
+        :raises ValueError: If ``units`` or ``num_features`` is not positive.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -174,11 +283,22 @@ class TverskyProjectionLayer(keras.layers.Layer):
         self.beta = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the layer's weights: prototypes, features, and contrast params."""
+        """
+        Create the prototypes, the feature bank and the three scalars.
+
+        Both weight matrices are ``(something, input_dim)``, so the last
+        dimension has to be known here.
+
+        :param input_shape: Shape of the input tensor. Must have exactly two
+            entries.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 2.
+        :raises ValueError: If the last entry of ``input_shape`` is ``None``.
+        """
         if self.built:
             return
 
-        # This layer's set-operation broadcasting is rank-2 only. Fail loud rather
+        # The set-operation broadcasting below is rank-2 only. Fail loud rather
         # than silently produce mismatched-rank broadcasts for higher-rank inputs.
         if len(input_shape) != 2:
             raise ValueError(
@@ -229,11 +349,23 @@ class TverskyProjectionLayer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass computation of Tversky similarity.
+        """
+        Score every input row against every prototype.
+
+        Runs the two matmuls, broadcasts to ``(batch, units, num_features)``,
+        reduces over the feature axis and applies the contrast formula. The
+        block-internals diagram on the class gives the exact expressions.
 
         :param inputs: Rank-2 tensor of shape ``(batch_size, input_dim)``.
-        :param training: Unused; accepted for standard FFN call-signature
-            compatibility (the layer has no training-specific behavior).
+        :type inputs: keras.KerasTensor
+        :param training: Unused. Accepted so the call signature matches the
+            other FFN layers; this layer behaves the same either way.
+        :type training: Optional[bool]
+        :return: Similarity scores of shape ``(batch_size, units)``.
+        :rtype: keras.KerasTensor
+        :raises NotImplementedError: If ``intersection_reduction`` is not
+            'product', 'min' or 'mean', or if ``difference_reduction`` is not
+            'ignorematch' or 'subtractmatch'.
         """
         # Compute dot products to get feature presence scores.
         # inputs shape: (batch_size, input_dim)
@@ -307,13 +439,28 @@ class TverskyProjectionLayer(keras.layers.Layer):
         return similarity
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """
+        Replace the last dimension of ``input_shape`` with ``units``.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape with the last entry set to ``units``. For the
+            rank-2 input this layer accepts that is
+            ``(batch_size, units)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return the configuration of the layer for serialization."""
+        """
+        Return everything ``__init__`` needs to rebuild this layer.
+
+        :return: The base ``Layer`` config plus the two sizes, the two
+            reduction names and the three serialized initializers.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'units': self.units,

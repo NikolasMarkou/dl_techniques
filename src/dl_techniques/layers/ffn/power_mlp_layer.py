@@ -1,80 +1,46 @@
 """
-A dual-branch MLP for enhanced function approximation.
+A dual-branch MLP layer: a ReLU-k branch plus a Swish branch, summed.
 
-This layer enhances the expressive power of a standard Multi-Layer Perceptron
-(MLP) by implementing a parallel, dual-branch architecture. The core principle
-is that different classes of functions are better suited for modeling
-different types of patterns. By combining two complementary non-linear
-pathways, this layer can approximate complex functions more efficiently and
-effectively than a traditional MLP with a single activation function.
+The layer runs the input through two parallel branches and adds their outputs.
+Both branches end at `units` wide, so the sum is element-wise.
 
-The design is rooted in function approximation theory, where a complex
-function can be decomposed into a sum of simpler, constituent functions. This
-layer operationalizes that idea by fusing a piecewise polynomial approximator
-with a smooth, global function approximator.
+Main branch, `Dense -> ReLUK`:
 
-Architectural Overview:
-The layer processes the input through two parallel branches whose outputs are
-summed element-wise:
+    y_main = (max(0, W_m @ x + b_m))^k
 
-1.  **Main Branch (Piecewise Polynomial Pathway)**: This branch follows a
-    `Dense -> ReLUK` structure. It is designed to capture sharp, localized,
-    and non-linear patterns. The `ReLUK` activation, defined as
-    `max(0, x)^k`, generalizes the standard ReLU. For `k > 1`, it produces a
-    smoother, higher-order polynomial function in the positive domain,
-    allowing the network to model more complex local curvatures.
+`ReLUK` is `max(0, x)^k` with an integer `k`. At `k = 1` it is a plain ReLU.
+At `k > 1` the positive half becomes a polynomial of degree `k`, which damps
+small activations and amplifies large ones.
 
-2.  **Basis Branch (Smooth Function Pathway)**: This branch follows a
-    `BasisFunction -> Dense` structure. It first projects the input onto a
-    set of smooth, continuous basis functions (e.g., sinusoids). A subsequent
-    linear layer then learns to combine these basis functions. This pathway
-    excels at modeling smooth, global trends and periodic patterns, which are
-    often difficult to represent efficiently with piecewise-linear activations
-    like ReLU.
+Basis branch, `BasisFunction -> Dense`:
 
-The final output is the sum of these two pathways, allowing the layer to
-simultaneously learn both sharp, discontinuous features and smooth, continuous
-trends within the data.
+    y_basis = W_b @ swish(x),   swish(x) = x / (1 + exp(-x))
 
-Foundational Mathematics:
-Let `x` be the input vector. The layer's output `y` is the sum of the
-outputs from the two branches:
+Output:
 
-`y = y_main + y_basis`
+    y = y_main + y_basis
 
-The computation for each branch is as follows:
+Two facts about the basis branch are easy to get wrong.
 
--   **Main Branch**: `y_main = (max(0, W_m @ x + b_m))^k`
-    Here, `W_m` and `b_m` are the weights and bias of the main dense layer,
-    and `k` is the integer power of the `ReLUK` activation. This branch
-    learns a function that is a piecewise polynomial of degree `k`.
+`BasisFunction` (`dl_techniques.layers.activations.basis_function`) is the
+Swish activation and nothing more. It is element-wise, it holds no weights,
+and its output shape equals its input shape. It is NOT a bank of basis
+functions, NOT a sinusoidal or Fourier expansion, and NOT an RBF projection --
+an earlier version of this docstring claimed all three. Read `y_basis` as "one
+linear layer over a smoothly rectified copy of the input", not as a series
+expansion.
 
--   **Basis Branch**: `y_basis = W_b @ φ(x)`
-    Here, `φ(x)` represents the transformation by a set of basis functions
-    (e.g., `[x, sin(x), cos(x), sin(2x), ... ]`). `W_b` is the weight matrix of
-    the basis dense layer (which intentionally lacks a bias term), learning a
-    linear combination of these basis functions.
+The basis Dense layer has no bias. Only the main branch's Dense has one, and
+only when `use_bias` is True.
 
-This formulation effectively models the target function as a superposition of
-a piecewise polynomial and a function from the span of the chosen basis
-functions (akin to a truncated Fourier series for sinusoidal bases).
+What the two branches buy you is one sharp, polynomial-tailed rectifier and
+one smooth, everywhere-differentiable one over the same input, added together.
+ReLU-k is zero and flat for negative inputs; Swish is not, so the basis branch
+still passes a signal where the main branch is dead.
 
 References:
-This architecture synthesizes principles from several areas of machine
-learning and approximation theory:
-
--   The concept of using polynomial activations to increase expressiveness is
-    related to works on higher-order neural networks.
--   The basis function branch is directly inspired by classical function
-    approximation methods, such as Radial Basis Function (RBF) Networks and
-    Fourier series analysis.
-    -   Broomhead, D. S., & Lowe, D. (1988). Multivariable functional
-        interpolation and adaptive networks. Complex Systems.
--   The idea of combining different activation functions within a network has
-    been explored to improve performance, for example, in:
-    -   Ramachandran, P., Zoph, B., & Le, Q. V. (2017). Searching for
-        Activation Functions. arXiv preprint arXiv:1710.05941.
-
+    - Ramachandran, P., Zoph, B., & Le, Q. V. (2017). Searching for
+      Activation Functions. arXiv:1710.05941. (Swish, the basis branch.)
 """
 
 import keras
@@ -95,14 +61,14 @@ from ..activations.basis_function import BasisFunction
 @keras.saving.register_keras_serializable()
 class PowerMLPLayer(keras.layers.Layer):
     """
-    PowerMLP layer with dual-branch architecture for enhanced expressiveness.
+    PowerMLP layer: a ReLU-k branch and a Swish branch, added together.
 
-    This layer combines two parallel branches -- a piecewise polynomial pathway
-    (Dense followed by ReLU-k activation, ``y_main = (max(0, W @ x + b))^k``) and a
-    smooth function pathway (BasisFunction followed by Dense, ``y_basis = W_b @ phi(x)``)
-    -- whose outputs are summed element-wise: ``output = y_main + y_basis``. This
-    enables the layer to simultaneously capture sharp localized patterns and smooth
-    global trends.
+    The main branch is ``Dense -> ReLUK``: ``y_main = (max(0, W_m @ x + b_m))^k``.
+    The basis branch is ``BasisFunction -> Dense``: ``y_basis = W_b @ swish(x)``,
+    where ``swish(x) = x / (1 + exp(-x))``. The output is ``y_main + y_basis``.
+
+    ``BasisFunction`` is the Swish activation. It is element-wise and holds no
+    weights. It is not a basis expansion of any kind; see the module docstring.
 
     **Architecture Overview:**
 
@@ -116,12 +82,12 @@ class PowerMLPLayer(keras.layers.Layer):
                  ▼           ▼
         ┌──────────────┐ ┌──────────────────┐
         │  main_dense  │ │  basis_function  │
-        │   (Dense)    │ │ (BasisFunction)  │
+        │Dense(units)  │ │  Swish, no wts   │
         └──────┬───────┘ └────────┬─────────┘
                ▼                  ▼
         ┌──────────────┐ ┌──────────────────┐
-        │   ReLU-k     │ │   basis_dense    │
-        │  max(0,x)^k  │ │  (Dense, no bias)│
+        │   relu_k     │ │   basis_dense    │
+        │  max(0,x)^k  │ │Dense(units),no b │
         └──────┬───────┘ └────────┬─────────┘
                │                  │
                └────────┬─────────┘
@@ -134,14 +100,40 @@ class PowerMLPLayer(keras.layers.Layer):
         │    Output (..., units)       │
         └──────────────────────────────┘
 
+    **The two branches (block internals):**
+
+    .. code-block:: text
+
+        x [.., D_in]
+        │
+        ├─► main_dense   W_m (D_in x units) + b_m  ─► [.., units]
+        │   relu_k       max(0, ·)^k               ─► [.., units]
+        │
+        └─► basis_func   x / (1 + exp(-x))         ─► [.., D_in]
+            basis_dense  W_b (D_in x units), no bias ─► [.., units]
+
+        sum: [.., units] + [.., units] ─► [.., units]
+
+        The branches differ only in their non-linearity and in
+        where it sits. The main branch rectifies AFTER the
+        projection, so its output is >= 0 before the sum. The
+        basis branch rectifies BEFORE the projection, so its
+        output is signed. relu_k is exactly 0 for every negative
+        pre-activation; swish is not, so the basis branch still
+        carries a signal there. relu_k with k=1 skips the power
+        step and is plain ReLU. Only main_dense has a bias, and
+        only when use_bias is True.
+
     :param units: Integer, number of output units/neurons in the layer. Must be positive.
     :type units: int
     :param k: Integer, power exponent for the ReLU-k activation function.
         Must be positive. Higher values create more aggressive non-linearities.
         Defaults to 3.
     :type k: int
-    :param kernel_initializer: Initializer for the kernel weights in both branches.
-        Can be string name or Initializer instance. Defaults to 'he_normal'.
+    :param kernel_initializer: Initializer for the kernel weights of both
+        branches. Can be a string name or an Initializer instance. Each branch
+        gets its own clone of it, so the two kernels are drawn independently.
+        Defaults to 'he_normal'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the bias vector in the main branch.
         Can be string name or Initializer instance. Defaults to 'zeros'.
@@ -157,14 +149,59 @@ class PowerMLPLayer(keras.layers.Layer):
     :type use_bias: bool
     :param kwargs: Additional keyword arguments passed to the Layer parent class,
         such as ``name``, ``dtype``, ``trainable``, etc.
+    :type kwargs: Any
 
-    :raises ValueError: If units or k are not positive integers.
-    :raises TypeError: If k is not an integer.
+    :ivar units: The stored output width. Both branches emit this width.
+    :vartype units: int
+    :ivar k: The stored ReLU-k exponent.
+    :vartype k: int
+    :ivar kernel_initializer: The resolved kernel initializer. ``main_dense``
+        gets this instance; ``basis_dense`` gets a clone of it.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer. Only ``main_dense``
+        uses it.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+        The SAME object goes to both branches.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``. Only
+        ``main_dense`` gets it, because only it has a bias.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar use_bias: Whether ``main_dense`` carries a bias. It never affects
+        ``basis_dense``, which has no bias either way.
+    :vartype use_bias: bool
+    :ivar main_dense: The main branch projection.
+    :vartype main_dense: keras.layers.Dense
+    :ivar relu_k: The ``max(0, x)^k`` activation layer.
+    :vartype relu_k: ReLUK
+    :ivar basis_function: The Swish activation layer. No weights.
+    :vartype basis_function: BasisFunction
+    :ivar basis_dense: The basis branch projection. No bias.
+    :vartype basis_dense: keras.layers.Dense
+
+    :raises TypeError: If ``units`` is not an ``int``.
+    :raises TypeError: If ``k`` is not an ``int``.
+    :raises ValueError: If ``units`` is not positive.
+    :raises ValueError: If ``k`` is not positive.
+
+    Input shape:
+        Tensor of shape ``(batch_size, ..., input_dim)``. Any rank of 2 or
+        more works; both branches act on the last axis only.
+
+    Output shape:
+        Same shape as the input with the last axis set to ``units``.
+
+    Example:
+        .. code-block:: python
+
+            layer = PowerMLPLayer(units=32, k=3)
+            y = layer(keras.random.normal((4, 16)))
+            y.shape                 # (4, 32)
 
     Note:
-        The main branch uses bias while the basis branch does not.
-        Both branches share the same kernel initializer and regularizer.
-        For k=1, this reduces to standard ReLU in the main branch.
+        Only the main branch has a bias; the basis branch never does. At
+        ``k = 1`` the main branch is a plain ReLU and the layer is the sum of
+        a ReLU MLP and a Swish MLP.
     """
 
     def __init__(
@@ -179,25 +216,16 @@ class PowerMLPLayer(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         """
-        Initialize the PowerMLP layer.
+        Validate the configuration and create the four sub-layers.
 
-        :param units: Number of output units. Must be positive.
-        :type units: int
-        :param k: Power for ReLU-k activation. Must be positive integer.
-        :type k: int
-        :param kernel_initializer: Initializer for kernel weights.
-        :type kernel_initializer: Union[str, keras.initializers.Initializer]
-        :param bias_initializer: Initializer for bias vector.
-        :type bias_initializer: Union[str, keras.initializers.Initializer]
-        :param kernel_regularizer: Regularizer for kernel weights.
-        :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param bias_regularizer: Regularizer for bias vector.
-        :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-        :param use_bias: Whether to use bias in main branch.
-        :type use_bias: bool
-        :param kwargs: Additional keyword arguments for Layer parent class.
-        :raises ValueError: If units or k are not positive integers.
-        :raises TypeError: If k is not an integer.
+        Every argument is documented on the class. The type checks run before
+        the range checks, so a non-integer ``units`` or ``k`` raises
+        ``TypeError``, never ``ValueError``. ``bool`` is a subclass of ``int``
+        in Python, so ``units=True`` passes both checks and builds a layer of
+        width 1.
+
+        :raises TypeError: If ``units`` or ``k`` is not an ``int``.
+        :raises ValueError: If ``units`` or ``k`` is not positive.
         """
         super().__init__(**kwargs)
 
@@ -221,10 +249,9 @@ class PowerMLPLayer(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.use_bias = use_bias
 
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        # These are unbuilt until build() is called
+        # Create all sub-layers here; build() builds them.
 
-        # Main branch dense layer (with bias)
+        # Main branch projection. Carries the bias, if any.
         self.main_dense = keras.layers.Dense(
             units=self.units,
             use_bias=self.use_bias,
@@ -235,30 +262,22 @@ class PowerMLPLayer(keras.layers.Layer):
             name="main_dense"
         )
 
-        # ReLU-k activation for main branch
+        # Main branch activation.
         self.relu_k = ReLUK(k=self.k, name="relu_k")
 
-        # Basis function activation
+        # Basis branch activation. Swish, element-wise, no weights.
         self.basis_function = BasisFunction(name="basis_function")
 
-        # Basis branch dense layer (no bias by design)
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-057
-        # ``clone_initializer`` here is load-bearing. Handing BOTH branches the
-        # same ``self.kernel_initializer`` INSTANCE made them start bit-identical
-        # -- ``main_dense/kernel == basis_dense/kernel``, max|delta| exactly
-        # 0.000000e+00, at (6,4) and at (6,12), i.e. shape-independently. A
-        # seedless Keras 3 initializer instance self-assigns a seed and replays
-        # it at every draw, so the two branches whose DIFFERENCE is the PowerMLP
-        # architecture began as the same function. Do NOT "simplify" this back to
-        # ``self.kernel_initializer``, and do NOT push the clone up into the
-        # ``keras.initializers.get`` call in ``__init__`` -- ``main_dense`` and
-        # ``get_config`` must keep reporting the initializer the caller passed.
-        # A SEEDED initializer still yields identical branches, deliberately:
-        # that is the caller's stated intent. See decisions.md D-057.
+        # Basis branch projection. Never has a bias.
+
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-057: clone the initializer
+        # for basis_dense. Sharing one instance with main_dense made the two
+        # kernels identical at init, max|delta| exactly 0.000000e+00.
+        # Do NOT pass self.kernel_initializer here, and do NOT move the clone
+        # into keras.initializers.get. See decisions.md D-057.
         self.basis_dense = keras.layers.Dense(
             units=self.units,
-            use_bias=False,  # Basis branch doesn't use bias
+            use_bias=False,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="basis_dense"

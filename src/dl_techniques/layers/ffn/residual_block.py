@@ -1,67 +1,39 @@
 """
-A residual block with a learnable projection shortcut.
+A residual block: a two-layer MLP plus a learnable projection shortcut.
 
-This layer encapsulates the core principle of residual learning, a foundational
-technique introduced in ResNet that enables the stable training of exceptionally
-deep neural networks. The central idea is to reframe the learning objective of a
-stack of layers. Instead of learning a direct, underlying mapping `H(x)`, the
-layers are tasked with learning a residual function `F(x) = H(x) - x`. The final
-output is then computed as `F(x) + x`.
+The block adds two paths. The main path is a two-layer MLP. The shortcut is a
+single Dense layer applied to the same input. The two results are added
+element-wise.
 
-This formulation is powerful because it provides a "shortcut" or "skip
-connection" that allows the gradient to flow directly through the block during
-backpropagation, mitigating the vanishing gradient problem. It also simplifies
-the optimization problem: if an identity mapping is optimal for a given block,
-the network can easily achieve this by driving the weights of the main path
-`F(x)` towards zero, which is easier than fitting an identity mapping with a
-stack of non-linear layers.
+ResNet's idea is to have the main path learn `F(x) = H(x) - x` rather than
+`H(x)` itself. Two things follow. The gradient gets a short route back through
+the shortcut, so it does not have to survive every layer of the main path. And
+a block that should do nothing is easy to reach: drive the main path's weights
+to zero.
 
-Architectural Overview:
-The block consists of two parallel pathways:
+The shortcut here is a Dense layer, not a bare identity. That is a projection
+shortcut. It costs `input_dim * output_dim` extra parameters, and in exchange
+the block works when the input width and the output width differ. When they are
+equal the shortcut still has to learn the identity; it does not get it for free.
 
-1.  **Main Path**: This is a non-linear transformation block, typically a
-    two-layer Multi-Layer Perceptron (MLP). It first projects the input into a
-    `hidden_dim` space with a non-linear activation, followed by an optional
-    dropout layer. A second linear projection then maps this hidden
-    representation to the final `output_dim`. This path is responsible for
-    learning the complex residual function `F(x)`.
+Main path, with an optional dropout between the two Dense layers:
 
-2.  **Residual Path (Shortcut Connection)**: This path provides the direct link
-    from input to output. In this implementation, the shortcut is a learnable
-    linear projection (a single Dense layer). This design choice, known as a
-    "projection shortcut," is crucial for flexibility. It allows the block to
-    function even when the input and output dimensions do not match, a common
-    scenario in downsampling stages of deep architectures. If the dimensions
-    were identical, this projection would learn to approximate an identity
-    mapping.
+    F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2
 
-The outputs of these two paths are combined via element-wise addition to
-produce the final output of the block.
+Shortcut path:
 
-Foundational Mathematics:
-Let `x` be the input to the block. The output `y` is defined as:
+    S(x) = W_s @ x + b_s
 
-`y = F(x, {W_i}) + W_s @ x`
+Output:
 
-where:
--   `F(x, {W_i})` represents the function learned by the main path, parameterized
-    by its weights `{W_i}`. In this implementation, it is:
-    `F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2`
--   `W_s @ x` represents the projection shortcut learned by the `residual_layer`,
-    where `W_s` is the weight matrix of this linear transformation. A bias term
-    may also be included.
+    y = F(x) + S(x)
 
-This formulation ensures that the gradient can propagate through the `W_s @ x`
-term unimpeded, providing a robust "gradient highway" deep into the network.
+The bias terms exist only when `use_bias` is True. The dropout layer is created
+only when `dropout_rate > 0`.
 
 References:
-The concept of residual learning and the architecture of residual blocks were
-introduced in the seminal paper:
-
--   He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
-    Image Recognition. In Proceedings of the IEEE Conference on Computer
-    Vision and Pattern Recognition (CVPR).
-
+    - He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
+      Image Recognition. CVPR.
 """
 
 import keras
@@ -74,13 +46,13 @@ from dl_techniques.initializers.clone import clone_initializer
 @keras.saving.register_keras_serializable()
 class ResidualBlock(keras.layers.Layer):
     """
-    Residual block with linear transformations and configurable activation.
+    Residual block: a two-layer MLP added to a learnable projection shortcut.
 
-    This layer implements a residual connection around a two-layer MLP. The main
-    path computes ``F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2`` while the
-    residual path applies a learnable projection shortcut ``W_s @ x + b_s``.
-    The final output is ``y = F(x) + W_s @ x``, enabling stable gradient flow
-    even when input and output dimensions differ.
+    The main path computes ``F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2``,
+    with an optional dropout between the two Dense layers. The shortcut
+    computes ``S(x) = W_s @ x + b_s``. The output is ``y = F(x) + S(x)``.
+    Because the shortcut is a Dense layer rather than an identity, the input
+    width and the output width may differ.
 
     **Architecture Overview:**
 
@@ -119,6 +91,30 @@ class ResidualBlock(keras.layers.Layer):
         │   Output (..., output_dim)   │
         └──────────────────────────────┘
 
+    **Width arithmetic (block internals):**
+
+    .. code-block:: text
+
+        D_in = input width, H = hidden_dim, D_out = output_dim
+
+        main path   x [.., D_in]
+             ─► W_1 (D_in x H) + b_1        ─► [.., H]
+             ─► activation                  ─► [.., H]
+             ─► dropout  (only if rate > 0) ─► [.., H]
+             ─► W_2 (H x D_out) + b_2       ─► [.., D_out]
+
+        shortcut    x [.., D_in]
+             ─► W_s (D_in x D_out) + b_s    ─► [.., D_out]
+
+        add         [.., D_out] + [.., D_out] ─► [.., D_out]
+
+        D_in and D_out are free to differ. W_s is what changes
+        the width, so the two addends always match. When
+        D_in == D_out the shortcut is still a Dense layer and
+        has to learn the identity. Biases exist only when
+        use_bias is True. The add is a plain `+` in call(),
+        not a keras.layers.Add.
+
     :param hidden_dim: Integer, dimensionality of the hidden layer. Must be positive.
     :type hidden_dim: int
     :param output_dim: Integer, dimensionality of the output space. Must be positive.
@@ -144,15 +140,62 @@ class ResidualBlock(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights. Accepts string
         names ('l1', 'l2') or Regularizer instances. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Additional keyword arguments for the Layer base class
+        (``name``, ``dtype``, ``trainable``, and so on).
+    :type kwargs: Any
 
-    :raises ValueError: If hidden_dim or output_dim is not positive.
-    :raises ValueError: If dropout_rate is not between 0 and 1.
+    :ivar hidden_dim: The stored hidden width.
+    :vartype hidden_dim: int
+    :ivar output_dim: The stored output width.
+    :vartype output_dim: int
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar activation: The RESOLVED activation callable, not the name that was
+        passed. ``get_config()`` serializes it back to a name.
+    :vartype activation: Callable
+    :ivar use_bias: Whether every Dense layer carries a bias.
+    :vartype use_bias: bool
+    :ivar kernel_initializer: The resolved kernel initializer. Each Dense layer
+        gets its own clone of it, never this instance.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer, cloned the same way.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar hidden_layer: The first Dense layer of the main path, with the
+        activation applied inside it.
+    :vartype hidden_layer: keras.layers.Dense
+    :ivar output_layer: The second Dense layer of the main path. Linear.
+    :vartype output_layer: keras.layers.Dense
+    :ivar residual_layer: The Dense layer on the shortcut. Linear.
+    :vartype residual_layer: keras.layers.Dense
+    :ivar dropout: The dropout layer, or ``None`` when ``dropout_rate`` is 0.
+    :vartype dropout: Optional[keras.layers.Dropout]
+
+    :raises ValueError: If ``hidden_dim`` is not positive.
+    :raises ValueError: If ``output_dim`` is not positive.
+    :raises ValueError: If ``dropout_rate`` is outside ``[0.0, 1.0]``.
+
+    Input shape:
+        Tensor of shape ``(batch_size, ..., input_dim)``. Any rank of 2 or
+        more works; the Dense layers act on the last axis only.
+
+    Output shape:
+        Same shape as the input with the last axis set to ``output_dim``.
+
+    Example:
+        .. code-block:: python
+
+            block = ResidualBlock(hidden_dim=64, output_dim=32)
+            y = block(keras.random.normal((4, 16)))
+            y.shape                 # (4, 32)
 
     Note:
-        This implementation creates a learnable residual projection, making it suitable
-        for cases where input and output dimensions differ. For same-dimension cases,
-        this adds parameters but maintains architectural flexibility.
+        The shortcut is always a Dense layer, even when the input and output
+        widths match. That costs parameters an identity shortcut would not,
+        and it is what lets the block change width.
     """
 
     def __init__(
@@ -168,6 +211,16 @@ class ResidualBlock(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the three Dense layers.
+
+        Every argument is documented on the class. The dropout layer is
+        created here only when ``dropout_rate > 0``; otherwise ``self.dropout``
+        stays ``None`` and no dropout runs at all.
+
+        :raises ValueError: If ``hidden_dim`` or ``output_dim`` is not
+            positive, or if ``dropout_rate`` is outside ``[0.0, 1.0]``.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -189,8 +242,9 @@ class ResidualBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        # Hidden transformation with activation
+        # Create all sub-layers here; build() builds them.
+        # Main path, first Dense: the activation runs inside it.
+
         # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per layer.
         # Do NOT restore the shared instance: the skip PROJECTION and the main-path
         # output layer had bit-identical kernels (MEASURED max|delta| = 0.0), which
@@ -206,10 +260,10 @@ class ResidualBlock(keras.layers.Layer):
             name="hidden_layer"
         )
 
-        # Output transformation (linear)
+        # Main path, second Dense. Linear.
         self.output_layer = keras.layers.Dense(
             units=self.output_dim,
-            activation=None,  # Linear output
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
@@ -218,10 +272,10 @@ class ResidualBlock(keras.layers.Layer):
             name="output_layer"
         )
 
-        # Residual projection layer
+        # Shortcut path. Linear, and it does the width change.
         self.residual_layer = keras.layers.Dense(
             units=self.output_dim,
-            activation=None,  # Linear projection
+            activation=None,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=clone_initializer(self.bias_initializer),
