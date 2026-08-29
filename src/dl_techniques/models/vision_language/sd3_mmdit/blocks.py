@@ -138,7 +138,7 @@ def _modulate(
 # =====================================================================
 
 
-@register_dl_technique("dl_techniques.models")
+@register_dl_technique("dl_techniques.models.sd3_mmdit.blocks")
 class MMDiTBlock(keras.layers.Layer):
     """SD3 MMDiT dual-stream transformer block.
 
@@ -474,7 +474,7 @@ class MMDiTBlock(keras.layers.Layer):
 # =====================================================================
 
 
-@register_dl_technique("dl_techniques.models")
+@register_dl_technique("dl_techniques.models.sd3_mmdit.blocks")
 class MMDiTFinalLayer(keras.layers.Layer):
     """SD3 MMDiT final projection head.
 

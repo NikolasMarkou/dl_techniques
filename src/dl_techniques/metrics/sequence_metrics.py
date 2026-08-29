@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics.sequence_metrics")
 class SequenceAccuracy(keras.metrics.Metric):
     """Sequence-level accuracy metric.
 
@@ -100,7 +100,7 @@ class SequenceAccuracy(keras.metrics.Metric):
         return config
 
 
-@register_dl_technique("dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics.sequence_metrics")
 class BitErrorRate(keras.metrics.Metric):
     """Bit Error Rate (BER) metric for binary vector outputs.
 

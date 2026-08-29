@@ -115,17 +115,18 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ConvUNext Stem Block
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-14T092357-0e3d792d/D-010: the `package=` string below says
-# `dl_techniques.bias_free_denoisers`, NOT `dl_techniques.convunext`, even though this
-# class now lives in `dl_techniques/models/vision/convunext/model.py`. The mismatch is
-# DELIBERATE and load-bearing. Keras keys a registered serializable on
-# `package` + class name and NEVER on the defining module (measured on Keras 3.8.0,
-# D-008), so keeping this string byte-unchanged keeps the registry key
-# `dl_techniques.bias_free_denoisers>ConvUNextStem` stable across this relocation —
-# which is what lets any `.keras` artifact written before the move still load.
-# Do NOT "fix" this to `dl_techniques.convunext` for tidiness: that is a KEY CHANGE and
-# it silently breaks every checkpoint containing this layer. See decisions.md D-010/D-005.
-@register_dl_technique("dl_techniques.bias_free_denoisers")
+# HISTORY (supersedes plan-2026-08-14T092357-0e3d792d/D-010). This `package=` string used to
+# say `dl_techniques.bias_free_denoisers` -- the module this class was defined in before it
+# was merged here -- deliberately, to hold the registry key
+# `dl_techniques.bias_free_denoisers>ConvUNextStem` byte-stable for `.keras` artifacts
+# written before the move. Keras keys a registered serializable on `package` + class name and
+# NEVER on the defining module (measured on Keras 3.8.0, D-008), so that worked. On
+# 2026-08-29 the user confirmed there are no checkpoints, which was the entire basis for the
+# exemption, and this became one of the last 34 ad-hoc strings in `src/`; it now follows the
+# same module-path rule as the other 710 (repo-root `MIGRATIONS.md`). The `Custom>ConvUNextStem`
+# alias the helper binds is unaffected. Do NOT restore the old string: it is not what the
+# tree registers any more and the tests pin the new key.
+@register_dl_technique("dl_techniques.models.convunext.model")
 class ConvUNextStem(keras.layers.Layer):
     """ConvUNext stem block for initial feature extraction.
 

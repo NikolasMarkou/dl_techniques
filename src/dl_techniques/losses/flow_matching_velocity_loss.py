@@ -42,7 +42,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses.flow_matching_velocity_loss")
 class FlowMatchingVelocityLoss(keras.losses.Loss):
     """Velocity MSE loss for rectified-flow / flow-matching training.
 

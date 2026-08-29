@@ -265,7 +265,7 @@ def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.blt")
+@register_dl_technique("dl_techniques.layers.blt_blocks")
 class ByteTokenizer(keras.layers.Layer):
     """
     Converts text to byte tokens for BLT processing.

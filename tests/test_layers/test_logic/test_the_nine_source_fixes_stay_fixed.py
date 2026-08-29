@@ -39,6 +39,18 @@ ALL_CLASSES = (
     LearnableNeuralCircuit,
 )
 
+#: Exact package string each class registers under. These four were pinned on the
+#: hand-chosen ``dl_techniques.layers`` (B7) until 2026-08-29, when the last 34 ad-hoc
+#: strings in ``src/`` were normalized onto the module-path rule (``MIGRATIONS.md``) --
+#: so ``CircuitDepthLayer`` and ``LearnableNeuralCircuit``, which share a module, are now
+#: the only two of the four that share a package.
+EXPECTED_PACKAGE = {
+    LearnableLogicOperator: "dl_techniques.layers.logic.logic_operators",
+    LearnableArithmeticOperator: "dl_techniques.layers.logic.arithmetic_operators",
+    CircuitDepthLayer: "dl_techniques.layers.logic.neural_circuit",
+    LearnableNeuralCircuit: "dl_techniques.layers.logic.neural_circuit",
+}
+
 
 def _call_bodies(tree):
     """Yield every ``def call`` FunctionDef in a parsed module."""
@@ -499,16 +511,17 @@ class TestB7TheRegisteredNamesArePackageQualified:
     """
 
     @pytest.mark.parametrize("cls", ALL_CLASSES, ids=lambda c: c.__name__)
-    def test_the_class_is_registered_under_dl_techniques_layers(self, cls,
-                                                                registration_contract):
+    def test_the_class_is_registered_under_its_module_path(self, cls,
+                                                           registration_contract):
         """Was ``test_no_bare_custom_key_survives`` plus an exact single-key pin.
 
-        The exact package string is still asserted here -- these four are the one
-        place in the tree where it is genuinely pinned rather than derived,
-        because ``dl_techniques.layers`` was chosen by hand (B7) and not by the
-        module-path rule.
+        The exact package string is still asserted here, but it is no longer the
+        hand-chosen ``dl_techniques.layers`` (B7): the 2026-08-29 normalization
+        (``MIGRATIONS.md``) put these four on the same module-path rule as the
+        other 740 sites, which is what makes ``CircuitDepthLayer`` distinguishable
+        from a hypothetical same-named class elsewhere under ``layers/``.
         """
-        registration_contract(cls, expected_package="dl_techniques.layers")
+        registration_contract(cls, expected_package=EXPECTED_PACKAGE[cls])
 
     @pytest.mark.parametrize("cls", ALL_CLASSES, ids=lambda c: c.__name__)
     def test_exactly_two_keys_and_no_third_claimant(self, cls):
@@ -521,7 +534,7 @@ class TestB7TheRegisteredNamesArePackageQualified:
         registry = keras.saving.get_custom_objects()
         keys = sorted(k for k, v in registry.items() if v is cls)
         assert len(keys) == 2, keys
-        assert keys[-1] == f"dl_techniques.layers>{cls.__name__}", keys
+        assert keys[-1] == f"{EXPECTED_PACKAGE[cls]}>{cls.__name__}", keys
 
     def test_every_decorator_in_the_package_names_a_package(self):
         for path in SOURCE_FILES:

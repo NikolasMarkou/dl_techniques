@@ -123,7 +123,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques")
+@register_dl_technique("dl_techniques.models.gpt2.gpt2")
 def gpt2_gelu(x: keras.KerasTensor) -> keras.KerasTensor:
     """GPT-2's ``gelu_new``: the tanh approximation, not the exact-erf form.
 

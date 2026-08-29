@@ -28,7 +28,7 @@ from typing import Any, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses.scaled_mse_loss")
 class ScaledMseLoss(keras.losses.Loss):
     """MSE loss with automatic target resizing for multi-scale supervision.
 

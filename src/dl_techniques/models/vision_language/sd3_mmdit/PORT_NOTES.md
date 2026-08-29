@@ -23,12 +23,12 @@ modules) and the tiny preset **smoke-trains cleanly** (synthetic data, loss
 `2.255 → 1.568`, ~-30.5%, zero NaN over the run). Every new class carries
 `@register_dl_technique(...)` (from `dl_techniques.utils.keras_registration`), builds
 sub-layers explicitly in `build()`, implements `compute_output_shape()`, and round-trips
-through `.keras` at `atol=1e-6`. The package strings are **not** uniform: `SD3MMDiT` and the
-three text encoders use their defining module
-(`dl_techniques.models.sd3_mmdit.transformer>SD3MMDiT`,
-`dl_techniques.models.sd3_mmdit.text_encoders><ClassName>`), while `MMDiTBlock` and
-`MMDiTFinalLayer` in `blocks.py` keep the coarse, pre-existing `dl_techniques.models>X`
-string that the 2026-08-29 migration deliberately left alone (repo-root `MIGRATIONS.md`). Logging is via `dl_techniques.utils.logger` (no `print`).
+through `.keras` at `atol=1e-6`. Every package string is the defining module's dotted path:
+`dl_techniques.models.sd3_mmdit.transformer>SD3MMDiT`,
+`dl_techniques.models.sd3_mmdit.text_encoders><ClassName>`, and
+`dl_techniques.models.sd3_mmdit.blocks>{MMDiTBlock,MMDiTFinalLayer}`. The last two carried the
+coarse `dl_techniques.models>X` string until 2026-08-29, when the tree's remaining 34 ad-hoc
+strings were normalized (repo-root `MIGRATIONS.md`). Logging is via `dl_techniques.utils.logger` (no `print`).
 
 ---
 

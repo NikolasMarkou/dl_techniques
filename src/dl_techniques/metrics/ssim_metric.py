@@ -30,7 +30,7 @@ from typing import Any, Dict, Optional
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.metrics")
+@register_dl_technique("dl_techniques.metrics.ssim_metric")
 class SsimMetric(keras.metrics.Metric):
     """Structural Similarity Index Measure (SSIM) metric.
 

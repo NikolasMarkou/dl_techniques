@@ -213,7 +213,14 @@ REGISTRAR_CLASSES = [
     'SpatialLinearAttention',
 ]
 
-STEM_REGISTRY_KEY = 'dl_techniques.bias_free_denoisers>ConvUNextStem'
+# UPDATED 2026-08-29 (`MIGRATIONS.md`): was
+# `'dl_techniques.bias_free_denoisers>ConvUNextStem'`, the module this class was
+# defined in before the ConvUNext merge, held byte-stable so pre-merge archives kept
+# loading. The user confirmed there are no checkpoints, which was that exemption's
+# entire basis, so the string was normalized onto the module-path rule the rest of
+# `src/` follows. Unlike `ATTENTION_REGISTRY_KEY` below this is NOT a legacy-path pin:
+# it is the key a NEW save writes.
+STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'
 
 # The OTHER key a saved bias-free ConvUNext graph names. Until 2026-08-29
 # `SpatialLinearAttention` carried a BARE `@keras.saving.register_keras_serializable()`

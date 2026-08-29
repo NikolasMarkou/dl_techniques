@@ -9,6 +9,55 @@ is tracked and does.
 
 ---
 
+## 2026-08-29 (later the same day) — the last 34 ad-hoc `package=` strings normalized
+
+### What changed
+
+The migration below moved 706 *bare* sites onto the module-path rule and **deliberately
+left the 38 already-explicit ones alone**, on the grounds that re-keying them would break a
+checkpoint. **The user has since confirmed there are no checkpoints at all**, which was that
+exemption's entire basis. 34 of those 38 did not follow the rule the other 710 followed, so
+they were normalized; the remaining 4 (the `yolov12_losses` group) already did.
+
+**34 sites in 26 files.** Only the `package=` string literal changed — never the decorator,
+never `legacy_alias=`, never `legacy_packages=`. They carried 13 different ad-hoc strings:
+`dl_techniques.layers` (7), `dl_techniques.losses` (6), `dl_techniques` (5),
+`dl_techniques.metrics` (3), `dl_techniques.models` (3), `dl_techniques.pw_fnet` (2),
+`dl_techniques.ideogram4` (2), and one each of `dl_techniques.blt`,
+`dl_techniques.standard_blocks`, `dl_techniques.tabm`,
+`dl_techniques.probabilistic_forecast`, `dl_techniques.bias_free_denoisers`,
+`dl_techniques.train.ideogram4`.
+
+The rule is unchanged and is restated in `src/dl_techniques/CLAUDE.md` § Registration: the
+defining module's dotted path, with `models/`'s family directories and subfamily containers
+stripped. After this change **0 of 744 sites are non-conforming**; the audit that says so is
+re-runnable and lives with the plan.
+
+### Why it is safe
+
+- The registry census is **1452 keys, 0 duplicates** — the same count as before. Every site
+  traded one key for one key, and every alias was preserved.
+- The archive-load guard's FAIL set did not grow: the same 9 archives fail, for the same
+  2026-08-24 reason described in the section below.
+- None of the 34 names appears in any archive in this repository.
+
+### The `Downsample` / `Upsample` hazard, and why it did not fire
+
+Before this change the two `Downsample` classes were distinguished **only** by their ad-hoc
+package strings (`dl_techniques.ideogram4` vs `dl_techniques.pw_fnet`), and likewise
+`Upsample`. Deriving from the module path gives them distinct keys too
+(`dl_techniques.models.ideogram4.vae>` vs `dl_techniques.models.pw_fnet.model>`), so the
+separation is now structural rather than hand-chosen. All four sites keep
+`legacy_alias=False` — that is about the `Custom>` namespace and is independent of
+checkpoints.
+
+### What a caller must do
+
+**Nothing, unless you pinned one of these key strings in a test or a doc.** Five test
+literals and nine prose sites named an old key and were updated in the same commit.
+
+---
+
 ## 2026-08-29 — every registered class moved to a package-qualified key
 
 ### What changed
@@ -44,7 +93,9 @@ derived from them would have broken every archive at that moment. So
 `dl_techniques.models.sam2.hiera`, not under its full import path.
 
 The 38 sites that already carried an explicit `package=` kept their string unchanged, with
-one exception (`yolov12_losses`, below).
+one exception (`yolov12_losses`, below). **34 of those 38 were normalized later the same
+day** — see the section above; the key strings quoted in the rest of THIS section are the
+ones that held between the two changes.
 
 ### Why it is safe
 
@@ -76,10 +127,13 @@ classes:
 
 | bare name | the two qualified keys |
 |---|---|
-| `ConvBlock` | `dl_techniques.layers.yolo12_blocks>ConvBlock`, `dl_techniques.standard_blocks>ConvBlock` |
-| `Downsample` | `dl_techniques.ideogram4>Downsample`, `dl_techniques.pw_fnet>Downsample` |
-| `MLPBlock` | `dl_techniques.layers.ffn.mlp>MLPBlock`, `dl_techniques.tabm>MLPBlock` |
-| `Upsample` | `dl_techniques.ideogram4>Upsample`, `dl_techniques.pw_fnet>Upsample` |
+| `ConvBlock` | `dl_techniques.layers.yolo12_blocks>ConvBlock`, `dl_techniques.layers.standard_blocks>ConvBlock` |
+| `Downsample` | `dl_techniques.models.ideogram4.vae>Downsample`, `dl_techniques.models.pw_fnet.model>Downsample` |
+| `MLPBlock` | `dl_techniques.layers.ffn.mlp>MLPBlock`, `dl_techniques.layers.tabm_blocks>MLPBlock` |
+| `Upsample` | `dl_techniques.models.ideogram4.vae>Upsample`, `dl_techniques.models.pw_fnet.model>Upsample` |
+
+*(Right-hand keys as of the 2026-08-29 normalization above; four of the eight were
+`dl_techniques.{standard_blocks,tabm,ideogram4,pw_fnet}` between the two changes.)*
 
 Aliasing either side would put **both** of them back on one `Custom>X` key and recreate,
 in the legacy namespace, exactly the import-order collision this migration removes. So all
@@ -109,7 +163,9 @@ under three keys to the same object.
 `dl_techniques.train.ideogram4` (`src/train/ideogram4/train_ideogram4.py`) was
 deliberately **left alone** by the same reasoning read the other way: it is already
 namespaced and already unique, so re-keying it would be a checkpoint-affecting change
-bought for nothing.
+bought for nothing. That held for a few hours: once the user confirmed there are no
+checkpoints the cost side of that trade went to zero and it became
+`dl_techniques.train.ideogram4.train_ideogram4` with the other 33 (section above).
 
 ### What a caller must do
 

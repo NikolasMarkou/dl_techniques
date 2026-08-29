@@ -452,14 +452,17 @@ Two things about the keys are worth knowing before you rename anything here.
 `dl_techniques.models.pw_fnet.model><ClassName>` — `vision/` and `image_restoration/` are
 stripped because a family directory under `models/` is a filing decision, not a namespace.
 
-`Downsample` and `Upsample` are different. They keep the coarse, pre-existing
-`dl_techniques.pw_fnet><ClassName>` string **and carry `legacy_alias=False`**, so
+`Downsample` and `Upsample` register under the same module path, so their keys are also
+`dl_techniques.models.pw_fnet.model><ClassName>` (normalized 2026-08-29 from the coarse
+`dl_techniques.pw_fnet`). They differ in one way: they **carry `legacy_alias=False`**, so
 `keras.saving.get_registered_object("Custom>Downsample")` and `("Custom>Upsample")` both
 return **`None`** (measured 2026-08-29). That is deliberate: `ideogram4` registers classes
 with the same two bare names, and aliasing either side would put both on one `Custom>X` key
 and recreate exactly the import-order collision the migration removed. Neither name appears
 in any archive in this repository, so nothing was orphaned. Reach them only through their
-package-qualified keys. Repo-root `MIGRATIONS.md` is the record.
+package-qualified keys. Note that the module path alone already separates the two pairs --
+`...pw_fnet.model>Downsample` vs `...ideogram4.vae>Downsample` -- so withholding the alias is
+about the `Custom>` namespace only. Repo-root `MIGRATIONS.md` is the record.
 
 ### Saving and Loading
 

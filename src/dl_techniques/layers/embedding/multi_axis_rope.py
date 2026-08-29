@@ -65,7 +65,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.embedding.multi_axis_rope")
 class Ideogram4MRoPE(keras.layers.Layer):
     """Build 3D multi-axis mRoPE ``cos``/``sin`` tables for Ideogram4.
 

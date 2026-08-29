@@ -108,7 +108,7 @@ _VALID_VGG_VARIANTS = ("vgg16", "vgg19")
 # ---------------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses.lpips_loss")
 class LPIPSLoss(keras.losses.Loss):
     """LPIPS-flavored perceptual loss using frozen VGG features.
 

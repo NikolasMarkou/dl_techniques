@@ -112,7 +112,7 @@ def _canonical_input_shape(
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.logic.arithmetic_operators")
 class LearnableArithmeticOperator(keras.layers.Layer):
     """
     A learnable choice among seven arithmetic operations.

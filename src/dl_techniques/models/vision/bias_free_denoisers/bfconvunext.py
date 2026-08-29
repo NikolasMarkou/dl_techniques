@@ -70,9 +70,11 @@ from dl_techniques.utils.logger import logger
 # under its own name because it is the Keras REGISTRAR that
 # `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval tools
 # import purely so `load_model` can resolve this class (contract H-4), and because the
-# bf test suite imports it from here. The class's decorator deliberately keeps
-# `package="dl_techniques.bias_free_denoisers"` so its registry key does not move.
-# Do NOT delete this re-export, and do NOT re-home the class's `package=` string.
+# bf test suite imports it from here. Its decorator used to keep
+# `package="dl_techniques.bias_free_denoisers"` so the registry key would not move; that
+# exemption was dropped on 2026-08-29 once the user confirmed there are no checkpoints, and
+# the key is now `dl_techniques.models.convunext.model>ConvUNextStem` (`MIGRATIONS.md`).
+# Do NOT delete this re-export -- the registrar role is independent of the key string.
 from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F401
 
 # `SpatialLinearAttention` moved with a BARE `@keras.saving.register_keras_serializable()`,

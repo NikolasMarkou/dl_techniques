@@ -70,9 +70,10 @@ onto downstream tasks without any architectural change.
    `dl_techniques.utils.keras_registration`, so its key is
    `dl_techniques.models.gpt2.gpt2>GPT2`; `get_config()` round-trips all twelve constructor
    arguments, and a `.keras` save/load needs no `custom_objects` (§12). The `gpt2_gelu`
-   activation in the same module is the one exception in this package: it keeps the coarse,
-   pre-existing `dl_techniques>gpt2_gelu` key, which the 2026-08-29 migration deliberately
-   left alone (repo-root `MIGRATIONS.md`).
+   activation in the same module registers under the same string, so its key is
+   `dl_techniques.models.gpt2.gpt2>gpt2_gelu`; it carried the coarse `dl_techniques>gpt2_gelu`
+   until 2026-08-29, when the tree's last 34 ad-hoc strings were normalized (repo-root
+   `MIGRATIONS.md`).
 4. **Configurable attention and FFN.** `attention_type` and `ffn_type` are
    passed straight through to `TextDecoder`'s factories, so the classic recipe
    is a default, not a hard-coding.

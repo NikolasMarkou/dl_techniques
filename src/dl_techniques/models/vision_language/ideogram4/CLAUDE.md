@@ -155,14 +155,14 @@ D-002 (net-new `ScalarSinusoidalEmbedding` +
   | class | key |
   |---|---|
   | `AttnBlock`, `AutoEncoder`, `Decoder`, `Encoder`, `ResnetBlock` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>` |
-  | `Downsample`, `Upsample` (`vae.py`) | `dl_techniques.ideogram4><Class>`, with `legacy_alias=False` |
-  | `Ideogram4Transformer` (`transformer.py`) | `dl_techniques.models>Ideogram4Transformer` — a pre-existing explicit package string, deliberately left unchanged |
+  | `Downsample`, `Upsample` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>`, with `legacy_alias=False` |
+  | `Ideogram4Transformer` (`transformer.py`) | `dl_techniques.models.ideogram4.transformer>Ideogram4Transformer` |
 
   The package string is the defining module's dotted path with the `models/` **family**
   directories (here `vision_language`) and subfamily containers stripped — a family is a filing
   decision, not a namespace.
 - **`Downsample` / `Upsample` have NO legacy alias.** Each name is claimed by a second
-  registered class (`dl_techniques.pw_fnet`), so aliasing both sides would put them back on one
+  registered class (`dl_techniques.models.pw_fnet.model`), so aliasing both sides would put them back on one
   `Custom>X` key and recreate the import-order collision. `Custom>Downsample` and
   `Custom>Upsample` resolve to **nothing** (measured 2026-08-29). Neither appears in any archive
   in this repository. Never a bare `@keras.saving.register_keras_serializable()`: its

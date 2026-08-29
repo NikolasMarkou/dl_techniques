@@ -114,7 +114,7 @@ def _resolve_gate_entropy_coefficient(
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.logic.neural_circuit")
 class CircuitDepthLayer(keras.layers.Layer):
     """
     One circuit stage: parallel logic and arithmetic experts, fused.
@@ -912,7 +912,7 @@ class CircuitDepthLayer(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.logic.neural_circuit")
 class LearnableNeuralCircuit(keras.layers.Layer):
     """
     A stack of ``circuit_depth`` ``CircuitDepthLayer`` stages.

@@ -72,7 +72,7 @@ SMALL: Dict[str, Any] = dict(depth=2, initial_filters=8, blocks_per_level=1)
 # LEGACY ALIAS, not the key a new save writes. It is kept, and kept as a literal, for
 # exactly the reason above: it is what a graph saved BEFORE that date names, and that
 # fact cannot be re-derived from today's source.
-STEM_REGISTRY_KEY = 'dl_techniques.bias_free_denoisers>ConvUNextStem'
+STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'  # was `dl_techniques.bias_free_denoisers>...` before 2026-08-29
 ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
 
 # Substring alternation covering BOTH TypeError shapes. The contract is "it raises",
@@ -510,12 +510,13 @@ class TestKerasRoundTrip:
     def test_both_registry_keys_a_saved_graph_names_still_resolve(self) -> None:
         """The keys `load_model` looks up, asserted EXACTLY.
 
-        `ConvUNextStem` carries `package='dl_techniques.bias_free_denoisers'`;
-        `SpatialLinearAttention` carries a BARE decorator whose key was measured to
-        be module-independent. Adding a `package=` argument to the bare one "for
-        symmetry" would mint a BRAND-NEW key -- the model would still build, still
-        save, and every previously saved graph would fail at `load_model`, silently,
-        until someone loaded one. The fresh-subprocess version of this pin lives in
+        `ConvUNextStem` carries `package='dl_techniques.models.convunext.model'`
+        (normalized 2026-08-29 from `'dl_techniques.bias_free_denoisers'`);
+        `SpatialLinearAttention` originally carried a BARE decorator whose key was
+        measured to be module-independent, and that bare key survives as its legacy
+        alias. Changing either string mints a BRAND-NEW key -- the model would still
+        build, still save, and every previously saved graph would fail at
+        `load_model`, silently, until someone loaded one. The fresh-subprocess version of this pin lives in
         `test_bfconvunext_wrappers.py::TestRegistrarContract`; this in-process copy
         is what makes the round-trip above mean something about OLD graphs.
         """

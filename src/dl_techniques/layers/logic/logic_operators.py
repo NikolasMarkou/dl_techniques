@@ -126,7 +126,7 @@ def _canonical_input_shape(
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.logic.logic_operators")
 class LearnableLogicOperator(keras.layers.Layer):
     """
     A learnable choice among 18 soft logic gates.

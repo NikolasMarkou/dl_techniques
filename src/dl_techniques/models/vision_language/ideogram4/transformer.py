@@ -141,7 +141,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models")
+@register_dl_technique("dl_techniques.models.ideogram4.transformer")
 class Ideogram4Transformer(keras.Model):
     """Ideogram4 flow-matching DiT: packed-stream masked-add velocity predictor.
 

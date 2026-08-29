@@ -77,21 +77,21 @@ modes so a checkpoint from either loads into either.
 
 ## Classes
 
-All four classes carry `@register_dl_technique("dl_techniques.layers")`, from
-`dl_techniques.utils.keras_registration`. **That string is the coarse
-`dl_techniques.layers`, not this module's own path** — it is a pre-existing explicit
-`package=` that the 2026-08-29 migration deliberately left byte-unchanged (repo-root
-`MIGRATIONS.md`: the 38 already-explicit sites kept their strings, because re-keying an
-already-namespaced key is checkpoint-affecting and buys nothing). Do not "fix" these four to
-`dl_techniques.layers.logic.<module>`.
+All four classes carry `@register_dl_technique(...)`, from
+`dl_techniques.utils.keras_registration`. **The string each passes is
+its own module's dotted path.** These four carried the coarse hand-chosen string
+`dl_techniques.layers` until 2026-08-29, when the last 34 ad-hoc `package=` strings in
+`src/` were normalized onto the module-path rule the other 710 sites already followed
+(repo-root `MIGRATIONS.md`).
 
 Resolved with `keras.saving.get_registered_name` on 2026-08-29, the keys are
-`dl_techniques.layers>LearnableArithmeticOperator`,
-`dl_techniques.layers>LearnableLogicOperator`, `dl_techniques.layers>CircuitDepthLayer` and
-`dl_techniques.layers>LearnableNeuralCircuit` — still **no module path in them**, only that
-one coarse package segment. So moving a class to another module does not break a saved
-`.keras` archive, but **renaming one does**, and so would any other class registering the
-same name under `dl_techniques.layers`. The helper additionally binds the legacy
+`dl_techniques.layers.logic.arithmetic_operators>LearnableArithmeticOperator`,
+`dl_techniques.layers.logic.logic_operators>LearnableLogicOperator`, and
+`dl_techniques.layers.logic.neural_circuit>` + `CircuitDepthLayer` /
+`LearnableNeuralCircuit` — the module path is now **in** the key. So **renaming** a class
+breaks a saved `.keras` archive, and so does **moving** one between these modules; what can
+no longer happen is a same-named class elsewhere under `layers/` silently taking the same
+slot. The helper additionally binds the legacy
 `Custom><ClassName>` key as an alias to the same object, and
 `keras.saving.get_registered_object("Custom>LearnableNeuralCircuit")` returns this class
 (measured 2026-08-29), which is what keeps pre-migration archives loading. The `__init__.py`
@@ -219,14 +219,13 @@ routing should pin `CircuitDepthLayer(circuit_routing='classic')`.
   `LearnableNeuralCircuit` enforced strict 4-D inputs. This has been
   relaxed to **rank >= 2** — the math was always rank-agnostic. Sibling
   arithmetic / logic operators were already rank-agnostic.
-- **`@register_dl_technique("dl_techniques.layers")`.** The key is
-  `dl_techniques.layers><ClassName>` and carries no module path below that coarse
-  segment, so **renaming** one of these classes breaks every `.keras` archive saved with a
-  prior version, and a same-named class registered elsewhere under `dl_techniques.layers`
-  would collide with it. The legacy `Custom><ClassName>` alias the helper also binds is
-  keyed on the bare class name too, so a rename drops that as well. Relocating a class
-  between modules is safe on this axis. New callers are encouraged to use the factory;
-  class-direct imports remain fully supported.
+- **`@register_dl_technique("dl_techniques.layers.logic.<module>")`.** The key is
+  `dl_techniques.layers.logic.<module>><ClassName>` and names the defining module, so
+  **renaming** one of these classes — or **moving** it to another module in this package —
+  breaks every `.keras` archive saved with a prior version. The legacy
+  `Custom><ClassName>` alias the helper also binds is keyed on the bare class name only, so
+  a rename drops that as well while a move does not. New callers are encouraged to use the
+  factory; class-direct imports remain fully supported.
 - **No internal projection.** Output channel count equals input channel
   count. Pair with a `Dense` / `Conv` if you need dimensionality change.
 - **Stacking `LearnableLogicOperator` re-squashes via sigmoid every layer

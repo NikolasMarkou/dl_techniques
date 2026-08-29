@@ -39,9 +39,11 @@ in two modules, which is confusing to read but harmless to load. That is also wh
 row lists a `package=`-qualified pair while its three neighbours list bare `Custom>`
 keys. It is moot now regardless: the two classes were MERGED into one on 2026-08-14,
 the `models.convunext.model` twin was deleted, and the survivor lives in
-`models/vision/convunext/model.py` while deliberately keeping
-``package="dl_techniques.bias_free_denoisers"`` so its key stays byte-stable. Do not
-"fix" that package/module mismatch.
+`models/vision/convunext/model.py`. It kept ``package="dl_techniques.bias_free_denoisers"``
+so its key stayed byte-stable until 2026-08-29, when the user confirmed there are no
+checkpoints -- the exemption's entire basis -- and it was normalized to
+``package="dl_techniques.models.convunext.model"`` along with the tree's other 33 ad-hoc
+strings (repo-root `MIGRATIONS.md`).
 
 Two of the OTHER right-hand modules have since been DELETED and no longer exist anywhere
 in the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`

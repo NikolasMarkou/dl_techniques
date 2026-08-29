@@ -127,7 +127,7 @@ def _reshape_to_nway(
     )
 
 
-@register_dl_technique("dl_techniques")
+@register_dl_technique("dl_techniques.losses.colbert_loss")
 class ColBERTPairwiseSoftmaxLoss(keras.losses.Loss):
     """ColBERT v1 objective: softmax cross-entropy over ``nway`` candidate scores.
 
@@ -213,7 +213,7 @@ class ColBERTPairwiseSoftmaxLoss(keras.losses.Loss):
         return config
 
 
-@register_dl_technique("dl_techniques")
+@register_dl_technique("dl_techniques.losses.colbert_loss")
 class ColBERTDistillationLoss(keras.losses.Loss):
     """ColBERT v2 objective: batch-mean KL between two log-probability distributions.
 

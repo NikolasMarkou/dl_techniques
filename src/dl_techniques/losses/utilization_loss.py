@@ -21,7 +21,7 @@ from typing import Any, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses.utilization_loss")
 class MANNUtilizationLoss(keras.losses.Loss):
     """Encourages a Memory-Augmented Neural Network to use its memory.
 
@@ -114,7 +114,7 @@ class MANNUtilizationLoss(keras.losses.Loss):
         return config
 
 
-@register_dl_technique("dl_techniques.losses")
+@register_dl_technique("dl_techniques.losses.utilization_loss")
 class GNNUtilizationLoss(keras.losses.Loss):
     """Encourages a Graph Neural Network to use its entity representations.
 

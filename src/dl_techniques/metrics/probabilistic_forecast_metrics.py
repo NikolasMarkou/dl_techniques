@@ -36,7 +36,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.probabilistic_forecast")
+@register_dl_technique("dl_techniques.metrics.probabilistic_forecast_metrics")
 class CoverageMetric(keras.metrics.Metric):
     """Empirical interval coverage for quantile forecasts.
 

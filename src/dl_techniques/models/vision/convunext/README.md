@@ -358,22 +358,21 @@ print(bf.count_params(), bf2.count_params(), bf.count_params() == bf2.count_para
 # 503424 503424 True
 ```
 
-`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) but keeps the package
-string `dl_techniques.bias_free_denoisers` —
-`@register_dl_technique("dl_techniques.bias_free_denoisers")`, from
-`dl_techniques.utils.keras_registration`. That package string no longer matches its module
-path and **that mismatch is deliberate and load-bearing**: it is the registry key
-`dl_techniques.bias_free_denoisers>ConvUNextStem` that existing `.keras` artifacts
-carry. Do not "tidy" it. An in-file `# DECISION` anchor says the same thing next to
-the code.
+`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) and registers under its own
+module path — `@register_dl_technique("dl_techniques.models.convunext.model")`, from
+`dl_techniques.utils.keras_registration`, giving the key
+`dl_techniques.models.convunext.model>ConvUNextStem`.
 
-The 2026-08-29 registration migration (repo-root `MIGRATIONS.md`) changed the **decorator**
-here, not the **key**: it moved every site in `src/` from the stock
-`@keras.saving.register_keras_serializable` onto the helper, and the 38 sites that already
-carried an explicit `package=` kept their string unchanged. `SpatialLinearAttention`, which
-had no explicit string, took the defining module's dotted path and is
-`dl_techniques.models.convunext.model>SpatialLinearAttention`. So the two classes in this
-one file sit under two different package strings, on purpose.
+It did not always. Until 2026-08-29 it kept the string `dl_techniques.bias_free_denoisers`,
+naming the module it was defined in before the merge, so that the key stayed byte-stable for
+`.keras` artifacts written before the move. The 2026-08-29 registration migration
+(repo-root `MIGRATIONS.md`) moved every site in `src/` from the stock
+`@keras.saving.register_keras_serializable` onto the helper and initially preserved that
+string, along with 37 other pre-existing explicit ones; the same day the user confirmed there
+are no checkpoints, which was the exemption's entire basis, and all 34 non-conforming strings
+were normalized. `SpatialLinearAttention` in the same file is
+`dl_techniques.models.convunext.model>SpatialLinearAttention`, so the two classes in this one
+file now sit under the **same** package string, as the rule requires.
 
 ## 9. Package surface
 

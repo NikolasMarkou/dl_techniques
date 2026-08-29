@@ -87,7 +87,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 _SINUSOID_SCALE: float = 1e4
 
 
-@register_dl_technique("dl_techniques.layers")
+@register_dl_technique("dl_techniques.layers.embedding.scalar_sinusoidal_embedding")
 class ScalarSinusoidalEmbedding(keras.layers.Layer):
     """Embed one scalar per token, then refine it with a SiLU MLP.
 

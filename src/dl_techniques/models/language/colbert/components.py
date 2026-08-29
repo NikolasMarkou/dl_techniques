@@ -128,7 +128,7 @@ def _safe_l2_normalize(x: Any) -> Any:
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques")
+@register_dl_technique("dl_techniques.models.colbert.components")
 class ColBERTProjection(keras.layers.Layer):
     """Bias-free linear projection to the retrieval dimension, then L2 normalize.
 
@@ -237,7 +237,7 @@ class ColBERTProjection(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques")
+@register_dl_technique("dl_techniques.models.colbert.components")
 class MaxSimScorer(keras.layers.Layer):
     """Late-interaction MaxSim reduction over a dense query-by-document matrix.
 

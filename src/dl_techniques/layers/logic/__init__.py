@@ -5,14 +5,16 @@ Four learnable layer classes plus a string-keyed factory. Every class is
 also importable from the module it is defined in. This file only re-exports
 already decorated symbols; it registers nothing of its own, so importing
 from here and importing from the module give you the same class object.
-The four `keras.saving` keys are `dl_techniques.layers><ClassName>` --
-resolved 2026-08-29 with `keras.saving.get_registered_name`, not copied from
-any doc. All four modules pass that same coarse `"dl_techniques.layers"`
-package string to `register_dl_technique`, so the key still carries no
-per-module path: renaming a class breaks saved archives while moving one
-between these modules does not. Each also keeps the pre-2026-08-29
-`Custom><ClassName>` alias bound to the identical object (verified `a is b`),
-so archives written before the registration migration still load.
+The four `keras.saving` keys are `dl_techniques.layers.logic.<module>><ClassName>`
+-- resolved 2026-08-29 with `keras.saving.get_registered_name`, not copied from
+any doc. Each module passes its own dotted path to `register_dl_technique`, so
+the key names the defining module: `arithmetic_operators`, `logic_operators` and
+`neural_circuit` (which owns two of the four). Until 2026-08-29 all four shared
+the coarse hand-chosen string `"dl_techniques.layers"`; that was the last batch
+of ad-hoc package strings in `src/` and it was normalized onto the module-path
+rule the other 710 sites already followed (repo-root `MIGRATIONS.md`). Each also
+keeps the `Custom><ClassName>` alias bound to the identical object (verified
+`a is b`).
 
 **Architecture Overview:**
 

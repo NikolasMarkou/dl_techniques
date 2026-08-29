@@ -269,7 +269,7 @@ def make_synthetic_dataset(
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.train.ideogram4")
+@register_dl_technique("dl_techniques.train.ideogram4.train_ideogram4")
 class Ideogram4FlowTrainer(keras.Model):
     """Thin trainer wrapping :class:`Ideogram4Transformer`.
 

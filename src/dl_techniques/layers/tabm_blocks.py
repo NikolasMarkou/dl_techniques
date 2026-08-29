@@ -560,7 +560,7 @@ class NLinear(keras.layers.Layer):
 # Registered under an explicit package: the bare class name collides with
 # `layers/ffn/mlp.py::MLPBlock`, and whichever module imported last used to win
 # the global registry key, so a saved TabM deserialized into the FFN block.
-@register_dl_technique("dl_techniques.tabm", legacy_alias=False)
+@register_dl_technique("dl_techniques.layers.tabm_blocks", legacy_alias=False)
 class MLPBlock(keras.layers.Layer):
     """
     MLP block with optional efficient ensemble support.

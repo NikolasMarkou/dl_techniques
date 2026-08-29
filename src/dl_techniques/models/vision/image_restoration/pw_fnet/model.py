@@ -445,7 +445,7 @@ class PW_FNet_Block(keras.layers.Layer):
 # Scaling Layers
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.pw_fnet", legacy_alias=False)
+@register_dl_technique("dl_techniques.models.pw_fnet.model", legacy_alias=False)
 class Downsample(keras.layers.Layer):
     """
     Trainable downsampling layer using strided convolution.
@@ -531,7 +531,7 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-@register_dl_technique("dl_techniques.pw_fnet", legacy_alias=False)
+@register_dl_technique("dl_techniques.models.pw_fnet.model", legacy_alias=False)
 class Upsample(keras.layers.Layer):
     """
     Trainable upsampling layer using transposed convolution.
