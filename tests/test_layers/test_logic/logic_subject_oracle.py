@@ -17,6 +17,7 @@ RED proofs for everything defined here live in the mirrored
 ``test_*`` modules beside it.
 """
 
+import contextlib
 import functools
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -425,3 +426,253 @@ class FiniteForwardObserver:
                 f"{cls.__name__}.call was left wrapped by the finiteness "
                 f"observer; the next test would inherit the instrument"
             )
+
+
+# --------------------------------------------------------------------
+# §12.5 / §13.3.2 -- the constructor-knob pins.
+#
+# One instrument per knob CLASS. The §13.3.2 trap this exists to avoid:
+# an OUTPUT-difference assertion on a STRUCTURAL knob is satisfied by
+# random-init luck alone, because two layers with different weight
+# shapes consume different draws from the RNG and their outputs differ
+# whether or not the argument was honoured. Structural knobs are pinned
+# on SHAPES.
+# --------------------------------------------------------------------
+
+#: The knob classes the dispatcher below understands.
+KNOB_CLASSES = ("structural", "value", "scoped_value", "loss")
+
+
+class Knob:
+    """One constructor parameter and the two configurations that pin it.
+
+    :param param: The constructor parameter name. Used as the test id.
+    :param knob_class: One of :data:`KNOB_CLASSES`.
+    :param variants: Two or more named kwarg overlays, applied on top of
+        the caller's base kwargs. Stored as a tuple of pairs so the
+        order is fixed and the ids are stable.
+    :param measured: The number this pin was written against, quoted in
+        the assertion message. A tolerance or a delta with no recorded
+        measurement is the §13.1 rule-1 violation.
+    :param scope: For ``scoped_value`` only: a substring of ``w.path``
+        naming the weight subtree whose VALUES must move. Every other
+        weight is ignored.
+    :param training: Passed to ``call``. ``True`` only for the Gumbel
+        knobs, which are no-ops at inference.
+    :param feature: Feature-shape override, for knobs that need a
+        specific input range or rank.
+    """
+
+    def __init__(
+            self,
+            param: str,
+            knob_class: str,
+            variants: Dict[str, Dict[str, Any]],
+            measured: float,
+            scope: Optional[str] = None,
+            training: bool = False,
+    ) -> None:
+        assert knob_class in KNOB_CLASSES, knob_class
+        assert len(variants) >= 2, f"{param}: a knob needs two variants"
+        assert (scope is None) == (knob_class != "scoped_value"), (
+            f"{param}: scope is required for scoped_value and "
+            f"meaningless otherwise"
+        )
+        self.param = param
+        self.knob_class = knob_class
+        self.variants = tuple(variants.items())
+        self.measured = measured
+        self.scope = scope
+        self.training = training
+
+
+@contextlib.contextmanager
+def frozen_random_uniform(active: bool = True, seed: int = 4242):
+    """Replace ``keras.random.uniform`` with a fixed NumPy draw.
+
+    Only for the Gumbel arms, whose noise is drawn at call time from the
+    global generator. Yields a dict whose ``"calls"`` entry counts the
+    interceptions, so a caller can prove the stub was actually reached
+    rather than assuming it.
+
+    :param active: When False this is a no-op, so the same code path
+        serves the deterministic knobs.
+    :param seed: Seed of the substituted draw.
+    """
+    state = {"calls": 0}
+    if not active:
+        yield state
+        return
+    original = keras.random.uniform
+
+    def stub(shape, minval=0.0, maxval=1.0, **kwargs):
+        state["calls"] += 1
+        rng = np.random.default_rng(seed)
+        drawn = rng.uniform(
+            float(minval), float(maxval),
+            size=tuple(int(dim) for dim in shape),
+        )
+        return keras.ops.convert_to_tensor(
+            drawn.astype(keras.backend.floatx())
+        )
+
+    keras.random.uniform = stub
+    try:
+        yield state
+    finally:
+        keras.random.uniform = original
+
+
+def _realize(cls, kwargs, sample, training, seed=0):
+    """Build and run one variant under a fixed seed.
+
+    Returns the shape signature, the output, the weight values by
+    relative path, and the summed regularization losses.
+    """
+    keras.utils.set_random_seed(seed)
+    layer = cls(name="knob_unit", **kwargs)
+    # The Gumbel path draws from the global generator at CALL time, and
+    # `keras.utils.set_random_seed` does NOT reproduce a later
+    # `keras.random.*` draw: measured, two rebuilds of the same variant
+    # under the same seed differ by up to 0.0374, so no difference the
+    # pin reports would be attributable to the knob. Freezing the draw
+    # also hands both variants the same noise, which is what isolates
+    # `gumbel_hard` from `gumbel_softmax`.
+    with frozen_random_uniform(active=training) as draws:
+        output = keras.ops.convert_to_numpy(
+            layer(sample, training=training)
+        ).astype("float64")
+    if training and kwargs.get("gumbel_softmax"):
+        assert draws["calls"] > 0, (
+            f"{cls.__name__}: gumbel_softmax=True at training=True made "
+            f"no keras.random.uniform draw; the frozen-noise instrument "
+            f"was not on the path it exists to control"
+        )
+    signature = tuple(
+        (w.path.split("/", 1)[-1], tuple(w.shape)) for w in layer.weights
+    )
+    assert signature, (
+        f"{cls.__name__} has no weights after the forward pass; every "
+        f"knob signature would compare equal"
+    )
+    values = {
+        w.path.split("/", 1)[-1]:
+            keras.ops.convert_to_numpy(w).astype("float64")
+        for w in layer.weights
+    }
+    losses = sum(
+        float(keras.ops.convert_to_numpy(term)) for term in layer.losses
+    )
+    return signature, output, values, losses
+
+
+def assert_the_harness_is_deterministic(cls, base, knob, sample_for):
+    """The anti-vacuity control every pin below needs (§13.1 rule 3).
+
+    Builds the SAME variant twice and demands bit-identical results. A
+    difference reported by the pin is otherwise attributable to run-to-
+    run noise rather than to the knob. It also catches the §13.3.2
+    closure gotcha from the other side: if two variants were silently
+    identical the pins would go red, and if a rebuild were non-
+    deterministic they would go green for free.
+    """
+    name, overlay = knob.variants[0]
+    kwargs = {**base, **overlay}
+    sample = sample_for(knob)
+    first = _realize(cls, kwargs, sample, knob.training)
+    second = _realize(cls, kwargs, sample, knob.training)
+    assert first[0] == second[0], (
+        f"{cls.__name__}.{knob.param}: rebuilding variant {name!r} "
+        f"changed the weight SHAPES"
+    )
+    np.testing.assert_array_equal(
+        first[1], second[1],
+        err_msg=(
+            f"{cls.__name__}.{knob.param}: rebuilding variant {name!r} "
+            f"under the same seed changed the OUTPUT, so any difference "
+            f"the pin measures is not attributable to the knob"
+        ),
+    )
+    assert first[3] == second[3], (
+        f"{cls.__name__}.{knob.param}: the losses are not reproducible"
+    )
+
+
+def assert_knob_is_honoured(cls, base, knob, sample_for):
+    """Pin one knob with the instrument matching its class.
+
+    :param cls: The layer class.
+    :param base: Kwargs common to every variant.
+    :param knob: The :class:`Knob` to pin.
+    :param sample_for: ``knob -> input``, so a knob can ask for its own
+        input range (the divide guards need a near-zero denominator;
+        the clip knobs need values outside ``[0, 1]``).
+    """
+    sample = sample_for(knob)
+    realized = {
+        name: _realize(cls, {**base, **overlay}, sample, knob.training)
+        for name, overlay in knob.variants
+    }
+    signatures = {n: r[0] for n, r in realized.items()}
+    names = list(realized)
+
+    if knob.knob_class == "structural":
+        assert len(set(signatures.values())) == len(signatures), (
+            f"{cls.__name__}.{knob.param} is STRUCTURAL and left the "
+            f"weight-shape signature unchanged across "
+            f"{names}; an output difference here would have been "
+            f"random-init luck (§13.3.2). Signatures: {signatures}"
+        )
+        return
+
+    assert len(set(signatures.values())) == 1, (
+        f"{cls.__name__}.{knob.param} is declared {knob.knob_class} but "
+        f"changed the weight shapes across {names}: {signatures}. Either "
+        f"the declaration is wrong or the pin is measuring the wrong "
+        f"thing"
+    )
+
+    if knob.knob_class == "loss":
+        losses = {n: r[3] for n, r in realized.items()}
+        assert len(set(losses.values())) == len(losses), (
+            f"{cls.__name__}.{knob.param} is a LOSS knob and every "
+            f"variant produced the same total loss {losses}; measured "
+            f"{knob.measured} when this pin was written"
+        )
+        return
+
+    if knob.knob_class == "scoped_value":
+        deltas = {}
+        for left, right in zip(names, names[1:]):
+            scoped = [
+                float(np.max(np.abs(
+                    realized[left][2][path] - realized[right][2][path]
+                )))
+                for path in realized[left][2]
+                if knob.scope in path
+            ]
+            assert scoped, (
+                f"{cls.__name__}.{knob.param}: no weight path contains "
+                f"{knob.scope!r}; the scope names nothing and the pin "
+                f"would be vacuous. Paths: {sorted(realized[left][2])}"
+            )
+            deltas[f"{left}->{right}"] = max(scoped)
+        assert all(value > 0.0 for value in deltas.values()), (
+            f"{cls.__name__}.{knob.param} is a SCOPED VALUE knob and "
+            f"left the {knob.scope!r} weight values identical: "
+            f"{deltas}; measured {knob.measured} when this pin was "
+            f"written"
+        )
+        return
+
+    outputs = {n: r[1] for n, r in realized.items()}
+    deltas = {
+        f"{left}->{right}":
+            float(np.max(np.abs(outputs[left] - outputs[right])))
+        for left, right in zip(names, names[1:])
+    }
+    assert all(value > 0.0 for value in deltas.values()), (
+        f"{cls.__name__}.{knob.param} is a VALUE knob and changed "
+        f"nothing in the output: {deltas}; measured {knob.measured} "
+        f"when this pin was written"
+    )

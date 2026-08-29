@@ -8,6 +8,12 @@ from typing import Any, Dict
 
 from dl_techniques.layers.logic.logic_operators import LearnableLogicOperator
 
+from .logic_subject_oracle import (
+    Knob,
+    assert_knob_is_honoured,
+    assert_the_harness_is_deterministic,
+)
+
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
 # Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
@@ -959,3 +965,227 @@ class TestPlanE33114daLogic:
         op = LearnableLogicOperator(operation_types=['and', 'or'])
         with pytest.raises(ValueError, match="same shape"):
             op.compute_output_shape([(None, 32), (None, 16)])
+
+
+# --------------------------------------------------------------------
+# §12.5 -- every constructor parameter pinned, with the §13.3.2
+# instrument that matches its knob class.
+# --------------------------------------------------------------------
+
+#: Every variant that needs a non-uniform gate distribution uses this.
+#: With the default `operation_initializer='zeros'` the softmax over the
+#: gates is exactly uniform, which makes the temperature and the Gumbel
+#: knobs structurally unobservable in the output (measured: `dy = 0.0`
+#: for `temperature_init` 1.0-vs-5.0 at the default initializer).
+_KNOB_LIVE = keras.initializers.RandomNormal(stddev=0.5, seed=11)
+_KNOB_OTHER = keras.initializers.RandomNormal(stddev=0.9, seed=13)
+
+#: Base kwargs. Three binary gates, so `operation_weights` has shape
+#: (3,) and the sweep below can shorten it to (2,).
+_KNOB_BASE = {"operation_types": ["and", "or", "xor"]}
+
+LOGIC_KNOBS = [
+    Knob("operation_types", "structural", {
+        "two": {"operation_types": ["and", "or"]},
+        "three": {"operation_types": ["and", "or", "xor"]},
+    }, measured=0.105044),
+    Knob("use_temperature", "structural", {
+        "on": {"use_temperature": True},
+        "off": {"use_temperature": False},
+    }, measured=0.0),
+    # NOT a value knob: at temperature_init=1.0 vs 5.0 the OUTPUT moves
+    # by only 0.0167, but the stored weight moves by 4.45191 --
+    # log(expm1(5.0)) - log(expm1(1.0)). The weight is the direct
+    # instrument; the output is a downstream consequence.
+    Knob("temperature_init", "scoped_value", {
+        "one": {"operation_initializer": _KNOB_LIVE, "temperature_init": 1.0},
+        "five": {"operation_initializer": _KNOB_LIVE, "temperature_init": 5.0},
+    }, measured=4.45191, scope="temperature"),
+    Knob("operation_initializer", "scoped_value", {
+        "narrow": {"operation_initializer": _KNOB_LIVE},
+        "wide": {"operation_initializer": _KNOB_OTHER},
+    }, measured=1.7634, scope="operation_weights"),
+    # Read ONLY when softplus_temperature is False -- the class
+    # docstring says so, and the softplus path overrides it with
+    # Constant(log(expm1(temperature_init))). Pinned in the
+    # configuration in which it is live; the ignored configuration is
+    # pinned separately below.
+    Knob("temperature_initializer", "scoped_value", {
+        "one": {"softplus_temperature": False,
+                "temperature_initializer": keras.initializers.Constant(1.0)},
+        "three": {"softplus_temperature": False,
+                  "temperature_initializer": keras.initializers.Constant(3.0)},
+    }, measured=2.0, scope="temperature"),
+    Knob("apply_sigmoid", "value", {
+        "on": {"apply_sigmoid": True},
+        "off": {"apply_sigmoid": False},
+    }, measured=0.40371),
+    Knob("force_clip_when_no_sigmoid", "value", {
+        "off": {"apply_sigmoid": False, "force_clip_when_no_sigmoid": False},
+        "on": {"apply_sigmoid": False, "force_clip_when_no_sigmoid": True},
+    }, measured=0.735067),
+    # softplus_temperature is a REPARAMETERIZATION, not an output knob:
+    # both paths give an effective temperature of temperature_init, so
+    # the output delta is EXACTLY 0.0 by construction. What moves is the
+    # stored raw value, 1.0 - log(expm1(1.0)) = 0.458675.
+    Knob("softplus_temperature", "scoped_value", {
+        "on": {"operation_initializer": _KNOB_LIVE,
+               "softplus_temperature": True},
+        "off": {"operation_initializer": _KNOB_LIVE,
+                "softplus_temperature": False},
+    }, measured=0.458675, scope="temperature"),
+    Knob("gumbel_softmax", "value", {
+        "off": {"operation_initializer": _KNOB_LIVE, "gumbel_softmax": False},
+        "on": {"operation_initializer": _KNOB_LIVE, "gumbel_softmax": True},
+    }, measured=0.124748, training=True),
+    Knob("gumbel_hard", "value", {
+        "soft": {"operation_initializer": _KNOB_LIVE,
+                 "gumbel_softmax": True, "gumbel_hard": False},
+        "hard": {"operation_initializer": _KNOB_LIVE,
+                 "gumbel_softmax": True, "gumbel_hard": True},
+    }, measured=0.398007, training=True),
+    Knob("entropy_coefficient", "loss", {
+        "zero": {"entropy_coefficient": 0.0},
+        "half": {"entropy_coefficient": 0.5},
+    }, measured=0.549306),
+    Knob("selection_mode", "structural", {
+        "global": {"selection_mode": "global"},
+        "per_channel": {"selection_mode": "per_channel"},
+    }, measured=0.0971184),
+    Knob("yager_p", "value", {
+        "two": {"operation_types": ["yager_and", "yager_or"], "yager_p": 2.0},
+        "five": {"operation_types": ["yager_and", "yager_or"], "yager_p": 5.0},
+    }, measured=0.0548472),
+]
+
+#: `allow_unary_degenerate` is a GUARD knob: it decides whether a
+#: single-tensor call raises. It has no output, weight or loss
+#: signature, so it gets its own pin below rather than a table row.
+LOGIC_KNOB_NAMES = [knob.param for knob in LOGIC_KNOBS] + [
+    "allow_unary_degenerate"
+]
+
+
+def _logic_sample(knob):
+    """The input each knob needs.
+
+    The clip knobs are no-ops on inputs already inside [0, 1] --
+    measured `dy = 0.0` on the default [0.05, 0.95] draw -- so they get
+    a draw that straddles the boundary. Everything else uses the shared
+    in-range draw.
+    """
+    rng = np.random.default_rng(1234)
+    drawn = [
+        rng.uniform(0.05, 0.95, size=(4, 8, 16)).astype("float32")
+        for _ in range(2)
+    ]
+    if knob.param == "force_clip_when_no_sigmoid":
+        drawn[0] = np.clip(drawn[0] * 4.0 - 1.5, -3.0, 3.0)
+    return drawn
+
+
+class TestEveryLogicConstructorKnobIsPinned:
+    """§12.5. Reading the value back off `self` is not coverage.
+
+    Fourteen constructor parameters, each varied and each asserted to
+    make a measured difference, with the instrument matching its
+    §13.3.2 class. The measurement each pin was written against is
+    carried in the `Knob.measured` field and quoted on failure.
+    """
+
+    def test_the_table_covers_every_constructor_parameter(self):
+        """The pin that keeps this table honest as the class grows.
+
+        A new constructor parameter with no table row fails HERE
+        instead of silently being unpinned -- which is the whole
+        finding this class exists to close.
+        """
+        import inspect
+
+        declared = [
+            name for name, parameter
+            in inspect.signature(LearnableLogicOperator.__init__)
+            .parameters.items()
+            if name != "self"
+            and parameter.kind is not parameter.VAR_KEYWORD
+        ]
+        assert sorted(declared) == sorted(LOGIC_KNOB_NAMES), (
+            f"unpinned: {sorted(set(declared) - set(LOGIC_KNOB_NAMES))}; "
+            f"stale rows: "
+            f"{sorted(set(LOGIC_KNOB_NAMES) - set(declared))}"
+        )
+
+    @pytest.mark.parametrize(
+        "knob", LOGIC_KNOBS, ids=[k.param for k in LOGIC_KNOBS]
+    )
+    def test_rebuilding_one_variant_is_bit_identical(self, knob):
+        """The anti-vacuity control (§13.1 rule 3)."""
+        assert_the_harness_is_deterministic(
+            LearnableLogicOperator, _KNOB_BASE, knob, _logic_sample
+        )
+
+    @pytest.mark.parametrize(
+        "knob", LOGIC_KNOBS, ids=[k.param for k in LOGIC_KNOBS]
+    )
+    def test_the_knob_is_honoured(self, knob):
+        assert_knob_is_honoured(
+            LearnableLogicOperator, _KNOB_BASE, knob, _logic_sample
+        )
+
+    def test_the_unary_guard_is_not_raising_for_an_unrelated_reason(
+            self
+    ):
+        """The missing twin of the `allow_unary_degenerate` pins.
+
+        `allow_unary_degenerate` is a GUARD knob -- it decides whether a
+        single-tensor call raises -- so it has no output, weight or loss
+        signature and gets no table row. It is already pinned in both
+        directions by `test_unary_input_raises_when_strict`,
+        `test_unary_input_blocked_when_default_M8` and
+        `test_unary_input_allowed_when_opt_in` above, which were
+        RED-proven here on 2026-08-29 by forcing the flag True (both
+        raise-side tests went red). This adds the twin none of the three
+        supplies: a class that rejected EVERY single tensor, ignoring
+        the knob, would satisfy all three. An ALL-UNARY gate set is
+        accepted at `allow_unary_degenerate=False`, so the raise is
+        attributable to the binary gate rather than to the arity.
+        """
+        sample = _logic_sample(LOGIC_KNOBS[0])[0]
+        unary_only = LearnableLogicOperator(
+            operation_types=["not"], allow_unary_degenerate=False
+        )
+        output = ops.convert_to_numpy(unary_only(sample))
+        assert bool(np.all(np.isfinite(output)))
+
+    def test_temperature_initializer_is_ignored_on_the_softplus_path(
+            self
+    ):
+        """The documented conditional. `softplus_temperature=True`
+        overrides `temperature_initializer` with
+        `Constant(log(expm1(temperature_init)))`, so the knob reads
+        `dw = 0.0` there -- pinned so the docstring claim cannot rot,
+        and paired with its live configuration in the table above
+        (`dw = 2.0`), which is the twin.
+        """
+        def stored(initializer):
+            keras.utils.set_random_seed(0)
+            layer = LearnableLogicOperator(
+                operation_types=["and", "or", "xor"],
+                softplus_temperature=True,
+                temperature_initializer=initializer,
+            )
+            layer(_logic_sample(LOGIC_KNOBS[0]))
+            return float(
+                ops.convert_to_numpy(layer.temperature)
+            )
+
+        one = stored(keras.initializers.Constant(1.0))
+        three = stored(keras.initializers.Constant(3.0))
+        assert one == three, (
+            "temperature_initializer became live on the softplus path; "
+            "the class docstring says it is read only when "
+            "softplus_temperature is False"
+        )
+        assert one == pytest.approx(
+            float(np.log(np.expm1(1.0))), rel=0, abs=1e-6
+        ), f"the softplus path stored {one}, not log(expm1(1.0))"

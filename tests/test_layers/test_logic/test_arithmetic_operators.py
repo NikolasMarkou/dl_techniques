@@ -8,6 +8,12 @@ from typing import Any, Dict
 
 from dl_techniques.layers.logic.arithmetic_operators import LearnableArithmeticOperator
 
+from .logic_subject_oracle import (
+    Knob,
+    assert_knob_is_honoured,
+    assert_the_harness_is_deterministic,
+)
+
 
 # R-038 closure -- plan-2026-08-22T035419-a11304c8 / D-251.
 # Keras `ops/nn.py:907` advises that a softmax over a size-1 axis always returns
@@ -781,3 +787,210 @@ class TestPlanE33114daArithmetic:
     def test_invalid_exponent_clip_mode_raises(self):
         with pytest.raises(ValueError, match="exponent_clip_mode"):
             LearnableArithmeticOperator(exponent_clip_mode='bogus')
+
+
+# --------------------------------------------------------------------
+# §12.5 -- every constructor parameter pinned, with the §13.3.2
+# instrument that matches its knob class.
+# --------------------------------------------------------------------
+
+#: See the note in `test_logic_operators.py`: the default
+#: `operation_initializer='zeros'` makes the gate softmax exactly
+#: uniform, which hides the temperature and Gumbel knobs.
+_KNOB_LIVE = keras.initializers.RandomNormal(stddev=0.5, seed=11)
+_KNOB_OTHER = keras.initializers.RandomNormal(stddev=0.9, seed=13)
+
+_KNOB_BASE = {"operation_types": ["add", "multiply"]}
+
+ARITHMETIC_KNOBS = [
+    Knob("operation_types", "structural", {
+        "two": {"operation_types": ["add", "multiply"]},
+        "three": {"operation_types": ["add", "multiply", "divide"]},
+    }, measured=5.30675),
+    Knob("use_temperature", "structural", {
+        "on": {"operation_initializer": _KNOB_LIVE, "use_temperature": True},
+        "off": {"operation_initializer": _KNOB_LIVE, "use_temperature": False},
+    }, measured=0.0),
+    Knob("temperature_init", "scoped_value", {
+        "one": {"operation_initializer": _KNOB_LIVE, "temperature_init": 1.0},
+        "five": {"operation_initializer": _KNOB_LIVE, "temperature_init": 5.0},
+    }, measured=4.45191, scope="temperature"),
+    Knob("use_scaling", "structural", {
+        "on": {"operation_initializer": _KNOB_LIVE, "use_scaling": True},
+        "off": {"operation_initializer": _KNOB_LIVE, "use_scaling": False},
+    }, measured=0.0),
+    Knob("scaling_init", "scoped_value", {
+        "one": {"operation_initializer": _KNOB_LIVE, "scaling_init": 1.0},
+        "two_five": {"operation_initializer": _KNOB_LIVE,
+                     "scaling_init": 2.5},
+    }, measured=1.5, scope="scaling_factor"),
+    Knob("operation_initializer", "scoped_value", {
+        "narrow": {"operation_initializer": _KNOB_LIVE},
+        "wide": {"operation_initializer": _KNOB_OTHER},
+    }, measured=0.526772, scope="operation_weights"),
+    # Live only when softplus_temperature is False; the docstring says
+    # so and the ignored configuration is pinned separately below.
+    Knob("temperature_initializer", "scoped_value", {
+        "one": {"softplus_temperature": False,
+                "temperature_initializer": keras.initializers.Constant(1.0)},
+        "three": {"softplus_temperature": False,
+                  "temperature_initializer": keras.initializers.Constant(3.0)},
+    }, measured=2.0, scope="temperature"),
+    Knob("scaling_initializer", "scoped_value", {
+        "one": {"scaling_initializer": keras.initializers.Constant(1.0)},
+        "three": {"scaling_initializer": keras.initializers.Constant(3.0)},
+    }, measured=2.0, scope="scaling_factor"),
+    # The divide guards are invisible on a denominator far from zero:
+    # measured dy = 9.5e-07 on the ordinary draw, which is float32
+    # noise. `_arithmetic_sample` hands these two a denominator that
+    # sweeps through 0.
+    Knob("epsilon", "value", {
+        "tiny": {"operation_types": ["divide"], "epsilon": 1e-7},
+        "large": {"operation_types": ["divide"], "epsilon": 1e-2},
+    }, measured=255432.0),
+    Knob("safe_divide_mode", "value", {
+        "hard_clamp": {"operation_types": ["divide"],
+                       "safe_divide_mode": "hard_clamp"},
+        "smooth": {"operation_types": ["divide"],
+                   "safe_divide_mode": "smooth"},
+    }, measured=665.328),
+    Knob("power_clip_range", "value", {
+        "wide": {"operation_types": ["power"],
+                 "power_clip_range": (1e-7, 10.0)},
+        "narrow": {"operation_types": ["power"],
+                   "power_clip_range": (0.5, 0.6)},
+    }, measured=0.494605),
+    Knob("exponent_clip_range", "value", {
+        "wide": {"operation_types": ["power"],
+                 "exponent_clip_range": (-2.0, 2.0)},
+        "narrow": {"operation_types": ["power"],
+                   "exponent_clip_range": (0.1, 0.2)},
+    }, measured=0.511649),
+    Knob("exponent_clip_mode", "value", {
+        "hard": {"operation_types": ["power"], "exponent_clip_mode": "hard"},
+        "smooth": {"operation_types": ["power"],
+                   "exponent_clip_mode": "smooth"},
+    }, measured=0.0259506),
+    # A reparameterization, not an output knob: both paths give an
+    # effective temperature of temperature_init, so the output delta is
+    # exactly 0.0 by construction and only the stored raw value moves.
+    Knob("softplus_temperature", "scoped_value", {
+        "on": {"operation_initializer": _KNOB_LIVE,
+               "softplus_temperature": True},
+        "off": {"operation_initializer": _KNOB_LIVE,
+                "softplus_temperature": False},
+    }, measured=0.458675, scope="temperature"),
+    Knob("gumbel_softmax", "value", {
+        "off": {"operation_initializer": _KNOB_LIVE, "gumbel_softmax": False},
+        "on": {"operation_initializer": _KNOB_LIVE, "gumbel_softmax": True},
+    }, measured=0.132332, training=True),
+    Knob("gumbel_hard", "value", {
+        "soft": {"operation_initializer": _KNOB_LIVE,
+                 "gumbel_softmax": True, "gumbel_hard": False},
+        "hard": {"operation_initializer": _KNOB_LIVE,
+                 "gumbel_softmax": True, "gumbel_hard": True},
+    }, measured=0.551703, training=True),
+    Knob("entropy_coefficient", "loss", {
+        "zero": {"entropy_coefficient": 0.0},
+        "half": {"entropy_coefficient": 0.5},
+    }, measured=0.346574),
+    Knob("selection_mode", "structural", {
+        "global": {"operation_initializer": _KNOB_LIVE,
+                   "selection_mode": "global"},
+        "per_channel": {"operation_initializer": _KNOB_LIVE,
+                        "selection_mode": "per_channel"},
+    }, measured=0.26746),
+]
+
+ARITHMETIC_KNOB_NAMES = [knob.param for knob in ARITHMETIC_KNOBS]
+
+
+def _arithmetic_sample(knob):
+    """The input each knob needs.
+
+    `epsilon` and `safe_divide_mode` guard a division, and both are
+    exactly invisible when the denominator is far from zero: measured
+    `dy = 9.5e-07` (float32 noise) on the ordinary [0.05, 0.95] draw
+    versus 255432 and 665.328 on a denominator that sweeps through 0.
+    """
+    rng = np.random.default_rng(1234)
+    drawn = [
+        rng.uniform(0.05, 0.95, size=(4, 8, 16)).astype("float32")
+        for _ in range(2)
+    ]
+    if knob.param in ("epsilon", "safe_divide_mode"):
+        drawn[1] = np.linspace(
+            -1e-3, 1e-3, drawn[1].size
+        ).reshape(drawn[1].shape).astype("float32")
+    return drawn
+
+
+class TestEveryArithmeticConstructorKnobIsPinned:
+    """§12.5. Eighteen constructor parameters, each varied and each
+    asserted to make a measured difference, with the instrument
+    matching its §13.3.2 class.
+    """
+
+    def test_the_table_covers_every_constructor_parameter(self):
+        """A new constructor parameter with no table row fails HERE."""
+        import inspect
+
+        declared = [
+            name for name, parameter
+            in inspect.signature(LearnableArithmeticOperator.__init__)
+            .parameters.items()
+            if name != "self"
+            and parameter.kind is not parameter.VAR_KEYWORD
+        ]
+        assert sorted(declared) == sorted(ARITHMETIC_KNOB_NAMES), (
+            f"unpinned: "
+            f"{sorted(set(declared) - set(ARITHMETIC_KNOB_NAMES))}; "
+            f"stale rows: "
+            f"{sorted(set(ARITHMETIC_KNOB_NAMES) - set(declared))}"
+        )
+
+    @pytest.mark.parametrize(
+        "knob", ARITHMETIC_KNOBS, ids=[k.param for k in ARITHMETIC_KNOBS]
+    )
+    def test_rebuilding_one_variant_is_bit_identical(self, knob):
+        """The anti-vacuity control (§13.1 rule 3)."""
+        assert_the_harness_is_deterministic(
+            LearnableArithmeticOperator, _KNOB_BASE, knob,
+            _arithmetic_sample,
+        )
+
+    @pytest.mark.parametrize(
+        "knob", ARITHMETIC_KNOBS, ids=[k.param for k in ARITHMETIC_KNOBS]
+    )
+    def test_the_knob_is_honoured(self, knob):
+        assert_knob_is_honoured(
+            LearnableArithmeticOperator, _KNOB_BASE, knob,
+            _arithmetic_sample,
+        )
+
+    def test_temperature_initializer_is_ignored_on_the_softplus_path(
+            self
+    ):
+        """The documented conditional, and the twin of the live pin in
+        the table above (`dw = 2.0` at `softplus_temperature=False`).
+        """
+        def stored(initializer):
+            keras.utils.set_random_seed(0)
+            layer = LearnableArithmeticOperator(
+                operation_types=["add", "multiply"],
+                softplus_temperature=True,
+                temperature_initializer=initializer,
+            )
+            layer(_arithmetic_sample(ARITHMETIC_KNOBS[0]))
+            return float(ops.convert_to_numpy(layer.temperature))
+
+        one = stored(keras.initializers.Constant(1.0))
+        three = stored(keras.initializers.Constant(3.0))
+        assert one == three, (
+            "temperature_initializer became live on the softplus path; "
+            "the class docstring says it is read only when "
+            "softplus_temperature is False"
+        )
+        assert one == pytest.approx(
+            float(np.log(np.expm1(1.0))), rel=0, abs=1e-6
+        ), f"the softplus path stored {one}, not log(expm1(1.0))"

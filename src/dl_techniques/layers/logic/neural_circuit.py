@@ -128,6 +128,11 @@ class CircuitDepthLayer(keras.layers.Layer):
     a residual block would go. With ``use_residual=True``, the default,
     the input is added back at the end.
 
+    Every child -- the operators, and the ``Dense`` channel mixer built in
+    ``build()`` -- receives this layer's own ``dtype_policy``. Pinning a
+    stage with ``dtype='float32'`` inside a ``mixed_float16`` model
+    therefore runs its experts in float32 too.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -458,6 +463,11 @@ class CircuitDepthLayer(keras.layers.Layer):
                 stacklevel=3,
             )
 
+        # DECISION plan-2026-08-29T112804-aff039c4/D-007 -- pass
+        # dtype=self.dtype_policy, never dtype=self.dtype, to every child
+        # constructed here. Under mixed_float16 self.dtype reads
+        # 'float32' (the VARIABLE dtype), so the 41-file house spelling
+        # would silently build pure-float32 children. See D-007.
         self.logic_operators = [
             LearnableLogicOperator(
                 operation_types=self.logic_op_types,
@@ -466,6 +476,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 force_clip_when_no_sigmoid=self.force_logic_input_clip,
                 selection_mode=self.selection_mode,
                 name=f"logic_op_{i}",
+                dtype=self.dtype_policy,
                 **logic_extra,
             )
             for i in range(self.num_logic_ops)
@@ -475,6 +486,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 operation_types=self.arithmetic_op_types,
                 selection_mode=self.selection_mode,
                 name=f"arithmetic_op_{i}",
+                dtype=self.dtype_policy,
                 **arith_extra,
             )
             for i in range(self.num_arithmetic_ops)
@@ -562,6 +574,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 channel_dim,
                 use_bias=True,
                 name="channel_mix",
+                dtype=self.dtype_policy,
             )
             self._channel_mix_layer.build(input_shape)
 
@@ -906,6 +919,8 @@ class LearnableNeuralCircuit(keras.layers.Layer):
     Each depth is its own ``CircuitDepthLayer`` with its own experts and
     its own weights, and the output of one is the input of the next. With
     ``use_layer_norm=True`` a ``LayerNormalization`` follows every depth.
+    Every stage and every norm receives this circuit's own
+    ``dtype_policy``, so a ``dtype=`` override reaches the whole tree.
     The shape never changes, so the whole stack drops in wherever a single
     stage would.
 
@@ -1238,12 +1253,15 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                     inner_logic_kwargs=self.inner_logic_kwargs or None,
                     inner_arithmetic_kwargs=self.inner_arithmetic_kwargs or None,
                     name=f"circuit_depth_{depth}",
+                    dtype=self.dtype_policy,
                 )
             )
         self.layer_norms: List[keras.layers.LayerNormalization] = []
         if self.use_layer_norm:
             self.layer_norms = [
-                keras.layers.LayerNormalization(name=f"layer_norm_{depth}")
+                keras.layers.LayerNormalization(
+                    name=f"layer_norm_{depth}", dtype=self.dtype_policy
+                )
                 for depth in range(self.circuit_depth)
             ]
 

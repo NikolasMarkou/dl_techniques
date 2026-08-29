@@ -8,6 +8,12 @@ from typing import Any, Dict
 
 from dl_techniques.layers.logic.neural_circuit import CircuitDepthLayer, LearnableNeuralCircuit
 
+from .logic_subject_oracle import (
+    Knob,
+    assert_knob_is_honoured,
+    assert_the_harness_is_deterministic,
+)
+
 
 class TestCircuitDepthLayer:
     """Comprehensive test suite for CircuitDepthLayer."""
@@ -340,33 +346,83 @@ class TestLearnableNeuralCircuit:
             assert len(layer.circuit_layers) == depth
 
     def test_with_residual_connections(self, sample_input_4d):
-        """Test with residual connections in depth layers."""
-        layer_with_residual = LearnableNeuralCircuit(
-            circuit_depth=2,
-            num_logic_ops_per_depth=1,
-            num_arithmetic_ops_per_depth=1,
-            use_residual=True
+        """`use_residual` moves the OUTPUT, not just the shape.
+
+        Repaired 2026-08-29. This was the textbook §13.5 shape-only knob
+        sweep: it built both variants, asserted `output.shape ==
+        input.shape` for each -- which `use_residual` cannot change,
+        since a residual add is shape-preserving by definition -- and
+        then read the flag back off every child. Both assertions are
+        invariant under a `use_residual` that is stored and never
+        consulted.
+
+        Measured 2026-08-29 at this configuration:
+        `max|with - without| = 1.41716`, on an output whose absmax is
+        2.28. The residual add is exactly the input, so the twin below
+        pins the delta to the input itself.
+        """
+        def build(use_residual):
+            keras.utils.set_random_seed(0)
+            return LearnableNeuralCircuit(
+                circuit_depth=2,
+                num_logic_ops_per_depth=1,
+                num_arithmetic_ops_per_depth=1,
+                use_residual=use_residual,
+            )
+
+        with_residual = build(True)
+        without_residual = build(False)
+
+        output_with = ops.convert_to_numpy(
+            with_residual(sample_input_4d)
+        ).astype("float64")
+        output_without = ops.convert_to_numpy(
+            without_residual(sample_input_4d)
+        ).astype("float64")
+
+        assert output_with.shape == tuple(sample_input_4d.shape)
+        assert output_without.shape == tuple(sample_input_4d.shape)
+
+        delta = float(np.max(np.abs(output_with - output_without)))
+        assert delta > 0.0, (
+            "use_residual changed nothing in the output; measured "
+            "1.41716 when this guard was written, so a reading of 0.0 "
+            "means the flag is stored and never consulted"
         )
 
-        layer_without_residual = LearnableNeuralCircuit(
-            circuit_depth=2,
-            num_logic_ops_per_depth=1,
-            num_arithmetic_ops_per_depth=1,
-            use_residual=False
-        )
-
-        output_with = layer_with_residual(sample_input_4d)
-        output_without = layer_without_residual(sample_input_4d)
-
-        assert output_with.shape == sample_input_4d.shape
-        assert output_without.shape == sample_input_4d.shape
-
-        # Check that circuit layers have correct residual setting
-        for circuit_layer in layer_with_residual.circuit_layers:
+        for circuit_layer in with_residual.circuit_layers:
             assert circuit_layer.use_residual is True
-
-        for circuit_layer in layer_without_residual.circuit_layers:
+        for circuit_layer in without_residual.circuit_layers:
             assert circuit_layer.use_residual is False
+
+    def test_the_residual_sweep_is_not_reading_run_to_run_noise(
+            self, sample_input_4d
+    ):
+        """The anti-vacuity twin of the sweep above.
+
+        Two layers built with the SAME `use_residual` under the same
+        seed must agree bit-for-bit. Without this, the delta above is
+        also produced by two independent random initializations and the
+        repaired guard would be no stronger than the shape check it
+        replaced.
+        """
+        def run(use_residual):
+            keras.utils.set_random_seed(0)
+            layer = LearnableNeuralCircuit(
+                circuit_depth=2,
+                num_logic_ops_per_depth=1,
+                num_arithmetic_ops_per_depth=1,
+                use_residual=use_residual,
+            )
+            return ops.convert_to_numpy(layer(sample_input_4d))
+
+        np.testing.assert_array_equal(
+            run(True), run(True),
+            err_msg=(
+                "two identically-configured circuits disagree, so the "
+                "use_residual delta is not attributable to the knob"
+            ),
+        )
 
     def test_custom_operation_types(self, sample_input_4d):
         """Test with custom operation types."""
@@ -784,22 +840,63 @@ class TestPlanA2b0f17bCircuit:
         with pytest.raises(ValueError, match="gate_entropy_coefficient"):
             CircuitDepthLayer(gate_entropy_coefficient=-0.1)
 
+    @staticmethod
+    def _sigmoid_mode_output(mode):
+        """Forward pass of a 3-deep circuit under one sigmoid mode.
+
+        Same seed and same input for every mode, so any difference
+        between two returns is attributable to `apply_sigmoid_per_depth`
+        alone.
+        """
+        keras.utils.set_random_seed(0)
+        nc = LearnableNeuralCircuit(
+            circuit_depth=3, apply_sigmoid_per_depth=mode
+        )
+        rng = np.random.default_rng(7)
+        sample = rng.uniform(
+            -2.0, 2.0, size=(2, 8, 16)
+        ).astype("float32")
+        return nc, ops.convert_to_numpy(nc(sample, training=False))
+
     def test_neural_circuit_apply_sigmoid_first_only(self):
-        """C2: with first_only mode, only depth 0 gets apply_sigmoid=True."""
-        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='first_only')
+        """C2: with first_only mode, only depth 0 gets apply_sigmoid=True.
+
+        Paired with a behavioural assertion 2026-08-29. The three flag
+        reads alone were the §13.5 constructor-attribute echo: they
+        prove the value was stored on the child and nothing else, and
+        they hold for a `CircuitDepthLayer` that never consults
+        `apply_sigmoid` at all.
+        """
+        nc, first_only = self._sigmoid_mode_output('first_only')
         assert nc.circuit_layers[0].apply_sigmoid is True
         assert nc.circuit_layers[1].apply_sigmoid is False
         assert nc.circuit_layers[2].apply_sigmoid is False
 
+        _, all_depths = self._sigmoid_mode_output('all')
+        assert not np.allclose(first_only, all_depths), (
+            "'first_only' and 'all' produced the same output, so the "
+            "flag stored on each stage is not reaching its forward pass"
+        )
+
     def test_neural_circuit_apply_sigmoid_all(self):
-        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='all')
+        nc, all_depths = self._sigmoid_mode_output('all')
         for depth_layer in nc.circuit_layers:
             assert depth_layer.apply_sigmoid is True
 
+        _, no_depths = self._sigmoid_mode_output('none')
+        assert not np.allclose(all_depths, no_depths), (
+            "'all' and 'none' produced the same output"
+        )
+
     def test_neural_circuit_apply_sigmoid_none(self):
-        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='none')
+        nc, no_depths = self._sigmoid_mode_output('none')
         for depth_layer in nc.circuit_layers:
             assert depth_layer.apply_sigmoid is False
+
+        # The twin: rebuilding the SAME mode must be bit-identical, or
+        # the two inequalities above are reading run-to-run noise.
+        _, again = self._sigmoid_mode_output('none')
+        np.testing.assert_array_equal(no_depths, again)
 
     def test_invalid_apply_sigmoid_per_depth_raises(self):
         with pytest.raises(ValueError, match="apply_sigmoid_per_depth"):
@@ -999,9 +1096,36 @@ class TestPlan3a2f1d23GateEntropyAlias:
     a deprecated alias that emits DeprecationWarning."""
 
     def test_canonical_name_accepted_on_depth(self):
+        """Paired with the loss the coefficient exists to scale.
+
+        The two attribute reads alone are the §13.5 echo: they hold for
+        a class that stores the coefficient and never adds a loss. The
+        forward pass below is what makes them mean something.
+        """
         l = CircuitDepthLayer(gate_entropy_coefficient=0.1)
         assert l.gate_entropy_coefficient == 0.1
         assert l.load_balance_coefficient == 0.1  # legacy attribute alias
+
+        rng = np.random.default_rng(7)
+        sample = rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+        l(sample)
+        assert l.losses, (
+            "gate_entropy_coefficient=0.1 added no loss; the value is "
+            "stored and never used"
+        )
+
+    def test_a_zero_coefficient_adds_no_loss_on_depth(self):
+        """The twin. Without it the assertion above is satisfied by a
+        class that adds an entropy loss unconditionally, ignoring the
+        coefficient entirely.
+        """
+        l = CircuitDepthLayer(gate_entropy_coefficient=0.0)
+        rng = np.random.default_rng(7)
+        sample = rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+        l(sample)
+        assert not l.losses, (
+            f"a zero coefficient still added {len(l.losses)} loss terms"
+        )
 
     def test_deprecated_name_warns_on_depth(self):
         with pytest.warns(DeprecationWarning, match="load_balance_coefficient"):
@@ -1009,10 +1133,30 @@ class TestPlan3a2f1d23GateEntropyAlias:
         assert l.gate_entropy_coefficient == 0.2
 
     def test_canonical_name_accepted_on_circuit(self):
+        """Paired with the loss, as on the stage above."""
         c = LearnableNeuralCircuit(
             circuit_depth=2, gate_entropy_coefficient=0.15
         )
         assert c.gate_entropy_coefficient == 0.15
+
+        rng = np.random.default_rng(7)
+        sample = rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+        c(sample)
+        assert c.losses, (
+            "gate_entropy_coefficient=0.15 added no loss on the circuit"
+        )
+
+    def test_a_zero_coefficient_adds_no_loss_on_the_circuit(self):
+        """The twin of the assertion above."""
+        c = LearnableNeuralCircuit(
+            circuit_depth=2, gate_entropy_coefficient=0.0
+        )
+        rng = np.random.default_rng(7)
+        sample = rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+        c(sample)
+        assert not c.losses, (
+            f"a zero coefficient still added {len(c.losses)} loss terms"
+        )
 
     def test_deprecated_name_warns_on_circuit(self):
         with pytest.warns(DeprecationWarning, match="load_balance_coefficient"):
@@ -1186,3 +1330,296 @@ class TestPlanE33114daNeuralCircuit:
         _ = nc(x)
         # Diversity loss should be among the model losses
         assert len(nc.losses) > 0
+
+
+# --------------------------------------------------------------------
+# §12.5 -- every constructor parameter pinned, with the §13.3.2
+# instrument that matches its knob class.
+# --------------------------------------------------------------------
+
+#: Both classes default every initializer to `'zeros'`, which makes the
+#: routing and combination softmaxes exactly uniform and hides several
+#: knobs downstream. `_LIVE` is the non-degenerate configuration; a
+#: knob that needs it says so by overlaying it.
+_KNOB_LIVE = keras.initializers.RandomNormal(stddev=0.5, seed=11)
+_KNOB_OTHER = keras.initializers.RandomNormal(stddev=0.9, seed=13)
+_LIVE = {
+    "circuit_routing": "classic",
+    "routing_initializer": _KNOB_LIVE,
+    "combination_initializer": _KNOB_LIVE,
+    "inner_logic_kwargs": {"operation_initializer": _KNOB_LIVE},
+    "inner_arithmetic_kwargs": {"operation_initializer": _KNOB_LIVE},
+}
+
+_DEPTH_BASE = {"num_logic_ops": 2, "num_arithmetic_ops": 1}
+_CIRCUIT_BASE = {"circuit_depth": 2}
+
+DEPTH_KNOBS = [
+    Knob("num_logic_ops", "structural", {
+        "one": {**_LIVE, "num_logic_ops": 1},
+        "three": {**_LIVE, "num_logic_ops": 3},
+    }, measured=0.0387674),
+    Knob("num_arithmetic_ops", "structural", {
+        "one": {**_LIVE, "num_arithmetic_ops": 1},
+        "three": {**_LIVE, "num_arithmetic_ops": 3},
+    }, measured=0.066314),
+    Knob("use_residual", "value", {
+        "on": {**_LIVE, "use_residual": True},
+        "off": {**_LIVE, "use_residual": False},
+    }, measured=0.946941),
+    Knob("logic_op_types", "structural", {
+        "two": {**_LIVE, "logic_op_types": ["and", "or"]},
+        "three": {**_LIVE, "logic_op_types": ["and", "or", "xor"]},
+    }, measured=0.014277),
+    # Two-versus-THREE, not two-versus-one: a single-element op list
+    # gives the child a softmax over a size-1 axis, which this repo
+    # raises on (R-038), so the pin would fail for an unrelated reason.
+    Knob("arithmetic_op_types", "structural", {
+        "two": {**_LIVE, "arithmetic_op_types": ["add", "multiply"]},
+        "three": {**_LIVE,
+                  "arithmetic_op_types": ["add", "multiply", "divide"]},
+    }, measured=0.0822943),
+    # 'classic' routing is required: under the default 'output_only'
+    # the routing weights are created but never read (see the source
+    # comment in CircuitDepthLayer.build), so an output pin would be
+    # measuring a weight nothing consumes.
+    Knob("routing_initializer", "scoped_value", {
+        "narrow": {"circuit_routing": "classic",
+                   "routing_initializer": _KNOB_LIVE},
+        "wide": {"circuit_routing": "classic",
+                 "routing_initializer": _KNOB_OTHER},
+    }, measured=1.7634, scope="routing_weights"),
+    Knob("combination_initializer", "scoped_value", {
+        "narrow": {"combination_initializer": _KNOB_LIVE},
+        "wide": {"combination_initializer": _KNOB_OTHER},
+    }, measured=1.7634, scope="combination_weights"),
+    Knob("circuit_routing", "value", {
+        "output_only": {"routing_initializer": _KNOB_LIVE,
+                        "combination_initializer": _KNOB_LIVE,
+                        "circuit_routing": "output_only"},
+        "classic": {"routing_initializer": _KNOB_LIVE,
+                    "combination_initializer": _KNOB_LIVE,
+                    "circuit_routing": "classic"},
+    }, measured=0.129542),
+    Knob("apply_sigmoid", "value", {
+        "on": {**_LIVE, "apply_sigmoid": True},
+        "off": {**_LIVE, "apply_sigmoid": False},
+    }, measured=0.0552939),
+    Knob("gate_entropy_coefficient", "loss", {
+        "zero": {"gate_entropy_coefficient": 0.0},
+        "half": {"gate_entropy_coefficient": 0.5},
+    }, measured=0.5),
+    # The deprecated alias for the row above. It resolves into the same
+    # float, so it drives the same loss -- which is exactly what a pin
+    # on an alias has to prove.
+    Knob("load_balance_coefficient", "loss", {
+        "zero": {"load_balance_coefficient": 0.0},
+        "half": {"load_balance_coefficient": 0.5},
+    }, measured=0.5),
+    Knob("channel_mix", "structural", {
+        "none": {**_LIVE, "channel_mix": None},
+        "dense": {**_LIVE, "channel_mix": "dense"},
+    }, measured=1.23636),
+    # Clipping to [0, 1] is a no-op on inputs already inside it:
+    # measured dy = 0.0 on the ordinary draw, and 0.0 again when
+    # apply_sigmoid=True puts them there. `_circuit_sample` hands this
+    # knob a draw on [-4, 4] and the variants turn the sigmoid off.
+    Knob("force_logic_input_clip", "value", {
+        "off": {**_LIVE, "apply_sigmoid": False,
+                "force_logic_input_clip": False},
+        "on": {**_LIVE, "apply_sigmoid": False,
+               "force_logic_input_clip": True},
+    }, measured=0.117834),
+    Knob("selection_mode", "structural", {
+        "global": {**_LIVE, "selection_mode": "global"},
+        "per_channel": {**_LIVE, "selection_mode": "per_channel"},
+    }, measured=0.0721772),
+    Knob("diversity_coefficient", "loss", {
+        "zero": {"diversity_coefficient": 0.0},
+        "half": {"diversity_coefficient": 0.5},
+    }, measured=0.5),
+    Knob("inner_logic_kwargs", "scoped_value", {
+        "narrow": {"inner_logic_kwargs":
+                   {"operation_initializer": _KNOB_LIVE}},
+        "wide": {"inner_logic_kwargs":
+                 {"operation_initializer": _KNOB_OTHER}},
+    }, measured=2.0346, scope="logic_op_"),
+    Knob("inner_arithmetic_kwargs", "scoped_value", {
+        "narrow": {"inner_arithmetic_kwargs":
+                   {"operation_initializer": _KNOB_LIVE}},
+        "wide": {"inner_arithmetic_kwargs":
+                 {"operation_initializer": _KNOB_OTHER}},
+    }, measured=2.57536, scope="arithmetic_op_"),
+]
+
+CIRCUIT_KNOBS = [
+    Knob("circuit_depth", "structural", {
+        "two": {**_LIVE, "circuit_depth": 2},
+        "three": {**_LIVE, "circuit_depth": 3},
+    }, measured=0.502867),
+    Knob("num_logic_ops_per_depth", "structural", {
+        "one": {**_LIVE, "num_logic_ops_per_depth": 1},
+        "three": {**_LIVE, "num_logic_ops_per_depth": 3},
+    }, measured=0.0804913),
+    Knob("num_arithmetic_ops_per_depth", "structural", {
+        "one": {**_LIVE, "num_arithmetic_ops_per_depth": 1},
+        "three": {**_LIVE, "num_arithmetic_ops_per_depth": 3},
+    }, measured=0.147238),
+    Knob("use_residual", "value", {
+        "on": {**_LIVE, "use_residual": True},
+        "off": {**_LIVE, "use_residual": False},
+    }, measured=1.41716),
+    Knob("use_layer_norm", "structural", {
+        "off": {**_LIVE, "use_layer_norm": False},
+        "on": {**_LIVE, "use_layer_norm": True},
+    }, measured=2.93893),
+    Knob("logic_op_types", "structural", {
+        "two": {**_LIVE, "logic_op_types": ["and", "or"]},
+        "three": {**_LIVE, "logic_op_types": ["and", "or", "xor"]},
+    }, measured=0.0220733),
+    Knob("arithmetic_op_types", "structural", {
+        "two": {**_LIVE, "arithmetic_op_types": ["add", "multiply"]},
+        "three": {**_LIVE,
+                  "arithmetic_op_types": ["add", "multiply", "divide"]},
+    }, measured=0.272115),
+    Knob("routing_initializer", "scoped_value", {
+        "narrow": {"circuit_routing": "classic",
+                   "routing_initializer": _KNOB_LIVE},
+        "wide": {"circuit_routing": "classic",
+                 "routing_initializer": _KNOB_OTHER},
+    }, measured=1.7634, scope="routing_weights"),
+    Knob("combination_initializer", "scoped_value", {
+        "narrow": {"combination_initializer": _KNOB_LIVE},
+        "wide": {"combination_initializer": _KNOB_OTHER},
+    }, measured=1.7634, scope="combination_weights"),
+    Knob("circuit_routing", "value", {
+        "output_only": {"routing_initializer": _KNOB_LIVE,
+                        "combination_initializer": _KNOB_LIVE,
+                        "circuit_routing": "output_only"},
+        "classic": {"routing_initializer": _KNOB_LIVE,
+                    "combination_initializer": _KNOB_LIVE,
+                    "circuit_routing": "classic"},
+    }, measured=0.780055),
+    # Three-valued, and all three are driven: 'first_only' vs 'all'
+    # measured 0.0389677 and 'first_only' vs 'none' 0.0429589. A pin on
+    # only two of the three values passes for a class that collapses
+    # the third onto one of them.
+    Knob("apply_sigmoid_per_depth", "value", {
+        "first_only": {**_LIVE, "apply_sigmoid_per_depth": "first_only"},
+        "all": {**_LIVE, "apply_sigmoid_per_depth": "all"},
+        "none": {**_LIVE, "apply_sigmoid_per_depth": "none"},
+    }, measured=0.0389677),
+    Knob("gate_entropy_coefficient", "loss", {
+        "zero": {"gate_entropy_coefficient": 0.0},
+        "half": {"gate_entropy_coefficient": 0.5},
+    }, measured=1.0),
+    Knob("load_balance_coefficient", "loss", {
+        "zero": {"load_balance_coefficient": 0.0},
+        "half": {"load_balance_coefficient": 0.5},
+    }, measured=1.0),
+    Knob("channel_mix", "structural", {
+        "none": {**_LIVE, "channel_mix": None},
+        "dense": {**_LIVE, "channel_mix": "dense"},
+    }, measured=2.45327),
+    Knob("selection_mode", "structural", {
+        "global": {**_LIVE, "selection_mode": "global"},
+        "per_channel": {**_LIVE, "selection_mode": "per_channel"},
+    }, measured=0.281299),
+    Knob("diversity_coefficient", "loss", {
+        "zero": {"diversity_coefficient": 0.0},
+        "half": {"diversity_coefficient": 0.5},
+    }, measured=1.0),
+    Knob("inner_logic_kwargs", "scoped_value", {
+        "narrow": {"inner_logic_kwargs":
+                   {"operation_initializer": _KNOB_LIVE}},
+        "wide": {"inner_logic_kwargs":
+                 {"operation_initializer": _KNOB_OTHER}},
+    }, measured=2.0346, scope="logic_op_"),
+    Knob("inner_arithmetic_kwargs", "scoped_value", {
+        "narrow": {"inner_arithmetic_kwargs":
+                   {"operation_initializer": _KNOB_LIVE}},
+        "wide": {"inner_arithmetic_kwargs":
+                 {"operation_initializer": _KNOB_OTHER}},
+    }, measured=2.57536, scope="arithmetic_op_"),
+]
+
+
+def _circuit_sample(knob):
+    """One tensor. The clip knob gets an out-of-range draw."""
+    rng = np.random.default_rng(1234)
+    drawn = rng.uniform(0.05, 0.95, size=(4, 8, 16)).astype("float32")
+    if knob.param == "force_logic_input_clip":
+        drawn = (drawn * 8.0 - 4.0).astype("float32")
+    return drawn
+
+
+def _declared_parameters(cls):
+    """Constructor parameter names, `**kwargs` excluded."""
+    import inspect
+
+    return sorted(
+        name for name, parameter
+        in inspect.signature(cls.__init__).parameters.items()
+        if name != "self" and parameter.kind is not parameter.VAR_KEYWORD
+    )
+
+
+class TestEveryCircuitConstructorKnobIsPinned:
+    """§12.5. `CircuitDepthLayer`'s 17 and `LearnableNeuralCircuit`'s
+    18 constructor parameters, each varied and each asserted to make a
+    measured difference with the instrument matching its §13.3.2 class.
+    """
+
+    @pytest.mark.parametrize(
+        "cls, knobs",
+        [(CircuitDepthLayer, DEPTH_KNOBS),
+         (LearnableNeuralCircuit, CIRCUIT_KNOBS)],
+        ids=["CircuitDepthLayer", "LearnableNeuralCircuit"],
+    )
+    def test_the_table_covers_every_constructor_parameter(
+            self, cls, knobs
+    ):
+        """A new constructor parameter with no table row fails HERE."""
+        pinned = sorted(knob.param for knob in knobs)
+        declared = _declared_parameters(cls)
+        assert declared == pinned, (
+            f"{cls.__name__} unpinned: "
+            f"{sorted(set(declared) - set(pinned))}; stale rows: "
+            f"{sorted(set(pinned) - set(declared))}"
+        )
+
+    @pytest.mark.parametrize(
+        "knob", DEPTH_KNOBS, ids=[k.param for k in DEPTH_KNOBS]
+    )
+    def test_rebuilding_one_depth_variant_is_bit_identical(self, knob):
+        """The anti-vacuity control (§13.1 rule 3)."""
+        assert_the_harness_is_deterministic(
+            CircuitDepthLayer, _DEPTH_BASE, knob, _circuit_sample
+        )
+
+    @pytest.mark.parametrize(
+        "knob", DEPTH_KNOBS, ids=[k.param for k in DEPTH_KNOBS]
+    )
+    def test_the_depth_knob_is_honoured(self, knob):
+        assert_knob_is_honoured(
+            CircuitDepthLayer, _DEPTH_BASE, knob, _circuit_sample
+        )
+
+    @pytest.mark.parametrize(
+        "knob", CIRCUIT_KNOBS, ids=[k.param for k in CIRCUIT_KNOBS]
+    )
+    def test_rebuilding_one_circuit_variant_is_bit_identical(
+            self, knob
+    ):
+        """The anti-vacuity control (§13.1 rule 3)."""
+        assert_the_harness_is_deterministic(
+            LearnableNeuralCircuit, _CIRCUIT_BASE, knob, _circuit_sample
+        )
+
+    @pytest.mark.parametrize(
+        "knob", CIRCUIT_KNOBS, ids=[k.param for k in CIRCUIT_KNOBS]
+    )
+    def test_the_circuit_knob_is_honoured(self, knob):
+        assert_knob_is_honoured(
+            LearnableNeuralCircuit, _CIRCUIT_BASE, knob, _circuit_sample
+        )

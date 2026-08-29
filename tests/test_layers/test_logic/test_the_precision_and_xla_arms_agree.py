@@ -40,7 +40,12 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from .logic_subject_oracle import SUBJECTS, SUBJECT_NAMES
+from dl_techniques.layers.logic.neural_circuit import (
+    CircuitDepthLayer,
+    LearnableNeuralCircuit,
+)
+
+from .logic_subject_oracle import FEATURE_SHAPE, SUBJECTS, SUBJECT_NAMES
 
 #: Per-policy bound and its measurement, see the module docstring.
 POLICY_ATOL = {
@@ -57,7 +62,8 @@ XLA_ATOL = 1e-5
 # control is captured at IMPORT, under the ambient policy. Do NOT
 # rewrite it as a per-layer dtype="float32" override: that dtype
 # never reaches the children CircuitDepthLayer builds in __init__.
-# See decisions.md D-006.
+# See decisions.md D-006. [2026-08-29: the propagation gap D-006
+# routed around is FIXED (D-007); the import capture stands anyway.]
 def _float32_reference():
     """Capture the float32 control once, at import, while the global
     policy is still float32.
@@ -272,4 +278,149 @@ class TestDegenerateLengthsAndDynamicShapes:
         np.testing.assert_allclose(
             graph, eager, atol=0.0, rtol=0,
             err_msg=f"{name}: dynamic trace and eager disagree",
+        )
+
+
+class TestAPinnedDtypeReachesEveryChild:
+    """§12.5 (the `dtype` knob) plus §13.2.6.
+
+    `CircuitDepthLayer` and `LearnableNeuralCircuit` construct their
+    children in `__init__` and, until 2026-08-29, passed no dtype. A
+    caller pinning a stage to float32 inside a `mixed_float16` model
+    silently got float16 experts. Measured at `fdfe1f3c8`, under a
+    `mixed_float16` global policy::
+
+        CircuitDepthLayer(dtype='float32')
+            parent          float32
+            logic child     mixed_float16    <- wrong
+            arith child     mixed_float16    <- wrong
+            channel_mix     mixed_float16    <- wrong
+        LearnableNeuralCircuit(dtype='float32')
+            stage child     mixed_float16    <- wrong
+            layer_norm      mixed_float16    <- wrong
+
+    The propagated object is `self.dtype_policy`, never `self.dtype`.
+    Measured on the same day: under a `mixed_float16` policy
+    `layer.dtype` reads `'float32'` (Keras 3 returns the VARIABLE
+    dtype), so the 41-file house spelling `dtype=self.dtype` would
+    build pure-float32 children under a mixed parent and disable
+    mixed precision for the whole subtree.
+    """
+
+    def _pinned(self, policy_name):
+        """A float32-pinned stage and circuit under `policy_name`.
+
+        The global policy is restored on the way out; leaking
+        `mixed_float16` would silently retune every later module.
+        """
+        previous = keras.mixed_precision.global_policy()
+        keras.mixed_precision.set_global_policy(policy_name)
+        try:
+            stage = CircuitDepthLayer(
+                num_logic_ops=1,
+                num_arithmetic_ops=1,
+                channel_mix="dense",
+                dtype="float32",
+                name="pinned_stage",
+            )
+            stage.build((None,) + FEATURE_SHAPE)
+            circuit = LearnableNeuralCircuit(
+                circuit_depth=2,
+                use_layer_norm=True,
+                dtype="float32",
+                name="pinned_circuit",
+            )
+            return {
+                "logic": stage.logic_operators[0],
+                "arithmetic": stage.arithmetic_operators[0],
+                "channel_mix": stage._channel_mix_layer,
+                "stage": circuit.circuit_layers[0],
+                "layer_norm": circuit.layer_norms[0],
+            }
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+    def test_the_ambient_policy_is_the_one_the_children_would_inherit(
+            self
+    ):
+        """The anti-vacuity control for the pin below.
+
+        Without this, a Keras version in which a child ignores the
+        ambient policy and defaults to float32 anyway would satisfy the
+        pin while propagating nothing. Under `mixed_float16` and with
+        NO parent override, every child must read `mixed_float16` --
+        which is exactly the value the pinned case must NOT read.
+        """
+        previous = keras.mixed_precision.global_policy()
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        try:
+            stage = CircuitDepthLayer(
+                num_logic_ops=1,
+                num_arithmetic_ops=1,
+                channel_mix="dense",
+                name="ambient_stage",
+            )
+            stage.build((None,) + FEATURE_SHAPE)
+            observed = {
+                "logic": stage.logic_operators[0].dtype_policy.name,
+                "arithmetic":
+                    stage.arithmetic_operators[0].dtype_policy.name,
+                "channel_mix":
+                    stage._channel_mix_layer.dtype_policy.name,
+            }
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+        assert set(observed.values()) == {"mixed_float16"}, (
+            "the ambient mixed_float16 policy does not reach these "
+            f"children at all, so the pin below is vacuous: {observed}"
+        )
+
+    @pytest.mark.parametrize(
+        "child",
+        ["logic", "arithmetic", "channel_mix", "stage", "layer_norm"],
+    )
+    def test_every_child_carries_the_parents_pinned_policy(self, child):
+        """Each of the five construction sites, named separately, so a
+        revert of one site does not hide behind another's pass.
+        """
+        observed = self._pinned("mixed_float16")[child].dtype_policy.name
+        assert observed == "float32", (
+            f"the {child!r} child of a dtype='float32' parent reads "
+            f"{observed!r} under a mixed_float16 global policy; the "
+            f"parent's dtype_policy is not reaching it"
+        )
+
+    def test_a_mixed_parent_gives_mixed_children_not_float32_ones(self):
+        """The `dtype_policy`-versus-`dtype` pin.
+
+        `dtype=self.dtype` reads `'float32'` under a mixed policy, so
+        this assertion is the one that goes red against the house
+        spelling while every assertion above stays green.
+        """
+        previous = keras.mixed_precision.global_policy()
+        keras.mixed_precision.set_global_policy("float32")
+        try:
+            stage = CircuitDepthLayer(
+                num_logic_ops=1,
+                num_arithmetic_ops=1,
+                channel_mix="dense",
+                dtype="mixed_float16",
+                name="mixed_stage",
+            )
+            stage.build((None,) + FEATURE_SHAPE)
+            observed = {
+                "logic": stage.logic_operators[0].dtype_policy.name,
+                "arithmetic":
+                    stage.arithmetic_operators[0].dtype_policy.name,
+                "channel_mix":
+                    stage._channel_mix_layer.dtype_policy.name,
+            }
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+        assert set(observed.values()) == {"mixed_float16"}, (
+            "a dtype='mixed_float16' parent produced children on "
+            f"{sorted(set(observed.values()))}; passing self.dtype "
+            f"instead of self.dtype_policy gives exactly this"
         )

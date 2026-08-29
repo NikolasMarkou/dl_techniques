@@ -138,11 +138,30 @@ class TestCreate:
             )
 
     def test_declared_keyword_reaches_the_layer(self):
-        """Twin: the rejection does not eat a name the entry DOES declare."""
+        """Twin: the rejection does not eat a name the entry DOES declare.
+
+        Paired with the weight shape 2026-08-29. `layer.operation_types
+        == [...]` alone is the §13.5 constructor-attribute echo: it is
+        satisfied by a factory that stores the list and builds the
+        default seven-operation layer anyway. The selection-weight
+        shape is what the two-element list actually has to produce.
+        """
         layer = create_logic_layer(
             "arithmetic", operation_types=["add", "multiply"]
         )
         assert layer.operation_types == ["add", "multiply"]
+
+        rng = np.random.default_rng(7)
+        sample = [
+            rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+            for _ in range(2)
+        ]
+        layer(sample)
+        assert tuple(layer.operation_weights.shape) == (2,), (
+            f"the two-element operation_types produced selection "
+            f"weights of shape {tuple(layer.operation_weights.shape)}; "
+            f"the default list has seven entries"
+        )
 
     def test_invalid_layer_type_raises(self):
         with pytest.raises(ValueError, match="Unknown logic layer type"):
@@ -234,9 +253,28 @@ class TestPlanE52a5ac8Factory:
         assert info2["arithmetic"]["description"] != "MUTATED"
 
     def test_factory_passes_apply_sigmoid(self):
-        """C3 factory wiring: create_logic_layer must accept apply_sigmoid."""
+        """C3 factory wiring: create_logic_layer must accept apply_sigmoid.
+
+        Paired with a forward pass 2026-08-29. The two flag reads alone
+        are the §13.5 echo -- they hold for a layer that stores
+        `apply_sigmoid` and never consults it. Measured on this input:
+        `max|off - on| = 0.40371`.
+        """
         from dl_techniques.layers.logic.factory import create_logic_layer
         layer = create_logic_layer("logic", apply_sigmoid=False)
         assert layer.apply_sigmoid is False
         layer_default = create_logic_layer("logic")
         assert layer_default.apply_sigmoid is True
+
+        rng = np.random.default_rng(7)
+        sample = [
+            rng.uniform(0.05, 0.95, size=(2, 8, 16)).astype("float32")
+            for _ in range(2)
+        ]
+        off = ops.convert_to_numpy(layer(sample, training=False))
+        on = ops.convert_to_numpy(layer_default(sample, training=False))
+        assert not np.allclose(off, on), (
+            "apply_sigmoid=False and the default produced identical "
+            "outputs, so the flag the factory forwarded is not reaching "
+            "the forward pass"
+        )
