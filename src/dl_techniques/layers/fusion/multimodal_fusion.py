@@ -1,31 +1,43 @@
 """
-A unified framework for multi-modal information fusion.
+One layer that fuses features from several modalities.
 
-This layer provides a modular and extensible framework for combining feature
-representations from multiple, heterogeneous data modalities (e.g., vision,
-language, audio). It serves as a factory that implements several distinct
-fusion strategies, each grounded in different theoretical assumptions about
-how cross-modal interactions should be modeled.
+``MultiModalFusion`` takes one tensor per modality -- vision, language, audio
+and so on -- and combines them into a fused representation. You choose how
+with ``fusion_strategy``. The layer builds the sub-layers for that strategy
+and no others, so the parameter count and the output shape both depend on the
+strategy you pick.
 
-Architecture Overview:
-    The layer uses the Strategy pattern where a high-level interface delegates
-    fusion logic to specific implementations. Core strategies include:
+Eight strategy keys, seven implementations: ``'addition'`` and
+``'multiplication'`` share one build and one call path. The full list, by the
+exact key you pass:
 
-    1. Early Fusion (Concatenation): Y = W[X₁; X₂; ...; Xₙ] + b
-    2. Element-wise Fusion: Addition/Multiplication with alignment
-    3. Interaction-based: Bilinear pooling (an explicit outer product)
-    4. Attention-based: Cross-modal attention mechanisms
-    5. Wide early fusion (``'tensor_fusion'``): a one-hidden-layer MLP over the
-       concatenation -- see the note below.
+    1. ``'cross_attention'``: every modality attends to every other one, then
+       normalization and FFN. Returns a TUPLE, one tensor per modality.
+    2. ``'concatenation'``: concatenate on the feature axis, project back to
+       ``dim``, then normalization and dropout.
+    3. ``'addition'``: align the modalities, sum them, then normalization and
+       FFN.
+    4. ``'multiplication'``: the same path with an element-wise product in
+       place of the sum.
+    5. ``'gated'``: a learned sigmoid gate scales each modality, then
+       concatenate, project and normalize. No FFN.
+    6. ``'attention_pooling'``: self-attend each modality, average over the
+       sequence axis, concatenate and project. Returns ``(batch, dim)`` --
+       the sequence axis is gone.
+    7. ``'bilinear'``: the outer product of exactly two modalities, flattened
+       and projected. This is the only real cross-modal product here.
+    8. ``'tensor_fusion'``: concatenate, then a wide hidden layer of
+       ``num_tensor_projections`` parallel ``Dense(dim)`` units, then one
+       linear projection back to ``dim``.
 
-    Note on ``'tensor_fusion'``:
-        Despite the name, this strategy computes **no outer product and no
-        tensor decomposition**. It is early fusion (case 1) with a wider,
-        non-linear hidden layer: concatenate on the feature axis, apply
-        ``num_tensor_projections`` parallel ``Dense(dim, activation)`` layers to
-        that same concatenation, concatenate their outputs, and project back to
-        ``dim``. Only ``'bilinear'`` in this file forms a genuine cross-modal
-        product. See ``_call_tensor_fusion`` for the measured cost comparison.
+Note on ``'tensor_fusion'``:
+    Despite the name, this strategy computes **no outer product and no tensor
+    decomposition**. It is concatenation fusion with a wider, non-linear
+    hidden layer: concatenate on the feature axis, apply
+    ``num_tensor_projections`` parallel ``Dense(dim, activation)`` layers to
+    that same concatenation, concatenate their outputs, and project back to
+    ``dim``. Only ``'bilinear'`` in this file forms a genuine cross-modal
+    product. See ``_call_tensor_fusion`` for the measured cost comparison.
 
 References:
     - Baltrusaitis et al. (2018): Multimodal Machine Learning: A Survey
@@ -53,94 +65,280 @@ from dl_techniques.layers.norms import create_normalization_layer, Normalization
 # ---------------------------------------------------------------------
 
 FusionStrategy = Literal[
-    'cross_attention',    # Bidirectional cross-attention between modalities
-    'concatenation',      # Concatenate and project
-    'addition',           # Element-wise addition with optional projection
-    'multiplication',     # Element-wise multiplication with optional projection
-    'gated',              # Learned gating mechanism
-    'attention_pooling',  # Attention-based pooling and fusion
-    'bilinear',           # Bilinear pooling
-    'tensor_fusion'       # Concatenate, then a wide parallel-Dense hidden layer
+    # Every modality attends to every other one
+    'cross_attention',
+    # Concatenate on the feature axis and project
+    'concatenation',
+    # Element-wise sum, with alignment projections above 2 modalities
+    'addition',
+    # Element-wise product, same path as 'addition'
+    'multiplication',
+    # A learned sigmoid gate per modality
+    'gated',
+    # Self-attend, mean-pool the sequence axis, concatenate and project
+    'attention_pooling',
+    # Outer product of exactly 2 modalities
+    'bilinear',
+    # Concatenate, then a wide parallel-Dense hidden layer
+    'tensor_fusion'
 ]
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MultiModalFusion(keras.layers.Layer):
-    """General-purpose configurable multi-modal fusion layer.
+    """Fuse two or more modalities into one representation.
 
-    This layer enables flexible fusion between multiple modalities using various
-    strategies including cross-attention, concatenation, gating, and tensor fusion.
+    Give the layer a list of tensors, one per modality, each shaped
+    ``(batch, seq_len, dim)``. It returns the fused features. Which sub-layers
+    exist, and what shape comes back, are both decided by ``fusion_strategy``.
+
+    There are eight strategy keys and seven call paths: ``'addition'`` and
+    ``'multiplication'`` share one. Three output shapes are possible, so read
+    the table below before wiring the output into something downstream.
+
+    ``num_fusion_layers`` above 1 works for ``'cross_attention'`` only. Every
+    other strategy raises at construction if you ask for more than one block.
+    ``num_tensor_projections`` is read by ``'tensor_fusion'`` only.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────┐   ┌───────────┐        ┌────────────┐
-        │ Modality 1│   │ Modality 2│  ...   │ Modality N │
-        └─────┬─────┘   └─────┬─────┘        └──────┬─────┘
-              │               │                     │
-              └───────┬───────┴─────────┬───────────┘
-                      │                 │
-                      ▼                 ▼
-              ┌──────────────┐  ┌──────────────┐
-              │  Projection  │  │   Alignment  │
-              └──────┬───────┘  └──────┬───────┘
-                     │                 │
-                     ▼                 ▼
-              ┌─────────────────────────────┐
-              │     Fusion Strategy         │
-              │  (cross_attention │ gated │ │
-              │   concat │ bilinear │ ...)  │
-              └────────────┬────────────────┘
-                           │
+        Modality 1     Modality 2    ...    Modality N
+        (B, T1, dim)   (B, T2, dim)         (B, TN, dim)
+             │              │                    │
+             └──────────────┼────────────────────┘
+                            ▼
+              ┌──────────────────────────┐
+              │  _validate_input_shapes  │  build() only
+              │  rank 3, last axis = dim │
+              └────────────┬─────────────┘
                            ▼
-                   ┌──────────────┐
-                   │ Norm + FFN   │
-                   └──────┬───────┘
-                          │
-                          ▼
-                  ┌───────────────┐
-                  │ Fused Output  │
-                  └───────────────┘
+              ┌──────────────────────────┐
+              │ _require_equal_sequence_ │
+              │          lengths         │
+              │   skipped for 2 of the   │
+              │   8 keys; see below      │
+              └────────────┬─────────────┘
+                           ▼
+              ┌──────────────────────────┐
+              │  dispatch on             │
+              │  fusion_strategy         │
+              │  8 keys, 7 call paths    │
+              └────────────┬─────────────┘
+             ┌─────────────┼─────────────┐
+             ▼             ▼             ▼
+      cross_attention  attention_     the other
+                        pooling       six keys
+             │             │             │
+             ▼             ▼             ▼
+        tuple of N     (B, dim)     (B, T, dim)
+       (B, Ti, dim)
 
-    :param dim: Feature dimension for the fused representation.
+    B is the batch size, Ti the sequence length of modality i, and N the
+    number of modalities. The three-way output fork at the bottom is
+    ``compute_output_shape``, not a per-strategy detail.
+
+    **Strategies, read from the code:**
+
+    .. code-block:: text
+
+        key                builds                output
+        -----------------  --------------------  ------------
+        cross_attention    N-1 cross-attn, one   tuple of N
+                           norm, one FFN, per    (B, Ti, dim)
+                           modality per block
+        concatenation      Dense, norm, dropout  (B, T, dim)
+        addition           align Dense if N > 2  (B, T, dim)
+        multiplication     then norm and FFN     (B, T, dim)
+        gated              N sigmoid gates,      (B, T, dim)
+                           Dense, norm
+        attention_pooling  N self-attn, Dense    (B, dim)
+        bilinear           Dense, norm           (B, T, dim)
+        tensor_fusion      P Dense + 1 linear    (B, T, dim)
+
+        P = num_tensor_projections. Only 'concatenation' uses
+        dropout_rate in its call path. 'gated', 'bilinear',
+        'attention_pooling' and 'tensor_fusion' apply no FFN;
+        'attention_pooling' and 'tensor_fusion' apply no norm.
+        'bilinear' accepts exactly 2 modalities and raises
+        otherwise. use_residual is read by 'cross_attention'
+        only.
+
+    **The equal-length contract:**
+
+    .. code-block:: text
+
+        call(inputs)
+             │
+             ▼
+        is fusion_strategy in LENGTH_AGNOSTIC_STRATEGIES?
+             │
+       yes ──┴── no
+        │         │
+        ▼         ▼
+      skip    _require_equal_sequence_lengths(inputs)
+                  │
+                  ├─ any shape[1] is None ─────► return
+                  ├─ all lengths equal ────────► return
+                  └─ lengths differ ───────────► ValueError
+
+        Exempt, 2 of 8 keys: 'cross_attention',
+        'attention_pooling'. Both go through attention layers
+        that accept different query and key lengths.
+
+        Guarded, 6 of 8 keys: 'concatenation', 'addition',
+        'multiplication', 'gated', 'bilinear', 'tensor_fusion'.
+        They concatenate on the feature axis or combine
+        element-wise, so axis 1 must match.
+
+        A None sequence axis is never refused. A symbolic build
+        is legal and the check stays out of it rather than
+        guessing.
+
+    :param dim: Feature width of the fused representation. Every modality
+        must already arrive at this width; ``build`` raises otherwise.
     :type dim: int
-    :param fusion_strategy: Strategy for combining modalities.
+    :param fusion_strategy: Which of the eight keys to use.
     :type fusion_strategy: FusionStrategy
-    :param num_fusion_layers: Number of fusion blocks (only for iterative strategies).
+    :param num_fusion_layers: How many fusion blocks to stack. Only
+        ``'cross_attention'`` accepts a value above 1; anything else raises.
     :type num_fusion_layers: int
-    :param attention_config: Configuration dict for attention layers.
+    :param attention_config: Extra arguments for ``create_attention_layer``.
+        Used by ``'cross_attention'`` and ``'attention_pooling'``. ``dim``
+        defaults to this layer's ``dim``.
     :type attention_config: Optional[Dict[str, Any]]
-    :param ffn_type: Type of feed-forward network to use.
+    :param ffn_type: FFN type passed to ``create_ffn_layer``. Read by
+        ``'cross_attention'`` and the element-wise strategies.
     :type ffn_type: FFNType
-    :param ffn_config: Configuration dict for FFN layers.
+    :param ffn_config: Extra arguments for ``create_ffn_layer``.
+        ``hidden_dim`` defaults to ``4 * dim`` and ``output_dim`` is always
+        forced to ``dim``.
     :type ffn_config: Optional[Dict[str, Any]]
-    :param norm_type: Type of normalization to apply.
+    :param norm_type: Normalization type passed to
+        ``create_normalization_layer``.
     :type norm_type: NormalizationType
-    :param norm_config: Configuration dict for normalization layers.
+    :param norm_config: Extra arguments for ``create_normalization_layer``.
     :type norm_config: Optional[Dict[str, Any]]
-    :param num_tensor_projections: Width multiplier for ``'tensor_fusion'``:
-        the number of parallel ``Dense(dim)`` units applied to the concatenated
-        modalities, i.e. a hidden layer of width ``num_tensor_projections * dim``.
-        Ignored by every other strategy.
+    :param num_tensor_projections: Hidden width for ``'tensor_fusion'``, in
+        units of ``dim``: the number of parallel ``Dense(dim)`` layers over
+        the concatenated modalities, so a hidden layer of width
+        ``num_tensor_projections * dim``. Ignored by every other strategy.
     :type num_tensor_projections: int
-    :param dropout_rate: Dropout probability for regularization.
+    :param dropout_rate: Dropout probability. Only ``'concatenation'`` builds
+        a Dropout layer, so this is inert for the other strategies.
     :type dropout_rate: float
-    :param use_residual: Whether to use residual connections.
+    :param use_residual: Whether ``'cross_attention'`` adds residual
+        connections around the attention and the FFN. No other strategy
+        reads it.
     :type use_residual: bool
-    :param activation: Activation function for projections.
+    :param activation: Activation for the projection layers. The final
+        ``'tensor_fusion'`` projection is linear and ignores it.
     :type activation: Union[str, Callable]
-    :param kernel_initializer: Initializer for weight matrices.
+    :param kernel_initializer: Initializer for the Dense kernels.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for bias vectors.
+    :param bias_initializer: Initializer for the Dense biases.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer for weight matrices.
+    :param kernel_regularizer: Regularizer for the Dense kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param bias_regularizer: Regularizer for bias vectors.
+    :param bias_regularizer: Regularizer for the Dense biases.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
 
-    :raises ValueError: If configuration parameters are invalid.
+    :ivar dim: The stored feature width.
+    :vartype dim: int
+    :ivar fusion_strategy: The stored strategy key. Both dispatch dicts are
+        looked up with it.
+    :vartype fusion_strategy: FusionStrategy
+    :ivar num_fusion_layers: The stored block count.
+    :vartype num_fusion_layers: int
+    :ivar attention_config: The attention arguments, ``{}`` when none were
+        given.
+    :vartype attention_config: Dict[str, Any]
+    :ivar ffn_type: The stored FFN type.
+    :vartype ffn_type: FFNType
+    :ivar ffn_config: The FFN arguments, ``{}`` when none were given.
+    :vartype ffn_config: Dict[str, Any]
+    :ivar norm_type: The stored normalization type.
+    :vartype norm_type: NormalizationType
+    :ivar norm_config: The normalization arguments, ``{}`` when none were
+        given.
+    :vartype norm_config: Dict[str, Any]
+    :ivar num_tensor_projections: The stored hidden-width multiplier.
+    :vartype num_tensor_projections: int
+    :ivar dropout_rate: The stored dropout rate.
+    :vartype dropout_rate: float
+    :ivar use_residual: The stored residual flag.
+    :vartype use_residual: bool
+    :ivar activation: The resolved activation function.
+    :vartype activation: Callable
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
+    :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :ivar fusion_layers: Attention-bearing sub-layers. One block per fusion
+        layer for ``'cross_attention'``; one attention layer per modality for
+        ``'attention_pooling'``. Empty for every other strategy.
+    :vartype fusion_layers: List[keras.layers.Layer]
+    :ivar projection_layers: The Dense projections. For ``'tensor_fusion'``
+        this holds ``num_tensor_projections`` hidden layers followed by the
+        final linear one, so the last entry is the output projection.
+    :vartype projection_layers: List[keras.layers.Dense]
+    :ivar norm_layers: The normalization layers, or empty for
+        ``'attention_pooling'`` and ``'tensor_fusion'``.
+    :vartype norm_layers: List[keras.layers.Layer]
+    :ivar ffn_layers: The FFN layers. Only the element-wise strategies fill
+        this; ``'cross_attention'`` keeps its FFNs on the block objects.
+    :vartype ffn_layers: List[keras.layers.Layer]
+    :ivar gate_layers: The sigmoid gates, one per modality. Filled by
+        ``'gated'`` only.
+    :vartype gate_layers: List[keras.layers.Dense]
+    :ivar dropout_layers: The Dropout layers. Filled by ``'concatenation'``
+        only.
+    :vartype dropout_layers: List[keras.layers.Dropout]
+    :ivar LENGTH_AGNOSTIC_STRATEGIES: Class constant. The two keys that may
+        fuse modalities of different sequence length.
+    :vartype LENGTH_AGNOSTIC_STRATEGIES: frozenset
+
+    :raises ValueError: If ``dim`` or ``num_fusion_layers`` is not positive,
+        if ``dropout_rate`` is outside ``[0, 1]``, if
+        ``num_tensor_projections`` is not positive under ``'tensor_fusion'``,
+        or if ``num_fusion_layers`` exceeds 1 for a non-iterative strategy.
+    :raises ValueError: If ``build`` receives fewer than 2 shapes, a shape
+        that is not rank 3, or a shape whose last axis is not ``dim``.
+    :raises ValueError: If ``call`` receives fewer than 2 tensors, an unknown
+        strategy key, or unequal statically-known sequence lengths for a
+        length-sensitive strategy.
+
+    Input shape:
+        A list or tuple of at least 2 tensors, each of shape
+        ``(batch_size, sequence_length, dim)``. ``'bilinear'`` accepts
+        exactly 2.
+
+    Output shape:
+        ``(batch_size, sequence_length, dim)`` for most strategies;
+        ``(batch_size, dim)`` for ``'attention_pooling'``; a tuple of N
+        tensors of shape ``(batch_size, sequence_length_i, dim)`` for
+        ``'cross_attention'``.
+
+    Example:
+        .. code-block:: python
+
+            import keras
+            from dl_techniques.layers.fusion.multimodal_fusion import (
+                MultiModalFusion,
+            )
+
+            vision = keras.random.normal((2, 16, 64))
+            text = keras.random.normal((2, 16, 64))
+
+            fusion = MultiModalFusion(dim=64, fusion_strategy='gated')
+            fused = fusion([vision, text])
+            fused.shape  # (2, 16, 64)
     """
 
     def __init__(
@@ -163,16 +361,20 @@ class MultiModalFusion(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs
     ) -> None:
-        """Initialize the MultiModalFusion layer with configuration."""
+        """Store the configuration and prepare the sub-layer containers.
+
+        No sub-layer is created here. Sub-layers need the input shapes, so
+        they are all created in :meth:`build`.
+        """
         super().__init__(**kwargs)
 
-        # Validate input parameters early to fail fast
+        # Validate first, so a bad argument fails here and not inside build()
         self._validate_init_params(
             dim, fusion_strategy, num_fusion_layers,
             num_tensor_projections, dropout_rate
         )
 
-        # Store configuration - these will be used in build()
+        # Store the configuration; build() reads it back
         self.dim = dim
         self.fusion_strategy = fusion_strategy
         self.num_fusion_layers = num_fusion_layers
@@ -185,14 +387,14 @@ class MultiModalFusion(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_residual = use_residual
 
-        # Convert string activations/initializers/regularizers to objects
+        # Resolve strings to activation, initializer and regularizer objects
         self.activation = keras.activations.get(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Initialize layer containers - will be populated in build()
+        # Create the empty containers; build() fills them
         self._init_layer_containers()
 
     def _validate_init_params(
@@ -203,20 +405,28 @@ class MultiModalFusion(keras.layers.Layer):
         num_tensor_projections: int,
         dropout_rate: float
     ) -> None:
-        """Validate initialization parameters.
+        """Check the constructor arguments and raise on the first bad one.
 
-        :param dim: Feature dimension.
+        Two of the four checks are conditional on the strategy.
+        ``num_tensor_projections`` is only required to be positive under
+        ``'tensor_fusion'``, and ``num_fusion_layers`` above 1 is only
+        allowed for ``'cross_attention'``. That second check is what makes
+        ``num_tensor_projections`` positive whenever ``_call_tensor_fusion``
+        can run.
+
+        :param dim: Feature width. Must be positive.
         :type dim: int
-        :param fusion_strategy: Fusion strategy name.
+        :param fusion_strategy: The strategy key being configured.
         :type fusion_strategy: str
-        :param num_fusion_layers: Number of fusion layers.
+        :param num_fusion_layers: Number of fusion blocks. Must be positive.
         :type num_fusion_layers: int
-        :param num_tensor_projections: Number of tensor projections.
+        :param num_tensor_projections: Hidden-width multiplier for
+            ``'tensor_fusion'``.
         :type num_tensor_projections: int
-        :param dropout_rate: Dropout rate.
+        :param dropout_rate: Dropout rate. Must be in ``[0, 1]``.
         :type dropout_rate: float
 
-        :raises ValueError: If any parameter is invalid.
+        :raises ValueError: If any of the four checks fails.
         """
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
@@ -233,7 +443,7 @@ class MultiModalFusion(keras.layers.Layer):
                 f"got {num_tensor_projections}"
             )
 
-        # Only iterative strategies support multiple fusion layers
+        # Only an iterative strategy can stack more than one fusion block
         iterative_strategies = {'cross_attention'}
         if fusion_strategy not in iterative_strategies and num_fusion_layers > 1:
             raise ValueError(
@@ -242,37 +452,47 @@ class MultiModalFusion(keras.layers.Layer):
             )
 
     def _init_layer_containers(self) -> None:
-        """Initialize containers for sublayers.
+        """Create the six empty sub-layer lists.
 
-        Uses lists to store sublayers instead of creating them here.
-        Sublayers are created in build() when input shapes are known.
+        Each strategy fills only the lists it needs, so most of these stay
+        empty for any given layer. The per-list contents are documented in
+        the class ``:ivar`` block.
         """
-        self.fusion_layers = []      # Main fusion layers
-        self.projection_layers = []  # Dense projection layers
-        self.norm_layers = []        # Normalization layers
-        self.ffn_layers = []         # Feed-forward network layers
-        self.gate_layers = []        # Gating mechanism layers
-        self.dropout_layers = []     # Dropout layers
+        # Attention blocks: 'cross_attention' and 'attention_pooling'
+        self.fusion_layers = []
+        # Dense projections, used by every strategy except 'cross_attention'
+        self.projection_layers = []
+        # Normalization layers
+        self.norm_layers = []
+        # Feed-forward networks: the element-wise strategies only
+        self.ffn_layers = []
+        # Sigmoid gates: 'gated' only
+        self.gate_layers = []
+        # Dropout: 'concatenation' only
+        self.dropout_layers = []
 
     def build(self, input_shape: Union[Tuple, List[Tuple]]) -> None:
-        """Create and build all sublayers based on input shapes.
+        """Create the sub-layers for the configured strategy.
 
-        This method is called automatically the first time the layer is called.
-        All sublayers are created here because input shapes are required.
+        Keras calls this the first time the layer runs. Every sub-layer is
+        created here because they all need the input shapes. Only one of the
+        eight builders runs, so a layer never carries sub-layers for a
+        strategy it does not use.
 
-        :param input_shape: List of shapes for each modality input.
-            Each shape should be (batch_size, sequence_length, dim).
+        :param input_shape: One shape per modality, each
+            ``(batch_size, sequence_length, dim)``.
         :type input_shape: Union[Tuple, List[Tuple]]
 
-        :raises ValueError: If input shapes are invalid.
+        :raises ValueError: If the shapes are not a list of at least 2 rank-3
+            shapes whose last axis is ``dim``, or if the strategy key is
+            unknown.
         """
         if self.built:
             return
 
-        # Validate input shapes
         self._validate_input_shapes(input_shape)
 
-        # Build strategy-specific sublayers
+        # One builder per strategy key; 'addition' and 'multiplication' share
         strategy_builders = {
             'cross_attention': self._build_cross_attention,
             'concatenation': self._build_concatenation,
@@ -288,19 +508,23 @@ class MultiModalFusion(keras.layers.Layer):
         if builder is None:
             raise ValueError(f"Unknown fusion strategy: {self.fusion_strategy}")
 
-        # Call the appropriate builder
         builder(input_shape)
 
-        # Mark as built
         super().build(input_shape)
 
     def _validate_input_shapes(self, input_shape: Union[Tuple, List]) -> None:
-        """Validate that input shapes are compatible.
+        """Check the modality shapes before any sub-layer is created.
 
-        :param input_shape: List of input shapes.
+        Four checks: the argument is a list or tuple, it is non-empty and
+        holds shapes rather than integers, it holds at least 2 modalities,
+        and every shape is rank 3 with a last axis of ``dim``. Sequence
+        lengths are not compared here; that is
+        :meth:`_require_equal_sequence_lengths`, which runs at call time.
+
+        :param input_shape: The per-modality shapes handed to :meth:`build`.
         :type input_shape: Union[Tuple, List]
 
-        :raises ValueError: If shapes are invalid or incompatible.
+        :raises ValueError: If any of the four checks fails.
         """
         if not isinstance(input_shape, (list, tuple)):
             raise ValueError("Expected list or tuple of input shapes")
@@ -311,7 +535,7 @@ class MultiModalFusion(keras.layers.Layer):
         if len(input_shape) < 2:
             raise ValueError(f"Expected at least 2 modalities, got {len(input_shape)}")
 
-        # Check each modality shape
+        # Every modality must be rank 3 and already at width dim
         for i, shape in enumerate(input_shape):
             if len(shape) != 3:
                 raise ValueError(
@@ -325,26 +549,33 @@ class MultiModalFusion(keras.layers.Layer):
                 )
 
     def _build_cross_attention(self, input_shape: List[Tuple]) -> None:
-        """Build layers for cross-attention fusion strategy.
+        """Build the sub-layers for ``'cross_attention'``.
 
-        Creates multiple fusion blocks, each containing cross-attention
-        between all modality pairs, normalization, and FFN layers.
+        Creates ``num_fusion_layers`` blocks. Each block holds, per modality
+        ``i``: one cross-attention layer for every other modality ``j``, one
+        normalization layer, and one FFN. The attention layers are stored on
+        the block as ``attention_i``, the rest as ``norm_i`` and ``ffn_i``.
 
-        :param input_shape: List of input shapes for each modality.
+        This is the only strategy that builds more than one block, and the
+        only one whose sub-layers do not go into ``self.norm_layers`` and
+        ``self.ffn_layers``.
+
+        :param input_shape: One shape per modality.
         :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
         for layer_idx in range(self.num_fusion_layers):
-            # Create a container to group layers for this fusion block
-            # This helps with organization and serialization
+            # A plain Layer used as a named container, so the block's
+            # sub-layers are tracked and serialized together
             block = keras.layers.Layer(name=f'fusion_block_{layer_idx}')
 
             for i in range(num_modalities):
-                # Create cross-attention layers for modality i attending to others
+                # One attention layer for each other modality i attends to
                 attn_layers = []
                 for j in range(num_modalities):
-                    if i != j:  # Skip self-attention
+                    # A modality never attends to itself here
+                    if i != j:
                         attn_config = self.attention_config.copy()
                         attn_config.setdefault('dim', self.dim)
 
@@ -353,14 +584,13 @@ class MultiModalFusion(keras.layers.Layer):
                             name=f'cross_attn_{layer_idx}_{i}_to_{j}',
                             **attn_config
                         )
-                        # Build with query from i and key/value from j
+                        # Query shape from modality i, key/value from j
                         attn_layer.build([input_shape[i], input_shape[j]])
                         attn_layers.append(attn_layer)
 
-                # Store attention layers as attribute on the block
                 setattr(block, f'attention_{i}', attn_layers)
 
-                # Create normalization layer for this modality
+                # One normalization layer per modality
                 norm_layer = create_normalization_layer(
                     normalization_type=self.norm_type,
                     name=f'norm_{layer_idx}_{i}',
@@ -369,7 +599,7 @@ class MultiModalFusion(keras.layers.Layer):
                 norm_layer.build(input_shape[i])
                 setattr(block, f'norm_{i}', norm_layer)
 
-                # Create FFN layer for this modality
+                # One FFN per modality; output_dim is forced back to dim
                 ffn_config = self.ffn_config.copy()
                 ffn_config.setdefault('hidden_dim', self.dim * 4)
                 ffn_config['output_dim'] = self.dim
@@ -385,14 +615,18 @@ class MultiModalFusion(keras.layers.Layer):
             self.fusion_layers.append(block)
 
     def _build_concatenation(self, input_shape: List[Tuple]) -> None:
-        """Build layers for concatenation fusion strategy.
+        """Build the three sub-layers for ``'concatenation'``.
 
-        :param input_shape: List of input shapes for each modality.
+        One ``Dense(dim, activation)`` over the ``dim * N`` concatenation,
+        one normalization layer, one Dropout. This is the only strategy that
+        builds a Dropout layer, so ``dropout_rate`` does nothing elsewhere.
+
+        :param input_shape: One shape per modality.
         :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
-        # Create projection layer for concatenated features
+        # Projection from the concatenated width back down to dim
         proj_layer = keras.layers.Dense(
             units=self.dim,
             activation=self.activation,
@@ -403,13 +637,12 @@ class MultiModalFusion(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer
         )
 
-        # Calculate concatenated shape
+        # The concatenation widens the last axis to dim * N
         concat_shape = list(input_shape[0])
         concat_shape[-1] = self.dim * num_modalities
         proj_layer.build(tuple(concat_shape))
         self.projection_layers.append(proj_layer)
 
-        # Create normalization layer
         norm_layer = create_normalization_layer(
             normalization_type=self.norm_type,
             name='concat_norm',
@@ -419,21 +652,25 @@ class MultiModalFusion(keras.layers.Layer):
         norm_layer.build(output_shape)
         self.norm_layers.append(norm_layer)
 
-        # Create dropout layer
         self.dropout_layers.append(
             keras.layers.Dropout(self.dropout_rate, name='concat_dropout')
         )
 
     def _build_elementwise(self, input_shape: List[Tuple]) -> None:
-        """Build layers for element-wise fusion strategies (add/multiply).
+        """Build the sub-layers for ``'addition'`` and ``'multiplication'``.
 
-        :param input_shape: List of input shapes for each modality.
+        Both keys share this builder. It always creates one normalization
+        layer and one FFN. Above 2 modalities it also creates one alignment
+        ``Dense(dim)`` per modality, so ``self.projection_layers`` is empty
+        at exactly 2 modalities and length N above that. ``_call_elementwise``
+        branches on that emptiness rather than on the count.
+
+        :param input_shape: One shape per modality.
         :type input_shape: List[Tuple]
         """
         num_modalities = len(input_shape)
 
-        # Create alignment projections if more than 2 modalities
-        # This ensures all modalities are in the same semantic space
+        # Above 2 modalities, project each into a common space first
         if num_modalities > 2:
             for i in range(num_modalities):
                 proj = keras.layers.Dense(
@@ -447,7 +684,6 @@ class MultiModalFusion(keras.layers.Layer):
                 proj.build(input_shape[i])
                 self.projection_layers.append(proj)
 
-        # Create normalization layer
         norm_layer = create_normalization_layer(
             normalization_type=self.norm_type,
             name='elementwise_norm',
@@ -456,7 +692,7 @@ class MultiModalFusion(keras.layers.Layer):
         norm_layer.build(input_shape[0])
         self.norm_layers.append(norm_layer)
 
-        # Create FFN layer for final processing
+        # The FFN runs after the merge; output_dim is forced back to dim
         ffn_config = self.ffn_config.copy()
         ffn_config.setdefault('hidden_dim', self.dim * 4)
         ffn_config['output_dim'] = self.dim
@@ -479,11 +715,12 @@ class MultiModalFusion(keras.layers.Layer):
         """
         num_modalities = len(input_shape)
 
-        # Create gating layers for each modality
+        # One sigmoid gate per modality, each reading only its own input
         for i in range(num_modalities):
             gate = keras.layers.Dense(
                 units=self.dim,
-                activation='sigmoid',  # Sigmoid for gating [0, 1]
+                # Sigmoid keeps the gate in [0, 1]
+                activation='sigmoid',
                 name=f'gate_{i}',
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
@@ -493,7 +730,7 @@ class MultiModalFusion(keras.layers.Layer):
             gate.build(input_shape[i])
             self.gate_layers.append(gate)
 
-        # Create projection for gated concatenated features
+        # Projection from the gated dim * N concatenation back to dim
         proj = keras.layers.Dense(
             units=self.dim,
             activation=self.activation,
@@ -508,7 +745,6 @@ class MultiModalFusion(keras.layers.Layer):
         proj.build(tuple(concat_shape))
         self.projection_layers.append(proj)
 
-        # Create normalization layer
         norm = create_normalization_layer(
             normalization_type=self.norm_type,
             name='gated_norm',
@@ -528,7 +764,7 @@ class MultiModalFusion(keras.layers.Layer):
         """
         num_modalities = len(input_shape)
 
-        # Create self-attention layers for pooling each modality
+        # One attention layer per modality, used as self-attention
         for i in range(num_modalities):
             attn_config = self.attention_config.copy()
             attn_config.setdefault('dim', self.dim)
@@ -538,11 +774,11 @@ class MultiModalFusion(keras.layers.Layer):
                 name=f'pool_attention_{i}',
                 **attn_config
             )
-            # Self-attention: same input for query and key/value
+            # Same shape for query and key/value makes it self-attention
             attn_layer.build([input_shape[i], input_shape[i]])
             self.fusion_layers.append(attn_layer)
 
-        # Create projection for pooled features
+        # Projection over the concatenated pooled vectors
         proj = keras.layers.Dense(
             units=self.dim,
             activation=self.activation,
@@ -552,7 +788,7 @@ class MultiModalFusion(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer
         )
-        # After pooling, sequence dimension is removed
+        # Mean-pooling drops the sequence axis, so this shape is rank 2
         pooled_shape = (input_shape[0][0], self.dim * num_modalities)
         proj.build(pooled_shape)
         self.projection_layers.append(proj)
@@ -573,7 +809,7 @@ class MultiModalFusion(keras.layers.Layer):
                 f"Bilinear fusion requires exactly 2 modalities, got {num_modalities}"
             )
 
-        # Create projection for flattened bilinear features
+        # Projection over the flattened outer product
         proj = keras.layers.Dense(
             units=self.dim,
             activation=self.activation,
@@ -584,13 +820,12 @@ class MultiModalFusion(keras.layers.Layer):
             bias_regularizer=self.bias_regularizer
         )
 
-        # Shape after outer product and flattening
+        # The outer product is dim x dim, flattened to dim * dim
         batch_size, seq_len, _ = input_shape[0]
         bilinear_flat_shape = (batch_size, seq_len, self.dim * self.dim)
         proj.build(bilinear_flat_shape)
         self.projection_layers.append(proj)
 
-        # Create normalization layer
         norm = create_normalization_layer(
             normalization_type=self.norm_type,
             name='bilinear_norm',
@@ -614,13 +849,13 @@ class MultiModalFusion(keras.layers.Layer):
         """
         num_modalities = len(input_shape)
 
-        # Calculate concatenated shape
+        # The concatenation widens the last axis to dim * N
         concat_shape = list(input_shape[0])
         concat_shape[-1] = self.dim * num_modalities
 
-        # Parallel hidden units: each sees the SAME concatenated input, so this
-        # is one wide Dense(dim * num_tensor_projections) written as a list, not
-        # a decomposition of anything.
+        # Parallel hidden units. Each sees the SAME concatenated input, so
+        # this is one wide Dense(dim * num_tensor_projections) written as a
+        # list. It is not a decomposition of anything.
         for i in range(self.num_tensor_projections):
             proj = keras.layers.Dense(
                 units=self.dim,
@@ -634,7 +869,7 @@ class MultiModalFusion(keras.layers.Layer):
             proj.build(tuple(concat_shape))
             self.projection_layers.append(proj)
 
-        # Create final projection layer
+        # The output layer. No activation, unlike the P hidden ones
         final_proj = keras.layers.Dense(
             units=self.dim,
             name='tensor_final_proj',
@@ -654,29 +889,34 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
-        """Apply the fusion strategy to combine multiple modalities.
+        """Fuse the modality tensors with the configured strategy.
 
-        :param inputs: List or tuple of tensors, one for each modality.
-            Each tensor shape: (batch_size, sequence_length, dim).
+        Checks the inputs, looks up the handler, runs the equal-length guard
+        unless the strategy is exempt, then delegates. The guard runs here and
+        nowhere else, so every length-sensitive strategy gets it.
+
+        :param inputs: One tensor per modality, each
+            ``(batch_size, sequence_length, dim)``. At least 2 are required.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Boolean flag for training mode (affects dropout).
+        :param training: Keras training flag, passed down to the sub-layers.
         :type training: Optional[bool]
 
-        :return: Fused representation(s). Shape depends on fusion strategy:
-            cross_attention returns a tuple of tensors (one per modality),
-            attention_pooling returns (batch_size, dim),
-            others return (batch_size, sequence_length, dim).
+        :return: The fused features. ``'cross_attention'`` returns a tuple
+            with one tensor per modality, ``'attention_pooling'`` returns
+            ``(batch_size, dim)``, and every other strategy returns
+            ``(batch_size, sequence_length, dim)``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]
 
-        :raises ValueError: If inputs are invalid.
+        :raises ValueError: If ``inputs`` is not a list or tuple of at least
+            2 tensors, if the strategy key is unknown, or if the guard finds
+            unequal statically-known sequence lengths.
         """
-        # Validate inputs
         if not isinstance(inputs, (list, tuple)):
             raise ValueError("Expected list or tuple of input tensors")
         if len(inputs) < 2:
             raise ValueError(f"Expected at least 2 modalities, got {len(inputs)}")
 
-        # Dispatch to strategy-specific implementation
+        # One handler per strategy key; 'addition' and 'multiplication' share
         strategy_handlers = {
             'cross_attention': self._call_cross_attention,
             'concatenation': self._call_concatenation,
@@ -698,8 +938,10 @@ class MultiModalFusion(keras.layers.Layer):
         return handler(inputs, training)
 
     #: The two strategies that can fuse modalities of DIFFERENT sequence
-    #: length. Every other strategy either concatenates on the feature axis or
-    #: broadcasts element-wise on axis 1, and so requires equal lengths.
+    #: length. Both route through attention layers that accept a query and a
+    #: key of different length. Every other strategy either concatenates on
+    #: the feature axis or combines element-wise on axis 1, so it needs equal
+    #: lengths. `call()` reads this to decide whether to run the guard.
     LENGTH_AGNOSTIC_STRATEGIES = frozenset({'cross_attention', 'attention_pooling'})
 
     def _require_equal_sequence_lengths(
@@ -708,12 +950,28 @@ class MultiModalFusion(keras.layers.Layer):
     ) -> None:
         """Refuse statically-unequal sequence lengths, naming the strategy.
 
-        Interface contract (1 call site, :meth:`call`, guarding the six
-        strategies outside :attr:`LENGTH_AGNOSTIC_STRATEGIES`): raises
-        ``ValueError`` when every input has a statically-known sequence length
-        and they are not all equal; returns ``None`` otherwise. A symbolic build
-        with a ``None`` sequence axis is legal and is NEVER refused here — the
-        check is deliberately blind to it rather than guessing.
+        Interface contract. One call site, :meth:`call`, guarding the six
+        strategy keys outside :attr:`LENGTH_AGNOSTIC_STRATEGIES`. Raises
+        ``ValueError`` when every input has a statically-known sequence
+        length and they are not all equal. Returns ``None`` otherwise.
+
+        A symbolic build with a ``None`` sequence axis is legal and is NEVER
+        refused here. The check stays out of that case instead of guessing.
+
+        **Decision table:**
+
+        .. code-block:: text
+
+            condition                          result
+            ---------------------------------  -----------
+            any input has rank <= 2            return
+            any input has shape[1] is None     return
+            all known lengths equal            return
+            known lengths differ               ValueError
+
+            The first two rows come from one test: the guard
+            collects only statically-known lengths, then bails
+            out when it collected fewer than one per input.
 
         :param inputs: The modality tensors, as passed to :meth:`call`.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
@@ -742,36 +1000,82 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, ...]:
-        """Apply cross-attention fusion.
+        """Fuse by letting every modality attend to every other one.
 
-        Each modality attends to all others, results are averaged,
-        then passed through normalization and FFN.
+        Each modality keeps its own output tensor, so this is the only
+        strategy that returns a tuple rather than one fused tensor. It is
+        also the only one that stacks more than one block and the only one
+        that reads ``use_residual``.
 
-        :param inputs: List of modality tensors.
+        **Block internals, for one modality i in one block:**
+
+        .. code-block:: text
+
+              outputs[i]  (B, Ti, dim)   outputs[j], j != i
+                    │                          │
+                    └────────────┬─────────────┘
+                                 ▼
+                     ┌───────────────────────┐
+                     │   cross_attn i to j   │  N-1 of them
+                     └───────────┬───────────┘
+                                 ▼
+                      stack over j, then mean
+                       combined  (B, Ti, dim)
+                                 │
+                  ┌──────────────┴──────────────┐
+              use_residual                not use_residual
+                  │                              │
+                  ▼                              ▼
+          outputs[i] + combined               combined
+                  └──────────────┬──────────────┘
+                                 ▼
+                     ┌───────────────────────┐
+                     │        norm_i         │
+                     └───────────┬───────────┘
+                                 ▼  normalized
+                     ┌───────────────────────┐
+                     │        ffn_i          │
+                     └───────────┬───────────┘
+                                 ▼  ffn_out
+                  ┌──────────────┴──────────────┐
+              use_residual                not use_residual
+                  │                              │
+                  ▼                              ▼
+          normalized + ffn_out                ffn_out
+                  └──────────────┬──────────────┘
+                                 ▼
+                    new_outputs[i]  (B, Ti, dim)
+
+            The second residual adds to `normalized`, not to the
+            block input. The two forks are written differently in
+            the code: the first has no else branch and simply
+            skips the addition, the second has an explicit else.
+            Both leaves are real.
+
+        :param inputs: One tensor per modality.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Refined features for each modality.
+        :return: One refined tensor per modality, in input order.
         :rtype: Tuple[keras.KerasTensor, ...]
         """
         outputs = list(inputs)
         num_modalities = len(inputs)
 
-        # Apply multiple fusion blocks iteratively
+        # Each block reads the previous block's outputs
         for layer_idx in range(self.num_fusion_layers):
             block = self.fusion_layers[layer_idx]
             new_outputs = []
 
             for i in range(num_modalities):
-                # Collect attention results from all other modalities
+                # Modality i attends to each of the other N-1 modalities
                 attended_features = []
                 attention_layers = getattr(block, f'attention_{i}')
                 attention_idx = 0
 
                 for j in range(num_modalities):
                     if i != j:
-                        # Modality i attends to modality j
                         attention_layer = attention_layers[attention_idx]
                         attended = attention_layer(
                             query_input=outputs[i],
@@ -781,25 +1085,26 @@ class MultiModalFusion(keras.layers.Layer):
                         attended_features.append(attended)
                         attention_idx += 1
 
-                # Average attention results from all other modalities
-                # Stack along new axis then average
+                # Average the N-1 attended tensors: stack on a new leading
+                # axis, then reduce it away
                 combined = keras.ops.mean(
                     keras.ops.stack(attended_features, axis=0),
                     axis=0
                 )
 
-                # Add residual connection if enabled
+                # First residual. There is no else: when use_residual is
+                # False, `combined` goes on unchanged
                 if self.use_residual:
                     combined = outputs[i] + combined
 
-                # Apply normalization
                 norm_layer = getattr(block, f'norm_{i}')
                 normalized = norm_layer(combined, training=training)
 
-                # Apply FFN with optional residual
                 ffn_layer = getattr(block, f'ffn_{i}')
                 ffn_out = ffn_layer(normalized, training=training)
 
+                # Second residual, around the FFN only. This one has an
+                # explicit else, unlike the first
                 if self.use_residual:
                     output = normalized + ffn_out
                 else:
@@ -816,26 +1121,52 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply concatenation fusion.
+        """Fuse by concatenating on the feature axis, then projecting.
 
-        :param inputs: List of modality tensors.
+        A straight line with no branches. This is the only strategy that
+        applies dropout.
+
+        **Block internals:**
+
+        .. code-block:: text
+
+            x_1 ... x_N   each (B, T, dim)
+                      │
+                      ▼
+            concatenate axis=-1   (B, T, dim*N)
+                      │
+                      ▼
+            ┌─────────────────────────────┐
+            │   projection_layers[0]      │
+            │   Dense(dim, activation)    │
+            └──────────────┬──────────────┘
+                           ▼  (B, T, dim)
+            ┌─────────────────────────────┐
+            │   norm_layers[0]            │
+            └──────────────┬──────────────┘
+                           ▼
+            ┌─────────────────────────────┐
+            │   dropout_layers[0]         │
+            └──────────────┬──────────────┘
+                           ▼
+                     (B, T, dim)
+
+        :param inputs: One tensor per modality, all the same length.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag. Dropout reads it.
         :type training: Optional[bool]
 
-        :return: Fused tensor after concatenation and projection.
+        :return: The fused tensor, ``(B, T, dim)``.
         :rtype: keras.KerasTensor
         """
-        # Concatenate along feature dimension
+        # Widen the last axis to dim * N
         concatenated = keras.ops.concatenate(inputs, axis=-1)
 
-        # Project to target dimension
+        # Project back down to dim
         output = self.projection_layers[0](concatenated, training=training)
 
-        # Apply normalization
         output = self.norm_layers[0](output, training=training)
 
-        # Apply dropout for regularization
         output = self.dropout_layers[0](output, training=training)
 
         return output
@@ -845,17 +1176,61 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply element-wise fusion (addition or multiplication).
+        """Fuse by summing or multiplying the modalities element-wise.
 
-        :param inputs: List of modality tensors.
+        Shared by ``'addition'`` and ``'multiplication'``. Two branches: one
+        on whether alignment projections exist, one on which of the two keys
+        is configured.
+
+        **Block internals:**
+
+        .. code-block:: text
+
+            x_1 ... x_N   each (B, T, dim)
+                        │
+              ┌─────────┴──────────┐
+        projection_layers      the list is empty
+        is non-empty (N > 2)   (exactly 2 modalities)
+              │                        │
+              ▼                        ▼
+        align Dense per modality   inputs unchanged
+              └─────────┬──────────────┘
+                        ▼
+                    aligned    each (B, T, dim)
+                        │
+              ┌─────────┴──────────┐
+         'addition'          'multiplication'
+              │                    │
+              ▼                    ▼
+        sum(stack(aligned))   aligned[0] * a[1] * ...
+                              a pairwise loop, not
+                              one N-ary op
+              └─────────┬──────────┘
+                        ▼  (B, T, dim)
+              ┌───────────────────┐
+              │  norm_layers[0]   │
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │  ffn_layers[0]    │
+              └─────────┬─────────┘
+                        ▼
+                  (B, T, dim)
+
+            The first fork tests the list for emptiness, not the
+            modality count. The two agree because
+            _build_elementwise only creates alignment projections
+            above 2 modalities.
+
+        :param inputs: One tensor per modality, all the same length.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Fused tensor after element-wise operation.
+        :return: The fused tensor, ``(B, T, dim)``.
         :rtype: keras.KerasTensor
         """
-        # Apply alignment projections if available
+        # Non-empty only above 2 modalities; see _build_elementwise
         if self.projection_layers:
             aligned = [
                 proj(inp, training=training)
@@ -864,23 +1239,21 @@ class MultiModalFusion(keras.layers.Layer):
         else:
             aligned = list(inputs)
 
-        # Apply element-wise operation
         if self.fusion_strategy == 'addition':
-            # Sum all aligned modalities
+            # Stack on a new leading axis, then sum it away
             output = keras.ops.sum(
                 keras.ops.stack(aligned, axis=0),
                 axis=0
             )
-        else:  # multiplication
-            # Element-wise product of all modalities
+        # The only other key routed here is 'multiplication'
+        else:
+            # Pairwise product, folded left to right
             output = aligned[0]
             for inp in aligned[1:]:
                 output = keras.ops.multiply(output, inp)
 
-        # Apply normalization
         output = self.norm_layers[0](output, training=training)
 
-        # Apply FFN for final processing
         output = self.ffn_layers[0](output, training=training)
 
         return output
@@ -890,32 +1263,68 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply gated fusion with learned importance weights.
+        """Fuse after scaling each modality by its own learned gate.
 
-        :param inputs: List of modality tensors.
+        Each gate reads only its own modality, so a gate cannot suppress a
+        feature because of what another modality is doing. No branches. No
+        FFN and no dropout on this path.
+
+        **Block internals:**
+
+        .. code-block:: text
+
+            per modality i:
+
+              x_i  (B, T, dim)
+                 ├──────────────┐
+                 │              ▼
+                 │      ┌─────────────────┐
+                 │      │ gate_layers[i]  │
+                 │      │ Dense(sigmoid)  │
+                 │      └────────┬────────┘
+                 │               ▼  gate in [0, 1]
+                 └─────► multiply
+                              │  (B, T, dim)
+                              ▼
+                          gated_i
+
+            then once, over all modalities:
+
+              concatenate gated_1..N   (B, T, dim*N)
+                              │
+                              ▼
+                  ┌────────────────────────┐
+                  │  projection_layers[0]  │
+                  │  Dense(dim, activation)│
+                  └───────────┬────────────┘
+                              ▼  (B, T, dim)
+                  ┌────────────────────────┐
+                  │  norm_layers[0]        │
+                  └───────────┬────────────┘
+                              ▼
+                        (B, T, dim)
+
+        :param inputs: One tensor per modality, all the same length.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Fused tensor after gating and projection.
+        :return: The fused tensor, ``(B, T, dim)``.
         :rtype: keras.KerasTensor
         """
-        # Apply learned gates to each modality
         gated_features = []
         for i, inp in enumerate(inputs):
-            # Compute gate values (sigmoid ensures [0, 1] range)
+            # Sigmoid keeps the gate in [0, 1]
             gate_values = self.gate_layers[i](inp, training=training)
-            # Apply gate element-wise
             gated = keras.ops.multiply(inp, gate_values)
             gated_features.append(gated)
 
-        # Concatenate gated features
+        # Widen the last axis to dim * N
         concatenated = keras.ops.concatenate(gated_features, axis=-1)
 
-        # Project to target dimension
+        # Project back down to dim
         output = self.projection_layers[0](concatenated, training=training)
 
-        # Apply normalization
         output = self.norm_layers[0](output, training=training)
 
         return output
@@ -925,22 +1334,58 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply attention-based pooling fusion.
+        """Self-attend each modality, mean-pool it, then fuse the vectors.
 
-        Uses self-attention to create pooled representations.
+        This is the only strategy whose output has no sequence axis: the mean
+        over axis 1 removes it, so the result is ``(B, dim)``. It is also the
+        shortest path here, with no normalization, no FFN and no dropout.
 
-        :param inputs: List of modality tensors.
+        Each modality is pooled on its own before the modalities meet, so
+        they may have different sequence lengths. That is why this key is in
+        :attr:`LENGTH_AGNOSTIC_STRATEGIES`.
+
+        **Block internals:**
+
+        .. code-block:: text
+
+            per modality i:
+
+              x_i  (B, Ti, dim)
+                    │
+                    ▼
+              ┌──────────────────────────┐
+              │  fusion_layers[i]        │
+              │  self-attn: query = kv   │
+              └────────────┬─────────────┘
+                           ▼  (B, Ti, dim)
+                    mean over axis 1
+                           ▼
+                pooled_i  (B, dim)   sequence axis gone
+
+            then once, over all modalities:
+
+              concatenate pooled_1..N   (B, dim*N)
+                           │
+                           ▼
+              ┌──────────────────────────┐
+              │  projection_layers[0]    │
+              │  Dense(dim, activation)  │
+              └────────────┬─────────────┘
+                           ▼
+                       (B, dim)
+
+        :param inputs: One tensor per modality. Lengths may differ.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Fused tensor after attention pooling.
+        :return: The fused vector, ``(B, dim)``.
         :rtype: keras.KerasTensor
         """
         pooled_features = []
 
         for i, inp in enumerate(inputs):
-            # Apply self-attention for context-aware pooling
+            # Same tensor as query and as key/value, so this is self-attention
             attention_layer = self.fusion_layers[i]
             attended_output = attention_layer(
                 query_input=inp,
@@ -948,14 +1393,14 @@ class MultiModalFusion(keras.layers.Layer):
                 training=training
             )
 
-            # Global average pooling over sequence dimension
+            # Mean over the sequence axis; the result is rank 2
             pooled = keras.ops.mean(attended_output, axis=1)
             pooled_features.append(pooled)
 
-        # Concatenate pooled features from all modalities
+        # Widen the last axis to dim * N
         concatenated = keras.ops.concatenate(pooled_features, axis=-1)
 
-        # Project to target dimension
+        # Project back down to dim
         output = self.projection_layers[0](concatenated, training=training)
 
         return output
@@ -965,29 +1410,66 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply bilinear pooling fusion.
+        """Fuse exactly two modalities through their outer product.
 
-        Computes outer product between two modalities.
+        This is the only genuine outer product in this file. Every pair of
+        features gets its own product term, so the projection reads a
+        ``dim * dim`` vector per token and the parameter count grows with
+        ``dim ** 3``. That is what makes this the most expensive strategy
+        here for any large ``dim``.
 
-        :param inputs: List of exactly 2 modality tensors.
+        Do not confuse this with ``'tensor_fusion'``, which forms no product
+        at all.
+
+        **Block internals:**
+
+        .. code-block:: text
+
+            x1  (B, T, dim)           x2  (B, T, dim)
+                 │                         │
+                 ▼                         ▼
+           expand_dims(-1)           expand_dims(-2)
+           (B, T, dim, 1)            (B, T, 1, dim)
+                 └────────────┬────────────┘
+                              ▼
+                     multiply, broadcasting
+                    = outer product per token
+                        (B, T, dim, dim)
+                              │
+                              ▼
+                   reshape (B, T, dim*dim)
+                              │
+                              ▼
+                ┌──────────────────────────┐
+                │  projection_layers[0]    │
+                │  Dense(dim, activation)  │
+                └────────────┬─────────────┘
+                             ▼  (B, T, dim)
+                ┌──────────────────────────┐
+                │  norm_layers[0]          │
+                └────────────┬─────────────┘
+                             ▼
+                        (B, T, dim)
+
+        :param inputs: Exactly 2 tensors, both the same length.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Fused tensor after bilinear pooling.
+        :return: The fused tensor, ``(B, T, dim)``.
         :rtype: keras.KerasTensor
         """
         x1, x2 = inputs
 
-        # Compute outer product efficiently
-        # Expand dims for broadcasting: x1 -> [..., d1, 1], x2 -> [..., 1, d2]
+        # Line up the two feature axes so they broadcast against each other:
+        # x1 becomes (..., dim, 1) and x2 becomes (..., 1, dim)
         x1_expanded = keras.ops.expand_dims(x1, axis=-1)
         x2_expanded = keras.ops.expand_dims(x2, axis=-2)
 
-        # Outer product via broadcasting
+        # The broadcast product is the outer product, (B, T, dim, dim)
         bilinear = keras.ops.multiply(x1_expanded, x2_expanded)
 
-        # Flatten the outer product matrix
+        # Flatten the dim x dim matrix into one dim*dim vector per token
         batch_size = keras.ops.shape(bilinear)[0]
         seq_len = keras.ops.shape(bilinear)[1]
         bilinear_flat = keras.ops.reshape(
@@ -995,10 +1477,9 @@ class MultiModalFusion(keras.layers.Layer):
             [batch_size, seq_len, -1]
         )
 
-        # Project to target dimension
+        # Project back down to dim
         output = self.projection_layers[0](bilinear_flat, training=training)
 
-        # Apply normalization
         output = self.norm_layers[0](output, training=training)
 
         return output
@@ -1008,7 +1489,7 @@ class MultiModalFusion(keras.layers.Layer):
         inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]],
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply the ``'tensor_fusion'`` strategy.
+        """Fuse by concatenating, then running a wide hidden layer.
 
         **What this actually computes.** Despite the name, there is no outer
         product and no tensor decomposition anywhere in this method. It is a
@@ -1018,19 +1499,57 @@ class MultiModalFusion(keras.layers.Layer):
             u_i      = activation(h @ W_i + b_i)            # i = 1..P
             output   = concat([u_1, ..., u_P], -1) @ W_out + b_out
 
-        where ``P = num_tensor_projections``. Because every ``u_i`` sees the
-        same ``h``, the parallel list is just one wide hidden layer of width
+        where ``P = num_tensor_projections``. Every ``u_i`` reads the same
+        ``h``, so the parallel list is one wide hidden layer of width
         ``P * dim`` written as ``P`` separate ``Dense`` layers.
 
+        **Block internals:**
+
+        .. code-block:: text
+
+            x_1 ... x_N   each (B, T, dim)
+                       │
+                       ▼
+             concatenate axis=-1   (B, T, dim*N)
+                       │
+             ┌─────────┼─────────┐   P branches, all
+             ▼         ▼         ▼   reading the SAME
+        ┌─────────┐┌─────────┐┌─────────┐  concatenation
+        │ proj_0  ││ proj_1  ││ proj_P-1│
+        │Dense dim││Dense dim││Dense dim│
+        │ + activ ││ + activ ││ + activ │
+        └────┬────┘└────┬────┘└────┬────┘
+             └─────────┬┴──────────┘
+                       ▼
+             concatenate axis=-1   (B, T, dim*P)
+                       │
+                       ▼
+             ┌───────────────────────────┐
+             │  projection_layers[-1]    │
+             │  Dense(dim), NO activation│
+             └─────────────┬─────────────┘
+                           ▼
+                     (B, T, dim)
+
+            No normalization, no dropout, no residual anywhere on
+            this path.
+
+        Note:
+            The ``if projections:`` test in the code below is never False.
+            :meth:`_validate_init_params` refuses a non-positive
+            ``num_tensor_projections`` under this strategy, so the loop
+            always appends at least one entry. The ``else`` branch is dead
+            code and is not a path this layer can take.
+
         **Relation to ``'concatenation'``.** Up to that hidden layer, this is
-        the same model: ``'concatenation'`` is ``activation(h @ W) -> norm ->
-        dropout``, i.e. the same concatenation with a width-``dim`` hidden layer
-        and no output projection. So ``'tensor_fusion'`` buys extra hidden width
-        and one more linear map, not a different class of interaction. It also
-        applies **no** normalization and **no** dropout, unlike
-        ``'concatenation'``. If you want genuine multiplicative cross-modal
-        interaction, use ``'bilinear'`` (a real outer product) or
-        ``'multiplication'``/``'gated'``.
+        the same model. ``'concatenation'`` is ``activation(h @ W) -> norm ->
+        dropout``: the same concatenation with a width-``dim`` hidden layer
+        and no output projection. So ``'tensor_fusion'`` buys extra hidden
+        width and one more linear map, not a different kind of interaction.
+        It also applies no normalization and no dropout, unlike
+        ``'concatenation'``. For genuine multiplicative cross-modal
+        interaction use ``'bilinear'``, which is a real outer product, or
+        ``'multiplication'`` / ``'gated'``.
 
         **Cost.** MEASURED trainable parameters, 2 modalities, ``dim=64``,
         default ``num_tensor_projections=8``: ``concatenation`` 8,384;
@@ -1051,54 +1570,49 @@ class MultiModalFusion(keras.layers.Layer):
         (at ``dim=24``: 14,040 vs 13,896; at ``dim=25``: 15,225 vs 15,700); it is
         not the most expensive strategy in this layer.
 
-        :param inputs: List of modality tensors.
+        :param inputs: One tensor per modality, all the same length.
         :type inputs: Union[List[keras.KerasTensor], Tuple[keras.KerasTensor, ...]]
-        :param training: Training mode flag.
+        :param training: Keras training flag.
         :type training: Optional[bool]
 
-        :return: Fused tensor after tensor fusion.
+        :return: The fused tensor, ``(B, T, dim)``.
         :rtype: keras.KerasTensor
 
-        :raises ValueError: If the modalities have statically-known but unequal
-            sequence lengths, which this strategy cannot fuse.
+        :raises ValueError: Raised before this method runs, by
+            :meth:`_require_equal_sequence_lengths`, if the modalities have
+            statically-known but unequal sequence lengths.
         """
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-007
-        # Do NOT drop this in favour of "the concat already fails": it fails as a
-        # backend-level InvalidArgumentError ("ConcatOp : Dimension 1 in both shapes
-        # must be equal"), which is not a ValueError, names neither the strategy nor
-        # the requirement, and points at no alternative. Do NOT "fix" it by padding
-        # or slicing to a common length either — that would silently change the
-        # semantics of the fusion. See decisions.md D-007.
-        #
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-024
-        # The check itself MOVED, verbatim in effect, to
-        # `_require_equal_sequence_lengths`, called once from `call()` for every
-        # strategy outside `LENGTH_AGNOSTIC_STRATEGIES`. It is not re-run here.
-        # WHAT NOT TO DO: do not re-inline it into this method. `tensor_fusion`
-        # was never the only strategy with this requirement — `concatenation`
-        # concatenates on the same axis with the same precondition, and
-        # `addition`/`multiplication`/`gated`/`bilinear` broadcast on axis 1 — so
-        # a per-method copy is how five of the six ended up unguarded while this
-        # one was fixed. See decisions.md D-024.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-007: unequal sequence
+        # lengths must raise a named ValueError. Do NOT fall back on the
+        # backend error (197 vision vs 8 text token shapes gave a bare
+        # InvalidArgumentError), and do NOT pad or slice to a common length.
+        # See decisions.md D-007.
 
-        # Concatenate all modalities
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-024: that check now lives
+        # in `_require_equal_sequence_lengths`, called once from `call()`.
+        # Do NOT re-inline it here. A per-method copy is how 5 of the 6
+        # length-sensitive strategies ended up unguarded.
+        # See decisions.md D-024.
+
+        # Widen the last axis to dim * N
         concatenated = keras.ops.concatenate(inputs, axis=-1)
 
-        # One wide hidden layer, expressed as P parallel Dense layers over the
-        # SAME concatenation (not a decomposition, not an outer product).
+        # One wide hidden layer, written as P parallel Dense layers over the
+        # SAME concatenation. Not a decomposition, not an outer product.
         projections = []
         for i in range(self.num_tensor_projections):
             proj_layer = self.projection_layers[i]
             projection = proj_layer(concatenated, training=training)
             projections.append(projection)
 
-        # Concatenate all projections
+        # The else branch is dead: num_tensor_projections is validated
+        # positive for this strategy, so `projections` is never empty
         if projections:
             combined = keras.ops.concatenate(projections, axis=-1)
         else:
             combined = concatenated
 
-        # Final projection to target dimension
+        # The output layer, linear, back down to dim
         output = self.projection_layers[-1](combined, training=training)
 
         return output
@@ -1107,28 +1621,37 @@ class MultiModalFusion(keras.layers.Layer):
         self,
         input_shape: Union[Tuple, List[Tuple]]
     ) -> Union[Tuple[int, ...], List[Tuple[int, ...]]]:
-        """Compute the output shape for given input shapes.
+        """Report the output shape, which depends on the strategy.
 
-        :param input_shape: List of input shapes for each modality.
+        Three cases. ``'cross_attention'`` hands the input shapes straight
+        back, one per modality. ``'attention_pooling'`` drops the sequence
+        axis. Everything else keeps the batch and sequence axes and sets the
+        last one to ``dim``.
+
+        :param input_shape: One shape per modality.
         :type input_shape: Union[Tuple, List[Tuple]]
 
-        :return: Output shape(s) depending on fusion strategy.
+        :return: The per-strategy output shape, as described above.
         :rtype: Union[Tuple[int, ...], List[Tuple[int, ...]]]
         """
         if self.fusion_strategy == 'cross_attention':
-            # Returns same shape for each modality
+            # One tensor per modality, each keeping its own shape
             return input_shape
         elif self.fusion_strategy == 'attention_pooling':
-            # Sequence dimension is pooled
+            # Mean-pooling removed the sequence axis
             return (input_shape[0][0], self.dim)
         else:
-            # Most strategies preserve batch and sequence dimensions
+            # Batch and sequence axes survive; the last axis becomes dim
             return (input_shape[0][0], input_shape[0][1], self.dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
+        """Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Every ``__init__`` parameter is stored. The activation, initializers
+        and regularizers are serialized to their dict form, so
+        :meth:`from_config` has to deserialize them again.
+
+        :return: The layer configuration.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -1154,15 +1677,18 @@ class MultiModalFusion(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'MultiModalFusion':
-        """Create layer from configuration.
+        """Rebuild the layer from a configuration dict.
 
-        :param config: Configuration dictionary.
+        Reverses what :meth:`get_config` serialized. The dict is modified in
+        place, so pass a copy if you need to keep the original.
+
+        :param config: A dict as produced by :meth:`get_config`.
         :type config: Dict[str, Any]
 
-        :return: New MultiModalFusion instance.
+        :return: A new layer with that configuration.
         :rtype: MultiModalFusion
         """
-        # Deserialize activation, initializers, and regularizers
+        # Turn the serialized dicts back into objects
         config['activation'] = keras.activations.deserialize(config['activation'])
         config['kernel_initializer'] = keras.initializers.deserialize(config['kernel_initializer'])
         config['bias_initializer'] = keras.initializers.deserialize(config['bias_initializer'])
