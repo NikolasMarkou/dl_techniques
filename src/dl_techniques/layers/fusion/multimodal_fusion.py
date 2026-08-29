@@ -15,8 +15,8 @@ exact key you pass:
        normalization and FFN. Returns a TUPLE, one tensor per modality.
     2. ``'concatenation'``: concatenate on the feature axis, project back to
        ``dim``, then normalization and dropout.
-    3. ``'addition'``: align the modalities, sum them, then normalization and
-       FFN.
+    3. ``'addition'``: align the modalities when there are more than two,
+       sum them, then normalization and FFN.
     4. ``'multiplication'``: the same path with an element-wise product in
        place of the sum.
     5. ``'gated'``: a learned sigmoid gate scales each modality, then
@@ -159,12 +159,12 @@ class MultiModalFusion(keras.layers.Layer):
         tensor_fusion      P Dense + 1 linear    (B, T, dim)
 
         P = num_tensor_projections. Only 'concatenation' uses
-        dropout_rate in its call path. 'gated', 'bilinear',
-        'attention_pooling' and 'tensor_fusion' apply no FFN;
-        'attention_pooling' and 'tensor_fusion' apply no norm.
-        'bilinear' accepts exactly 2 modalities and raises
-        otherwise. use_residual is read by 'cross_attention'
-        only.
+        dropout_rate in its call path. Only 'cross_attention',
+        'addition' and 'multiplication' apply an FFN; the other
+        five apply none. 'attention_pooling' and 'tensor_fusion'
+        apply no norm either. 'bilinear' accepts exactly 2
+        modalities and raises otherwise. use_residual is read by
+        'cross_attention' only.
 
     **The equal-length contract:**
 
@@ -180,6 +180,7 @@ class MultiModalFusion(keras.layers.Layer):
         ▼         ▼
       skip    _require_equal_sequence_lengths(inputs)
                   │
+                  ├─ any input has rank <= 2 ──► return
                   ├─ any shape[1] is None ─────► return
                   ├─ all lengths equal ────────► return
                   └─ lengths differ ───────────► ValueError
@@ -309,7 +310,8 @@ class MultiModalFusion(keras.layers.Layer):
         ``num_tensor_projections`` is not positive under ``'tensor_fusion'``,
         or if ``num_fusion_layers`` exceeds 1 for a non-iterative strategy.
     :raises ValueError: If ``build`` receives fewer than 2 shapes, a shape
-        that is not rank 3, or a shape whose last axis is not ``dim``.
+        that is not rank 3, a shape whose last axis is not ``dim``, or a
+        number of modalities other than 2 under ``'bilinear'``.
     :raises ValueError: If ``call`` receives fewer than 2 tensors, an unknown
         strategy key, or unequal statically-known sequence lengths for a
         length-sensitive strategy.
@@ -460,7 +462,8 @@ class MultiModalFusion(keras.layers.Layer):
         """
         # Attention blocks: 'cross_attention' and 'attention_pooling'
         self.fusion_layers = []
-        # Dense projections, used by every strategy except 'cross_attention'
+        # Dense projections. Empty for 'cross_attention', and also empty for
+        # 'addition' and 'multiplication' at exactly 2 modalities
         self.projection_layers = []
         # Normalization layers
         self.norm_layers = []
@@ -794,9 +797,11 @@ class MultiModalFusion(keras.layers.Layer):
         self.projection_layers.append(proj)
 
     def _build_bilinear(self, input_shape: List[Tuple]) -> None:
-        """Build layers for bilinear pooling fusion strategy.
+        """Build the two sub-layers for ``'bilinear'``.
 
-        Computes outer product between modalities.
+        One ``Dense(dim, activation)`` and one normalization layer. The outer
+        product itself is formed in :meth:`_call_bilinear`; this method only
+        sizes the projection for it, at ``dim * dim`` inputs per token.
 
         :param input_shape: List of input shapes for each modality.
         :type input_shape: List[Tuple]
