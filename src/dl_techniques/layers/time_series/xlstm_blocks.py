@@ -1,14 +1,22 @@
 """
-xLSTM (Extended Long Short-Term Memory) implementation.
+xLSTM (Extended Long Short-Term Memory) layers.
 
-This module provides a production-ready implementation of the xLSTM architecture
-from the paper "xLSTM: Extended Long Short-Term Memory" (arXiv:2405.04517v2).
+Implements the xLSTM architecture from "xLSTM: Extended Long Short-Term Memory"
+(Beck et al. 2024, arXiv:2405.04517v2).
 
-The implementation follows the dl_techniques framework standards:
-- Uses normalization factory for all normalization layers
-- Uses FFN factory for feed-forward networks
-- Follows Keras 3 custom layer/model guidelines
-- Implements proper serialization and build patterns
+The module exports six classes, in two families:
+
+- ``sLSTMCell`` / ``sLSTMLayer`` / ``sLSTMBlock`` -- the scalar variant of
+  Section 2.2. Memory is a vector, gating is exponential.
+- ``mLSTMCell`` / ``mLSTMLayer`` / ``mLSTMBlock`` -- the matrix variant of
+  Section 2.3. Memory is a matrix updated by a covariance rule.
+
+In each family the ``Cell`` runs one timestep, the ``Layer`` wraps that cell in a
+``keras.layers.RNN`` to run a sequence, and the ``Block`` adds the residual
+wrapper the paper draws in Figure 10 (sLSTM) and Figure 11 (mLSTM).
+
+Normalization layers come from the norms factory and feed-forward networks from
+the FFN factory, so both are selected by string.
 
 References:
     Beck, M., et al. (2024). xLSTM: Extended Long Short-Term Memory.
@@ -37,16 +45,17 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class sLSTMCell(keras.layers.Layer):
     """
-    Scalar LSTM (sLSTM) cell with exponential gating and normalizer state.
+    Scalar LSTM (sLSTM) cell with exponential gating and a normalizer state.
 
-    This cell implements the sLSTM from Section 2.2 of the xLSTM paper, featuring
-    exponential gating for improved memory dynamics, a normalizer state (n_t) to
-    stabilize memory updates, and a stabilization technique to prevent numerical
-    overflow.
+    This is the sLSTM of Section 2.2 of the xLSTM paper. It differs from a stock
+    LSTM in three ways. The input gate is exponential rather than sigmoid, which
+    lets one timestep dominate the memory. A normalizer state ``n_t`` accumulates
+    the same gates and divides them back out, so the memory stays on scale. A
+    log-domain running maximum ``m_t`` keeps the exponentials from overflowing.
 
-    The sLSTM maintains three internal states per timestep:
-    ``cell_state (c_t)``, ``normalizer_state (n_t)``, and ``hidden_state (h_t)``
-    derived as ``c_t / n_t``.
+    The cell carries four states per timestep: ``h_t``, ``c_t``, ``n_t`` and
+    ``m_t``, each of shape ``(batch, units)``. The hidden state is
+    ``h_t = o_t * (c_t / n_t)``.
 
     **Gate equations** (per timestep t):
 
@@ -71,34 +80,38 @@ class sLSTMCell(keras.layers.Layer):
 
     .. code-block:: text
 
-        x_t: (batch, input_dim)    h_{t-1}: (batch, units)
-              │                          │
-              ▼                          ▼
-        ┌──────────┐             ┌──────────────┐
-        │ W @ x_t  │             │ R @ h_{t-1}  │
-        └────┬─────┘             └──────┬───────┘
-             └──────────┬───────────────┘
-                        ▼
-              ┌───────────────────┐
-              │ Split into 4 gates│
-              │  i, f, o, z       │
-              └────────┬──────────┘
-                       ▼
-              ┌───────────────────┐
-              │  Stabilize (m_t)  │
-              │  Exp gating       │
-              └────────┬──────────┘
-                       ▼
-              ┌───────────────────┐
-              │  State Updates    │
-              │  c_t, n_t         │
-              └────────┬──────────┘
-                       ▼
-              ┌───────────────────┐
-              │  h_t = o * c/n    │
-              └────────┬──────────┘
-                       ▼
-              Output: h_t (batch, units)
+        x_t: (batch, input_dim)   h_{t-1}: (batch, units)
+              │                         │
+              ▼                         ▼
+        ┌────────────┐          ┌──────────────┐
+        │ W @ x_t + b│          │ R @ h_{t-1}  │
+        └─────┬──────┘          └──────┬───────┘
+              └──────────┬─────────────┘
+                         │ (batch, 4 * units)
+                         ▼
+             ┌──────────────────────────┐
+             │ split into i, f, o, z    │
+             └────────────┬─────────────┘
+                          │ each (batch, units)
+                          ▼
+             ┌──────────────────────────┐
+             │ m_t = max(m_{t-1}+log f, │
+             │            log i)        │
+             │ i, f rescaled by exp     │
+             └────────────┬─────────────┘
+                          ▼
+             ┌──────────────────────────┐
+             │ c_t = f * c_{t-1} + i * z│
+             │ n_t = f * n_{t-1} + i    │
+             └────────────┬─────────────┘
+                          ▼
+             ┌──────────────────────────┐
+             │ h_t = o * (c_t / n_t)    │
+             └────────────┬─────────────┘
+                          ▼
+        h_t: (batch, units), plus states [h_t, c_t, n_t, m_t]
+
+    Every state is (batch, units); m_t is the log-domain stabilizer.
 
     :param units: Dimensionality of the output space. Must be positive.
     :type units: int
@@ -118,6 +131,29 @@ class sLSTMCell(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer, optional
     :param kwargs: Additional arguments for the Layer base class.
+
+    :raises ValueError: If ``units`` is not positive.
+    :raises ValueError: If ``forget_gate_activation`` is not ``'sigmoid'`` or
+        ``'exp'``.
+
+    Input shape:
+        2D tensor ``(batch_size, input_dim)``, one timestep.
+
+    Output shape:
+        2D tensor ``(batch_size, units)``, plus the four state tensors.
+
+    Example:
+        .. code-block:: python
+
+            cell = sLSTMCell(units=32)
+            rnn = keras.layers.RNN(cell, return_sequences=True)
+            y = rnn(keras.random.normal((2, 10, 8)))
+            # y.shape == (2, 10, 32)
+
+    :ivar state_size: ``[units, units, units, units]`` for ``[h, c, n, m]``.
+    :vartype state_size: list of int
+    :ivar output_size: Equal to ``units``.
+    :vartype output_size: int
     """
 
     def __init__(
@@ -132,6 +168,14 @@ class sLSTMCell(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and record the state layout.
+
+        See the class docstring for the full parameter list.
+
+        :raises ValueError: If ``units`` is not positive, or
+            ``forget_gate_activation`` is not ``'sigmoid'`` or ``'exp'``.
+        """
         super().__init__(**kwargs)
 
         if units <= 0:
@@ -162,8 +206,9 @@ class sLSTMCell(keras.layers.Layer):
         self.o_activation = activations.get('sigmoid')
         self.z_activation = activations.get('tanh')
 
-        # RNN cell properties
-        self.state_size = [self.units, self.units, self.units, self.units]  # [h, c, n, m]
+        # RNN cell state layout, in the order call() unpacks it:
+        # [h, c, n, m], each of shape (batch, units).
+        self.state_size = [self.units, self.units, self.units, self.units]
         self.output_size = self.units
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -320,9 +365,9 @@ class sLSTMLayer(keras.layers.Layer):
     """
     Scalar LSTM (sLSTM) layer for processing sequences.
 
-    Wraps the ``sLSTMCell`` in a ``keras.layers.RNN`` to process full sequences.
-    Provides a drop-in replacement for standard LSTM layers with enhanced memory
-    dynamics through exponential gating.
+    Wraps ``sLSTMCell`` in a ``keras.layers.RNN`` so it runs over a whole
+    sequence. It is a drop-in replacement for ``keras.layers.LSTM``, with
+    exponential gating instead of sigmoid gating on the input gate.
 
     **Architecture Overview:**
 
@@ -335,13 +380,17 @@ class sLSTMLayer(keras.layers.Layer):
         │   keras.layers.RNN        │
         │   ┌───────────────────┐   │
         │   │   sLSTMCell       │   │
-        │   │  (per timestep)   │   │
+        │   │  (one timestep)   │   │
         │   └───────────────────┘   │
         └───────────┬───────────────┘
-                    ▼
-        Output: (batch, seq_len, units)
-             or (batch, units) if
-             return_sequences=False
+                    │
+          ┌─────────┴──────────┐
+          ▼                    ▼
+    return_sequences=True  return_sequences=False
+    (batch, seq_len, units)  (batch, units)
+
+    With return_state=True the four final states [h, c, n, m],
+    each (batch, units), are appended to whichever leaf applies.
 
     :param units: Dimensionality of the output space.
     :type units: int
@@ -370,6 +419,25 @@ class sLSTMLayer(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer, optional
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor ``(batch_size, seq_len, input_dim)``.
+
+    Output shape:
+        3D tensor ``(batch_size, seq_len, units)`` when
+        ``return_sequences=True``, otherwise 2D ``(batch_size, units)``.
+
+    Example:
+        .. code-block:: python
+
+            layer = sLSTMLayer(units=32, forget_gate_activation='exp')
+            y = layer(keras.random.normal((2, 10, 8)))
+            # y.shape == (2, 10, 32)
+
+    :ivar cell: The wrapped :class:`sLSTMCell`.
+    :vartype cell: sLSTMCell
+    :ivar rnn: The ``keras.layers.RNN`` that drives the cell.
+    :vartype rnn: keras.layers.RNN
     """
 
     def __init__(
@@ -389,6 +457,12 @@ class sLSTMLayer(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the cell and its RNN wrapper.
+
+        See the class docstring for the full parameter list. Validation of
+        ``units`` and ``forget_gate_activation`` happens inside ``sLSTMCell``.
+        """
         super().__init__(**kwargs)
 
         self.units = units
@@ -513,17 +587,21 @@ class mLSTMCell(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) cell with matrix memory and covariance update rule.
 
-    This cell implements the fully parallelizable mLSTM from Section 2.3 of the
-    xLSTM paper. It uses a matrix memory ``C_t`` of shape ``(d_key, d_value)``
-    and a covariance-style update rule for enhanced storage capacity compared
-    to traditional LSTMs.
+    This is the mLSTM of Section 2.3 of the xLSTM paper. Memory is a matrix
+    ``C_t`` of shape ``(key_dim, value_dim)`` per head, not a vector. Each
+    timestep adds an outer product to it, which is why it stores more than a
+    scalar LSTM of the same width.
 
-    The cell computes query, key, and value projections alongside input, forget,
-    and output gates. The exponential input gate is stabilized in log space by a
-    running max state ``m_t`` (one scalar per head), mirroring ``sLSTMCell`` and
-    following Eq. 15-17 of the xLSTM paper. Without this stabilizer the matrix
-    memory overflows fp32 once the sequence is long enough (~64 steps); the
-    stabilized form is mathematically equivalent in the finite regime:
+    One combined kernel produces all six projections: query, key, value, and the
+    input, forget and output gates. Queries and keys are ``key_dim`` wide per
+    head, values are ``value_dim`` wide, and the input and forget gates are one
+    scalar per head.
+
+    The exponential input gate is stabilized in log space by a running maximum
+    ``m_t``, one scalar per head. This mirrors ``sLSTMCell`` and follows Eq.
+    15-17 of the paper. Without it the matrix memory overflows fp32 at around 64
+    timesteps. The stabilized form below is mathematically equivalent while the
+    values stay finite:
 
         log_f = log(sigmoid(f_proj))
         m_t   = max(m_{t-1} + log_f, i_proj)            # log-domain stabilizer
@@ -537,35 +615,41 @@ class mLSTMCell(keras.layers.Layer):
 
     .. code-block:: text
 
-        x_t: (batch, input_dim)    h_{t-1}: (batch, units)
-              │                          │
-              ▼                          ▼
-        ┌──────────┐             ┌──────────────┐
-        │ W @ x_t  │             │ R @ h_{t-1}  │
-        └────┬─────┘             └──────┬───────┘
-             └──────────┬───────────────┘
-                        ▼
-              ┌───────────────────────┐
-              │ Split into projections│
-              │  q, k, v, i, f, o     │
-              └────────┬──────────────┘
-                       ▼
-              ┌───────────────────────┐
-              │ Matrix Memory Update  │
-              │ C_t = f*C + i*(v⊗k^T) │
-              └────────┬──────────────┘
-                       ▼
-              ┌───────────────────────┐
-              │ Normalizer Update     │
-              │ n_t = f*n + i*k       │
-              └────────┬──────────────┘
-                       ▼
-              ┌───────────────────────┐
-              │ Memory Retrieval      │
-              │ o * (C@q / (n^T@q))   │
-              └────────┬──────────────┘
-                       ▼
-              Output: h_t (batch, units)
+        x_t: (batch, input_dim)   h_{t-1}: (batch, units)
+              │                         │
+              ▼                         ▼
+        ┌────────────┐          ┌──────────────┐
+        │ W @ x_t + b│          │ R @ h_{t-1}  │
+        └─────┬──────┘          └──────┬───────┘
+              └──────────┬─────────────┘
+                         ▼
+             ┌──────────────────────────┐
+             │ split into q, k, v,      │
+             │           i, f, o        │
+             └────────────┬─────────────┘
+                          ▼
+             ┌──────────────────────────┐
+             │ m_t = max(m_{t-1}+log f, │
+             │            log i)        │
+             │ i, f rescaled by exp     │
+             └────────────┬─────────────┘
+                          ▼
+             ┌──────────────────────────┐
+             │ C_t = f * C_{t-1}        │
+             │       + i * (v_t ⊗ k_t^T)│
+             │ n_t = f * n_{t-1} + i*k_t│
+             └────────────┬─────────────┘
+                          ▼
+             ┌──────────────────────────┐
+             │ h_t = o * (C_t^T @ q_t)  │
+             │   / max(|n_t . q_t|,     │
+             │         exp(-m_t))       │
+             └────────────┬─────────────┘
+                          ▼
+        h_t: (batch, units), states [h_t, C_t, n_t, m_t]
+
+    q and k are (batch, heads, key_dim), v is (batch, heads, value_dim).
+    i, f and m carry one scalar per head. C_t and n_t are stored flat.
 
     :param units: Dimensionality of the output space (d_model). Must be positive.
     :type units: int
@@ -594,6 +678,28 @@ class mLSTMCell(keras.layers.Layer):
     :raises ValueError: If ``units`` is not positive.
     :raises ValueError: If ``num_heads`` is not positive.
     :raises ValueError: If ``units`` is not divisible by ``num_heads``.
+
+    Input shape:
+        2D tensor ``(batch_size, input_dim)``, one timestep.
+
+    Output shape:
+        2D tensor ``(batch_size, units)``, plus the four state tensors.
+
+    Example:
+        .. code-block:: python
+
+            cell = mLSTMCell(units=32, num_heads=4)
+            rnn = keras.layers.RNN(cell, return_sequences=True)
+            y = rnn(keras.random.normal((2, 10, 8)))
+            # y.shape == (2, 10, 32)
+
+    :ivar matrix_memory_size: ``num_heads * key_dim * value_dim``, the flat size
+        of ``C_t``.
+    :vartype matrix_memory_size: int
+    :ivar normalizer_size: ``num_heads * key_dim``, the flat size of ``n_t``.
+    :vartype normalizer_size: int
+    :ivar state_size: ``[units, matrix_memory_size, normalizer_size, num_heads]``.
+    :vartype state_size: list of int
     """
 
     def __init__(
@@ -610,6 +716,14 @@ class mLSTMCell(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and record the state layout.
+
+        See the class docstring for the full parameter list.
+
+        :raises ValueError: If ``units`` or ``num_heads`` is not positive, or if
+            ``units`` is not divisible by ``num_heads``.
+        """
         super().__init__(**kwargs)
 
         if units <= 0:
@@ -634,12 +748,10 @@ class mLSTMCell(keras.layers.Layer):
         self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # State size: [h, C (flattened), n, m]
-        # C is (num_heads, key_dim, value_dim) flattened
-        # n is (num_heads, key_dim)
-        # m is (num_heads,) -- log-domain max-stabilizer (one scalar per head),
-        # mirroring sLSTMCell; prevents the exp() input gate from overflowing fp32
-        # when accumulated over long sequences.
+        # State layout, in the order call() unpacks it: [h, C, n, m].
+        # h is (units,). C is (num_heads, key_dim, value_dim), stored flat.
+        # n is (num_heads, key_dim), stored flat. m is (num_heads,) -- the
+        # log-domain max-stabilizer, one scalar per head, mirroring sLSTMCell.
         # DECISION plan_2026-06-11_50891da1/D-001: the 4th state m_t is the
         # paper-correct (Beck et al. 2024) log-domain max-stabilizer. Do NOT
         # remove it or revert to the bare exp() input gate -- that form overflows
@@ -649,10 +761,10 @@ class mLSTMCell(keras.layers.Layer):
         self.normalizer_size = self.num_heads * self.key_dim
 
         self.state_size = [
-            self.units,  # h_t
-            self.matrix_memory_size,  # C_t (flattened)
-            self.normalizer_size,  # n_t
-            self.num_heads,  # m_t (stabilizer, scalar per head)
+            self.units,
+            self.matrix_memory_size,
+            self.normalizer_size,
+            self.num_heads,
         ]
         self.output_size = self.units
 
@@ -669,14 +781,17 @@ class mLSTMCell(keras.layers.Layer):
         if input_dim is None:
             raise ValueError("Last dimension of input_shape cannot be None.")
 
-        # Total projection size: q, k, v, i, f, o
+        # One combined kernel produces all six projections. The terms below are
+        # in the order call() splits them: q, k (num_heads * key_dim each),
+        # v (num_heads * value_dim), i and f (one scalar per head), then
+        # o (the full units dimension).
         total_proj_size = (
-            self.num_heads * self.key_dim +  # q
-            self.num_heads * self.key_dim +  # k
-            self.num_heads * self.value_dim +  # v
-            self.num_heads +  # i (scalar per head)
-            self.num_heads +  # f (scalar per head)
-            self.units  # o (full dimension)
+            self.num_heads * self.key_dim +
+            self.num_heads * self.key_dim +
+            self.num_heads * self.value_dim +
+            self.num_heads +
+            self.num_heads +
+            self.units
         )
 
         self.kernel = self.add_weight(
@@ -771,27 +886,31 @@ class mLSTMCell(keras.layers.Layer):
         k_t = ops.reshape(k_proj, (batch_size, self.num_heads, self.key_dim))
         v_t = ops.reshape(v_proj, (batch_size, self.num_heads, self.value_dim))
 
-        # Stabilized gates (mirrors sLSTMCell): a log-domain max-stabilizer m_t
-        # keeps the exponential input gate bounded so the matrix-memory recurrence
-        # cannot overflow fp32 over long sequences. log_f uses sigmoid-forget
-        # semantics (same as the unstabilized form, just in log space).
+        # Stabilized gates, mirroring sLSTMCell. The log-domain running maximum
+        # m_t keeps the exponential input gate bounded, so the matrix-memory
+        # recurrence cannot overflow fp32 over a long sequence. log_f is the
+        # same sigmoid forget gate as the unstabilized form, taken in log space.
+        # log_f, m_t, i_t and f_t are (batch_size, num_heads); o_t is
+        # (batch_size, units).
         # DECISION plan_2026-06-11_50891da1/D-001: do NOT revert to a bare
         # `i_t = ops.exp(i_proj)`; that overflows fp32 at seq>=64. See decisions.md D-001.
-        log_f = ops.log(ops.sigmoid(f_proj) + 1e-8)  # (batch_size, num_heads)
-        m_t = ops.maximum(m_tm1 + log_f, i_proj)      # (batch_size, num_heads)
-        i_t = ops.exp(i_proj - m_t)                   # bounded in (0, 1]
-        f_t = ops.exp(m_tm1 + log_f - m_t)            # bounded
-        o_t = ops.sigmoid(o_proj)  # (batch_size, units)
+        log_f = ops.log(ops.sigmoid(f_proj) + 1e-8)
+        m_t = ops.maximum(m_tm1 + log_f, i_proj)
+        i_t = ops.exp(i_proj - m_t)
+        f_t = ops.exp(m_tm1 + log_f - m_t)
+        o_t = ops.sigmoid(o_proj)
 
         # Reshape gates for broadcasting
         i_t = ops.reshape(i_t, (batch_size, self.num_heads, 1, 1))
         f_t = ops.reshape(f_t, (batch_size, self.num_heads, 1, 1))
 
-        # Matrix memory update: C_t = f_t * C_{t-1} + i_t * (v_t ⊗ k_t^T)
-        # Outer product: v_t (batch, heads, value_dim, 1) @ k_t (batch, heads, 1, key_dim)
-        v_t_expanded = ops.expand_dims(v_t, axis=-1)  # (batch, heads, value_dim, 1)
-        k_t_expanded = ops.expand_dims(k_t, axis=-2)  # (batch, heads, 1, key_dim)
-        outer_product = ops.matmul(v_t_expanded, k_t_expanded)  # (batch, heads, value_dim, key_dim)
+        # Matrix memory update: C_t = f_t * C_{t-1} + i_t * (v_t ⊗ k_t^T).
+        # The outer product is a matmul of v_t as a column, (batch, heads,
+        # value_dim, 1), with k_t as a row, (batch, heads, 1, key_dim). That
+        # gives (batch, heads, value_dim, key_dim).
+        v_t_expanded = ops.expand_dims(v_t, axis=-1)
+        k_t_expanded = ops.expand_dims(k_t, axis=-2)
+        outer_product = ops.matmul(v_t_expanded, k_t_expanded)
 
         # Transpose to match C format (batch, heads, key_dim, value_dim)
         outer_product = ops.transpose(outer_product, [0, 1, 3, 2])
@@ -803,26 +922,30 @@ class mLSTMCell(keras.layers.Layer):
         i_t_norm = ops.reshape(i_t, (batch_size, self.num_heads, 1))
         n_t = f_t_norm * n_tm1 + i_t_norm * k_t
 
-        # Compute output: h_t = o_t * (C_t @ q_t / (n_t^T @ q_t))
-        # C_t @ q_t: (batch, heads, key_dim, value_dim) @ (batch, heads, key_dim, 1)
-        q_t_expanded = ops.expand_dims(q_t, axis=-1)  # (batch, heads, key_dim, 1)
+        # Read the memory back out with the query: C_t^T @ q_t.
+        # C_t is (batch, heads, key_dim, value_dim), so the transpose is
+        # (batch, heads, value_dim, key_dim) and q_t as a column is
+        # (batch, heads, key_dim, 1). The matmul gives
+        # (batch, heads, value_dim, 1), squeezed to (batch, heads, value_dim).
+        q_t_expanded = ops.expand_dims(q_t, axis=-1)
         memory_retrieval = ops.matmul(
-            ops.transpose(C_t, [0, 1, 3, 2]),  # (batch, heads, value_dim, key_dim)
+            ops.transpose(C_t, [0, 1, 3, 2]),
             q_t_expanded
-        )  # (batch, heads, value_dim, 1)
-        memory_retrieval = ops.squeeze(memory_retrieval, axis=-1)  # (batch, heads, value_dim)
+        )
+        memory_retrieval = ops.squeeze(memory_retrieval, axis=-1)
 
-        # Normalization: max(|n_t^T @ q_t|, exp(-m_t)) -- the stabilized mLSTM
-        # denominator (Beck et al. 2024). exp(-m_t) lower-bounds the divisor so a
+        # The stabilized mLSTM denominator, max(|n_t^T @ q_t|, exp(-m_t))
+        # (Beck et al. 2024). exp(-m_t) is a floor on the divisor, so a
         # near-zero n_t^T q_t cannot blow up the retrieval.
+        # nq, m_t3 and normalization are all (batch, heads, 1).
         # DECISION plan_2026-06-11_50891da1/D-001: keep the exp(-m_t) floor; the
         # bare `+ 1e-8` form was insufficient. See decisions.md D-001.
-        nq = ops.sum(n_t * q_t, axis=-1, keepdims=True)  # (batch, heads, 1)
+        nq = ops.sum(n_t * q_t, axis=-1, keepdims=True)
         m_t3 = ops.reshape(m_t, (batch_size, self.num_heads, 1))
-        normalization = ops.maximum(ops.abs(nq), ops.exp(-m_t3)) + 1e-8  # (batch, heads, 1)
+        normalization = ops.maximum(ops.abs(nq), ops.exp(-m_t3)) + 1e-8
 
-        # Normalized retrieval
-        normalized_retrieval = memory_retrieval / normalization  # (batch, heads, value_dim)
+        # Divide, giving (batch, heads, value_dim).
+        normalized_retrieval = memory_retrieval / normalization
 
         # Reshape to (batch, units)
         normalized_retrieval = ops.reshape(
@@ -886,8 +1009,9 @@ class mLSTMLayer(keras.layers.Layer):
     """
     Matrix LSTM (mLSTM) layer for processing sequences.
 
-    Wraps the ``mLSTMCell`` in a ``keras.layers.RNN`` to process full sequences,
-    providing a high-level interface for using matrix-valued memory in models.
+    Wraps ``mLSTMCell`` in a ``keras.layers.RNN`` so it runs over a whole
+    sequence. This is the layer to use when you want matrix memory in a model
+    without driving the cell yourself.
 
     **Architecture Overview:**
 
@@ -900,13 +1024,19 @@ class mLSTMLayer(keras.layers.Layer):
         │   keras.layers.RNN        │
         │   ┌───────────────────┐   │
         │   │   mLSTMCell       │   │
-        │   │  (per timestep)   │   │
+        │   │  (one timestep)   │   │
         │   └───────────────────┘   │
         └───────────┬───────────────┘
-                    ▼
-        Output: (batch, seq_len, units)
-             or (batch, units) if
-             return_sequences=False
+                    │
+          ┌─────────┴──────────┐
+          ▼                    ▼
+    return_sequences=True  return_sequences=False
+    (batch, seq_len, units)  (batch, units)
+
+    With return_state=True the four final states are appended to
+    whichever leaf applies: h (batch, units), C flattened to
+    (batch, heads*key_dim*value_dim), n flattened to
+    (batch, heads*key_dim), and m (batch, heads).
 
     :param units: Dimensionality of the output space.
     :type units: int
@@ -939,6 +1069,25 @@ class mLSTMLayer(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer, optional
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor ``(batch_size, seq_len, input_dim)``.
+
+    Output shape:
+        3D tensor ``(batch_size, seq_len, units)`` when
+        ``return_sequences=True``, otherwise 2D ``(batch_size, units)``.
+
+    Example:
+        .. code-block:: python
+
+            layer = mLSTMLayer(units=32, num_heads=4)
+            y = layer(keras.random.normal((2, 10, 8)))
+            # y.shape == (2, 10, 32)
+
+    :ivar cell: The wrapped :class:`mLSTMCell`.
+    :vartype cell: mLSTMCell
+    :ivar rnn: The ``keras.layers.RNN`` that drives the cell.
+    :vartype rnn: keras.layers.RNN
     """
 
     def __init__(
@@ -960,6 +1109,12 @@ class mLSTMLayer(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the cell and its RNN wrapper.
+
+        See the class docstring for the full parameter list. Validation of
+        ``units`` and ``num_heads`` happens inside ``mLSTMCell``.
+        """
         super().__init__(**kwargs)
 
         self.units = units
@@ -1089,11 +1244,15 @@ class mLSTMLayer(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class sLSTMBlock(keras.layers.Layer):
     """
-    sLSTM residual block with post-normalization architecture.
+    sLSTM residual block with post-normalization.
 
-    Implements the architecture from Figure 10 of the xLSTM paper: a residual
-    block that applies sLSTM followed by normalization and a configurable
-    feed-forward network, with a skip connection around the entire block.
+    This is Figure 10 of the xLSTM paper. The input goes through ``sLSTMLayer``,
+    then normalization, then a feed-forward network, and the original input is
+    added back at the end. Normalization sits after the recurrence, not before
+    it, which is what makes this post-norm.
+
+    Both the normalization type and the FFN type are strings resolved by the
+    repo factories, so the block can be reshaped without subclassing.
 
     **Architecture Overview:**
 
@@ -1150,6 +1309,28 @@ class sLSTMBlock(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer, optional
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor ``(batch_size, seq_len, units)``.
+
+    Output shape:
+        3D tensor ``(batch_size, seq_len, units)``. The residual fixes the
+        output width to ``units``.
+
+    Example:
+        .. code-block:: python
+
+            block = sLSTMBlock(units=32, ffn_type='swiglu')
+            y = block(keras.random.normal((2, 10, 32)))
+            # y.shape == (2, 10, 32)
+
+    :ivar slstm: The recurrent path, an :class:`sLSTMLayer` with
+        ``return_sequences=True``.
+    :vartype slstm: sLSTMLayer
+    :ivar norm: Normalization layer built by the norms factory.
+    :vartype norm: keras.layers.Layer
+    :ivar ffn: Feed-forward network built by the FFN factory.
+    :vartype ffn: keras.layers.Layer
     """
 
     def __init__(
@@ -1169,6 +1350,12 @@ class sLSTMBlock(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the three sub-layers.
+
+        See the class docstring for the full parameter list. The sub-layers are
+        created here and built in ``build()``.
+        """
         super().__init__(**kwargs)
 
         self.units = units
@@ -1228,8 +1415,9 @@ class sLSTMBlock(keras.layers.Layer):
         slstm_output_shape = self.slstm.compute_output_shape(input_shape)
         self.norm.build(slstm_output_shape)
 
-        # Build FFN
-        norm_output_shape = slstm_output_shape  # Norm doesn't change shape
+        # Build the FFN. Normalization does not change the shape, so the FFN
+        # sees the sLSTM output shape.
+        norm_output_shape = slstm_output_shape
         self.ffn.build(norm_output_shape)
 
         super().build(input_shape)
@@ -1267,7 +1455,14 @@ class sLSTMBlock(keras.layers.Layer):
         return x + residual
 
     def compute_output_shape(self, input_shape):
-        """Output shape equals input shape (residual block preserves dimensions)."""
+        """
+        Compute the output shape. The residual makes it equal the input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: The same shape tuple.
+        :rtype: tuple
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
@@ -1307,12 +1502,15 @@ class sLSTMBlock(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.time_series.xlstm_blocks")
 class mLSTMBlock(keras.layers.Layer):
     """
-    mLSTM residual block with pre-up-projection architecture.
+    mLSTM residual block with an up-projection around the recurrence.
 
-    Implements the architecture from Figure 11 of the xLSTM paper: a residual
-    block that up-projects the input, applies depthwise causal convolution with
-    swish activation, processes through mLSTM, normalizes, and down-projects
-    back to the original dimension with a skip connection.
+    This is Figure 11 of the xLSTM paper. The input is projected up to
+    ``units * expansion_factor``, mixed by a depthwise causal Conv1D, passed
+    through swish, run through ``mLSTMLayer``, normalized, and projected back
+    down to ``units``. The original input is added at the end.
+
+    The convolution uses ``padding='causal'`` and ``groups=inner_dim``, so it
+    mixes across time only, never across channels, and never looks ahead.
 
     **Architecture Overview:**
 
@@ -1378,6 +1576,33 @@ class mLSTMBlock(keras.layers.Layer):
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: keras.regularizers.Regularizer, optional
     :param kwargs: Additional arguments for the Layer base class.
+
+    Input shape:
+        3D tensor ``(batch_size, seq_len, units)``.
+
+    Output shape:
+        3D tensor ``(batch_size, seq_len, units)``. The residual fixes the
+        output width to ``units``.
+
+    Example:
+        .. code-block:: python
+
+            block = mLSTMBlock(units=32, expansion_factor=2, num_heads=4)
+            y = block(keras.random.normal((2, 10, 32)))
+            # y.shape == (2, 10, 32)
+
+    :ivar inner_dim: ``units * expansion_factor``, the width of the inner path.
+    :vartype inner_dim: int
+    :ivar up_proj: Dense layer widening ``units`` to ``inner_dim``.
+    :vartype up_proj: keras.layers.Dense
+    :ivar conv: Depthwise causal Conv1D over the inner path.
+    :vartype conv: keras.layers.Conv1D
+    :ivar mlstm: The recurrent path, an :class:`mLSTMLayer` at ``inner_dim``.
+    :vartype mlstm: mLSTMLayer
+    :ivar norm: Normalization layer built by the norms factory.
+    :vartype norm: keras.layers.Layer
+    :ivar down_proj: Dense layer narrowing ``inner_dim`` back to ``units``.
+    :vartype down_proj: keras.layers.Dense
     """
 
     def __init__(
@@ -1396,6 +1621,12 @@ class mLSTMBlock(keras.layers.Layer):
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and create the five sub-layers.
+
+        See the class docstring for the full parameter list. The sub-layers are
+        created here and built in ``build()``.
+        """
         super().__init__(**kwargs)
 
         self.units = units
@@ -1423,12 +1654,13 @@ class mLSTMBlock(keras.layers.Layer):
             name='up_proj',
         )
 
-        # Depthwise (grouped) conv for mixing
+        # Depthwise conv for mixing across time. groups == filters makes it
+        # depthwise, so no channel is mixed with any other.
         self.conv = layers.Conv1D(
             filters=self.inner_dim,
             kernel_size=conv_kernel_size,
             padding='causal',
-            groups=self.inner_dim,  # Depthwise
+            groups=self.inner_dim,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -1533,7 +1765,14 @@ class mLSTMBlock(keras.layers.Layer):
         return x + residual
 
     def compute_output_shape(self, input_shape):
-        """Output shape equals input shape (residual block preserves dimensions)."""
+        """
+        Compute the output shape. The residual makes it equal the input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: The same shape tuple.
+        :rtype: tuple
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
