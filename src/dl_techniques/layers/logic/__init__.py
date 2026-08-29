@@ -1,10 +1,49 @@
 """
 Public API for `dl_techniques.layers.logic`.
 
-Exposes four differentiable, learnable layer primitives plus a string-keyed
-factory function. All classes remain importable from their original module
-paths — this `__init__` only re-exports already-decorated symbols (no extra
-registration with `keras.saving`).
+Four learnable layer classes plus a string-keyed factory. Every class is
+also importable from the module it is defined in. This file only re-exports
+already decorated symbols; it registers nothing of its own, so importing
+from here and importing from the module give you the same class object.
+The four `keras.saving` keys are `Custom><ClassName>` and carry no module
+path, so renaming a class breaks saved archives while moving one does not.
+
+**Architecture Overview:**
+
+.. code-block:: text
+
+    caller
+      │
+      ├─ create_logic_layer(type, **kwargs)
+      │    type = 'arithmetic'      ─────────┐
+      │           'logic'                    │
+      │           'circuit_depth'            │
+      │           'neural_circuit'           │
+      │    the 4 keys live in LOGIC_REGISTRY │
+      │                                      ▼
+      └─ direct import ──► LearnableArithmeticOperator
+                           LearnableLogicOperator
+                           CircuitDepthLayer
+                           LearnableNeuralCircuit
+
+    create_logic_from_config(dict) reads 'type' out of a
+    copy of the dict and calls create_logic_layer.
+    Both operator classes take rank >= 1; the two circuit
+    classes need rank >= 2. All four preserve the shape.
+
+Counts, re-derived from the live module rather than copied from any doc:
+`__all__` exports 10 names — the 4 classes drawn above, the 4 functions
+`create_logic_layer`, `create_logic_from_config`, `get_logic_info` and
+`validate_logic_config`, and 2 module-level objects, the `LogicLayerType`
+alias and the `LOGIC_REGISTRY` dict. `LOGIC_REGISTRY` has 4 entries. Their
+`optional_params` hold 18, 14, 17 and 18 defaults for `arithmetic`,
+`logic`, `circuit_depth` and `neural_circuit`; every `required_params` is
+empty, so every key builds with no arguments at all.
+
+The detail lives in the modules. Read `factory.py` for the dispatch and
+the registry tables, `logic_operators.py` for the 18 fuzzy gates,
+`arithmetic_operators.py` for the 7 arithmetic operations, and
+`neural_circuit.py` for the two shape-preserving stacking layers.
 """
 
 from .arithmetic_operators import LearnableArithmeticOperator

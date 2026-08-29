@@ -243,8 +243,9 @@ class CircuitDepthLayer(keras.layers.Layer):
     :vartype apply_sigmoid: bool
     :ivar gate_entropy_coefficient: The resolved coefficient, as a float.
     :vartype gate_entropy_coefficient: float
-    :ivar load_balance_coefficient: Read-only alias holding the same
-        value. ``call`` still reads this name.
+    :ivar load_balance_coefficient: Alias holding the same value. It is
+        the name ``_maybe_load_balance_loss`` reads, so deleting it
+        would switch the loss off.
     :vartype load_balance_coefficient: float
     :ivar channel_mix: ``'dense'`` or ``None``.
     :vartype channel_mix: Optional[str]
@@ -825,11 +826,15 @@ class LearnableNeuralCircuit(keras.layers.Layer):
     The shape never changes, so the whole stack drops in wherever a single
     stage would.
 
-    The only setting that varies by depth is whether the logic children
+    Two settings vary by depth. The first is whether the logic children
     sigmoid their input, which ``apply_sigmoid_per_depth`` controls. Its
     default ``'first_only'`` sigmoids depth 0 and no other, because
     stacking sigmoids narrows the range until the stack outputs a
-    constant.
+    constant. The second follows from it: when that default is set on a
+    stack of 2 or more that also has arithmetic experts or a residual,
+    ``force_logic_input_clip`` is switched on for depths 1 and up, and the
+    constructor logs a warning saying so. Everything else is identical
+    across depths.
 
     **Architecture Overview:**
 
@@ -862,8 +867,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                             ▼
              Y = output [B, ..., C]
 
-        Only apply_sigmoid differs between depths.
-        See _sigmoid_for_depth for the rule.
+        Two things differ between depths: apply_sigmoid,
+        per _sigmoid_for_depth, and force_logic_input_clip,
+        which is True on depths >= 1 of a risky stack.
 
     :param circuit_depth: How many stages to stack. Must be > 0.
     :type circuit_depth: int
@@ -946,8 +952,8 @@ class LearnableNeuralCircuit(keras.layers.Layer):
     :vartype apply_sigmoid_per_depth: str
     :ivar gate_entropy_coefficient: The resolved coefficient, as a float.
     :vartype gate_entropy_coefficient: float
-    :ivar load_balance_coefficient: Read-only alias holding the same
-        value.
+    :ivar load_balance_coefficient: Alias holding the same value, kept
+        for callers still on the old name.
     :vartype load_balance_coefficient: float
     :ivar channel_mix: ``'dense'`` or ``None``.
     :vartype channel_mix: Optional[str]
@@ -970,6 +976,10 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         one of the two keys, ``circuit_depth`` or either per-depth expert
         count is not positive, ``apply_sigmoid_per_depth`` is not one of
         the three keys, or ``diversity_coefficient`` is negative.
+    :raises ValueError: Also from the constructor, raised by the stages it
+        builds there, if ``circuit_routing`` or ``channel_mix`` is not one
+        of its allowed values or the resolved gate-entropy coefficient is
+        negative. This class does not check those three itself.
     :raises ValueError: From ``build`` if the input rank is below 2.
     :raises RuntimeError: From ``to_symbolic`` before the layer is built.
 

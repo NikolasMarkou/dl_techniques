@@ -11,7 +11,8 @@ their layer type out of a config file.
 
 .. code-block:: text
 
-    config dict ──► create_logic_from_config()  pops config['type']
+    config dict ──► create_logic_from_config()
+                    copies the dict, then pops 'type' from the copy
                                  │
                                  ▼
       create_logic_layer(layer_type, name=None, **kwargs)
@@ -42,8 +43,10 @@ their layer type out of a config file.
     ├──────────────────────────────────────────────────────────┤
     │ except (TypeError, ValueError) as e:                     │
     │   every raise above lands here and comes back out as     │
-    │   one ValueError naming layer_type, its required params  │
-    │   and the params you passed, chained with `from e`.      │
+    │   one ValueError, chained with `from e`. Two messages:   │
+    │     layer_type in LOGIC_REGISTRY -> names the class,     │
+    │       its required params and the params you passed      │
+    │     layer_type unknown ──────────► names only the type   │
     └──────────────────────────────────────────────────────────┘
                                  │
                                  ▼

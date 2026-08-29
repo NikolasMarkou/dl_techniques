@@ -378,6 +378,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         # DECISION plan_2026-05-13_e52a5ac8/D-001 — apply_sigmoid=False is the
         # intended path for stacking. Default True keeps the legacy reading of
         # inputs as raw logits, mapped to [0,1] before the fuzzy gates run.
+        # Do not flip the default: it would change every saved caller's math.
         # Owning plan dir gone; this comment is the record.
         self.apply_sigmoid = apply_sigmoid
         # With apply_sigmoid=False the layer trusts the caller to stay in

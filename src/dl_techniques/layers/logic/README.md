@@ -10,13 +10,15 @@ The package exposes four layer classes and a factory:
 
 | Class | Purpose | Shape contract |
 |---|---|---|
-| `LearnableArithmeticOperator` | DARTS-style soft selection over `add / multiply / subtract / divide / power / max / min` | rank-agnostic (rank >= 1); preserves shape |
-| `LearnableLogicOperator` | Soft fuzzy logic over `and / or / xor / not / nand / nor` (sigmoid-normalized inputs) | rank-agnostic; preserves shape |
+| `LearnableArithmeticOperator` | DARTS-style soft selection over 7 operations: `add / multiply / subtract / divide / power / max / min`. All 7 are selected by default | rank-agnostic (rank >= 1); preserves shape |
+| `LearnableLogicOperator` | Soft fuzzy logic over **18** gates in `VALID_OPS`. The default set is the first 6, `and / or / xor / not / nand / nor`; the other 12 (Lukasiewicz, Godel, Hamacher, Yager, 4 implications) are opt-in. Inputs are sigmoid-normalized unless `apply_sigmoid=False` | rank-agnostic (rank >= 1); preserves shape |
 | `CircuitDepthLayer` | One MoE-style stage combining parallel logic + arithmetic experts with learnable routing + fusion | **rank >= 2**; preserves shape |
 | `LearnableNeuralCircuit` | Stack of `CircuitDepthLayer` with optional `LayerNormalization` between stages | **rank >= 2**; preserves shape |
 
-The factory `create_logic_layer(layer_type, **kwargs)` mirrors the registry
-pattern used in `layers/ffn/factory.py` and `layers/norms/factory.py`.
+The factory `create_logic_layer(layer_type, **kwargs)` follows the registry
+pattern of `layers/ffn/factory.py` and `layers/norms/factory.py`, with one
+difference that matters: **this factory drops an unknown keyword instead of
+raising on it.** See the Factory section below.
 
 ## Math
 
@@ -35,7 +37,8 @@ uniform combination.
 
 ### Soft fuzzy logic
 
-Inputs are first sigmoided into `[0, 1]`, then combined via:
+Inputs are sigmoided into `[0, 1]` first, unless `apply_sigmoid=False`. The
+six default gates are:
 
 ```
 NOT(p) = 1 - p
@@ -45,8 +48,10 @@ XOR(p, q) = p + q - 2*p*q
 NAND, NOR = 1 - AND, 1 - OR
 ```
 
-Combined via the same softmax-weighted mixture used by the arithmetic
-operator.
+`VALID_OPS` holds 18 gates in total; the class docstring of
+`LearnableLogicOperator` prints the formula for every one. The gate results
+are combined by the same softmax-weighted mixture the arithmetic operator
+uses.
 
 ### Circuit depth layer (MoE-style)
 
@@ -54,20 +59,31 @@ For input `X`, routing weights `w_r`, combination weights `w_c`, and `N`
 expert operators `f_i`:
 
 ```
-alpha = softmax(w_r)              # input gating
 beta  = softmax(w_c)              # output fusion
-Y     = sum_i( beta_i * f_i(alpha_i * X) )  [+ X]   # optional residual
+Y     = sum_i( beta_i * f_i(X) )            [+ X]   # circuit_routing='output_only', the DEFAULT
+
+alpha = softmax(w_r)              # input gating, read only by 'classic'
+Y     = sum_i( beta_i * f_i(alpha_i * X) )  [+ X]   # circuit_routing='classic'
 ```
+
+`'output_only'` is the default. Under `'classic'` each expert sees `X / N` on
+average, so the signal shrinks as experts are added; keep that mode only to
+load models trained before the default changed. `w_r` is created in both
+modes so a checkpoint from either loads into either.
 
 `LearnableNeuralCircuit` stacks `D` such depth layers with optional
 `LayerNormalization` between stages.
 
 ## Classes
 
-All classes are registered with `@keras.saving.register_keras_serializable()`
-at their **original module paths**; relocating them would break previously
-saved `.keras` archives. The `__init__.py` only re-exports the symbols — it
-does not re-register them.
+All four classes carry a bare `@keras.saving.register_keras_serializable()`.
+Measured, the registered keys are `Custom>LearnableArithmeticOperator`,
+`Custom>LearnableLogicOperator`, `Custom>CircuitDepthLayer` and
+`Custom>LearnableNeuralCircuit` — **the bare class name, with no module path
+in it.** So moving a class to another module does not break a saved `.keras`
+archive, but **renaming one does**, and so would any other class anywhere in
+the repo registering the same bare name. The `__init__.py` only re-exports
+the symbols; it does not re-register them.
 
 ```python
 from dl_techniques.layers.logic import (
@@ -101,9 +117,24 @@ The factory:
 
 - validates `layer_type` against `LOGIC_REGISTRY`,
 - merges registry defaults with user kwargs,
-- filters unknown keys (no `Unrecognized keyword arguments` from Keras),
-- logs the final parameter set,
+- **drops any key the target type does not declare, silently** — measured:
+  `create_logic_layer("logic", bogus_key=1)` returns a `LearnableLogicOperator`,
+  emits no warning, and the layer has no such attribute. Every other factory
+  in `layers/` raises `ValueError` there (`layers/CLAUDE.md` § The factory
+  contract). Check every name against `get_logic_info()`, because a typo costs
+  you the setting with nothing printed,
+- logs the final parameter set at debug level,
 - raises a `ValueError` with a contextual message on construction failure.
+
+`LOGIC_REGISTRY` has 4 entries. Each has an empty `required_params`, so every
+key constructs with no arguments, and the `optional_params` counts are:
+
+| Key | Class | `optional_params` | `enum_params` |
+|---|---|---:|---:|
+| `arithmetic` | `LearnableArithmeticOperator` | 18 | 3 |
+| `logic` | `LearnableLogicOperator` | 14 | 1 |
+| `circuit_depth` | `CircuitDepthLayer` | 17 | 3 |
+| `neural_circuit` | `LearnableNeuralCircuit` | 18 | 4 |
 
 `create_logic_from_config({"type": "neural_circuit", "circuit_depth": 4})`
 is the equivalent dict-driven entry point.
@@ -131,11 +162,18 @@ it in like a residual block.
 The deep review's findings were implemented in full — every change is opt-in
 or back-compatible by default unless noted as **BREAKING**.
 
+**This table records the state at the end of that work, not today's.** Two of
+its Default cells were flipped afterwards and are stale as claims about the
+current code: `softplus_temperature` is now `True` and
+`allow_unary_degenerate` is now `False`, both changed by
+`plan_2026-05-13_3a2f1d23` and tabulated further down. Read the class
+docstrings for the live defaults.
+
 | Change | Flag / API | Default | Notes |
 |---|---|---|---|
 | **BREAKING**: `CircuitDepthLayer` no longer attenuates input | `circuit_routing='output_only'` | new default | Old math: `Y=Σβ_i·f_i(α_i·X)`. New: `Y=Σβ_i·f_i(X)`. Set `circuit_routing='classic'` to reproduce old. |
 | Sigmoid plumbing through circuit | `LearnableNeuralCircuit(apply_sigmoid_per_depth=...)` | `'first_only'` | Was `'all'` (legacy collapse). `'all'` and `'none'` still selectable. |
-| Sign-preserving `_safe_power` | (auto) | — | `power(-2, 3) == -8`. Real restriction `cos(πy)·\|x\|^y`. |
+| Sign-preserving `_safe_power` | (auto) | — | Real restriction `cos(πy)·\|x\|^y`, so the sign of a negative base survives. **`power(-2, 3)` returns 4.0, not -8**, because the default `exponent_clip_range=(-2.0, 2.0)` clips the exponent 3 down to 2; measured. Pass `exponent_clip_range=(-4.0, 4.0)` and it returns -8.0, also measured. |
 | Smooth-clamp divide | `safe_divide_mode='smooth'` | `'hard_clamp'` | Bounded gradient at `x2=0`; opt-in. |
 | Softplus-parameterized temperature | `softplus_temperature=True` | `False` | Always-positive, gradient-defined-everywhere. Round-trip via `from_config`. |
 | Strict raise on single-input + binary ops | `allow_unary_degenerate=False` | `True` | Default still permits the legacy footgun. |
@@ -143,9 +181,9 @@ or back-compatible by default unless noted as **BREAKING**.
 | Gumbel-softmax mode | `gumbel_softmax=True[, gumbel_hard=True]` | `False` | Discrete-at-inference selection. |
 | Entropy regularization | `entropy_coefficient=0.1` | `0.0` | Adds `coef · H(probs)` to layer.losses. |
 | Shazeer load-balance aux loss | `CircuitDepthLayer(load_balance_coefficient=0.1)` | `0.0` | Penalizes peaky combination distributions. |
-| Cross-channel mixing | `CircuitDepthLayer(channel_mix='dense')` | `None` | Appends per-channel `Dense(C, C)` after fusion. |
+| Cross-channel mixing | `CircuitDepthLayer(channel_mix='dense')` | `None` | Appends a `Dense(C)` after fusion — C units, bias on, so a `(C, C)` kernel that mixes channels. |
 | `to_symbolic(top_k=k)` | method | — | Returns a string of dominant ops post-training. |
-| Vectorized weighted sum | (auto) | — | Replaces Python loop with `ops.stack` + `ops.sum`. |
+| Vectorized weighted sum | (auto) | — | Replaces the Python loop with `keras.ops.stack` + `keras.ops.sum`. |
 
 **Migration**: existing `.keras` archives load unchanged because every new
 flag has a back-compat default. Models that depend on the old attenuated
@@ -153,22 +191,25 @@ routing should pin `CircuitDepthLayer(circuit_routing='classic')`.
 
 ## Limitations
 
-- **Unary inputs to binary operators.** Passing a single tensor (e.g. a plain
-  `(B, D)`) to `LearnableArithmeticOperator` or `LearnableLogicOperator`
-  causes `x1 == x2`, which degenerates `subtract -> 0`, `divide -> 1`,
-  `xor -> 0`, `nand/nor -> constants`, and any binary-logic op into a fixed
-  value. The remaining unary-friendly ops (`add`, `multiply`, `power`,
-  `max`, `min`, `and`, `or`) still produce meaningful gradients, but the soft
-  mixture is biased toward those operations. **If your data is genuinely
-  unary, prefer a different layer.**
+- **Unary inputs to binary operators.** The two classes handle this
+  differently now. `LearnableLogicOperator` **raises** `ValueError` on a single
+  tensor whenever any selected gate is binary, which is 17 of the 18 (`not` is
+  the only unary one); `allow_unary_degenerate=True` opts back into the old
+  rebinding. `LearnableArithmeticOperator` still rebinds `x2 = x1` without
+  complaint, and that degenerates `subtract -> 0` and `divide -> 1` (measured
+  for both signs). Its remaining ops (`add`, `multiply`, `power`, `max`,
+  `min`) stay meaningful, but the soft mixture is then biased toward them.
+  **If your data is genuinely unary, prefer a different layer.**
 - **Rank requirement.** Prior to this iteration `CircuitDepthLayer` and
   `LearnableNeuralCircuit` enforced strict 4-D inputs. This has been
   relaxed to **rank >= 2** — the math was always rank-agnostic. Sibling
   arithmetic / logic operators were already rank-agnostic.
-- **Bare `@register_keras_serializable()`.** Renaming or relocating any of
-  these classes will break `.keras` archives saved with prior versions. New
-  callers are encouraged to use the factory; class-direct imports remain
-  fully supported.
+- **Bare `@register_keras_serializable()`.** The key is `Custom><ClassName>`
+  and carries no module path, so **renaming** one of these classes breaks
+  every `.keras` archive saved with a prior version, and a same-named class
+  registered elsewhere in the repo would collide with it. Relocating a class
+  between modules is safe on this axis. New callers are encouraged to use the
+  factory; class-direct imports remain fully supported.
 - **No internal projection.** Output channel count equals input channel
   count. Pair with a `Dense` / `Conv` if you need dimensionality change.
 - **Stacking `LearnableLogicOperator` re-squashes via sigmoid every layer
@@ -305,11 +346,13 @@ New callback:
 ## Changes in plan_2026-05-13_e33114da
 
 Post-rewrite review fixes. All changes are back-compatible by default; new
-flags opt-in. See `plans/plan_2026-05-13_e33114da/summary.md` for details.
+flags opt-in. That plan's directory no longer exists, so this table and the
+`# DECISION plan_2026-05-13_e33114da/...` comments in the source are the whole
+surviving record — there is no summary document to look the details up in.
 
 | Change | Class / API | Default | Notes |
 |---|---|---|---|
-| **Bug fix**: `hamacher_or(1,1) → 1` (was 0) and `hamacher_and(0,0) → 0` | `LearnableLogicOperator` | — | Unified eps strategy via `ops.where` at singular corners. |
+| **Bug fix**: `hamacher_or(1,1) → 1` (was 0) and `hamacher_and(0,0) → 0` | `LearnableLogicOperator` | — | Unified eps strategy via `keras.ops.where` at singular corners. |
 | **Bug fix**: Gumbel-softmax is deterministic at inference | `_operation_probs(training=...)` | — | `training is True` injects noise; `False`/`None` skips. |
 | **Bug fix**: per-channel `gate_entropy_coefficient` aux loss properly penalizes per-channel peakiness | `CircuitDepthLayer` | — | Was averaged-then-L2 (let channel-wise peakiness escape); now per-channel L2 then mean. |
 | **Bug fix**: `risky_stack` widened to include `use_residual=True` | `LearnableNeuralCircuit` | — | Force-clip on depth>=1 inner logic ops when first_only mode + residual or arithmetic experts. |
