@@ -37,6 +37,11 @@ The math:
     where s is the learnable scale. Gradients reach w, T and s, so all
     three are learned.
 
+Every weight clones the initializer it is given, so one ``Initializer``
+INSTANCE passed to two parameters, or handed down by a parent to every
+child, still leaves each weight with an independent draw. A seeded
+instance keeps its seed and so keeps drawing the same values.
+
 References:
     - Liu, H., Simonyan, K., & Yang, Y. (2018). "DARTS: Differentiable
       Architecture Search". The continuous relaxation of a discrete
@@ -56,6 +61,7 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 
 
 # ---------------------------------------------------------------------
@@ -456,10 +462,15 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             self._channels = None
             weight_shape = (self.num_operations,)
 
+        # DECISION plan-2026-08-29T112804-aff039c4/D-001 -- clone at the
+        # add_weight site: one resolved Initializer INSTANCE redraws
+        # identical values at every weight whose shape matches. A string
+        # is safe; a seeded instance defeats the clone.
+        # See decisions.md D-001.
         self.operation_weights = self.add_weight(
             name="operation_weights",
             shape=weight_shape,
-            initializer=self.operation_initializer,
+            initializer=clone_initializer(self.operation_initializer),
             trainable=True,
         )
 
@@ -477,7 +488,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             self.temperature = self.add_weight(
                 name="temperature",
                 shape=(),
-                initializer=temp_initializer,
+                initializer=clone_initializer(temp_initializer),
                 trainable=True,
             )
 
@@ -486,7 +497,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             self.scaling_factor = self.add_weight(
                 name="scaling_factor",
                 shape=(),
-                initializer=self.scaling_initializer,
+                initializer=clone_initializer(self.scaling_initializer),
                 trainable=True,
             )
 

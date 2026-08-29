@@ -16,9 +16,10 @@ The package exposes four layer classes and a factory:
 | `LearnableNeuralCircuit` | Stack of `CircuitDepthLayer` with optional `LayerNormalization` between stages | **rank >= 2**; preserves shape |
 
 The factory `create_logic_layer(layer_type, **kwargs)` follows the registry
-pattern of `layers/ffn/factory.py` and `layers/norms/factory.py`, with one
-difference that matters: **this factory drops an unknown keyword instead of
-raising on it.** See the Factory section below.
+pattern of `layers/ffn/factory.py` and `layers/norms/factory.py`, including
+its treatment of an unknown keyword: **it raises `ValueError`, naming the key
+and the accepted set.** It dropped such a keyword silently until 2026-08-29.
+See the Factory section below.
 
 ## Math
 
@@ -117,12 +118,15 @@ The factory:
 
 - validates `layer_type` against `LOGIC_REGISTRY`,
 - merges registry defaults with user kwargs,
-- **drops any key the target type does not declare, silently** — measured:
-  `create_logic_layer("logic", bogus_key=1)` returns a `LearnableLogicOperator`,
-  emits no warning, and the layer has no such attribute. Every other factory
-  in `layers/` raises `ValueError` there (`layers/CLAUDE.md` § The factory
-  contract). Check every name against `get_logic_info()`, because a typo costs
-  you the setting with nothing printed,
+- **raises `ValueError` on any key the target type does not declare** — measured:
+  `create_logic_layer("logic", bogus_key=1)` raises, naming the count, the key
+  and the accepted set, on all 4 registry keys. This matches every other factory
+  in `layers/` (`layers/CLAUDE.md` § The factory contract). The check lives in
+  `validate_logic_config`, so calling that directly rejects the same key, and
+  every message carries `STRICT_UNSUPPORTED_KEY_MARKER` for tests to match on.
+  **Migration**: until 2026-08-29 the key was filtered out silently, so a call
+  that quietly lost a setting now fails loudly — read the accepted set off the
+  error or off `get_logic_info()` and correct the spelling,
 - logs the final parameter set at debug level,
 - raises a `ValueError` with a contextual message on construction failure.
 
@@ -301,6 +305,13 @@ prior defaults; opt-out with explicit keyword args):
 | `routing_initializer`     | `"random_uniform"`| `"zeros"`   | CircuitDepthLayer + NeuralCircuit|
 | `combination_initializer` | `"random_uniform"`| `"zeros"`   | CircuitDepthLayer + NeuralCircuit|
 | `allow_unary_degenerate`  | `True`            | `False`     | LearnableLogicOperator           |
+
+Every weight clones the initializer it is given (`initializers/clone.py`), so
+one `Initializer` INSTANCE passed to two parameters, or handed by a parent to
+every child, still leaves each weight an independent draw. Measured on 8 pairs
+in this package: `max|delta|` 0.0 before, > 0 after, with an unseeded
+`RandomNormal()`. A seeded instance keeps its seed and still draws identically,
+which is why a guard for this cannot use one.
 
 New parameters:
 

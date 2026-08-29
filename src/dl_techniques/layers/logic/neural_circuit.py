@@ -48,8 +48,14 @@ depths let their logic children sigmoid their input. ``'first_only'`` is
 the default and only depth 0 does, because a sigmoid of a sigmoid keeps
 squeezing the range and a 3-deep stack converges to a constant. ``'all'``
 is the old behavior; ``'none'`` trusts the caller to stay in [0, 1].
+
+Every weight clones the initializer it is given, so one ``Initializer``
+INSTANCE passed to two parameters, or handed down by a parent to every
+child, still leaves each weight with an independent draw. A seeded
+instance keeps its seed and so keeps drawing the same values.
 """
 
+import copy
 import keras
 import warnings
 from typing import List, Optional, Union, Any, Dict, Tuple
@@ -59,6 +65,7 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from .logic_operators import LearnableLogicOperator
 from .arithmetic_operators import LearnableArithmeticOperator
 
@@ -402,8 +409,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         # Set in build() for per_channel mode; stays None in global mode.
         self._channels = None
         self.diversity_coefficient = float(diversity_coefficient)
-        self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
-        self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
+        # Deep, so an Initializer instance in here is this layer's own copy
+        # and a caller mutating the dict afterwards cannot reach the children.
+        self.inner_logic_kwargs = copy.deepcopy(inner_logic_kwargs) if inner_logic_kwargs else {}
+        self.inner_arithmetic_kwargs = copy.deepcopy(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — the children are built
         # here in __init__, and the logic ones get
@@ -514,16 +523,21 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         # The routing weights are created in both modes so a checkpoint
         # from either one loads into either one. Only 'classic' reads them.
+        # DECISION plan-2026-08-29T112804-aff039c4/D-001 -- clone at the
+        # add_weight site: one resolved Initializer INSTANCE redraws
+        # identical values at every weight whose shape matches. A string
+        # is safe; a seeded instance defeats the clone.
+        # See decisions.md D-001.
         self.routing_weights = self.add_weight(
             name="routing_weights",
             shape=(total_operators,),
-            initializer=self.routing_initializer,
+            initializer=clone_initializer(self.routing_initializer),
             trainable=True,
         )
         self.combination_weights = self.add_weight(
             name="combination_weights",
             shape=combination_shape,
-            initializer=self.combination_initializer,
+            initializer=clone_initializer(self.combination_initializer),
             trainable=True,
         )
 
@@ -1096,9 +1110,11 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         # These go to the stages, which pass them on to their children.
         # Keys a stage sets itself (operation_types, apply_sigmoid,
         # selection_mode, force_clip_when_no_sigmoid, name) are dropped
-        # there with a warning and cannot be overridden from here.
-        self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
-        self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
+        # there with a warning and cannot be overridden from here. The copy
+        # is deep, so a caller mutating the dict afterwards cannot reach
+        # the stages.
+        self.inner_logic_kwargs = copy.deepcopy(inner_logic_kwargs) if inner_logic_kwargs else {}
+        self.inner_arithmetic_kwargs = copy.deepcopy(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
         # A 'first_only' stack only sigmoids depth 0, so depths >= 1 read
         # whatever the depth below produced. An arithmetic expert or a

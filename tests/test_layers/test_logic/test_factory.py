@@ -1,11 +1,15 @@
 """Tests for `dl_techniques.layers.logic.factory`."""
 import os
+import re
 import tempfile
 import numpy as np
 import pytest
 import keras
 from keras import ops
 
+from dl_techniques.layers.logic.factory import (
+    STRICT_UNSUPPORTED_KEY_MARKER,
+)
 from dl_techniques.layers.logic import (
     CircuitDepthLayer,
     LearnableArithmeticOperator,
@@ -97,12 +101,46 @@ class TestCreate:
         assert layer.use_residual is False
         assert layer.name == "custom_cd"
 
-    def test_unknown_params_filtered(self):
-        # Bogus kwarg must not raise — factory filters unknowns.
+    @pytest.mark.parametrize("layer_type", sorted(LOGIC_REGISTRY))
+    def test_undeclared_keyword_raises(self, layer_type):
+        """A key the entry does not declare is a ValueError, not a default.
+
+        Measured at b1258bc0a: 0 of 4 keys raised; the layer came back with
+        the key silently dropped. The match is on the marker constant and
+        on the key itself, never on ``Exception``.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            create_logic_layer(layer_type, this_is_not_a_real_param=42)
+        msg = str(excinfo.value)
+        assert STRICT_UNSUPPORTED_KEY_MARKER in msg
+        assert "this_is_not_a_real_param" in msg
+        assert f"create_logic_layer('{layer_type}')" in msg
+        # The accepted set is named, so the caller can fix the spelling.
+        for declared in LOGIC_REGISTRY[layer_type]["optional_params"]:
+            assert declared in msg
+
+    @pytest.mark.parametrize("layer_type", sorted(LOGIC_REGISTRY))
+    def test_declared_keyword_still_constructs(self, layer_type):
+        """The twin of the raise: a valid call is untouched by it."""
+        layer = create_logic_layer(layer_type)
+        assert isinstance(layer, LOGIC_REGISTRY[layer_type]["class"])
+        assert not layer.built
+
+    def test_undeclared_keyword_raises_from_validate_directly(self):
+        """The check has ONE home, so validating alone rejects it too."""
+        with pytest.raises(ValueError, match=re.escape(STRICT_UNSUPPORTED_KEY_MARKER)):
+            validate_logic_config("arithmetic", this_is_not_a_real_param=42)
+
+    def test_undeclared_keyword_raises_through_create_from_config(self):
+        with pytest.raises(ValueError, match=re.escape(STRICT_UNSUPPORTED_KEY_MARKER)):
+            create_logic_from_config(
+                {"type": "logic", "this_is_not_a_real_param": 42}
+            )
+
+    def test_declared_keyword_reaches_the_layer(self):
+        """Twin: the rejection does not eat a name the entry DOES declare."""
         layer = create_logic_layer(
-            "arithmetic",
-            operation_types=["add", "multiply"],
-            this_is_not_a_real_param=42,
+            "arithmetic", operation_types=["add", "multiply"]
         )
         assert layer.operation_types == ["add", "multiply"]
 

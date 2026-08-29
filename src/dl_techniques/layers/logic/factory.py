@@ -23,16 +23,17 @@ their layer type out of a config file.
     │   validate_logic_config(layer_type, **kwargs)            │
     │     ├─ layer_type not in LOGIC_REGISTRY ───────► raise   │
     │     ├─ a required_params name is missing ──────► raise   │
+    │     ├─ an undeclared keyword is present ───────► raise   │
     │     ├─ a positive-int name is <= 0, or a bool ─► raise   │
     │     ├─ a positive-float name is <= 0 ──────────► raise   │
     │     └─ an enum_params value is not allowed ────► raise   │
     │     │                                                    │
     │     ▼                                                    │
     │   cls    = LOGIC_REGISTRY[layer_type]['class']           │
-    │   valid  = required_params + optional_params names       │
-    │   params = optional_params defaults, then kwargs         │
-    │   final  = params filtered down to valid                 │
-    │            a key outside valid is DROPPED here           │
+    │   final  = optional_params defaults, then kwargs         │
+    │            validate already rejected every key the       │
+    │            entry does not declare, so nothing here       │
+    │            is filtered out                               │
     │     │                                                    │
     │     ▼                                                    │
     │   final['name'] = name   (only when name is given)       │
@@ -52,11 +53,20 @@ their layer type out of a config file.
                                  ▼
                         keras.layers.Layer
 
-Note the DROPPED line. Most factories in `layers/` raise on a keyword the
-target class does not declare; this one drops it. Measured:
-``create_logic_layer("logic", bogus_key=1)`` returns a layer and says
-nothing. Check your spelling against ``get_logic_info()``, because a typo
-here costs you the setting silently.
+A keyword the target type does not declare is a ``ValueError``, not a
+default. Measured: ``create_logic_layer("logic", bogus_key=1)`` raises,
+naming the key, the count and the accepted set. The check lives in
+``validate_logic_config``, so calling that directly rejects the same key.
+Every message carries ``STRICT_UNSUPPORTED_KEY_MARKER``, which is what a
+test should match on.
+
+**Migration.** Until 2026-08-29 this factory filtered such a keyword out
+and said nothing, so a call that quietly lost a setting now fails loudly.
+The fix is the same either way: read the accepted set off the error, or
+off ``get_logic_info()``, and correct the spelling. If a wrapper is
+handing over its own generic defaults rather than an explicit request,
+filter them against ``get_logic_info()[type]["optional_params"]`` before
+the call.
 
 **The four registry keys:**
 
@@ -316,6 +326,15 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
 # Public API
 # ---------------------------------------------------------------------
 
+#: The stable substring every undeclared-key ``ValueError`` raised by
+#: :func:`validate_logic_config` carries. Guards match on this constant
+#: instead of retyping the phrase, so rewording the message cannot blind
+#: them. `layers/ffn/factory.py` defines its own copy for its own message;
+#: the two are independent on purpose, so a reword there cannot change what
+#: a guard here matches.
+STRICT_UNSUPPORTED_KEY_MARKER: str = "unsupported parameter(s)"
+
+
 def get_logic_info() -> Dict[str, Dict[str, Any]]:
     """
     Return a deep copy of the whole registry.
@@ -336,11 +355,13 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
     """
     Check the arguments a ``create_logic_layer`` call would use.
 
-    This catches an unknown type, a missing required parameter, a
-    non-positive count or scale, and a value outside the allowed set of an
-    enum parameter. It checks by NAME, so a parameter this layer type does
-    not take is not checked here and is dropped later without a word. The
-    module docstring lists exactly what is checked.
+    This catches an unknown type, a missing required parameter, a keyword
+    the entry does not declare, a non-positive count or scale, and a value
+    outside the allowed set of an enum parameter. The undeclared-keyword
+    message carries ``STRICT_UNSUPPORTED_KEY_MARKER``. Range and enum
+    checks are by NAME, so a name this type does not declare never reaches
+    them -- it is rejected first. The module docstring lists exactly what
+    is checked.
 
     :param layer_type: One of the keys in ``LOGIC_REGISTRY``.
     :type layer_type: str
@@ -349,8 +370,9 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
     :return: Nothing. It either passes or raises.
     :rtype: None
     :raises ValueError: If the type is unknown, a required parameter is
-        missing, a count is not a positive int, a scale is not positive, or
-        an enum value is not allowed.
+        missing, a keyword is not declared by the entry, a count is not a
+        positive int, a scale is not positive, or an enum value is not
+        allowed.
     """
     if layer_type not in LOGIC_REGISTRY:
         available = sorted(LOGIC_REGISTRY.keys())
@@ -366,6 +388,24 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
         raise ValueError(
             f"Required parameters missing for {layer_type}: {missing}. "
             f"Required: {required}"
+        )
+
+    # DECISION plan-2026-08-29T112804-aff039c4/D-002 -- raise, never
+    # filter-and-drop. Subtract from `kwargs`, not from the merged
+    # parameter dict the factory builds: that dict already carries the
+    # registry defaults, so it can never expose a caller's typo. The
+    # rejection lives here rather than in the layer constructor, which
+    # takes **kwargs and would name the Keras base class instead of this
+    # factory. See decisions.md D-002.
+    declared = set(required) | set(info["optional_params"])
+    unsupported = sorted(set(kwargs) - declared)
+    if unsupported:
+        raise ValueError(
+            f"create_logic_layer('{layer_type}'): {len(unsupported)} "
+            f"{STRICT_UNSUPPORTED_KEY_MARKER} {unsupported}. "
+            f"'{layer_type}' ({info['class'].__name__}) accepts only "
+            f"{sorted(declared)}. Nothing is dropped here: check the "
+            f"spelling against get_logic_info()."
         )
 
     # These names must be positive whole numbers wherever they appear.
@@ -414,8 +454,8 @@ def create_logic_layer(
     Build one layer from `dl_techniques.layers.logic` by type string.
 
     Anything you do not pass takes its default from the registry entry.
-    Anything you pass that the type does not declare is dropped without a
-    warning, so check the name against ``get_logic_info()``. Every error
+    Anything you pass that the type does not declare is a ``ValueError``
+    naming the key and the accepted set; nothing is dropped. Every error
     raised on the way, including one from the class constructor, comes
     back as a single ``ValueError`` naming the type and what you passed.
 
@@ -429,8 +469,9 @@ def create_logic_layer(
     :type kwargs: Any
     :return: A fresh, unbuilt layer.
     :rtype: keras.layers.Layer
-    :raises ValueError: On an unknown type, a failed validation, or any
-        error the constructor itself raises.
+    :raises ValueError: On an unknown type, a keyword the type does not
+        declare, a failed validation, or any error the constructor itself
+        raises.
 
     Example:
         .. code-block:: python
@@ -450,13 +491,10 @@ def create_logic_layer(
         info = LOGIC_REGISTRY[layer_type]
         cls = info["class"]
 
-        valid_params = set(info["required_params"]) | set(info["optional_params"].keys())
-
-        params: Dict[str, Any] = {}
-        params.update(info["optional_params"])
-        params.update(kwargs)
-
-        final_params = {k: v for k, v in params.items() if k in valid_params}
+        # validate_logic_config has already rejected every key outside the
+        # entry's schema, so this merge cannot carry an undeclared name.
+        final_params: Dict[str, Any] = dict(info["optional_params"])
+        final_params.update(kwargs)
 
         if name is not None:
             final_params["name"] = name
