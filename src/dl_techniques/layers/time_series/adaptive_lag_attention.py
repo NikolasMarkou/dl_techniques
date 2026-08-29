@@ -1,48 +1,42 @@
 """
-Context-aware, gated attention mechanism for autoregression.
+Context-gated attention over a fixed set of lags.
 
-This layer performs a dynamic, context-dependent autoregressive forecast. It
-is designed to be a robust and interpretable component within a larger time
-series model, allowing the model to learn when and how to rely on historical
-values.
+This module holds ``AdaptiveLagAttentionLayer``. The layer makes a one-step
+autoregressive forecast from a fixed set of past values, and lets a context
+vector decide how much each past value counts.
 
-The layer's architecture separates control logic from data flow. A
-``context_tensor``, typically from a deep encoder like an LSTM, acts as the
-controller. It generates two distinct control signals that modulate a separate
-``lag_tensor`` containing historical values:
+Control and data are separate. A ``context_tensor``, usually from a deep
+encoder such as an LSTM, is the controller. A ``lag_tensor`` holds the raw
+historical values. The context produces two control signals:
 
-1. **Attention Weights**: The context is passed through a dense layer with a
-   ``sigmoid`` activation to produce a set of independent attention weights,
-   one for each lag. These weights determine the relative importance of
-   each historical value for the current time step.
+1. **Attention weights.** A Dense layer with ``sigmoid`` turns the context
+   into one weight per lag. Each weight says how much that historical value
+   matters right now.
 
-2. **Master Gate**: In parallel, the context is passed through a second dense
-   layer, also with a ``sigmoid`` activation, to produce a single scalar
-   gate value. This gate acts as a master switch, controlling the overall
-   contribution of the entire autoregressive component to the final model output.
+2. **Master gate.** A second Dense layer with ``sigmoid`` turns the same
+   context into a single value. It scales the whole autoregressive
+   contribution, so the layer can shut history off entirely.
 
-The final output is the weighted sum of the lags, multiplicatively controlled
-by the master gate. This design allows the model to learn complex temporal
-strategies, such as ignoring history entirely (gate ~ 0) during anomalous
-periods or focusing on specific seasonalities (high weights on corresponding
-lags).
+The output is the weighted sum of the lags, scaled by the gate. A model can
+learn to ignore history during anomalous periods (gate near 0), or to lean on
+one seasonality by putting a high weight on its lag.
 
-**Independent Sigmoid Attention**: Unlike the ``softmax`` function used in
-Transformers, which forces a competitive probability distribution where
-``sum(weights) = 1``, this layer uses a ``sigmoid`` activation. This yields
-independent weights ``w_i in (0, 1)`` for each lag, allowing the model to
-recognize that multiple historical points are simultaneously important (e.g.,
-both 7 days ago and 365 days ago could have high weights), or conversely, that
-*no* historical points are relevant.
+**Independent sigmoid attention.** Transformers use ``softmax``, which forces
+``sum(weights) = 1`` and makes the lags compete. This layer uses ``sigmoid``
+instead, so each weight is an independent value in ``(0, 1)``. Several lags
+can be important at once, for example 7 days ago and 365 days ago. All of them
+can also be near zero at the same time.
 
-**Multiplicative Gating**: The final output is computed as:
-    ``output = g * (sum_i w_i * l_i)``
-where ``g`` is the master gate, ``w_i`` are the attention weights, and ``l_i``
+**Multiplicative gating.** The output is::
+
+    output = g * (sum_i w_i * l_i)
+
+where ``g`` is the master gate, ``w_i`` are the attention weights and ``l_i``
 are the lag values.
 
 References:
-    The concept of gating to control information flow is a foundational
-    principle in modern deep learning, most famously used in LSTMs and GRUs.
+    Gating to control information flow is a foundational idea in modern deep
+    learning, best known from LSTMs and GRUs.
 
     - Hochreiter, S., & Schmidhuber, J. (1997). Long Short-Term Memory.
       Neural Computation.
@@ -69,20 +63,21 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.adaptive_lag_attention")
 class AdaptiveLagAttentionLayer(keras.layers.Layer):
     """
-    Advanced attention layer for dynamically weighting temporal lags with gating control.
+    Weight a set of temporal lags from a context vector, then gate the result.
 
-    This layer uses a context tensor to generate independent attention weights
-    and a master gate for a set of provided lag values. The attention mechanism
-    uses sigmoid activation to allow independent weighting of multiple lags,
-    while a master gate controls the overall contribution of the autoregressive
-    component.
+    The context tensor drives two Dense heads. One makes an independent
+    sigmoid weight per lag. The other makes a single sigmoid master gate. The
+    weights scale the lags, the result is summed, and the gate scales that
+    sum. Sigmoid rather than softmax means the weights do not compete, so
+    several lags can be important at once.
 
-    The two key mathematical operations are:
+    The steps are:
 
-    1. **Attention Weights**: ``w = sigma(W_a * context + b_a)`` where sigma is sigmoid
-    2. **Gate Value**: ``g = sigma(W_g * context + b_g)``
-    3. **Weighted Sum**: ``s = sum(w_i * lag_i)`` for i in [1, num_lags]
-    4. **Final Output**: ``output = g * s``
+    1. **Attention weights**: ``w = sigma(W_a * context + b_a)``, sigma is
+       sigmoid, shape ``(batch, num_lags)``
+    2. **Gate value**: ``g = sigma(W_g * context + b_g)``, shape ``(batch, 1)``
+    3. **Weighted sum**: ``s = sum_i w_i * lag_i``, shape ``(batch,)``
+    4. **Output**: ``output = g * s``, reshaped to ``(batch, 1)``
 
     **Architecture Overview:**
 
@@ -111,6 +106,9 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
                               │         │
                               ▼         ▼
                          Gate (batch,1) │
+                              │ squeeze │
+                              ▼         ▼
+                          (batch,)      │
                               │         │
                               ▼         ▼
                         ┌───────────────────┐
@@ -120,26 +118,49 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
                                   ▼
                         Output (batch, 1)
 
-    :param num_lags: The number of past time series values (lags) to consider.
-        This must match the last dimension of the lag input tensor. Must be positive.
+    The lag tensor is used as data only. No weights are attached to it, so
+    the layer's parameter count depends on the context width, not on the lags.
+
+    Input shape:
+        A list of two tensors. Context ``(batch_size, context_dim)`` and lags
+        ``(batch_size, num_lags)``. Both must be at least 2D.
+
+    Output shape:
+        2D tensor ``(batch_size, 1)``.
+
+    Example:
+        .. code-block:: python
+
+            layer = AdaptiveLagAttentionLayer(num_lags=7)
+            y = layer([context, lags])
+
+    :param num_lags: Number of past values in the lag tensor. Must be a
+        positive int and must equal ``lag_tensor.shape[-1]``.
     :type num_lags: int
-    :param kernel_initializer: Initializer for the weight-generating sublayers.
-        Defaults to ``"glorot_uniform"``.
+    :param kernel_initializer: Initializer for both Dense kernels. Defaults to
+        ``"glorot_uniform"``.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for the bias of the sublayers.
-        Defaults to ``"zeros"``.
+    :param bias_initializer: Initializer for both Dense biases. Defaults to
+        ``"zeros"``.
     :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for the kernel weights of sublayers.
+    :param kernel_regularizer: Optional regularizer for both Dense kernels.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
-    :param bias_regularizer: Optional regularizer for the bias vectors of sublayers.
+    :param bias_regularizer: Optional regularizer for both Dense biases.
     :type bias_regularizer: str or keras.regularizers.Regularizer or None
-    :param activity_regularizer: Optional regularizer function for the output.
+    :param activity_regularizer: Optional regularizer on the output. See the
+        note in ``call()`` before using it.
     :type activity_regularizer: str or keras.regularizers.Regularizer or None
     :param kwargs: Additional keyword arguments for the Layer parent class.
 
-    :raises ValueError: If num_lags is not a positive integer.
-    :raises ValueError: If input format is incorrect during call.
-    :raises ValueError: If lag tensor's last dimension doesn't match num_lags during build.
+    :raises ValueError: If ``num_lags`` is not a positive integer.
+    :raises ValueError: If ``build`` or ``call`` gets anything other than a
+        list of two entries.
+    :raises ValueError: If the lag tensor's last axis is not ``num_lags``.
+
+    :ivar attention_generator: Dense head making one sigmoid weight per lag.
+    :vartype attention_generator: keras.layers.Dense
+    :ivar gate_generator: Dense head making the single sigmoid master gate.
+    :vartype gate_generator: keras.layers.Dense
     """
 
     def __init__(
@@ -153,9 +174,12 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         **kwargs: Any
     ) -> None:
         """
-        Initialize the AdaptiveLagAttentionLayer.
+        Validate ``num_lags`` and create the two Dense sublayers.
 
-        :param num_lags: Number of past time series values (lags) to consider.
+        Both sublayers are created here and left unbuilt. ``build()`` builds
+        them against the context shape.
+
+        :param num_lags: Number of past values in the lag tensor.
         :type num_lags: int
         :param kernel_initializer: Initializer for kernel weights.
         :type kernel_initializer: str or keras.initializers.Initializer
@@ -165,9 +189,11 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         :type kernel_regularizer: str or keras.regularizers.Regularizer or None
         :param bias_regularizer: Optional regularizer for bias vectors.
         :type bias_regularizer: str or keras.regularizers.Regularizer or None
-        :param activity_regularizer: Optional regularizer for the output.
+        :param activity_regularizer: Optional regularizer on the output.
         :type activity_regularizer: str or keras.regularizers.Regularizer or None
         :param kwargs: Additional keyword arguments for the Layer parent class.
+
+        :raises ValueError: If ``num_lags`` is not a positive integer.
         """
         super().__init__(**kwargs)
 
@@ -187,7 +213,7 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         # Sublayer for attention weights: maps context -> independent weights
         self.attention_generator = keras.layers.Dense(
             units=self.num_lags,
-            activation='sigmoid',  # Sigmoid for independent [0, 1] weights
+            activation='sigmoid',
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -198,7 +224,7 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         # Sublayer for master gate: maps context -> single gate value
         self.gate_generator = keras.layers.Dense(
             units=1,
-            activation='sigmoid',  # Sigmoid for a [0, 1] gate value
+            activation='sigmoid',
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -210,15 +236,19 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """
-        Build the layer and all its sub-layers.
+        Validate the two input shapes and build both Dense sublayers.
 
-        Explicitly builds each sub-layer for robust serialization.
+        Both sublayers read the context, so both are built on
+        ``context_shape``. The lag shape is only checked, never built against.
+        Building explicitly means a ``.keras`` weight restore finds every
+        variable already materialized.
 
-        :param input_shape: A list of two tuples representing the shapes of
-            the context tensor and lag tensor inputs.
+        :param input_shape: A list of two shape tuples, for the context tensor
+            and the lag tensor.
         :type input_shape: list[tuple[int or None, ...]]
-        :raises ValueError: If input_shape is not a list of two tensors.
-        :raises ValueError: If lag tensor's last dimension doesn't match num_lags.
+        :raises ValueError: If ``input_shape`` is not a list of two shapes.
+        :raises ValueError: If the context shape has fewer than 2 axes.
+        :raises ValueError: If the lag shape's last axis is not ``num_lags``.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -255,17 +285,26 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass of the layer.
+        Weight the lags from the context, sum them, then apply the gate.
 
-        :param inputs: A list containing two tensors: inputs[0] is the context
-            tensor of shape ``(batch_size, context_dim)``, and inputs[1] is
-            the lag values tensor of shape ``(batch_size, num_lags)``.
+        Note on ``activity_regularizer``: this method calls ``add_loss`` on the
+        output itself, and Keras 3 also applies the same regularizer in
+        ``Layer.__call__`` (``keras/src/layers/layer.py:925-928``). With an
+        ``activity_regularizer`` set, the penalty is therefore counted twice.
+        Measured with ``L1(1.0)`` on a ``(2, 5)`` context and a ``(2, 4)`` lag
+        tensor: ``len(layer.losses) == 2``, both entries ``1.2843523025512695``.
+        This is a code defect, reported and left unfixed here.
+
+        :param inputs: A list of two tensors. ``inputs[0]`` is the context of
+            shape ``(batch_size, context_dim)``, ``inputs[1]`` is the lag
+            tensor of shape ``(batch_size, num_lags)``.
         :type inputs: list[keras.KerasTensor]
-        :param training: Whether the layer should behave in training mode.
+        :param training: Whether the layer runs in training mode. Forwarded to
+            both Dense sublayers.
         :type training: bool or None
-        :return: The predicted value tensor with shape ``(batch_size, 1)``.
+        :return: Predicted value of shape ``(batch_size, 1)``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If inputs is not a list of exactly two tensors.
+        :raises ValueError: If ``inputs`` is not a list of exactly two tensors.
         """
         if not isinstance(inputs, list) or len(inputs) != 2:
             raise ValueError(
@@ -306,13 +345,16 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Compute the output shape from the context shape alone.
 
-        :param input_shape: A list of two tuples representing the input shapes.
+        Only the batch axis of the context is used. The lag shape is ignored.
+
+        :param input_shape: A list of two shape tuples, for the context tensor
+            and the lag tensor.
         :type input_shape: list[tuple[int or None, ...]]
         :return: The output shape ``(batch_size, 1)``.
         :rtype: tuple[int or None, ...]
-        :raises ValueError: If input_shape is not a list of two tuples.
+        :raises ValueError: If ``input_shape`` is not a list of two shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -328,9 +370,12 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the layer configuration for serialization.
+        Return the constructor arguments needed to rebuild this layer.
 
-        :return: Dictionary containing the layer configuration with all init parameters.
+        Initializers and regularizers are serialized to their dict form.
+
+        :return: Configuration dictionary covering every ``__init__``
+            parameter.
         :rtype: dict[str, Any]
         """
         config = super().get_config()

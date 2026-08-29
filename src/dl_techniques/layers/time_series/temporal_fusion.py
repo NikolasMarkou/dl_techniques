@@ -1,57 +1,49 @@
 """
-Fuse contextual and autoregressive forecasts with a dynamic gating mechanism.
+Blend a context forecast with an attention-weighted lag forecast.
 
-This layer implements a sophisticated fusion strategy for time series
-forecasting, designed to combine the strengths of a deep, context-aware model
-with a simple, dynamic autoregressive model. It is particularly effective for
-time series that exhibit both complex, non-linear patterns and stable,
-history-dependent behaviors.
+This module holds ``TemporalFusionLayer``. The layer mixes two forecasts of
+the same target. One comes from a learned context vector, the other from
+recent past values of the series. A learned gate decides how much of each to
+use, per output unit and per sample.
 
-The layer operates on the principle of a dynamically weighted mixture of
-experts, where two specialized forecasting pathways are blended based on the
-current input context.
+The two pathways are:
 
-1.  **The Contextual Pathway**: This path leverages a rich, latent
-    representation of the time series (the ``context_tensor``), typically the
-    output of a recurrent or attentional encoder. A dense layer transforms
-    this context directly into a forecast. This pathway is responsible for
-    capturing complex, non-linear relationships, incorporating exogenous
-    features, and understanding the high-level "state" of the system.
+1.  **Contextual pathway.** A Dense layer maps the ``context_tensor`` straight
+    to a forecast. The context is usually the output of a recurrent or
+    attentional encoder. This path carries non-linear structure and exogenous
+    features.
 
-2.  **The Autoregressive Pathway**: This path models the forecast as a function
-    of recent past values (the ``lag_tensor``). Crucially, it is not a static
-    autoregressive model. Instead, it uses a context-aware attention
-    mechanism where the ``context_tensor`` generates weights for each lag. This
-    allows the model to dynamically decide which past time steps are most
-    relevant for the current prediction.
+2.  **Autoregressive pathway.** Attention weights are generated from the
+    context, one weight per lag. Those weights scale the ``lag_tensor``, the
+    result is summed over lags, and a Dense layer turns that sum into a
+    forecast. The weights come from the context, so the layer can change which
+    lags matter from sample to sample.
 
-3.  **The Fusion Gate**: The core of the layer is a learned gating mechanism.
-    The ``context_tensor`` is passed through a separate dense layer with a
-    sigmoid activation to produce a scalar "fusion gate" value between 0 and 1.
-    This gate determines the mixing proportion between the two pathways,
-    allowing the model to learn a sophisticated switching strategy. For instance,
-    it might learn to rely on the stable autoregressive path during normal
-    periods (gate ~ 1) but switch to the more flexible contextual path during
-    anomalous events or regime shifts (gate ~ 0).
+The fusion gate is a third Dense head on the context, with a sigmoid. It
+produces one value per output unit, not a single scalar. The output is a
+per-unit interpolation between the two forecasts.
 
 **Foundational Mathematics:**
 
-The layer's operation can be described as a context-dependent, gated linear
-interpolation between two expert forecasts. Given a context vector ``c`` and a
-lag vector ``l = [l_1, l_2, ..., l_n]``:
+Given a context vector ``c`` and a lag vector ``l = [l_1, ..., l_n]``:
 
-1.  Context Forecast: a direct, non-linear projection of the context.
+1.  Context forecast, a direct projection of the context.
         f_context = W_c * c + b_c
 
-2.  Autoregressive Forecast: a contextually-weighted sum of lags.
+2.  Autoregressive forecast, a contextually weighted sum of lags.
         alpha = sigmoid(W_alpha * c + b_alpha)
-        f_lag = W_l * (sum_i alpha_i * l_i) + b_l
+        s     = sum_i alpha_i * l_i
+        f_lag = W_l * s + b_l
 
-3.  Fusion Gate: a learned interpolation coefficient.
+3.  Fusion gate, a vector of interpolation coefficients.
         g = sigmoid(W_g * c + b_g)
 
-4.  Final Output: the gated combination of the two forecasts.
+4.  Output, the gated combination of the two forecasts.
         output = (1 - g) * f_context + g * f_lag
+
+Note that ``s`` is a single scalar per sample. Every lag is squeezed through
+that one number before ``W_l`` sees it, so ``lag_forecaster``'s kernel has
+shape ``(1, output_dim)``.
 
 References:
     - Hochreiter, S., & Schmidhuber, J. (1997). Long Short-Term Memory.
@@ -78,91 +70,136 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.time_series.temporal_fusion")
 class TemporalFusionLayer(keras.layers.Layer):
     """
-    Fuse a context-based forecast with an attention-based autoregressive forecast.
+    Blend a context forecast with an attention-weighted lag forecast.
 
-    This layer implements a temporal fusion mechanism that combines deep
-    contextual understanding with dynamic autoregressive modeling. Two parallel
-    forecasting pathways are intelligently blended using a learned fusion gate
-    derived from the context tensor.
+    Three Dense heads read the context tensor: one makes a forecast, one makes
+    per-lag attention weights, one makes the fusion gate. A fourth Dense turns
+    the attention-weighted lag sum into the second forecast. The gate then
+    interpolates between the two.
 
-    The mathematical operations are:
+    The steps are:
 
-    1. Attention:  alpha = sigmoid(Dense_att(context))
-    2. Gate:       g = sigmoid(Dense_gate(context))
-    3. Context:    f_c = Dense_ctx(context)
-    4. AR path:    f_l = Dense_lag(sum(alpha * lags))
-    5. Fusion:     output = (1 - g) * f_c + g * f_l
+    1. Attention:  alpha = sigmoid(Dense_att(context))     [B, num_lags]
+    2. Gate:       g     = sigmoid(Dense_gate(context))    [B, output_dim]
+    3. Context:    f_c   = Dense_ctx(context)              [B, output_dim]
+    4. AR path:    f_l   = Dense_lag(sum(alpha * lags))    [B, output_dim]
+    5. Fusion:     out   = (1 - g) * f_c + g * f_l         [B, output_dim]
+
+    The gate is a vector of length ``output_dim``, not a scalar. Each output
+    unit gets its own mixing coefficient.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Inputs: [context_tensor, lag_tensor]
-                     │                │
-                     │                ▼
-                     │    ┌──────────────────────┐
-                     │    │  Lag Projector (opt.)│
-                     │    └──────────┬───────────┘
-                     │               │
-                     ▼               │
-        ┌────────────────────┐       │
-        │   Attention Gen.   │       │
-        │  Dense → sigmoid   │       │
-        └────────┬───────────┘       │
-                 │  alpha            │
-                 └───────┐           │
-                         ▼           ▼
-                    ┌─────────────────────┐
-                    │  Weighted Sum:      │
-                    │  sum(alpha * lags)  │
-                    └─────────┬───────────┘
-                              ▼
-                    ┌─────────────────────┐
-                    │   Lag Forecaster    │
-                    │      Dense          │
-                    └─────────┬───────────┘
-                              │ f_lag
-        context_tensor        │
-             │                │
-             ├────────────────┤
-             │                │
-             ▼                │
-        ┌──────────────┐      │
-        │ Context      │      │
-        │ Forecaster   │      │
-        │  Dense       │      │
-        └──────┬───────┘      │
-               │ f_ctx        │
-               │              │
-               ▼              ▼
-             ┌───────────────────┐
-        g ──►│  Fusion Gate      │
-             │  (1-g)*f_ctx      │
-             │   + g * f_lag     │
-             └────────┬──────────┘
-                      ▼
-               Output: (batch, output_dim)
+        context [B, Dc]                 lags [B, L]
+             │                               │
+             ├───────────┬────────────┐      │
+             ▼           ▼            ▼      ▼
+        ┌─────────┐ ┌─────────┐ ┌──────────────────┐
+        │ Context │ │ Gate    │ │ Lag Pathway      │
+        │ Fcst    │ │ Gen     │ │ (detail below)   │
+        │ Dense O │ │ Dense O │ └────────┬─────────┘
+        └────┬────┘ │ sigmoid │          │
+             │      └────┬────┘          │
+             │ f_ctx     │ g             │ f_lag
+             │ [B, O]    │ [B, O]        │ [B, O]
+             ▼           ▼               ▼
+        ┌─────────────────────────────────────────┐
+        │   (1 - g) * f_ctx  +  g * f_lag         │
+        └────────────────────┬────────────────────┘
+                             ▼
+                      Output: [B, O]
 
-    :param output_dim: Dimensionality of the final output forecast. Must be positive.
+    ``Dc`` is the context width, ``L`` is ``num_lags``, ``O`` is
+    ``output_dim``. The lag pathway reads both inputs: the lags themselves and
+    the context that weights them.
+
+    **Lag Pathway Detail:**
+
+    .. code-block:: text
+
+           context [B, Dc]             lags [B, L]
+                  │                          │
+                  │                          ▼
+                  │           ┌────────────────────────┐
+                  │           │ Lag Projector          │
+                  │           │ Dense L, relu          │
+                  │           │ (optional)             │
+                  │           └──────────────┬─────────┘
+                  ▼                          │ [B, L]
+        ┌───────────────────┐                │
+        │ Attention Gen     │                │
+        │ Dense L, sigmoid  │                │
+        └─────────┬─────────┘                │
+                  │ alpha [B, L]             │
+                  └───────────►( * )◄────────┘
+                                 │
+                                 ▼
+                      sum(axis=-1, keepdims)
+                                 │ [B, 1]
+                                 ▼
+                      ┌─────────────────────┐
+                      │ Lag Forecaster      │
+                      │ Dense O             │
+                      └──────────┬──────────┘
+                                 ▼
+                           f_lag: [B, O]
+
+    ``project_lags=False`` drops the Lag Projector and the raw lags are
+    multiplied by ``alpha`` directly.
+
+    Input shape:
+        A list of two tensors. Context ``(batch, context_dim)`` and lags
+        ``(batch, num_lags)``. Both must be at least 2D.
+
+    Output shape:
+        The context shape with its last axis replaced by ``output_dim``, so
+        ``(batch, output_dim)`` for a 2D context.
+
+    Example:
+        .. code-block:: python
+
+            layer = TemporalFusionLayer(output_dim=1, num_lags=7)
+            y = layer([context, lags])
+
+    :param output_dim: Width of the final forecast, and of the gate. Must be
+        a positive int.
     :type output_dim: int
-    :param num_lags: Number of past time series values (lags) to consider. Must be positive.
+    :param num_lags: Number of past values in the lag tensor. Must be a
+        positive int and must equal ``lag_tensor.shape[-1]``.
     :type num_lags: int
-    :param project_lags: If True, an internal Dense layer transforms the raw lag
-        values into a richer feature space before attention is applied.
+    :param project_lags: If ``True``, a Dense layer with ``relu`` maps the raw
+        lags to ``num_lags`` features before attention is applied.
     :type project_lags: bool
-    :param kernel_initializer: Initializer for the kernel weights of all sublayers.
+    :param kernel_initializer: Initializer for the kernels of all sublayers.
     :type kernel_initializer: str or keras.initializers.Initializer
-    :param bias_initializer: Initializer for the bias vectors of all sublayers.
+    :param bias_initializer: Initializer for the biases of all sublayers.
     :type bias_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for the kernel weights of all sublayers.
+    :param kernel_regularizer: Optional regularizer for all sublayer kernels.
     :type kernel_regularizer: str or keras.regularizers.Regularizer, optional
-    :param bias_regularizer: Optional regularizer for the bias vectors of all sublayers.
+    :param bias_regularizer: Optional regularizer for all sublayer biases.
     :type bias_regularizer: str or keras.regularizers.Regularizer, optional
-    :param activity_regularizer: Optional regularizer function for the output.
+    :param activity_regularizer: Optional regularizer on the output. See the
+        note in ``call()`` before using it.
     :type activity_regularizer: str or keras.regularizers.Regularizer, optional
     :param kwargs: Additional keyword arguments for the Layer parent class.
 
-    :raises ValueError: If ``output_dim`` or ``num_lags`` is not a positive integer.
+    :raises ValueError: If ``output_dim`` or ``num_lags`` is not a positive
+        integer.
+
+    :ivar attention_generator: Dense head making per-lag weights from context.
+    :vartype attention_generator: keras.layers.Dense
+    :ivar gate_generator: Dense head making the ``output_dim``-wide gate.
+    :vartype gate_generator: keras.layers.Dense
+    :ivar context_forecaster: Dense head making the contextual forecast.
+    :vartype context_forecaster: keras.layers.Dense
+    :ivar lag_projector: Optional Dense on the raw lags, ``None`` when
+        ``project_lags`` is ``False``.
+    :vartype lag_projector: keras.layers.Dense or None
+    :ivar lag_forecaster: Dense mapping the ``[B, 1]`` weighted lag sum to the
+        autoregressive forecast.
+    :vartype lag_forecaster: keras.layers.Dense
     """
 
     def __init__(
@@ -178,25 +215,33 @@ class TemporalFusionLayer(keras.layers.Layer):
         **kwargs: Any
     ) -> None:
         """
-        Initialize the TemporalFusionLayer.
+        Validate the arguments and create the five Dense sublayers.
 
-        :param output_dim: Dimensionality of the final output forecast.
+        The sublayers are created here and left unbuilt. ``build()`` builds
+        them. ``lag_projector`` is created only when ``project_lags`` is
+        ``True``; otherwise it is ``None``.
+
+        :param output_dim: Width of the final forecast and of the gate.
         :type output_dim: int
-        :param num_lags: Number of lag values to consider.
+        :param num_lags: Number of lag values the layer expects.
         :type num_lags: int
-        :param project_lags: Whether to project lags through a Dense layer.
+        :param project_lags: Whether to run the raw lags through a Dense layer
+            before applying attention.
         :type project_lags: bool
-        :param kernel_initializer: Initializer for kernel weights.
+        :param kernel_initializer: Initializer for all sublayer kernels.
         :type kernel_initializer: str or keras.initializers.Initializer
-        :param bias_initializer: Initializer for bias vectors.
+        :param bias_initializer: Initializer for all sublayer biases.
         :type bias_initializer: str or keras.initializers.Initializer
-        :param kernel_regularizer: Optional regularizer for kernel weights.
+        :param kernel_regularizer: Optional regularizer for sublayer kernels.
         :type kernel_regularizer: str or keras.regularizers.Regularizer, optional
-        :param bias_regularizer: Optional regularizer for bias vectors.
+        :param bias_regularizer: Optional regularizer for sublayer biases.
         :type bias_regularizer: str or keras.regularizers.Regularizer, optional
-        :param activity_regularizer: Optional regularizer for the output.
+        :param activity_regularizer: Optional regularizer on the output.
         :type activity_regularizer: str or keras.regularizers.Regularizer, optional
         :param kwargs: Additional keyword arguments for the Layer parent class.
+
+        :raises ValueError: If ``output_dim`` or ``num_lags`` is not a
+            positive integer.
         """
         super().__init__(**kwargs)
 
@@ -277,16 +322,23 @@ class TemporalFusionLayer(keras.layers.Layer):
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
         """
-        Build the layer weights and sublayers based on input shape.
+        Validate the two input shapes and build every sublayer.
 
-        Explicitly builds each sub-layer for robust serialization.
+        The three context-driven heads are built on ``context_shape``. The
+        optional projector is built on ``lag_shape``. ``lag_forecaster`` is
+        built on ``(batch, 1)``, because the weighted lag sum keeps one
+        element on the last axis.
 
-        :param input_shape: A list of two tuples representing the shapes of
-            the context tensor and lag tensor inputs.
+        Each sublayer is built explicitly so that a ``.keras`` weight restore
+        finds every variable already materialized.
+
+        :param input_shape: A list of two shape tuples, for the context tensor
+            and the lag tensor.
         :type input_shape: list of tuple
 
-        :raises ValueError: If ``input_shape`` is not a list of two tensors.
-        :raises ValueError: If the lag tensor's last dimension does not match ``num_lags``.
+        :raises ValueError: If ``input_shape`` is not a list of two shapes.
+        :raises ValueError: If the context shape has fewer than 2 axes.
+        :raises ValueError: If the lag shape's last axis is not ``num_lags``.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -329,15 +381,24 @@ class TemporalFusionLayer(keras.layers.Layer):
 
     def call(self, inputs: List[keras.KerasTensor], training: Optional[bool] = None) -> keras.KerasTensor:
         """
-        Forward pass through the temporal fusion mechanism.
+        Run both forecast pathways and blend them with the gate.
 
-        :param inputs: A list containing two tensors: ``inputs[0]`` is the
-            context tensor of shape ``(batch_size, context_dim)`` and
-            ``inputs[1]`` is the lag tensor of shape ``(batch_size, num_lags)``.
+        Note on ``activity_regularizer``: this method calls ``add_loss`` on the
+        output itself, and Keras 3 also applies the same regularizer in
+        ``Layer.__call__`` (``keras/src/layers/layer.py:925-928``). With an
+        ``activity_regularizer`` set, the penalty is therefore counted twice.
+        Measured with ``L1(1.0)`` on a ``(2, 5)`` context and a ``(2, 4)`` lag
+        tensor: ``len(layer.losses) == 2``, both entries ``2.6033520698547363``.
+        This is a code defect, reported and left unfixed here.
+
+        :param inputs: A list of two tensors. ``inputs[0]`` is the context of
+            shape ``(batch_size, context_dim)``, ``inputs[1]`` is the lag
+            tensor of shape ``(batch_size, num_lags)``.
         :type inputs: list of keras.KerasTensor
-        :param training: Whether the layer is in training mode.
+        :param training: Whether the layer runs in training mode. Forwarded to
+            every Dense sublayer.
         :type training: bool, optional
-        :return: Fused forecast tensor of shape ``(batch_size, output_dim)``.
+        :return: Fused forecast of shape ``(batch_size, output_dim)``.
         :rtype: keras.KerasTensor
 
         :raises ValueError: If ``inputs`` is not a list of two tensors.
@@ -382,14 +443,18 @@ class TemporalFusionLayer(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of the layer.
+        Compute the output shape from the context shape alone.
 
-        :param input_shape: A list of two tuples representing the input shapes.
+        The lag shape is ignored. The context shape is returned with its last
+        axis replaced by ``output_dim``.
+
+        :param input_shape: A list of two shape tuples, for the context tensor
+            and the lag tensor.
         :type input_shape: list of tuple
-        :return: Output shape tuple.
+        :return: The context shape with ``output_dim`` as its last axis.
         :rtype: tuple
 
-        :raises ValueError: If ``input_shape`` is not a list of two tuples.
+        :raises ValueError: If ``input_shape`` is not a list of two shapes.
         """
         if not isinstance(input_shape, list) or len(input_shape) != 2:
             raise ValueError(
@@ -407,7 +472,9 @@ class TemporalFusionLayer(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return the layer configuration for serialization.
+        Return the constructor arguments needed to rebuild this layer.
+
+        Initializers and regularizers are serialized to their dict form.
 
         :return: Configuration dictionary.
         :rtype: dict
