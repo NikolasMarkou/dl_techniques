@@ -1,39 +1,36 @@
 """
-A hybrid sequential block combining recurrent and attention mechanisms.
+A hybrid sequential block that combines an LSTM with self-attention.
 
-This layer provides a flexible and powerful building block for deep time series
-models by unifying the two dominant paradigms for sequence processing:
-recurrence (LSTMs) and self-attention (Transformers). It is designed to
-capture the complex, multi-faceted dependencies present in time series data.
+This module holds one layer, :class:`MixedSequentialBlock`. It is a building
+block for deep time series models and runs in three modes: LSTM only,
+Transformer only, or both in sequence. The two mechanisms live in one class
+because they capture different things.
 
-The block's design is founded on the principle that LSTMs and self-attention
-possess complementary inductive biases, each excelling at modeling different
-types of temporal patterns:
+-   An LSTM walks the sequence step by step. It is good at local order and at
+    state that evolves over time.
+-   Self-attention lets every step read every other step directly. It is good
+    at long-range links that depend on content, not on distance.
 
--   **LSTMs (Recurrence)**: Excel at capturing local, sequential dependencies.
-    Their stateful, step-by-step processing makes them inherently adept at
-    modeling temporal ordering and evolving states over time.
--   **Self-Attention (Transformers)**: Excels at capturing global, long-range
-    dependencies. By allowing every time step to directly interact with every
-    other time step, it can identify content-based relationships regardless of
-    their distance in the sequence.
+The ``mixed`` mode runs the LSTM first and attention second. The idea is that
+the LSTM gives each step a summary of its own recent history. Attention then
+compares context-rich steps instead of raw ones.
 
-The ``mixed`` architecture operationalizes this synergy by processing the input
-sequentially: first with an LSTM, then with a self-attention layer. The
-hypothesis is that the LSTM first enriches each time step with a summary of
-its local, historical context. The self-attention layer then operates on these
-context-aware representations, allowing it to model global interactions
-between semantically rich, localized events rather than raw time steps.
+All three modes use Pre-LN. Normalization runs *before* each sub-layer, not
+after. Pre-LN trains more stably in deep stacks than the original Post-LN
+order. Every sub-layer ends in a residual add, so the block returns its input
+shape unchanged.
 
-For training stability, especially in deep architectures, the block adopts the
-Pre-Layer Normalization (Pre-LN) structure. Normalization is applied *before*
-the main transformation in each sub-layer, which has been shown to promote
-smoother gradient flow and more stable training dynamics compared to the
-original Post-LN design.
+Self-attention is::
 
-The LSTM core gating mechanism (input, forget, output gates) controls
-information flow through the cell. The self-attention mechanism is governed by:
     Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
+
+The normalization, attention and FFN sub-layers are built by the shared
+factories in ``layers/norms``, ``layers/attention`` and ``layers/ffn``. All
+three factories raise on a keyword the chosen type does not accept, which is
+what makes forwarding a caller's arguments awkward here. Two anchors below
+record how this block handles that: D-011 pre-filters one allowlisted key
+before calling the attention factory, and D-021 renames one key for the
+``differential`` FFN.
 
 References:
     - Hochreiter & Schmidhuber (1997). Long Short-Term Memory.
@@ -63,19 +60,16 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# DECISION plan-2026-08-17T183311-79c63e38/D-011
-# Caller-supplied `attention_args` keys this block is allowed to SCOPE to the
-# attention types that accept them, instead of forwarding them into
-# `create_attention_layer`'s strict raise. Membership here is earned by a
-# documented conditional contract, not by convenience: `window_size` is on the
-# list because `models/time_series/tirex/model.py` wires it at every
-# `attention_type` and documents it as "used only when `attention_type='window'`".
-# Adding a key here removes it from the factory's typo detection for every
-# consumer of this block -- keep the tuple short and justify each entry.
+# DECISION plan-2026-08-17T183311-79c63e38/D-011: caller `attention_args` keys
+# this block may drop when the chosen attention_type rejects them. Adding a key
+# here hides a caller typo in that key from the factory, so keep the tuple short.
+# The full rule lives on the drop loop in __init__ (search this name). See D-011.
 _CONDITIONAL_ATTENTION_ARG_KEYS: Tuple[str, ...] = ('window_size',)
 
 # ---------------------------------------------------------------------
 
+# The three modes of MixedSequentialBlock. 'lstm' runs LSTM + FFN,
+# 'transformer' runs attention + FFN, 'mixed' runs LSTM + attention + FFN.
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
 
@@ -84,96 +78,136 @@ class MixedSequentialBlock(keras.layers.Layer):
     """
     Hybrid sequential block combining LSTM and self-attention for time series.
 
-    This layer implements a flexible architecture that can operate in three modes:
-    LSTM-only, Transformer-only, or a hybrid sequential combination. It uses
-    Pre-LayerNorm architecture with residual connections, making it suitable for
-    deep time series models where both recurrent processing and self-attention
-    are beneficial.
+    The block runs in three modes, chosen by ``block_type``: LSTM only,
+    Transformer only, or both in sequence. Every mode is Pre-LN with a residual
+    add per sub-layer, so the output shape always equals the input shape.
 
-    The mixed mode processes inputs sequentially: LSTM captures local temporal
-    patterns, attention captures global dependencies, and FFN provides
-    non-linear transformation. This combination is particularly effective
-    for long time series with both local and global patterns.
+    In ``mixed`` mode the LSTM runs first and attention second. The LSTM picks
+    up local temporal structure, attention picks up long-range structure, and
+    the FFN adds the non-linear mixing. That ordering is the reason to use this
+    layer instead of a plain Transformer block.
+
+    Sub-layers are built by the shared factories, so ``normalization_type``,
+    ``attention_type`` and ``ffn_type`` select from those registries. The three
+    ``*_args`` dicts are passed through to them. All three factories raise on a
+    key the chosen type does not accept, with one allowlisted exception; see the
+    D-011 anchors in ``__init__``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        Mixed mode (block_type='mixed'):
+        Input x  [B, T, embed_dim]
+                          │
+                     block_type
+            ┌─────────────┼─────────────┐
+            ▼             ▼             ▼
+         'lstm'     'transformer'    'mixed'
+            │             │             │
+            ▼             ▼             ▼
+      ┌───────────┐ ┌───────────┐ ┌───────────┐
+      │ LSTM sub  │ │ Attn sub  │ │ LSTM sub  │
+      └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
+            │             │             ▼
+            │             │       ┌───────────┐
+            │             │       │ Attn sub  │
+            │             │       └─────┬─────┘
+            ▼             ▼             ▼
+      ┌───────────┐ ┌───────────┐ ┌───────────┐
+      │ FFN sub   │ │ FFN sub   │ │ FFN sub   │
+      └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
+            └─────────────┴─────────────┘
+                          ▼
+        Output x  [B, T, embed_dim]
 
-        Input: x (batch, seq_len, embed_dim)
-                        |
-                        v
-               +--------+---------+
-               | Norm1 -> LSTM    |
-               | [-> Projection]  |
-               | -> Dropout1      |
-               +--------+---------+
-                        |
-                    x + output  (Residual 1)
-                        |
-                        v
-               +--------+---------+
-               | Norm3 -> MHA     |
-               | -> Dropout3      |
-               +--------+---------+
-                        |
-                    x + output  (Residual 2)
-                        |
-                        v
-               +--------+---------+
-               | Norm2 -> FFN     |
-               | -> Dropout2      |
-               +--------+---------+
-                        |
-                    x + output  (Residual 3)
-                        |
-                        v
-               Output: (batch, seq_len, embed_dim)
+    Each box is one Pre-LN sub-layer: normalize, transform, drop out, add the
+    residual. The per-sub-layer diagrams are on ``_lstm_block``,
+    ``_transformer_block`` and ``_mixed_block``. Only ``mixed`` builds ``norm3``
+    and ``dropout3``; the other two modes leave them ``None``.
 
-        LSTM mode omits the MHA sub-layer.
-        Transformer mode omits the LSTM sub-layer.
-
-    :param embed_dim: Embedding dimension and output dimension. Must be positive.
+    :param embed_dim: Embedding dimension, and also the output dimension. Must
+        be positive.
     :type embed_dim: int
-    :param num_heads: Number of attention heads for transformer/mixed modes.
-        Must divide evenly into embed_dim.
+    :param num_heads: Number of attention heads, used by the 'transformer' and
+        'mixed' modes. Must divide ``embed_dim`` exactly.
     :type num_heads: int
-    :param lstm_units: Number of LSTM units for lstm/mixed modes.
-        Defaults to embed_dim if None.
+    :param lstm_units: Number of LSTM units, used by the 'lstm' and 'mixed'
+        modes. Defaults to ``embed_dim``. A different value adds a Dense
+        projection back to ``embed_dim`` so the residual add still lines up.
     :type lstm_units: int or None
-    :param ff_dim: Dimension of feed-forward network hidden layer.
-        Defaults to embed_dim * 4 if None.
+    :param ff_dim: Hidden width of the feed-forward network. Defaults to
+        ``embed_dim * 4``.
     :type ff_dim: int or None
-    :param block_type: Architecture mode: 'lstm', 'transformer', or 'mixed'.
+    :param block_type: Which mode to run: 'lstm', 'transformer' or 'mixed'.
     :type block_type: str
-    :param dropout_rate: Dropout rate for all dropout layers (0 to 1).
+    :param dropout_rate: Dropout rate for every dropout layer, in [0, 1].
     :type dropout_rate: float
-    :param use_layer_norm: Whether to apply normalization before each sub-layer
-        (Pre-LN architecture).
+    :param use_layer_norm: Normalize before each sub-layer (Pre-LN). When
+        False, no normalization layer is built at all and each sub-layer reads
+        its input directly.
     :type use_layer_norm: bool
-    :param normalization_type: Type of normalization from factory
-        (e.g., 'layer_norm', 'rms_norm', 'batch_norm').
+    :param normalization_type: Key into the normalization factory, for example
+        'layer_norm', 'rms_norm' or 'batch_norm'.
     :type normalization_type: str
-    :param attention_type: Type of attention mechanism from factory
-        (e.g., 'multi_head', 'anchor', 'differential').
+    :param attention_type: Key into the attention factory, for example
+        'multi_head', 'window', 'anchor' or 'differential'.
     :type attention_type: str
-    :param ffn_type: Type of feed-forward network from factory
-        (e.g., 'mlp', 'swiglu', 'glu').
+    :param ffn_type: Key into the FFN factory, for example 'mlp', 'swiglu' or
+        'glu'.
     :type ffn_type: str
-    :param activation: Activation function for the feed-forward network.
+    :param activation: Activation for the feed-forward network. Not every FFN
+        type takes one; see the branches in ``__init__``.
     :type activation: str or callable
-    :param normalization_args: Additional arguments for normalization layers.
+    :param normalization_args: Extra keywords for the normalization layers.
+        Passed to the factory unchanged.
     :type normalization_args: dict or None
-    :param attention_args: Additional arguments for attention layer.
+    :param attention_args: Extra keywords for the attention layer. Merged on
+        top of this block's own defaults, so a caller value wins.
     :type attention_args: dict or None
-    :param ffn_args: Additional arguments for FFN layer.
+    :param ffn_args: Extra keywords for the FFN layer. Merged last and never
+        filtered, so a caller value wins.
     :type ffn_args: dict or None
     :param kwargs: Additional keyword arguments for the Layer base class.
 
-    :raises ValueError: If embed_dim, num_heads, or dropout_rate are invalid,
-        or if embed_dim is not divisible by num_heads, or if block_type is
-        not one of 'lstm', 'transformer', 'mixed'.
+    :raises ValueError: If ``embed_dim``, ``num_heads``, ``lstm_units``,
+        ``ff_dim`` or ``dropout_rate`` is out of range, if ``embed_dim`` is not
+        divisible by ``num_heads``, or if ``block_type`` is not one of 'lstm',
+        'transformer', 'mixed'.
+
+    Input shape:
+        3D tensor of shape ``(batch, seq_len, embed_dim)``.
+
+    Output shape:
+        3D tensor of shape ``(batch, seq_len, embed_dim)``. Same as the input.
+
+    Example:
+        .. code-block:: python
+
+            block = MixedSequentialBlock(
+                embed_dim=64,
+                num_heads=8,
+                block_type='mixed',
+                ffn_type='swiglu',
+            )
+            y = block(keras.random.normal((2, 32, 64)))
+
+    :ivar lstm_layer: The LSTM, or None outside 'lstm'/'mixed' mode.
+    :vartype lstm_layer: keras.layers.LSTM or None
+    :ivar projection: Dense map from ``lstm_units`` back to ``embed_dim``, or
+        None when the two are equal.
+    :vartype projection: keras.layers.Dense or None
+    :ivar attention_layer: The attention layer, or None in 'lstm' mode.
+    :vartype attention_layer: keras.layers.Layer or None
+    :ivar ffn_layer: The feed-forward network. Built in every mode.
+    :vartype ffn_layer: keras.layers.Layer
+    :ivar norm1: Normalization before the first sub-layer, or None when
+        ``use_layer_norm`` is False.
+    :vartype norm1: keras.layers.Layer or None
+    :ivar norm2: Normalization before the FFN sub-layer, or None.
+    :vartype norm2: keras.layers.Layer or None
+    :ivar norm3: Normalization before the attention sub-layer in 'mixed' mode.
+        None in the other two modes.
+    :vartype norm3: keras.layers.Layer or None
     """
 
     def __init__(
@@ -254,10 +288,10 @@ class MixedSequentialBlock(keras.layers.Layer):
 
         # Attention components (for 'transformer' and 'mixed' modes)
         if self.block_type in ['transformer', 'mixed']:
-            # THIS BLOCK's own generic conveniences, derived from its own
-            # hyperparameters. They are pre-filtered against `attention_type`
-            # below; the caller's `attention_args` is merged on top VERBATIM so
-            # a caller typo still reaches the factory's raise.
+            # This block's own defaults, derived from its own hyperparameters.
+            # `assemble_attention_config` filters these against the chosen
+            # attention type, then merges the caller's `attention_args` on top
+            # unfiltered, so a caller typo still reaches the factory's raise.
             if self.attention_type == 'multi_head':
                 attention_defaults = {
                     'dim': self.embed_dim,
@@ -265,21 +299,11 @@ class MixedSequentialBlock(keras.layers.Layer):
                     'dropout_rate': self.dropout_rate
                 }
             elif self.attention_type == 'window':
-                # DECISION plan-2026-08-17T183311-79c63e38/D-011
-                # `'normalization': 'softmax'` used to be injected here and is
-                # REMOVED, not relocated. `WindowAttention` has no
-                # `normalization` parameter at all (it is neither in
-                # `ATTENTION_REGISTRY['window']` nor in the class signature), so
-                # the key was discarded on EVERY 'window' construction from the
-                # day it was written -- a dead knob that only became visible
-                # when `create_attention_layer` stopped dropping silently. Do
-                # NOT "restore" it by declaring `normalization` on the registry
-                # entry: the entry's target is the `create_grid_window_attention`
-                # wrapper, and the parameter it would have to forward does not
-                # exist. The live knob for the attention-probability function is
-                # `probability_type` (default 'softmax'), which the registry
-                # does declare -- pass that through `attention_args` if you want
-                # anything other than softmax.
+                # DECISION plan-2026-08-17T183311-79c63e38/D-011: a
+                # `'normalization': 'softmax'` default here was REMOVED, not
+                # relocated. None of WindowAttention's 18 registry parameters is
+                # named `normalization`, so it was discarded on every build. Do
+                # NOT re-declare it; pass `probability_type` instead. See D-011.
                 attention_defaults = {
                     'dim': self.embed_dim,
                     'num_heads': self.num_heads,
@@ -316,27 +340,11 @@ class MixedSequentialBlock(keras.layers.Layer):
                 self.attention_type, attention_defaults, self.attention_args
             )
 
-            # DECISION plan-2026-08-17T183311-79c63e38/D-011
-            # `window_size` is CONDITIONAL by contract, and this is the one
-            # caller key this block is allowed to scope. Consumers wire it
-            # unconditionally on purpose -- `models/time_series/tirex/model.py`
-            # passes `attention_args={'window_size': ...}` at every
-            # `attention_type` and documents the parameter as "used only when
-            # `attention_type='window'`" -- so once the factory raises, TiReX
-            # breaks at its own DEFAULT ('multi_head', which declares no
-            # `window_size`) unless it is dropped HERE.
-            #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT fix this at `tirex/model.py:348` by making the caller
-            #     conditional. That pushes registry knowledge -- which type
-            #     accepts which key -- up into every `MixedSequentialBlock`
-            #     consumer; the block is the only place that knows which branch
-            #     it took.
-            #   * Do NOT widen this to filter the whole merged dict. Every OTHER
-            #     caller key must stay visible to `create_attention_layer` so a
-            #     misspelled `attention_args` entry still raises. This tuple is
-            #     an allowlist of documented-conditional keys, not a licence to
-            #     swallow the caller's dict.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011: drop only the
+            # allowlisted keys the chosen type rejects. None of `multi_head`'s
+            # 11 registry params is `window_size`, so TiReX, which wires it at
+            # every type, raises at its own default without this. Do NOT filter
+            # the whole merged dict, nor push the test into callers. See D-011.
             _accepted = set(
                 ATTENTION_REGISTRY[self.attention_type]['required_params']
             ) | set(ATTENTION_REGISTRY[self.attention_type]['optional_params'])
@@ -384,15 +392,14 @@ class MixedSequentialBlock(keras.layers.Layer):
             self.norm2 = None
             self.norm3 = None
 
-        # Feed-forward network using factory.
+        # Feed-forward network, built through the factory.
         #
-        # This block's OWN generic conveniences go into `ffn_config`; the
-        # caller's `self.ffn_args` is handed to `assemble_ffn_config` as the
-        # third argument so it is merged LAST and NEVER filtered (D-017). Do
-        # not fold `ffn_args` into `ffn_config` -- that ordering lets this
-        # block's defaults override what the caller explicitly asked for, and
-        # it hides a caller's typo from `create_ffn_layer`, which now RAISES
-        # on one.
+        # This block's own defaults go into `ffn_config`. The caller's
+        # `self.ffn_args` is the third argument to `assemble_ffn_config`, so it
+        # is merged last and is never filtered (D-017). Do not fold `ffn_args`
+        # into `ffn_config`. That ordering would let this block's defaults
+        # override what the caller asked for, and it would hide a caller typo
+        # from `create_ffn_layer`, which raises on an unknown key.
         ffn_config: Dict[str, Any] = {
             'hidden_dim': self.ff_dim,
             'output_dim': self.embed_dim,
@@ -401,18 +408,11 @@ class MixedSequentialBlock(keras.layers.Layer):
             ffn_config['activation'] = self.activation
             ffn_config['dropout_rate'] = self.dropout_rate
         elif self.ffn_type == 'differential':
-            # DECISION plan-2026-07-30T140922-8af1028f/D-021
-            # RENAME, do not drop. `differential` was listed in the generic
-            # `activation`-injecting branch above, so this site's expressed
-            # intent has always been "the block's activation is the FFN's
-            # activation" -- but `DifferentialFFN` takes `branch_activation`,
-            # so the value was SILENTLY DISCARDED on every construction.
-            # `gate_activation` is deliberately NOT forwarded (the sigmoid
-            # gate is that layer's defining feature). Same shape as D-016 on
-            # `TransformerDecoderLayer`. A dropped-key grid CANNOT see a
-            # missing rename -- the pre-filter would simply discard
-            # `activation` and report a clean zero -- so this line is pinned
-            # by an explicit `branch_activation` assertion, never by the grid.
+            # DECISION plan-2026-07-30T140922-8af1028f/D-021: RENAME, do not
+            # drop. DifferentialFFN takes `branch_activation`, so `activation`
+            # was silently discarded by the pre-filter on every build here.
+            # `gate_activation` stays unforwarded: the sigmoid gate defines the
+            # layer. Do NOT merge this branch into the generic one. See D-021.
             ffn_config['branch_activation'] = self.activation
             ffn_config['dropout_rate'] = self.dropout_rate
         elif self.ffn_type == 'swiglu':
@@ -438,9 +438,15 @@ class MixedSequentialBlock(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the layer and all its sub-layers.
+        Build the layer and every sub-layer that this mode created.
 
-        :param input_shape: Shape of the input tensor.
+        Each sub-layer is built explicitly so that the weights exist before the
+        first call and survive a save/load round trip. Sub-layers left as None
+        by ``__init__`` are skipped. Only the LSTM projection gets a different
+        shape, since it reads ``lstm_units`` channels rather than ``embed_dim``.
+
+        :param input_shape: Shape of the input tensor,
+            ``(batch, seq_len, embed_dim)``.
         :type input_shape: tuple
         """
         # Build sub-layers based on block type and configuration
@@ -486,15 +492,48 @@ class MixedSequentialBlock(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Execute the standard Pre-LN Transformer block data flow.
+        Run the 'transformer' mode: attention, then FFN, both Pre-LN.
+
+        **Block Internals:**
+
+        .. code-block:: text
+
+             x  [B, T, D]
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm1 (opt)   │
+             │      │ Attention     │
+             │      │ Dropout1      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm2 (opt)   │
+             │      │ FFN           │
+             │      │ Dropout2      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ▼
+            out  [B, T, D]
+
+        ``(opt)`` marks the normalization layers, which are skipped when
+        ``use_layer_norm`` is False. ``mask`` is accepted for signature parity
+        with the other two blocks and is not used here.
 
         :param inputs: Input tensor of shape (batch, seq_len, embed_dim).
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode.
         :type training: bool or None
-        :param mask: Optional attention mask.
+        :param mask: Attention mask. Not forwarded to the attention layer.
         :type mask: keras.KerasTensor or None
-        :return: Transformed tensor with same shape as input.
+        :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -503,13 +542,13 @@ class MixedSequentialBlock(keras.layers.Layer):
         norm_input = self.norm1(x, training=training) if self.use_layer_norm else x
         attn_output = self.attention_layer(norm_input, training=training)
         attn_output = self.dropout1(attn_output, training=training)
-        x = x + attn_output  # Residual connection
+        x = x + attn_output
 
         # Second Sub-layer: Feed-Forward Network
         norm_output = self.norm2(x, training=training) if self.use_layer_norm else x
         ff_output = self.ffn_layer(norm_output, training=training)
         ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output  # Residual connection
+        return x + ff_output
 
     def _lstm_block(
         self,
@@ -518,15 +557,50 @@ class MixedSequentialBlock(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Execute an LSTM block followed by a feed-forward network.
+        Run the 'lstm' mode: LSTM, then FFN, both Pre-LN.
+
+        **Block Internals:**
+
+        .. code-block:: text
+
+             x  [B, T, D]
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm1 (opt)   │
+             │      │ LSTM          │
+             │      │ Project (opt) │
+             │      │ Dropout1      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm2 (opt)   │
+             │      │ FFN           │
+             │      │ Dropout2      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ▼
+            out  [B, T, D]
+
+        The norm layers are skipped when ``use_layer_norm`` is False. The
+        projection exists only when ``lstm_units != embed_dim``; the LSTM
+        output is ``[B, T, lstm_units]`` and the projection is what brings it
+        back to ``D`` so the residual add works. ``mask`` reaches the LSTM.
 
         :param inputs: Input tensor of shape (batch, seq_len, embed_dim).
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode.
         :type training: bool or None
-        :param mask: Optional mask for LSTM.
+        :param mask: Sequence mask, forwarded to the LSTM.
         :type mask: keras.KerasTensor or None
-        :return: Transformed tensor with same shape as input.
+        :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -537,13 +611,13 @@ class MixedSequentialBlock(keras.layers.Layer):
         if self.projection is not None:
             lstm_output = self.projection(lstm_output, training=training)
         lstm_output = self.dropout1(lstm_output, training=training)
-        x = x + lstm_output  # Residual connection
+        x = x + lstm_output
 
         # Second Sub-layer: Feed-Forward Network
         norm_output = self.norm2(x, training=training) if self.use_layer_norm else x
         ff_output = self.ffn_layer(norm_output, training=training)
         ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output  # Residual connection
+        return x + ff_output
 
     def _mixed_block(
         self,
@@ -552,15 +626,60 @@ class MixedSequentialBlock(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Execute a sequential LSTM, Attention, FFN flow.
+        Run the 'mixed' mode: LSTM, then attention, then FFN, all Pre-LN.
+
+        **Block Internals:**
+
+        .. code-block:: text
+
+             x  [B, T, D]
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm1 (opt)   │
+             │      │ LSTM          │
+             │      │ Project (opt) │
+             │      │ Dropout1      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm3 (opt)   │
+             │      │ Attention     │
+             │      │ Dropout3      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ├──────────────┐
+             │              ▼
+             │      ┌───────────────┐
+             │      │ Norm2 (opt)   │
+             │      │ FFN           │
+             │      │ Dropout2      │
+             │      └───────┬───────┘
+             │              │
+            (+) ◄───────────┘
+             │
+             ▼
+            out  [B, T, D]
+
+        Note the norm order: the attention sub-layer uses ``norm3`` and the FFN
+        sub-layer uses ``norm2``. That is why ``norm3`` and ``dropout3`` exist
+        only in this mode. Attention sees the LSTM output, not the raw input.
+        ``mask`` reaches the LSTM only.
 
         :param inputs: Input tensor of shape (batch, seq_len, embed_dim).
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode.
         :type training: bool or None
-        :param mask: Optional mask for LSTM.
+        :param mask: Sequence mask, forwarded to the LSTM.
         :type mask: keras.KerasTensor or None
-        :return: Transformed tensor with same shape as input.
+        :return: Transformed tensor with the same shape as the input.
         :rtype: keras.KerasTensor
         """
         x = inputs
@@ -571,19 +690,19 @@ class MixedSequentialBlock(keras.layers.Layer):
         if self.projection is not None:
             lstm_output = self.projection(lstm_output, training=training)
         lstm_output = self.dropout1(lstm_output, training=training)
-        x = x + lstm_output  # Residual 1
+        x = x + lstm_output
 
         # Block 2: Attention
         norm3_input = self.norm3(x, training=training) if self.use_layer_norm else x
         attn_output = self.attention_layer(norm3_input, training=training)
         attn_output = self.dropout3(attn_output, training=training)
-        x = x + attn_output  # Residual 2
+        x = x + attn_output
 
         # Block 3: Feed-Forward Network
         norm2_output = self.norm2(x, training=training) if self.use_layer_norm else x
         ff_output = self.ffn_layer(norm2_output, training=training)
         ff_output = self.dropout2(ff_output, training=training)
-        return x + ff_output  # Residual 3
+        return x + ff_output
 
     def call(
         self,
@@ -592,7 +711,7 @@ class MixedSequentialBlock(keras.layers.Layer):
         mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass dispatching to the correct block type.
+        Forward pass. Dispatches to the block for the configured mode.
 
         :param inputs: Input tensor of shape (batch, seq_len, embed_dim).
         :type inputs: keras.KerasTensor
@@ -628,7 +747,10 @@ class MixedSequentialBlock(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Return configuration dictionary for serialization.
+        Return the config needed to rebuild this layer.
+
+        Every ``__init__`` parameter is returned. ``activation`` goes through
+        ``serialize_activation`` so a callable survives the round trip.
 
         :return: Configuration dictionary.
         :rtype: dict
