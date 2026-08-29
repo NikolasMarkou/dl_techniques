@@ -503,16 +503,12 @@ class LearnableLogicOperator(keras.layers.Layer):
             weight_shape = (self.num_operations,)
 
         # The learnable selection weights.
+        #
         # DECISION plan-2026-08-29T112804-aff039c4/D-001 -- clone at the
-        # add_weight site, not at the hand-off. One resolved Initializer
-        # INSTANCE redraws identical values at every weight whose shape
-        # matches, so a parent handing one object to every child, or a
-        # caller aliasing one object across two roles, gets bit-identical
-        # weights (MEASURED max|delta| 0.0 on 8 pairs in this package). A
-        # raw string is safe -- Keras resolves it once per consumer. A
-        # seeded instance defeats the clone by design, which is why the
-        # guards use an unseeded one. Do not put self.operation_initializer
-        # back into this call. See decisions.md D-001.
+        # add_weight site, not the hand-off: one resolved Initializer
+        # INSTANCE redraws identical values at every matching shape
+        # (MEASURED max|delta| 0.0 on 8 pairs). Do not pass
+        # self.operation_initializer here. See decisions.md D-001.
         self.operation_weights = self.add_weight(
             name="operation_weights",
             shape=weight_shape,

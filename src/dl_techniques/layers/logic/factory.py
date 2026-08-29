@@ -391,12 +391,10 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
         )
 
     # DECISION plan-2026-08-29T112804-aff039c4/D-002 -- raise, never
-    # filter-and-drop. Subtract from `kwargs`, not from the merged
-    # parameter dict the factory builds: that dict already carries the
-    # registry defaults, so it can never expose a caller's typo. The
-    # rejection lives here rather than in the layer constructor, which
-    # takes **kwargs and would name the Keras base class instead of this
-    # factory. See decisions.md D-002.
+    # filter-and-drop. Subtract from `kwargs`, not the merged dict: that
+    # one carries the registry defaults and cannot expose a typo. Do not
+    # move this into the layer constructor -- it takes **kwargs and would
+    # name the Keras base class. See decisions.md D-002.
     declared = set(required) | set(info["optional_params"])
     unsupported = sorted(set(kwargs) - declared)
     if unsupported:
