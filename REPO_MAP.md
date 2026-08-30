@@ -206,8 +206,8 @@ transformer block's constructor arguments. For the options behind `attention_typ
 
 <!-- allow-dead-path: src/train/convunext/ - drift-note subject: deleted 2026-08-14 in the ConvUNext/bfconvunext merge; naming it is the point of the addendum below -->
 
-Three trees are meant to line up by directory name: **85 leaf model packages** under
-`src/dl_techniques/models/`, **47** trainer directories under `src/train/`, and **80** test
+Three trees are meant to line up by directory name: **84 leaf model packages** under
+`src/dl_techniques/models/`, **48** trainer directories under `src/train/`, and **84** test
 directories under `tests/test_models/`. **The first tree is two or three levels deep, the test tree is one level deep, and the
 trainer tree is *mostly* one level deep**, which is the first thing to know here: since
 2026-08-24 a model package is `models/<family>/<name>/` (and for five of them
@@ -386,9 +386,9 @@ thing you will meet and should not be surprised by.
   it is genuinely unmigratable (FFT, SVD).
 - **Docstring style is split repo-wide; both styles are in wide use.** Counted
   on the same scope — the library *outside*
-  `src/dl_techniques/layers/attention/` — 362 modules carry Sphinx/reST
-  `:param:` and 224 carry a Google-style `Args:` block, and the two sets are not
-  disjoint: 17 modules carry both, so these do not sum to a partition. reST is
+  `src/dl_techniques/layers/attention/` — 370 modules carry Sphinx/reST
+  `:param:` and 223 carry a Google-style `Args:` block, and the two sets are not
+  disjoint: 16 modules carry both, so these do not sum to a partition. reST is
   therefore not a carve-out and is localized nowhere. The only thing true of
   `src/dl_techniques/layers/attention/` is that it is near-uniformly reST
   *within itself* — 34 of its 35 modules. The split reaches the shared test
@@ -397,8 +397,8 @@ thing you will meet and should not be surprised by.
   docstrings" line as a preference for new code, not a description of the tree.
 - **The factory convention is now near-universal, but this entry is kept because
   the measurement trap that produced it is not.** Re-derived 2026-08-25 over the
-  **85 leaf** packages: **78 of 85** bind a `create_*` in their own
-  `<pkg>/__init__.py` and **82 of 85** declare a curated `__all__`, so the old
+  **84 leaf** packages: **77 of 84** bind a `create_*` in their own
+  `<pkg>/__init__.py` and **81 of 84** declare a curated `__all__`, so the old
   "read the init before assuming importability" caveat is largely retired. The
   exceptions are named in Part A's `models/` row. Before the `1bfe89d08`
   curated-export pass the binding figure was 27 of 73 while 14 packages defined no
@@ -958,13 +958,13 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 
 | Quantity | Value | Command |
 |---|---|---|
-| Python files under `src/` | 1049 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1109 | `find tests -name '*.py' \| wc -l` |
+| Python files under `src/` | 1048 | `find src -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1126 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 300 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/models/` | 287 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
-| `.py` in `src/dl_techniques/losses/` | 43 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/models/` | 285 | `find src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in `src/dl_techniques/losses/` | 44 | `find src/dl_techniques/losses -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/utils/` | 42 | `find src/dl_techniques/utils -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/datasets/` | 37 | `find src/dl_techniques/datasets -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/analyzer/` | 24 | `find src/dl_techniques/analyzer -name '*.py' \| wc -l` |
@@ -975,19 +975,19 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | `.py` in `src/dl_techniques/regularizers/` | 8 | `find src/dl_techniques/regularizers -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/visualization/` | 7 | `find src/dl_techniques/visualization -name '*.py' \| wc -l` |
 | `.py` in `src/dl_techniques/constraints/` | 2 | `find src/dl_techniques/constraints -name '*.py' \| wc -l` |
-| `.py` in layers + models | 587 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
+| `.py` in layers + models | 585 | `find src/dl_techniques/layers src/dl_techniques/models -name '*.py' \| wc -l` |
 | layers+models share of `src/` (%) | 55 | `echo $(( ( $(find src/dl_techniques/layers -name '*.py' \| wc -l) + $(find src/dl_techniques/models -name '*.py' \| wc -l) ) * 100 / $(find src -name '*.py' \| wc -l) ))` |
 | Subpackages under `src/dl_techniques/layers/` | 21 | `find src/dl_techniques/layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Loose modules directly under `src/dl_techniques/layers/` | 75 | `find src/dl_techniques/layers -maxdepth 1 -name '*.py' \| grep -vc __init__` |
 | Model FAMILIES directly under `src/dl_techniques/models/` — **this is NOT the model-package count**; it read 74 and answered that question until the 2026-08-24 restructure, and the label is spelled out because re-running the command was what hid the change | 12 | `find src/dl_techniques/models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
-| **LEAF** model packages under `src/dl_techniques/models/` (a directory carrying an `__init__.py` with no `__init__.py`-bearing child) | 85 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| wc -l` |
+| **LEAF** model packages under `src/dl_techniques/models/` (a directory carrying an `__init__.py` with no `__init__.py`-bearing child) | 84 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| wc -l` |
 | Containers under `src/dl_techniques/models/` (12 families + 4 subfamilies; excludes `models/` itself) | 16 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -n "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| wc -l` |
 | …of those, subfamily containers nested inside a family (`vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`) | 4 | `find src/dl_techniques/models -mindepth 2 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -n "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| wc -l` |
 | Leaf model packages under `vision/` (the largest family) | 35 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| grep -c '^src/dl_techniques/models/vision/'` |
 | Leaf model packages under `language/` (the second largest) | 17 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| grep -c '^src/dl_techniques/models/language/'` |
-| Leaf model packages with a non-empty `__init__.py` | 82 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do [ -s "$p/__init__.py" ] && echo "$p"; done \| wc -l` |
-| Leaf model packages declaring `__all__` | 82 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -q '__all__' "$p/__init__.py" && echo "$p"; done \| wc -l` |
-| Leaf model packages carrying a `README.md` | 85 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do [ -f "$p/README.md" ] && echo "$p"; done \| wc -l` |
+| Leaf model packages with a non-empty `__init__.py` | 81 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do [ -s "$p/__init__.py" ] && echo "$p"; done \| wc -l` |
+| Leaf model packages declaring `__all__` | 81 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -q '__all__' "$p/__init__.py" && echo "$p"; done \| wc -l` |
+| Leaf model packages carrying a `README.md` | 84 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do [ -f "$p/README.md" ] && echo "$p"; done \| wc -l` |
 | Entries under `src/train/` | 49 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Entries under `src/applications/` | 1 | `find src/applications -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Top-level dirs under `tests/` | 15 | `find tests -mindepth 1 -maxdepth 1 -type d \| wc -l` |
@@ -1019,7 +1019,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Keys in `SEQUENCE_POOLING_REGISTRY` | 3 | `awk 'index($0,"SEQUENCE_POOLING_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/sequence_pooling/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `_TYPE_TO_CLASS` (norms factory) | 18 | `awk 'index($0,"_TYPE_TO_CLASS")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/norms/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Trainer dirs under `src/train/` (excl. `src/train/common/`) | 48 | `find src/train -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ ! -name common \| wc -l` |
-| Test dirs under `tests/test_models/` | 85 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
+| Test dirs under `tests/test_models/` | 84 | `find tests/test_models -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Model dirs nested in `src/dl_techniques/models/time_series/` | 7 | `find src/dl_techniques/models/time_series -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | Files under `src/` naming `keras.callbacks.Callback` | 46 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 10 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
@@ -1027,20 +1027,20 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files MENTIONING `@keras.saving.register_keras_serializable` — **this is not the registration count and no longer even a decorator count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper (`MIGRATIONS.md`); it then read 16, and 5 after the same day's prose pass retired the stale mentions. All 5 survivors are docstrings and comments — 4 superseded-in-place DECISION anchors that must keep naming the old form to forbid it, plus the helper itself. There are **0** live bare decorators (`grep -rc "^@keras.saving.register_keras_serializable()" src/`). The row below is the one that counts registrations | 5 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
 | Files using `@register_dl_technique` (the live registration count; anchored at line start, so prose mentions and the helper's own module do not inflate it — the unanchored form read 480 on 2026-08-29 and then 484 once four docstrings began naming the helper) | 479 | `grep -rlE "^@register_dl_technique" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 484 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
-| Files using the central logger | 347 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
+| Files using the central logger | 348 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |
 | Files importing raw `tensorflow` | 59 | `grep -rl "import tensorflow as tf" src/dl_techniques --include=*.py \| wc -l` |
 | `.py` in `src/dl_techniques/layers/attention/` | 35 | `find src/dl_techniques/layers/attention -name '*.py' \| wc -l` |
 | …of those using Sphinx `:param` docstrings | 34 | `grep -rl ":param " src/dl_techniques/layers/attention --include=*.py \| wc -l` |
 | Modules in `src/dl_techniques/layers/` using Sphinx `:param` (the figure `src/dl_techniques/CLAUDE.md` asserts) | 265 | `grep -rl ":param " src/dl_techniques/layers --include=*.py \| wc -l` |
 | Library modules using Sphinx `:param` OUTSIDE `src/dl_techniques/layers/attention/` | 370 | `grep -rl ":param " src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 224 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
-| Library modules carrying BOTH styles (the two sets overlap) | 17 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
+| Library modules using a Google-style `Args:` block OUTSIDE `src/dl_techniques/layers/attention/` (same scope as the row above) | 223 | `grep -rlE "^ +Args:$" src/dl_techniques --include=*.py \| grep -vc "src/dl_techniques/layers/attention"` |
+| Library modules carrying BOTH styles (the two sets overlap) | 16 | `{ grep -rlE "^ +Args:$" src/dl_techniques --include=*.py; grep -rl ":param " src/dl_techniques --include=*.py; } \| sort \| uniq -d \| wc -l` |
 | Modules in `src/dl_techniques/layers/transformers/` importing a sibling `create_*` dispatcher | 10 | `grep -rlE "^from .* import .*create_(attention\|ffn\|normalization)\|^ +create_(attention\|ffn\|normalization)_[a-z_]+,$" src/dl_techniques/layers/transformers --include=*.py \| wc -l` |
 | Loose `test_*.py` directly under `tests/test_layers/` | 84 | `find tests/test_layers -maxdepth 1 -name 'test_*.py' \| wc -l` |
 | Subdirectories under `tests/test_layers/` | 20 | `find tests/test_layers -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | **Leaf** model packages with no `create_` function ANYWHERE in the package (`common/power_sampling/`, `vision_language/sam/sam1/`, `vision_language/sam/sam3/`) | 3 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -rq '^def create_' "$p" --include=*.py \|\| echo "$p"; done \| wc -l` |
-| **Leaf** model packages BINDING a `create_` in their own package init (what a caller sees) | 78 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -qE '^(from\|import) .*create_\|^ +create_\|^def create_' "$p/__init__.py" && echo "$p"; done \| wc -l` |
-| …the same thing counted by a bare mention-grep, which has overcounted at every measurement: by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10), by three on 2026-08-24, and by one today — **73** against a binding count of 72, because `common/power_sampling/` merely MENTIONS `create_` in its init docstring while binding nothing. The gap between this row and the one above it is the whole point of keeping both | 79 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -q 'create_' "$p/__init__.py" && echo "$p"; done \| wc -l` |
+| **Leaf** model packages BINDING a `create_` in their own package init (what a caller sees) | 77 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -qE '^(from\|import) .*create_\|^ +create_\|^def create_' "$p/__init__.py" && echo "$p"; done \| wc -l` |
+| …the same thing counted by a bare mention-grep, which has overcounted at every measurement: by one until the docstring-only `convnext_patch_vae` init was deleted (2026-08-10), by three on 2026-08-24, and by one today — **73** against a binding count of 72, because `common/power_sampling/` merely MENTIONS `create_` in its init docstring while binding nothing. The gap between this row and the one above it is the whole point of keeping both | 78 | `find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| while read -r p; do grep -q 'create_' "$p/__init__.py" && echo "$p"; done \| wc -l` |
 | **Leaf** model packages with no same-named `src/train/` dir AND no `models.<...>.<name>` import under `src/train/`. The import half of this test had to be REWRITTEN, not re-run: a trainer now writes `dl_techniques.models.vision.beit`, so the old `models\.<name>` pattern matched nothing and would have reported every package unreachable | 26 | `t=$(find src/train -mindepth 1 -maxdepth 1 -type d -printf "%f\n"); find src/dl_techniques/models -mindepth 1 -type d ! -path '*__pycache__*' \| while read -r d; do [ -f "$d/__init__.py" ] && [ -z "$(find "$d" -mindepth 2 -maxdepth 2 -name __init__.py)" ] && echo "$d"; done \| sed 's#.*/##' \| while read -r n; do echo "$t" \| grep -qx "$n" \|\| grep -rqE "models\.([a-z0-9_]+\.)*$n([^a-zA-Z0-9_]\|$)" src/train --include=*.py \|\| echo "$n"; done \| wc -l` |
 | Lines in the mandatory authoring guide | 2698 | `wc -l < research/2026_keras_custom_models_instructions_v2.md` |
 | Relative imports reaching a shared oracle from `tests/test_models/` (the measured cost of nesting the test tree — see § Tests, D-001) | 218 | `grep -rn "from \.\." --include='*.py' tests/test_models \| wc -l` |
