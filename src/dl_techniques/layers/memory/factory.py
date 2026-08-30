@@ -13,7 +13,7 @@ class yourself. Three builders share one call shape:
 Each one returns a built Keras layer, ready for `keras.Sequential` or the
 functional API.
 
-# DECISION plan_2026-05-13_8c1dc6fd/D-002
+# DECISION plan_2026-05-13_8c1dc6fd/D-002 [STALE]
 `create_mann` returns a `NeuralTuringMachine`, not a dedicated MANN class. Do
 NOT add one: it duplicates addressing/read/write logic `NTMCell` already has,
 and the NTM RNN-cell wrapper subsumes the LSTMCell rewrite proposed as R4.
