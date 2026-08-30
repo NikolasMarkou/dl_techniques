@@ -8,8 +8,11 @@
 (b) `src/train/nam/train_nam.py` collected `q_halt_logits` into `all_q_halt` and
     consumed it in NO loss; there was no `L_halt` in the file. The head was
     neither trained nor read. (D-034)
-(d) `src/dl_techniques/models/CLAUDE.md` filed the package as "Neural additive
-    model"; it is a Neural Arithmetic MODULE.
+(d) The per-package catalogue filed the package as "Neural additive model"; it
+    is a Neural Arithmetic MODULE. The catalogue has since moved out of
+    `models/CLAUDE.md` into `models/README.md`, which is why the guard below
+    selects its row BY TABLE STRUCTURE and holds no file line number: an
+    address-based citation rots silently, the rule does not.
 
 The halting probes drive `q_halt` by writing the cell's `halt_head` weights
 directly, so each arm's halting decision is DICTATED rather than inferred from
@@ -17,12 +20,15 @@ whatever a randomly initialised head happens to emit.
 """
 
 import pathlib
+import re
 
 import numpy as np
 import keras
 import pytest
 import tensorflow as tf
 
+import dl_techniques.models as models_package
+from dl_techniques.models.neural_computer import nam as nam_package
 from dl_techniques.models.neural_computer.nam import NAM, NAMConfig
 
 HALT_MAX_STEPS = 4
@@ -201,21 +207,222 @@ class TestHaltHeadReceivesGradient:
         )
 
 
-class TestPackageIsFiledUnderItsRealArchitecture:
-    """(d) — the index entry must name what the code is."""
+NAM_CATALOGUE_KEY = "`neural_computer/nam/`"
+"""The exact FIRST cell of every catalogue row that describes this package."""
 
-    def test_models_claude_md_does_not_call_nam_a_neural_additive_model(self):
-        root = pathlib.Path(__file__).resolve().parents[3]
-        text = (root / "src" / "dl_techniques" / "models" / "CLAUDE.md").read_text()
-        entry = next(
-            line for line in text.splitlines() if line.startswith("- `nam/`")
+WRONG_NAME_HEADER = re.compile(r"reads as|misattribut|name", re.IGNORECASE)
+"""Headers of columns that legitimately quote the WRONG name in order to correct it.
+
+`models/README.md`'s "Names that misattribute" table has a ``Reads as`` column
+holding the literal string "Neural *Additive* Model". A guard that asserted
+"additive" is absent from every cell would false-fail against the very row that
+documents the correction, so cells are classified BY THEIR COLUMN HEADER.
+"""
+
+
+def _split_row(line):
+    """Split one Markdown table row into its cells.
+
+    :param line: a single line of Markdown.
+    :type line: str
+    :return: the row's cells, stripped, or ``None`` if the line is not a row.
+    :rtype: list[str] | None
+    """
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return None
+    return [cell.strip() for cell in stripped.strip("|").split("|")]
+
+
+def _is_separator(cells):
+    """Whether ``cells`` came from a Markdown header/body separator row.
+
+    :param cells: the cells of one table row.
+    :type cells: list[str]
+    :return: ``True`` for rows like ``|---|---|``.
+    :rtype: bool
+    """
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell) for cell in cells
+    )
+
+
+def _nam_rows(text):
+    """Select every catalogue row describing this package, BY STRUCTURE.
+
+    For each Markdown table row whose first cell is exactly
+    :data:`NAM_CATALOGUE_KEY`, walk UPWARD to that table's own header row (the
+    line immediately above the table's ``|---|`` separator) and pair each cell
+    with the header above it. Selection therefore survives a column reorder, a
+    row reorder and any change of line number; only a whole-table rewrite
+    breaks it, which is the intent.
+
+    Pure: takes text, touches no filesystem, so the selection logic is testable
+    on synthetic input (see :class:`TestTheCatalogueGuardItself`).
+
+    :param text: the full text of a Markdown document.
+    :type text: str
+    :return: one dict per matching row, with keys ``row`` (the raw line) and
+        ``cells`` (a list of ``(header, cell)`` pairs, header ``""`` when the
+        table's header cell is blank).
+    :rtype: list[dict]
+    """
+    lines = text.splitlines()
+    rows = []
+    for index, line in enumerate(lines):
+        cells = _split_row(line)
+        if cells is None or _is_separator(cells):
+            continue
+        if not cells or cells[0] != NAM_CATALOGUE_KEY:
+            continue
+
+        header = None
+        for above in range(index - 1, -1, -1):
+            above_cells = _split_row(lines[above])
+            if above_cells is None:
+                break
+            if _is_separator(above_cells):
+                header = _split_row(lines[above - 1]) if above > 0 else None
+                break
+        if header is None:
+            header = []
+
+        padded = list(header) + [""] * max(0, len(cells) - len(header))
+        rows.append(
+            {"row": line, "cells": list(zip(padded[: len(cells)], cells))}
         )
-        assert "additive" not in entry.lower() or "Not" in entry, (
-            f"models/CLAUDE.md files nam/ as {entry!r}; the package is a Neural "
-            "Arithmetic MODULE (tree parse + NTM memory + TRM halting) and "
-            "contains no per-feature additive model"
+    return rows
+
+
+def _assert_rows_name_the_architecture(rows, source):
+    """Assert the catalogue rows name NAM's real architecture.
+
+    The rule, stated rather than addressed: in every cell whose column header is
+    not a wrong-name column, "additive" must be ABSENT, and "Arithmetic" must
+    appear in at least one such cell.
+
+    :param rows: the output of :func:`_nam_rows`.
+    :type rows: list[dict]
+    :param source: how to name the text in failure messages.
+    :type source: str
+    :raises Failed: loudly, when ``rows`` is empty. There is deliberately no
+        skip-when-absent path: the absence of the row is the defect this guard
+        exists to surface.
+    """
+    if not rows:
+        pytest.fail(
+            f"{source} holds NO Markdown table row whose first cell is exactly "
+            f"{NAM_CATALOGUE_KEY} — the per-package catalogue this guard reads "
+            "has moved or been restructured again (it already migrated out of "
+            "models/CLAUDE.md once). The claim it pins is that NAM is a Neural "
+            "Arithmetic MODULE, not a Neural Additive Model; it is also stated "
+            "in the same file's 'Names that misattribute' table and, primarily, "
+            "in the first line of the neural_computer/nam package docstring. "
+            "Re-point this guard at wherever the catalogue now lives — do not "
+            "delete it."
         )
-        assert "Arithmetic" in entry, (
-            f"models/CLAUDE.md's nam/ entry {entry!r} does not name the actual "
-            "architecture"
+
+    for row in rows:
+        checked = [
+            (header, cell)
+            for header, cell in row["cells"]
+            if not WRONG_NAME_HEADER.search(header)
+        ]
+        for header, cell in checked:
+            assert "additive" not in cell.lower(), (
+                f"{source} row {row['row']!r} calls nam/ 'additive' in column "
+                f"{header!r}, which is not a wrong-name column; the package is "
+                "a Neural Arithmetic MODULE (tree parse + NTM memory + TRM "
+                "halting) and contains no per-feature additive model"
+            )
+        assert any("Arithmetic" in cell for _, cell in checked), (
+            f"{source} row {row['row']!r} never names the actual architecture "
+            "('Arithmetic') in any column that is not a wrong-name column"
         )
+
+
+class TestPackageIsFiledUnderItsRealArchitecture:
+    """(d) — the catalogue and the package itself must name what the code is."""
+
+    def test_the_models_catalogue_names_nam_a_neural_arithmetic_module(self):
+        readme = pathlib.Path(models_package.__file__).parent / "README.md"
+        _assert_rows_name_the_architecture(
+            _nam_rows(readme.read_text()), "models/README.md"
+        )
+
+    def test_the_package_docstring_names_a_neural_arithmetic_module(self):
+        """The primary source: it lives beside the code and moves with it."""
+        docstring = nam_package.__doc__
+        assert docstring, (
+            "the neural_computer/nam package has no module docstring; the "
+            "primary statement of what this architecture is has been deleted"
+        )
+        first_line = docstring.splitlines()[0]
+        assert "Neural Arithmetic Module" in first_line, (
+            f"the nam package docstring opens with {first_line!r}, which does "
+            "not name it a Neural Arithmetic Module"
+        )
+
+
+class TestTheCatalogueGuardItself:
+    """RED proofs for the guard above, run on synthetic text.
+
+    `_nam_rows` is pure, so both failure directions are exercised directly
+    rather than by mutating a tracked document.
+    """
+
+    CATALOGUE = "\n".join(
+        [
+            "### The small families",
+            "",
+            "| Package | |",
+            "|---|---|",
+            "| `graph/relgt/` | Relational Graph Transformer |",
+            "| `neural_computer/nam/` | Neural Arithmetic **Module**. "
+            "Name misattributes |",
+            "",
+            "## Names that misattribute",
+            "",
+            "| Package | Reads as | Actually is | Where the evidence sits |",
+            "|---|---|---|---|",
+            "| `neural_computer/nam/` | Neural *Additive* Model | Neural "
+            "Arithmetic **Module** — not a GAM | the package docstring |",
+        ]
+    )
+
+    def test_the_guard_accepts_the_two_legitimate_shapes(self):
+        """ANTI-VACUITY control for both RED proofs below.
+
+        The misattribution row's "Additive" sits under a `Reads as` header, so
+        it must pass; without this arm a guard that rejected everything would
+        satisfy both RED proofs.
+        """
+        rows = _nam_rows(self.CATALOGUE)
+        assert len(rows) == 2, (
+            f"structural selection found {len(rows)} nam rows in the synthetic "
+            "catalogue, not the 2 it contains"
+        )
+        _assert_rows_name_the_architecture(rows, "synthetic catalogue")
+
+    def test_a_corrupted_catalogue_row_goes_red(self):
+        corrupted = self.CATALOGUE.replace(
+            "| `neural_computer/nam/` | Neural Arithmetic **Module**. "
+            "Name misattributes |",
+            "| `neural_computer/nam/` | Neural **Additive** Model |",
+        )
+        with pytest.raises(AssertionError, match="not a wrong-name column"):
+            _assert_rows_name_the_architecture(
+                _nam_rows(corrupted), "synthetic catalogue"
+            )
+
+    def test_a_catalogue_with_no_matching_row_fails_loudly(self):
+        without = "\n".join(
+            line
+            for line in self.CATALOGUE.splitlines()
+            if NAM_CATALOGUE_KEY not in line
+        )
+        assert _nam_rows(without) == []
+        with pytest.raises(pytest.fail.Exception, match="holds NO Markdown"):
+            _assert_rows_name_the_architecture(
+                _nam_rows(without), "synthetic catalogue"
+            )
