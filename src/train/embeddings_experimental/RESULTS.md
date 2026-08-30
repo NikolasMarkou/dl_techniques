@@ -13,7 +13,7 @@ by name rather than quietly edited out.
 
 ## TL;DR
 
-**1. The convolutional arms beat the transformer in all 16 cells of the
+**1. The convolutional arms beat the transformer in all 12 cells of the
 context x position factorial**, and at every arm's own best setting. That is the
 study's central result and it is robust.
 
@@ -28,7 +28,7 @@ claim".) The defensible claim is ~0.4 nats, not ~1.9.
 
 **3. The two model families want opposite settings, so no fixed setting is
 neutral.** The transformer's best cell is 64 + sinusoidal, on *both* endpoints at
-once; all three convolutional arms peak at 512 + learned, on both. Any
+once; both convolutional arms peak at 512 + learned, on both. Any
 fixed-setting four-arm comparison handicaps someone, and the choice of setting
 decides part of the answer. The strong two-way interaction behind this is
 **specific to the attention arm** — the convolutional arms show only a small
@@ -61,7 +61,7 @@ ZCA whitening lifts the learned-position convolutional arms from R@1 ~0.059 to
 | Run 3 | 64 | sinusoidal | 28 | complete |
 | Run 4 | 64 | learned | 28 | complete — closes the 2x2 |
 
-Runs 2-4 are 4 arms x 7 seeds at `tiny`/`mean`, 6000 MLM + 2000 contrastive
+Runs 2-4 were 4 arms x 7 seeds at `tiny`/`mean` (the fourth arm has since been withdrawn; see "The V2 arm was withdrawn"), 6000 MLM + 2000 contrastive
 steps, `max_train_samples=60000`, and are paired cell-by-cell on
 `(model, variant, pooling, seed)` — never compared as two independent means.
 
@@ -91,7 +91,7 @@ python -m train.embeddings_experimental.sweep \
 | `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 | 1.1192 ±0.006 |
 | `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 | 0.9750 ±0.008 |
 
-All 16 cells are n=7. **Bold marks each arm's best configuration** — and the
+All 12 cells are n=7. **Bold marks each arm's best configuration** — and the
 transformer's is a different cell from every other arm's.
 
 Reference points: a uniform guess over the 101-id vocabulary costs `ln(101)` =
@@ -145,7 +145,7 @@ is slightly better than 512 + sinusoidal (1.6218).
 
 **The strong interaction is specific to the attention arm.** Run 4 makes this
 checkable — the same two effects, measured at both levels of the other, for all
-four arms:
+three arms:
 
 | arm | positions @512 | positions @64 | context @learned | context @sinusoidal |
 |---|---:|---:|---:|---:|
@@ -155,7 +155,7 @@ four arms:
 
 Two qualitatively different regimes. For the transformer both settings are **large
 fixes that substitute**: one interaction of **−1.0743 ±0.0651**, 7/7 seeds,
-p=0.0156. For the three convolutional arms both are **small penalties** (+0.02 to
+p=0.0156. For both convolutional arms they are **small penalties** (+0.02 to
 +0.11, always the same sign).
 
 Whether the convolutional arms show *any* interaction is a weaker claim than this
@@ -166,8 +166,9 @@ file used to make. Re-derived, paired by seed:
 | `ascii_clifford_bert` | +0.0328 ±0.0203 | 7/7 | 0.0156 |
 | `ascii_convnext_bert` | +0.0223 ±0.0244 | 5/7 | **0.0938** |
 
-Under this study's own Holm family of three non-baseline arms, **neither convnext
-arm's attenuation survives**; only clifford's does. An earlier version of this
+Under this study's own Holm family (now **two** non-baseline arms), clifford's
+attenuation survives at p_adj = 0.0312 and **convnext's does not** (p_adj =
+0.0938). An earlier version of this
 paragraph stated "attenuate only ~1.5–2x" for all three as established fact.
 What is established is that the convolutional arms have no *large* interaction —
 not that they have a small one.
@@ -201,7 +202,7 @@ Context length, paired at sinusoidal, n=7:
 | `ascii_convnext_bert` | +0.0314 ±0.004 |
 
 All 7 of 7 seeds agree in every arm of both tables. **Every change that helps the
-transformer mildly hurts all three convolutional arms** — they already carry
+transformer mildly hurts both convolutional arms** — they already carry
 positional structure in the block, so a large sinusoidal table only compresses
 their token signal (11.07 → 0.42 through the embedding LayerNorm), and a fixed
 convolutional span means extra context is simply a little more material to model,
@@ -223,10 +224,10 @@ The transformer's deficit against the best convolutional arm:
 The third row is the one to quote. It lets every arm use the configuration that
 suits it, which is the harder test and the fairer one.
 
-> **Read the 85% row with care.** Both its numbers are corners of the 2x2, and
+> **Read the 86% row with care.** Both its numbers are corners of the 2x2, and
 > in opposite directions. `512/learned` is simultaneously `ascii_convnext_bert`'s
 > **best** cell and `ascii_bert`'s **worst**; `64/sinusoidal` is `convnext`'s **worst**
-> and `ascii_bert`'s **best**. So 85% is the ratio between the maximum-spread and
+> and `ascii_bert`'s **best**. So 86% is the ratio between the maximum-spread and
 > minimum-spread corners of the design, and it is the largest number the data
 > can be made to yield. Averaged over all four configurations the deficit is
 > 0.8152 and the gap closed is **57%**. The honest range is 57%–86%, with 80%
@@ -330,7 +331,7 @@ contributor rather than as the cause:
 | centering does nothing | the offset varies per text; centering removes one global mean |
 | whitening makes it worse | same reason, plus it amplifies the low-variance directions where content survives |
 | the 64-context run shows no penalty | packed training makes every sequence exactly 64 — no mismatch to expose |
-| MLM ordering unaffected in all 16 cells | MLM is scored per position and never pooled, so it never touches the readout |
+| MLM ordering unaffected in all 12 cells | MLM is scored per position and never pooled, so it never touches the readout |
 
 It also predicts the truncation curve that found it. Re-measured 2026-08-30 at
 3 seeds, truncating **both** queries and contexts to a common length:
@@ -651,20 +652,30 @@ uses `ascii_bert` as the positive control that the probe can see global mixing a
 all.
 
 **The study runs at its statistical power floor.** The primary endpoint
-(`eval_squad_mrr_at_10`) is `BETTER` for all three convolutional arms in all four
+(`eval_squad_mrr_at_10`) is `BETTER` for both convolutional arms in all four
 configurations. But with n=7 the smallest reachable two-sided sign-flip p is
-`2/2^7` = **0.0156**, and Holm across the three non-baseline arms multiplies the
-first by 3, so **0.0469 is the smallest adjusted p this design can ever
-produce**. The measured values are 0.0469 (Run 2a) and 0.0474 (the other three
-roots), against a 0.05 bar. Every arm shows perfect 7/7 sign agreement — the
-result is as strong as the design can show, and it clears by 0.003. The same
-effect judged against the secondary family of 18 (which `README.md` says needs 10
-seeds) would not clear.
+`2/2^7` = **0.0156**, and Holm across the non-baseline arms multiplies the first
+by `m`, so the smallest adjusted p the design can produce is `0.0156 x m`.
+
+Withdrawing the V2 arm shrank that family from three to **two**, which bought
+real margin on the same data: the primary endpoint is now `BETTER` for both
+convolutional arms in **all four configurations at p_adj = 0.0312**, against a
+0.05 bar and a floor of 0.0312. Before the withdrawal the same comparisons sat
+at 0.0469–0.0474 — clearing by 0.003. Every arm still shows perfect 7/7 sign
+agreement, so the result remains as strong as this design can show; it now has
+somewhere to fall short of the bar and does not.
+
+The margin is still structural rather than comfortable. Judged against the
+secondary family of 18 (which `README.md` says needs 10 seeds) the same effect
+would not clear.
 
 **Run 2a has no committed verdicts.** `report.py` was never run on
 `results/embeddings_study_512`, so that root has only `all_runs.json` — no
-`summary.md`, `headline_summary.csv` or `paired_summary.csv`. The 0.0469 above
-was recomputed for this file rather than read from an artifact.
+`summary.md`, `headline_summary.csv` or `paired_summary.csv`. Every adjusted
+p-value above was recomputed for this file rather than read from an artifact,
+and the three roots that DO carry a `paired_summary.csv` still record the
+pre-withdrawal three-arm values (0.0474). Re-run `report.py` on all four roots
+to refresh them.
 
 **Stage 2 is packed, and its docstring says it is not.** `data.py` states "Stage
 2 cannot pack — contrastive learning needs whole sentences", but
