@@ -453,8 +453,11 @@ class TestSOMLayer:
                 loaded_model(input_data_2d[:8], training=False)
             )
 
-            # Check predictions match BIT-EXACTLY: a round trip restores
-            # weights by copy, so it is a restoration and not a computation.
+            # DECISION plan-2026-08-30T063229-ccd6ad17/D-024
+            # atol=0.0, not the guide EXAMPLE's 1e-6. A round trip restores
+            # weights by copy, so it is a restoration, not a computation, and
+            # all 6 sites in this package measure exactly 0.0. Do NOT re-loosen
+            # to 1e-6 citing that example. See decisions.md D-024.
             np.testing.assert_allclose(
                 original_prediction, loaded_prediction,
                 rtol=0.0, atol=0.0,
