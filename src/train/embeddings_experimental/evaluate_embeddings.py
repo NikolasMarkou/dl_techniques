@@ -69,6 +69,7 @@ from dl_techniques.metrics.embedding_quality import (
     effective_rank,
     embedding_norm_stats,
     l2_normalize,
+    zca_whiten,
     ranking_metrics,
     uniformity,
 )
@@ -302,6 +303,17 @@ def squad_retrieval_eval(
     out: Dict[str, float] = {
         f"squad_{k}": v for k, v in ranking_metrics(similarity, truth).items()
     }
+
+    # Raw cosine understates these encoders by ~3.3x, so report both rather
+    # than silently picking one. The transform is fitted on the CONTEXT POOL
+    # only -- embeddings, no queries, no labels -- and it transfers across
+    # corpora, so this is not a transductive score. See RESULTS.md.
+    ctx_white, q_white = zca_whiten(ctx_emb, q_emb)
+    white_similarity = l2_normalize(q_white) @ l2_normalize(ctx_white).T
+    out.update({
+        f"squad_whitened_{k}": v
+        for k, v in ranking_metrics(white_similarity, truth).items()
+    })
     out["squad_ctx_pad_fraction"] = ctx_pad
     out["squad_q_pad_fraction"] = q_pad
     out["squad_alignment"] = alignment(

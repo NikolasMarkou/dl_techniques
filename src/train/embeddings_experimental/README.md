@@ -69,10 +69,12 @@ hurts".
 
 Raw cosine understates these encoders by **~3.3x**. ZCA whitening lifts the
 learned-position convolutional arms from R@1 ~0.060 to ~0.21 on 9 of 9 cells,
-needs no retraining, and survives being fitted on an unrelated corpus. The
-harness does **not** currently compute it — `eval.json` is raw cosine only — so
-any retrieval claim taken from it is a lower bound, and the whitened ordering is
-not the same as the raw one.
+needs no retraining, and survives being fitted on an unrelated corpus. Since
+2026-08-30 the harness computes both: every `squad_*` metric now has a
+`squad_whitened_*` twin, fitted on the context pool (embeddings only — no
+queries, no labels). **`eval.json` from Runs 1-4 predates this and carries the
+raw metrics only.** Quote both going forward; the whitened ordering is not the
+same as the raw one.
 
 ### The guard
 
