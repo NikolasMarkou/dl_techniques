@@ -14,8 +14,12 @@ by name rather than quietly edited out.
 ## TL;DR
 
 **1. The convolutional arms beat the transformer in all 12 cells of the
-context x position factorial**, and at every arm's own best setting. That is the
-study's central result and it is robust.
+context x position factorial**, and at every arm's own best setting. On the
+study's one confirmatory endpoint — SQuAD MRR@10 — both arms are `BETTER` in all
+four configurations (Holm, p_adj 0.0290 against a 0.0312 floor). The MLM
+ordering is stable in all 12 cells and all 28 (configuration, seed) pairs, but
+it is a **secondary** endpoint and formally `UNDERPOWERED`: its BH family of 12
+needs 9 seeds and the study ran 7. Two more seeds per cell would close that.
 
 **2. Most of the original margin was configuration, not architecture.** The
 transformer's deficit against the best arm was first reported as **1.9035 nats**.
@@ -554,36 +558,183 @@ ordering also changes: raw ranks `convnext` and `clifford` a hair apart
 
 ---
 
-## Why the transformer arm was stuck
+## Statistical verdicts — `report.py`, all four roots
 
-The diagnosis behind finding 2, kept because it is reusable.
+Regenerated 2026-08-30 on all four sweep roots, three arms, 21 cells each:
 
-**It had converged, not stalled early.** Doubling both context and steps moved
-validation loss by **−0.0041 nats**. Recovering the instantaneous per-batch loss
-(Keras logs the epoch running mean, which hides this) shows the arm reaching
-2.878 by step ~400 and then going flat at **−0.0081 nats per 1000 steps** —
-~200,000 further steps to reach where the convolutional arms already were.
+```bash
+python -m train.embeddings_experimental.report --in-dir results/<root> \
+    --models ascii_bert ascii_clifford_bert ascii_convnext_bert
+```
 
-**Where it stopped is exactly derivable.** MLM leaves 10% of selected tokens
-unchanged, which are free to copy. A model that predicts the corpus unigram and
-copies those scores:
+The `--models` flag is **required here, not cosmetic.** `all_runs.json` still
+holds the 28 withdrawn V2 cells, and Holm corrects across the non-baseline arms,
+so reporting them takes the primary family from 2 to 3 and every adjusted
+p-value with it. `report.py` now warns by name when a root contains an arm the
+registry no longer knows, and drops it only when asked.
 
-| | predicted | measured (diagnostic runs) | Run 2a, 7 seeds |
+### Primary endpoint — SQuAD MRR@10, Holm over 2 non-baseline arms
+
+| root | `ascii_clifford_bert` | `ascii_convnext_bert` | p_adj | verdict |
+|---|---:|---:|---:|---|
+| 512 / learned | +0.0631 | +0.0646 | 0.0290 | **BETTER** |
+| 512 / sinusoidal | +0.0061 | +0.0267 | 0.0290 | **BETTER** |
+| 64 / sinusoidal | +0.0314 | +0.0305 | 0.0290 | **BETTER** |
+| 64 / learned | +0.0528 | +0.0578 | 0.0290 | **BETTER** |
+
+**Both convolutional arms beat the transformer on the confirmatory endpoint in
+every configuration**, at n=7 against a family floor of 7 seeds. That is the
+study's one significance-tested claim, and it holds four times out of four.
+
+Withdrawing the V2 arm bought margin on unchanged data: the family fell from 3
+to 2, so the floor fell from `0.0156 x 3 = 0.0469` to `0.0156 x 2 = 0.0312`.
+The three roots' previously committed reports recorded 0.0474 — clearing 0.05 by
+0.003.
+
+> **On the 0.0290.** The exact two-sided sign-flip p at n=7 is `2/2^7` =
+> 0.015625, so the exact Holm floor is **0.0312**, not 0.0290.
+> `paired_permutation_test` samples 10,000 sign vectors even though the complete
+> set has only 128, and applies the Phipson–Smyth add-one correction; 0.0290 is
+> a Monte-Carlo estimate of 0.0312, about one standard error low. It is
+> reproducible (`RNG_SEED = 20260828`) but it is an estimate of a number that
+> could be enumerated exactly. The fix belongs in `train/common/stats.py`, which
+> is shared with other trainers and out of this study's scope. **Quote 0.0312 as
+> the floor.**
+
+### Secondary endpoints — BH over 12 tests, and ALL are UNDERPOWERED
+
+Every secondary comparison in every root returns `UNDERPOWERED`: the family is
+12 tests, whose seed floor is **9**, and the study ran **7**. That includes
+`mlm_val_loss_best` — the metric every headline table in this file is built on.
+
+| | family | seed floor | seeds run | outcome |
+|---|---:|---:|---:|---|
+| primary (`eval_squad_mrr_at_10`) | 2 | 7 | 7 | **BETTER**, all four roots |
+| secondary (6 metrics x 2 arms) | 12 | **9** | 7 | **UNDERPOWERED**, all four roots |
+
+**This is the honest statement of the study's central claim.** The MLM ordering
+`convnext < clifford < bert` is stable in all 12 cells and every one of the 28
+(configuration, seed) pairs, with p_adj values of 0.0204 that would clear 0.05 —
+but under the study's own pre-registered correction it is not a *significance-
+tested* result, because 7 seeds cannot support a 12-test BH family. `UNDERPOWERED`
+means the question was not askable at this budget, **not** that the arms are
+equivalent.
+
+Two more seeds per cell would settle it: 3 arms x 4 roots x 2 seeds = **24
+cells**, roughly 4 GPU-hours, and the entire secondary family becomes reportable.
+Withdrawing the V2 arm already moved this floor from 10 seeds to 9.
+
+### High-variance flags
+
+Two, both in the 512/learned root, both on the same metric:
+
+- `ascii_clifford_bert` `contrastive_val_loss_best`: std 0.03437 > |mean| 0.02833
+- `ascii_convnext_bert` `contrastive_val_loss_best`: std 0.03431 > |mean| 0.03205
+
+The contrastive validation loss is near zero at 512/learned, so its standard
+deviation exceeding its mean is a small-denominator artifact rather than
+instability. No metric the conclusions rest on is flagged in any root.
+
+---
+
+## The misconfigured baseline
+
+**This is the study's most reusable result, and it is a methodological one.** The
+headline was first reported as a **1.9-nat** architectural advantage for
+convolution over attention. Roughly four fifths of that number was a baseline
+that had been configured badly, and no architecture changed to recover it.
+
+### What was misconfigured
+
+Two settings, neither of which the study chose deliberately:
+
+| setting | value used | why it was wrong |
+|---|---|---|
+| `position_embedding_type` | `'learned'` — **the encoder's own default, inherited silently** | A learned table initialises at `initializer_range=0.02`, giving mean row norm **0.1987** — essentially the word table's own norm (0.1987). Training then *abandons* it: the position table **shrinks to 0.1612** while the word table **grows to 0.3283**. A sinusoidal table is fixed at row norm **8.0** for `d`=128, ~40x larger, and cannot be abandoned. |
+| `max_seq_length` | `512` | Attention over `S` positions with a near-uniform softmax gives each neighbour ~`1/S` of the attended value. At `S`=512 a positional signal that starts at the token signal's magnitude and then shrinks cannot survive the dilution. |
+
+Neither alone is the cause, and that is the point: **the failure needs a weak
+positional signal AND a long context together.** Fixing either recovers most of
+it (−1.2030 nats from positions at 512; −1.3963 from context at learned), and
+fixing both adds little more, because one interaction of −1.0743 sits between
+them.
+
+### How it presented — the tell to recognise
+
+The arm did not diverge, produce NaNs, or crash. It trained cleanly to a
+**precisely derivable wrong answer**, which is the hard case to spot.
+
+MLM leaves 10% of selected tokens unchanged, and those are free to copy. A model
+that predicts the corpus unigram everywhere and copies the unchanged tokens
+scores:
+
+| | predicted | Run 2a, 7 seeds | diagnostic runs (256 ctx) |
 |---|---:|---:|---:|
-| loss | `0.9 x 3.1135` = **2.8022** | 2.8307–2.8331 | **2.8128–2.8366** |
-| accuracy | `0.9 x 0.1532 + 0.1` = **0.2379** | 0.2321–0.2322 | **0.2314–0.2351** |
+| loss | `0.9 x 3.1135` = **2.8022** | **2.8128–2.8366** | 2.8307–2.8331 |
+| accuracy | `0.9 x 0.1532 + 0.1` = **0.2379** | **0.2314–0.2351** | 0.2321–0.2322 |
 
-The middle column is from the 256-context diagnostic runs, not from the 28-cell
-study; it carried no label saying so until 2026-08-30, and its bands are much
-tighter than the study's own cells. The right-hand column is Run 2a re-derived.
-The prediction holds against both.
+The measured arm sat on that closed-form solution to within ~0.02 nats. Against
+the reference points — `ln(101)` = 4.615 nats for a uniform guess, 3.1135 for
+character frequencies with no context — an arm at 2.8248 has learned **almost
+nothing beyond letter frequencies**, while its siblings were at 0.92–1.07.
 
-**Confirmed directly.** Perturbing the trained model's position-0 hidden state:
-reordering the whole context (identical multiset) moved it **0.83%** of
-activation scale; replacing the context moved **52.58%**. A 63x ratio — the model
-read *which* characters were present, not *where*. Consistently, its position
-table **shrank** during training (mean row norm 0.1987 → 0.1612) while the word
-table **grew** (0.1987 → 0.3283).
+Three further tells, each cheap and each worth running on any suspect baseline:
+
+1. **It had converged, not stalled early.** Doubling both context and steps moved
+   validation loss by **−0.0041 nats**. Recovering the instantaneous per-batch
+   loss (Keras logs the epoch running mean, which hides this) shows the arm flat
+   at **−0.0081 nats per 1000 steps** — ~200,000 further steps to reach where the
+   convolutional arms already were. *More compute was never going to fix it.*
+2. **It was reading content, not order.** Perturbing the trained model's
+   position-0 hidden state: reordering the whole context (identical multiset)
+   moved it **0.83%** of activation scale; replacing the context moved
+   **52.58%**. A **63x** ratio — a bag of characters.
+3. **The position table was shrinking.** Mean row norm 0.1987 → 0.1612 while the
+   word table grew 0.1987 → 0.3283. A table the model is actively walking away
+   from is not one it is using.
+
+### Why it went unnoticed for a whole run
+
+The defect is invisible to everything a sweep normally checks. Losses were
+finite, curves were smooth, serialization round-tripped, every cell reported
+`eval_ok`. The arm was simply *worse*, and "the baseline is worse" is exactly
+what a study comparing architectures **expects** to see — so the result confirmed
+the hypothesis and nobody looked further. That is the trap: **a misconfigured
+baseline is indistinguishable from a real architectural win until you attack it.**
+
+It also came in through the least visible route available. `position_embedding_type`
+was not set by the study at all; it was inherited from `EmbeddingEncoder`'s own
+default, so it appeared in no config file, no CLI flag and no run directory. It
+is now an explicit `ExperimentConfig` field for exactly that reason — the value
+lands in every run's `config.json` whether or not anyone chose it.
+
+### What it cost, and the checklist
+
+The claim went from **~1.9 nats to ~0.4** at each arm's own best cell. The
+convolutional arms still win — in all 12 cells, and at every arm's own best —
+but at roughly a fifth of the advertised size.
+
+Before believing any baseline deficit this large:
+
+- **Compute the trivial-solution score** for your objective (unigram, majority
+  class, copy) and check whether the baseline is sitting on it.
+- **Check the instantaneous loss, not the epoch mean**, and extrapolate the
+  slope. If the budget cannot reach the comparison arm, the number is a
+  statement about configuration, not architecture.
+- **Probe what the model is sensitive to** — reorder vs replace, mask vs
+  perturb — rather than only how well it scores.
+- **Watch the norms of anything learned and optional.** A table shrinking while
+  its sibling grows is a component being switched off.
+- **Record inherited defaults explicitly.** A setting that appears in no config
+  file cannot be swept, compared, or blamed.
+
+### The original diagnosis, kept
+
+The 2.878-by-step-400 figure, the −0.0081 nats/1000-steps slope, the 63x
+reorder-vs-replace ratio and the two table norms above all come from the
+256-context diagnostic runs rather than from the 28-cell study. They are
+reproducible and they are what found the defect; they are simply not Run 2a
+cells, and the middle column of the table above is labelled accordingly.
 
 ---
 

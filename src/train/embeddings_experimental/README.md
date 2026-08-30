@@ -520,11 +520,11 @@ of "no difference" — it means the question was not askable with that many seed
 
 ```python
 import math
-for m in (1, 3, 18):
+for m in (1, 2, 12):
     print(m, math.ceil(1 + math.log2(m / 0.05)))
 # 1  6      uncorrected, 6 seeds is the minimum
-# 3  7      the primary family (3 arms) needs 7
-# 18 10     the secondary family needs 10
+# 2  7      the primary family (2 non-baseline arms) needs 7  <- met
+# 12 9      the secondary family needs 9                      <- NOT met, 7 run
 # Below these, the test cannot return a significant result for ANY effect
 # size -- which is what UNDERPOWERED reports.
 ```
@@ -576,8 +576,13 @@ sign-flip permutation test, so with `n` pairs the smallest reachable p-value is
 about `2/2**n`: n=3 gives 0.248, n=5 gives 0.063, n=6 gives 0.031. The primary
 endpoint is then Holm-corrected across the non-baseline arms, which tightens the
 bar to `alpha/m`, so the requirement is `n >= 1 + log2(m/alpha)`. Verified
-against the real test: m=1 needs **6** seeds, m=3 needs **7**, m=18 needs
-**10**, m=63 needs **12**.
+against the real test: m=1 needs **6** seeds, m=2 needs **7**, m=12 needs
+**9**, m=18 needs **10**, m=63 needs **12**.
+
+As run, the study MEETS the primary floor (m=2, 7 seeds) and MISSES the
+secondary one (m=12, needs 9). So every secondary comparison — `mlm_val_loss`
+included — reports `UNDERPOWERED`, and only the primary endpoint is a tested
+claim. Two more seeds per cell (24 cells, ~4 GPU-hours) would close it.
 
 **At five seeds or fewer — six, once corrected — no effect size however large
 can be reported significant.** Such comparisons are labelled `UNDERPOWERED`
