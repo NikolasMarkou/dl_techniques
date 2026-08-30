@@ -687,3 +687,45 @@ class TestAnOomIsRetriedOnceAndNothingElseIs:
     ])
     def test_the_oom_signatures(self, tail: str, expected: bool) -> None:
         assert sweep_module.looks_like_oom(tail) is expected
+
+
+class TestAFailedCellRecordsEnoughToDiagnoseIt:
+    """A failure that records no cause is a failure you get to have twice.
+
+    Measured 2026-08-30: `ascii_bert/small/mean/seed_3` died 141 s into stage 1
+    with an EMPTY stdout and a stderr tail containing nothing but its own
+    optimizer construction. At the old 2000-char cap the framework's INFO
+    logging had already filled the window, so the real error was discarded --
+    and `looks_like_oom` was then asked to classify a tail with no error in it,
+    so it silently declined to retry.
+    """
+
+    def test_the_tail_is_large_enough_to_survive_framework_logging(self) -> None:
+        assert sweep_module.STDERR_TAIL_CHARS >= 10000, (
+            "the stderr window is small enough that TF/Keras INFO logging can "
+            "push the actual error out of it, which is how a real failure was "
+            "recorded as 'died silently'"
+        )
+
+    @pytest.mark.parametrize("code,marker", [(-9, "SIGNAL 9"), (-6, "SIGNAL 6")])
+    def test_a_signalled_death_is_labelled_as_one(self, code: int, marker: str) -> None:
+        """SIGKILL prints no traceback; the exit code IS the diagnosis."""
+        tail = (
+            f"[exit code: {code}"
+            f"{' (SIGNAL ' + str(-code) + ')' if code < 0 else ''}]\n" + "log noise"
+        )
+        assert marker in tail and f"exit code: {code}" in tail
+
+    def test_a_sigkill_is_treated_as_an_oom_and_retried(self) -> None:
+        """A host-RAM OOM and a fatal allocator abort both look like SIGKILL.
+
+        Neither prints a Python traceback, so without this the sweep cannot tell
+        them from a genuine bug and declines to retry a cell that would very
+        likely have succeeded on a second attempt.
+        """
+        assert sweep_module.looks_like_oom("[exit code: -9 (SIGNAL 9)]\nlog noise")
+
+    def test_an_ordinary_failure_is_still_not_an_oom(self) -> None:
+        assert not sweep_module.looks_like_oom(
+            "[exit code: 1]\nValueError: Unknown model 'nope'"
+        )

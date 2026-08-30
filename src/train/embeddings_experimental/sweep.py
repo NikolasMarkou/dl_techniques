@@ -185,12 +185,19 @@ def build_run_specs(
     ]
 
 
+#: How much of a failed cell's stderr to keep. Large on purpose: at 2000 chars
+#: the framework's own INFO logging filled the window and the real error was
+#: lost, which is both undiagnosable and invisible to :func:`looks_like_oom`.
+STDERR_TAIL_CHARS: int = 20000
+
 #: Substrings identifying a GPU out-of-memory failure. A cell that OOMs is not
 #: a broken cell: twice now an identical re-run has succeeded on a settled GPU.
 #: The BFC line is included because TensorFlow can turn an OOM into a FATAL
 #: allocator check rather than a Python exception, which exits the subprocess
 #: without a traceback.
 OOM_SIGNATURES: Tuple[str, ...] = (
+    "exit code: -9",
+    "Killed",
     "ResourceExhaustedError",
     "Out of memory while trying to allocate",
     "OOM when allocating tensor",
@@ -263,7 +270,22 @@ def run_one(
             timeout=timeout,
         )
         ok = completed.returncode == 0
-        stderr_tail = completed.stderr[-2000:]
+        # Keep enough stderr to CONTAIN the error. At 2000 chars the model-build
+        # INFO logging alone overflowed the window, so a cell that died silently
+        # 141 s into stage 1 recorded nothing but its optimizer construction --
+        # the actual cause was discarded before anyone could read it, and
+        # `looks_like_oom` was asked to classify a tail with no error in it.
+        stderr_tail = completed.stderr[-STDERR_TAIL_CHARS:]
+        if not ok:
+            # A negative return code is a SIGNAL, not a Python exception: -9 is
+            # SIGKILL, which is what the host OOM killer and a fatal allocator
+            # abort both look like, and neither prints a traceback. Recording it
+            # is the difference between "died silently" and a diagnosis.
+            stderr_tail = (
+                f"[exit code: {completed.returncode}"
+                f"{' (SIGNAL ' + str(-completed.returncode) + ')' if completed.returncode < 0 else ''}]\n"
+                + stderr_tail
+            )
         stdout = completed.stdout
     except subprocess.TimeoutExpired:
         ok, stderr_tail, stdout = False, f"TIMEOUT after {timeout:.0f}s", ""
