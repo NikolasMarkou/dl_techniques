@@ -24,6 +24,19 @@ the ConvNeXt arm starts at 1.0 and so collapses "only" two orders. Both are
 fatal, and one bound at 0.5 separates health from either defect -- but note that
 a threshold tuned to the Clifford arm's 1e-13 alone would be far too generous
 to catch the ConvNeXt arm.
+
+**Do NOT extend this guard to the transformer arm.** The exclusion is not just
+"it does not need it": the oracle below is structurally incapable of seeing the
+defect there. `TransformerLayer` runs post-LN in this study, so a `LayerNorm`
+sets the output scale regardless of whether the residual is present. Measured
+2026-08-30 by deleting BOTH residual adds from the post-LN path and chaining
+four layers: the surviving-RMS ratio is **1.00330 with the residuals and
+1.00330 without them** -- bit-identical. A test added here for the transformer
+would pass in both directions and pin nothing.
+
+That defect is not unguarded, it is just guarded elsewhere: injecting it reddens
+`test_the_positional_signal_survives_the_embedding_sum` (dominance falls to
+0.00x for `ascii_bert`) and `test_different_strategies_give_different_embeddings`.
 """
 
 import keras

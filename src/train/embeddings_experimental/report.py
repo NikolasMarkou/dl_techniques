@@ -113,6 +113,18 @@ HEADLINE_METRICS: Dict[str, MetricSpec] = {
         "Contrastive val loss (best)", "min", "secondary"
     ),
     # --- diagnostics: no verdict, no p-value --------------------------
+    # Whitened retrieval is DIAGNOSTIC, not secondary, and the choice is
+    # load-bearing. RESULTS.md asks for raw and whitened to be quoted together,
+    # but promoting these to `secondary` would grow the BH family from 18 tests
+    # to 24 and so RAISE the seed floor the README derives (18 tests -> 10
+    # seeds). A post-hoc transform of an existing endpoint should not cost the
+    # study statistical power it then has to buy back with GPU time.
+    "eval_squad_whitened_recall_at_1": MetricSpec(
+        "SQuAD R@1, ZCA-whitened", "max", "diagnostic"
+    ),
+    "eval_squad_whitened_mrr_at_10": MetricSpec(
+        "SQuAD MRR@10, ZCA-whitened", "max", "diagnostic"
+    ),
     "eval_squad_median_rank": MetricSpec(
         "SQuAD median rank", "min", "diagnostic"
     ),

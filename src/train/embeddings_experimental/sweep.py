@@ -361,6 +361,58 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+#: Basename of the per-sweep failure log. One producer, so a reader and a
+#: writer cannot disagree about where it lives.
+FAILURES_LOG_FILENAME: str = "failures.log"
+
+
+def failures_log_path(sweep_root: str) -> str:
+    """Return the failure-log path for a sweep root.
+
+    :param sweep_root: The sweep root directory.
+    :type sweep_root: str
+    :return: Absolute or relative path to the failure log.
+    :rtype: str
+    """
+    return os.path.join(sweep_root, FAILURES_LOG_FILENAME)
+
+
+def write_failures_log(
+        sweep_root: str,
+        failures: Sequence[Tuple[str, str]],
+) -> Optional[str]:
+    """Write the failure log, or REMOVE a stale one when nothing failed.
+
+    The removal is the point. Until 2026-08-30 this was a bare ``if failures:``
+    that only ever wrote, so a cell that failed and was then re-run to
+    completion left its old entry behind for good. That happened: the
+    ``embeddings_study_512_sinusoidal_maxpool`` root carries a ``failures.log``
+    naming two ``ascii_clifford_bert`` cells that OOMed in the contrastive
+    stage, both of which subsequently succeeded with byte-identical argv. The
+    file could only be interpreted by comparing its mtime against each cell's,
+    and a reader who trusted it would have discarded two good cells.
+
+    Absence of the file is now the signal that a sweep root is clean.
+
+    :param sweep_root: The sweep root directory.
+    :type sweep_root: str
+    :param failures: ``(cell_id, stderr_tail)`` for each failed cell.
+    :type failures: Sequence[Tuple[str, str]]
+    :return: The path written, or ``None`` if nothing failed.
+    :rtype: Optional[str]
+    """
+    path = failures_log_path(sweep_root)
+    if not failures:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"all cells succeeded; removed stale {path}")
+        return None
+    with open(path, "w") as handle:
+        for cell_id, tail in failures:
+            handle.write(f"=== {cell_id} ===\n{tail}\n\n")
+    return path
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point.
 
@@ -421,11 +473,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         json.dump(records, handle, indent=2)
     logger.info(f"Collected {len(records)} cells -> {summary_path}")
 
-    if failures:
-        failures_path = os.path.join(args.sweep_root, "failures.log")
-        with open(failures_path, "w") as handle:
-            for cell_id, tail in failures:
-                handle.write(f"=== {cell_id} ===\n{tail}\n\n")
+    failures_path = write_failures_log(args.sweep_root, failures)
+    if failures_path is not None:
         logger.error(f"{len(failures)} cell(s) failed; see {failures_path}")
         return 1
     return 0
