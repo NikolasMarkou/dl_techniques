@@ -309,10 +309,21 @@ class SymmetricInfoNCELoss(keras.losses.Loss):
 
         # DECISION plan-2026-08-30T191258-29fae917/D-002
         # RETURN THE (batch,) VECTOR. Do NOT restore the reference's scalar
-        # `keras.ops.mean(forward + backward) / 2.0`: a scalar is passed through the
-        # parent's reduction unchanged (keras/src/losses/loss.py:143-147), silently
-        # bypassing sample_weight, masking and scale_loss_for_distribution. The reduced
-        # value is identical either way -- that is measured, not the reason. decisions.md D-002.
+        # `keras.ops.mean(forward + backward) / 2.0`. The reduced value is identical
+        # either way when no weights are passed (measured bit-exact) -- that is NOT the
+        # reason. The reason is what a scalar does to sample_weight, MEASURED:
+        #   * with no sample_weight, a rank-0 return hits the early return in
+        #     `reduce_values` (keras/src/losses/loss.py:143-147) and skips reduction --
+        #     and with it `scale_loss_for_distribution`;
+        #   * with a sample_weight, `reduce_weighted_values` computes
+        #     `values * sample_weight` BEFORE reducing, so the scalar BROADCASTS to
+        #     (batch,) and is then divided by batch. The result is
+        #     `whole_batch_loss * mean(sample_weight)`: every sample is charged the
+        #     batch aggregate and WHICH samples were weighted is silently discarded.
+        # Measured on 8 rows with a one-hot weight keeping only row 0: this vector form
+        # gives 0.5340447 (= per_sample[0]/8, correct); the scalar form gives 0.7308553
+        # (= 5.8468428/8, the unweighted batch loss scaled by mean(sw)). A plausible
+        # wrong number, not an error. See decisions.md D-002.
         return (forward + backward) / 2.0
 
     def get_config(self) -> Dict[str, Any]:
