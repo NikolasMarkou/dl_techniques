@@ -40,9 +40,9 @@ characters against contexts of 774. But swapping to a length-invariant readout
 does **not** recover retrieval: it helps one arm 3.6x and sends the other to
 chance. For retrieval, use **learned positions**.
 
-**5. Every raw retrieval number below understates these encoders by ~3.3x.** ZCA
-whitening lifts the learned-position convolutional arms from R@1 ~0.060 to ~0.21,
-on 9 of 9 cells, with no retraining.
+**5. Every raw retrieval number below understates these encoders by ~3.3x-3.9x.**
+ZCA whitening lifts the learned-position convolutional arms from R@1 ~0.060 to
+~0.23, on **21 of 21 cells**, with no retraining.
 
 ---
 
@@ -379,31 +379,74 @@ are all from clean cells.
 
 ## The largest retrieval win here is free
 
-Full 2000-query protocol, 3 seeds per cell, ZCA whitening fitted on the context
-pool (no queries, no labels):
+Full 2000-query protocol, **7 seeds per cell**, ZCA whitening fitted on the
+context pool (embeddings only — no queries, no labels). Re-measured 2026-08-30
+from the saved encoders; see the correction below for what this replaces.
 
-| arm | learned raw | learned + ZCA | gain | sinusoidal raw | sinusoidal + ZCA |
-|---|---:|---:|---:|---:|---:|
-| `ascii_bert` | 0.0102 | 0.0102 | **1.00x** | 0.0040 | 0.0013 |
-| `ascii_clifford_bert` | 0.0598 | **0.2178** | 3.64x | 0.0435 | 0.0212 |
-| `ascii_convnext_bert` | 0.0590 | **0.2075** | 3.52x | 0.0280 | 0.0047 |
-| `ascii_convnext_v2_bert` | 0.0647 | **0.2110** | 3.26x | 0.0535 | 0.0297 |
+| arm | learned raw | learned + ZCA | gain | cells gaining |
+|---|---:|---:|---:|---|
+| `ascii_bert` | 0.0129 | 0.0084 | **0.65x** | 0 / 7 |
+| `ascii_clifford_bert` | 0.0587 | **0.2304** | **3.92x** | 7 / 7 |
+| `ascii_convnext_bert` | 0.0594 | **0.2268** | **3.82x** | 7 / 7 |
+| `ascii_convnext_v2_bert` | 0.0681 | **0.2272** | **3.34x** | 7 / 7 |
 
-**9 of 9 learned convolutional cells gain (3.09x–3.97x, no exceptions); 12 of 12
-sinusoidal cells lose.** `ascii_bert` with learned positions gains exactly
-nothing — its own confirmation, since that model is a bag of characters with no
-drowned structure to recover. Whitening therefore works as a **diagnostic** as
-much as a fix: it helps only where low-variance directions carry content.
+| arm | sinusoidal raw | sinusoidal + ZCA | gain | cells gaining |
+|---|---:|---:|---:|---|
+| `ascii_bert` | 0.0019 | 0.0010 | 0.54x | 1 / 7 |
+| `ascii_clifford_bert` | 0.0061 | **0.0469** | **7.72x** | **7 / 7** |
+| `ascii_convnext_bert` | 0.0170 | 0.0059 | 0.34x | 0 / 7 |
+| `ascii_convnext_v2_bert` | 0.0507 | 0.0386 | 0.76x | 1 / 7 |
 
-**It is not transductive.** Fitting the transform on 3000 SST-2 sentences —
-movie reviews, a different domain from the Wikipedia paragraphs being retrieved —
-keeps ~90% of the gain:
+**All 21 learned convolutional cells gain — 3.34x to 3.92x by arm, 3.12x to
+5.19x by cell, no exceptions.** That is the headline result and it is stronger
+than the 3-seed version this file used to carry.
 
-| arm | raw | ZCA fit on the pool | ZCA fit on SST-2 |
-|---|---:|---:|---:|
-| `ascii_clifford_bert` | 0.0575 | 0.2145 | **0.1865** |
-| `ascii_convnext_bert` | 0.0595 | 0.2060 | **0.1925** |
-| `ascii_convnext_v2_bert` | 0.0620 | 0.2085 | **0.1940** |
+Whitening works as a **diagnostic** as much as a fix: it helps only where
+low-variance directions carry content.
+
+> **Correction, 2026-08-30 (review).** Three things in the previous version of
+> this section were wrong, and one had no source.
+>
+> 1. **"`ascii_bert` with learned positions gains exactly nothing (1.00x) — its
+>    own confirmation."** At 7 seeds that arm **loses 35%** (0.0129 → 0.0084),
+>    with 0 of 7 cells gaining; the per-cell gains are 0.87, 1.00, 0.62, 0.78,
+>    0.52, 0.13, 0.95. The "exactly 1.00x" was seed 1 alone. The point it was
+>    making — that whitening finds nothing in a bag of characters — is if
+>    anything stronger, but it was a coincidence read as a result.
+> 2. **"12 of 12 sinusoidal cells lose."** `ascii_clifford_bert`/sinusoidal
+>    **gains 7.72x on 7 of 7 cells** — the largest whitening gain anywhere in
+>    this study — and it was recorded as a loss.
+> 3. **The old table's numbers are not re-derivable.** `squad_whitened_*` was
+>    added by `8915409e2`, *after* Runs 1–4, so the four 28-cell roots carry no
+>    whitened keys at all and both whitening tables came from an ad-hoc
+>    measurement whose artifacts were not kept. The old "sinusoidal raw" column
+>    matched **no stored root** at 3 or 7 seeds (it gave clifford 0.0435 against
+>    0.0061 at 512/sinusoidal and 0.0531 at 64/sinusoidal).
+>
+> The tables above are re-derived from the saved `encoder.keras` of every cell,
+> with the whitening path first checked against the shipped code on the 6
+> maxpool cells that *do* carry stored `squad_whitened_*` values — **6 of 6
+> identical**.
+
+**It is not transductive**, and this is now measured by a route that exists in
+the code. Fitting the transform on a random **half** of the context pool, and
+separately on the **queries** — short questions rather than long paragraphs, a
+different length and register — at 512/learned, 7 seeds:
+
+| arm | raw | fit on the pool | fit on half the pool | fit on the queries |
+|---|---:|---:|---:|---:|
+| `ascii_clifford_bert` | 0.0587 | 0.2304 | **0.2135** | **0.2582** |
+| `ascii_convnext_bert` | 0.0594 | 0.2268 | **0.2119** | **0.2557** |
+| `ascii_convnext_v2_bert` | 0.0681 | 0.2272 | **0.2110** | **0.2469** |
+
+A half-size fit keeps ~93% of the gain and a fit on a different text
+distribution *beats* fitting on the pool.
+
+> **Correction, 2026-08-30 (review).** This paragraph used to cite a fit on
+> 3000 SST-2 sentences keeping "~90% of the gain". **That measurement has no
+> code anywhere in the study** — `evaluate_embeddings.py` only ever fits on the
+> context pool — so it could not be reproduced. The conclusion it supported is
+> confirmed above by two fits that can be.
 
 So it is a property of the embedding space, not of the corpus: fit once on
 arbitrary text, ship it with the encoder, no index-time corpus access. This is
@@ -411,7 +454,8 @@ the known BERT-whitening result (Su et al., 2021) reproducing on character-level
 encoders — a reason to trust it rather than to discount it.
 
 **Consequence for this file.** Every `squad_*` number above is raw cosine and
-understates these encoders by ~3.3x. The ordering also changes: raw ranks
+understates these learned-position convolutional encoders by 3.3x-3.9x. The
+ordering also changes: raw ranks
 `convnext_v2` clearly first; whitened puts the three convolutional arms within
 0.01 of each other. Quote both.
 
@@ -456,7 +500,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while both conv arms measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. |
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix — and R@1 does not move. Clifford also lost 10x with anisotropy slightly *improving*, and across arms the anisotropy rise is *anti-correlated* with the damage. |
-| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes sinusoidal models **worse** (0.0040 → 0.0013). Correct for the learned-position conv arms — that is where the 3.3x came from — but wrong here. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
+| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **three of the four** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059, `convnext_v2` 0.0507 → 0.0386). Correct for the learned-position conv arms — that is where the 3.3x-3.9x came from — but wrong for those three. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
 | **"A length-invariant readout will fix retrieval"** — my own prediction | `max` pooling IS length-invariant (0.9693 vs `mean`'s 0.3805) and does not fix it: bert falls to chance (0.00033) while clifford improves 3.6x (0.02167), neither reaching its learned-position baseline. Length drift is real and contributory, not sufficient. |
 | **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
 | **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
@@ -505,7 +549,7 @@ absolute numbers do not.
 64-character window sees a prefix, not a passage.
 
 **Absolute quality is low.** The best raw cell is `convnext_v2`/learned at R@1
-0.0681 — 141x chance, and still under 7%. Whitened it is ~0.21. These are
+0.0681 — 141x chance, and still under 7%. Whitened it is ~0.23. These are
 6000-step `tiny` models.
 
 ---

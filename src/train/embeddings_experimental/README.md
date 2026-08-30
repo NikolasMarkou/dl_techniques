@@ -113,16 +113,16 @@ remedy.
 
 ### Report retrieval whitened as well as raw
 
-Raw cosine understates these encoders by **~3.3x**. ZCA whitening lifts the
-learned-position convolutional arms from R@1 ~0.060 to ~0.21 on 9 of 9 cells,
-needs no retraining, and keeps ~90% of the gain when fitted on an unrelated
-corpus, so it is not transductive. Every `squad_*` metric now has a
+Raw cosine understates these encoders by **3.3x-3.9x**. ZCA whitening lifts the
+learned-position convolutional arms from R@1 ~0.060 to ~0.23 on **21 of 21
+cells**, needs no retraining, and keeps ~93% of the gain when fitted on half the
+pool (and *improves* when fitted on the queries), so it is not transductive. Every `squad_*` metric now has a
 `squad_whitened_*` twin, fitted on the context pool (embeddings only — no
 queries, no labels).
 
 It is also **diagnostic**: it helps only where low-variance directions carry
-content. It gains exactly 1.00x on `ascii_bert`/learned, and *loses* on 12 of 12
-sinusoidal cells. **`eval.json` from Runs 1-4 predates this and carries raw
+content. It *loses* on `ascii_bert`/learned (0.65x, 0 of 7 cells gaining) and on three of
+the four sinusoidal arms — but `ascii_clifford_bert`/sinusoidal gains 7.72x. **`eval.json` from Runs 1-4 predates this and carries raw
 metrics only.**
 
 ### The guards
