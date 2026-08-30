@@ -658,3 +658,96 @@ class TestNeuroGrid:
         assert not keras.ops.any(keras.ops.isnan(output))
 
 # Run tests with: pytest test_neurogrid.py -v
+
+class TestNeuroGridProjectionIndependence:
+    """Guard for C-5: the per-dimension projections must draw INDEPENDENT kernels.
+
+    ``NeuroGrid`` builds one ``Dense`` per grid axis in a loop. Handing the SAME
+    resolved ``Initializer`` INSTANCE to every one of them makes all of them draw
+    bit-identically at every matching shape, because a Keras 3 initializer
+    instance self-assigns a seed on first use and then re-emits it. The remedy is
+    ``clone_initializer`` per projection.
+
+    Two properties make this guard able to see the defect at all:
+
+    * ``grid_shape``'s first two axes are EQUAL, so projections 0 and 1 have the
+      same kernel shape and "identical" is a meaningful question.
+    * the initializer is an explicit UNSEEDED ``RandomNormal``. Under the
+      ``'glorot_uniform'``/``'zeros'`` defaults a constant tensor is identical
+      either way, which is how this defect stayed invisible to 194 tests.
+
+    The identity census is restricted to NON-CONSTANT tensors (``std > 0``).
+    Comparing every tensor would report false identical pairs purely from
+    all-zero bias vectors of equal shape.
+    """
+
+    @staticmethod
+    def _non_constant(tensor: np.ndarray) -> bool:
+        """A tensor is non-constant when its standard deviation is strictly > 0."""
+        return float(np.std(tensor)) > 0.0
+
+    def test_projection_kernels_are_not_identical(self):
+        """Same-shaped projection kernels must differ under an unseeded initializer."""
+        layer = NeuroGrid(
+            grid_shape=[5, 5, 4],
+            latent_dim=8,
+            kernel_initializer=keras.initializers.RandomNormal(),
+            bias_initializer=keras.initializers.RandomNormal(),
+        )
+        layer.build((None, 16))
+
+        kernels = [np.array(p.kernel) for p in layer.projection_layers]
+
+        # Restrict the census to non-constant tensors (std > 0).
+        indices = [i for i, k in enumerate(kernels) if self._non_constant(k)]
+        assert len(indices) >= 2, (
+            "census needs at least two non-constant kernels to be meaningful, "
+            f"got {len(indices)}"
+        )
+
+        identical_pairs = [
+            (i, j)
+            for a, i in enumerate(indices)
+            for j in indices[a + 1:]
+            if kernels[i].shape == kernels[j].shape
+            and np.array_equal(kernels[i], kernels[j])
+        ]
+
+        assert identical_pairs == [], (
+            "projection kernels share one initializer instance: identical pairs "
+            f"{identical_pairs}; max abs diff for pair (0, 1) = "
+            f"{np.max(np.abs(kernels[0] - kernels[1]))}"
+        )
+
+    def test_projection_biases_are_not_identical(self):
+        """Same-shaped projection biases must differ under an unseeded initializer."""
+        layer = NeuroGrid(
+            grid_shape=[5, 5, 4],
+            latent_dim=8,
+            use_bias=True,
+            kernel_initializer=keras.initializers.RandomNormal(),
+            bias_initializer=keras.initializers.RandomNormal(),
+        )
+        layer.build((None, 16))
+
+        biases = [np.array(p.bias) for p in layer.projection_layers]
+
+        indices = [i for i, b in enumerate(biases) if self._non_constant(b)]
+        assert len(indices) >= 2, (
+            "census needs at least two non-constant biases to be meaningful, "
+            f"got {len(indices)}"
+        )
+
+        identical_pairs = [
+            (i, j)
+            for a, i in enumerate(indices)
+            for j in indices[a + 1:]
+            if biases[i].shape == biases[j].shape
+            and np.array_equal(biases[i], biases[j])
+        ]
+
+        assert identical_pairs == [], (
+            "projection biases share one initializer instance: identical pairs "
+            f"{identical_pairs}; max abs diff for pair (0, 1) = "
+            f"{np.max(np.abs(biases[0] - biases[1]))}"
+        )

@@ -66,6 +66,7 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -236,9 +237,12 @@ class NeuroGrid(keras.layers.Layer):
     :param entropy_regularizer_strength: Strength of entropy
         regularisation encouraging sharper distributions. Non-negative.
     :type entropy_regularizer_strength: float
-    :param kernel_initializer: Initializer for projection Dense kernels.
+    :param kernel_initializer: Initializer for projection Dense kernels. Each
+        projection receives its OWN copy, so the per-axis kernels are drawn
+        independently rather than all taking the same draw.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param bias_initializer: Initializer for projection Dense biases.
+    :param bias_initializer: Initializer for projection Dense biases. Copied
+        per projection on the same terms as ``kernel_initializer``.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
     :param grid_initializer: Initializer for the grid latent vectors.
     :type grid_initializer: Union[str, keras.initializers.Initializer]
@@ -353,14 +357,12 @@ class NeuroGrid(keras.layers.Layer):
                 units=dim_size,
                 use_bias=self.use_bias,
                 activation=None,
-                # KNOWN DEFECT (measured 2026-08-30): every projection in this
-                # loop receives the SAME resolved Initializer INSTANCE, so all N
-                # draw bit-identical kernels (max abs diff 0.0; a control shows
-                # two separate instances differ). Fix is clone_initializer(...)
-                # per projection, as baseline_ntm.py already does at 20 sites.
-                # Changing it moves initial weights, so re-baseline seeded tests.
-                kernel_initializer=self.kernel_initializer,
-                bias_initializer=self.bias_initializer,
+                # One INDEPENDENT initializer copy per projection. A single
+                # Initializer instance re-emits the same tensor at every
+                # matching shape, which would start all N projections
+                # bit-identical. Same pattern as baseline_ntm.py.
+                kernel_initializer=clone_initializer(self.kernel_initializer),
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name=f'projection_{i}'
