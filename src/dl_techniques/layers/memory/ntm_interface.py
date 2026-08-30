@@ -132,11 +132,8 @@ class MemoryState:
     The external memory matrix and everything carried alongside it.
 
     One instance describes memory at one point in a sequence. `memory` is the
-    only required field; the rest exist so richer variants (DNC-style memory,
-    usage tracking) can carry their own state through the same object.
-
-    `temporal_links` and `precedence` are declared for DNC-style variants and
-    are never set to anything but None by the NTM in `baseline_ntm.py`.
+    only required field; the rest exist so richer variants (usage tracking)
+    can carry their own state through the same object.
 
     **Architecture Overview:**
 
@@ -148,8 +145,6 @@ class MemoryState:
         │ usage          │ (batch, N)          or None  │
         │ write_weights  │ (batch, H, N)       or None  │
         │ read_weights   │ (batch, H, N)       or None  │
-        │ temporal_links │ DNC-style links     or None  │
-        │ precedence     │ temporal ordering   or None  │
         │ metadata       │ dict, default {}             │
         └────────────────┴──────────────────────────────┘
                  │
@@ -166,10 +161,6 @@ class MemoryState:
     :ivar read_weights: Most recent read weights of shape (batch, H, N),
         or None.
     :vartype read_weights: Any | None
-    :ivar temporal_links: Temporal link matrix for DNC-style memory, or None.
-    :vartype temporal_links: Any | None
-    :ivar precedence: Precedence weights for temporal ordering, or None.
-    :vartype precedence: Any | None
     :ivar metadata: Free dictionary for variant-specific state. Defaults to an
         empty dict.
     :vartype metadata: dict[str, Any]
@@ -179,8 +170,6 @@ class MemoryState:
     usage: Any | None = None
     write_weights: Any | None = None
     read_weights: Any | None = None
-    temporal_links: Any | None = None
-    precedence: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def clone(self) -> "MemoryState":
@@ -199,8 +188,6 @@ class MemoryState:
             usage=self.usage,
             write_weights=self.write_weights,
             read_weights=self.read_weights,
-            temporal_links=self.temporal_links,
-            precedence=self.precedence,
             metadata=dict(self.metadata),
         )
 
@@ -216,8 +203,8 @@ class HeadState:
     `gamma`, and a write head additionally fills `erase_vector` and
     `add_vector`.
 
-    `read_vector` is declared here but no head in `layers/memory/` sets it.
-    The read result travels in `NTMOutput.read_vectors` instead.
+    The read result does not travel here; it travels in
+    `NTMOutput.read_vectors`.
 
     **Architecture Overview:**
 
@@ -226,7 +213,6 @@ class HeadState:
         N = num_slots, M = memory_dim
         ┌──────────────┬───────────────────────────────────┐
         │ weights      │ (batch, N)            always set  │
-        │ read_vector  │ (batch, M)            or None     │
         │ key          │ (batch, M)            content     │
         │ beta         │ (batch, 1)            content     │
         │ gate         │ (batch, 1)            HYBRID only │
@@ -239,8 +225,6 @@ class HeadState:
 
     :ivar weights: Attention weights over memory slots, shape (batch, N).
     :vartype weights: Any
-    :ivar read_vector: Last read vector, shape (batch, M), or None.
-    :vartype read_vector: Any | None
     :ivar key: Content-addressing key, shape (batch, M), or None.
     :vartype key: Any | None
     :ivar beta: Key strength, shape (batch, 1), or None.
@@ -263,7 +247,6 @@ class HeadState:
     """
 
     weights: Any
-    read_vector: Any | None = None
     key: Any | None = None
     beta: Any | None = None
     gate: Any | None = None

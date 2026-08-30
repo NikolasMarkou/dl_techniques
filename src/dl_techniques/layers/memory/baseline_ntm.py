@@ -91,8 +91,7 @@ class NTMMemory(BaseMemory):
         │ add:    ... + w * a                              │
         └───────────────────┬──────────────────────────────┘
                             ▼
-        MemoryState(memory=M', usage/temporal_links/
-        precedence carried through unchanged)
+        MemoryState(memory=M', usage carried through unchanged)
 
     Note:
         This class takes no `epsilon`. One was declared, stored and
@@ -218,8 +217,8 @@ class NTMMemory(BaseMemory):
         each slot is modified in proportion to its weight. A slot
         with weight 0 is left exactly as it was.
 
-        `usage`, `temporal_links` and `precedence` are carried
-        through unchanged; this class does not maintain them.
+        `usage` is carried through unchanged; this class does not
+        maintain it.
 
         :param memory_state: The state holding the memory to write to.
         :type memory_state: MemoryState
@@ -253,8 +252,6 @@ class NTMMemory(BaseMemory):
         return MemoryState(
             memory=new_memory,
             usage=memory_state.usage,
-            temporal_links=memory_state.temporal_links,
-            precedence=memory_state.precedence,
         )
 
     def get_config(self) -> dict[str, Any]:
