@@ -1,43 +1,51 @@
 """
-Memory-Augmented Neural Networks Package.
+Memory-augmented and topographic-memory layers.
 
-This package consolidates memory-augmented and topographic-memory layer families
-that were previously split across `layers/ntm/` and `layers/memory/`. It provides:
+This package is the single home for layer families that were previously split
+across `layers/ntm/` and `layers/memory/`. Two families live here, plus a
+standalone grid layer:
 
-* **NTM family** — Neural Turing Machine (Graves et al., 2014): differentiable
-  external memory with content + location addressing. Re-exported from
-  `ntm_interface` and `baseline_ntm`.
-* **SOM family** — Self-Organizing Maps (Kohonen, 1982): 2D, ND, and soft
-  variants. Defined in `som_2d_layer.py`, `som_nd_layer.py`, `som_nd_soft_layer.py`.
+* **NTM** (Graves et al., 2014): differentiable external memory with content and
+  location addressing. Interfaces in `ntm_interface.py`, implementation in
+  `baseline_ntm.py`.
+* **SOM** (Kohonen, 1982): Self-Organizing Maps, in 2D, N-D and soft variants.
+* **NeuroGrid**: a topographic memory grid with differentiable soft assignment.
 
-Modules:
-    ntm_interface: Abstract base classes, dataclasses, enums, and utilities.
-    baseline_ntm: Production-ready NTM implementation + factory.
-    som_nd_layer: N-dimensional Self-Organizing Map layer (hard winner).
-    som_2d_layer: 2D Self-Organizing Map layer (subclass of SOMLayer).
-    som_nd_soft_layer: Soft (differentiable) N-dimensional SOM layer.
+`__all__` re-exports 26 names. Import from the package, not the modules.
 
-NTM Classes:
-    Interface:
-        - BaseMemory, BaseHead, BaseController, BaseNTM
-    State / Config:
-        - MemoryState, HeadState, NTMOutput, NTMConfig
-    Enumerations:
-        - AddressingMode, MemoryAccessType
-    Baseline Implementation:
-        - NTMMemory, NTMReadHead, NTMWriteHead, NTMController, NTMCell,
-          NeuralTuringMachine
+**Package Surface:**
 
-NTM Functions:
-    - create_ntm, cosine_similarity, circular_convolution, sharpen_weights
+.. code-block:: text
 
-Factory Functions:
-    - create_mann — Memory-Augmented Neural Network (Santoro et al., 2016)
-      knobs, built on the NTM pipeline; returns a `NeuralTuringMachine`.
-    - create_som_2d — 2D Self-Organizing Map.
+    dl_techniques.layers.memory
+      │
+      ├─ ntm_interface.py      enums, state dataclasses, ABCs,
+      │                        addressing utilities
+      ├─ baseline_ntm.py       NTMMemory, NTMReadHead,
+      │                        NTMWriteHead, NTMController,
+      │                        NTMCell, NeuralTuringMachine,
+      │                        create_ntm
+      ├─ som_nd_layer.py       SOMLayer (N-D, hard winner)
+      ├─ som_2d_layer.py       SOM2dLayer (2D SOMLayer subclass)
+      ├─ som_nd_soft_layer.py  SoftSOMLayer (differentiable)
+      ├─ neuro_grid.py         NeuroGrid
+      └─ factory.py            create_mann, create_som_2d
 
-SOM Classes:
-    - SOMLayer (ND, hard winner), SOM2dLayer (2D specialization), SoftSOMLayer
+Exported names, by group:
+
+* Enums: `AddressingMode`, `MemoryAccessType`.
+* State and config: `MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig`.
+* Abstract bases: `BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM`.
+* Addressing utilities: `cosine_similarity`, `circular_convolution`,
+  `sharpen_weights`.
+* NTM layers: `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`,
+  `NTMCell`, `NeuralTuringMachine`.
+* SOM layers: `SOMLayer`, `SOM2dLayer`, `SoftSOMLayer`.
+* Grid layer: `NeuroGrid`.
+* Builders: `create_ntm`, `create_mann`, `create_som_2d`.
+
+There is no standalone MANN class. `create_mann` returns a configured
+`NeuralTuringMachine`; see `factory.py` for why.
 
 Example:
     >>> from dl_techniques.layers.memory import (
@@ -99,7 +107,8 @@ from .neuro_grid import NeuroGrid
 # Factory (recommended construction surface)
 # ---------------------------------------------------------------------------
 
-from .factory import create_mann, create_som_2d  # noqa: E402  (after class imports)
+# Imported last so the classes above are already bound.
+from .factory import create_mann, create_som_2d
 
 
 __all__ = [

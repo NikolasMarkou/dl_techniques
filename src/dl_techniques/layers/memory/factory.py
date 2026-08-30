@@ -1,34 +1,31 @@
 """
 Factory functions for the `dl_techniques.layers.memory` package.
 
-This module is the recommended entry point for constructing memory-augmented
-layers via configuration rather than direct class instantiation. It exposes a
-single, consistent function-call surface across the three families:
+Build a memory-augmented layer from configuration instead of instantiating the
+class yourself. Three builders share one call shape:
 
-* `create_ntm(...)` — Neural Turing Machine (wraps `NTMCell` inside `keras.layers.RNN`).
-* `create_mann(...)` — Memory-Augmented Neural Network configured as an NTM
-  (uses the NTM RNN-cell pipeline with MANN-equivalent knobs).
-* `create_som_2d(...)` — 2D Self-Organizing Map.
+* `create_ntm(...)`: Neural Turing Machine. Defined in `baseline_ntm.py` and
+  re-exported here.
+* `create_mann(...)`: Memory-Augmented Neural Network. Returns a
+  `NeuralTuringMachine` configured through MANN-style argument names.
+* `create_som_2d(...)`: 2D Self-Organizing Map.
 
-All three return fully-built Keras layers ready for use in `keras.Sequential`
-or the functional API.
+Each one returns a built Keras layer, ready for `keras.Sequential` or the
+functional API.
 
 # DECISION plan_2026-05-13_8c1dc6fd/D-002
-`create_mann` returns a `NeuralTuringMachine`, not a dedicated MANN class.
-Rationale (see plan decisions.md D-002): a standalone MANN layer duplicates the
-NTM addressing/read/write logic that `NTMCell` already implements, and the
-NTM RNN-cell wrapper subsumes the LSTMCell-based rewrite originally proposed
-as R4. Output shape is preserved (`controller_units + num_read_heads * memory_dim`),
-so this is an implementation choice, not a shape contract change.
+`create_mann` returns a `NeuralTuringMachine`, not a dedicated MANN class. Do
+NOT add one: it duplicates addressing/read/write logic `NTMCell` already has,
+and the NTM RNN-cell wrapper subsumes the LSTMCell rewrite proposed as R4.
+Output width is unchanged: `controller_units + num_read_heads * memory_dim`.
+The plan that owned this decision is gone; this note is the only record left.
 
 # DECISION plan-2026-08-03T161943-02be1d7e/D-004
-The legacy `MannLayer` class (`mann.py`) that the paragraph above refers to has
-been DELETED. Do NOT reintroduce a standalone MANN class as a "simpler" or
-"more faithful" alternative to this factory: the deleted class had zero
-consumers, was unreachable through this module, and carried its own independent
-copy of the location-shift math — the two copies drifted and one was fixed
-while the other stayed wrong. `create_mann(...)` is the only MANN construction
-path. See decisions.md D-004.
+The legacy `MannLayer` class (`mann.py`) the note above refers to is DELETED.
+Do NOT reintroduce a standalone MANN class as a "simpler" or "more faithful"
+alternative: it had zero consumers, was unreachable from this module, and kept
+its own copy of the location-shift math; the two copies drifted and only one
+was fixed. `create_mann(...)` is the only MANN path. See decisions.md D-004.
 """
 
 from __future__ import annotations
@@ -53,36 +50,92 @@ def create_mann(
     **kwargs: Any,
 ) -> NeuralTuringMachine:
     """
-    Construct a Memory-Augmented Neural Network as a configured `NeuralTuringMachine`.
+    Build a Memory-Augmented Neural Network as a configured `NeuralTuringMachine`.
 
-    The output dimensionality is set to
-    ``output_dim = controller_units + num_read_heads * memory_dim`` to preserve
-    the historical MANN shape contract. The internal
-    architecture is the standard NTM (NTMMemory + NTMReadHead + NTMWriteHead +
-    NTMController wrapped in keras.layers.RNN(NTMCell)).
+    This function only assembles configuration. It packs the MANN-style keyword
+    arguments into an `NTMConfig`, computes
+    ``output_dim = controller_units + num_read_heads * memory_dim`` to keep the
+    historical MANN output width, and hands both to `NeuralTuringMachine`. The
+    architecture you get is the standard NTM: `NTMMemory`, `NTMReadHead`,
+    `NTMWriteHead` and `NTMController` inside an `NTMCell`, which
+    `NeuralTuringMachine` wraps in a `keras.layers.RNN`.
 
-    :param memory_locations: Number of memory slots (N) in the external memory matrix.
+    Config fields this function does not expose keep their `NTMConfig` defaults,
+    including ``addressing_mode=AddressingMode.HYBRID``.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        memory_locations, memory_dim, controller_units,
+        num_read_heads, num_write_heads, controller_type,
+        shift_range
+                    │
+                    ▼
+        ┌────────────────────────────────┐
+        │ NTMConfig (dataclass)          │  config, no weights
+        └────────────────────────────────┘
+                    │
+                    │  output_dim = controller_units
+                    │             + num_read_heads * memory_dim
+                    ▼
+        ┌────────────────────────────────────────────────┐
+        │ NeuralTuringMachine (returned layer)           │
+        │                                                │
+        │  x (batch, seq_len, input_dim)                 │
+        │            │                                   │
+        │            ▼                                   │
+        │  ┌──────────────────────────────────────────┐  │
+        │  │ keras.layers.RNN(NTMCell)                │  │
+        │  └──────────────────────────────────────────┘  │
+        │            │  last axis = output_dim           │
+        │            ▼                                   │
+        │  ┌──────────────────────────────────────────┐  │
+        │  │ Dense output_projection                  │  │
+        │  └──────────────────────────────────────────┘  │
+        │            │                                   │
+        └────────────┼───────────────────────────────────┘
+                     │
+        return_sequences ─┬─ True  ► (batch, seq_len, output_dim)
+                          └─ False ► (batch, output_dim)
+
+        return_state=True ► (output, final RNN states)
+
+    :param memory_locations: Number of memory slots (N). Becomes
+        ``NTMConfig.memory_size``.
     :type memory_locations: int
-    :param memory_dim: Dimension of each memory slot (M).
+    :param memory_dim: Width of each memory slot (M).
     :type memory_dim: int
-    :param controller_units: Dimension of the controller hidden state.
+    :param controller_units: Width of the controller hidden state. Becomes
+        ``NTMConfig.controller_dim``.
     :type controller_units: int
     :param num_read_heads: Number of read heads. Defaults to 1.
     :type num_read_heads: int
     :param num_write_heads: Number of write heads. Defaults to 1.
     :type num_write_heads: int
-    :param controller_type: One of `'lstm'`, `'gru'`, `'feedforward'`. Defaults to `'lstm'`.
+    :param controller_type: One of `'lstm'`, `'gru'`, `'feedforward'`.
+        Defaults to `'lstm'`.
     :type controller_type: str
-    :param shift_range: Range of allowed circular shifts (must be odd). Defaults to 3.
+    :param shift_range: Range of allowed circular shifts. Must be odd.
+        Defaults to 3.
     :type shift_range: int
-    :param return_sequences: Whether to return outputs at every timestep. Defaults to True.
+    :param return_sequences: Return an output at every timestep. Defaults to True.
     :type return_sequences: bool
-    :param return_state: Whether to also return final RNN states. Defaults to False.
+    :param return_state: Also return the final RNN states. Defaults to False.
     :type return_state: bool
-    :param kwargs: Forwarded to `NeuralTuringMachine.__init__` (e.g. `name`).
+    :param kwargs: Forwarded to `NeuralTuringMachine.__init__`, for example
+        `name`, `kernel_initializer` or `kernel_regularizer`.
     :type kwargs: Any
-    :return: Configured `NeuralTuringMachine` ready to be called on `(batch, seq_len, input_dim)`.
+    :return: Configured `NeuralTuringMachine`, called on `(batch, seq_len, input_dim)`.
     :rtype: NeuralTuringMachine
+    :raises ValueError: Propagated from `NTMConfig.__post_init__` when a size is
+        not positive or `shift_range` is invalid.
+
+    Example:
+        >>> mann = create_mann(memory_locations=128, memory_dim=64,
+        ...                    controller_units=256, num_read_heads=2)
+        >>> mann.output_dim
+        384
     """
     output_dim = controller_units + num_read_heads * memory_dim
     config = NTMConfig(
@@ -109,21 +162,58 @@ def create_som_2d(
     **kwargs: Any,
 ) -> SOM2dLayer:
     """
-    Construct a 2D Self-Organizing Map layer.
+    Build a 2D Self-Organizing Map layer.
 
-    Thin factory around `SOM2dLayer` for API uniformity with `create_ntm` /
-    `create_mann`. All keyword arguments are forwarded.
+    A thin wrapper around `SOM2dLayer`, present so the SOM family is built the
+    same way as the NTM family. Every keyword argument is forwarded unchanged.
+    `SOM2dLayer` passes `map_size` to `SOMLayer` as `grid_shape`, so the neuron
+    weight tensor has shape `(H, W, input_dim)`.
 
-    :param map_size: Shape of the 2D grid `(H, W)`. Must be exactly 2 positive integers.
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        map_size = (H, W), input_dim, **kwargs
+                    │
+                    ▼
+        ┌────────────────────────────────────────────┐
+        │ SOM2dLayer (returned layer)                │
+        │   grid_shape = map_size                    │
+        │                                            │
+        │  x (batch, input_dim)                      │
+        │            │                               │
+        │            ▼                               │
+        │  squared distance to every neuron          │
+        │  weights_map (H, W, input_dim)             │
+        │            │  (batch, H*W)                 │
+        │            ▼                               │
+        │  BMU = argmin over neurons                 │
+        │            │                               │
+        │            ├──────────────┐                │
+        │            ▼              ▼                │
+        │  neighborhood h      quantization error    │
+        │  (training only)     sqrt(min distance)    │
+        │            │              │                │
+        │            ▼              │                │
+        │  weights_map += alpha*h*(x - w)            │
+        │                           │                │
+        └───────────────────────────┼────────────────┘
+                                    │
+        returns ─┬─ bmu_coords (batch, 2), int32
+                 └─ quantization_errors (batch,)
+
+    :param map_size: Shape of the 2D grid `(H, W)`. Exactly 2 positive integers.
     :type map_size: tuple[int, int]
-    :param input_dim: Dimensionality of the input data vectors.
+    :param input_dim: Width of each input vector.
     :type input_dim: int
-    :param kwargs: Forwarded to `SOM2dLayer.__init__`
-        (`initial_learning_rate`, `decay_function`, `sigma`,
-        `neighborhood_function`, `weights_initializer`, `regularizer`, `name`).
+    :param kwargs: Forwarded to `SOM2dLayer.__init__`: `initial_learning_rate`,
+        `decay_function`, `sigma`, `neighborhood_function`,
+        `weights_initializer`, `regularizer`, `name`.
     :type kwargs: Any
-    :return: Configured `SOM2dLayer` ready to be called on `(batch, input_dim)`.
+    :return: Configured `SOM2dLayer`, called on `(batch, input_dim)`.
     :rtype: SOM2dLayer
+    :raises ValueError: From `SOM2dLayer.__init__` when `map_size` is not 2
+        positive integers.
     """
     return SOM2dLayer(map_size=map_size, input_dim=input_dim, **kwargs)
 
