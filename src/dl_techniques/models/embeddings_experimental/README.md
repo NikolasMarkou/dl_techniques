@@ -43,7 +43,7 @@ At `max_position_embeddings=128`, ASCII vocabulary (101 ids):
 and width-matched, not parameter-matched, which is why the study reports the
 parameter column beside every result.
 
-## Three caveats that decide how the study must be run
+## Four caveats that decide how the study must be run
 
 **1. Padding is not neutral for the Clifford arm.** `CliffordNetBlock` sets
 `supports_masking = False`. Three separate facts, each measured and each pinned
@@ -115,6 +115,23 @@ with `max_seq_length`, and it moves retrieval and language-modelling quality in
 opposite directions. Any comparison across these arms must state which setting it
 used. The numbers are in
 [`RESULTS.md`](../../../train/embeddings_experimental/RESULTS.md).
+
+**4. The blocks are equally regularized only since 2026-08-30.** Until then
+`CliffordEncoderBlock` had no dropout at all — `build_clifford_block` declared no
+such parameter and `CliffordNetBlock` has none of its own — while the ConvNeXt
+blocks carried `dropout_rate` and `TransformerLayer` carried two dropout sites.
+The fix lives in this package's wrapper rather than in `CliffordNetBlock`, which
+is shared with other packages: dropout is applied to the update before the
+external residual add, the same position the ConvNeXt blocks use, so parameter
+counts are unchanged.
+
+Repairing it exposed a second asymmetry: `AsciiBert.attention_probs_dropout_rate`
+was hard-defaulted to 0.1 and ignored `hidden_dropout_rate`, so the study's
+dropout knob only partly controlled that arm. It now follows `hidden_dropout_rate`
+unless passed explicitly. Both are pinned by
+`tests/test_models/test_embeddings_shared/test_every_arm_is_equally_regularized.py`.
+**Every run reported in `RESULTS.md` predates this**, so a clifford cell trained
+after the fix is not comparable to one trained before it.
 
 ## Usage
 

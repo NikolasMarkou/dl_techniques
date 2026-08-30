@@ -22,67 +22,125 @@ sweep.py                 the grid driver, one subprocess per cell
 report.py                aggregation -> summary.md + CSVs
 ```
 
-## Two settings that decide the answer, not just the run
+## Three settings that decide the answer, not just the run
 
-`position_embedding_type` and `max_seq_length` are not neutral knobs here. Each
-changes the four-arm comparison by more than the differences the study exists to
-measure, and they act in **opposite directions on different arms** — so there is
-no setting that is fair to everyone. Pick deliberately, record the pick, and
-report it. Full numbers in [`RESULTS.md`](RESULTS.md).
+`position_embedding_type`, `max_seq_length` and `pooling_strategy` each move the
+four-arm comparison by more than the block differences the study exists to
+measure, and they move the arms in **opposite directions**. There is no setting
+that is fair to every arm, so the choice is part of the result: pick
+deliberately, and report which you picked. All numbers here are 7 seeds per cell
+unless stated; the full tables are in [`RESULTS.md`](RESULTS.md).
 
-### `position_embedding_type`
+**If you only want the recommendation:** use **learned positions** and **`mean`
+pooling** when the deliverable is embeddings; use **sinusoidal positions** and a
+**short context** when the deliverable is the language model. There is no single
+configuration that is best for both, and that is a finding rather than an
+oversight.
+
+### `position_embedding_type` — a genuine trade-off between the two objectives
 
 `ExperimentConfig` defaults to `'sinusoidal'`, overriding the encoder's own
-`'learned'`. It is a config field rather than an inherited default precisely so
-that it lands in every run's `config.json`.
+`'learned'`. It is a config field rather than an inherited default so that it
+lands in every run's `config.json`.
 
-A learned table is initialized at `initializer_range=0.02`, which puts it at
-essentially the word table's norm (0.1985 against 0.1987) — and training then
-*abandons* it, shrinking it to 0.1612 while the word table grows to 0.3283. The
-transformer arm could not bootstrap position-dependent attention from that and
-converged to a **bag of characters**: reordering its whole context moved the
-output 0.83% of activation scale, replacing the context moved 52.58%.
+A learned table initializes at `initializer_range=0.02`, which puts it at
+essentially the word table's norm (0.1985 against 0.1987), and training then
+*abandons* it — shrinking it to 0.1612 while the word table grows to 0.3283. The
+transformer arm cannot bootstrap position-dependent attention from that and
+converges to a **bag of characters**: reordering its whole context moves the
+output 0.83% of activation scale, while replacing the context moves 52.58%.
 
-| effect of switching to sinusoidal, 512 context, n=7 | |
+| switching to sinusoidal, 512 context | effect |
 |---|---:|
 | `ascii_bert` MLM | **−1.2030 nats** |
 | the three convolutional arms, MLM | +0.07 to +0.11 |
 | every arm's SQuAD recall@1 | **1.3x to 10x worse** |
 
 So it buys a large amount of the pretraining objective and sells a large amount
-of the downstream embedding quality. **The retrieval penalty is a long-context
-effect**: at `max_seq_length=64` it nearly vanishes, and `ascii_bert` reaches its
-best retrieval of any configuration measured.
+of the embedding quality. The two objectives genuinely disagree here.
 
-### `max_seq_length`
+### `max_seq_length` — an interaction, and it substitutes for the above
 
-Context length is an **interaction**. Going 512 → 64 at matched tokens per step
-helps only the transformer (**−0.3220** nats) and mildly hurts all three
-convolutional arms (+0.017 to +0.031) — attention dilutes a near-uniform softmax
-over every position, while a convolution has a fixed span.
+Going 512 → 64 at matched tokens per step helps only the transformer
+(**−0.3220** nats) and mildly hurts all three convolutional arms (+0.017 to
++0.031): attention dilutes a near-uniform softmax over every position, while a
+convolution has a fixed span.
 
-If you change it, hold **tokens per step** constant (`mlm_batch_size x
-max_seq_length`), or you cannot tell "shorter context helps" from "less training
-hurts".
+The two settings **substitute rather than compound**, and only for the
+transformer. Each is worth ~1.2-1.4 nats applied alone and ~0.13-0.32 applied
+second:
+
+| `ascii_bert` | learned | sinusoidal |
+|---|---:|---:|
+| **512 context** | 2.8248 | 1.6218 |
+| **64 context** | 1.4285 | **1.2999** |
+
+Either repair alone recovers most of the collapse, so **neither is "the" cause**
+— the failure needs long context *and* a weak positional signal together. The
+convolutional arms show no such interaction: for them both settings are small
+same-signed penalties, because they have no failure to rescue.
+
+If you change this, hold **tokens per step** constant
+(`mlm_batch_size x max_seq_length`), or you cannot separate "shorter context
+helps" from "less training hurts".
+
+### `pooling_strategy` — and why `max` is in the axis
+
+`("cls", "mean", "attention", "max")`. `max` was added 2026-08-30 because a
+sinusoidal model's **pooled embedding depends on sequence length**: encode one
+repeated sentence at 64 and at 512 real characters and the two vectors are nearly
+orthogonal.
+
+| cosine, same content at 512 vs 64 | `mean` | `max` |
+|---|---:|---:|
+| `ascii_bert` / sinusoidal | **0.3805** | 0.9693 |
+| `ascii_bert` / learned | 0.9705 | 0.9945 |
+
+Since SQuAD queries average 59 characters against contexts of 774, `mean`
+pooling displaces a query from its own answer by length alone. That single
+mechanism also explains why the SST-2 probe never moves (one narrow length band,
+so the offset is a constant a linear probe absorbs) and why centering and
+whitening cannot repair it (both remove *global* structure; this offset varies
+per text).
+
+**But `max` does not fix retrieval, and the axis is not a fix.** Measured on
+trained cells at 512/sinusoidal, `max` helps `ascii_clifford_bert` 3.6x
+(0.00607 → 0.02167) and sends `ascii_bert` **to chance** (0.00186 → 0.00033,
+chance 0.00048). Neither reaches its learned-position baseline. Length drift is
+real and contributory but not sufficient — a per-dimension extremum over 128
+dimensions discards more than the drift costs. Use the axis to explore, not as a
+remedy.
 
 ### Report retrieval whitened as well as raw
 
 Raw cosine understates these encoders by **~3.3x**. ZCA whitening lifts the
 learned-position convolutional arms from R@1 ~0.060 to ~0.21 on 9 of 9 cells,
-needs no retraining, and survives being fitted on an unrelated corpus. Since
-2026-08-30 the harness computes both: every `squad_*` metric now has a
+needs no retraining, and keeps ~90% of the gain when fitted on an unrelated
+corpus, so it is not transductive. Every `squad_*` metric now has a
 `squad_whitened_*` twin, fitted on the context pool (embeddings only — no
-queries, no labels). **`eval.json` from Runs 1-4 predates this and carries the
-raw metrics only.** Quote both going forward; the whitened ordering is not the
-same as the raw one.
+queries, no labels).
 
-### The guard
+It is also **diagnostic**: it helps only where low-variance directions carry
+content. It gains exactly 1.00x on `ascii_bert`/learned, and *loses* on 12 of 12
+sinusoidal cells. **`eval.json` from Runs 1-4 predates this and carries raw
+metrics only.**
 
-`tests/test_train/test_embeddings_experimental/test_the_positional_signal_survives_the_embedding_sum.py`
-pins the positional signal in both directions. Read its docstring before moving
-the threshold: the obvious oracle (reorder-vs-replace) is decisive on a *trained*
-model and **blind at initialization** — 0.0806 learned against 0.0925 sinusoidal
-— which is why the guard measures signal magnitude instead.
+### The guards
+
+Two tests pin the facts above, and both had to be written twice — read their
+docstrings before moving a threshold.
+
+`test_the_positional_signal_survives_the_embedding_sum.py` pins the positional
+signal in both directions. The obvious oracle (reorder-vs-replace) is decisive on
+a *trained* model and **blind at initialization** — 0.0806 learned against 0.0925
+sinusoidal — so the guard measures signal magnitude instead.
+
+`test_every_arm_is_equally_regularized.py` pins that every block honours a
+dropout rate. Its first version compared two training passes of the assembled
+*model* and was **vacuous**, because `BertEmbeddings` applies dropout to every
+arm regardless of its block; its second used an absolute threshold, which
+`layer_scale_init=1e-5` defeats by shrinking the clifford update to ~1e-5. The
+oracle is now the disagreement *relative to the update*.
 
 ## What is measured
 
@@ -398,7 +456,8 @@ print(np.log(V))          # 4.615 nats -- guessing uniformly at random
 # Knowing only how often each character occurs, with no context at all:
 p = np.array([0.18, 0.10, 0.08, 0.07, 0.07] + [0.5 / 96] * 96); p /= p.sum()
 print(-(p * np.log(p)).sum())   # 3.742 nats for these toy frequencies
-# Measured on the real corpus (1.03M characters): 3.130 nats.
+# Measured on the EXACT packed stream the model sees (3,121,152 ids): 3.1135.
+# (An earlier 1.03M-character sample gave 3.130; use the packed figure.)
 # So a model at 2.838 has learned little more than letter frequencies;
 # one at 1.153 has learned a great deal of context.
 ```
@@ -537,6 +596,12 @@ are stated in `summary.md` rather than buried.
 - Stage 2 saves the encoder, not the SimCSE wrapper, so the metrics use
   `pooled_output`; the contrastive loss lives in projection space and the two can
   move in opposite directions.
+- **Query and document lengths differ by an order of magnitude** — SQuAD
+  questions average 59 characters, contexts 774 — and a sinusoidal encoder's
+  pooled vector is length-dependent. Any retrieval number from such a cell is
+  measuring length mismatch as well as content. Learned-position cells are
+  length-invariant to within 0.97 cosine across an 8x range and do not have this
+  problem.
 
 **Neither stage uses a custom `train_step`.** Stage 1 delegates to the existing
 `MaskedLanguageModel` wrapper; stage 2's forward pass returns both dropout views
