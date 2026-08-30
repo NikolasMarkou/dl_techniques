@@ -359,7 +359,10 @@ class DeepKernelPCA(keras.layers.Layer):
             self.kernel_params = [kernel_params.copy() for _ in range(num_levels)]
         else:
             if len(kernel_params) != num_levels:
-                raise ValueError(f"kernel_params list length must match num_levels")
+                raise ValueError(
+                    f"kernel_params list length ({len(kernel_params)}) must match "
+                    f"num_levels ({num_levels})"
+                )
             self.kernel_params = kernel_params
 
         # Weight attributes for the un-fitted path; build() fills them in.
@@ -448,7 +451,10 @@ class DeepKernelPCA(keras.layers.Layer):
 
         input_dim = input_shape[-1]
         if input_dim is None:
-            raise ValueError("Last dimension of input must be defined")
+            raise ValueError(
+                f"Last dimension of input must be defined, got "
+                f"input_shape={tuple(input_shape)}"
+            )
 
         self.components_per_level = self._resolve_components_per_level(input_dim)
 

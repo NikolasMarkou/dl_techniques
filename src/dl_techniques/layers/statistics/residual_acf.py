@@ -280,8 +280,16 @@ class ResidualACFLayer(keras.layers.Layer):
         :raises ValueError: If ``input_shape`` is not a pair, or if the two
             shapes differ.
         """
-        if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
-            raise ValueError("ResidualACFLayer expects a list of 2 inputs: [predictions, targets]")
+        if not isinstance(input_shape, (list, tuple)):
+            raise ValueError(
+                f"ResidualACFLayer expects a list of 2 input shapes "
+                f"[predictions, targets], got a {type(input_shape).__name__}"
+            )
+        if len(input_shape) != 2:
+            raise ValueError(
+                f"ResidualACFLayer expects a list of 2 input shapes "
+                f"[predictions, targets], got {len(input_shape)}: {input_shape}"
+            )
 
         pred_shape, target_shape = input_shape
 
@@ -383,8 +391,16 @@ class ResidualACFLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         :raises ValueError: If ``inputs`` is not a pair of tensors.
         """
-        if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
-            raise ValueError("ResidualACFLayer expects a list of 2 inputs: [predictions, targets]")
+        if not isinstance(inputs, (list, tuple)):
+            raise ValueError(
+                f"ResidualACFLayer expects a list of 2 inputs "
+                f"[predictions, targets], got a {type(inputs).__name__}"
+            )
+        if len(inputs) != 2:
+            raise ValueError(
+                f"ResidualACFLayer expects a list of 2 inputs "
+                f"[predictions, targets], got {len(inputs)}"
+            )
 
         predictions, targets = inputs
 
@@ -587,8 +603,25 @@ class ACFMonitorCallback(keras.callbacks.Callback):
 
         See the class docstring for the parameters. The batch counter starts
         at 0 and is never reset between epochs.
+
+        :raises ValueError: If ``layer_name`` is not a non-empty string, or if
+            ``log_frequency`` is less than 1.
         """
         super().__init__()
+
+        # Validated here rather than left to the first batch. log_frequency=0
+        # used to construct fine and then die with ZeroDivisionError inside
+        # on_train_batch_end, in the middle of a training run.
+        if not isinstance(layer_name, str) or not layer_name.strip():
+            raise ValueError(
+                f"layer_name must be a non-empty string naming the "
+                f"ResidualACFLayer to monitor, got {layer_name!r}"
+            )
+        if not isinstance(log_frequency, int) or log_frequency < 1:
+            raise ValueError(
+                f"log_frequency must be an integer >= 1, got {log_frequency!r}"
+            )
+
         self.layer_name = layer_name
         self.log_frequency = log_frequency
         self.batch_count = 0

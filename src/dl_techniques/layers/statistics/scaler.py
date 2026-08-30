@@ -280,7 +280,8 @@ class UnifiedScaler(keras.layers.Layer):
             self._inferred_num_features = input_shape[-1]
             if self._inferred_num_features is None:
                 raise ValueError(
-                    "Last dimension of input must be defined when num_features=None"
+                    f"Last dimension of input must be defined when "
+                    f"num_features=None, got input_shape={tuple(input_shape)}"
                 )
         else:
             self._inferred_num_features = self.num_features

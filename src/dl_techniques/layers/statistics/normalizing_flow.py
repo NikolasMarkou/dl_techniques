@@ -273,11 +273,11 @@ class AffineCouplingLayer(keras.layers.Layer):
 
         # Validate input parameters
         if input_dim < 2:
-            raise ValueError("input_dim must be >= 2 to allow splitting")
+            raise ValueError(f"input_dim must be >= 2 to allow splitting, got {input_dim}")
         if context_dim < 1:
-            raise ValueError("context_dim must be >= 1")
+            raise ValueError(f"context_dim must be >= 1, got {context_dim}")
         if hidden_units < 1:
-            raise ValueError("hidden_units must be >= 1")
+            raise ValueError(f"hidden_units must be >= 1, got {hidden_units}")
 
         # Store configuration parameters
         self.input_dim = input_dim
@@ -330,8 +330,16 @@ class AffineCouplingLayer(keras.layers.Layer):
         if isinstance(input_shapes, tuple) and len(input_shapes) == 2 \
                 and all(isinstance(s, (list, tuple)) for s in input_shapes):
             input_shapes = list(input_shapes)
-        if not isinstance(input_shapes, list) or len(input_shapes) != 2:
-            raise ValueError("input_shapes must be a list of two shape tuples")
+        if not isinstance(input_shapes, list):
+            raise ValueError(
+                f"input_shapes must be a list of two shape tuples, got a "
+                f"{type(input_shapes).__name__}: {input_shapes}"
+            )
+        if len(input_shapes) != 2:
+            raise ValueError(
+                f"input_shapes must be a list of two shape tuples, got "
+                f"{len(input_shapes)}: {input_shapes}"
+            )
 
         # Input size for the transformation network
         net_input_size = self.split_dim + self.context_dim
@@ -689,13 +697,18 @@ class NormalizingFlowLayer(keras.layers.Layer):
 
         # Validate input parameters
         if output_dimension < 2:
-            raise ValueError("output_dimension must be >= 2 to allow splitting")
+            raise ValueError(
+                f"output_dimension must be >= 2 to allow splitting, got "
+                f"{output_dimension}"
+            )
         if num_flow_steps < 1:
-            raise ValueError("num_flow_steps must be >= 1")
+            raise ValueError(f"num_flow_steps must be >= 1, got {num_flow_steps}")
         if context_dim < 1:
-            raise ValueError("context_dim must be >= 1")
+            raise ValueError(f"context_dim must be >= 1, got {context_dim}")
         if hidden_units_coupling < 1:
-            raise ValueError("hidden_units_coupling must be >= 1")
+            raise ValueError(
+                f"hidden_units_coupling must be >= 1, got {hidden_units_coupling}"
+            )
 
         # Store configuration parameters
         self.output_dim = output_dimension
@@ -737,8 +750,16 @@ class NormalizingFlowLayer(keras.layers.Layer):
         if isinstance(input_shapes, tuple) and len(input_shapes) == 2 \
                 and all(isinstance(s, (list, tuple)) for s in input_shapes):
             input_shapes = list(input_shapes)
-        if not isinstance(input_shapes, list) or len(input_shapes) != 2:
-            raise ValueError("input_shapes must be a list of two shape tuples")
+        if not isinstance(input_shapes, list):
+            raise ValueError(
+                f"input_shapes must be a list of two shape tuples, got a "
+                f"{type(input_shapes).__name__}: {input_shapes}"
+            )
+        if len(input_shapes) != 2:
+            raise ValueError(
+                f"input_shapes must be a list of two shape tuples, got "
+                f"{len(input_shapes)}: {input_shapes}"
+            )
 
         # BUILD all coupling layers (critical for serialization)
         for layer in self.coupling_layers:
@@ -768,7 +789,9 @@ class NormalizingFlowLayer(keras.layers.Layer):
         :raises ValueError: If ``inputs`` does not hold exactly two tensors.
         """
         if len(inputs) != 2:
-            raise ValueError("Expected exactly 2 inputs: [data, context]")
+            raise ValueError(
+                f"Expected exactly 2 inputs [data, context], got {len(inputs)}"
+            )
 
         y, context = inputs
 
@@ -836,7 +859,7 @@ class NormalizingFlowLayer(keras.layers.Layer):
         :raises ValueError: If ``num_samples`` is less than 1.
         """
         if num_samples < 1:
-            raise ValueError("num_samples must be >= 1")
+            raise ValueError(f"num_samples must be >= 1, got {num_samples}")
 
         batch_size = ops.shape(context)[0]
 

@@ -365,7 +365,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
         """
         input_dim = input_shape[-1]
         if input_dim is None:
-            raise ValueError("Last dimension of input must be defined")
+            raise ValueError(
+                f"Last dimension of input must be defined, got "
+                f"input_shape={tuple(input_shape)}"
+            )
 
         # Set gamma if not specified
         if self.gamma is None:
