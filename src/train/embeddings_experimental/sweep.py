@@ -28,7 +28,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -185,6 +185,36 @@ def build_run_specs(
     ]
 
 
+#: Substrings identifying a GPU out-of-memory failure. A cell that OOMs is not
+#: a broken cell: twice now an identical re-run has succeeded on a settled GPU.
+#: The BFC line is included because TensorFlow can turn an OOM into a FATAL
+#: allocator check rather than a Python exception, which exits the subprocess
+#: without a traceback.
+OOM_SIGNATURES: Tuple[str, ...] = (
+    "ResourceExhaustedError",
+    "Out of memory while trying to allocate",
+    "OOM when allocating tensor",
+    "bfc_allocator.cc",
+)
+
+#: Seconds to let the GPU settle before retrying an OOM cell. A process does not
+#: release device memory the instant it exits; the 2026-08-30 failure was a cell
+#: that started 55 s after the previous job wrote its results and OOMed, while
+#: the very next cell on a settled GPU succeeded with identical settings.
+OOM_SETTLE_S: float = 90.0
+
+
+def looks_like_oom(stderr_tail: str) -> bool:
+    """Return whether a failure tail is a GPU out-of-memory failure.
+
+    :param stderr_tail: Captured stderr from a failed cell.
+    :type stderr_tail: str
+    :return: True if any known OOM signature is present.
+    :rtype: bool
+    """
+    return any(sig in stderr_tail for sig in OOM_SIGNATURES)
+
+
 def run_one(
     spec: RunSpec,
     *,
@@ -246,6 +276,68 @@ def run_one(
         handle.write("\n--- stderr ---\n")
         handle.write(stderr_tail)
 
+    return ok, stderr_tail
+
+
+def run_one_with_oom_retry(
+    spec: RunSpec,
+    *,
+    python_exe: str,
+    gpu_id: int,
+    cell_timeout_s: float,
+    deadline_s: Optional[float] = None,
+    settle_s: float = OOM_SETTLE_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Tuple[bool, str]:
+    """Run one cell, retrying ONCE if it failed with a GPU OOM.
+
+    Only OOM is retried, and only once. A cell that fails for any other reason
+    is a real failure and re-running it just burns GPU time on the same bug.
+
+    This exists because the manual version of it has now happened twice and both
+    times it corrupted the run's own record. In the 512 maxpool sweep two
+    clifford cells OOMed in the contrastive stage, were re-run by hand with
+    byte-identical argv, and succeeded -- leaving a ``failures.log`` describing
+    cells that were fine, readable only by comparing its mtime against each
+    cell's ``results.json``. On 2026-08-30 an ``ascii_bert`` cell at 1024 OOMed
+    55 s after a previous job wrote its results, while the next cell on a
+    settled GPU succeeded with identical settings.
+
+    :param spec: The cell to run.
+    :type spec: RunSpec
+    :param python_exe: Interpreter to run the trainer with.
+    :type python_exe: str
+    :param gpu_id: GPU index to pin.
+    :type gpu_id: int
+    :param cell_timeout_s: Per-cell timeout.
+    :type cell_timeout_s: float
+    :param deadline_s: Wall-clock deadline for the whole sweep.
+    :type deadline_s: float | None
+    :param settle_s: Seconds to wait before the retry.
+    :type settle_s: float
+    :param sleep: Sleep function; injectable so tests need not wait.
+    :type sleep: Callable[[float], None]
+    :return: ``(ok, stderr_tail)`` from the last attempt.
+    :rtype: tuple[bool, str]
+    """
+    ok, stderr_tail = run_one(
+        spec, python_exe=python_exe, gpu_id=gpu_id,
+        cell_timeout_s=cell_timeout_s, deadline_s=deadline_s,
+    )
+    if ok or not looks_like_oom(stderr_tail):
+        return ok, stderr_tail
+
+    logger.warning(
+        f"{spec.cell_id} failed with a GPU OOM; settling {settle_s:.0f}s and "
+        f"retrying ONCE. If the retry also OOMs the cell is genuinely too large "
+        f"for this device and the config must change, not the schedule."
+    )
+    sleep(settle_s)
+    ok, stderr_tail = run_one(
+        spec, python_exe=python_exe, gpu_id=gpu_id,
+        cell_timeout_s=cell_timeout_s, deadline_s=deadline_s,
+    )
+    logger.info(f"{spec.cell_id} retry after OOM: {'OK' if ok else 'FAILED again'}")
     return ok, stderr_tail
 
 
@@ -456,7 +548,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             logger.warning("global timeout reached; skipping the remainder")
             break
         logger.info(f"[{index}/{len(specs)}] {spec.cell_id}")
-        ok, stderr_tail = run_one(
+        ok, stderr_tail = run_one_with_oom_retry(
             spec,
             python_exe=args.python_exe,
             gpu_id=args.gpu,

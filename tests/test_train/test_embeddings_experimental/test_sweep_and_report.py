@@ -9,6 +9,8 @@ import json
 import logging
 import os
 
+import train.embeddings_experimental.sweep as sweep_module
+
 import numpy as np
 import pytest
 
@@ -592,3 +594,96 @@ class TestAWithdrawnArmDoesNotSilentlyRejoinTheStatistics:
             f"({min(adj_two):.4f} -> {min(adj_three):.4f}). Then the Holm family "
             f"is not tracking the arm count and this flag protects nothing."
         )
+
+
+class TestAnOomIsRetriedOnceAndNothingElseIs:
+    """A cell that OOMs is not a broken cell; a cell that raises is.
+
+    This has now happened twice, and both times the manual recovery corrupted the
+    run's own record. In the 512 maxpool sweep two clifford cells OOMed in the
+    contrastive stage, were re-run by hand with byte-identical argv and
+    succeeded, leaving a `failures.log` describing cells that were fine. On
+    2026-08-30 an `ascii_bert` cell at 1024 OOMed 55 s after the previous job
+    wrote its results, while the next cell on a settled GPU succeeded with
+    identical settings.
+
+    Retrying anything else would burn GPU hours re-running the same bug, so the
+    discrimination is the substance of these tests, not the retry.
+    """
+
+    @staticmethod
+    def _spec():
+        return RunSpec(
+            model="ascii_bert", variant="tiny", pooling="mean", seed=0,
+            sweep_root="/tmp/sweep", extra_args=(),
+        )
+
+    def _run_with(self, monkeypatch, outcomes):
+        """Drive run_one_with_oom_retry over a scripted list of (ok, tail)."""
+        calls = {"n": 0}
+
+        def fake_run_one(spec, **kwargs):
+            i = calls["n"]
+            calls["n"] += 1
+            return outcomes[min(i, len(outcomes) - 1)]
+
+        monkeypatch.setattr(sweep_module, "run_one", fake_run_one)
+        slept = []
+        ok, tail = sweep_module.run_one_with_oom_retry(
+            self._spec(), python_exe="python", gpu_id=0, cell_timeout_s=10.0,
+            settle_s=1.0, sleep=slept.append,
+        )
+        return ok, tail, calls["n"], slept
+
+    def test_an_oom_is_retried_and_can_succeed(self, monkeypatch) -> None:
+        ok, _, n, slept = self._run_with(
+            monkeypatch,
+            [(False, "tensorflow...ResourceExhaustedError: Graph execution error"),
+             (True, "")],
+        )
+        assert ok is True
+        assert n == 2, "the OOM cell was not retried"
+        assert slept == [1.0], "the GPU was not given time to settle before retrying"
+
+    def test_a_fatal_bfc_check_counts_as_an_oom(self, monkeypatch) -> None:
+        """TF can turn an OOM into a FATAL allocator check with no traceback."""
+        ok, _, n, _ = self._run_with(
+            monkeypatch,
+            [(False, "external/local_xla/xla/tsl/framework/bfc_allocator.cc:811] Check failed"),
+             (True, "")],
+        )
+        assert ok is True and n == 2
+
+    def test_a_non_oom_failure_is_NOT_retried(self, monkeypatch) -> None:
+        """The discriminating case: re-running a real bug wastes GPU hours."""
+        ok, _, n, slept = self._run_with(
+            monkeypatch,
+            [(False, "ValueError: Unknown model 'nope'"), (True, "")],
+        )
+        assert ok is False, "a non-OOM failure must be reported, not retried away"
+        assert n == 1, f"run_one was called {n} times for a non-OOM failure"
+        assert slept == []
+
+    def test_a_success_is_not_re_run(self, monkeypatch) -> None:
+        ok, _, n, _ = self._run_with(monkeypatch, [(True, "")])
+        assert ok is True and n == 1
+
+    def test_a_cell_that_ooms_twice_stays_failed(self, monkeypatch) -> None:
+        """Retry ONCE. A cell too big for the device needs a config change."""
+        oom = (False, "OOM when allocating tensor with shape[16,1024,128]")
+        ok, tail, n, _ = self._run_with(monkeypatch, [oom, oom])
+        assert ok is False
+        assert n == 2, "retried more than once"
+        assert "OOM" in tail
+
+    @pytest.mark.parametrize("tail,expected", [
+        ("ResourceExhaustedError", True),
+        ("Out of memory while trying to allocate 3119438016 bytes", True),
+        ("OOM when allocating tensor with shape[64,1,512,128]", True),
+        ("bfc_allocator.cc:811] Check failed", True),
+        ("ValueError: Unknown model", False),
+        ("TIMEOUT after 3600s", False),
+        ("", False),
+    ])
+    def test_the_oom_signatures(self, tail: str, expected: bool) -> None:
+        assert sweep_module.looks_like_oom(tail) is expected
