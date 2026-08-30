@@ -581,10 +581,15 @@ validation loss by **−0.0041 nats**. Recovering the instantaneous per-batch lo
 unchanged, which are free to copy. A model that predicts the corpus unigram and
 copies those scores:
 
-| | predicted | measured |
-|---|---:|---:|
-| loss | `0.9 x 3.1135` = **2.8022** | 2.8307–2.8331 |
-| accuracy | `0.9 x 0.1532 + 0.1` = **0.2379** | 0.2321–0.2322 |
+| | predicted | measured (diagnostic runs) | Run 2a, 7 seeds |
+|---|---:|---:|---:|
+| loss | `0.9 x 3.1135` = **2.8022** | 2.8307–2.8331 | **2.8128–2.8366** |
+| accuracy | `0.9 x 0.1532 + 0.1` = **0.2379** | 0.2321–0.2322 | **0.2314–0.2351** |
+
+The middle column is from the 256-context diagnostic runs, not from the 28-cell
+study; it carried no label saying so until 2026-08-30, and its bands are much
+tighter than the study's own cells. The right-hand column is Run 2a re-derived.
+The prediction holds against both.
 
 **Confirmed directly.** Perturbing the trained model's position-0 hidden state:
 reordering the whole context (identical multiset) moved it **0.83%** of
@@ -675,6 +680,37 @@ training-mode passes of the assembled *model* and was **vacuous**, because the
 shared embedding dropout makes every arm stochastic regardless of its block; and
 its successor needed a **scale-free** oracle, because `layer_scale_init=1e-5`
 shrinks the clifford update so far that live dropout moves it only 1.4e-06.
+
+**The study runs at its statistical power floor.** The primary endpoint
+(`eval_squad_mrr_at_10`) is `BETTER` for all three convolutional arms in all four
+configurations. But with n=7 the smallest reachable two-sided sign-flip p is
+`2/2^7` = **0.0156**, and Holm across the three non-baseline arms multiplies the
+first by 3, so **0.0469 is the smallest adjusted p this design can ever
+produce**. The measured values are 0.0469 (Run 2a) and 0.0474 (the other three
+roots), against a 0.05 bar. Every arm shows perfect 7/7 sign agreement — the
+result is as strong as the design can show, and it clears by 0.003. The same
+effect judged against the secondary family of 18 (which `README.md` says needs 10
+seeds) would not clear.
+
+**Run 2a has no committed verdicts.** `report.py` was never run on
+`results/embeddings_study_512`, so that root has only `all_runs.json` — no
+`summary.md`, `headline_summary.csv` or `paired_summary.csv`. The 0.0469 above
+was recomputed for this file rather than read from an artifact.
+
+**Stage 2 is packed, and its docstring says it is not.** `data.py` states "Stage
+2 cannot pack — contrastive learning needs whole sentences", but
+`run_contrastive_stage` calls `build_packed_mlm_dataset`. So the contrastive
+stage trains on packed fixed-length windows too, which means **no model in this
+study has ever seen a sequence of any length other than `max_seq_length`**. That
+leaves "the embedding drifts with length" and "no model was ever trained
+off-length" unseparated by any measurement here — a live alternative to the
+length-drift account above.
+
+**Training frames no `[CLS]`; evaluation frames one.** The packed MLM stream is
+`[SEP]`-delimited character runs with no `[CLS]` anywhere, while `embed_texts`
+frames every text as `[CLS] + content + [SEP]`. Any `cls`-pooling number is
+therefore read off a token the encoder never saw in that position during
+training.
 
 **Train/eval overlap.** SQuAD contexts *are* Wikipedia paragraphs and the MLM
 corpus is Wikipedia. Every arm shares the overlap, so the ordering survives; the
