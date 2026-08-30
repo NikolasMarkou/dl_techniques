@@ -995,3 +995,188 @@ class TestNormalizingFlowStep5Fixes:
         coupling = AffineCouplingLayer(input_dim=4, context_dim=6, hidden_units=8)
         coupling.build(((None, 4), (None, 6)))
         assert coupling.built
+
+class TestOddDimensionInvertibility:
+    """Round-trip guards for every input_dim and both reverse settings.
+
+    The entry rotation in AffineCouplingLayer must be undone exactly on exit.
+    An exit rotation in the same direction as the entry rotation only cancels
+    when input_dim is even, so these cases pin the odd sizes too.
+    """
+
+    @staticmethod
+    def _build_coupling(
+        input_dim: int,
+        reverse: bool,
+        seed: int
+    ) -> Tuple[AffineCouplingLayer, keras.KerasTensor, keras.KerasTensor]:
+        """Build a seeded coupling layer plus data and a real context."""
+        keras.utils.set_random_seed(seed)
+        context_dim = 3
+        layer = AffineCouplingLayer(
+            input_dim=input_dim,
+            context_dim=context_dim,
+            hidden_units=16,
+            reverse=reverse
+        )
+        layer.build([(None, input_dim), (None, context_dim)])
+        z = keras.random.normal((8, input_dim), seed=seed + 1)
+        context = keras.random.normal((8, context_dim), seed=seed + 2)
+        return layer, z, context
+
+    @pytest.mark.parametrize("input_dim", [2, 3, 4, 5, 6, 7])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_coupling_round_trip_every_dim(
+        self,
+        input_dim: int,
+        reverse: bool
+    ) -> None:
+        """inverse(forward(z)) must recover z at every input_dim."""
+        layer, z, context = self._build_coupling(input_dim, reverse, seed=17)
+
+        y = layer.forward(z, context)
+        z_back, _ = layer.inverse(y, context)
+
+        err = float(np.max(np.abs(
+            keras.ops.convert_to_numpy(z) - keras.ops.convert_to_numpy(z_back)
+        )))
+        assert err < 1e-5, (
+            f"inverse(forward(z)) differs from z by {err} at "
+            f"input_dim={input_dim}, reverse={reverse}"
+        )
+
+    @pytest.mark.parametrize("input_dim", [2, 3, 4, 5, 6, 7])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_coupling_round_trip_other_direction(
+        self,
+        input_dim: int,
+        reverse: bool
+    ) -> None:
+        """forward(inverse(y)) must recover y at every input_dim."""
+        layer, y, context = self._build_coupling(input_dim, reverse, seed=2029)
+
+        z, _ = layer.inverse(y, context)
+        y_back = layer.forward(z, context)
+
+        err = float(np.max(np.abs(
+            keras.ops.convert_to_numpy(y) - keras.ops.convert_to_numpy(y_back)
+        )))
+        assert err < 1e-5, (
+            f"forward(inverse(y)) differs from y by {err} at "
+            f"input_dim={input_dim}, reverse={reverse}"
+        )
+
+    @pytest.mark.parametrize("input_dim", [3, 5, 7])
+    def test_coupling_output_is_a_permutation_of_the_untransformed_half(
+        self,
+        input_dim: int
+    ) -> None:
+        """The static half must land back in its original slots.
+
+        With reverse=True the entry rotation moves the static half to the
+        front; the exit rotation must put it back. The static half is
+        input_dim - split_dim wide and starts at index split_dim.
+        """
+        layer, z, context = self._build_coupling(input_dim, True, seed=5)
+        split_dim = layer.split_dim
+
+        y = layer.forward(z, context)
+        z_np = keras.ops.convert_to_numpy(z)
+        y_np = keras.ops.convert_to_numpy(y)
+
+        np.testing.assert_allclose(
+            z_np[..., split_dim:], y_np[..., split_dim:],
+            rtol=1e-6, atol=1e-6,
+            err_msg=(
+                "reverse=True must leave z[..., split_dim:] untouched in the "
+                "output ordering"
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "output_dimension,num_flow_steps",
+        [(3, 2), (3, 3), (4, 2), (5, 2), (5, 3), (6, 3), (7, 4)]
+    )
+    def test_flow_stack_round_trip(
+        self,
+        output_dimension: int,
+        num_flow_steps: int
+    ) -> None:
+        """call() then the forward chain must recover the input.
+
+        num_flow_steps >= 2 means reverse=(i % 2 == 1) actually alternates, so
+        at least one coupling layer runs with reverse=True.
+        """
+        keras.utils.set_random_seed(31)
+        context_dim = 3
+        flow = NormalizingFlowLayer(
+            output_dimension=output_dimension,
+            num_flow_steps=num_flow_steps,
+            context_dim=context_dim,
+            hidden_units_coupling=16
+        )
+        flow.build([(None, output_dimension), (None, context_dim)])
+
+        y = keras.random.normal((8, output_dimension), seed=32)
+        context = keras.random.normal((8, context_dim), seed=33)
+
+        z, ldj = flow([y, context])
+
+        y_back = z
+        for layer in flow.coupling_layers:
+            y_back = layer.forward(y_back, context)
+
+        err = float(np.max(np.abs(
+            keras.ops.convert_to_numpy(y) - keras.ops.convert_to_numpy(y_back)
+        )))
+        assert err < 1e-5, (
+            f"flow round trip differs by {err} at "
+            f"output_dimension={output_dimension}, "
+            f"num_flow_steps={num_flow_steps}"
+        )
+        assert bool(ops.all(ops.isfinite(ldj)))
+
+    @pytest.mark.parametrize("input_dim", [2, 4, 6, 3, 5])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_log_det_matches_autodiff_jacobian(
+        self,
+        input_dim: int,
+        reverse: bool
+    ) -> None:
+        """The reported log-determinant must equal log|det| of the Jacobian.
+
+        The rotation is a permutation, whose determinant has magnitude 1, so it
+        must contribute nothing to the log-determinant. An exit rotation that
+        changed the reported value would break this equality.
+        """
+        layer, y, context = self._build_coupling(input_dim, reverse, seed=101)
+
+        y_one = tf.convert_to_tensor(
+            keras.ops.convert_to_numpy(y)[:1], dtype="float32"
+        )
+        context_one = tf.convert_to_tensor(
+            keras.ops.convert_to_numpy(context)[:1], dtype="float32"
+        )
+
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(y_one)
+            z, ldj = layer.inverse(y_one, context_one)
+        jac = tape.jacobian(z, y_one)
+        del tape
+
+        jac_matrix = np.reshape(
+            keras.ops.convert_to_numpy(jac), (input_dim, input_dim)
+        )
+        sign, logabsdet = np.linalg.slogdet(jac_matrix.astype(np.float64))
+
+        assert abs(sign) == 1.0, "Jacobian must be non-singular"
+        reported = float(keras.ops.convert_to_numpy(ldj)[0])
+        np.testing.assert_allclose(
+            abs(reported), abs(float(logabsdet)),
+            rtol=1e-4, atol=1e-4,
+            err_msg=(
+                "Reported log-determinant magnitude must match the autodiff "
+                "Jacobian; the rotation is a permutation and must contribute "
+                "nothing to it"
+            )
+        )
