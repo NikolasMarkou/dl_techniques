@@ -73,9 +73,50 @@ from dl_techniques.losses import (
 
 ## Conventions
 
-- All losses inherit from `keras.losses.Loss`
-- Must implement `call(self, y_true, y_pred)` and `get_config()`
-- Some modules also export companion metric classes or analysis functions
+Each number below carries the command that re-derives it. Re-run rather than trust — this section
+has gone stale before.
+
+- **Base class.** All losses inherit from `keras.losses.Loss` and implement
+  `call(self, y_true, y_pred)` and `get_config()`. Some modules also export companion metric
+  classes or analysis functions.
+
+- **`call()` returns ONE VALUE PER SAMPLE, shape `(batch,)` — never a scalar.**
+  This is the rule most often broken here, and the failure is silent. Keras'
+  `reduce_weighted_values` computes `values * sample_weight` **before** reducing, so a scalar
+  return does not *ignore* `sample_weight` — it BROADCASTS against it and yields
+  `whole_batch_loss * mean(sample_weight)`, charging every row the batch aggregate and discarding
+  which rows were weighted. It also makes `reduction=` a dead knob. A plausible wrong number, not
+  an error. `goodhart_loss.py` and `focal_uncertainty_loss.py` are correct exemplars.
+  **Which modules still violate this is recorded executably, not in prose:**
+  `tests/test_losses/test_the_premature_scalar_family_is_pinned.py` MEASURES the defect per class
+  and goes red the day one is fixed. As of 2026-08-31 it pins 14 classes across 12 modules. Do not
+  duplicate that list here — a prose list rots; the test cannot.
+
+- **Registration.** Every `Loss` subclass carries
+  `@register_dl_technique("dl_techniques.losses.<module>")` from
+  `dl_techniques.utils.keras_registration` — never a bare
+  `@keras.saving.register_keras_serializable()`. 41 of 44 modules register something; the
+  non-registering ones export plain functions only.
+  `grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l`
+
+- **Import style.** NEW files use `import keras` and qualify at the call site (`keras.ops.matmul`).
+  33 of 44 existing modules use the superseded `from keras import ops`; that majority is **neither a
+  pattern to extend nor a migration target** — leave them alone.
+  `grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l`
+
+- **Docstring style is Google-majority, and that is a fact, not a mandate.**
+  32 of 44 carry a Google `Args:` block, 10 carry Sphinx `:param `, 1 carries both.
+  **Match the file you are editing; never convert a file wholesale.** The newest modules
+  (`colbert_loss.py`, `infonce_loss.py`) are Sphinx, so both styles are live and growing —
+  an earlier claim that "Sphinx is the losses/ convention" was an overstatement the tree does not
+  support.
+  `grep -rlE "^ +Args:$" src/dl_techniques/losses --include=*.py | wc -l`
+  `grep -rl ":param " src/dl_techniques/losses --include=*.py | wc -l`
+
+- **Documenting a loss.** A row in the tables above asserts the symbol is IMPORTABLE from
+  `dl_techniques.losses`. Verify with `hasattr`, not by reading the module — several modules ship
+  classes that `__init__.py` does not export, and a row promising an import that raises is worse
+  than no row at all.
 
 ## Testing
 
