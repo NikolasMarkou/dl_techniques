@@ -6,6 +6,7 @@ asserted directly rather than by running cells.
 """
 
 import json
+import logging
 import os
 
 import numpy as np
@@ -18,6 +19,7 @@ from train.embeddings_experimental.report import (
     RNG_SEED,
     build_report,
     write_report,
+    select_models,
 )
 from train.embeddings_experimental.sweep import (
     DEFAULT_MAX_CELLS,
@@ -509,3 +511,84 @@ class TestTheFailureLogDoesNotOutliveTheFailure:
         """Reader and writer must not be able to disagree about the location."""
         written = write_failures_log(str(tmp_path), [("c", "t")])
         assert written == failures_log_path(str(tmp_path))
+
+
+class TestAWithdrawnArmDoesNotSilentlyRejoinTheStatistics:
+    """A sweep root outlives the study, and `all_runs.json` keeps every cell.
+
+    `ascii_convnext_v2_bert` was withdrawn on 2026-08-30 and its 28 cells remain
+    on disk. Re-reporting a root does not merely add a row for it: the primary
+    endpoint is Holm-corrected across the NON-BASELINE arms, so one extra arm
+    multiplies the smallest reachable adjusted p-value by ``m / (m - 1)`` --
+    here from ``0.0156 x 2 = 0.0312`` to ``0.0156 x 3 = 0.0469``, the difference
+    between clearing a 0.05 bar comfortably and clearing it by 0.003.
+
+    The behaviour pinned is deliberately NOT "drop unregistered arms": a report
+    that quietly omits cells is worse than one that includes too many. It warns
+    by default and drops only when asked.
+    """
+
+    @staticmethod
+    def _records(models, n_seeds=7):
+        out = []
+        for m in models:
+            for s in range(n_seeds):
+                out.append({
+                    "model": m, "variant": "tiny", "pooling": "mean", "seed": s,
+                    "parameters": 1000, "run_dir": f"/tmp/{m}/{s}",
+                    "eval_squad_mrr_at_10": 0.05 if m == "ascii_bert" else 0.09 + 0.001 * s,
+                    "eval_ok": True,
+                })
+        return out
+
+    def test_by_default_every_arm_present_is_reported(self) -> None:
+        recs = self._records(["ascii_bert", "ascii_clifford_bert", "withdrawn_arm"])
+        kept = select_models(recs, None)
+        assert {r["model"] for r in kept} == {
+            "ascii_bert", "ascii_clifford_bert", "withdrawn_arm"
+        }, "the default must report what RAN, never silently drop cells"
+
+    def test_an_unregistered_arm_is_warned_about(self, caplog) -> None:
+        recs = self._records(["ascii_bert", "withdrawn_arm"])
+        with caplog.at_level(logging.WARNING):
+            select_models(recs, None)
+        assert "withdrawn_arm" in caplog.text and "MODEL_REGISTRY" in caplog.text, (
+            "an arm the registry no longer knows must be named in a warning; "
+            "otherwise it rejoins the correction family invisibly"
+        )
+
+    def test_models_restricts_the_report(self) -> None:
+        recs = self._records(["ascii_bert", "ascii_clifford_bert", "withdrawn_arm"])
+        kept = select_models(recs, ["ascii_bert", "ascii_clifford_bert"])
+        assert {r["model"] for r in kept} == {"ascii_bert", "ascii_clifford_bert"}
+        assert len(kept) == 14
+
+    def test_naming_an_absent_arm_raises_rather_than_reporting_nothing(self) -> None:
+        recs = self._records(["ascii_bert", "ascii_clifford_bert"])
+        with pytest.raises(ValueError, match="no cells"):
+            select_models(recs, ["ascii_bert", "not_a_real_arm"])
+
+    def test_the_extra_arm_really_does_move_every_adjusted_p_value(self) -> None:
+        """The reason the flag exists, asserted rather than described.
+
+        Without this the tests above pin plumbing and never show that including
+        a withdrawn arm changes a reported number.
+        """
+        two = build_report(self._records(
+            ["ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert"]))
+        three = build_report(self._records(
+            ["ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert", "withdrawn_arm"]))
+
+        def primary_adj(report):
+            return sorted(
+                row["p_adjusted"] for row in report["paired"]
+                if row["metric"] == "eval_squad_mrr_at_10"
+            )
+
+        adj_two, adj_three = primary_adj(two), primary_adj(three)
+        assert adj_two and adj_three, "no primary comparisons were produced"
+        assert min(adj_three) > min(adj_two), (
+            f"adding a fourth arm left the smallest adjusted p-value unchanged "
+            f"({min(adj_two):.4f} -> {min(adj_three):.4f}). Then the Holm family "
+            f"is not tracking the arm count and this flag protects nothing."
+        )

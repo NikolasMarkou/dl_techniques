@@ -186,6 +186,63 @@ def _dedupe(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(seen.values())
 
 
+def select_models(
+        records: List[Dict[str, Any]],
+        models: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Restrict the report to ``models``, and warn about withdrawn arms.
+
+    A sweep root outlives the study that produced it. ``all_runs.json`` still
+    holds every cell that ever ran, so an arm WITHDRAWN from
+    :data:`~train.embeddings_experimental.config.MODEL_REGISTRY` silently
+    re-enters the statistics on the next report -- and it does not merely add a
+    row. The primary endpoint is Holm-corrected across the non-baseline arms, so
+    one extra arm multiplies the smallest reachable adjusted p-value by
+    ``m / (m - 1)``. Concretely, `ascii_convnext_v2_bert` was withdrawn on
+    2026-08-30 and its 28 cells remain on disk: reporting them takes the family
+    from 2 to 3 and the floor from ``0.0156 x 2 = 0.0312`` to
+    ``0.0156 x 3 = 0.0469``, which is the difference between clearing a 0.05 bar
+    comfortably and clearing it by 0.003.
+
+    So the default is to report what RAN, with a warning naming any arm the
+    registry no longer knows -- never a silent drop, because a report that
+    quietly omits cells is worse than one that includes too many.
+
+    :param records: One record per cell.
+    :type records: list[dict[str, Any]]
+    :param models: Arms to keep. ``None`` keeps every arm present.
+    :type models: Sequence[str] | None
+    :return: The retained records.
+    :rtype: list[dict[str, Any]]
+    :raises ValueError: If ``models`` names an arm with no cells.
+    """
+    from .config import MODEL_REGISTRY
+
+    present = {r.get("model") for r in records}
+    unregistered = sorted(m for m in present if m not in MODEL_REGISTRY)
+    if unregistered:
+        logger.warning(
+            f"cells present for arm(s) not in "
+            f"MODEL_REGISTRY: {unregistered}. They are INCLUDED unless you pass "
+            f"--models. Including a withdrawn arm changes the Holm family size "
+            f"and therefore every adjusted p-value in this report."
+        )
+    if models is None:
+        return records
+
+    missing = sorted(set(models) - present)
+    if missing:
+        raise ValueError(
+            f"--models named {missing}, which have no cells under this sweep "
+            f"root; present arms are {sorted(present)}"
+        )
+    kept = [r for r in records if r.get("model") in set(models)]
+    dropped = sorted(present - set(models))
+    if dropped:
+        logger.info(f"--models excluded {dropped} ({len(records) - len(kept)} cells)")
+    return kept
+
+
 def build_report(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Compute the report's tables from the collected records.
 
@@ -505,6 +562,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--in-dir", type=str, default="results/embeddings_study")
     parser.add_argument("--out-dir", type=str, default=None)
+    parser.add_argument(
+        "--models", type=str, nargs="+", default=None,
+        help=(
+            "Restrict the report to these arms. Default: every arm with cells "
+            "under the root, which for an old sweep root can include an arm the "
+            "study has since withdrawn -- that changes the Holm family size and "
+            "so every adjusted p-value. A warning names any such arm."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Resolve against the REPO ROOT, matching the trainer and the sweep. The
@@ -516,6 +582,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger.error(f"no cell results found under {in_dir}")
         return 1
 
+    records = select_models(records, args.models)
     report = build_report(records)
     write_report(report, resolve_output_dir(args.out_dir) if args.out_dir else in_dir)
     logger.info(
