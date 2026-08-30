@@ -1,126 +1,64 @@
 """
-N-Dimensional Self-Organizing Map (SOM) layer implementation for Keras.
+N-dimensional Self-Organizing Map (SOM) layer for Keras.
 
-A Self-Organizing Map is an unsupervised neural network that performs dimensionality
-reduction through competitive learning and topological organization. This implementation
-supports N-dimensional grids (1D, 2D, 3D, etc.) and maps high-dimensional input data 
-onto a lower-dimensional discretized grid, preserving topological relationships between 
-input patterns.
+A SOM is an unsupervised network that maps high-dimensional vectors onto a
+discrete grid of neurons. Each neuron holds one prototype vector. For an input
+`x` the layer finds the closest prototype -- the Best Matching Unit (BMU) --
+and pulls the BMU and its grid neighbours toward `x`. Nearby grid positions end
+up holding similar prototypes, so the grid preserves the topology of the input
+space. This module supports any grid rank: `(50,)` is a chain of 50 neurons,
+`(10, 10)` a 10x10 plane, `(8, 8, 8)` a 512-neuron cube.
 
-SOMs function as associative memory structures where:
-  - Each neuron represents a prototype vector in the input space
-  - Competitive learning determines which neuron "wins" for each input
-  - Neighborhood functions create topological organization
-  - Similar inputs activate nearby regions in the grid
-  - The grid preserves distance relationships from the input space
+The layer trains itself. Weights are updated in `call()` with `assign_add`, not
+by backpropagation, and the weight map is a non-trainable variable.
 
-Learning Process:
-----------------
-1. For each input vector:
-   a. Find the Best Matching Unit (BMU) - the neuron with weights closest to the input
-   b. Update the BMU and its neighbors to move them closer to the input
-   c. The neighborhood size and learning rate decrease over time
+The rule is Kohonen's:
 
-Grid Structure:
---------------
-The SOM organizes neurons in an N-dimensional grid:
-- 1D: Linear chain of neurons (5,) -> 5 neurons in a line
-- 2D: Rectangular grid (10, 10) -> 100 neurons in a 10x10 plane  
-- 3D: Cubic grid (5, 5, 5) -> 125 neurons in a 5x5x5 cube
-- etc.
+    BMU  = argmin_i ||x - w_i||^2
+    w_i <- w_i + alpha(t) * h_i(t) * (x - w_i)
 
-Each neuron has coordinates in the grid and a weight vector with the same
-dimensionality as the input.
+`alpha(t)` is the learning rate and `h_i(t)` the neighbourhood value for neuron
+`i`. Both shrink as training proceeds, so early steps move large regions of the
+grid and later steps fine-tune. Two neighbourhood shapes are available:
 
-Competitive Learning:
--------------------
-For an input x, the best matching unit (BMU) is the neuron with weight vector w_bmu that
-minimizes the Euclidean distance:
+    gaussian:  h_i = exp(-d^2 / (2 * sigma^2))
+    bubble:    h_i = 1 if d <= sigma else 0
 
-    BMU = argmin_i ||x - w_i||^2
+where `d` is the grid distance from neuron `i` to the BMU.
 
-Neighborhood Functions:
----------------------
-1. Gaussian neighborhood:
-   h_i = exp(-d^2/(2*sigma^2))
-   where d = distance from neuron i to the BMU
+Read as memory, a SOM is content-addressable. Similar inputs retrieve the same
+or a nearby slot, and a novel input still retrieves its closest prototype. That
+makes the layer useful for clustering, visualization, feature organization and
+anomaly detection.
 
-2. Bubble neighborhood:
-   h_i = 1 if d <= sigma, 0 otherwise
-   where d = distance from neuron i to the BMU
+The layer returns BMU grid coordinates and the quantization error (the distance
+to the winning prototype), not a reconstruction.
 
-Weight Update:
-------------
-For each neuron i, the weight update is:
+Example:
+    >>> # A 10x10 SOM over 784-dimensional MNIST digits.
+    >>> som_layer = SOMLayer(grid_shape=(10, 10), input_dim=784,
+    ...                     initial_learning_rate=0.5, sigma=2.0)
+    >>> bmu_indices, quant_errors = som_layer(input_data, training=True)
+    >>> weights_grid = som_layer.get_weights_map()
+    >>>
+    >>> # A 1D SOM for time-series clustering.
+    >>> som_1d = SOMLayer(grid_shape=(50,), input_dim=100)
+    >>>
+    >>> # A 3D SOM.
+    >>> som_3d = SOMLayer(grid_shape=(8, 8, 8), input_dim=512)
 
-    w_i(t+1) = w_i(t) + α(t) * h_i(t) * (x - w_i(t))
-
-Where:
-    - α(t) is the learning rate at time t
-    - h_i(t) is the neighborhood function value for neuron i at time t
-    - Both α(t) and h_i(t) decrease over time, leading to fine-tuning
-
-Applications:
------------
-- Dimensionality reduction and visualization
-- Clustering and pattern recognition
-- Feature extraction and organization
-- Associative memory systems
-- Anomaly detection
-- Topological data analysis
-
-Memory Properties:
-----------------
-SOMs function as content-addressable memory where:
-- Each neuron stores a prototype pattern
-- Similar inputs activate the same or nearby memory locations
-- The topology preserves relationships between stored memories
-- Retrieval works by finding the best matching memory unit
-- The memory has generalization capabilities for novel inputs
-
-Notes
------
-- Weight vectors are updated manually during training, not through backpropagation
-- Both learning rate and neighborhood radius decrease over training iterations
-- The SOM preserves topological relationships, not exact distances
-- The output provides BMU coordinates (grid position) and quantization error
-- This implementation is fully vectorized for efficient training on modern hardware
-
-Examples
---------
->>> # Create a 10x10 SOM for 784-dimensional MNIST digits
->>> som_layer = SOMLayer(grid_shape=(10, 10), input_dim=784,
-...                     initial_learning_rate=0.5, sigma=2.0)
->>>
->>> # Forward pass (finding BMUs)
->>> bmu_indices, quant_errors = som_layer(input_data, training=True)
->>>
->>> # The grid can be visualized to see the organization of the memory space
->>> weights_grid = som_layer.get_weights_map()
-
->>> # Create a 1D SOM for time series clustering
->>> som_1d = SOMLayer(grid_shape=(50,), input_dim=100)
->>>
->>> # Create a 3D SOM for complex data organization
->>> som_3d = SOMLayer(grid_shape=(8, 8, 8), input_dim=512)
-
-References
-----------
-[1] Kohonen, T. (1982). Self-organized formation of topologically correct feature
-       maps. Biological Cybernetics, 43(1), 59-69.
-
-[2] Kohonen, T. (1990). The self-organizing map. Proceedings of the IEEE, 78(9),
-       1464-1480.
-
-[3] Kohonen, T. (2001). Self-Organizing Maps. Springer Series in Information
-       Sciences, Vol. 30, Springer, Berlin.
-
-[4] Ultsch, A., & Siemon, H. P. (1990). Kohonen's Self Organizing Feature Maps for
-       Exploratory Data Analysis. In Proceedings of International Neural Networks
-       Conference (INNC).
-
-[5] Vesanto, J., & Alhoniemi, E. (2000). Clustering of the self-organizing map.
-       IEEE Transactions on Neural Networks, 11(3), 586-600.
+References:
+    [1] Kohonen, T. (1982). Self-organized formation of topologically correct
+        feature maps. Biological Cybernetics, 43(1), 59-69.
+    [2] Kohonen, T. (1990). The self-organizing map. Proceedings of the IEEE,
+        78(9), 1464-1480.
+    [3] Kohonen, T. (2001). Self-Organizing Maps. Springer Series in
+        Information Sciences, Vol. 30, Springer, Berlin.
+    [4] Ultsch, A., & Siemon, H. P. (1990). Kohonen's Self Organizing Feature
+        Maps for Exploratory Data Analysis. In Proceedings of International
+        Neural Networks Conference (INNC).
+    [5] Vesanto, J., & Alhoniemi, E. (2000). Clustering of the self-organizing
+        map. IEEE Transactions on Neural Networks, 11(3), 586-600.
 """
 
 import keras
@@ -141,70 +79,140 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.memory.som_nd_layer")
 class SOMLayer(keras.layers.Layer):
     """
-    N-Dimensional Self-Organizing Map layer for unsupervised topological learning.
+    N-dimensional Self-Organizing Map layer.
 
-    Implements a fully vectorized SOM that maps high-dimensional input data onto an
-    N-dimensional discretized grid (1D, 2D, 3D, etc.) via competitive learning. For
-    each input ``x``, the Best Matching Unit is found via
-    ``BMU = argmin_i ||x - w_i||^2``, then the BMU and its neighbors are updated:
-    ``w_i(t+1) = w_i(t) + alpha(t) * h_i(t) * (x - w_i(t))`` where ``h_i`` is
-    the neighborhood function (Gaussian or bubble). Weights are not updated via
-    backpropagation but through the custom competitive learning rule in ``call()``.
+    Maps input vectors onto a grid of prototype neurons by competitive
+    learning. Every forward pass finds each input's Best Matching Unit and
+    returns its grid coordinates plus the quantization error. When
+    ``training=True`` the layer also moves the BMU and its neighbours toward
+    the input.
+
+    The weight map is a NON-TRAINABLE variable. It is updated inside ``call()``
+    with ``assign_add``, so an optimizer never sees it and no gradient flows
+    into it. A regularizer, if given, is still applied via ``add_loss()``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌────────────────────────────────────────────┐
-        │               SOMLayer                     │
-        │                                            │
-        │  Input(batch, input_dim)                   │
-        │         │                                  │
-        │         ▼                                  │
-        │  Distance: ||x - w_i||^2  (vectorized)     │
-        │         │                                  │
-        │         ▼                                  │
-        │  BMU = argmin_i (distances)                │
-        │         │                                  │
-        │         ▼                                  │
-        │  Neighborhood: h_i(BMU, sigma)             │
-        │  (Gaussian or Bubble)                      │
-        │         │                                  │
-        │         ▼                                  │
-        │  Weight Update: w += alpha * h * (x - w)   │
-        │         │                                  │
-        │         ▼                                  │
-        │  Output: BMU_coords(batch, grid_dim),      │
-        │          quant_errors(batch,)              │
-        └────────────────────────────────────────────┘
+        inputs (batch, input_dim)  -- INPUT tensor, not a weight
+                 │
+                 ▼
+        ┌────────────────────────────────────────────────┐
+        │ squared distance to every neuron               │
+        │ reads weights_map (*grid_shape, input_dim)     │
+        └────────────────────────────────────────────────┘
+                 │  squared_distances (batch, num_neurons)
+                 ├─────────────────────────────┐
+                 ▼                             ▼
+        ┌─────────────────────────┐  ┌─────────────────────────┐
+        │ argmin over neurons     │  │ sqrt of min distance    │
+        │ bmu_indices             │  │ quantization_errors     │
+        │ (batch, grid_dim) int32 │  │ (batch,)                │
+        └─────────────────────────┘  └─────────────────────────┘
+                 │                             │
+                 ├──────────────┐              │
+                 │              ▼              │
+                 │   ┌───────────────────────────────────┐
+                 │   │ neighbourhood h around the BMU    │
+                 │   │ (batch, *grid_shape)  (training)  │
+                 │   └───────────────────────────────────┘
+                 │              │
+                 │              ▼
+                 │   ┌───────────────────────────────────┐
+                 │   │ weights_map.assign_add(           │
+                 │   │   lr * mean(h * (x - w), axis=0)) │
+                 │   │ iterations.assign_add(batch size) │
+                 │   └───────────────────────────────────┘
+                 │
+                 │   add_loss(regularizer(weights_map))   (optional)
+                 │
+                 ▼                             ▼
+                 bmu_indices                   quantization_errors
+                 (batch, grid_dim) int32       (batch,) float
+                 └──────────── return ─────────┘
 
-    :param grid_shape: Shape of the SOM neuron grid, e.g. ``(10, 10)`` for 2D
-        or ``(5, 5, 5)`` for 3D.
+    **Neighbourhood Function:**
+
+    .. code-block:: text
+
+        squared_dist_to_bmus (batch, *grid_shape)
+        current_sigma (scalar, decayed)
+                 │
+                 ▼
+          neighborhood_function
+                 │
+           ┌─────┴──────────────────┐
+           │                        │
+        'gaussian'               'bubble'
+           │                        │
+           ▼                        ▼
+        ┌──────────────────┐   ┌──────────────────────┐
+        │ exp(-d2 /        │   │ sqrt(d2) <= sigma    │
+        │    (2 * sigma^2))│   │ cast to float32      │
+        └──────────────────┘   └──────────────────────┘
+           │                        │
+           └───────────┬────────────┘
+                       ▼
+                neighborhood (batch, *grid_shape)
+
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``.
+
+    Output shape:
+        Tuple of two tensors: ``(batch_size, grid_dim)`` int32 BMU
+        coordinates, and ``(batch_size,)`` float quantization errors.
+
+    Example:
+        >>> som = SOMLayer(grid_shape=(10, 10), input_dim=784, sigma=2.0)
+        >>> bmu_coords, quant_errors = som(x, training=True)
+
+    :param grid_shape: Shape of the neuron grid, e.g. ``(10, 10)`` for 2D or
+        ``(5, 5, 5)`` for 3D. All entries must be positive integers.
     :type grid_shape: Tuple[int, ...]
-    :param input_dim: Dimensionality of the input data vectors.
+    :param input_dim: Width of each input vector.
     :type input_dim: int
-    :param initial_learning_rate: Starting learning rate for weight updates.
-        Defaults to 0.1.
+    :param initial_learning_rate: Starting learning rate for the weight
+        update. Must be positive. Defaults to 0.1.
     :type initial_learning_rate: float
-    :param decay_function: Callable for learning rate decay taking
-        ``(iteration, max_iterations)`` and returning a new rate. If None,
-        linear decay is used. Defaults to None.
-    :type decay_function: Optional[Callable]
-    :param sigma: Initial radius of the neighborhood function. Defaults to 1.0.
-    :type sigma: float
-    :param neighborhood_function: Type of neighborhood function
-        (``'gaussian'`` or ``'bubble'``). Defaults to ``'gaussian'``.
-    :type neighborhood_function: str
-    :param weights_initializer: Initialization method for the SOM weights.
-        Defaults to ``'random_uniform'``.
-    :type weights_initializer: Union[str, keras.initializers.Initializer]
-    :param regularizer: Optional regularizer applied to the weights.
+    :param decay_function: Callable ``(iterations, max_iterations) -> rate``.
+        If None, linear decay from ``initial_learning_rate`` to 0 is used.
         Defaults to None.
+    :type decay_function: Optional[Callable]
+    :param sigma: Starting neighbourhood radius, in grid units. Must be
+        positive. Defaults to 1.0.
+    :type sigma: float
+    :param neighborhood_function: ``'gaussian'`` or ``'bubble'``. Defaults to
+        ``'gaussian'``.
+    :type neighborhood_function: str
+    :param weights_initializer: Initializer for the neuron weight map. The
+        string ``'sample'`` is rejected; see ``__init__``. Defaults to
+        ``'random_uniform'``.
+    :type weights_initializer: Union[str, keras.initializers.Initializer]
+    :param regularizer: Optional regularizer applied to the weight map through
+        ``add_loss()``. Defaults to None.
     :type regularizer: Optional[keras.regularizers.Regularizer]
-    :param name: Name of the layer. Defaults to None.
+    :param name: Layer name. Defaults to None.
     :type name: Optional[str]
-    :param kwargs: Additional keyword arguments for the base layer.
+    :param kwargs: Forwarded to ``keras.layers.Layer.__init__``.
     :type kwargs: Any
+
+    :ivar grid_dim: Rank of the grid, ``len(grid_shape)``.
+    :vartype grid_dim: int
+    :ivar num_neurons: Total neuron count, ``prod(grid_shape)``.
+    :vartype num_neurons: int
+    :ivar weights_map: Non-trainable variable of shape
+        ``(*grid_shape, input_dim)``. Created in ``build()``.
+    :vartype weights_map: keras.Variable
+    :ivar iterations: Non-trainable float32 scalar counting the input vectors
+        seen with ``training=True``.
+    :vartype iterations: keras.Variable
+    :ivar max_iterations: Non-trainable float32 scalar, the horizon the decay
+        schedules are expressed against. Initialized to 1000.0.
+    :vartype max_iterations: keras.Variable
+    :ivar grid_positions: Plain tensor of shape ``(*grid_shape, grid_dim)``
+        holding each neuron's grid coordinates. Not a variable.
+    :vartype grid_positions: keras.KerasTensor
     """
 
     def __init__(
@@ -220,7 +228,20 @@ class SOMLayer(keras.layers.Layer):
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the SOM layer."""
+        """
+        Validate the configuration and store it. Weights are created in
+        ``build()``.
+
+        See the class docstring for the meaning of every parameter.
+
+        :raises ValueError: If ``grid_shape`` holds a non-positive or
+            non-integer entry, ``input_dim`` is not positive,
+            ``initial_learning_rate`` is not positive, ``sigma`` is not
+            positive, or ``neighborhood_function`` is not ``'gaussian'`` or
+            ``'bubble'``.
+        :raises NotImplementedError: If ``weights_initializer`` is the string
+            ``'sample'``.
+        """
         super().__init__(name=name, **kwargs)
 
         # Validation
@@ -243,15 +264,14 @@ class SOMLayer(keras.layers.Layer):
         self.sigma = sigma
         self.neighborhood_function = neighborhood_function
 
-        # Store raw config values for serialization
+        # Keep the raw arguments so get_config() round-trips them.
         self._decay_function_config = decay_function
         self._weights_initializer_config = weights_initializer
         self._regularizer_config = regularizer
 
-        # Handle special string initializers vs. Keras standard initializers.
-        # NOTE: 'sample' (data-sample init) was historically advertised but never
-        # implemented — it silently fell back to seeded RandomUniform. We now
-        # raise loudly so callers can pick a real initializer.
+        # 'sample' (data-sample init) was advertised but never implemented; it
+        # silently fell back to a seeded RandomUniform. Raise instead, so the
+        # caller picks a real initializer.
         if isinstance(weights_initializer, str) and weights_initializer == 'sample':
             raise NotImplementedError(
                 "'sample' initializer (data-sample init) is not implemented; pass "
@@ -261,27 +281,30 @@ class SOMLayer(keras.layers.Layer):
         self.weights_initializer = keras.initializers.get(weights_initializer)
         self.regularizer = keras.regularizers.get(regularizer)
 
-        # Define custom decay function if none provided
+        # Default schedule: linear decay to zero at max_iterations.
         if decay_function is None:
             self.decay_function = lambda x, max_iter: self.initial_learning_rate * (1 - x / max_iter)
         else:
             self.decay_function = decay_function
 
-        # Initialize weights to None (will be created in build)
+        # Created in build().
         self.weights_map = None
         self.iterations = None
         self.max_iterations = None
         self.grid_positions = None
 
-        # Store build input shape for serialization
+        # Set in build(), read by get_build_config().
         self._build_input_shape = None
 
     def build(self, input_shape: Tuple) -> None:
         """
-        Build the SOM layer by initializing the weight vectors.
+        Create the weight map, the two counters and the grid coordinates.
 
-        :param input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor. Must be
+            ``(batch_size, input_dim)``.
         :type input_shape: Tuple
+        :raises ValueError: If ``input_shape`` is not rank 2 or its last axis
+            is not ``input_dim``.
         """
         # Store input shape for serialization
         self._build_input_shape = input_shape
@@ -296,7 +319,7 @@ class SOMLayer(keras.layers.Layer):
                 f"but received input_shape={input_shape}"
             )
 
-        # Training iterations counter
+        # Counts the input vectors seen with training=True.
         self.iterations = self.add_weight(
             name="iterations",
             shape=(),
@@ -313,16 +336,17 @@ class SOMLayer(keras.layers.Layer):
             trainable=False
         )
 
-        # Handle weight initialization (dead 'sample' fallback removed — raises
-        # NotImplementedError at __init__ time now).
+        # The dead 'sample' fallback was removed; __init__ raises instead.
         initializer = self.weights_initializer
 
+        # trainable=False: call() updates this map with assign_add, so it must
+        # stay out of the optimizer's hands.
         self.weights_map = self.add_weight(
             name="som_weights",
             shape=(*self.grid_shape, self.input_dim),
             initializer=initializer,
             regularizer=self.regularizer,
-            trainable=False  # Weights are updated manually
+            trainable=False
         )
 
         # Initialize grid positions
@@ -335,9 +359,14 @@ class SOMLayer(keras.layers.Layer):
 
     def _initialize_grid_positions(self) -> keras.KerasTensor:
         """
-        Initialize the N-dimensional grid positions for the SOM.
+        Build the neuron coordinate grid.
 
-        :return: Tensor of shape ``(*grid_shape, grid_dim)`` with neuron coordinates.
+        Returns a plain tensor, not a variable. That matters under mixed
+        precision: Keras autocasts variables read inside ``call()`` but leaves
+        plain tensors alone.
+
+        :return: Tensor of shape ``(*grid_shape, grid_dim)`` holding each
+            neuron's integer grid coordinates as float32.
         :rtype: keras.KerasTensor
         """
         coord_ranges = [ops.cast(ops.arange(d), "float32") for d in self.grid_shape]
@@ -350,13 +379,18 @@ class SOMLayer(keras.layers.Layer):
              training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Forward pass for the SOM layer.
+        Find each input's BMU, and update the map when training.
+
+        With ``training=True`` this also mutates ``weights_map`` and
+        ``iterations``. The return value is the same either way.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether the layer is in training mode.
+        :param training: Whether to run the competitive weight update.
+            Defaults to None, which does not update.
         :type training: Optional[bool]
-        :return: Tuple of (BMU coordinates, quantization errors).
+        :return: ``(bmu_indices, quantization_errors)`` of shapes
+            ``(batch_size, grid_dim)`` int32 and ``(batch_size,)``.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Find the Best Matching Units (BMUs) for each input
@@ -375,11 +409,17 @@ class SOMLayer(keras.layers.Layer):
 
     def _find_bmu(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Find the Best Matching Unit (BMU) for each input vector.
+        Find the Best Matching Unit for each input vector.
+
+        Compares every input against every neuron at once, so the intermediate
+        distance tensor is ``(batch_size, num_neurons)``.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :return: Tuple of (BMU coordinates, quantization errors).
+        :return: ``(bmu_indices, quantization_errors)``. ``bmu_indices`` is
+            int32 of shape ``(batch_size, grid_dim)``; ``quantization_errors``
+            is the Euclidean distance to the winning neuron, shape
+            ``(batch_size,)``.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Reshape weights to [total_neurons, input_dim]
@@ -407,40 +447,31 @@ class SOMLayer(keras.layers.Layer):
 
     def _update_weights(self, inputs: keras.KerasTensor, bmu_indices: keras.KerasTensor) -> None:
         """
-        Update the SOM weights using a vectorized learning rule.
+        Apply one Kohonen update to the whole map.
+
+        Decays the learning rate and sigma against ``iterations`` and
+        ``max_iterations``, builds the neighbourhood around each BMU, then
+        adds ``lr * mean_over_batch(h * (x - w))`` to ``weights_map``.
+
+        Both decayed quantities are floored. The default schedule is linear
+        and unbounded downward, so once ``iterations`` passes
+        ``max_iterations`` the learning rate would go negative and every
+        update would push neurons AWAY from their inputs. Sigma is floored at
+        1e-4 to keep the Gaussian denominator non-zero.
+
+        The whole update runs in float32; see the D-062 note below.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param bmu_indices: BMU coordinates of shape ``(batch_size, grid_dim)``.
+        :param bmu_indices: BMU grid coordinates of shape
+            ``(batch_size, grid_dim)``.
         :type bmu_indices: keras.KerasTensor
         """
-        # Update learning rate and sigma based on iteration.
-        #
-        # The learning rate is floored at 0 for the same reason sigma is floored
-        # below: the default linear decay is unbounded downward, so once
-        # `iterations` passes `max_iterations` it goes NEGATIVE and every update
-        # pushes neurons AWAY from their inputs -- anti-learning that is
-        # invisible to a quantization-error check with a loose tolerance. Sigma
-        # was already clamped here and the learning rate was not; that asymmetry
-        # is what let a unit mismatch between the layer and SOMModel.train turn
-        # into silent divergence rather than a visible error.
         # DECISION plan-2026-08-19T163559-499b6f0e/D-062
-        # Every quantity in this competitive update is forced to float32,
-        # including `inputs` and the weight map read below. Kohonen's rule is
-        # NOT a gradient step -- it is a statistical update applied by
-        # `assign_add` to a float32 variable -- and the grid geometry beside it
-        # is ALREADY hard float32 (`bmu_coords`, and the `bubble` cast). Under
-        # `mixed_float16` Keras AUTOCASTS a float32 variable to the compute
-        # dtype when it is read inside `call`, so `self.iterations` and
-        # `self.max_iterations` came back float16 while `self.grid_positions`
-        # -- a plain tensor, not a variable, and therefore not autocast --
-        # stayed float32. MEASURED at HEAD: `SOM2dLayer.call(training=True)`
-        # raised `TypeError: x and y must have the same dtype, got tf.float32
-        # != tf.float16` at the gaussian neighbourhood, on any mixed-precision
-        # training step; the inference path was green, which is why no test saw
-        # it. Do NOT "fix" this by casting the grid to float16 instead: a
-        # float16 neighbourhood underflows to zero for distant neurons.
-        # See decisions.md D-062.
+        # This update runs entirely in float32. MEASURED: without the casts,
+        # `call(training=True)` under `mixed_float16` raises `TypeError: ...
+        # got tf.float32 != tf.float16`. Do NOT cast the grid to float16
+        # instead: distant neurons underflow to 0.0. See decisions.md D-062.
         geom_dtype = "float32"
         inputs = ops.cast(inputs, geom_dtype)
         current_learning_rate = self.decay_function(self.iterations, self.max_iterations)
@@ -463,9 +494,12 @@ class SOMLayer(keras.layers.Layer):
             ops.square(grid_pos_expanded - bmu_coords_expanded), axis=-1
         )
 
+        # Two neighbourhood shapes. 'gaussian' falls off smoothly; 'bubble' is
+        # a hard 0/1 cut at current_sigma. __init__ allows nothing else, so the
+        # else branch is 'bubble'.
         if self.neighborhood_function == 'gaussian':
             neighborhood = ops.exp(-squared_dist_to_bmus / (2 * ops.square(current_sigma)))
-        else:  # 'bubble'
+        else:
             dist_to_bmus = ops.sqrt(squared_dist_to_bmus)
             neighborhood = ops.cast(dist_to_bmus <= current_sigma, geom_dtype)
 
@@ -480,31 +514,30 @@ class SOMLayer(keras.layers.Layer):
 
         # AVERAGE the deltas over the batch, then apply the learning rate.
         #
-        # Kohonen's rule is w += eta*h*(x-w), which is stable for eta*h <= 1.
-        # Summing over a batch of B gives an effective coefficient of
-        # eta * sum_b h_b, which for B=32 and eta=0.1 exceeds 1 for any neuron
-        # near several BMUs -- the update then overshoots PAST the inputs and
-        # oscillates. Averaging is the mini-batch analogue of the online rule
-        # and bounds the coefficient by eta, independently of batch size.
+        # Kohonen's rule w += eta*h*(x-w) is stable for eta*h <= 1. Summing
+        # over a batch of B gives an effective coefficient of eta * sum_b h_b,
+        # which for B=32 and eta=0.1 exceeds 1 for any neuron near several
+        # BMUs; the update then overshoots past the inputs and oscillates.
+        # Averaging bounds the coefficient by eta at any batch size.
         weight_update = current_learning_rate * ops.mean(delta_per_input, axis=0)
         self.weights_map.assign_add(weight_update)
 
     def get_weights_map(self) -> keras.KerasTensor:
         """
-        Get the current weights organized as an N-dimensional map.
+        Return the neuron prototypes laid out on the grid.
 
-        :return: SOM weights of shape ``(*grid_shape, input_dim)``.
+        :return: The weight map of shape ``(*grid_shape, input_dim)``.
         :rtype: keras.KerasTensor
         """
         return self.weights_map
 
     def compute_output_shape(self, input_shape: Tuple) -> Tuple[Tuple, Tuple]:
         """
-        Compute the output shape of the layer.
+        Compute the shapes of the two output tensors.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple
-        :return: Tuple of (BMU shape, quantization error shape).
+        :return: ``((batch_size, grid_dim), (batch_size,))``.
         :rtype: Tuple[Tuple, Tuple]
         """
         # Convert to list for consistent manipulation
@@ -518,9 +551,12 @@ class SOMLayer(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get configuration for the layer.
+        Return the constructor arguments needed to rebuild this layer.
 
-        :return: Configuration dictionary for the layer.
+        ``weights_initializer`` and ``regularizer`` are serialized from the
+        raw values passed to ``__init__``, not from the resolved objects.
+
+        :return: Configuration dictionary.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
@@ -546,9 +582,10 @@ class SOMLayer(keras.layers.Layer):
 
     def get_build_config(self) -> Dict[str, Any]:
         """
-        Get build configuration for the layer.
+        Return the input shape ``build()`` was called with.
 
-        :return: Build configuration dictionary.
+        :return: Build configuration dictionary with one key,
+            ``"input_shape"``.
         :rtype: Dict[str, Any]
         """
         return {
@@ -557,9 +594,13 @@ class SOMLayer(keras.layers.Layer):
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """
-        Build the layer from a configuration.
+        Rebuild the layer's weights from a saved build configuration.
 
-        :param config: Build configuration dictionary.
+        Does nothing if the saved ``"input_shape"`` is None, which happens
+        when the layer was never built before saving.
+
+        :param config: Build configuration dictionary from
+            ``get_build_config()``.
         :type config: Dict[str, Any]
         """
         if config.get("input_shape") is not None:
@@ -568,11 +609,14 @@ class SOMLayer(keras.layers.Layer):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SOMLayer":
         """
-        Create a layer from its configuration.
+        Create a layer from a configuration dictionary.
 
-        :param config: Configuration dictionary.
+        Deserializes ``weights_initializer`` and ``regularizer`` back into
+        Keras objects before calling the constructor.
+
+        :param config: Configuration dictionary from ``get_config()``.
         :type config: Dict[str, Any]
-        :return: A new SOMLayer instance.
+        :return: A new ``SOMLayer``.
         :rtype: SOMLayer
         """
         # Handle complex object deserialization
