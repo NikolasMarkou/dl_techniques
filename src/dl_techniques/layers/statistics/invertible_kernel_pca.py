@@ -304,6 +304,14 @@ class InvertibleKernelPCA(keras.layers.Layer):
             raise ValueError(f"kernel_type must be 'rbf', 'laplacian', or 'cauchy', got {kernel_type}")
         if regularization < 0:
             raise ValueError(f"regularization must be non-negative, got {regularization}")
+        # Checked here, not in build(): both operands are constructor arguments.
+        # The n_components=None path cannot violate it, because build() resolves
+        # None to min(n_random_features, input_dim), which is never larger.
+        if n_components is not None and n_components > n_random_features:
+            raise ValueError(
+                f"n_components ({n_components}) cannot be larger than "
+                f"n_random_features ({n_random_features})"
+            )
 
         # Store configuration.
         # ``build`` mutates ``self.gamma`` (None -> 1/input_dim) and
@@ -331,7 +339,6 @@ class InvertibleKernelPCA(keras.layers.Layer):
         self.phases = None
         self.projection_matrix = None
         self.eigenvalues = None
-        self.eigenvectors = None
         self.feature_mean = None
         self.reconstruction_matrix = None
         self.reconstruction_bias = None
@@ -352,8 +359,9 @@ class InvertibleKernelPCA(keras.layers.Layer):
         :return: Nothing.
         :rtype: None
         :raises ValueError: if the last dimension of ``input_shape`` is
-            ``None``, if ``n_components`` exceeds ``n_random_features``, or if
-            ``kernel_type`` is not recognised.
+            ``None``, or if ``kernel_type`` is not recognised. The
+            ``n_components`` / ``n_random_features`` contract is enforced in
+            ``__init__``, which is where both operands are known.
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -363,14 +371,11 @@ class InvertibleKernelPCA(keras.layers.Layer):
         if self.gamma is None:
             self.gamma = 1.0 / input_dim
 
-        # Determine actual number of components
+        # Determine actual number of components. The n_components >
+        # n_random_features contract is enforced in __init__, which is where
+        # both of its operands are already known.
         if self.n_components is None:
             self.n_components = min(self.n_random_features, input_dim)
-        elif self.n_components > self.n_random_features:
-            raise ValueError(
-                f"n_components ({self.n_components}) cannot be larger than "
-                f"n_random_features ({self.n_random_features})"
-            )
 
         # Initialize random number generator
         if self.random_seed is not None:
@@ -927,10 +932,14 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         """Store the configuration and split the ``n_components`` argument.
 
         An int goes straight to ``self.n_components`` and leaves
-        ``self.variance_threshold`` at ``None``. A float goes the other way,
-        and ``build`` resolves it. The raw argument is kept on
-        ``self.n_components_param`` for ``get_config``. No child layer and no
-        weights are created here. See the class docstring for the parameters.
+        ``self.variance_threshold`` at ``None``. A float is kept as the
+        threshold and turned into a count here as well: the count scales by
+        ``n_random_features`` only and needs no input shape.
+
+        The ``ikpca`` child is created here. No weights are: the child's own
+        ``build`` makes those. The raw ``n_components`` argument is kept on
+        ``self.n_components_param`` for ``get_config``. See the class docstring
+        for the parameters.
         """
         super().__init__(**kwargs)
 
@@ -945,51 +954,40 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         if isinstance(n_components, float):
             if not (0 < n_components <= 1):
                 raise ValueError(f"When float, n_components must be in (0, 1], got {n_components}")
-            # Will be determined based on variance
-            self.n_components = None
             self.variance_threshold = n_components
+            # Turn the fraction into a count. This scales by n_random_features
+            # only; it does not inspect any eigenvalue and needs no input_shape,
+            # which is why it belongs here and not in build().
+            self.n_components = max(1, int(n_random_features * n_components))
         else:
             self.n_components = n_components
             self.variance_threshold = None
 
-        # Create ikPCA layer
-        self.ikpca = None
+        # Create the ikPCA child. whiten=True puts every retained component on
+        # the same scale, so the single adaptive threshold in call() applies to
+        # all of them equally.
+        self.ikpca = InvertibleKernelPCA(
+            n_components=self.n_components,
+            n_random_features=self.n_random_features,
+            kernel_type=self.kernel_type,
+            gamma=self.gamma,
+            whiten=True,
+            center_features=True,
+            name='ikpca_denoiser'
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Resolve ``n_components`` and build the ``ikpca`` child.
+        """Build the ``ikpca`` child.
 
-        Reuses an existing child when ``from_config`` already restored one, so
-        deserialization does not silently replace saved weights with a fresh
-        layer.
+        The child itself is created in ``__init__``; ``from_config`` may have
+        replaced it with a deserialized one carrying saved weights, and either
+        way this only builds whatever child is there.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
         :return: Nothing.
         :rtype: None
         """
-        # Turn a float n_components into a count. This scales by
-        # n_random_features only; it does not inspect any eigenvalue.
-        if self.variance_threshold is not None:
-            self.n_components = max(
-                1,
-                int(self.n_random_features * self.variance_threshold)
-            )
-
-        # Create ikPCA child layer only if it was not already provided by
-        # from_config (deserialization rebuilds the child from its saved config).
-        # whiten=True puts every retained component on the same scale, so the
-        # single adaptive threshold below applies to all of them equally.
-        if self.ikpca is None:
-            self.ikpca = InvertibleKernelPCA(
-                n_components=self.n_components,
-                n_random_features=self.n_random_features,
-                kernel_type=self.kernel_type,
-                gamma=self.gamma,
-                whiten=True,
-                center_features=True,
-                name='ikpca_denoiser'
-            )
-
         # Build ikPCA child before finalizing this layer's build.
         if not self.ikpca.built:
             self.ikpca.build(input_shape)

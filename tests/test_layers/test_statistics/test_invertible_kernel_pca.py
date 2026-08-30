@@ -111,10 +111,15 @@ class TestInvertibleKernelPCA:
         with pytest.raises(ValueError, match="regularization"):
             InvertibleKernelPCA(regularization=-1.0)
 
-    def test_build_components_exceed_features(self, input_dim):
-        layer = InvertibleKernelPCA(n_components=32, n_random_features=16)
+    def test_components_exceeding_features_are_rejected_at_construction(self):
+        """Both operands are constructor arguments, so the raise is here.
+
+        This used to build the layer first and expect the raise from ``build``.
+        Nothing in the contract needs an ``input_shape``, and §3.5 puts such a
+        check where it can be seen.
+        """
         with pytest.raises(ValueError, match="cannot be larger"):
-            layer.build((None, input_dim))
+            InvertibleKernelPCA(n_components=32, n_random_features=16)
 
     @pytest.mark.parametrize("kernel_type", ["rbf", "laplacian", "cauchy"])
     def test_build_all_kernels(self, kernel_type, input_dim):
@@ -280,10 +285,16 @@ class TestInvertibleKernelPCADenoiser:
     def test_init_defaults(self):
         layer = InvertibleKernelPCADenoiser()
         assert layer.n_components_param == 0.95
-        assert layer.n_components is None  # float -> resolved in build
         assert layer.variance_threshold == 0.95
-        assert layer.ikpca is None
+        # Both of these used to assert the opposite (None), which pinned the
+        # "resolve it in build()" / "create the child in build()" violations as
+        # if they were the contract. The count is a pure function of
+        # n_random_features and the threshold, and the child needs no
+        # input_shape, so both are settled at construction.
+        assert layer.n_components == max(1, int(layer.n_random_features * 0.95))
+        assert layer.ikpca is not None
         assert not layer.built
+        assert not layer.ikpca.built
 
     def test_init_int_components(self, basic_denoiser):
         assert basic_denoiser.n_components == 4
