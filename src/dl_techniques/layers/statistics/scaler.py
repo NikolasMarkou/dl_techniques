@@ -414,11 +414,24 @@ class UnifiedScaler(keras.layers.Layer):
         # The gate is self.built alone. That skips the update during the symbolic
         # functional-API shape-inference pass, where the weights do not exist yet.
         #
-        # Known limitation, shared with BatchNorm's own .assign: this state
-        # mutation is graph-safe under the TF backend, eager and tf.function /
-        # model.fit alike. It is NOT supported under TF jit_compile=True (XLA) or
-        # the stateless JAX backend. This repo uses neither: the backend is TF and
-        # this layer is never compiled with jit.
+        # This state mutation is graph-safe under the TF backend in every regime
+        # that was measured: eager, tf.function, model.fit, and
+        # jit_compile=True. XLA is not an exception. An earlier version of this
+        # comment claimed the assign was "NOT supported under TF
+        # jit_compile=True"; that was measured false and removed. It also matters
+        # in practice, because model.fit compiles with jit_compile="auto" and so
+        # reaches the XLA path by default.
+        #
+        # What XLA does require is a fully defined variable shape. stored_mean
+        # and stored_std have one. A variable with any unknown dimension fails
+        # tf2xla conversion on AssignVariableOp, measured. So do not make any
+        # variable assigned here dynamically shaped.
+        #
+        # Behaviour on the stateless JAX backend is UNVERIFIED. This repo runs on
+        # TF, so the claim was not tested either way and is not made here.
+        #
+        # The XLA half of this is pinned by TestTheStoredStatsAssignWorksUnderXla
+        # in tests/test_layers/test_statistics/test_the_package_is_v2_compliant.py.
         if self.store_stats and self.built:
             # Average statistics across batch dimension for storage
             batch_mean = ops.mean(mean, axis=0)
