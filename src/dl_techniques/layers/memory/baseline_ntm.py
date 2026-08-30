@@ -2343,6 +2343,10 @@ def create_ntm(
     shift_range: int = 3,
     return_sequences: bool = True,
     return_state: bool = False,
+    addressing_mode: AddressingMode = AddressingMode.HYBRID,
+    use_memory_init: bool = True,
+    memory_init_seed: int = 42,
+    epsilon: float = 1e-6,
 ) -> NeuralTuringMachine:
     """
     Build a `NeuralTuringMachine` from plain arguments.
@@ -2350,27 +2354,33 @@ def create_ntm(
     Packs the memory and controller arguments into an `NTMConfig`,
     then constructs the layer. The returned layer is unbuilt.
 
-    Four `NTMConfig` fields are NOT exposed here and keep their
-    defaults: `addressing_mode` (HYBRID), `use_memory_init` (True),
-    `memory_init_seed` (42) and `epsilon` (1e-6). Construct
-    `NTMConfig` yourself and call `NeuralTuringMachine` directly to
-    set any of them.
+    Every `NTMConfig` field is reachable from here; each argument
+    that feeds the config defaults to the value `NTMConfig` itself
+    declares, so omitting all of them builds the same layer the
+    dataclass defaults would.
+
+    The four config arguments come LAST in the signature, after the
+    two layer flags, rather than beside the other config arguments:
+    they were added to a released signature, and any other position
+    would have changed what an existing positional call means.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        the 10 keyword arguments below
+        the 14 keyword arguments below
                           │
                           ▼
         ┌─ NTMConfig ────────────────────────────────────────┐
         │ memory_size, memory_dim, num_read_heads,           │
         │ num_write_heads, controller_dim,                   │
-        │ controller_type, shift_range                       │
+        │ controller_type, shift_range,                      │
+        │ addressing_mode, use_memory_init,                  │
+        │ memory_init_seed, epsilon                          │
         └─────────────────┬──────────────────────────────────┘
-                          │  addressing_mode, use_memory_init,
-                          │  memory_init_seed and epsilon are NOT
-                          │  exposed here; they keep NTMConfig defaults
+                          │  output_dim, return_sequences and
+                          │  return_state are layer arguments and
+                          │  bypass the config
                           ▼
         ┌─ NeuralTuringMachine ──────────────────────────────┐
         │ config, output_dim, return_sequences, return_state │
@@ -2413,6 +2423,22 @@ def create_ntm(
     :param return_state: Whether to also return the final RNN
         states. Defaults to False.
     :type return_state: bool
+    :param addressing_mode: Which addressing chain the heads run.
+        `AddressingMode.HYBRID`, the default, runs content
+        addressing then interpolation, shift and sharpening;
+        `AddressingMode.CONTENT` stops after content addressing and
+        the heads never build the three location projections.
+    :type addressing_mode: AddressingMode
+    :param use_memory_init: Whether the initial memory is a learned
+        variable. Defaults to True.
+    :type use_memory_init: bool
+    :param memory_init_seed: Seed for the symmetry-breaking initial
+        memory draw used when `use_memory_init` is False. Defaults
+        to 42.
+    :type memory_init_seed: int
+    :param epsilon: Small constant for numerical stability, handed
+        to the heads' addressing helpers. Defaults to 1e-6.
+    :type epsilon: float
     :return: An unbuilt NTM layer.
     :rtype: NeuralTuringMachine
     """
@@ -2424,6 +2450,10 @@ def create_ntm(
         controller_dim=controller_dim,
         controller_type=controller_type,
         shift_range=shift_range,
+        addressing_mode=addressing_mode,
+        use_memory_init=use_memory_init,
+        memory_init_seed=memory_init_seed,
+        epsilon=epsilon,
     )
 
     return NeuralTuringMachine(

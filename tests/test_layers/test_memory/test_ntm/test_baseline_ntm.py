@@ -1291,6 +1291,124 @@ class TestMemoryInitSeedPaths:
         )
 
 
+class TestCreateNTMReachesEveryConfigField:
+    """`create_ntm` must be able to reach every `NTMConfig` field.
+
+    The factory exposed 7 of `NTMConfig`'s 11 fields. `addressing_mode`,
+    `use_memory_init`, `memory_init_seed` and `epsilon` were unreachable and
+    silently kept their defaults, so a CONTENT-addressing NTM could not be
+    built through the documented construction path at all.
+
+    The `memory_init_seed` half of this class is ONLY checkable because the
+    preceding step landed: before it, `NTMCell` built its `NTMMemory` without
+    passing the configured seed down, so even a correctly widened factory
+    signature would still have shown 42 on the built memory. See
+    `TestMemoryInitSeedPaths`.
+    """
+
+    @staticmethod
+    def _build(**kwargs):
+        """Build a small NTM through the factory and run one forward pass."""
+        ntm = create_ntm(
+            memory_size=8,
+            memory_dim=4,
+            output_dim=3,
+            controller_dim=6,
+            num_read_heads=1,
+            num_write_heads=1,
+            shift_range=3,
+            **kwargs,
+        )
+        inputs = keras.random.normal((2, 5, 4))
+        ntm(inputs)
+        return ntm
+
+    def test_content_addressing_head_omits_the_location_projections(self):
+        """CONTENT must change what the heads ARE, not just what they store.
+
+        Under CONTENT the three location-addressing projections
+        (`gate_dense` / `shift_dense` / `gamma_dense`) are never created, so a
+        CONTENT head owns strictly fewer weights than the HYBRID head the same
+        factory call builds by default. A merely-stored `addressing_mode`
+        attribute cannot satisfy this: the assertion is on the built weight
+        set and the parameter count, both of which a stored enum leaves
+        untouched. The HYBRID build is the paired control -- without it the
+        count assertion could pass against an NTM of any shape.
+        """
+        content = self._build(addressing_mode=AddressingMode.CONTENT)
+        hybrid = self._build(addressing_mode=AddressingMode.HYBRID)
+
+        content_head = content.ntm_cell.read_heads[0]
+        hybrid_head = hybrid.ntm_cell.read_heads[0]
+
+        assert content_head.gate_dense is None
+        assert content_head.shift_dense is None
+        assert content_head.gamma_dense is None
+        assert hybrid_head.gate_dense is not None
+
+        content_names = [w.path for w in content_head.weights]
+        assert not any(
+            token in name
+            for name in content_names
+            for token in ("gate", "shift", "gamma")
+        ), f"a CONTENT read head owns location-addressing weights: {content_names}"
+
+        content_params = int(sum(np.prod(w.shape) for w in content_head.weights))
+        hybrid_params = int(sum(np.prod(w.shape) for w in hybrid_head.weights))
+        assert content_params < hybrid_params, (
+            f"CONTENT read head has {content_params} parameters and the HYBRID "
+            f"control has {hybrid_params}; CONTENT did not reach the head"
+        )
+
+        # The same must hold for the write head, which builds its own projections.
+        assert content.ntm_cell.write_heads[0].shift_dense is None
+
+    def test_memory_init_seed_reaches_the_built_memory(self):
+        """A non-default seed passed to the factory must reach the memory module.
+
+        Checkable only because the preceding step landed: the cell now forwards
+        its config's seed to the `NTMMemory` it builds. The behavioural half
+        below is what "reached" means, and the repeat draw is its control.
+        """
+        seven = self._build(memory_init_seed=7)
+        assert seven.ntm_cell.memory.memory_init_seed == 7, (
+            "create_ntm(memory_init_seed=7) built a memory carrying "
+            f"{seven.ntm_cell.memory.memory_init_seed}"
+        )
+
+        default = self._build()
+        assert default.ntm_cell.memory.memory_init_seed == 42
+
+        drawn = keras.ops.convert_to_numpy(
+            seven.ntm_cell.memory.initialize_state(2).memory
+        )
+        again = keras.ops.convert_to_numpy(
+            self._build(memory_init_seed=7).ntm_cell.memory.initialize_state(2).memory
+        )
+        other = keras.ops.convert_to_numpy(
+            default.ntm_cell.memory.initialize_state(2).memory
+        )
+
+        # Control: the same seed repeats exactly.
+        np.testing.assert_allclose(drawn, again, rtol=0, atol=0)
+        assert float(np.max(np.abs(drawn - other))) > 0.0
+
+    def test_use_memory_init_and_epsilon_reach_the_config(self):
+        """The remaining two withheld fields must also arrive.
+
+        `epsilon` is asserted on a head, which is where it is actually
+        consumed (`cosine_similarity` / `sharpen_weights`), not only on the
+        config dataclass.
+        """
+        ntm = self._build(use_memory_init=False, epsilon=1e-3)
+
+        assert ntm.ntm_cell.config.use_memory_init is False
+        assert ntm.ntm_cell.config.epsilon == 1e-3
+        assert ntm.ntm_cell.read_heads[0].epsilon == 1e-3
+        assert ntm.ntm_cell.write_heads[0].epsilon == 1e-3
+        assert ntm.ntm_cell.memory.epsilon == 1e-3
+
+
 # ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------
