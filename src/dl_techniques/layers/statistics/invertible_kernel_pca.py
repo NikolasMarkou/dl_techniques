@@ -606,8 +606,14 @@ class InvertibleKernelPCA(keras.layers.Layer):
         # Apply cosine transformation: cos(Xω + b)
         cos_features = ops.cos(proj_with_phase)
 
-        # Scale by sqrt(2/D) for proper kernel approximation
-        scale = ops.sqrt(2.0 / self.n_random_features)
+        # Scale by sqrt(2/D) for proper kernel approximation.
+        # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
+        # `self.n_random_features` is a Python int, so `ops.sqrt(2.0 / ...)`
+        # alone materializes the scale at backend.floatx() and the multiply
+        # below raised `cannot compute Mul ... expected to be a float tensor but
+        # is a half/double/bfloat16 tensor` (measured). Take the dtype from
+        # `cos_features`, never from a literal. decisions.md D-002.
+        scale = ops.sqrt(ops.cast(2.0 / self.n_random_features, cos_features.dtype))
         rff_features = scale * cos_features
 
         return rff_features

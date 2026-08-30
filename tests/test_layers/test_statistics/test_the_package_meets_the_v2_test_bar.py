@@ -210,22 +210,6 @@ XFAILS: Dict[Tuple[str, str], str] = {
         "test build-out. Note the sibling InvertibleKernelPCADenoiser PASSES this item, "
         "because its call() runs transform followed by inverse_transform"
     ),
-    ("InvertibleKernelPCA", "dtype-mixed_float16"): (
-        "measured: InvalidArgumentError at invertible_kernel_pca.py:611, "
-        "`ops.sqrt(2.0 / self.n_random_features)` produces a float32 scale that is "
-        "multiplied into float16 cosine features"
-    ),
-    ("InvertibleKernelPCA", "dtype-float64"): (
-        "measured: the same site, invertible_kernel_pca.py:611, with float64 features "
-        "and a float32 scale"
-    ),
-    ("InvertibleKernelPCADenoiser", "dtype-mixed_float16"): (
-        "measured: inherited -- the denoiser delegates to its InvertibleKernelPCA "
-        "child, and the traceback lands on the same invertible_kernel_pca.py:611"
-    ),
-    ("InvertibleKernelPCADenoiser", "dtype-float64"): (
-        "measured: inherited from the same child, invertible_kernel_pca.py:611"
-    ),
 }
 
 
