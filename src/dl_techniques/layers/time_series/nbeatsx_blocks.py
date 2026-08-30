@@ -12,11 +12,15 @@ are concatenated along time and run through a TCN encoder, and the result
 is the basis.
 
 The target residual still goes through the inherited 4-layer dense stack,
-which produces one theta vector per sample. Backcast and forecast are the
-basis weighted by theta:
+which produces one theta vector per sample per output channel. Backcast
+and forecast are the basis weighted by theta:
 
-    backcast = einsum('btc,bc->bt', basis_backcast, theta_backcast)
-    forecast = einsum('btc,bc->bt', basis_forecast, theta_forecast)
+    backcast = einsum('btc,bic->bti', basis_backcast, theta_backcast)
+    forecast = einsum('btc,boc->bto', basis_forecast, theta_forecast)
+
+where i runs over ``input_dim`` and o over ``output_dim``. Each result is
+flattened to (batch, length * dim), the residual-stream layout every
+sibling block produces.
 
 With ``use_tcn=True`` (NBEATSx-G) the basis is ``C = TCN(X)``. With
 ``use_tcn=False`` (NBEATSx-I) the raw exogenous tensor is the basis.
@@ -42,14 +46,17 @@ class ExogenousBlock(NBeatsBlock):
 
     A standard N-BEATS block has a fixed or learned basis. This one builds
     the basis from the exogenous inputs at run time, then weights it with
-    theta coefficients read off the target residual. Backcast and forecast
-    are both single-channel.
+    theta coefficients read off the target residual. Backcast carries
+    ``input_dim`` channels and forecast carries ``output_dim`` channels,
+    matching the inherited :meth:`NBeatsBlock.compute_output_shape`
+    contract and every sibling block.
 
     The dense spine is inherited from :class:`NBeatsBlock` and is drawn
     there. This block re-runs those four layers itself, because it needs
     the exogenous basis before it can project theta. The theta heads are
     replaced: they are bias-free Dense layers whose width is the number of
-    basis channels, not ``thetas_dim``.
+    basis channels times ``input_dim`` (or ``output_dim``), rather than
+    ``thetas_dim`` times it.
 
     Two configurations follow the paper. NBEATSx-G (``use_tcn=True``)
     encodes the covariates with a TCN. NBEATSx-I (``use_tcn=False``) uses
@@ -83,20 +90,27 @@ class ExogenousBlock(NBeatsBlock):
         ┌───────┴───────┐         ┌────────┴─────────┐
         ▼               ▼         ▼                  ▼
      theta_b         theta_f   basis_b            basis_f
-     [B, C]          [B, C]  [B,B_len,C]        [B,F_len,C]
-        └───────┬───────┘         └────────┬─────────┘
+   [B, in*C]       [B, out*C] [B,B_len,C]        [B,F_len,C]
+        │               │         └────────┬─────────┘
+        ▼               ▼                  │
+   reshape to      reshape to              │
+   [B, in, C]      [B, out, C]             │
+        └───────┬───────┘                  │
                 └────────────┬─────────────┘
                              ▼
-            einsum('btc,bc->bt', basis, theta)
+           einsum('btc,bic->bti', basis, theta)
                              │
               ┌──────────────┴──────────────┐
               ▼                             ▼
-     backcast [B, B_len]           forecast [B, F_len]
+     [B, B_len, in]                 [B, F_len, out]
+              │                             │
+              ▼                             ▼
+   backcast [B, B_len*in]        forecast [B, F_len*out]
 
     C is ``tcn_filters`` when ``use_tcn`` is True and ``exogenous_dim``
-    when it is False. The einsum sums over C, so each output step is one
-    number. See :class:`NBeatsBlock` for the dense stack and theta heads
-    this diagram points at.
+    when it is False. The einsum sums over C, leaving one number per time
+    step per channel. See :class:`NBeatsBlock` for the dense stack and
+    theta heads this diagram points at.
 
     :param exogenous_dim: Number of exogenous features per time step.
     :type exogenous_dim: int
@@ -124,7 +138,9 @@ class ExogenousBlock(NBeatsBlock):
         (batch, forecast_length, exogenous_dim).
 
     Output shape:
-        Tuple of (batch, backcast_length) and (batch, forecast_length).
+        Tuple of (batch, backcast_length * input_dim) and
+        (batch, forecast_length * output_dim), time-major within the flat
+        axis: entry ``t * dim + i`` is step ``t`` of channel ``i``.
 
     Example:
         .. code-block:: python
@@ -137,6 +153,7 @@ class ExogenousBlock(NBeatsBlock):
             back, fore = block(
                 residual, exogenous_inputs=(x_back, x_fore)
             )
+            # at the default input_dim=output_dim=1:
             # back.shape == (batch, 10), fore.shape == (batch, 4)
 
     Note:
@@ -149,10 +166,19 @@ class ExogenousBlock(NBeatsBlock):
         because the exogenous basis must be built before theta is projected.
         It applies the same RMSNorm AND the same four Dropout layers as the
         parent, in the same order, so ``dropout_rate`` behaves identically
-        here. One thing still differs, measured and not assumed: the final
-        reshape multiplies the length by a literal 1, so the outputs stay
-        single-channel even when ``input_dim`` or ``output_dim`` is larger
-        than 1.
+        here, and the final reshape honours ``input_dim`` / ``output_dim``
+        the same way the sibling blocks do. ``call`` keeps a literal
+        ``input_dim == output_dim == 1`` fast path holding the older
+        single-channel spelling: the two are algebraically the same but not
+        bit-identical on CPU, and the only in-repo caller runs at 1/1.
+
+    Note:
+        What still differs from the parent is the basis, not the shape
+        contract: theta weights a data-derived basis of ``C`` channels
+        here, where the parent's theta weights a fixed or learned basis of
+        ``thetas_dim`` rows. ``thetas_dim`` is therefore inert for this
+        block's projection -- it is still accepted, and still forwarded to
+        :class:`NBeatsBlock`, but nothing here reads it.
     """
 
     def __init__(
@@ -186,17 +212,20 @@ class ExogenousBlock(NBeatsBlock):
             # No complex encoder needed, but we might need projection if dims don't match
             self.encoder = None
 
-        # Redefine Theta layers to match TCN/Exog dimensionality
-        # Theta must project to the dimension of the Basis channels
-        basis_channels = tcn_filters if use_tcn else exogenous_dim
+        # Redefine Theta layers to match TCN/Exog dimensionality.
+        # Theta must project to the dimension of the Basis channels, once per
+        # output channel -- mirroring the parent's `thetas_dim * input_dim`
+        # heads (nbeats_blocks.py:294-312) with `thetas_dim` replaced by the
+        # basis channel count.
+        self.basis_channels = tcn_filters if use_tcn else exogenous_dim
 
         self.theta_backcast = layers.Dense(
-            basis_channels,
+            self.basis_channels * self.input_dim,
             use_bias=False,
             name='theta_backcast_exog'
         )
         self.theta_forecast = layers.Dense(
-            basis_channels,
+            self.basis_channels * self.output_dim,
             use_bias=False,
             name='theta_forecast_exog'
         )
@@ -276,7 +305,7 @@ class ExogenousBlock(NBeatsBlock):
 
         # 2. Generate Theta Coefficients (Weights for the Basis)
         # -----------------------------------------------------------
-        # Shape: (Batch, Basis_Channels)
+        # Shape: (Batch, Basis_Channels * dim)
         # Note: Unlike standard N-BEATS, these are global weights per sample,
         # not per time-step. They scale the TCN basis vectors.
         theta_b = self.theta_backcast(x, training=training)
@@ -301,14 +330,32 @@ class ExogenousBlock(NBeatsBlock):
 
         # 4. Projection (Eq 9)
         # -----------------------------------------------------------
-        # Backcast = Basis_b * theta_b
-        # basis: (B, T, C), theta: (B, C) -> result: (B, T) (summed over C)
-        backcast = ops.einsum('btc,bc->bt', basis_b, theta_b)
-        forecast = ops.einsum('btc,bc->bt', basis_f, theta_f)
+        if self.input_dim == 1 and self.output_dim == 1:
+            # DECISION plan-2026-08-30T020716-ebbaf641/D-010: this is the OLD
+            # spelling, kept verbatim. The general path below is algebraically
+            # identical at dim==1 but NOT bit-identical on CPU (measured: 5/45
+            # trials non-zero, worst 4.77e-07; the sole consumer nbeatsx.py:353
+            # runs here). Do NOT delete it as redundant without re-measuring.
+            backcast = ops.einsum('btc,bc->bt', basis_b, theta_b)
+            forecast = ops.einsum('btc,bc->bt', basis_f, theta_f)
+            backcast = ops.reshape(backcast, (-1, self.backcast_length * 1))
+            forecast = ops.reshape(forecast, (-1, self.forecast_length * 1))
+        else:
+            # DECISION plan-2026-08-30T020716-ebbaf641/D-009: theta is reshaped
+            # DIM-major, (B, dim, C), so the einsum gives (B, T, dim) and flat
+            # entry t*dim+i is step t of channel i. Do NOT use (B, C, dim): it
+            # type-checks, every shape assertion still passes, and it silently
+            # transposes the residual stream against TrendBlock/NBeatsNet.
+            theta_b_r = ops.reshape(theta_b, (-1, self.input_dim, self.basis_channels))
+            theta_f_r = ops.reshape(theta_f, (-1, self.output_dim, self.basis_channels))
 
-        # Reshape to flatten (Batch, Time) -> (Batch, Time * 1) if input_dim=1
-        backcast = ops.reshape(backcast, (-1, self.backcast_length * 1))
-        forecast = ops.reshape(forecast, (-1, self.forecast_length * 1))
+            # basis: (B, T, C), theta: (B, dim, C) -> (B, T, dim), summed over C
+            backcast = ops.einsum('btc,bic->bti', basis_b, theta_b_r)
+            forecast = ops.einsum('btc,boc->bto', basis_f, theta_f_r)
+
+            # Flatten to the residual-stream layout (Batch, Time * dim)
+            backcast = ops.reshape(backcast, (-1, self.backcast_length * self.input_dim))
+            forecast = ops.reshape(forecast, (-1, self.forecast_length * self.output_dim))
 
         return backcast, forecast
 
