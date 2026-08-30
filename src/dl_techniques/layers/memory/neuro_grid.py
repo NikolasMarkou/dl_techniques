@@ -70,6 +70,15 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
+# module constants
+# ---------------------------------------------------------------------
+
+# Subscript alphabet for the ``_soft_lookup`` einsum, one letter per grid axis.
+# The equation also spends ``'b'`` on the batch axis and ``'z'`` on the latent
+# axis, so neither may appear here: the run is ``'i'``..``'y'``, 17 letters.
+GRID_EINSUM_SUBSCRIPTS: str = 'ijklmnopqrstuvwxy'
+
 
 # ---------------------------------------------------------------------
 
@@ -575,12 +584,14 @@ class NeuroGrid(keras.layers.Layer):
 
         # Build einsum equation dynamically based on grid dimensions
         batch_idx = 'b'
-        # Grid axes get the letters i, j, k, ... The min() caps the run at 23,
-        # which is NOT a letter count: only 18 characters run from 'i' to 'z',
-        # so a cap of 23 would emit '{', '|', '}', '~' and DEL. It never bites
-        # because n_dims > 6 takes the matmul branch below and skips einsum.
-        grid_indices = ''.join([chr(ord('i') + j) for j in range(min(self.n_dims, 23))])
-        # 'z' sits past the end of that run, so it cannot collide with a grid axis.
+        # Grid axes take one letter each from GRID_EINSUM_SUBSCRIPTS. Do NOT go
+        # back to `chr(ord('i') + j)` capped by a number: the run 'i'..'z' is 18
+        # characters but its 18th IS 'z', which this equation already spends on
+        # the latent axis, so 18 emits 'ijklmnopqrstuvwxyz,ijklmnopqrstuvwxyzz->bz'
+        # and TensorFlow raises InvalidArgumentError on the repeated 'z'. The
+        # honest maximum is 17 and it lives in the constant, where a test can
+        # address it. Only n_dims <= 6 reaches here, so the slice never truncates.
+        grid_indices = GRID_EINSUM_SUBSCRIPTS[:self.n_dims]
         latent_idx = 'z'
 
         # joint_prob indices: batch + grid dimensions
@@ -733,10 +744,11 @@ class NeuroGrid(keras.layers.Layer):
         Counts, per flattened cell, how many inputs peak there, and sums the
         joint probability mass landing on each cell.
 
-        For a rank-3 input the counts run over ``batch * seq_len`` tokens
-        while ``utilization_rate`` divides by ``shape(inputs)[0]``, which is
-        ``batch``. The rate is therefore scaled by ``seq_len`` in that case.
-        Read the raw counts if you need a comparable number.
+        Every item lands in exactly one cell, so ``activation_counts`` totals
+        the number of items scored and ``utilization_rate`` is that count over
+        the same total: it sums to 1.0 and no entry exceeds 1.0. A rank-3 input
+        is scored PER TOKEN, so "item" means ``batch * seq_len`` there and
+        ``batch`` at rank 2. Both rates are therefore comparable across ranks.
 
         :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
@@ -766,9 +778,13 @@ class NeuroGrid(keras.layers.Layer):
         # Total activations per position (sum of all probabilities)
         total_activation = keras.ops.sum(joint_prob_flat, axis=0)
 
-        # Utilization rate (normalized)
-        total_inputs = keras.ops.cast(keras.ops.shape(inputs)[0], 'float32')
-        utilization_rate = activation_counts / (total_inputs + self.epsilon)
+        # Utilization rate (normalized). The divisor is the leading axis of the
+        # FLATTENED joint probability, i.e. the number of items actually counted:
+        # `batch` at rank 2 but `batch * seq_len` at rank 3. Using
+        # `shape(inputs)[0]` instead divides a token count by a row count and
+        # yields "rates" above 1.0 on any input with seq_len > 1.
+        total_items = keras.ops.cast(keras.ops.shape(joint_prob_flat)[0], 'float32')
+        utilization_rate = activation_counts / (total_items + self.epsilon)
 
         return {
             'activation_counts': activation_counts,

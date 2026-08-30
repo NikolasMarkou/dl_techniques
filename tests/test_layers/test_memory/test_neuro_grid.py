@@ -860,3 +860,156 @@ class TestNeuroGridQualityThresholdFilter:
         rng = np.random.default_rng(1)
         inputs = rng.normal(size=(4, 5, self.INPUT_DIM)).astype('float32')
         self._assert_partitions(inputs)
+
+
+class TestNeuroGridUtilizationDenominator:
+    """Guard for C-6: ``get_grid_utilization`` must divide by what it counted.
+
+    ``activation_counts`` is built by argmax-ing the FLATTENED joint probability,
+    whose leading axis is ``batch * seq_len`` for a rank-3 input (see
+    ``get_addressing_probabilities``, which flattens the token axis and does not
+    reshape back). The divisor was ``shape(inputs)[0]``, i.e. ``batch`` alone, so
+    on rank-3 input the "rate" came out scaled by ``seq_len``.
+
+    Measured on the unfixed code with a ``(2, 7, 6)`` input: the counts summed to
+    14 while the rates summed to 7.0 and a single cell read 1.5 -- a "rate" above
+    1.0, which is not a rate.
+
+    The contract the assertions pin:
+
+    * every input item lands in exactly one cell, so ``sum(activation_counts)``
+      equals the number of ITEMS scored, ``batch * seq_len`` at rank 3;
+    * ``utilization_rate`` is that count divided by the same item total, so it
+      sums to 1.0 and no single entry exceeds 1.0.
+
+    ``seq_len`` is 7, not 1, on purpose: at ``seq_len == 1`` the two denominators
+    coincide and the defect is invisible. The rank-2 case is asserted alongside as
+    the control -- it was already correct and must stay so.
+    """
+
+    GRID_SHAPE = [4, 3]
+    LATENT_DIM = 8
+    INPUT_DIM = 6
+
+    def _build(self, inputs: np.ndarray) -> NeuroGrid:
+        """Build a ``NeuroGrid`` by invoking it once on ``inputs``."""
+        layer = NeuroGrid(grid_shape=self.GRID_SHAPE, latent_dim=self.LATENT_DIM)
+        layer(keras.ops.convert_to_tensor(inputs))
+        return layer
+
+    def test_rank3_rate_is_a_rate(self):
+        """On rank-3 input the rate must sum to 1.0 and never exceed 1.0."""
+        inputs = np.random.RandomState(0).randn(2, 7, self.INPUT_DIM).astype('float32')
+        layer = self._build(inputs)
+
+        info = layer.get_grid_utilization(keras.ops.convert_to_tensor(inputs))
+        counts = np.array(info['activation_counts'])
+        rate = np.array(info['utilization_rate'])
+
+        n_items = 2 * 7
+        assert float(np.sum(counts)) == pytest.approx(float(n_items)), (
+            f"counts must total one per ITEM ({n_items}); got {float(np.sum(counts))}"
+        )
+        assert float(np.sum(rate)) == pytest.approx(1.0, abs=1e-4), (
+            f"utilization_rate must sum to 1.0; got {float(np.sum(rate))} "
+            f"(a divisor of batch={2} instead of items={n_items} scales it by seq_len)"
+        )
+        assert float(np.max(rate)) <= 1.0 + 1e-4, (
+            f"no cell may hold more than all of the mass; max rate {float(np.max(rate))}"
+        )
+
+    def test_rank2_rate_is_unchanged(self):
+        """Control: the rank-2 path was already correct and must stay correct."""
+        inputs = np.random.RandomState(1).randn(5, self.INPUT_DIM).astype('float32')
+        layer = self._build(inputs)
+
+        info = layer.get_grid_utilization(keras.ops.convert_to_tensor(inputs))
+        counts = np.array(info['activation_counts'])
+        rate = np.array(info['utilization_rate'])
+
+        assert float(np.sum(counts)) == pytest.approx(5.0)
+        assert float(np.sum(rate)) == pytest.approx(1.0, abs=1e-4)
+
+
+class TestNeuroGridEinsumSubscripts:
+    """Guard for C-7: the einsum grid subscripts must be real, disjoint letters.
+
+    ``_soft_lookup`` built its grid subscripts as ``chr(ord('i') + j)`` capped by
+    ``min(self.n_dims, 23)``. 23 is not a letter count. Only 18 characters run from
+    ``'i'`` to ``'z'``, and the 18th of them IS ``'z'`` -- which the same equation
+    already spends on the latent axis. Re-derived by execution at iteration 2: the
+    honest cap is **17**, the run ``'i'``..``'y'``, not the 18 recorded in the
+    carried defect list. A cap of 18 emits ``'bijklmnopqrstuvwxyz,ijklmnopqrstuvwxyzz->bz'``,
+    whose repeated ``'z'`` makes TensorFlow raise
+    ``InvalidArgumentError: Expected dimension 1 at axis 18 ... but got dimension 4``;
+    a cap of 23 additionally emits ``'{'``, ``'|'``, ``'}'``, ``'~'`` and DEL.
+
+    The defect is LATENT: ``n_dims > 6`` takes the ``matmul`` branch and never
+    reaches the einsum, so no reachable configuration can produce a wrong VALUE
+    today. This guard is therefore STRUCTURAL -- it pins the subscript alphabet
+    itself, in the module-level constant that now owns the invariant, rather than
+    waiting for an unreachable value to go wrong.
+
+    ``test_einsum_equation_reaches_the_branch`` is a CONTROL, not a guard: it passes
+    against the unfixed code too. Its job is to prove the assertions are made about
+    the equation einsum actually receives, on the branch that actually runs.
+    """
+
+    def test_grid_subscripts_are_the_i_to_y_run(self):
+        """The subscript alphabet is exactly ``'i'``..``'y'``: 17 lowercase letters."""
+        from dl_techniques.layers.memory.neuro_grid import GRID_EINSUM_SUBSCRIPTS
+
+        assert GRID_EINSUM_SUBSCRIPTS == 'ijklmnopqrstuvwxy'
+        assert len(GRID_EINSUM_SUBSCRIPTS) == 17
+        assert all(c.isascii() and c.islower() for c in GRID_EINSUM_SUBSCRIPTS)
+        assert len(set(GRID_EINSUM_SUBSCRIPTS)) == 17
+
+    def test_grid_subscripts_exclude_the_reserved_axes(self):
+        """``'b'`` (batch) and ``'z'`` (latent) may never appear as a grid axis."""
+        from dl_techniques.layers.memory.neuro_grid import GRID_EINSUM_SUBSCRIPTS
+
+        assert 'b' not in GRID_EINSUM_SUBSCRIPTS
+        assert 'z' not in GRID_EINSUM_SUBSCRIPTS
+
+    def test_alphabet_covers_every_rank_that_reaches_einsum(self):
+        """Every grid rank taking the einsum branch (``n_dims <= 6``) has letters."""
+        from dl_techniques.layers.memory.neuro_grid import GRID_EINSUM_SUBSCRIPTS
+
+        assert len(GRID_EINSUM_SUBSCRIPTS) >= 6
+
+    def test_einsum_equation_reaches_the_branch(self):
+        """CONTROL: the equation einsum receives on the 6-D branch is well formed.
+
+        Passes against the unfixed code as well; it exists to prove the branch is
+        reached rather than to detect the defect.
+        """
+        captured = []
+        original = keras.ops.einsum
+
+        def spy(equation, *operands, **kwargs):
+            captured.append(equation)
+            return original(equation, *operands, **kwargs)
+
+        layer = NeuroGrid(grid_shape=[2, 2, 2, 2, 2, 2], latent_dim=4)
+        inputs = keras.ops.convert_to_tensor(
+            np.random.RandomState(2).randn(3, 6).astype('float32')
+        )
+        keras.ops.einsum = spy
+        try:
+            layer(inputs)
+        finally:
+            keras.ops.einsum = original
+
+        assert captured, "the 6-D grid must take the einsum branch, not matmul"
+        equation = captured[-1]
+        joint, rest = equation.split(',')
+        weights, output = rest.split('->')
+
+        grid_subscripts = joint[1:]
+        assert joint[0] == 'b'
+        assert len(grid_subscripts) == 6
+        assert all(c.isascii() and c.islower() for c in grid_subscripts)
+        assert weights == grid_subscripts + 'z'
+        assert output == 'bz'
+        assert 'z' not in grid_subscripts
+        assert 'b' not in grid_subscripts
