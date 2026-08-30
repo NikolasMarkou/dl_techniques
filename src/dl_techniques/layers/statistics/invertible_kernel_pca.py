@@ -1084,7 +1084,15 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             # Zero every component at or below the noise floor. sqrt(2.0) is
             # the confidence factor: a component must clear the estimated
             # noise by that margin to survive.
-            threshold = noise_level * ops.sqrt(2.0)
+            # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
+            # Build the confidence factor in `noise_level`'s dtype. Bare
+            # `ops.sqrt(2.0)` pins backend.floatx() and this line then raised
+            # `cannot compute Mul ... expected to be a half/double/bfloat16
+            # tensor but is a float tensor` (measured only after site 3 at :610
+            # was fixed -- it masked this one). decisions.md D-002 and D-005.
+            threshold = noise_level * ops.sqrt(
+                ops.cast(2.0, noise_level.dtype)
+            )
             mask = ops.abs(components) > threshold
             components = components * ops.cast(mask, components.dtype)
 

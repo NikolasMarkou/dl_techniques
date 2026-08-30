@@ -265,38 +265,6 @@ class TestEveryAllScalarOpsCallFollowsTheActivePolicy:
             own_site="invertible_kernel_pca.py:1081",
         )
 
-    def test_site_4_is_masked_by_site_3_today(self, sample_data):
-        """The masking itself, pinned as a fact rather than left in a comment.
-
-        The adaptive denoiser and the non-adaptive control fail at the SAME source
-        line. Only the adaptive one can reach site 4, so an identical failure line
-        proves site 4 never executes. This guard is GREEN at HEAD and must go RED the
-        moment site 3 is fixed -- at which point the two arms diverge and site 4's own
-        red becomes readable. It is DELETED in the step that fixes site 4.
-        """
-        with DtypePolicyScope("mixed_float16"):
-            _, adaptive_site = _forward_or_raising_site(
-                lambda: InvertibleKernelPCADenoiser(
-                    n_components=3, n_random_features=16, adaptive_components=True
-                ),
-                lambda layer: layer(_as_compute_dtype(sample_data), training=True),
-            )
-            _, control_site = _forward_or_raising_site(
-                lambda: InvertibleKernelPCADenoiser(
-                    n_components=3, n_random_features=16, adaptive_components=False
-                ),
-                lambda layer: layer(_as_compute_dtype(sample_data), training=True),
-            )
-        assert adaptive_site is not None and control_site is not None, (
-            "one of the two denoiser arms no longer raises -- site 3 has been fixed, "
-            "so this masking guard has served its purpose and must be deleted "
-            "together with the site-4 fix"
-        )
-        assert adaptive_site == control_site, (
-            f"the adaptive denoiser fails at {adaptive_site} and the non-adaptive "
-            f"control at {control_site}. They diverged, so site 4 is no longer masked."
-        )
-
 
 # ---------------------------------------------------------------------
 # GUARD SET A5 -- the package-wide rule scan (plan SC1)
