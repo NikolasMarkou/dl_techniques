@@ -456,6 +456,9 @@ class NTMReadHead(BaseHead):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Create sub-layers in __init__ (Golden Rule)
+        # KNOWN DEFECT (found 2026-08-30): this Dense is built without
+        # bias_initializer, so a non-default value silently misses this one
+        # projection while reaching every other Dense in the head.
         self.key_dense = keras.layers.Dense(
             memory_dim,
             # DECISION plan-2026-08-19T163559-499b6f0e/D-068
@@ -872,6 +875,9 @@ class NTMWriteHead(BaseHead):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Addressing parameters
+        # KNOWN DEFECT (found 2026-08-30): this Dense is built without
+        # bias_initializer, so a non-default value silently misses this one
+        # projection while reaching every other Dense in the head.
         self.key_dense = keras.layers.Dense(
             memory_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),

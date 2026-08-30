@@ -353,6 +353,12 @@ class NeuroGrid(keras.layers.Layer):
                 units=dim_size,
                 use_bias=self.use_bias,
                 activation=None,
+                # KNOWN DEFECT (measured 2026-08-30): every projection in this
+                # loop receives the SAME resolved Initializer INSTANCE, so all N
+                # draw bit-identical kernels (max abs diff 0.0; a control shows
+                # two separate instances differ). Fix is clone_initializer(...)
+                # per projection, as baseline_ntm.py already does at 20 sites.
+                # Changing it moves initial weights, so re-baseline seeded tests.
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
@@ -1060,7 +1066,12 @@ class NeuroGrid(keras.layers.Layer):
         high_quality_mask = quality_scores >= quality_threshold
         low_quality_mask = quality_scores < quality_threshold
 
-        # Fix: Replace keras.ops.boolean_mask with proper tensor indexing
+        # KNOWN DEFECT (measured 2026-08-30, keras 3.8.0): the two lines below
+        # raise TypeError at EVERY input rank, so this method cannot run. A
+        # single-argument keras.ops.where returns a LIST, and a list rejects the
+        # [:, 0] tuple index. It has zero call sites and zero tests, which is why
+        # the suite is green over it. The comment below is an older fix attempt
+        # that was never carried out. Fix needs a RED-first guard.
         high_quality_indices = keras.ops.where(high_quality_mask)[:, 0]
         low_quality_indices = keras.ops.where(low_quality_mask)[:, 0]
 
