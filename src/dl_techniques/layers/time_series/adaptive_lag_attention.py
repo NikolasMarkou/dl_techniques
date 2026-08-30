@@ -290,7 +290,7 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         Note on ``activity_regularizer``: the penalty is charged exactly ONCE,
         and it is Keras 3's ``Layer.__call__`` that charges it, by applying
         ``self.activity_regularizer`` to this method's return value. This
-        method therefore deliberately does NOT call ``add_loss`` itself.
+        method therefore does NOT call ``add_loss`` itself.
         Measured with ``L1(1.0)`` on a ``(2, 5)`` context and a ``(2, 4)`` lag
         tensor: ``len(layer.losses) == 1``, and that one entry equals a manual
         ``activity_regularizer(output)`` call.
