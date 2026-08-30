@@ -414,8 +414,8 @@ thing you will meet and should not be surprised by.
   drift usually produces a *plausible* number. **A command's scope is part of its
   claim** — when the tree's shape changes, re-run is not enough, the command has to
   be re-read. **Defining a factory and exporting one are different things**, and a
-  plain mention-`grep create_` answers neither: it reads **74** against a binding
-  count of 73 today, and until 2026-08-10 it gave 24 against a binding count of 25
+  plain mention-`grep create_` answers neither: it reads **78** against a binding
+  count of 77 today, and until 2026-08-10 it gave 24 against a binding count of 25
   because `src/dl_techniques/models/convnext_patch_vae/__init__.py` was a pure
   docstring cross-referencing factories it never bound. Use an AST scan for the
   definition question and the binding command in the Numbers table for the export
