@@ -40,11 +40,13 @@ _INSTANCE_DEFAULT_NODES = (
     ast.Lambda,
 )
 
+# DECISION plan-2026-08-30T063229-ccd6ad17/D-023
 # A default that is a bare NAME hides whatever that name is bound to. The two
 # fixed layers now use exactly this shape -- `x=_KERNEL_REGULARIZER_DEFAULT` --
 # so it is the house pattern and therefore the MOST LIKELY shape of a fourth
 # defect. Resolving the name is what stops this guard from being blind to the
 # very thing it exists to prevent. Only these bindings are safe as a default.
+# See decisions.md D-023.
 _SAFE_SENTINEL_FACTORIES = frozenset({"object"})
 
 _PACKAGE = (
