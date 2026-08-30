@@ -1409,6 +1409,97 @@ class TestCreateNTMReachesEveryConfigField:
         assert ntm.ntm_cell.memory.epsilon == 1e-3
 
 
+class TestBiasInitializerReachesEveryProjection:
+    """A caller's `bias_initializer` must reach EVERY Dense in a head.
+
+    Both heads documented `bias_initializer` as "Initializer for the Dense
+    biases", but each built its `key_dense` without passing it, so a
+    non-default value silently missed exactly one projection per head while
+    reaching every other Dense. The default is `'zeros'` and Dense's own
+    default is also `'zeros'`, which is why the whole suite stayed green over
+    it.
+
+    The biases are enumerated from the BUILT weight set rather than named by
+    hand, so a projection added later is covered without editing this class.
+    Both addressing modes are asserted because the projection set differs by
+    mode: under CONTENT `gate` / `shift` / `gamma` are never created, so a
+    HYBRID-only guard could not see a CONTENT-only regression.
+    """
+
+    CONSTANT = 0.7
+
+    @staticmethod
+    def _built_head(head_cls, addressing_mode):
+        """Build one head with a recognisable non-default bias initializer."""
+        head = head_cls(
+            memory_size=8,
+            memory_dim=4,
+            addressing_mode=addressing_mode,
+            shift_range=3,
+            bias_initializer=keras.initializers.Constant(
+                TestBiasInitializerReachesEveryProjection.CONSTANT
+            ),
+        )
+        head.build((2, 6))
+        return head
+
+    @staticmethod
+    def _biases(head):
+        """Map projection name -> bias values, read off the built weights."""
+        return {
+            w.path.split("/")[-2]: keras.ops.convert_to_numpy(w)
+            for w in head.weights
+            if w.path.endswith("/bias")
+        }
+
+    @pytest.mark.parametrize(
+        "head_cls,addressing_mode,expected",
+        [
+            (
+                NTMReadHead,
+                AddressingMode.HYBRID,
+                {"key", "beta", "gate", "shift", "gamma"},
+            ),
+            (NTMReadHead, AddressingMode.CONTENT, {"key", "beta"}),
+            (
+                NTMWriteHead,
+                AddressingMode.HYBRID,
+                {"key", "beta", "gate", "shift", "gamma", "erase", "add"},
+            ),
+            (NTMWriteHead, AddressingMode.CONTENT, {"key", "beta", "erase", "add"}),
+        ],
+    )
+    def test_every_dense_bias_carries_the_requested_constant(
+        self, head_cls, addressing_mode, expected
+    ):
+        """No projection may fall back to Dense's own `'zeros'` default.
+
+        The `expected` set is asserted first so the per-bias loop can never
+        pass vacuously against a head that built fewer projections than it
+        should have.
+        """
+        head = self._built_head(head_cls, addressing_mode)
+        biases = self._biases(head)
+
+        assert set(biases) == expected, (
+            f"{head_cls.__name__} under {addressing_mode} built biases "
+            f"{sorted(biases)}, expected {sorted(expected)}"
+        )
+
+        missed = {
+            name: float(np.max(np.abs(values - self.CONSTANT)))
+            for name, values in biases.items()
+            if not np.allclose(values, self.CONSTANT, rtol=0, atol=0)
+        }
+        assert not missed, (
+            f"{head_cls.__name__} under {addressing_mode}: the caller's "
+            f"bias_initializer did not reach {sorted(missed)}; "
+            + ", ".join(
+                f"{name} reads {biases[name].reshape(-1)[0]!r}" for name in sorted(missed)
+            )
+        )
+
+
 # ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------

@@ -366,10 +366,9 @@ class NTMReadHead(BaseHead):
         projection gets its own clone of it. Defaults to
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for the Dense biases, EXCEPT
-        `key_dense`, which is constructed without it and so keeps Keras'
-        own `'zeros'` default. A non-default value therefore reaches every
-        projection but the key. Defaults to `'zeros'`.
+    :param bias_initializer: Initializer for the Dense biases. Every
+        projection this head creates receives it, `key_dense` included.
+        Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
         Defaults to None.
@@ -460,9 +459,6 @@ class NTMReadHead(BaseHead):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Create sub-layers in __init__ (Golden Rule)
-        # KNOWN DEFECT (found 2026-08-30): this Dense is built without
-        # bias_initializer, so a non-default value silently misses this one
-        # projection while reaching every other Dense in the head.
         self.key_dense = keras.layers.Dense(
             memory_dim,
             # DECISION plan-2026-08-19T163559-499b6f0e/D-068
@@ -471,6 +467,7 @@ class NTMReadHead(BaseHead):
             # 22 identical pairs of 17 non-constant tensors, and 0 after it. `erase` and `add`
             # are OPPOSITE ops and the two heads address memory independently: see decisions.md D-068.
             kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
@@ -780,10 +777,9 @@ class NTMWriteHead(BaseHead):
         projection gets its own clone of it. Defaults to
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for the Dense biases, EXCEPT
-        `key_dense`, which is constructed without it and so keeps Keras'
-        own `'zeros'` default. A non-default value therefore reaches every
-        projection but the key. Defaults to `'zeros'`.
+    :param bias_initializer: Initializer for the Dense biases. Every
+        projection this head creates receives it, `key_dense` included.
+        Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
         Defaults to None.
@@ -879,12 +875,10 @@ class NTMWriteHead(BaseHead):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Addressing parameters
-        # KNOWN DEFECT (found 2026-08-30): this Dense is built without
-        # bias_initializer, so a non-default value silently misses this one
-        # projection while reaching every other Dense in the head.
         self.key_dense = keras.layers.Dense(
             memory_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),
+            bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
