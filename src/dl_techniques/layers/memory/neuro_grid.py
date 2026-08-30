@@ -1,69 +1,50 @@
 """
-Implements a differentiable, n-dimensional memory with probabilistic addressing.
+Differentiable n-dimensional memory grid with probabilistic addressing.
 
-This layer provides a structured, spatially organized memory system that is fully
-differentiable, enabling end-to-end training within modern deep learning
-frameworks. It bridges the gap between the topology-preserving properties of
-classical Self-Organizing Maps (SOMs) and the requirements of gradient-based
-optimization, offering a powerful mechanism for learning structured
-representations.
+A classical Self-Organizing Map picks one winning cell per input. That argmax
+is not differentiable, so a classical SOM cannot sit inside a network trained
+by gradient descent. `NeuroGrid` replaces the winner search with a soft
+lookup. Every cell contributes to the output, weighted by a learned
+probability.
 
-Architectural and Mathematical Underpinnings:
+The layer owns two things. A grid of learnable latent vectors, of shape
+`(d1, d2, ..., dn, latent_dim)`. And one `Dense` projection per grid
+dimension, which turns the input into an address.
 
-The core architecture consists of two main components: a probabilistic
-addressing mechanism and an n-dimensional grid of learnable latent vectors
-(the memory lattice). The goal is to perform a "soft lookup" where an input
-vector is mapped not to a single memory location, but to a weighted average
-of all memory locations, with weights determined by learned similarity.
+The forward pass is four steps:
 
-1.  **Factorized, Probabilistic Addressing**: For an n-dimensional grid of
-    shape (d₁, d₂, ..., dₙ), the addressing is factorized across dimensions.
-    An input vector `x` is fed into `n` independent projection networks,
-    `f₁, f₂, ..., fₙ`. Each network `fᵢ` outputs a logit vector of size `dᵢ`.
-    These logits are then transformed into a probability distribution `Pᵢ`
-    over the `i`-th dimension using a temperature-controlled softmax:
+1. Projection. `Dense` layer `i` maps the input to `d_i` logits. There is no
+   activation on it; the softmax is applied separately so the temperature can
+   be applied first.
 
-        Pᵢ = softmax(fᵢ(x) / T)
+2. Temperature softmax, `P_i = softmax(logits_i / T)`. A low temperature gives
+   a sharp, nearly one-hot address; a high one gives a diffuse address. `T` is
+   a weight, trainable only when `learnable_temperature=True`.
 
-    The temperature parameter `T` controls the sharpness of the distribution.
-    A low temperature results in a sparse, focused distribution (akin to a
-    hard lookup), while a high temperature yields a smooth, diffuse
-    distribution. This continuous, differentiable transformation is the key
-    departure from the discrete Best Matching Unit (BMU) search in a
-    traditional SOM.
+3. Outer product, `P_joint = P_1 (x) P_2 (x) ... (x) P_n`, of shape
+   `(batch, d1, ..., dn)`. The joint address is FACTORIZED: it is a product of
+   per-axis distributions, not one softmax over the whole grid.
 
-2.  **Joint Probability via Outer Product**: The individual dimensional
-    probabilities `P₁, P₂, ..., Pₙ` are combined to form a joint probability
-    distribution over the entire n-dimensional grid. This is achieved through
-    an outer product (tensor product):
+4. Soft lookup, `output = sum P_joint * grid_weights`, giving
+   `(batch, latent_dim)`.
 
-        P_joint = P₁ ⊗ P₂ ⊗ ... ⊗ Pₙ
+Factorizing the address is what keeps the layer cheap. A grid of
+`d1 * ... * dn` cells is addressed by `sum d_i` logits rather than by
+`prod d_i` of them. The idea comes from Product Key Memories.
 
-    The resulting tensor `P_joint` has the shape (d₁, d₂, ..., dₙ), where each
-    element `P_joint[i₁, i₂, ..., iₙ]` represents the probability of addressing
-    the memory cell at that specific coordinate. This compositional approach
-    is inspired by Product Key Memories, allowing for a vast addressable
-    memory space with a modest number of parameters.
+Gradients reach both the grid vectors and the projections, so the memory
+content and the addressing logic are learned together. Similar inputs end up
+addressing nearby cells, which is where the SOM-like topological behaviour
+comes from.
 
-3.  **Differentiable Soft Lookup**: The final output is the expectation of the
-    latent vectors in the memory grid `G`, weighted by the joint probability
-    distribution. This is a weighted sum over all grid positions:
+Both 2-D `(batch, input_dim)` and 3-D `(batch, seq_len, input_dim)` inputs
+work. A 3-D input is flattened to `(batch * seq_len, input_dim)`, run through
+the same grid, then reshaped back, so each token is addressed on its own.
 
-        Output = Σ_{i₁, i₂, ..., iₙ} P_joint[i₁, i₂, ..., iₙ] * G[i₁, i₂, ..., iₙ]
-
-    This operation is fully differentiable with respect to both the grid
-    vectors `G` and the parameters of the projection networks `fᵢ`. During
-    training, gradients flow through this weighted sum, simultaneously
-    updating the memory content (`G`) and the addressing logic (`fᵢ`) to
-    minimize the task-specific loss. This process encourages semantically
-    similar inputs to activate neighboring regions of the grid, leading to an
-    emergent, self-organized topological representation of the input space.
-
-This layer serves as a modern reinterpretation of classic unsupervised
-learning algorithms, reformulated for deep learning. By replacing discrete,
-non-differentiable operations with their probabilistic, soft counterparts, it
-integrates the powerful concept of structured, topologically-aware memory
-directly into end-to-end trainable models.
+Beyond the forward pass the layer exposes read-only analysis helpers: the
+per-dimension and joint addressing probabilities, grid utilisation counts,
+best matching units, and six input quality measures derived from how sharp
+the addressing is.
 
 References:
     - Kohonen, T. (1990). The Self-Organizing Map. *Proceedings of the IEEE*.
@@ -93,54 +74,151 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.memory.neuro_grid")
 class NeuroGrid(keras.layers.Layer):
-    """Differentiable N-dimensional memory lattice with probabilistic addressing.
+    """
+    Differentiable N-dimensional memory grid with probabilistic addressing.
 
-    This layer implements a differentiable soft lookup table over an
-    n-dimensional grid of learnable latent vectors. For each grid
-    dimension ``d_i`` a dedicated dense projection followed by
-    temperature-controlled softmax produces a probability distribution
-    ``P_i = softmax(Dense_i(x) / T)``. The joint addressing probability
-    is formed by their outer product
-    ``P_joint = P_1 (x) P_2 (x) ... (x) P_N`` and the output is the
-    weighted expectation over the grid:
-    ``output = sum P_joint * grid_weights``.
-    Both 2-D ``(batch, input_dim)`` and 3-D ``(batch, seq_len, dim)``
-    inputs are supported; for 3-D inputs each token is processed
-    independently through the shared grid, preserving sequence structure.
+    Learns a grid of latent vectors and returns a weighted average of them.
+    One ``Dense`` projection per grid dimension turns the input into a
+    probability distribution over that axis,
+    ``P_i = softmax(Dense_i(x) / T)``. The outer product of those
+    distributions is the joint address ``P_joint``, and the output is
+    ``sum P_joint * grid_weights``. Nothing picks a single winner, so every
+    step is differentiable.
+
+    The address is FACTORIZED. It is a product of per-axis distributions, not
+    one softmax over the whole grid, which is what makes a large grid cheap to
+    address. That is the opposite trade-off from ``SOMLayer`` in
+    ``som_nd_layer.py``, which searches for a single best matching unit and
+    updates it in place without an optimizer.
+
+    Both 2-D ``(batch, input_dim)`` and 3-D ``(batch, seq_len, input_dim)``
+    inputs work. A 3-D input is flattened over the token axis, addressed, then
+    reshaped back, so tokens do not interact.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────┐
-        │  Input [B, (seq,) input_dim]         │
-        └───────────────┬──────────────────────┘
-                        │  (reshape to 2-D if 3-D)
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Dense_1(d1) → softmax(T) → P_1      │
-        │  Dense_2(d2) → softmax(T) → P_2      │
-        │       ...                            │
-        │  Dense_N(dn) → softmax(T) → P_N      │
-        └───────────────┬──────────────────────┘
-                        │
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Outer product: P_joint              │
-        │  [B, d1, d2, ..., dn]                │
-        └───────────────┬──────────────────────┘
-                        │
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Soft lookup via einsum              │
-        │  sum(P_joint * grid_weights)         │
-        │  grid_weights [d1,..,dn, latent_dim] │
-        └───────────────┬──────────────────────┘
-                        │  (reshape back if 3-D)
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output [B, (seq,) latent_dim]       │
-        └──────────────────────────────────────┘
+        inputs -- INPUT tensor, not a weight
+        (batch, input_dim) or (batch, seq_len, input_dim)
+                             │
+                             ▼
+                        input rank
+                             │
+                  ┌──────────┴──────────┐
+                 3-D                   2-D
+                  │                     │
+                  ▼                     │
+        ┌───────────────────┐           │
+        │ reshape to        │           │
+        │ (batch*seq_len,   │           │
+        │  input_dim)       │           │
+        └─────────┬─────────┘           │
+                  └──────────┬──────────┘
+                             ▼
+                  inputs_2d (B, input_dim)
+                             │
+                             ▼
+        ┌─────────────────────────────────────────┐
+        │ per-dimension projection tower          │
+        │ n Dense + softmax, see sub-block below  │
+        └────────────────────┬────────────────────┘
+                             │  P_1 .. P_n, each (B, d_i)
+                             ├─► entropy add_loss     (optional)
+                             │     strength > 0 and training
+                             ▼
+        ┌─────────────────────────────────────────┐
+        │ outer product, + epsilon, renormalize   │
+        │ joint_prob (B, d1, ..., dn)             │
+        └────────────────────┬────────────────────┘
+                             ▼
+        ┌─────────────────────────────────────────┐
+        │ soft lookup, weighted sum over the grid │
+        │ reads grid_weights (d1..dn, latent_dim) │
+        │ einsum, or flat matmul when n_dims > 6  │
+        └────────────────────┬────────────────────┘
+                             │  output_2d (B, latent_dim)
+                             ▼
+                        input rank
+                             │
+                  ┌──────────┴──────────┐
+                 3-D                   2-D
+                  │                     │
+                  ▼                     │
+        ┌───────────────────┐           │
+        │ reshape to        │           │
+        │ (batch, seq_len,  │           │
+        │  latent_dim)      │           │
+        └─────────┬─────────┘           │
+                  └──────────┬──────────┘
+                             ▼
+        output (batch, latent_dim) or
+               (batch, seq_len, latent_dim)
+
+    **Per-Dimension Projection Tower:**
+
+    .. code-block:: text
+
+        inputs_2d (B, input_dim) -- INPUT tensor, not a weight
+                                │
+               ┌────────────────┼────────────────┐
+               │                │                │
+               ▼                ▼                ▼
+         ┌───────────┐    ┌───────────┐    ┌───────────┐
+         │ Dense d1  │    │ Dense d2  │    │ Dense dn  │
+         │ no activ. │    │ no activ. │    │ no activ. │
+         └─────┬─────┘    └─────┬─────┘    └─────┬─────┘
+               │ logits         │  ...           │
+               ▼                ▼                ▼
+         ┌───────────┐    ┌───────────┐    ┌───────────┐
+         │ divide by │    │ divide by │    │ divide by │
+         │ T + eps   │    │ T + eps   │    │ T + eps   │
+         │ softmax   │    │ softmax   │    │ softmax   │
+         └─────┬─────┘    └─────┬─────┘    └─────┬─────┘
+               │                │                │
+               ▼                ▼                ▼
+            P_1 (B,d1)      P_2 (B,d2)      P_n (B,dn)
+
+        The columns run in a Python loop, not in parallel on device.
+        T is one temperature weight shared by every column. It is
+        trainable only when learnable_temperature=True (optional);
+        otherwise it is a fixed non-trainable weight.
+
+    Input shape:
+        2D tensor ``(batch_size, input_dim)`` or 3D tensor
+        ``(batch_size, seq_len, input_dim)``.
+
+    Output shape:
+        ``(batch_size, latent_dim)`` or ``(batch_size, seq_len,
+        latent_dim)`` -- the input rank is preserved and only the last
+        axis changes.
+
+    Example:
+        >>> grid = NeuroGrid(grid_shape=[10, 8], latent_dim=32)
+        >>> y = grid(x)                       # (batch, 32)
+        >>> probs = grid.get_addressing_probabilities(x)['joint']
+        >>>
+        >>> # Sharper addressing, and let the temperature be learned.
+        >>> sharp = NeuroGrid(grid_shape=[10, 8], latent_dim=32,
+        ...                   temperature=0.1,
+        ...                   learnable_temperature=True)
+        >>>
+        >>> # Push the addressing toward one cell during training.
+        >>> sparse = NeuroGrid(grid_shape=[10, 8], latent_dim=32,
+        ...                    entropy_regularizer_strength=0.01)
+
+    Note:
+        ``grid_regularizer`` defaults to a
+        ``SoftOrthonormalConstraintRegularizer``, not to None, so the grid
+        vectors are pushed apart unless you pass something else. The
+        ``grid_initializer`` default is likewise an
+        ``OrthogonalHypersphereInitializer`` instance.
+
+    Note:
+        The entropy loss is added only when
+        ``entropy_regularizer_strength > 0`` AND ``training`` is true. It
+        raises nothing when you set the strength and call the layer outside
+        training; it simply does not fire.
 
     :param grid_shape: List of integers defining grid dimensions, e.g.
         ``[10, 8, 6]`` for a 10x8x6 grid. All values must be positive.
@@ -170,10 +248,37 @@ class NeuroGrid(keras.layers.Layer):
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param grid_regularizer: Optional regularizer for grid weights.
     :type grid_regularizer: Optional[keras.regularizers.Regularizer]
-    :param epsilon: Small constant for numerical stability.
+    :param epsilon: Small positive constant added to the temperature before
+        dividing, to the joint probability before renormalising, and inside
+        every logarithm. Must be positive.
     :type epsilon: float
-    :param kwargs: Additional keyword arguments for the Layer base class.
-    :type kwargs: Any"""
+    :param kwargs: Forwarded to ``keras.layers.Layer.__init__``.
+    :type kwargs: Any
+
+    :ivar n_dims: Rank of the grid, ``len(grid_shape)``.
+    :vartype n_dims: int
+    :ivar total_grid_size: Number of cells, ``prod(grid_shape)``.
+    :vartype total_grid_size: int
+    :ivar initial_temperature: The ``temperature`` argument, kept for
+        serialization. The live value lives in the ``temperature`` weight.
+    :vartype initial_temperature: float
+    :ivar projection_layers: One ``Dense`` per grid dimension, created in
+        ``__init__`` and built in ``build()``.
+    :vartype projection_layers: List[keras.layers.Dense]
+    :ivar grid_weights: Trainable variable of shape
+        ``(d1, ..., dn, latent_dim)`` holding one latent vector per cell.
+        Created in ``build()``.
+    :vartype grid_weights: keras.Variable
+    :ivar temperature: Scalar weight holding the softmax temperature.
+        Trainable and constrained non-negative when
+        ``learnable_temperature=True``, otherwise non-trainable. Created in
+        ``build()``.
+    :vartype temperature: keras.Variable
+    :ivar input_is_3d: Whether ``build()`` saw a rank-3 input shape. Recorded
+        for inspection; ``call()`` re-derives the rank from its own argument
+        and does not read this. Not serialized.
+    :vartype input_is_3d: Optional[bool]
+    """
 
     def __init__(
             self,
@@ -192,6 +297,18 @@ class NeuroGrid(keras.layers.Layer):
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
+        """
+        Validate the configuration and create the projection layers.
+
+        The grid and the temperature weight are created later, in ``build()``,
+        because their shapes depend on the input width.
+
+        See the class docstring for the meaning of every parameter.
+
+        :raises ValueError: If ``grid_shape`` is empty or holds a non-positive
+            entry; or if ``latent_dim``, ``temperature`` or ``epsilon`` is not
+            positive; or if ``entropy_regularizer_strength`` is negative.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -230,11 +347,12 @@ class NeuroGrid(keras.layers.Layer):
         # Create projection layers in __init__
         self.projection_layers = []
         for i, dim_size in enumerate(self.grid_shape):
-            # Create Dense layer without activation (we'll apply softmax manually with temperature)
+            # No activation here. The softmax is applied in call() so the
+            # temperature can divide the logits first.
             layer = keras.layers.Dense(
                 units=dim_size,
                 use_bias=self.use_bias,
-                activation=None,  # No activation, we'll apply temperature-controlled softmax
+                activation=None,
                 kernel_initializer=self.kernel_initializer,
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
@@ -246,13 +364,22 @@ class NeuroGrid(keras.layers.Layer):
         # Grid weights and temperature created in build()
         self.grid_weights = None
         self.temperature = None
-        self.input_is_3d = None  # Set during build based on input shape
+        # Set in build() from the input rank.
+        self.input_is_3d = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create grid weights, temperature parameter, and build projections.
+        """
+        Create the grid, the temperature weight, and build the projections.
 
-        :param input_shape: Shape tuple of the input tensor (2-D or 3-D).
-        :type input_shape: Tuple[Optional[int], ...]"""
+        The projections are built against ``(None, input_dim)`` so the same
+        built layers serve 2-D and 3-D inputs.
+
+        :param input_shape: Shape of the input tensor. Must be rank 2 or
+            rank 3, with a defined last axis.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the input is not rank 2 or 3, or if its last
+            axis is None.
+        """
         if len(input_shape) < 2 or len(input_shape) > 3:
             raise ValueError(f"Expected 2D or 3D input, got shape {input_shape}")
 
@@ -265,8 +392,10 @@ class NeuroGrid(keras.layers.Layer):
         # Store input shape info for call method
         self.input_is_3d = len(input_shape) == 3
 
-        # Build projection layers - they work on the last dimension regardless of 2D/3D
-        projection_input_shape = (None, input_dim)  # Generic shape for Dense layers
+        # Build projection layers - they work on the last dimension regardless of 2D/3D.
+        # The leading axis is left undefined because a 3-D input is flattened
+        # to (batch * seq_len, input_dim) before it reaches these layers.
+        projection_input_shape = (None, input_dim)
         for layer in self.projection_layers:
             layer.build(projection_input_shape)
 
@@ -276,7 +405,8 @@ class NeuroGrid(keras.layers.Layer):
                 name='temperature',
                 shape=(),
                 initializer=keras.initializers.Constant(self.initial_temperature),
-                constraint=keras.constraints.NonNeg(),  # Ensure temperature stays positive
+                # Keeps the learned temperature from going negative.
+                constraint=keras.constraints.NonNeg(),
                 trainable=True
             )
         else:
@@ -305,14 +435,22 @@ class NeuroGrid(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass: project, compute joint probability, and soft lookup.
+        """
+        Project, form the joint address, and read the grid.
 
-        :param inputs: Input tensor (2-D or 3-D).
+        A rank-3 input is flattened over the token axis first and reshaped
+        back at the end. The entropy loss is added only when
+        ``entropy_regularizer_strength > 0`` and ``training`` is true.
+
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode.
+        :param training: Whether the caller is in training mode. Gates the
+            entropy loss.
         :type training: Optional[bool]
-        :return: Output tensor with same rank as input.
-        :rtype: keras.KerasTensor"""
+        :return: Output tensor with the same rank as the input and
+            ``latent_dim`` on its last axis.
+        :rtype: keras.KerasTensor
+        """
         original_shape = keras.ops.shape(inputs)
         input_rank = len(inputs.shape)
 
@@ -329,7 +467,8 @@ class NeuroGrid(keras.layers.Layer):
         total_entropy_loss = 0.0
 
         for layer in self.projection_layers:
-            logits = layer(inputs_2d, training=training)  # (batch_size [* seq_len], dim_i)
+            # logits: (batch_size [* seq_len], dim_i)
+            logits = layer(inputs_2d, training=training)
             # Apply learnable temperature-controlled softmax for sharper/smoother addressing
             scaled_logits = logits / (self.temperature + self.epsilon)
             prob = keras.ops.softmax(scaled_logits, axis=-1)
@@ -363,12 +502,18 @@ class NeuroGrid(keras.layers.Layer):
         return output
 
     def _compute_joint_probability(self, probabilities: List[keras.KerasTensor]) -> keras.KerasTensor:
-        """Compute joint probability via outer product of per-dimension distributions.
+        """
+        Combine the per-axis distributions into one joint distribution.
 
-        :param probabilities: List of probability tensors ``(batch, d_i)``.
+        Takes the outer product one axis at a time by broadcasting, adds
+        ``epsilon``, then renormalises so each row sums to 1.
+
+        :param probabilities: One probability tensor ``(batch, d_i)`` per grid
+            dimension, in grid order.
         :type probabilities: List[keras.KerasTensor]
         :return: Joint probability tensor ``(batch, d1, ..., dn)``.
-        :rtype: keras.KerasTensor"""
+        :rtype: keras.KerasTensor
+        """
         # Start with first probability: (batch, d1)
         joint_prob = probabilities[0]
 
@@ -379,7 +524,9 @@ class NeuroGrid(keras.layers.Layer):
 
             # Add axes to prob for proper broadcasting: (batch, 1, ..., 1, di)
             for _ in range(i):
-                if len(prob.shape) == 2:  # First iteration
+                # On the first pass prob is still (batch, di) and the new axis
+                # goes in front; afterwards it goes before the last axis.
+                if len(prob.shape) == 2:
                     prob = keras.ops.expand_dims(prob, axis=1)
                 else:
                     prob = keras.ops.expand_dims(prob, axis=-2)
@@ -401,12 +548,18 @@ class NeuroGrid(keras.layers.Layer):
         return joint_prob
 
     def _soft_lookup(self, joint_prob: keras.KerasTensor) -> keras.KerasTensor:
-        """Perform weighted lookup over the grid using joint probabilities.
+        """
+        Read the grid, weighting every cell by its joint probability.
+
+        Builds an einsum equation such as ``'bijk,ijkz->bz'`` from the grid
+        rank. Grids of rank above 6 take a flat ``matmul`` instead, which
+        computes the same sum.
 
         :param joint_prob: Joint probability tensor ``(batch, d1, ..., dn)``.
         :type joint_prob: keras.KerasTensor
         :return: Weighted sum tensor ``(batch, latent_dim)``.
-        :rtype: keras.KerasTensor"""
+        :rtype: keras.KerasTensor
+        """
         # Create einsum equation for the weighted sum
         # joint_prob: (batch, d1, d2, ..., dn)
         # grid_weights: (d1, d2, ..., dn, latent_dim)
@@ -414,9 +567,13 @@ class NeuroGrid(keras.layers.Layer):
 
         # Build einsum equation dynamically based on grid dimensions
         batch_idx = 'b'
-        # Fix: Use alphabet letters that don't conflict and handle higher dimensions
-        grid_indices = ''.join([chr(ord('i') + j) for j in range(min(self.n_dims, 23))])  # Limit to available letters
-        latent_idx = 'z'  # Use 'z' to avoid conflicts
+        # Grid axes get the letters i, j, k, ... The min() caps the run at 23,
+        # which is NOT a letter count: only 18 characters run from 'i' to 'z',
+        # so a cap of 23 would emit '{', '|', '}', '~' and DEL. It never bites
+        # because n_dims > 6 takes the matmul branch below and skips einsum.
+        grid_indices = ''.join([chr(ord('i') + j) for j in range(min(self.n_dims, 23))])
+        # 'z' sits past the end of that run, so it cannot collide with a grid axis.
+        latent_idx = 'z'
 
         # joint_prob indices: batch + grid dimensions
         joint_indices = batch_idx + grid_indices
@@ -430,8 +587,9 @@ class NeuroGrid(keras.layers.Layer):
         # Einsum equation: e.g., 'bijk,ijkz->bz' for 3D grid
         equation = f"{joint_indices},{grid_indices_with_latent}->{output_indices}"
 
-        # For very high dimensional grids, fall back to manual computation
-        if self.n_dims > 6:  # Einsum becomes inefficient/problematic for very high dims
+        # For very high dimensional grids, fall back to manual computation:
+        # einsum gets slow and unreliable past a handful of index letters.
+        if self.n_dims > 6:
             # Reshape for manual computation
             batch_size = keras.ops.shape(joint_prob)[0]
             joint_flat = keras.ops.reshape(joint_prob, (batch_size, self.total_grid_size))
@@ -444,12 +602,15 @@ class NeuroGrid(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute output shape for 2-D or 3-D inputs.
+        """
+        Replace the last axis with ``latent_dim`` and keep the rest.
 
-        :param input_shape: Input shape tuple.
+        :param input_shape: Input shape tuple, rank 2 or rank 3.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape tuple.
-        :rtype: Tuple[Optional[int], ...]"""
+        :return: Output shape tuple of the same rank.
+        :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 2 or rank 3.
+        """
         if len(input_shape) == 2:
             # 2D input: (batch_size, input_dim) → (batch_size, latent_dim)
             return (input_shape[0], self.latent_dim)
@@ -460,10 +621,15 @@ class NeuroGrid(keras.layers.Layer):
             raise ValueError(f"Unsupported input shape: {input_shape}")
 
     def get_config(self) -> Dict[str, Any]:
-        """Return layer configuration for serialization.
+        """
+        Return the constructor arguments needed to rebuild this layer.
 
-        :return: Dictionary containing all constructor parameters.
-        :rtype: Dict[str, Any]"""
+        ``input_is_3d`` is not included: ``build()`` derives it from the
+        input shape.
+
+        :return: Serializable configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'use_bias': self.use_bias,
@@ -480,14 +646,18 @@ class NeuroGrid(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
             'grid_regularizer': keras.regularizers.serialize(self.grid_regularizer),
         })
-        # Note: input_is_3d is not serialized as it's determined during build() from input shape
         return config
 
     def get_grid_weights(self) -> keras.KerasTensor:
-        """Get the current grid weights for analysis or visualisation.
+        """
+        Return the grid variable itself, for analysis or visualisation.
+
+        This is the live variable, not a copy.
 
         :return: Grid weights ``(d1, d2, ..., dn, latent_dim)``.
-        :rtype: keras.KerasTensor"""
+        :rtype: keras.KerasTensor
+        :raises ValueError: If the layer has not been built.
+        """
         if self.grid_weights is None:
             raise ValueError("Layer must be built before accessing grid weights")
         return self.grid_weights
@@ -496,13 +666,23 @@ class NeuroGrid(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> Dict[str, Union[List[keras.KerasTensor], keras.KerasTensor]]:
-        """Get addressing probabilities for analysis and interpretation.
+        """
+        Recompute the addressing distributions without running the lookup.
 
-        :param inputs: Input tensor (2-D or 3-D).
+        Repeats the projection and softmax steps of ``call()``, then the outer
+        product. A rank-3 input is flattened over the token axis and the
+        results are NOT reshaped back, so every returned tensor has a leading
+        axis of ``batch * seq_len``. No loss is added.
+
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
-        :return: Dictionary with keys ``'individual'``, ``'joint'``, and
-            ``'entropy'``.
-        :rtype: Dict[str, Union[List[keras.KerasTensor], keras.KerasTensor]]"""
+        :return: Dictionary with ``'individual'`` (a list of per-dimension
+            probability tensors ``(B, d_i)``), ``'joint'`` (one tensor
+            ``(B, d1, ..., dn)``) and ``'entropy'`` (a list of per-dimension
+            entropy tensors ``(B,)``).
+        :rtype: Dict[str, Union[List[keras.KerasTensor], keras.KerasTensor]]
+        :raises ValueError: If the layer has not been built.
+        """
         if not self.built:
             raise ValueError("Layer must be built before getting probabilities")
 
@@ -539,13 +719,25 @@ class NeuroGrid(keras.layers.Layer):
         }
 
     def get_grid_utilization(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
-        """Compute grid utilisation statistics.
+        """
+        Report how much of the grid a batch of inputs actually uses.
 
-        :param inputs: Input tensor.
+        Counts, per flattened cell, how many inputs peak there, and sums the
+        joint probability mass landing on each cell.
+
+        For a rank-3 input the counts run over ``batch * seq_len`` tokens
+        while ``utilization_rate`` divides by ``shape(inputs)[0]``, which is
+        ``batch``. The rate is therefore scaled by ``seq_len`` in that case.
+        Read the raw counts if you need a comparable number.
+
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
-        :return: Dictionary with ``'activation_counts'``,
-            ``'total_activation'``, and ``'utilization_rate'``.
-        :rtype: Dict[str, keras.KerasTensor]"""
+        :return: Dictionary with ``'activation_counts'`` and
+            ``'total_activation'``, both of shape ``(total_grid_size,)``, and
+            ``'utilization_rate'`` of the same shape.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If the layer has not been built.
+        """
         if not self.built:
             raise ValueError("Layer must be built before computing utilization")
 
@@ -577,13 +769,23 @@ class NeuroGrid(keras.layers.Layer):
         }
 
     def find_best_matching_units(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
-        """Find Best Matching Units (BMUs) for given inputs.
+        """
+        Find the single most probable grid cell for each input.
 
-        :param inputs: Input tensor.
+        Note the two key names read backwards from what you might expect.
+        ``'bmu_coordinates'`` is the FLAT argmax index and
+        ``'bmu_indices'`` is the unravelled per-axis coordinate.
+
+        :param inputs: Input tensor, rank 2 or rank 3. A rank-3 input is
+            flattened over the token axis, so the leading axis of every
+            returned tensor is ``batch * seq_len``.
         :type inputs: keras.KerasTensor
-        :return: Dictionary with ``'bmu_indices'``, ``'bmu_probabilities'``,
-            and ``'bmu_coordinates'``.
-        :rtype: Dict[str, keras.KerasTensor]"""
+        :return: Dictionary with ``'bmu_indices'`` of shape ``(B, n_dims)``,
+            ``'bmu_probabilities'`` of shape ``(B,)``, and
+            ``'bmu_coordinates'`` of shape ``(B,)``.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If the layer has not been built.
+        """
         if not self.built:
             raise ValueError("Layer must be built before finding BMUs")
 
@@ -614,10 +816,18 @@ class NeuroGrid(keras.layers.Layer):
         }
 
     def set_temperature(self, new_temperature: float) -> None:
-        """Update the temperature parameter.
+        """
+        Overwrite the temperature weight in place.
 
-        :param new_temperature: New temperature value (must be positive).
-        :type new_temperature: float"""
+        Useful for annealing the addressing from diffuse to sharp during
+        training. The assignment happens even when
+        ``learnable_temperature=False``.
+
+        :param new_temperature: New temperature value. Must be positive.
+        :type new_temperature: float
+        :raises ValueError: If ``new_temperature`` is not positive, or if the
+            layer has not been built.
+        """
         if new_temperature <= 0:
             raise ValueError(f"temperature must be positive, got {new_temperature}")
         if self.temperature is None:
@@ -627,30 +837,48 @@ class NeuroGrid(keras.layers.Layer):
         self.temperature.assign(new_temperature)
 
     def get_current_temperature(self) -> float:
-        """Get the current temperature value.
+        """
+        Read the temperature weight back as a Python float.
 
-        :return: Current temperature as a float.
-        :rtype: float"""
+        :return: Current temperature.
+        :rtype: float
+        :raises ValueError: If the layer has not been built.
+        """
         if self.temperature is None:
             raise ValueError("Layer must be built before getting temperature")
 
         return float(keras.ops.convert_to_numpy(self.temperature))
 
     def compute_input_quality(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
-        """Compute quality measures for inputs based on addressing behaviour.
+        """
+        Score how cleanly each input addresses the grid.
 
-        Returns six complementary metrics: ``addressing_confidence``
-        (peak joint probability), ``addressing_entropy``, ``dimension_consistency``
-        (mean per-dimension peak probability), ``grid_coherence``
-        (inverse variance of the joint distribution), ``uncertainty``
-        (mean per-dimension entropy), and a weighted ``overall_quality``
-        composite in ``[0, 1]``. For 3-D inputs each metric is computed
-        per token, yielding shape ``(batch, seq_len)``.
+        The premise is that a sharp, confident address means the input looks
+        like something the grid has learned, and a diffuse one means it does
+        not. Six measures are returned:
 
-        :param inputs: Input tensor (2-D or 3-D).
+        - ``addressing_confidence`` -- peak joint probability, in ``[0, 1]``.
+        - ``addressing_entropy`` -- entropy of the joint distribution. Lower
+          is sharper. Not normalised.
+        - ``dimension_consistency`` -- mean per-axis peak probability, in
+          ``[0, 1]``.
+        - ``grid_coherence`` -- ``1 / (1 + var(joint))``, in ``(0, 1]``.
+        - ``uncertainty`` -- mean per-axis entropy. Not normalised.
+        - ``overall_quality`` -- weighted mix of the five, in ``[0, 1]``.
+          The two entropies are first inverted and clipped against their
+          theoretical maxima, ``log(total_grid_size)`` and
+          ``log(max(grid_shape))``.
+
+        For a rank-2 input each measure has shape ``(batch,)``. For a rank-3
+        input each is computed per token and reshaped to
+        ``(batch, seq_len)``.
+
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
-        :return: Dictionary of quality measure tensors.
-        :rtype: Dict[str, keras.KerasTensor]"""
+        :return: Dictionary of the six measures above.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If the layer has not been built.
+        """
         if not self.built:
             raise ValueError("Layer must be built before computing quality")
 
@@ -702,10 +930,12 @@ class NeuroGrid(keras.layers.Layer):
         uncertainty = avg_dimension_entropy
 
         # 6. Overall Quality Score: Composite measure (0-1 scale)
-        # Normalize and combine multiple factors
-        confidence_norm = addressing_confidence  # Already 0-1
-        consistency_norm = dimension_consistency  # Already 0-1
-        coherence_norm = grid_coherence  # Already 0-1
+        # Normalize and combine multiple factors.
+        # These three are already in [0, 1] and are renamed, not rescaled:
+        # two are peak probabilities and one is 1 / (1 + variance).
+        confidence_norm = addressing_confidence
+        consistency_norm = dimension_consistency
+        coherence_norm = grid_coherence
 
         # Entropy-based terms (invert and normalize to 0-1)
         max_joint_entropy = keras.ops.log(keras.ops.cast(self.total_grid_size, 'float32'))
@@ -716,13 +946,15 @@ class NeuroGrid(keras.layers.Layer):
         uncertainty_quality = 1.0 - (uncertainty / (max_dim_entropy + self.epsilon))
         uncertainty_quality = keras.ops.clip(uncertainty_quality, 0.0, 1.0)
 
-        # Weighted combination of quality factors
+        # Weighted combination of quality factors. The five weights sum to 1.0
+        # and every term is in [0, 1], so overall_quality is in [0, 1] too.
+        # The two entropy-derived terms carry 0.40 of the total between them.
         overall_quality = (
-                0.25 * confidence_norm +  # Addressing confidence
-                0.25 * entropy_quality +  # Joint entropy quality
-                0.20 * consistency_norm +  # Dimension consistency
-                0.15 * coherence_norm +  # Grid coherence
-                0.15 * uncertainty_quality  # Individual dimension quality
+                0.25 * confidence_norm +
+                0.25 * entropy_quality +
+                0.20 * consistency_norm +
+                0.15 * coherence_norm +
+                0.15 * uncertainty_quality
         )
 
         # Reshape results back to match input format for 3D inputs
@@ -745,60 +977,30 @@ class NeuroGrid(keras.layers.Layer):
         }
 
     def get_quality_statistics(self, inputs: keras.KerasTensor) -> Dict[str, float]:
-        """Compute batch-level statistical summaries for all quality measures.
+        """
+        Summarise ``compute_input_quality`` over a whole batch.
 
-        This method provides detailed statistical analysis of quality measure distributions
-        across a batch of inputs, enabling comprehensive assessment of data quality patterns,
-        detection of distribution shifts, and identification of statistical anomalies.
+        Runs ``compute_input_quality`` and reduces each of its six measures to
+        mean, std, min, max and median, giving 30 floats. The reduction is
+        over every element, so for a rank-3 input it pools across tokens as
+        well as across the batch.
 
-        **Statistical Measures Computed**:
+        The numbers are for monitoring: watching the mean drift, or the std
+        widen, tells you the incoming data has changed. A gap between mean and
+        median points at outliers. There are no built-in thresholds; pick them
+        from your own data.
 
-        For each quality measure (addressing_confidence, addressing_entropy, dimension_consistency,
-        grid_coherence, uncertainty, overall_quality), the following statistics are calculated:
+        This converts to NumPy, so it does not belong inside a compiled
+        training step.
 
-        - **Mean**: Central tendency of the quality distribution
-        - **Standard Deviation**: Variability and spread in quality scores
-        - **Minimum**: Worst-case quality in the batch
-        - **Maximum**: Best-case quality in the batch
-        - **Median**: Robust central tendency measure (50th percentile)
-
-        **Interpretation Guidelines**:
-
-        **Mean Quality Patterns**:
-        - High mean (>0.7): Batch contains predominantly high-quality samples
-        - Medium mean (0.3-0.7): Mixed quality batch with diverse sample types
-        - Low mean (<0.3): Batch dominated by problematic or out-of-distribution samples
-
-        **Standard Deviation Patterns**:
-        - Low std (<0.1): Homogeneous batch with consistent quality
-        - Medium std (0.1-0.3): Natural variation in sample quality
-        - High std (>0.3): Heterogeneous batch with wide quality range
-
-        **Min-Max Range Analysis**:
-        - Narrow range: Consistent data quality across batch
-        - Wide range: Batch contains both excellent and poor samples
-        - Low minimum: Presence of outliers or problematic samples
-
-        **Mean vs Median Comparison**:
-        - Similar values: Symmetric quality distribution
-        - Mean < Median: Distribution skewed toward lower quality (outliers present)
-        - Mean > Median: Distribution skewed toward higher quality
-
-        **Applications**:
-
-        1. **Data Quality Monitoring**: Track quality distributions over time
-        2. **Batch Assessment**: Evaluate incoming data quality before processing
-        3. **Distribution Analysis**: Understand quality patterns in datasets
-        4. **Outlier Detection**: Identify batches with unusual quality characteristics
-        5. **Model Performance Correlation**: Relate quality statistics to model performance
-        6. **Data Filtering Thresholds**: Set appropriate quality filtering thresholds
-        7. **Quality Control**: Monitor data pipeline quality in production systems
-
-        :param inputs: Input tensor.
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
-        :return: Dictionary with keys ``'{measure}_{stat}'`` where stat is
-            one of mean, std, min, max, median. Values are Python floats.
-        :rtype: Dict[str, float]"""
+        :return: Dictionary keyed ``'{measure}_{stat}'`` with ``stat`` one of
+            ``mean``, ``std``, ``min``, ``max``, ``median``. Values are Python
+            floats.
+        :rtype: Dict[str, float]
+        :raises ValueError: If the layer has not been built.
+        """
         quality_measures = self.compute_input_quality(inputs)
 
         statistics = {}
@@ -818,18 +1020,37 @@ class NeuroGrid(keras.layers.Layer):
             quality_threshold: float = 0.5,
             quality_measure: str = 'overall_quality'
     ) -> Dict[str, keras.KerasTensor]:
-        """Partition inputs into high- and low-quality subsets by threshold.
+        """
+        Split a batch into a high-quality and a low-quality half.
+
+        Scores every input with ``compute_input_quality``, compares one chosen
+        measure against the threshold, and gathers the two subsets along axis
+        0. The comparison is ``>=`` for the high half.
+
+        BROKEN as written, at every input rank. Measured on keras 3.8.0,
+        2026-08-30: single-argument ``keras.ops.where`` returns a LIST of
+        index arrays, so the ``[:, 0]`` slice below raises
+        ``TypeError: list indices must be integers or slices, not tuple``
+        before any partition happens. Nothing in the repository calls this
+        method and no test covers it. Do not build on it until it is fixed
+        and given a test.
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor
-        :param quality_threshold: Threshold for partitioning.
+        :param quality_threshold: Cut-off applied to the chosen measure.
         :type quality_threshold: float
-        :param quality_measure: Quality metric name to threshold on.
+        :param quality_measure: Which key of ``compute_input_quality`` to
+            threshold on.
         :type quality_measure: str
         :return: Dictionary with ``'high_quality_inputs'``,
-            ``'low_quality_inputs'``, ``'high_quality_mask'``, and
+            ``'low_quality_inputs'``, ``'high_quality_mask'`` and
             ``'quality_scores'``.
-        :rtype: Dict[str, keras.KerasTensor]"""
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If ``quality_measure`` is not one of the six
+            measure names, or if the layer has not been built.
+        :raises TypeError: Always, on the ``keras.ops.where`` slice described
+            above.
+        """
         quality_measures = self.compute_input_quality(inputs)
 
         if quality_measure not in quality_measures:
