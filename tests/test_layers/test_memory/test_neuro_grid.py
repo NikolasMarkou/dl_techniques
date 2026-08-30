@@ -1013,3 +1013,103 @@ class TestNeuroGridEinsumSubscripts:
         assert output == 'bz'
         assert 'z' not in grid_subscripts
         assert 'b' not in grid_subscripts
+
+
+class TestNeuroGridDefaultsAreFreshPerInstance:
+    """``grid_initializer`` and ``grid_regularizer`` must not be shared objects.
+
+    Both parameters used to default to a LIVE instance evaluated once, at import
+    time, so every caller who omitted the argument received the SAME object. The
+    contract asserted here has two halves and both are load-bearing: the resolved
+    objects must be DISTINCT (the defect) and EQUIVALENT (a fix that swapped in a
+    different class would satisfy distinctness alone). Assertions on class name
+    are stated against the expected class by NAME, so a fix that resolves the
+    sentinel after ``keras.regularizers.get(...)`` -- which returns ``None`` --
+    cannot pass vacuously with ``NoneType`` on both sides.
+    """
+
+    @staticmethod
+    def _two_layers():
+        """Two independently constructed layers, both omitting the arguments."""
+        return (
+            NeuroGrid(grid_shape=[4, 3], latent_dim=6),
+            NeuroGrid(grid_shape=[4, 3], latent_dim=6),
+        )
+
+    def test_grid_initializer_is_a_fresh_object_per_instance(self):
+        """Two default-constructed layers hold DISTINCT grid initializers."""
+        a, b = self._two_layers()
+
+        assert a.grid_initializer is not None
+        assert type(a.grid_initializer).__name__ == 'OrthogonalHypersphereInitializer'
+        assert a.grid_initializer is not b.grid_initializer
+
+    def test_grid_initializer_default_is_equivalent_across_instances(self):
+        """Distinct, but the SAME class and the SAME serialized configuration."""
+        a, b = self._two_layers()
+
+        assert type(a.grid_initializer) is type(b.grid_initializer)
+        assert (
+            keras.initializers.serialize(a.grid_initializer)
+            == keras.initializers.serialize(b.grid_initializer)
+        )
+
+    def test_grid_regularizer_is_a_fresh_object_per_instance(self):
+        """Two default-constructed layers hold DISTINCT grid regularizers."""
+        a, b = self._two_layers()
+
+        assert a.grid_regularizer is not None
+        assert type(a.grid_regularizer).__name__ == 'SoftOrthonormalConstraintRegularizer'
+        assert a.grid_regularizer is not b.grid_regularizer
+
+    def test_grid_regularizer_default_is_equivalent_across_instances(self):
+        """Distinct, but the SAME class and the SAME serialized configuration."""
+        a, b = self._two_layers()
+
+        assert type(a.grid_regularizer) is type(b.grid_regularizer)
+        assert (
+            keras.regularizers.serialize(a.grid_regularizer)
+            == keras.regularizers.serialize(b.grid_regularizer)
+        )
+
+    def test_get_config_emits_the_resolved_objects_not_the_sentinel(self):
+        """``get_config()`` must serialize the RESOLVED default, never ``None``."""
+        config = NeuroGrid(grid_shape=[4, 3], latent_dim=6).get_config()
+
+        assert config['grid_initializer'] is not None
+        assert config['grid_regularizer'] is not None
+        assert (
+            config['grid_initializer']['class_name']
+            == 'OrthogonalHypersphereInitializer'
+        )
+        assert (
+            config['grid_regularizer']['class_name']
+            == 'SoftOrthonormalConstraintRegularizer'
+        )
+
+    def test_from_config_reconstructs_the_same_classes(self):
+        """A round trip through ``from_config`` keeps both classes and configs."""
+        original = NeuroGrid(grid_shape=[4, 3], latent_dim=6)
+        restored = NeuroGrid.from_config(original.get_config())
+
+        assert type(restored.grid_initializer) is type(original.grid_initializer)
+        assert type(restored.grid_regularizer) is type(original.grid_regularizer)
+        assert (
+            keras.initializers.serialize(restored.grid_initializer)
+            == keras.initializers.serialize(original.grid_initializer)
+        )
+        assert (
+            keras.regularizers.serialize(restored.grid_regularizer)
+            == keras.regularizers.serialize(original.grid_regularizer)
+        )
+
+    def test_an_explicit_none_grid_regularizer_still_means_no_regularizer(self):
+        """CONTROL: green both before and after the fix; NOT counted among the REDs.
+
+        ``grid_regularizer`` is ``Optional[...]``, so ``None`` is a legal value
+        today meaning "no regularizer at all". It is why this parameter takes a
+        module-level sentinel rather than plain ``None``.
+        """
+        layer = NeuroGrid(grid_shape=[4, 3], latent_dim=6, grid_regularizer=None)
+
+        assert layer.grid_regularizer is None

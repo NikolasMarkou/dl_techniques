@@ -79,6 +79,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # axis, so neither may appear here: the run is ``'i'``..``'y'``, 17 letters.
 GRID_EINSUM_SUBSCRIPTS: str = 'ijklmnopqrstuvwxy'
 
+# Sentinel for ``NeuroGrid.grid_regularizer``. That parameter is
+# ``Optional[...]``, so ``None`` is already a legal value meaning "no
+# regularizer at all"; plain ``None`` therefore cannot double as "argument
+# omitted" without silently handing a regularizer to a caller who asked for
+# none. ``grid_initializer`` is NOT ``Optional`` and uses plain ``None``.
+_GRID_REGULARIZER_DEFAULT: Any = object()  # unique; never an interned literal a caller could pass
+
 
 # ---------------------------------------------------------------------
 
@@ -218,11 +225,14 @@ class NeuroGrid(keras.layers.Layer):
         ...                    entropy_regularizer_strength=0.01)
 
     Note:
-        ``grid_regularizer`` defaults to a
-        ``SoftOrthonormalConstraintRegularizer``, not to None, so the grid
-        vectors are pushed apart unless you pass something else. The
-        ``grid_initializer`` default is likewise an
-        ``OrthogonalHypersphereInitializer`` instance.
+        The rendered signature defaults are sentinels, not the effective
+        values. Omitting ``grid_regularizer`` builds a
+        ``SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.001)``, so the grid
+        vectors are pushed apart unless you pass something else; passing
+        ``None`` explicitly still means no regularizer at all. Omitting
+        ``grid_initializer`` likewise builds an
+        ``OrthogonalHypersphereInitializer()``. Each omission builds a FRESH
+        object, so two layers never share one.
 
     Note:
         The entropy loss is added only when
@@ -253,13 +263,16 @@ class NeuroGrid(keras.layers.Layer):
     :param bias_initializer: Initializer for projection Dense biases. Copied
         per projection on the same terms as ``kernel_initializer``.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param grid_initializer: Initializer for the grid latent vectors.
-    :type grid_initializer: Union[str, keras.initializers.Initializer]
+    :param grid_initializer: Initializer for the grid latent vectors. Omit it
+        or pass ``None`` for a fresh ``OrthogonalHypersphereInitializer()``.
+    :type grid_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param kernel_regularizer: Optional regularizer for Dense kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for Dense biases.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :param grid_regularizer: Optional regularizer for grid weights.
+    :param grid_regularizer: Optional regularizer for grid weights. Omit it for
+        a fresh ``SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.001)``; pass
+        ``None`` explicitly for no regularizer at all.
     :type grid_regularizer: Optional[keras.regularizers.Regularizer]
     :param epsilon: Small positive constant added to the temperature before
         dividing, to the joint probability before renormalising, and inside
@@ -303,10 +316,10 @@ class NeuroGrid(keras.layers.Layer):
             entropy_regularizer_strength: float = 0.0,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            grid_initializer: Union[str, keras.initializers.Initializer] = OrthogonalHypersphereInitializer(),
+            grid_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            grid_regularizer: Optional[keras.regularizers.Regularizer] = SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.001),
+            grid_regularizer: Optional[keras.regularizers.Regularizer] = _GRID_REGULARIZER_DEFAULT,
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
@@ -348,6 +361,16 @@ class NeuroGrid(keras.layers.Layer):
         self.n_dims = len(self.grid_shape)
         self.use_bias = use_bias
         self.total_grid_size = int(np.prod(self.grid_shape))
+
+        # DECISION plan-2026-08-30T063229-ccd6ad17/D-019
+        # Resolve BEFORE the keras.*.get(...) calls below. Do NOT move this
+        # after them: get(None) returns None, so the grid would silently lose
+        # its initializer and its regularizer while an `is not` guard passed.
+        # See decisions.md D-019.
+        if grid_initializer is None:
+            grid_initializer = OrthogonalHypersphereInitializer()
+        if grid_regularizer is _GRID_REGULARIZER_DEFAULT:
+            grid_regularizer = SoftOrthonormalConstraintRegularizer(0.1, 0.0, 0.001)
 
         # Store initializers and regularizers
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
