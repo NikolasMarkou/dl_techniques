@@ -229,17 +229,20 @@ model = create_manokhin_compliant_model(
 
 outputs = model.predict(np.random.randn(4, 168, 1).astype("float32"), verbose=0)
 print([o.shape for o in outputs])   # [(4, 24, 1), (4, 24, 1, 3)]
-print(model.output_shape)           # [(None, 168, 1), (None, 24, 1, 3)]
+print(model.output_shape)           # [(None, 24, 1), (None, 24, 1, 3)]
 ```
 
 The builder returns a two-output model: the gated point forecast and the raw
-quantiles.
+quantiles. The declared shapes match the runtime ones.
 
-Read the runtime shape, not `model.output_shape`. `ForecastabilityGate` takes
-`deep_forecast` and `pure_naive` as extra call arguments, not as part of
-`inputs`, so under the functional API Keras hands its `compute_output_shape` a
-single shape and gets the backcast shape back. The first output is really
-`(batch, 24, 1)`; the graph declares `(None, 168, 1)`.
+`ForecastabilityGate` takes `deep_forecast` and `pure_naive` as extra call
+arguments, not as part of `inputs`, so under the functional API Keras hands its
+`compute_output_shape` only the backcast shape — the layer cannot infer its own
+forecast length. The builder therefore passes `forecast_length=` down to the
+gate, and `compute_output_shape` substitutes it for the time axis. If you
+construct a `ForecastabilityGate` yourself and omit `forecast_length`, the
+older behaviour is kept: the declared shape is the backcast shape, a warning is
+logged, and you must read the runtime shape instead.
 
 ### EMA smoothing and slope signals
 

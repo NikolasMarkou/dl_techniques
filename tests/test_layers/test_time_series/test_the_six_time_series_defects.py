@@ -36,7 +36,10 @@ import pytest
 import dl_techniques
 
 from dl_techniques.layers.time_series.adaptive_lag_attention import AdaptiveLagAttentionLayer
-from dl_techniques.layers.time_series.forecasting_layers import create_manokhin_compliant_model
+from dl_techniques.layers.time_series.forecasting_layers import (
+    ForecastabilityGate,
+    create_manokhin_compliant_model,
+)
 from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
@@ -91,6 +94,30 @@ def test_the_gate_declares_the_forecast_shape():
     assert declared[1:] == runtime[1:], (
         f"declared non-batch dims {declared[1:]} != runtime {runtime[1:]}"
     )
+
+
+def test_the_gate_still_loads_a_config_written_before_forecast_length_existed():
+    """
+    Backward-compat control for the D-1 fix.
+
+    ``forecast_length`` is a NEW ``get_config`` key, so every config written
+    before this plan lacks it. ``from_config`` must still succeed there and
+    leave the attribute ``None`` — otherwise the fix would break reloading of
+    any archive containing this layer.
+    """
+    legacy = ForecastabilityGate(hidden_units=8).get_config()
+    legacy.pop("forecast_length", None)
+    assert "forecast_length" not in legacy
+
+    restored = ForecastabilityGate.from_config(legacy)
+    assert restored.forecast_length is None
+    assert restored.hidden_units == 8
+
+    # And the round trip WITH the key preserves it.
+    kept = ForecastabilityGate.from_config(
+        ForecastabilityGate(hidden_units=8, forecast_length=8).get_config()
+    )
+    assert kept.forecast_length == 8
 
 
 # =========================================================================

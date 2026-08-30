@@ -27,6 +27,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -244,6 +245,13 @@ class ForecastabilityGate(layers.Layer):
     :type kernel_initializer: str or keras.initializers.Initializer
     :param kernel_regularizer: Regularizer for kernel weights.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param forecast_length: Length ``Tf`` of the forecast this gate emits. The
+        layer cannot infer it: ``deep_forecast`` and ``naive_forecast`` arrive
+        as extra ``call`` arguments, so ``build`` only ever sees the backcast
+        shape. Supplying it is what lets ``compute_output_shape`` declare the
+        tensor ``call`` really returns. Defaults to ``None``, which keeps the
+        older, unreliable behaviour and warns.
+    :type forecast_length: int or None
     :param name: Layer name.
     :type name: str or None
     :param kwargs: Additional keyword arguments passed to the base Layer.
@@ -255,6 +263,7 @@ class ForecastabilityGate(layers.Layer):
             activation: str = 'relu',
             kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            forecast_length: Optional[int] = None,
             name: Optional[str] = None,
             **kwargs
     ):
@@ -269,6 +278,9 @@ class ForecastabilityGate(layers.Layer):
         :type kernel_initializer: str or keras.initializers.Initializer
         :param kernel_regularizer: Regularizer for kernel weights.
         :type kernel_regularizer: keras.regularizers.Regularizer or None
+        :param forecast_length: Length of the emitted forecast, used solely by
+            ``compute_output_shape``. ``None`` keeps the older behaviour.
+        :type forecast_length: int or None
         :param name: Layer name.
         :type name: str or None
         :param kwargs: Additional keyword arguments for the base Layer.
@@ -278,6 +290,7 @@ class ForecastabilityGate(layers.Layer):
         self.activation = deserialize_activation(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.forecast_length = forecast_length
 
         # Complexity analyzer will be built in build()
         self.complexity_analyzer = None
@@ -370,27 +383,53 @@ class ForecastabilityGate(layers.Layer):
 
     def compute_output_shape(self, input_shape):
         """
-        Compute the output shape.
+        Compute the output shape, which is the FORECAST shape.
 
-        Given a list of the three call shapes, this returns the second one, the
-        deep forecast shape, which is the true output shape.
+        Keras hands this method a single shape under the functional API,
+        because ``deep_forecast`` and ``naive_forecast`` are extra ``call``
+        arguments rather than part of ``inputs`` — so the only shape available
+        is the backcast one, ``(batch, backcast_len, features)``. With
+        ``forecast_length`` supplied to the constructor the time axis is
+        replaced by it, and both the single-shape and the list-of-three forms
+        return ``(batch, forecast_length, features)``, which is exactly what
+        ``call`` produces. On a model built with ``input_shape=(24, 3)`` and
+        ``forecast_length=8`` the graph now declares ``(None, 8, 3)`` and
+        ``predict`` returns ``(5, 8, 3)`` for a batch of 5.
 
-        Given a single shape it returns that shape unchanged, which is the
-        BACKCAST shape, not the forecast shape. Keras takes this branch under
-        the functional API, because ``deep_forecast`` and ``naive_forecast``
-        are extra call arguments rather than part of ``inputs``. Measured on a
-        model built with ``input_shape=(24, 3)`` and ``forecast_length=8``: the
-        graph declares ``(None, 24, 3)`` while ``predict`` returns ``(5, 8, 3)``
-        for a batch of 5. Read the runtime shape, not ``model.output_shape``.
+        With ``forecast_length=None`` — the pre-existing constructor form —
+        the older behaviour is kept and one warning is logged: the single-shape
+        branch then returns the backcast shape, so ``model.output_shape`` is
+        not the shape the model really emits and the runtime shape must be
+        read instead. Passing ``forecast_length`` removes the caveat.
 
         :param input_shape: One shape tuple, or a list of the three call shapes.
         :type input_shape: tuple or list
-        :return: The deep forecast shape, or ``input_shape`` unchanged.
+        :return: ``(batch, forecast_length, features)`` when ``forecast_length``
+            is set; otherwise the deep forecast shape for the list form, or
+            ``input_shape`` unchanged for the single-shape form.
         :rtype: tuple
         """
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 3 and isinstance(input_shape[0], (list, tuple)):
-            return input_shape[1]
-        return input_shape
+        is_call_shape_list = (
+            isinstance(input_shape, (list, tuple))
+            and len(input_shape) == 3
+            and isinstance(input_shape[0], (list, tuple))
+        )
+        reference = input_shape[1] if is_call_shape_list else input_shape
+
+        if self.forecast_length is not None:
+            reference = tuple(reference)
+            return (reference[0], self.forecast_length) + reference[2:]
+
+        if not is_call_shape_list:
+            logger.warning(
+                "ForecastabilityGate.compute_output_shape was given only the "
+                "backcast shape %s and has no forecast_length, so it is "
+                "returning that shape unchanged. The layer actually emits "
+                "(batch, forecast_length, features). Pass forecast_length=<Tf> "
+                "to the constructor to declare the real output shape.",
+                tuple(reference),
+            )
+        return reference
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -405,6 +444,7 @@ class ForecastabilityGate(layers.Layer):
             "activation": serialize_activation(self.activation),
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "forecast_length": self.forecast_length,
         })
         return config
 
@@ -845,6 +885,7 @@ def create_manokhin_compliant_model(
     gate = ForecastabilityGate(
         hidden_units=gate_hidden_units,
         activation=gate_activation,
+        forecast_length=forecast_length,
         name='forecastability_gate'
     )
     final_point_forecast = gate(inputs, deep_forecast, pure_naive)
