@@ -87,12 +87,12 @@ from .config import (
     resolve_contrastive_seq_length,
 )
 from .data import build_packed_mlm_dataset
+from dl_techniques.losses import SymmetricInfoNCELoss
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 __all__ = [
-    "SimCSELoss",
     "SimCSEModel",
     "main",
     "parse_args",
@@ -238,59 +238,6 @@ def run_mlm_stage(
 # ---------------------------------------------------------------------
 # Stage 2 -- contrastive embedding fine-tuning
 # ---------------------------------------------------------------------
-
-@register_dl_technique("dl_techniques.train.embeddings_experimental.train_embeddings")
-class SimCSELoss(keras.losses.Loss):
-    """Symmetric InfoNCE over two dropout views of the same batch.
-
-    ``y_true`` is ignored: the positives are positional (row *i* of view A
-    matches row *i* of view B), so the targets are implicit. ``y_pred`` is the
-    stacked pair produced by :meth:`SimCSEModel.call`, shape
-    ``(batch, 2, embed_dim)``.
-
-    :param temperature: Softmax temperature over cosine similarities.
-    :type temperature: float
-    :param kwargs: Additional keyword arguments for the Loss base class.
-    """
-
-    def __init__(self, temperature: float = 0.05, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.temperature = temperature
-
-    def call(self, y_true, y_pred):
-        """Compute the symmetric InfoNCE loss.
-
-        :param y_true: Ignored; positives are positional.
-        :type y_true: Any
-        :param y_pred: ``(batch, 2, embed_dim)`` stacked views.
-        :type y_pred: keras.KerasTensor
-        :return: Scalar loss.
-        :rtype: keras.KerasTensor
-        """
-        view_a = y_pred[:, 0, :]
-        view_b = y_pred[:, 1, :]
-        logits = keras.ops.matmul(
-            view_a, keras.ops.transpose(view_b)
-        ) / self.temperature
-        targets = keras.ops.arange(keras.ops.shape(logits)[0])
-        forward = keras.losses.sparse_categorical_crossentropy(
-            targets, logits, from_logits=True
-        )
-        backward = keras.losses.sparse_categorical_crossentropy(
-            targets, keras.ops.transpose(logits), from_logits=True
-        )
-        return keras.ops.mean(forward + backward) / 2.0
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
-
-        :return: Serializable configuration dictionary.
-        :rtype: dict[str, Any]
-        """
-        config = super().get_config()
-        config.update({"temperature": self.temperature})
-        return config
-
 
 @register_dl_technique("dl_techniques.train.embeddings_experimental.train_embeddings")
 class SimCSEModel(keras.Model):
@@ -478,7 +425,7 @@ def run_contrastive_stage(
             total_steps=total_steps,
             warmup_ratio=config.mlm_warmup_ratio,
         ),
-        loss=SimCSELoss(temperature=config.contrastive_temperature),
+        loss=SymmetricInfoNCELoss(temperature=config.contrastive_temperature),
         # XLA is OFF here deliberately. Keras defaults `jit_compile="auto"`,
         # which turns it on for a GPU, and the SimCSE step -- two forward passes
         # of one batch feeding a symmetric cross-entropy -- fails to compile on
