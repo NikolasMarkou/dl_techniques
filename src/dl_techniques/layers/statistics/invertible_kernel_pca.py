@@ -34,7 +34,8 @@ pre-image solve. It maps components back to RFF space with the trainable
 ``reconstruction_matrix``, then decodes RFF space to input space by multiplying
 with the transposed random frequency matrix and dividing by
 ``n_random_features + regularization``. Both steps are linear. Gradient
-descent learns ``projection_matrix`` and ``reconstruction_matrix``. The
+descent learns ``projection_matrix``, ``reconstruction_matrix`` and
+``reconstruction_bias``. The
 frequency decoder is fixed: it reuses ``frequencies``, which trains only when
 ``trainable_frequencies=True`` (default ``False``). Reconstruction quality is
 only as good as ``reconstruction_matrix`` makes it. The method's own docstring
@@ -103,9 +104,15 @@ class InvertibleKernelPCA(keras.layers.Layer):
         ``inverse_transform`` is a **LEARNED APPROXIMATION**, NOT a true
         kernel-PCA pre-image solve. It uses a trainable
         ``reconstruction_matrix`` followed by a fixed linear frequency decoder.
-        Only ``reconstruction_matrix`` is trained by gradient descent. The
-        decoder reuses ``frequencies``, which trains only when
-        ``trainable_frequencies=True`` (default ``False``). The ``laplacian``
+        ``reconstruction_matrix`` and ``reconstruction_bias`` are the trained
+        parts. The decoder reuses ``frequencies``, which trains only when
+        ``trainable_frequencies=True`` (default ``False``).
+
+        Nothing in this package trains them. A loss on this layer's own output
+        gives them no gradient, because they are reached only through
+        ``inverse_transform``. Straight after ``adapt``, reconstruction is no
+        better than returning zeros: relative error 0.9985 on 20 Gaussian
+        samples at seed 0. Put ``inverse_transform`` in a loss first. The ``laplacian``
         and ``cauchy`` kernel options draw Gaussian frequencies, not the exact
         Cauchy frequencies those kernels require. No online eigendecomposition
         runs anywhere. See ``inverse_transform`` for the exact reconstruction
@@ -252,6 +259,9 @@ class InvertibleKernelPCA(keras.layers.Layer):
             layer = InvertibleKernelPCA(n_components=8, n_random_features=128)
             layer.adapt(train_x)
             codes = layer(train_x)
+
+            # `adapt` fits the forward path only. Until the reconstruction
+            # weights are trained against a loss, `approx` is close to zeros.
             approx = layer.inverse_transform(codes)
 
     Note:
