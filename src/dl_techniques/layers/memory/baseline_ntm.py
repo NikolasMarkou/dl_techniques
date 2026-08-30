@@ -95,18 +95,15 @@ class NTMMemory(BaseMemory):
         precedence carried through unchanged)
 
     Note:
-        `epsilon` is stored and serialized by `BaseMemory`, but
-        neither `read` nor `write` reads it. It is an inert knob on
-        this class. The heads carry their own `epsilon`, which does
-        reach code.
+        This class takes no `epsilon`. One was declared, stored and
+        serialized here but read by neither `read` nor `write`; it was
+        removed, and `BaseMemory.from_config` drops the legacy key. The
+        heads carry their own `epsilon`, which does reach code.
 
     :param memory_size: Number of memory slots, N. Must be positive.
     :type memory_size: int
     :param memory_dim: Width of one memory slot, M. Must be positive.
     :type memory_dim: int
-    :param epsilon: Small constant for numerical stability. Stored and
-        serialized, but unused here. Defaults to 1e-6.
-    :type epsilon: float
     :param memory_init_seed: Seed for the symmetry-breaking draw in
         `initialize_state`. It is fixed, so that draw is stateless and
         repeats exactly. Defaults to 42. Serialized by this class's
@@ -125,25 +122,19 @@ class NTMMemory(BaseMemory):
         self,
         memory_size: int,
         memory_dim: int,
-        epsilon: float = 1e-6,
         memory_init_seed: int = 42,
         **kwargs: Any,
     ) -> None:
         """
-        Store the two sizes, epsilon and the init seed.
+        Store the two sizes and the init seed.
 
-        `BaseMemory.__init__` stores the sizes and epsilon;
-        `memory_init_seed` is stored here and is the only field this
-        subclass adds.
+        `BaseMemory.__init__` stores the sizes; `memory_init_seed` is
+        stored here and is the only field this subclass adds.
 
         :param memory_size: Number of memory slots, N.
         :type memory_size: int
         :param memory_dim: Width of one memory slot, M.
         :type memory_dim: int
-        :param epsilon: Small constant for numerical stability.
-            Stored and serialized, but unused by this class.
-            Defaults to 1e-6.
-        :type epsilon: float
         :param memory_init_seed: Seed for the draw in
             `initialize_state`. Defaults to 42.
         :type memory_init_seed: int
@@ -153,7 +144,6 @@ class NTMMemory(BaseMemory):
         super().__init__(
             memory_size=memory_size,
             memory_dim=memory_dim,
-            epsilon=epsilon,
             **kwargs,
         )
         self.memory_init_seed = memory_init_seed
@@ -271,10 +261,10 @@ class NTMMemory(BaseMemory):
         """
         Return the constructor arguments, for serialization.
 
-        `BaseMemory.get_config` emits `memory_size`, `memory_dim` and
-        `epsilon`; this override adds `memory_init_seed`, the one field
-        this subclass owns, so a `from_config` round-trip reproduces the
-        seed rather than resetting it to the default 42.
+        `BaseMemory.get_config` emits `memory_size` and `memory_dim`;
+        this override adds `memory_init_seed`, the one field this
+        subclass owns, so a `from_config` round-trip reproduces the seed
+        rather than resetting it to the default 42.
 
         :return: The configuration dictionary.
         :rtype: dict[str, Any]
@@ -1525,7 +1515,6 @@ class NTMCell(keras.layers.Layer):
         self.memory = NTMMemory(
             self.config.memory_size,
             self.config.memory_dim,
-            epsilon=self.config.epsilon,
             memory_init_seed=self.config.memory_init_seed,
             name="memory",
         )

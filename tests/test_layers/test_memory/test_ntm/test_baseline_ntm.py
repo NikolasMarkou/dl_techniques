@@ -139,13 +139,19 @@ class TestNTMMemory:
         )
 
     def test_serialization(self):
-        """Test get_config."""
-        memory = NTMMemory(memory_size=32, memory_dim=16, epsilon=1e-5)
+        """Test get_config.
+
+        `epsilon` used to be emitted here. It was declared, stored and
+        serialized but read by neither `read` nor `write`, so it was removed
+        (decisions.md D-002); `test_the_legacy_epsilon_key_is_dropped.py`
+        guards the shim that keeps old configs loadable.
+        """
+        memory = NTMMemory(memory_size=32, memory_dim=16)
         config = memory.get_config()
 
         assert config["memory_size"] == 32
         assert config["memory_dim"] == 16
-        assert config["epsilon"] == 1e-5
+        assert "epsilon" not in config
 
 
 # ---------------------------------------------------------------------
@@ -1399,7 +1405,10 @@ class TestCreateNTMReachesEveryConfigField:
 
         `epsilon` is asserted on a head, which is where it is actually
         consumed (`cosine_similarity` / `sharpen_weights`), not only on the
-        config dataclass.
+        config dataclass. It is NOT asserted on `ntm_cell.memory`: that knob
+        was declared, stored and serialized there but read by nothing, and it
+        was removed (decisions.md D-002). The two heads are the whole live
+        surface of this field.
         """
         ntm = self._build(use_memory_init=False, epsilon=1e-3)
 
@@ -1407,7 +1416,7 @@ class TestCreateNTMReachesEveryConfigField:
         assert ntm.ntm_cell.config.epsilon == 1e-3
         assert ntm.ntm_cell.read_heads[0].epsilon == 1e-3
         assert ntm.ntm_cell.write_heads[0].epsilon == 1e-3
-        assert ntm.ntm_cell.memory.epsilon == 1e-3
+        assert not hasattr(ntm.ntm_cell.memory, "epsilon")
 
 
 class TestBiasInitializerReachesEveryProjection:

@@ -525,7 +525,7 @@ class BaseMemory(keras.layers.Layer, ABC):
     A subclass owns the memory matrix and the three operations on it: create
     an initial `MemoryState`, read a vector out of it under attention weights,
     and write into it with an erase-then-add update. This base class stores
-    the two sizes and `epsilon`, and serializes them; it creates no weights.
+    the two sizes and serializes them; it creates no weights.
 
     Three methods are abstract and must be implemented. `__init__` and
     `get_config` are concrete and usually only need `super()` calls.
@@ -548,16 +548,15 @@ class BaseMemory(keras.layers.Layer, ABC):
         └───────────────────────────────────────────────────────┘
 
         ┌─ concrete: provided here ─────────────────────────────┐
-        │ __init__(memory_size=N, memory_dim=M, epsilon)        │
-        │ get_config() ──► adds memory_size, memory_dim, epsilon│
+        │ __init__(memory_size=N, memory_dim=M)                 │
+        │ get_config() ──► adds memory_size, memory_dim         │
+        │ from_config()  ──► drops a legacy `epsilon` key       │
         └───────────────────────────────────────────────────────┘
 
     :param memory_size: Number of memory slots, N.
     :type memory_size: int
     :param memory_dim: Width of one memory slot, M.
     :type memory_dim: int
-    :param epsilon: Small constant for numerical stability. Defaults to 1e-6.
-    :type epsilon: float
     :param kwargs: Forwarded to `keras.layers.Layer.__init__`.
     :type kwargs: Any
 
@@ -565,15 +564,12 @@ class BaseMemory(keras.layers.Layer, ABC):
     :vartype memory_size: int
     :ivar memory_dim: The M given to `__init__`.
     :vartype memory_dim: int
-    :ivar epsilon: The epsilon given to `__init__`.
-    :vartype epsilon: float
     """
 
     def __init__(
         self,
         memory_size: int,
         memory_dim: int,
-        epsilon: float = 1e-6,
         **kwargs: Any,
     ) -> None:
         """
@@ -583,16 +579,12 @@ class BaseMemory(keras.layers.Layer, ABC):
         :type memory_size: int
         :param memory_dim: Width of one memory slot, M.
         :type memory_dim: int
-        :param epsilon: Small constant for numerical stability. Defaults to
-            1e-6.
-        :type epsilon: float
         :param kwargs: Forwarded to `keras.layers.Layer.__init__`.
         :type kwargs: Any
         """
         super().__init__(**kwargs)
         self.memory_size = memory_size
         self.memory_dim = memory_dim
-        self.epsilon = epsilon
 
     @abstractmethod
     def initialize_state(self, batch_size: int) -> MemoryState:
@@ -657,8 +649,7 @@ class BaseMemory(keras.layers.Layer, ABC):
         """
         Serialize the sizes on top of the base layer configuration.
 
-        :return: The base configuration plus `memory_size`, `memory_dim` and
-            `epsilon`.
+        :return: The base configuration plus `memory_size` and `memory_dim`.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -666,10 +657,37 @@ class BaseMemory(keras.layers.Layer, ABC):
             {
                 "memory_size": self.memory_size,
                 "memory_dim": self.memory_dim,
-                "epsilon": self.epsilon,
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "BaseMemory":
+        """
+        Reconstruct from a configuration, tolerating one removed legacy key.
+
+        :param config: A configuration dictionary, possibly one written by a
+            version of this class that still emitted `epsilon`.
+        :type config: dict[str, Any]
+        :return: The reconstructed memory layer.
+        :rtype: BaseMemory
+        """
+        config = dict(config)
+        # DECISION plan-2026-08-30T120217-7f6cedd1/D-002
+        # `epsilon` was stored and serialized here but read by neither `read`
+        # nor `write`, so it was removed; an old config still carrying it would
+        # raise in `cls(**config)`. Drop ONLY this named key. Do NOT generalize
+        # to a blanket unknown-key filter: that swallows typos and turns a loud
+        # constructor error into a wrong-config-that-runs. See decisions.md
+        # D-002, and D-003 of plan-2026-08-03T130803-4c570ee4 for the precedent.
+        if "epsilon" in config:
+            config.pop("epsilon")
+            logger.warning(
+                "BaseMemory.from_config: ignoring removed legacy key 'epsilon' "
+                "(it never affected behaviour on this class; the read/write "
+                "heads carry their own, which is live)."
+            )
+        return cls(**config)
 
 
 class BaseHead(keras.layers.Layer, ABC):
