@@ -628,11 +628,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
 
         # Scale by sqrt(2/D) for proper kernel approximation.
         # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
-        # `self.n_random_features` is a Python int, so `ops.sqrt(2.0 / ...)`
-        # alone materializes the scale at backend.floatx() and the multiply
-        # below raised `cannot compute Mul ... expected to be a float tensor but
-        # is a half/double/bfloat16 tensor` (measured). Take the dtype from
-        # `cos_features`, never from a literal. decisions.md D-002.
+        # `n_random_features` is a Python int, so bare `ops.sqrt(2.0 / n)` pins
+        # backend.floatx() and the multiply below raised `cannot compute Mul ...
+        # expected a float tensor but is a half/double/bfloat16 tensor`. Take the
+        # dtype from `cos_features`, never a literal. See decisions.md D-002.
         scale = ops.sqrt(ops.cast(2.0 / self.n_random_features, cos_features.dtype))
         rff_features = scale * cos_features
 
@@ -1106,10 +1105,9 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             # noise by that margin to survive.
             # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
             # Build the confidence factor in `noise_level`'s dtype. Bare
-            # `ops.sqrt(2.0)` pins backend.floatx() and this line then raised
-            # `cannot compute Mul ... expected to be a half/double/bfloat16
-            # tensor but is a float tensor` (measured only after site 3 at :610
-            # was fixed -- it masked this one). decisions.md D-002 and D-005.
+            # `ops.sqrt(2.0)` pins backend.floatx() and raised `cannot compute Mul
+            # ... expected a half/bfloat16 tensor but is a float tensor` -- visible
+            # only after :610 was fixed; it masked this. See decisions.md D-005.
             threshold = noise_level * ops.sqrt(
                 ops.cast(2.0, noise_level.dtype)
             )

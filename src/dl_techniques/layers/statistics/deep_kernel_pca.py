@@ -712,11 +712,10 @@ class DeepKernelPCA(keras.layers.Layer):
         # Add regularization to diagonal for numerical stability.
         # ops.eye accepts the symbolic batch size under TF graph mode (verified).
         # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
-        # Take the identity's dtype from `kernel_matrix`. Do NOT write bare
-        # `ops.eye(batch_size)` nor a literal `dtype="float32"`: both pin
-        # backend.floatx(), and this line then raised `cannot compute AddV2 ...
-        # expected to be a half/bfloat16 tensor but is a float tensor` under
-        # mixed_float16 and mixed_bfloat16 (measured). decisions.md D-002.
+        # Take the identity's dtype from `kernel_matrix`. Bare `ops.eye(n)` or a
+        # literal `dtype="float32"` both pin backend.floatx(), and this line then
+        # raised `cannot compute AddV2 ... expected a half/bfloat16 tensor but is
+        # a float tensor` under both mixed policies. See decisions.md D-002.
         kernel_matrix_reg = kernel_matrix + self.regularization_lambda * ops.eye(
             batch_size, dtype=kernel_matrix.dtype
         )
@@ -1175,11 +1174,10 @@ class DeepKernelPCA(keras.layers.Layer):
             for i, features in enumerate(output_features):
                 # Exponential decay weighting.
                 # DECISION plan-2026-08-30T175846-3e8a6ff3/D-002
-                # `i` is a Python int, so `ops.exp(-0.1 * i)` alone materializes
-                # the weight at backend.floatx() and the multiply below raised
-                # `cannot compute Mul ... expected to be a float tensor but is a
-                # half/double/bfloat16 tensor` (measured). Source the dtype from
-                # `features`, not from a literal. decisions.md D-002.
+                # `i` is a Python int, so bare `ops.exp(-0.1 * i)` materializes at
+                # backend.floatx() and the multiply below raised `cannot compute
+                # Mul ... expected a float tensor but is a half/double/bfloat16
+                # tensor`. Source the dtype from `features`. See decisions.md D-002.
                 weight = ops.exp(ops.cast(-0.1 * i, features.dtype))
                 weighted_features.append(weight * features)
 

@@ -412,11 +412,10 @@ class AffineCouplingLayer(keras.layers.Layer):
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # DECISION plan-2026-08-30T175846-3e8a6ff3/D-004
-        # Build here, once, if no one has. `forward`/`inverse` are public and do
-        # NOT go through `Layer.__call__`, so without this the first touch built
-        # `transformation_net` outside this layer's name scope and its weights
-        # landed at a bare `dense_1/kernel`. Do NOT instead give this class a
-        # `call()`: that changes the public API. decisions.md D-004.
+        # Build here if no one has. `forward`/`inverse` skip `Layer.__call__`, so
+        # without this the first touch built `transformation_net` outside this
+        # layer's name scope and its weights landed at a bare `dense_1/kernel`.
+        # Do NOT add a `call()` instead: that changes the API. decisions.md D-004.
         if not self.built:
             self.build([(None, self.input_dim), (None, self.context_dim)])
 
