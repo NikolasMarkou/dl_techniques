@@ -351,6 +351,26 @@ class AffineCouplingLayer(keras.layers.Layer):
             ], axis=-1)
         return tensor
 
+    def _undo_split_and_reverse(self, tensor: keras.KerasTensor) -> keras.KerasTensor:
+        """Rotate the last axis right by ``split_dim`` when ``reverse`` is set.
+
+        This is the exact inverse of ``_apply_split_and_reverse`` for any
+        ``input_dim``. At an even ``input_dim`` the two rotate by the same
+        amount and produce the same tensor. With ``reverse=False`` it is the
+        identity.
+
+        :param tensor: Tensor whose last axis is ``input_dim`` wide.
+        :type tensor: keras.KerasTensor
+        :return: The rotated tensor, or ``tensor`` itself.
+        :rtype: keras.KerasTensor
+        """
+        if self.reverse:
+            return ops.concatenate([
+                tensor[..., -self.split_dim:],
+                tensor[..., :-self.split_dim]
+            ], axis=-1)
+        return tensor
+
     def _compute_scale_and_shift(
         self,
         static_part: keras.KerasTensor,
@@ -420,9 +440,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         y_b = z_b * s + t
         y = ops.concatenate([z_a, y_b], axis=-1)
 
-        # Re-apply the SAME rotation. It restores the original ordering
-        # only when input_dim is even; see the class Note on odd input_dim.
-        y = self._apply_split_and_reverse(y)
+        # Undo the entry rotation, restoring the original ordering.
+        y = self._undo_split_and_reverse(y)
 
         return y
 
@@ -463,9 +482,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         z_b = (y_b - t) / s
         z = ops.concatenate([y_a, z_b], axis=-1)
 
-        # Re-apply the SAME rotation. It restores the original ordering
-        # only when input_dim is even; see the class Note on odd input_dim.
-        z = self._apply_split_and_reverse(z)
+        # Undo the entry rotation, restoring the original ordering.
+        z = self._undo_split_and_reverse(z)
 
         # Compute log-determinant of Jacobian (sum of log scale factors)
         log_det_jacobian = ops.sum(ops.log(s), axis=-1)
