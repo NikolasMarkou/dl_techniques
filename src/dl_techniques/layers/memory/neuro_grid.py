@@ -1078,12 +1078,11 @@ class NeuroGrid(keras.layers.Layer):
         high_quality_mask_flat = keras.ops.reshape(high_quality_mask, (-1,))
         low_quality_mask_flat = keras.ops.reshape(low_quality_mask, (-1,))
 
-        # A SINGLE-argument keras.ops.where returns a LIST holding one index
-        # tensor per axis of the condition -- verified by execution on keras
-        # 3.8.0 -- not a stacked (n_selected, rank) index matrix. For the 1-D
-        # masks above the list has exactly one entry: the item indices. Do not
-        # reintroduce a `[:, 0]` slice here; a list rejects a tuple index and
-        # the method raised TypeError at every input rank until 2026-08-30.
+        # DECISION plan-2026-08-30T063229-ccd6ad17/D-014
+        # A single-argument keras.ops.where returns a LIST of per-axis index
+        # tensors, so index it [0], never [:, 0] -- that slice raised TypeError
+        # at EVERY rank. The flatten above is not optional either: [0] alone
+        # gathers whole sequences at rank 3. See decisions.md D-014.
         high_quality_indices = keras.ops.where(high_quality_mask_flat)[0]
         low_quality_indices = keras.ops.where(low_quality_mask_flat)[0]
 
