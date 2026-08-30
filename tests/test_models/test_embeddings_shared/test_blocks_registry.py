@@ -31,7 +31,6 @@ class TestRegistrySurface:
             "transformer",
             "clifford",
             "convnext",
-            "convnext_v2",
         }
 
     def test_available_block_types_is_sorted(self):
@@ -86,7 +85,6 @@ class TestBlockCallContract:
             ("transformer", {"num_heads": 2, "intermediate_size": 32}),
             ("clifford", {"shifts": [1, 2], "context_kernel_size": 3}),
             ("convnext", {"kernel_size": 3}),
-            ("convnext_v2", {"kernel_size": 3}),
         ],
     )
     def test_shape_is_preserved_and_mask_is_accepted(self, block_type, config):

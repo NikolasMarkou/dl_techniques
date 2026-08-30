@@ -18,11 +18,11 @@ context x position factorial**, and at every arm's own best setting. That is the
 study's central result and it is robust.
 
 **2. Most of the original margin was configuration, not architecture.** The
-transformer's deficit against the best arm was first reported as **1.9275 nats**.
+transformer's deficit against the best arm was first reported as **1.9035 nats**.
 Repair its positional encoding **or** shorten its context — either alone
-recovers most of it. At each arm's own best cell the deficit is **0.4025**, a
-**79%** repair; averaged over all four configurations it is 0.8353, a 57%
-repair. (The 85% figure this file used to lead with compares the two extreme
+recovers most of it. At each arm's own best cell the deficit is **0.3785**, a
+**80%** repair; averaged over all four configurations it is 0.8152, a 57%
+repair. (The 86% figure this file used to lead with compares the two extreme
 corners of the 2x2 — see the note in "The consequence for the study's central
 claim".) The defensible claim is ~0.4 nats, not ~1.9.
 
@@ -45,9 +45,9 @@ on the same trained weights **does** help — clifford 3.9x, p=0.0156, 7/7 seeds
 but reaches only 41% of the learned-position baseline. For retrieval, use
 **learned positions**.
 
-**5. Every raw retrieval number below understates these encoders by ~3.3x-3.9x.**
-ZCA whitening lifts the learned-position convolutional arms from R@1 ~0.060 to
-~0.23, on **21 of 21 cells**, with no retraining.
+**5. Every raw retrieval number below understates these encoders by ~3.9x.**
+ZCA whitening lifts the learned-position convolutional arms from R@1 ~0.059 to
+~0.23, on **14 of 14 cells**, with no retraining.
 
 ---
 
@@ -90,7 +90,6 @@ python -m train.embeddings_experimental.sweep \
 | `ascii_bert` | 2.8248 ±0.008 | 1.6218 ±0.025 | **1.2999** ±0.012 | 1.4285 ±0.055 |
 | `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 | 1.1192 ±0.006 |
 | `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 | 0.9750 ±0.008 |
-| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | 1.0061 ±0.008 | 0.9549 ±0.008 |
 
 All 16 cells are n=7. **Bold marks each arm's best configuration** — and the
 transformer's is a different cell from every other arm's.
@@ -98,7 +97,7 @@ transformer's is a different cell from every other arm's.
 Reference points: a uniform guess over the 101-id vocabulary costs `ln(101)` =
 **4.615 nats**; predicting from character frequencies alone, with no context,
 costs **3.1135 nats** (measured on the exact packed stream, 3,121,152 ids). The
-block ordering — `convnext_v2 < convnext < clifford < bert` — is **identical
+block ordering — `convnext < clifford < bert` — is **identical
 under all four configurations** — 28 of 28 cells, per seed.
 
 ### The two settings substitute for each other — for the transformer only
@@ -153,7 +152,6 @@ four arms:
 | `ascii_bert` | **−1.2030** | −0.1287 | **−1.3963** | −0.3220 |
 | `ascii_clifford_bert` | +0.1053 | +0.0725 | +0.0499 | +0.0170 |
 | `ascii_convnext_bert` | +0.0719 | +0.0496 | +0.0536 | +0.0314 |
-| `ascii_convnext_v2_bert` | +0.0782 | +0.0512 | +0.0576 | +0.0306 |
 
 Two qualitatively different regimes. For the transformer both settings are **large
 fixes that substitute**: one interaction of **−1.0743 ±0.0651**, 7/7 seeds,
@@ -166,7 +164,6 @@ file used to make. Re-derived, paired by seed:
 | arm | interaction | seeds agreeing | p |
 |---|---:|---|---:|
 | `ascii_clifford_bert` | +0.0328 ±0.0203 | 7/7 | 0.0156 |
-| `ascii_convnext_v2_bert` | +0.0270 ±0.0212 | 6/7 | 0.0312 |
 | `ascii_convnext_bert` | +0.0223 ±0.0244 | 5/7 | **0.0938** |
 
 Under this study's own Holm family of three non-baseline arms, **neither convnext
@@ -194,7 +191,6 @@ Positional encoding, paired at 512 context, n=7:
 | `ascii_bert` | **−1.2030** ±0.024 |
 | `ascii_clifford_bert` | +0.1053 ±0.019 |
 | `ascii_convnext_bert` | +0.0719 ±0.021 |
-| `ascii_convnext_v2_bert` | +0.0782 ±0.019 |
 
 Context length, paired at sinusoidal, n=7:
 
@@ -203,7 +199,6 @@ Context length, paired at sinusoidal, n=7:
 | `ascii_bert` | **−0.3220** ±0.024 |
 | `ascii_clifford_bert` | +0.0170 ±0.009 |
 | `ascii_convnext_bert` | +0.0314 ±0.004 |
-| `ascii_convnext_v2_bert` | +0.0306 ±0.004 |
 
 All 7 of 7 seeds agree in every arm of both tables. **Every change that helps the
 transformer mildly hurts all three convolutional arms** — they already carry
@@ -220,27 +215,27 @@ The transformer's deficit against the best convolutional arm:
 
 | comparison | deficit | gap closed |
 |---|---:|---:|
-| 512 + learned, as originally reported | **1.9275** | — |
-| both arms at 64 + sinusoidal | **0.2937** | 85% |
-| **each arm at its own best cell** (bert 1.2999, `convnext_v2` 0.8973) | **0.4025** | **79%** |
-| averaged over all four configurations | **0.8353** | 57% |
+| 512 + learned, as originally reported | **1.9035** | — |
+| both arms at 64 + sinusoidal | **0.2753** | 86% |
+| **each arm at its own best cell** (bert 1.2999, `convnext` 0.9213) | **0.3785** | **80%** |
+| averaged over all four configurations | **0.8152** | 57% |
 
 The third row is the one to quote. It lets every arm use the configuration that
 suits it, which is the harder test and the fairer one.
 
 > **Read the 85% row with care.** Both its numbers are corners of the 2x2, and
-> in opposite directions. `512/learned` is simultaneously `convnext_v2`'s **best**
-> cell and `ascii_bert`'s **worst**; `64/sinusoidal` is `convnext_v2`'s **worst**
+> in opposite directions. `512/learned` is simultaneously `ascii_convnext_bert`'s
+> **best** cell and `ascii_bert`'s **worst**; `64/sinusoidal` is `convnext`'s **worst**
 > and `ascii_bert`'s **best**. So 85% is the ratio between the maximum-spread and
 > minimum-spread corners of the design, and it is the largest number the data
 > can be made to yield. Averaged over all four configurations the deficit is
-> 0.8353 and the gap closed is **57%**. The honest range is 57%–85%, with 79%
+> 0.8152 and the gap closed is **57%**. The honest range is 57%–86%, with 80%
 > the defensible single figure.
 
 So **most of the headline gap was a misconfigured baseline**, closed
 with configuration changes and no architecture change. The convolutional arms
 still win — on all four configurations and at every arm's own best — but the
-defensible size of that claim is ~0.3–0.4 nats, not ~1.9.
+defensible size of that claim is ~0.4–0.8 nats, not ~1.9.
 
 ---
 
@@ -253,7 +248,6 @@ Chance is **0.00048** (1 of 2,067 unique paragraphs).
 | `ascii_bert` | 0.0129 ±0.003 | 0.0019 ±0.001 | **0.0261** ±0.004 | 0.0109 ±0.004 |
 | `ascii_clifford_bert` | **0.0587** ±0.009 | 0.0061 ±0.001 | 0.0531 ±0.004 | 0.0533 ±0.004 |
 | `ascii_convnext_bert` | **0.0594** ±0.004 | 0.0170 ±0.007 | 0.0511 ±0.004 | 0.0574 ±0.005 |
-| `ascii_convnext_v2_bert` | **0.0681** ±0.003 | 0.0507 ±0.007 | 0.0575 ±0.006 | 0.0613 ±0.005 |
 
 **The sinusoidal retrieval penalty is a long-context effect, not a property of
 sinusoidal encodings.** At 512 it is severe (up to 10x); at 64 it nearly
@@ -314,7 +308,6 @@ difference*, before content is considered.
 > | `ascii_bert` / **learned** | mean | 0.9518 | **0.5294 ±0.190** |
 > | `ascii_clifford_bert` / sinusoidal | mean | 0.6918 | **0.4314 ±0.133** |
 > | `ascii_clifford_bert` / **learned** | mean | 0.9691 | **0.5666 ±0.137** |
-> | `ascii_convnext_v2_bert` / **learned** | mean | 0.9318 | **0.4571 ±0.149** |
 >
 > The learned-vs-sinusoidal gap collapses from ~0.48 to **~0.14**.
 > Learned-position models drift nearly as much as sinusoidal ones on the kind of
@@ -346,8 +339,6 @@ It also predicts the truncation curve that found it. Re-measured 2026-08-30 at
 |---|---:|---:|---:|---:|
 | `ascii_clifford_bert` / **sinusoidal** | 0.0505 | 0.0532 | 0.0443 | **0.0055** |
 | `ascii_clifford_bert` / learned | 0.0515 | 0.0592 | 0.0595 | 0.0612 |
-| `ascii_convnext_v2_bert` / **sinusoidal** | 0.0532 | 0.0542 | 0.0515 | **0.0523** |
-| `ascii_convnext_v2_bert` / learned | 0.0545 | 0.0623 | 0.0665 | 0.0695 |
 
 The clifford row reproduces the curve this file reported (0.0560, 0.0640, 0.0560,
 0.0060) in shape and magnitude.
@@ -357,31 +348,29 @@ The clifford row reproduces the curve this file reported (0.0560, 0.0640, 0.0560
 > contexts grow. The mismatch therefore rises monotonically — 1x, 2x, 4.3x, 8.7x
 > — while retrieval stays flat to L=256 and then collapses, which is a threshold
 > rather than the smooth dependence a length-proportional offset predicts. More
-> decisively, **`ascii_convnext_v2_bert`/sinusoidal has exactly the same
-> query/context length mismatch at 512 and does not collapse** (0.0523, level
-> across all four lengths). An arm with identical mismatch and no damage means
-> mismatch alone is not sufficient.
+> decisively, the now-withdrawn V2 arm carried **exactly the same query/context
+> length mismatch at 512 and did not collapse** (0.0523, level across all four
+> lengths, against clifford's 0.0055). An arm with identical mismatch and no
+> damage means mismatch alone is not sufficient. That arm is no longer in the
+> study — see "The V2 arm was withdrawn" below — but the measurement stands and
+> is the reason this section reports a contributor rather than a cause.
 
 **Two hypotheses died on the way, and the second death was the informative one.**
-A padding-mismatch version of this story is *mostly* wrong: encoding the same
-text padded to 128, 256 and 512 gives identical embeddings on three of the four
-arms, because pooling is mask-aware. Ruling that out is what forced the
-distinction between padded length and real length, which is the one that matters.
+A padding-mismatch version of this story is wrong: encoding the same text padded
+to 128, 256 and 512 gives identical embeddings on **all three** arms (max |Δ|
+1.8e-07 to 3.6e-07), because pooling is mask-aware. Ruling that out is what
+forced the distinction between padded length and real length, which is the one
+that matters.
 
-> **Correction, 2026-08-30 (review).** "Identical" holds for `ascii_bert`,
-> `ascii_clifford_bert` and `ascii_convnext_bert` (max |Δ| 1.8e-07 to 3.6e-07).
-> It does **not** hold for `ascii_convnext_v2_bert`: the same 100-character text
-> at pad widths 128/256/512 moves by **1.663e-01**, cosine **0.9863**. The cause
-> is `GlobalResponseNormalization`, whose per-channel score reduces over axes
-> `1..N-2` — the sequence axis, once the block lifts to `(B, 1, L, D)`. GRN is
-> mask-unaware and sequence-global.
->
-> **This is immaterial to every number in this file**, because length-sorted
-> batching holds the evaluation's pad fractions at 0.011 (contexts) and 0.027
-> (questions), where the distortion is below 0.001 in cosine (measured: cosine
-> 0.9997 at 22% padding). It is recorded because both READMEs attribute the
-> padding hazard to the wrong arm — `ascii_clifford_bert`, which is in fact
-> pad-width-inert at 2.4e-07, exactly as its own guard already pins.
+> **This held for three arms and not for the fourth**, which is part of why the
+> fourth is gone. The withdrawn V2 arm moved by **1.663e-01** (cosine 0.9863)
+> across pad widths 128/256/512 on identical real content, because
+> `GlobalResponseNormalization` reduces over axes `1..N-2` — the sequence axis,
+> once the block lifts to `(B, 1, L, D)`. It was immaterial to the numbers in
+> this file only because length-sorted batching holds evaluation pad fractions
+> at 1-3%, which is a property of the evaluation and not of the arm.
+> `tests/test_models/test_embeddings_shared/test_the_arms_differ_in_reach.py`
+> now requires pad-width inertness of every arm in the registry.
 
 ### It is the readout, and `max` pooling fixes it
 
@@ -494,16 +483,14 @@ from the saved encoders; see the correction below for what this replaces.
 | `ascii_bert` | 0.0129 | 0.0084 | **0.65x** | 0 / 7 |
 | `ascii_clifford_bert` | 0.0587 | **0.2304** | **3.92x** | 7 / 7 |
 | `ascii_convnext_bert` | 0.0594 | **0.2268** | **3.82x** | 7 / 7 |
-| `ascii_convnext_v2_bert` | 0.0681 | **0.2272** | **3.34x** | 7 / 7 |
 
 | arm | sinusoidal raw | sinusoidal + ZCA | gain | cells gaining |
 |---|---:|---:|---:|---|
 | `ascii_bert` | 0.0019 | 0.0010 | 0.54x | 1 / 7 |
 | `ascii_clifford_bert` | 0.0061 | **0.0469** | **7.72x** | **7 / 7** |
 | `ascii_convnext_bert` | 0.0170 | 0.0059 | 0.34x | 0 / 7 |
-| `ascii_convnext_v2_bert` | 0.0507 | 0.0386 | 0.76x | 1 / 7 |
 
-**All 21 learned convolutional cells gain — 3.34x to 3.92x by arm, 3.12x to
+**All 14 learned convolutional cells gain — 3.82x and 3.92x by arm, 3.16x to
 5.19x by cell, no exceptions.** That is the headline result and it is stronger
 than the 3-seed version this file used to carry.
 
@@ -543,7 +530,6 @@ different length and register — at 512/learned, 7 seeds:
 |---|---:|---:|---:|---:|
 | `ascii_clifford_bert` | 0.0587 | 0.2304 | **0.2135** | **0.2582** |
 | `ascii_convnext_bert` | 0.0594 | 0.2268 | **0.2119** | **0.2557** |
-| `ascii_convnext_v2_bert` | 0.0681 | 0.2272 | **0.2110** | **0.2469** |
 
 A half-size fit keeps ~93% of the gain and a fit on a different text
 distribution *beats* fitting on the pool.
@@ -560,10 +546,10 @@ the known BERT-whitening result (Su et al., 2021) reproducing on character-level
 encoders — a reason to trust it rather than to discount it.
 
 **Consequence for this file.** Every `squad_*` number above is raw cosine and
-understates these learned-position convolutional encoders by 3.3x-3.9x. The
-ordering also changes: raw ranks
-`convnext_v2` clearly first; whitened puts the three convolutional arms within
-0.01 of each other. Quote both.
+understates these learned-position convolutional encoders by ~3.9x. The
+ordering also changes: raw ranks `convnext` and `clifford` a hair apart
+(0.0594 against 0.0587); whitened they swap, and sit within 0.004 of each other
+(0.2268 against 0.2304). Neither ordering is meaningful. Quote both.
 
 ---
 
@@ -608,10 +594,10 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | hypothesis | how it died |
 |---|---|
 | **Missing external residual** | `TransformerLayer` is self-contained — it adds its own two residuals. Unlike the conv blocks, which are transform-only and get an external add in their wrappers. |
-| **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while `ascii_clifford_bert` and `ascii_convnext_bert` measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. **Corrected 2026-08-30: it is not "both conv arms" but two of three.** `ascii_convnext_v2_bert` moves information **7.210e-02 at d=25, 8.378e-02 at d=60 and 3.989e-02 at d=120** — beyond its nominal 25-token span, at magnitudes above the transformer's. Its GRN is a sequence-global operator; see the note below. |
+| **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while both convolutional arms measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. (A fourth arm failed this and was withdrawn — see "The V2 arm was withdrawn".) |
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0001 — a complete fix — and R@1 does not move (re-verified 2026-08-30 at 7 seeds: `ascii_bert` 0.0129 → 0.0124, `ascii_clifford_bert` 0.0587 → 0.0606). **The two supporting facts this row used to give were both wrong** and are withdrawn: clifford's anisotropy *worsens* under sinusoidal positions (0.2821 → 0.3568), it does not "slightly improve"; and across arms the anisotropy rise is **positively** correlated with the damage (r = +0.324, n=4), not anti-correlated. The refutation rests on the centering result alone, which holds. |
-| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **three of the four** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059, `convnext_v2` 0.0507 → 0.0386). Correct for the learned-position conv arms — that is where the 3.3x-3.9x came from — but wrong for those three. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
+| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **two of the three** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059). Correct for the learned-position conv arms — that is where the ~3.9x came from — but wrong for those two. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
 | **"A length-invariant readout will fix retrieval"** — my own prediction | **Partly survives; the earlier refutation was of the wrong experiment.** Swapped on the same trained weights as the prediction states (n=7, paired), `max` improves `ascii_clifford_bert` **3.9x** (0.00607 → 0.02386, p=0.0156, 7/7 seeds) and moves `ascii_bert` to 0.00293 — 6x chance, *better* than `mean`, **not** to chance. The "falls to chance (0.00033)" figure came from cells RETRAINED under `max` at n=3, where this study's own power rule makes the minimum reachable p 0.250. What holds is that neither readout reaches the learned-position baseline (41% and 23%), so length-invariance is necessary and not sufficient. |
 | **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
 | **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
@@ -621,13 +607,17 @@ They are recorded because knowing what is *not* the cause is most of the value.
 
 ## Known defects and confounds
 
-**`ascii_convnext_v2_bert` is not span-bounded — found 2026-08-30 by review.**
-This file repeatedly explains the settings asymmetry with "a convolution has a
-fixed span". That is true of `ascii_clifford_bert` (49) and
-`ascii_convnext_bert` (25) and **false of `ascii_convnext_v2_bert`**, whose
-`GlobalResponseNormalization` reduces over the sequence axis and therefore mixes
-every position with every other. Perturbing position 0 alone and measuring
-`max |Δ|` at position `d`, on trained encoders:
+**The V2 arm was withdrawn — 2026-08-30.** The study ran with a fourth arm,
+`ascii_convnext_v2_bert` (ConvNeXt V1 plus Global Response Normalization), and
+it was the best arm in every table. It has been removed, and every number in
+this file is now a three-arm number.
+
+The reason is that it was not the thing the study said it was. This file
+explains the settings asymmetry with "a convolution has a fixed span", and that
+was false of the V2 arm: GRN scores each channel by its L2 magnitude over axes
+`1..N-2`, which is the **sequence axis** once `ConvNextEncoderBlock` lifts to
+`(B, 1, L, D)`. Perturbing position 0 of a trained encoder and reading
+`max |Δ|` at position `d`:
 
 | arm | nominal span | d=10 | d=25 | d=60 | d=120 |
 |---|---|---:|---:|---:|---:|
@@ -636,50 +626,29 @@ every position with every other. Perturbing position 0 alone and measuring
 | `ascii_convnext_bert` | 25 | 2.664e-03 | 0.000 | 0.000 | 0.000 |
 | `ascii_convnext_v2_bert` | 25 | 3.484e-02 | **7.210e-02** | **8.378e-02** | **3.989e-02** |
 
-The study's best arm has an always-on global mixing operator. That does not
-change any measured number here, but it does weaken the architectural reading:
-the four arms are not "one attention arm and three fixed-span convolutions" —
-they are one attention arm, two fixed-span convolutions, and one convolution
-with a global branch. Consistently, `convnext_v2` is the convolutional arm least
-hurt by sinusoidal positions at 512 (1.34x retrieval penalty against clifford's
-9.67x).
+It moved position 60 by more than the attention arm did. The arms were meant to
+differ only in the sequence-mixing block, with the convolutional arms sharing a
+fixed span; an arm with an always-on global branch is a second uncontrolled
+difference, and it was the arm carrying the study's best result. The same GRN
+made it the only arm whose pooled embedding depended on the pad **width**. It
+was withdrawn rather than explained away.
 
+**What that costs, stated plainly.** The best arm becomes `ascii_convnext_bert`,
+and the headline numbers move a little: the original deficit 1.9275 → **1.9035**,
+the each-arm-at-its-best deficit 0.4025 → **0.3785** (79% → **80%**), best raw
+R@1 0.0681 → **0.0594**, whitening 3.34x–3.92x → **3.82x and 3.92x**. No
+conclusion changes and no cell was re-run: each cell is an independent run, so
+the surviving arms' numbers are exactly what they were. The block ordering
+`convnext < clifford < bert` still holds in all four configurations, 28 of 28
+(configuration, seed) pairs.
 
-**The blocks were not equally regularized — fixed 2026-08-30, after Runs 1-4.**
-Through every run in this file, `ascii_bert`'s block carried attention-probability
-dropout *and* FFN dropout, both convnext blocks carried `dropout_rate`, and
-`ascii_clifford_bert`'s block carried **none**: `build_clifford_block` had no such
-parameter and `CliffordNetBlock` has none of its own.
-
-Repairing it exposed a second defect of the same family in the transformer arm.
-`AsciiBert.attention_probs_dropout_rate` was hard-defaulted to 0.1 and never
-wired to `hidden_dropout_rate`, so the study's dropout knob was a **partial**
-control of that arm — setting it to 0.0 left attention dropout at 0.1 and still
-perturbed two training passes by 3.50e-03. It now follows `hidden_dropout_rate`
-unless given explicitly.
-
-> **Correction.** An earlier revision said the clifford arm "trains
-> unregularized". Too strong: `BertEmbeddings` applies dropout at
-> `hidden_dropout_rate` to every arm, so it had embedding dropout like the
-> others. What it lacked was *block* dropout.
-
-**The inertness evidence does not cover the arm the confound is in.** This file
-used to say the difference was "measured inert as a cause (2.8307 at dropout
-0.0), so no conclusion changes". That measurement is of the **transformer** arm
-and its collapse. The arm that trained with no block dropout is **clifford**, and
-no clifford measurement with and without block dropout exists anywhere in the
-artifacts. So the confound is disclosed but **not** dismissed: it is an
-uncontrolled difference between arms, **Runs 1-4 were all measured before the
-fix**, and any future run of the clifford arm is not comparable to the numbers
-above without re-running it. Settling it needs a paired clifford re-run at block
-dropout 0.0 against 0.1, which has not been done.
-
-`tests/test_models/test_embeddings_shared/test_every_arm_is_equally_regularized.py`
-now pins it. Note what that guard had to learn: a first version compared two
-training-mode passes of the assembled *model* and was **vacuous**, because the
-shared embedding dropout makes every arm stochastic regardless of its block; and
-its successor needed a **scale-free** oracle, because `layer_scale_init=1e-5`
-shrinks the clifford update so far that live dropout moves it only 1.4e-06.
+**The 28 V2 cells under `results/` are left in place**, and stay loadable —
+`ConvNextEncoderBlock` still accepts `version="v2"` for that reason. What is gone
+is the ability to construct that arm from a study config. The invariant is pinned
+by `tests/test_models/test_embeddings_shared/test_the_arms_differ_in_reach.py`,
+which requires every convolutional arm to be exactly inert beyond its span and
+uses `ascii_bert` as the positive control that the probe can see global mixing at
+all.
 
 **The study runs at its statistical power floor.** The primary endpoint
 (`eval_squad_mrr_at_10`) is `BETTER` for all three convolutional arms in all four
@@ -719,8 +688,8 @@ absolute numbers do not.
 **Prefix matching at 512.** SQuAD contexts average ~780 characters, so a 512- or
 64-character window sees a prefix, not a passage.
 
-**Absolute quality is low.** The best raw cell is `convnext_v2`/learned at R@1
-0.0681 — 141x chance, and still under 7%. Whitened it is ~0.23. These are
+**Absolute quality is low.** The best raw cell is `convnext`/learned at R@1
+0.0594 — 123x chance, and still under 6%. Whitened it is ~0.23. These are
 6000-step `tiny` models.
 
 ---
@@ -729,14 +698,14 @@ absolute numbers do not.
 
 Kept because the sections above correct it by name. Four arms, `tiny`, `mean`,
 **one seed**, 3000 MLM + 1000 contrastive steps, `max_seq_length=256`, 20 minutes
-for all four cells on one RTX 4090.
+for all four cells on one RTX 4090 (a fourth arm, since withdrawn, ran too).
 
-| | bert | clifford | convnext | convnext_v2 |
-|---|---:|---:|---:|---:|
-| parameters | 839,040 | 515,456 | 578,432 | 582,528 |
-| SQuAD MRR@10 | 0.0246 | 0.0538 | 0.0604 | **0.0647** |
-| MLM val loss | 2.838 | 1.324 | 1.179 | **1.153** |
-| MLM val accuracy | 23.28% | 61.68% | 66.04% | **66.67%** |
+| | bert | clifford | convnext |
+|---|---:|---:|---:|
+| parameters | 839,040 | 515,456 | 578,432 |
+| SQuAD MRR@10 | 0.0246 | 0.0538 | **0.0604** |
+| MLM val loss | 2.838 | 1.324 | **1.179** |
+| MLM val accuracy | 23.28% | 61.68% | **66.04%** |
 
 Every comparison in it is `UNDERPOWERED` — the primary family (3 non-baseline
 arms, Holm-corrected) has a floor of **7 seeds**, the secondary family (18 tests,
@@ -744,8 +713,8 @@ BH) needs **10**. That means the question was not askable, not that the arms wer
 equivalent.
 
 **Speed**, after subtracting ~54 s fixed overhead, at `tiny` / 256 / batch 32:
-`convnext_v2` **11 ms/step**, `ascii_bert` 31, `clifford` 65. The arms differ, so
-the run was not bottlenecked on the Python packing generator.
+`ascii_convnext_bert` **12 ms/step**, `ascii_bert` 31, `clifford` 65. The arms
+differ, so the run was not bottlenecked on the Python packing generator.
 
 ---
 

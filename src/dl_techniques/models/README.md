@@ -162,7 +162,6 @@ that `mamba` is only a language model.
 | `embeddings_experimental/ascii_bert/` | ASCII-vocabulary BERT, the study's transformer baseline |
 | `embeddings_experimental/ascii_clifford_bert/` | same skeleton, attention-free Clifford mixing |
 | `embeddings_experimental/ascii_convnext_bert/` | same skeleton, ConvNeXt V1 convolutional mixing |
-| `embeddings_experimental/ascii_convnext_v2_bert/` | ConvNeXt V2: V1 plus Global Response Normalization |
 
 ## Second-level nesting
 

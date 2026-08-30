@@ -57,7 +57,6 @@ MIN_SURVIVING_RATIO = 0.5
 ARMS = [
     ("clifford", {"shifts": [1, 2], "context_kernel_size": 7}),
     ("convnext", {"kernel_size": 7}),
-    ("convnext_v2", {"kernel_size": 7}),
 ]
 ARM_IDS = [arm[0] for arm in ARMS]
 
@@ -195,7 +194,6 @@ def test_gradients_reach_the_wrapped_block_weights(
     marker = {
         "clifford": "clifford_block",
         "convnext": "convnext_v1_block",
-        "convnext_v2": "convnext_v2_block",
     }[block_type]
     block_weights = [w for w in model.trainable_weights if marker in w.path]
     assert block_weights, f"[{block_type}] no wrapped-block weights found"

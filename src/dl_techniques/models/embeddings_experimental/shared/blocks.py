@@ -64,7 +64,6 @@ __all__ = [
     "available_block_types",
     "build_clifford_block",
     "build_convnext_block",
-    "build_convnext_v2_block",
     "build_transformer_block",
     "clifford_receptive_field",
     "conv_receptive_field",
@@ -777,85 +776,29 @@ def build_convnext_block(
     )
 
 
-def build_convnext_v2_block(
-    *,
-    hidden_size: int,
-    name: str,
-    kernel_size: int = 7,
-    activation: str = "gelu",
-    dropout_rate: float = 0.0,
-    drop_path_rate: float = 0.0,
-    gamma_initial_value: float = 1.0,
-    use_gamma: bool = True,
-    normalization_type: str = "layernorm",
-    use_bias: bool = True,
-    kernel_initializer: Any = None,
-) -> keras.layers.Layer:
-    """Build one ConvNeXt V2 sequence-mixing block.
-
-    Identical to :func:`build_convnext_block` except for the wrapped block:
-    V2 inserts Global Response Normalization after the activation. GRN scores
-    each channel by its L2 magnitude **over the sequence axis**, so unlike
-    every other block in this registry it performs a GLOBAL reduction along
-    the sequence -- see :class:`ConvNextEncoderBlock` for what that means for
-    padded batches.
-
-    A separate function rather than a ``version=`` argument on the v1 builder,
-    because the registry validates keywords against the builder's signature:
-    a shared builder would let ``version`` be passed through
-    ``block_config`` from anywhere, and the registry key is meant to be the
-    single place the version is decided.
-
-    :param hidden_size: Model width.
-    :type hidden_size: int
-    :param name: Layer name.
-    :type name: str
-    :param kernel_size: Depthwise kernel width along the sequence axis.
-    :type kernel_size: int
-    :param activation: Activation before GRN.
-    :type activation: str
-    :param dropout_rate: Dropout inside the block.
-    :type dropout_rate: float
-    :param drop_path_rate: Stochastic-depth rate.
-    :type drop_path_rate: float
-    :param gamma_initial_value: Initial LayerScale value.
-    :type gamma_initial_value: float
-    :param use_gamma: Whether to apply LayerScale.
-    :type use_gamma: bool
-    :param normalization_type: Normalization inside the block.
-    :type normalization_type: str
-    :param use_bias: Whether the convolutions carry a bias.
-    :type use_bias: bool
-    :param kernel_initializer: Initializer for the depthwise convolution; see
-        :func:`build_convnext_block` for what it does and does not reach.
-    :type kernel_initializer: Any
-    :return: A configured :class:`ConvNextEncoderBlock` wrapping V2.
-    :rtype: keras.layers.Layer
-    """
-    return ConvNextEncoderBlock(
-        hidden_size=hidden_size,
-        kernel_size=kernel_size,
-        activation=activation,
-        dropout_rate=dropout_rate,
-        drop_path_rate=drop_path_rate,
-        gamma_initial_value=gamma_initial_value,
-        use_gamma=use_gamma,
-        normalization_type=normalization_type,
-        use_bias=use_bias,
-        depthwise_initializer=kernel_initializer,
-        version="v2",
-        name=name,
-    )
-
-
 #: Block-type string -> builder. Append-only: the keys are public API,
 #: recorded in every run directory's config and in the study's reports, so
 #: renaming one invalidates existing results rather than tidying them.
+#:
+#: ``"convnext_v2"`` was REMOVED on 2026-08-30, which is a deliberate exception
+#: to that rule rather than an oversight. Its Global Response Normalization
+#: reduces over the sequence axis, so unlike every other entry here it mixes
+#: tokens GLOBALLY -- measured on trained encoders, perturbing position 0 moved
+#: position 60 by 8.378e-02, more than the attention arm did at the same
+#: distance, against exactly 0.000 for ``clifford`` and ``convnext``. That made
+#: the study's controlled comparison uncontrolled: the arms were meant to differ
+#: only in the sequence-mixing block, with the convolutional arms sharing a
+#: fixed span. The V2 arm was withdrawn instead of being explained away.
+#:
+#: ``ConvNextEncoderBlock`` still accepts ``version="v2"``, and deliberately so:
+#: the 28 V2 cells already written under ``results/`` deserialize through the
+#: layer's own ``get_config``, not through this registry, and must stay
+#: loadable. What is gone is the ability to CONSTRUCT that arm from a study
+#: config.
 BLOCK_REGISTRY: Dict[str, Callable[..., keras.layers.Layer]] = {
     "transformer": build_transformer_block,
     "clifford": build_clifford_block,
     "convnext": build_convnext_block,
-    "convnext_v2": build_convnext_v2_block,
 }
 
 
