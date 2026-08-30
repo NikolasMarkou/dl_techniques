@@ -17,8 +17,18 @@ recipe ``train.common.nlp.preprocess_clm_packed_dataset`` implements for causal
 LM; that function is tiktoken-specific and emits shifted CLM pairs, so the ASCII
 MLM variant lives here rather than being bolted onto it.
 
-Stage 2 cannot pack -- contrastive learning needs whole sentences -- so padding
-returns there, and the length-bucketing that bounds its effect goes with it.
+Stage 2 packs too. ``run_contrastive_stage`` calls :func:`build_packed_mlm_dataset`
+for its own stream, so SimCSE's two dropout views are of a packed fixed-length
+window rather than of a whole sentence. That is a deliberate consequence of the
+Clifford arm's ``supports_masking = False`` -- the same reason stage 1 packs --
+but it has a consequence worth stating: **no model trained by this package has
+ever seen a sequence of any length other than ``max_seq_length``**. Padding, and
+the length-bucketing that bounds its effect, return only at EVALUATION
+(``evaluate_embeddings.embed_texts``), which is the first time these encoders
+meet a short input at all.
+
+An earlier version of this docstring said "Stage 2 cannot pack -- contrastive
+learning needs whole sentences". That described an intention, not the code.
 """
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple

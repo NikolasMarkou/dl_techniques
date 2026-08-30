@@ -21,6 +21,12 @@ from dl_techniques.metrics.embedding_quality import (
     zca_whiten,
 )
 
+#: Multiple of chance above which retrieval on INDEPENDENT queries and contexts
+#: counts as invented signal. Deliberately loose -- see
+#: ``test_the_bound_rejects_an_actual_signal_inventing_transform`` for its
+#: measured sensitivity, which is the honest account of what this bound buys.
+SIGNAL_INVENTION_BOUND = 20
+
 
 def test_the_output_is_white() -> None:
     """Zero mean, and a covariance that is the identity."""
@@ -97,9 +103,64 @@ def test_it_does_not_invent_signal_where_there_is_none() -> None:
         l2_normalize(q_w) @ l2_normalize(ctx_w).T, truth
     )["recall_at_1"]
     chance = 1.0 / n
-    assert whitened < 20 * chance, (
+    assert whitened < SIGNAL_INVENTION_BOUND * chance, (
         f"whitened recall@1 is {whitened:.4f} against chance {chance:.4f} on "
         f"INDEPENDENT queries and contexts. The transform is inventing signal."
+    )
+
+
+def _null_pair(n: int = 400, d: int = 16):
+    """The null dataset both invention tests share: nothing to retrieve."""
+    rng = np.random.default_rng(0)
+    ctx = rng.normal(size=(n, d)) @ rng.normal(size=(d, d))
+    queries = rng.normal(size=(n, d)) @ rng.normal(size=(d, d))
+    return ctx, queries, np.arange(n)
+
+
+@pytest.mark.parametrize("leak", [1.0, 3.0])
+def test_the_bound_rejects_an_actual_signal_inventing_transform(leak: float) -> None:
+    """Anti-vacuity for the anti-vacuity test: run the bound against an inventor.
+
+    The test above asserts only on the real ``zca_whiten``. That makes it a
+    control over the implementation but says nothing about whether the BOUND
+    could reject a transform that did manufacture structure. This builds one and
+    requires the bound to fire.
+
+    The inventor leaks each fit row into the correspondingly-indexed apply row,
+    which is exactly the defect class named: structure that comes from the
+    pairing rather than from the content.
+
+    **The leak must be norm-matched.** ``zca_whiten`` fits on ``ctx``
+    in-sample and applies to ``queries`` out-of-sample, so the whitened queries
+    carry roughly 46x the norm of the whitened contexts on this null data. An
+    unscaled ``q_w + alpha * c_w`` is invisible at every alpha up to 1.0 -- an
+    underpowered injection that would have read as "the guard is blind".
+
+    Measured sensitivity of the shipped bound, at ``SIGNAL_INVENTION_BOUND=20``:
+    a norm-matched leak of 0.05 gives recall@1 0.0050, 0.30 gives **0.0250**
+    (10x chance, and it PASSES), 1.00 gives 0.6325. So the bound is loose --
+    it tolerates an invented 10x-chance signal. It is kept at 20 rather than
+    tightened because the real transform scores 0.0050 = 2x chance on this data
+    and a tighter bound would be flaky; the looseness is recorded here instead
+    of being discovered later.
+    """
+    ctx, queries, truth = _null_pair()
+    ctx_w, q_w = zca_whiten(ctx, queries)
+    scale = (
+        np.linalg.norm(q_w, axis=1, keepdims=True)
+        / np.linalg.norm(ctx_w, axis=1, keepdims=True)
+    )
+    invented = q_w + leak * ctx_w * scale
+
+    recall = ranking_metrics(
+        l2_normalize(invented) @ l2_normalize(ctx_w).T, truth
+    )["recall_at_1"]
+    chance = 1.0 / len(ctx)
+    assert recall >= SIGNAL_INVENTION_BOUND * chance, (
+        f"a transform leaking {leak} of each context into its own query scored "
+        f"recall@1 {recall:.4f}, under the {SIGNAL_INVENTION_BOUND}x-chance "
+        f"bound that test_it_does_not_invent_signal_where_there_is_none relies "
+        f"on. That bound cannot reject an inventor and pins nothing."
     )
 
 
