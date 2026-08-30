@@ -571,3 +571,81 @@ def test_the_factory_builds_an_equivalent_loss_to_the_constructor():
         "the factory-built loss computes a different value than the directly-constructed "
         "one on identical input, so the factory is not a pass-through."
     )
+
+
+# ---------------------------------------------------------------------
+# D-002: what the (batch,) return actually buys — sample_weight correctness
+# ---------------------------------------------------------------------
+
+
+def _scalar_returning_variant(temperature: float):
+    """The reference's premature-``mean`` shape, as a Loss subclass.
+
+    This exists ONLY as the counterfactual for the test below: it is what
+    :class:`SymmetricInfoNCELoss` would be if ``call`` reduced internally.
+    """
+
+    class _ScalarVariant(keras.losses.Loss):
+        def call(self, y_true, y_pred):
+            del y_true
+            view_a, view_b = y_pred[:, 0, :], y_pred[:, 1, :]
+            logits = keras.ops.matmul(
+                view_a, keras.ops.transpose(view_b)
+            ) / temperature
+            targets = keras.ops.arange(keras.ops.shape(logits)[0])
+            forward = keras.losses.sparse_categorical_crossentropy(
+                targets, logits, from_logits=True
+            )
+            backward = keras.losses.sparse_categorical_crossentropy(
+                targets, keras.ops.transpose(logits), from_logits=True
+            )
+            return keras.ops.mean(forward + backward) / 2.0
+
+    return _ScalarVariant()
+
+
+def test_sample_weight_selects_rows_which_a_scalar_return_cannot_do():
+    """The per-sample return makes ``sample_weight`` mean what it says.
+
+    This is the guard for decisions.md D-002 -- the ACTUAL justification for returning
+    ``(batch,)``. Without it D-002 is an unguarded comment.
+
+    Keras applies ``values * sample_weight`` *before* reducing
+    (``keras/src/losses/loss.py``, ``reduce_weighted_values``). So a rank-0 return does
+    not "ignore" the weights: it broadcasts against them, yielding
+    ``whole_batch_loss * mean(sample_weight)`` -- a plausible number that has silently
+    discarded WHICH rows were weighted. A failure here means that distinction has been
+    lost and the loss can no longer be row-weighted or masked.
+    """
+    batch, temperature = 8, 0.05
+    y_pred = _l2_normalized_views(batch=batch, dim=64, seed=3)
+    y_true = keras.ops.zeros((batch,), dtype="float32")
+    keep_row_0 = keras.ops.convert_to_tensor(
+        np.array([1.0] + [0.0] * (batch - 1), dtype="float32")
+    )
+
+    loss_fn = SymmetricInfoNCELoss(temperature=temperature)
+    per_sample = keras.ops.convert_to_numpy(
+        loss_fn.call(y_true, keras.ops.convert_to_tensor(y_pred))
+    )
+    weighted = float(keras.ops.convert_to_numpy(
+        loss_fn(y_true, y_pred, sample_weight=keep_row_0)
+    ))
+
+    # Only row 0 survives, and `sum_over_batch_size` still divides by the full batch.
+    expected = float(per_sample[0]) / batch
+    assert weighted == pytest.approx(expected, abs=1e-6, rel=0.0), (
+        f"weighting to row 0 alone gave {weighted!r}, expected {expected!r} "
+        f"(= per_sample[0]/{batch}). sample_weight is not selecting rows, so the "
+        f"per-sample return is not doing the one job it exists for."
+    )
+
+    # And the counterfactual: the scalar shape cannot express this.
+    scalar_weighted = float(keras.ops.convert_to_numpy(
+        _scalar_returning_variant(temperature)(y_true, y_pred, sample_weight=keep_row_0)
+    ))
+    assert abs(scalar_weighted - weighted) > 1e-3, (
+        f"the scalar-returning variant produced {scalar_weighted!r}, indistinguishable "
+        f"from the per-sample form's {weighted!r}. If these agree, this test is not "
+        f"pinning anything and D-002's justification is unsupported."
+    )
