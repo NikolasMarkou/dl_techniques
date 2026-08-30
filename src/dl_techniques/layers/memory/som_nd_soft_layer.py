@@ -46,10 +46,11 @@ gate, and they are not all independent:
                          reconstruction_weight > 0
     topological          topological_weight > 0
                          (there is no on/off flag for this one)
-    sharpness entropy    sharpness_weight > 0 AND
-                         use_per_dimension_softmax
-                         (the global path produces no per-axis softmaxes,
-                         so this loss cannot be added there at all)
+    sharpness entropy    sharpness_weight > 0
+                         (requires use_per_dimension_softmax; the global
+                         path produces no per-axis softmaxes, so the
+                         constructor REFUSES that combination outright
+                         rather than accepting a weight it cannot honour)
 
 The topological loss is what makes the grid map-like: it rewards nearby grid
 positions for having correlated activation patterns across the batch, using
@@ -171,8 +172,9 @@ class SoftSOMLayer(keras.layers.Layer):
           ├─► topological(soft_assignments)    (optional)
           │     topological_weight > 0
           └─► sharpness(dim_softmaxes)         (optional)
-                sharpness_weight > 0 and the per-dim
-                path ran; never on the global path
+                sharpness_weight > 0; only ever the
+                per-dim path, since __init__ refuses
+                a positive weight on the global path
                          │
                          ▼
              return reconstruction (batch, input_dim)
@@ -192,8 +194,10 @@ class SoftSOMLayer(keras.layers.Layer):
 
     Note:
         The sharpness loss reads the per-axis softmaxes, which only the
-        per-dimension path produces. Setting ``sharpness_weight`` while
-        ``use_per_dimension_softmax=False`` adds nothing and raises nothing.
+        per-dimension path produces. Setting ``sharpness_weight > 0`` while
+        ``use_per_dimension_softmax=False`` is therefore unsatisfiable, and
+        ``__init__`` raises ``ValueError`` on it. It used to be accepted and
+        then silently ignored, which let a configuration train a lie.
 
     :param grid_shape: Shape of the neuron grid, e.g. ``(10, 10)`` for 2D.
         All entries must be positive integers.
@@ -222,7 +226,9 @@ class SoftSOMLayer(keras.layers.Layer):
         reproduces the earlier fixed-scale ``exp(-d)`` behaviour.
     :type topological_sigma: float
     :param sharpness_weight: Multiplier on the entropy sharpness loss. Must
-        be non-negative. Defaults to 0.0, which disables it.
+        be non-negative, and must be 0.0 unless
+        ``use_per_dimension_softmax`` is True. Defaults to 0.0, which
+        disables it.
     :type sharpness_weight: float
     :param kernel_initializer: Initializer for the prototype weight map.
         Defaults to ``'glorot_uniform'``.
@@ -268,9 +274,12 @@ class SoftSOMLayer(keras.layers.Layer):
 
         :raises ValueError: If ``grid_shape`` holds a non-positive or
             non-integer entry; if ``input_dim`` or ``temperature`` is not
-            positive; if ``topological_sigma`` is not positive; or if
+            positive; if ``topological_sigma`` is not positive; if
             ``reconstruction_weight``, ``topological_weight`` or
-            ``sharpness_weight`` is negative.
+            ``sharpness_weight`` is negative; or if ``sharpness_weight`` is
+            positive while ``use_per_dimension_softmax`` is False, which is
+            unsatisfiable because only the per-dimension path produces the
+            per-axis softmaxes that loss reads.
         """
         super().__init__(**kwargs)
 
@@ -289,6 +298,17 @@ class SoftSOMLayer(keras.layers.Layer):
             raise ValueError("topological_sigma must be positive.")
         if sharpness_weight < 0:
             raise ValueError("sharpness_weight must be non-negative.")
+        if sharpness_weight > 0 and not use_per_dimension_softmax:
+            raise ValueError(
+                "sharpness_weight > 0 requires use_per_dimension_softmax=True. "
+                "The sharpness loss is the entropy of the per-axis softmaxes, "
+                "which only the per-dimension path produces; the global softmax "
+                "path has none, so the weight could never take effect. Got "
+                f"sharpness_weight={sharpness_weight} with "
+                "use_per_dimension_softmax=False. Either set "
+                "sharpness_weight=0.0 to keep the global softmax, or set "
+                "use_per_dimension_softmax=True to keep the sharpness loss."
+            )
 
         # Store ALL configuration parameters for serialization
         self.grid_shape = grid_shape
@@ -628,21 +648,19 @@ class SoftSOMLayer(keras.layers.Layer):
         Computes ``H(p) = -sum(p * log(p))`` along each grid axis and
         averages. Minimizing it pushes the assignments toward one-hot.
 
-        The empty-list guard returns 0.0, but nothing in this class can reach
-        it: ``call()`` only calls this method when ``dim_softmaxes is not
-        None``, and the per-dimension path always returns one tensor per grid
-        axis. On the global path ``dim_softmaxes`` is None and this method is
-        not called at all.
+        ``dim_softmaxes`` is never empty: this method is only called on the
+        per-dimension path, which always returns one tensor per grid axis,
+        and ``grid_shape`` is validated non-empty in ``__init__``. The
+        constructor now refuses ``sharpness_weight > 0`` on the global path,
+        so there is no configuration in which this runs with nothing to
+        average.
 
         :param dim_softmaxes: One softmax tensor per grid axis, in axis
-            order, as returned by ``_per_dimension_softmax``.
+            order, as returned by ``_per_dimension_softmax``. Non-empty.
         :type dim_softmaxes: list
         :return: Scalar mean entropy across the grid axes.
         :rtype: keras.KerasTensor
         """
-        if not dim_softmaxes:
-            return ops.convert_to_tensor(0.0, dtype="float32")
-
         total_entropy = ops.convert_to_tensor(0.0, dtype="float32")
 
         for dim_idx, softmax_tensor in enumerate(dim_softmaxes):

@@ -171,7 +171,7 @@ class TestSoftSOMLayer:
             grid_shape=(8, 8),
             input_dim=100,
             temperature=2.0,
-            use_per_dimension_softmax=False,
+            use_per_dimension_softmax=True,
             use_reconstruction_loss=False,
             reconstruction_weight=0.5,
             topological_weight=0.3,
@@ -183,7 +183,7 @@ class TestSoftSOMLayer:
         assert soft_som.grid_shape == (8, 8)
         assert soft_som.input_dim == 100
         assert soft_som.temperature == 2.0
-        assert soft_som.use_per_dimension_softmax is False
+        assert soft_som.use_per_dimension_softmax is True
         assert soft_som.use_reconstruction_loss is False
         assert soft_som.reconstruction_weight == 0.5
         assert soft_som.topological_weight == 0.3
@@ -460,25 +460,48 @@ class TestSoftSOMLayer:
         loss_values = [float(loss) for loss in soft_som.losses]
         assert all(np.isfinite(loss_val) for loss_val in loss_values)
 
-    def test_sharpness_regularization_disabled_for_global_softmax(self):
-        """Test that sharpness regularization is disabled for global softmax."""
+    def test_sharpness_regularization_refused_for_global_softmax(self):
+        """Sharpness regularization is REFUSED, not ignored, on the global path.
+
+        This test previously constructed the combination and asserted
+        ``len(soft_som.losses) >= 0``, which is vacuously true for every
+        possible input and so checked nothing. The layer now raises.
+        """
+        with pytest.raises(ValueError, match="requires use_per_dimension_softmax=True"):
+            SoftSOMLayer(
+                grid_shape=(4, 4),
+                input_dim=20,
+                temperature=1.0,
+                use_per_dimension_softmax=False,  # Global softmax
+                sharpness_weight=0.1  # cannot be honoured here
+            )
+
+        # The global softmax itself is unaffected: with the weight at 0.0 it
+        # builds, runs, and adds exactly the three non-sharpness losses
+        # (reconstruction MSE, topological, and the default L2 kernel
+        # regularizer). MEASURED, not assumed. The per-dimension path with a
+        # positive sharpness_weight adds a fourth.
         soft_som = SoftSOMLayer(
             grid_shape=(4, 4),
             input_dim=20,
             temperature=1.0,
-            use_per_dimension_softmax=False,  # Global softmax
-            sharpness_weight=0.1  # This should be ignored
+            use_per_dimension_softmax=False,
+            sharpness_weight=0.0
         )
-
         test_input = keras.random.uniform((8, 20), seed=42)
-
-        # Forward pass in training mode
-        soft_som.losses.clear()
         reconstruction = soft_som(test_input, training=True)
+        assert reconstruction.shape == (8, 20)
+        assert len(soft_som.losses) == 3
 
-        # Should work without errors but no sharpness loss should be added
-        # (only reconstruction and topological losses if enabled)
-        assert len(soft_som.losses) >= 0  # Could be 0 if other losses disabled
+        per_dim = SoftSOMLayer(
+            grid_shape=(4, 4),
+            input_dim=20,
+            temperature=1.0,
+            use_per_dimension_softmax=True,
+            sharpness_weight=0.1
+        )
+        per_dim(test_input, training=True)
+        assert len(per_dim.losses) == 4
 
     def test_sharpness_effect_on_assignments(self):
         """Test that sharpness regularization affects assignment distributions."""
@@ -1013,3 +1036,61 @@ class TestSoftSOMLayer:
             rtol=1e-6, atol=1e-6,
             err_msg="Results should be independent of batch size"
         )
+
+class TestUnsatisfiableSharpnessWeight:
+    """
+    The layer must REFUSE a sharpness_weight the global softmax cannot honour.
+
+    The sharpness entropy loss reads the per-axis softmaxes, which only the
+    per-dimension path produces. Before this guard existed the constructor
+    accepted ``sharpness_weight > 0`` together with
+    ``use_per_dimension_softmax=False`` and then silently never added the
+    loss -- no warning, no error, a knob that trains a lie.
+    """
+
+    FORBIDDEN_MSG = "sharpness_weight > 0 requires use_per_dimension_softmax=True"
+
+    def test_global_softmax_with_positive_sharpness_raises(self):
+        """The unsatisfiable combination raises ValueError at construction."""
+        with pytest.raises(ValueError, match=self.FORBIDDEN_MSG):
+            SoftSOMLayer(
+                grid_shape=(4, 4),
+                input_dim=20,
+                use_per_dimension_softmax=False,
+                sharpness_weight=0.1,
+            )
+
+    def test_raise_message_names_both_remedies(self):
+        """The message must say what to do, not merely what is wrong."""
+        with pytest.raises(ValueError) as excinfo:
+            SoftSOMLayer(
+                grid_shape=(4, 4),
+                input_dim=20,
+                use_per_dimension_softmax=False,
+                sharpness_weight=0.1,
+            )
+        message = str(excinfo.value)
+        assert "sharpness_weight=0.0" in message
+        assert "use_per_dimension_softmax=True" in message
+
+    def test_three_satisfiable_corners_still_construct(self):
+        """Only the one forbidden corner is refused; the other three build."""
+        # global softmax, no sharpness
+        SoftSOMLayer(grid_shape=(4, 4), input_dim=20,
+                     use_per_dimension_softmax=False, sharpness_weight=0.0)
+        # per-dimension softmax, with sharpness
+        SoftSOMLayer(grid_shape=(4, 4), input_dim=20,
+                     use_per_dimension_softmax=True, sharpness_weight=0.1)
+        # per-dimension softmax, no sharpness
+        SoftSOMLayer(grid_shape=(4, 4), input_dim=20,
+                     use_per_dimension_softmax=True, sharpness_weight=0.0)
+
+    def test_negative_weight_still_reports_the_negative_error_first(self):
+        """A negative weight is not the unsatisfiable-combination error."""
+        with pytest.raises(ValueError, match="must be non-negative"):
+            SoftSOMLayer(
+                grid_shape=(4, 4),
+                input_dim=20,
+                use_per_dimension_softmax=False,
+                sharpness_weight=-0.1,
+            )
