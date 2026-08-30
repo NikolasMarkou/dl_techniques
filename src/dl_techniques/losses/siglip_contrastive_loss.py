@@ -123,7 +123,7 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
                 - 'temperature': current temperature value (if learnable)
 
         Returns:
-            Scalar loss value
+            Per-sample loss values of shape `(batch_size,)`.
         """
         if isinstance(y_pred, dict):
             logits_per_image = y_pred['logits_per_image']
@@ -153,9 +153,13 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
         image_loss = ops.softplus(-labels * scaled_logits_per_image)
         text_loss = ops.softplus(-labels * scaled_logits_per_text)
 
-        # Average over batch dimension
-        image_loss = ops.mean(image_loss)
-        text_loss = ops.mean(text_loss)
+        # Reduce over the PAIR axis only, leaving the batch axis intact, so
+        # that `call()` returns one value per sample. `keras.losses.Loss.__call__`
+        # multiplies by `sample_weight` BEFORE reducing: a scalar returned here
+        # would broadcast and charge every row the batch aggregate, which makes
+        # both `sample_weight` and `reduction=` dead knobs.
+        image_loss = keras.ops.mean(image_loss, axis=-1)
+        text_loss = keras.ops.mean(text_loss, axis=-1)
 
         # Combine losses
         total_loss = (image_loss + text_loss) / 2.0
@@ -227,7 +231,7 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
             y_pred: Dictionary containing logits
 
         Returns:
-            Scalar loss value
+            Per-sample loss values of shape `(batch_size,)`.
         """
         if isinstance(y_pred, dict):
             logits_per_image = y_pred['logits_per_image']
@@ -264,8 +268,13 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         image_loss = ops.softplus(-labels * scaled_logits_per_image)
         text_loss = ops.softplus(-labels * scaled_logits_per_text)
 
-        # Average losses
-        total_loss = (ops.mean(image_loss) + ops.mean(text_loss)) / 2.0
+        # Reduce over the PAIR axis only, leaving the batch axis intact, so that
+        # `call()` returns one value per sample (see `SigLIPContrastiveLoss.call`).
+        # The temperature adaptation above is UNAFFECTED: it still runs exactly one
+        # `assign` per call, on a batch-global entropy estimate.
+        total_loss = (
+            keras.ops.mean(image_loss, axis=-1) + keras.ops.mean(text_loss, axis=-1)
+        ) / 2.0
 
         return total_loss
 
@@ -332,7 +341,7 @@ class HybridContrastiveLoss(keras.losses.Loss):
             y_pred: Dictionary containing logits and embeddings
 
         Returns:
-            Combined loss value
+            Per-sample combined loss values of shape `(batch_size,)`.
         """
         # Standard SigLIP loss
         siglip_loss = self.siglip_loss(y_true, y_pred)
@@ -352,11 +361,15 @@ class HybridContrastiveLoss(keras.losses.Loss):
             # Cross-modal denoising objective: noisy embeddings from one
             # modality should remain close to clean embeddings of the other.
             # This regularizes the embedding space for noise robustness.
-            score_loss_image = ops.mean(
-                ops.sum(ops.square(noisy_image_emb - text_emb), axis=-1)
+            # Sum over the FEATURE axis only: one score-matching value per
+            # sample, matching the per-sample SigLIP term above. The inner loss
+            # is constructed with `reduction='none'`, so it already hands back
+            # `(batch_size,)`.
+            score_loss_image = keras.ops.sum(
+                keras.ops.square(noisy_image_emb - text_emb), axis=-1
             )
-            score_loss_text = ops.mean(
-                ops.sum(ops.square(noisy_text_emb - image_emb), axis=-1)
+            score_loss_text = keras.ops.sum(
+                keras.ops.square(noisy_text_emb - image_emb), axis=-1
             )
 
             score_loss = (score_loss_image + score_loss_text) / 2.0
