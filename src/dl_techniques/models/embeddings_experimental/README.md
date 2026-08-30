@@ -84,7 +84,7 @@ two come apart. `ascii_convnext_v2_bert` then differs from the V1 arm by
 precisely the GRN weights), isolating channel competition. Each addition buys
 one comparison that the previous set could not make.
 
-**2. Token mixing in both convolutional arms is local.** The geometric product rolls
+**2. Token mixing is local in the Clifford and V1 arms — and NOT in V2.** The geometric product rolls
 along the *channel* axis, so all cross-token mixing comes from the two depthwise
 convolutions per block. The two arms do **not** share a formula:
 
@@ -97,6 +97,30 @@ so matching them on `kernel_size` does not match them on span — the Clifford
 span is `2 * convnext - 1`. At the Clifford layer's default `K=3` a 4-block
 stack sees **17 characters**. Both arms therefore default to `K=7`, and both
 warn when the span is shorter than `max_position_embeddings`.
+
+**These formulas do NOT bound `ascii_convnext_v2_bert`.** The same GRN that makes
+that arm pad-length-sensitive under caveat 1 also mixes *tokens*: reducing over
+the sequence axis makes every position a function of every other, so the V2 arm
+has no finite receptive field at all. Measured 2026-08-30 on trained encoders,
+perturbing position 0 and reading `max |delta|` at position `d`:
+
+| arm | span formula | d=25 | d=60 | d=120 |
+|---|---|---:|---:|---:|
+| `ascii_clifford_bert` | 49 | 0.000 | 0.000 | 0.000 |
+| `ascii_convnext_bert` | 25 | 0.000 | 0.000 | 0.000 |
+| `ascii_convnext_v2_bert` | 25 (**does not hold**) | 7.210e-02 | 8.378e-02 | 3.989e-02 |
+
+The V1 and Clifford arms are exactly inert beyond their spans, as the formulas
+promise. The V2 arm moves *more* at d=60 than the transformer does. So the
+"local token mixing" heading above covers two of the three convolutional arms,
+and the span warning `create_ascii_convnext_v2_bert` emits describes its
+convolutional reach only, not its actual reach.
+
+This matters beyond bookkeeping: `RESULTS.md` explains the study's settings
+asymmetry with "a convolution has a fixed span, which is why it shows no such
+interaction", and the arm that best resists sinusoidal positions at long context
+is precisely the one for which that is false. Pinned in both directions by
+`tests/test_models/test_embeddings_shared/test_the_arms_differ_in_reach.py`.
 
 **3. The encoder's positional default is not the study's.** `EmbeddingEncoder`
 defaults to `position_embedding_type='learned'`; the study overrides it. This is

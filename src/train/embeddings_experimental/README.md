@@ -91,25 +91,29 @@ sinusoidal model's **pooled embedding depends on sequence length**: encode one
 repeated sentence at 64 and at 512 real characters and the two vectors are nearly
 orthogonal.
 
-| cosine, same content at 512 vs 64 | `mean` | `max` |
-|---|---:|---:|
-| `ascii_bert` / sinusoidal | **0.3805** | 0.9693 |
-| `ascii_bert` / learned | 0.9705 | 0.9945 |
+| cosine, same content at 512 vs 64 | probe | `mean` | `max` |
+|---|---|---:|---:|
+| `ascii_bert` / sinusoidal | one sentence repeated | 0.3805 | 0.9693 |
+| `ascii_bert` / learned | one sentence repeated | 0.9705 | 0.9945 |
+| `ascii_bert` / sinusoidal | **natural text** | **0.3879** | **0.9578** |
+| `ascii_bert` / learned | **natural text** | **0.5294** | **0.9790** |
 
-Since SQuAD queries average 59 characters against contexts of 774, `mean`
-pooling displaces a query from its own answer by length alone. That single
-mechanism also explains why the SST-2 probe never moves (one narrow length band,
-so the offset is a constant a linear probe absorbs) and why centering and
-whitening cannot repair it (both remove *global* structure; this offset varies
-per text).
+**Read the two probes as different measurements.** The repeated-sentence probe
+holds content identical at every length, so the positional term is the only thing
+that can move the vector; it is the right instrument for "does position leak into
+the readout". It is the wrong instrument for "are learned positions
+length-invariant in practice" — on natural text they are not (0.53, not 0.97),
+and the learned-vs-sinusoidal gap shrinks from ~0.48 to ~0.14. `max` is
+length-invariant under both probes and for every arm.
 
-**But `max` does not fix retrieval, and the axis is not a fix.** Measured on
-trained cells at 512/sinusoidal, `max` helps `ascii_clifford_bert` 3.6x
-(0.00607 → 0.02167) and sends `ascii_bert` **to chance** (0.00186 → 0.00033,
-chance 0.00048). Neither reaches its learned-position baseline. Length drift is
-real and contributory but not sufficient — a per-dimension extremum over 128
-dimensions discards more than the drift costs. Use the axis to explore, not as a
-remedy.
+**`max` helps, but not enough to be a remedy.** Swapped onto the *same trained
+weights* at 512/sinusoidal (n=7, paired by seed): `ascii_clifford_bert`
+0.00607 → **0.02386**, p=0.0156, 7/7 seeds; `ascii_bert` 0.00186 → 0.00293,
+not significant. Neither reaches its learned-position baseline (41% and 23%), so
+length-invariance is necessary and not sufficient. Cells *retrained* at
+`pooling=max` behave differently again (bert falls to 0.00033) — that is a
+different experiment, at n=3, where the minimum reachable p is 0.250. Use the
+axis to explore; for retrieval use learned positions.
 
 ### Report retrieval whitened as well as raw
 
@@ -589,19 +593,29 @@ are stated in `summary.md` rather than buried.
   claim does.
 - Contexts are mean 780 / median 705 / p90 1166 characters against a window of a
   few hundred, so retrieval matches a context **prefix**, not a passage.
-- Evaluation cannot pack, so padding returns — on the arm whose block cannot
-  mask it. `embed_texts` sorts by length and pads to the batch maximum, and each
-  corpus reports its pad fraction. Measured on a real encoder at `max_length=64`:
-  contexts 0.000, questions 0.061, SST-2 0.026.
+- Evaluation cannot pack, so padding returns. `embed_texts` sorts by length and
+  pads to the batch maximum, and each corpus reports its pad fraction. Measured
+  on a real encoder at `max_length=64`: contexts 0.000, questions 0.061, SST-2
+  0.026. **The arm this actually bites is `ascii_convnext_v2_bert`, not
+  `ascii_clifford_bert`.** Measured 2026-08-30 on trained encoders, the same text
+  at pad widths 128/256/512 moves `convnext_v2` by 1.663e-01 (cosine 0.9863) via
+  its mask-unaware GRN, while clifford, convnext and bert move by 1.8e-07 to
+  3.6e-07. Clifford is sensitive to pad *presence*, not pad *width*, and its
+  global branch is off by default. The length sorting above is what keeps this
+  harmless: at the 1-3% pad fractions it produces, the distortion is under 0.001
+  in cosine. Pinned by
+  `tests/test_models/test_embeddings_shared/test_the_arms_differ_in_reach.py`.
 - Stage 2 saves the encoder, not the SimCSE wrapper, so the metrics use
   `pooled_output`; the contrastive loss lives in projection space and the two can
   move in opposite directions.
 - **Query and document lengths differ by an order of magnitude** — SQuAD
   questions average 59 characters, contexts 774 — and a sinusoidal encoder's
   pooled vector is length-dependent. Any retrieval number from such a cell is
-  measuring length mismatch as well as content. Learned-position cells are
-  length-invariant to within 0.97 cosine across an 8x range and do not have this
-  problem.
+  measuring length mismatch as well as content. **Learned-position cells are not
+  exempt**: on natural text they drift to 0.53 cosine across an 8x range against
+  sinusoidal's 0.39, so the difference is much smaller than the 0.97-vs-0.38 the
+  repeated-sentence probe suggests — while they still retrieve 9.7x better. The
+  drift is real and contributory; it is not what separates the two.
 
 **Neither stage uses a custom `train_step`.** Stage 1 delegates to the existing
 `MaskedLanguageModel` wrapper; stage 2's forward pass returns both dropout views
