@@ -14,7 +14,6 @@ Tests cover:
 import pytest
 import numpy as np
 import keras
-from keras import ops
 import tensorflow as tf
 
 from dl_techniques.layers.memory.ntm_interface import (
@@ -59,8 +58,8 @@ class TestNTMMemory:
         state = memory.initialize_state(batch_size)
 
         assert isinstance(state, MemoryState)
-        assert ops.shape(state.memory) == (batch_size, memory_size, memory_dim)
-        assert ops.shape(state.usage) == (batch_size, memory_size)
+        assert keras.ops.shape(state.memory) == (batch_size, memory_size, memory_dim)
+        assert keras.ops.shape(state.usage) == (batch_size, memory_size)
 
     def test_read(self):
         """Test read operation."""
@@ -79,15 +78,15 @@ class TestNTMMemory:
 
         # Create read weights (one-hot at position 0)
         # Using ops.scatter which is effectively scatter_nd in Keras 3 with these args
-        read_weights = ops.scatter(
+        read_weights = keras.ops.scatter(
             [[i, 0] for i in range(batch_size)],
-            ops.ones((batch_size,)),
+            keras.ops.ones((batch_size,)),
             (batch_size, memory_size),
         )
 
         read_vector = memory_module.read(state, read_weights)
 
-        assert ops.shape(read_vector) == (batch_size, memory_dim)
+        assert keras.ops.shape(read_vector) == (batch_size, memory_dim)
 
         # With one-hot weights, read vector should match first memory slot
         memory_np = keras.ops.convert_to_numpy(state.memory)
@@ -112,20 +111,20 @@ class TestNTMMemory:
 
         # Create write weights (one-hot at position 5)
         # Using ops.scatter which is effectively scatter_nd in Keras 3 with these args
-        write_weights = ops.scatter(
+        write_weights = keras.ops.scatter(
             [[i, 5] for i in range(batch_size)],
-            ops.ones((batch_size,)),
+            keras.ops.ones((batch_size,)),
             (batch_size, memory_size),
         )
 
         # Erase everything and add new content
-        erase_vector = ops.ones((batch_size, memory_dim))
+        erase_vector = keras.ops.ones((batch_size, memory_dim))
         add_vector = keras.random.normal((batch_size, memory_dim), seed=42)
 
         new_state = memory_module.write(state, write_weights, erase_vector, add_vector)
 
         assert isinstance(new_state, MemoryState)
-        assert ops.shape(new_state.memory) == (batch_size, memory_size, memory_dim)
+        assert keras.ops.shape(new_state.memory) == (batch_size, memory_size, memory_dim)
 
         # With one-hot write and full erase, slot 5 should match add_vector
         new_memory_np = keras.ops.convert_to_numpy(new_state.memory)
@@ -190,12 +189,12 @@ class TestNTMReadHead:
         head = NTMReadHead(memory_size=memory_size, memory_dim=memory_dim)
 
         key = keras.random.normal((batch_size, 1, memory_dim), seed=42)
-        beta = ops.ones((batch_size, 1)) * 10.0  # High beta for sharp attention
+        beta = keras.ops.ones((batch_size, 1)) * 10.0  # High beta for sharp attention
         memory = keras.random.normal((batch_size, memory_size, memory_dim), seed=43)
 
         content_weights = head.content_addressing(key, beta, memory)
 
-        assert ops.shape(content_weights) == (batch_size, memory_size)
+        assert keras.ops.shape(content_weights) == (batch_size, memory_size)
 
         # Weights should sum to 1
         weights_np = keras.ops.convert_to_numpy(content_weights)
@@ -220,7 +219,7 @@ class TestNTMReadHead:
         memory_state = MemoryState(
             memory=keras.random.normal((batch_size, memory_size, memory_dim), seed=43)
         )
-        prev_weights = ops.softmax(
+        prev_weights = keras.ops.softmax(
             keras.random.normal((batch_size, memory_size), seed=44), axis=-1
         )
 
@@ -228,7 +227,7 @@ class TestNTMReadHead:
             controller_output, memory_state, prev_weights
         )
 
-        assert ops.shape(weights) == (batch_size, memory_size)
+        assert keras.ops.shape(weights) == (batch_size, memory_size)
         assert isinstance(head_state, HeadState)
         assert head_state.key is not None
         assert head_state.beta is not None
@@ -288,7 +287,7 @@ class TestNTMWriteHead:
         memory_state = MemoryState(
             memory=keras.random.normal((batch_size, memory_size, memory_dim), seed=43)
         )
-        prev_weights = ops.softmax(
+        prev_weights = keras.ops.softmax(
             keras.random.normal((batch_size, memory_size), seed=44), axis=-1
         )
 
@@ -296,11 +295,11 @@ class TestNTMWriteHead:
             controller_output, memory_state, prev_weights
         )
 
-        assert ops.shape(weights) == (batch_size, memory_size)
+        assert keras.ops.shape(weights) == (batch_size, memory_size)
         assert head_state.erase_vector is not None
         assert head_state.add_vector is not None
-        assert ops.shape(head_state.erase_vector) == (batch_size, memory_dim)
-        assert ops.shape(head_state.add_vector) == (batch_size, memory_dim)
+        assert keras.ops.shape(head_state.erase_vector) == (batch_size, memory_dim)
+        assert keras.ops.shape(head_state.add_vector) == (batch_size, memory_dim)
 
         # Erase vector should be in [0, 1] due to sigmoid
         erase_np = keras.ops.convert_to_numpy(head_state.erase_vector)
@@ -360,8 +359,8 @@ class TestNTMController:
         states = controller.initialize_state(batch_size)
 
         assert len(states) == 2  # h and c states
-        assert ops.shape(states[0]) == (batch_size, controller_dim)
-        assert ops.shape(states[1]) == (batch_size, controller_dim)
+        assert keras.ops.shape(states[0]) == (batch_size, controller_dim)
+        assert keras.ops.shape(states[1]) == (batch_size, controller_dim)
 
     def test_initialize_state_gru(self):
         """Test state initialization for GRU."""
@@ -372,7 +371,7 @@ class TestNTMController:
         states = controller.initialize_state(batch_size)
 
         assert len(states) == 1
-        assert ops.shape(states[0]) == (batch_size, controller_dim)
+        assert keras.ops.shape(states[0]) == (batch_size, controller_dim)
 
     def test_initialize_state_feedforward(self):
         """Test state initialization for feedforward (should be None)."""
@@ -395,7 +394,7 @@ class TestNTMController:
 
         output, new_states = controller(inputs, state=states)
 
-        assert ops.shape(output) == (batch_size, controller_dim)
+        assert keras.ops.shape(output) == (batch_size, controller_dim)
         assert len(new_states) == 2
 
     def test_call_feedforward(self):
@@ -413,7 +412,7 @@ class TestNTMController:
 
         output, new_states = controller(inputs)
 
-        assert ops.shape(output) == (batch_size, controller_dim)
+        assert keras.ops.shape(output) == (batch_size, controller_dim)
         assert new_states == []
 
     def test_serialization(self):
@@ -535,7 +534,7 @@ class TestNTMCell:
 
         output, new_states = cell(inputs, states)
 
-        assert ops.shape(output) == (batch_size, cell.output_size)
+        assert keras.ops.shape(output) == (batch_size, cell.output_size)
         assert len(new_states) == len(states)
 
     def test_rnn_compatibility(self):
@@ -556,7 +555,7 @@ class TestNTMCell:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = rnn(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, cell.output_size)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, cell.output_size)
 
     def test_serialization(self):
         """Test get_config and from_config."""
@@ -598,7 +597,7 @@ class TestNTMCell:
 
         with tf.GradientTape() as tape:
             output, _ = cell(inputs, states)
-            loss = ops.sum(output)
+            loss = keras.ops.sum(output)
 
         grads = tape.gradient(loss, inputs)
         assert grads is not None
@@ -687,7 +686,7 @@ class TestNeuralTuringMachine:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, output_dim)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, output_dim)
 
     def test_call_no_return_sequences(self):
         """Test call with return_sequences=False."""
@@ -706,7 +705,7 @@ class TestNeuralTuringMachine:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, output_dim)
+        assert keras.ops.shape(outputs) == (batch_size, output_dim)
 
     def test_call_return_state(self):
         """Test call with return_state=True."""
@@ -727,7 +726,7 @@ class TestNeuralTuringMachine:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs, final_states = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, output_dim)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, output_dim)
         assert isinstance(final_states, list)
         assert len(final_states) > 0
 
@@ -827,7 +826,7 @@ class TestNeuralTuringMachine:
 
         with tf.GradientTape() as tape:
             outputs = ntm(inputs, training=True)
-            loss = ops.sum(outputs)
+            loss = keras.ops.sum(outputs)
 
         grads = tape.gradient(loss, inputs)
         assert grads is not None
@@ -918,7 +917,7 @@ class TestCreateNTM:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, 4)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, 4)
 
 
 # ---------------------------------------------------------------------
@@ -948,7 +947,7 @@ class TestIntegration:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, output_dim)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, output_dim)
 
     def test_multiple_heads(self):
         """Test NTM with multiple read/write heads."""
@@ -968,7 +967,7 @@ class TestIntegration:
         inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
         outputs = ntm(inputs)
 
-        assert ops.shape(outputs) == (batch_size, seq_len, 8)
+        assert keras.ops.shape(outputs) == (batch_size, seq_len, 8)
 
     def test_different_controller_types(self):
         """Test NTM with different controller types."""
@@ -988,7 +987,7 @@ class TestIntegration:
             inputs = keras.random.normal((batch_size, seq_len, input_dim), seed=42)
             outputs = ntm(inputs)
 
-            assert ops.shape(outputs) == (batch_size, seq_len, 4), (
+            assert keras.ops.shape(outputs) == (batch_size, seq_len, 4), (
                 f"Failed for controller_type={controller_type}"
             )
 
@@ -1014,8 +1013,8 @@ class TestIntegration:
         inputs_10 = keras.random.normal((batch_size, 10, input_dim), seed=43)
         outputs_10, states_10 = ntm(inputs_10)
 
-        assert ops.shape(outputs_5) == (batch_size, 5, output_dim)
-        assert ops.shape(outputs_10) == (batch_size, 10, output_dim)
+        assert keras.ops.shape(outputs_5) == (batch_size, 5, output_dim)
+        assert keras.ops.shape(outputs_10) == (batch_size, 10, output_dim)
 
 
 # ---------------------------------------------------------------------
@@ -1030,7 +1029,7 @@ class TestAddressingHealth:
         """Memory initialization must produce distinct rows."""
         memory = NTMMemory(memory_size=32, memory_dim=16)
         state = memory.initialize_state(batch_size=2)
-        mem_np = ops.convert_to_numpy(state.memory)
+        mem_np = keras.ops.convert_to_numpy(state.memory)
 
         # Rows should NOT all be identical
         row_std = np.std(mem_np[0], axis=0)  # std across 32 rows per dim
@@ -1064,16 +1063,16 @@ class TestAddressingHealth:
         rnn = keras.layers.RNN(cell, return_sequences=True)
 
         x = np.random.randn(2, 5, 8).astype("float32")
-        x_t = ops.convert_to_tensor(x)
+        x_t = keras.ops.convert_to_tensor(x)
 
         with tf.GradientTape() as tape:
             y = rnn(x_t, training=True)
-            loss = ops.mean(y)
+            loss = keras.ops.mean(y)
         grads = tape.gradient(loss, rnn.trainable_weights)
 
         for w, g in zip(rnn.trainable_weights, grads):
             assert g is not None, f"Gradient is None for {w.path}"
-            gnorm = float(ops.sqrt(ops.sum(ops.square(g))))
+            gnorm = float(keras.ops.sqrt(keras.ops.sum(keras.ops.square(g))))
             assert gnorm > 1e-10, (
                 f"Gradient is effectively zero for {w.path} (norm={gnorm:.2e})"
             )
@@ -1089,11 +1088,11 @@ class TestAddressingHealth:
         rnn = keras.layers.RNN(cell, return_sequences=True)
 
         x = np.random.randn(2, 5, 8).astype("float32")
-        x_t = ops.convert_to_tensor(x)
+        x_t = keras.ops.convert_to_tensor(x)
 
         with tf.GradientTape() as tape:
             y = rnn(x_t, training=True)
-            loss = ops.mean(y)
+            loss = keras.ops.mean(y)
         grads = tape.gradient(loss, rnn.trainable_weights)
 
         # Find the initial_memory weight
@@ -1104,7 +1103,7 @@ class TestAddressingHealth:
                 break
 
         assert mem_grad is not None, "initial_memory weight not found"
-        gnorm = float(ops.sqrt(ops.sum(ops.square(mem_grad))))
+        gnorm = float(keras.ops.sqrt(keras.ops.sum(keras.ops.square(mem_grad))))
         assert gnorm > 1e-8, (
             f"initial_memory gradient too small: {gnorm:.2e}"
         )
@@ -1152,13 +1151,13 @@ class TestCircularConvolutionDirection:
         shift = np.zeros((1, self.SHIFT_RANGE), dtype="float32")
         shift[0, shift_index] = 1.0
 
-        return ops.convert_to_tensor(weights), ops.convert_to_tensor(shift)
+        return keras.ops.convert_to_tensor(weights), keras.ops.convert_to_tensor(shift)
 
     def test_shift_direction_positive_offset_moves_forward(self):
         """Offset +1 (index 2) must move a delta impulse from slot 0 to slot 1."""
         weights, shift = self._delta_inputs(shift_index=2)
 
-        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+        out = keras.ops.convert_to_numpy(circular_convolution(weights, shift))
 
         assert int(np.argmax(out[0])) == 1, (
             "Shift +1 moved the impulse to slot "
@@ -1174,7 +1173,7 @@ class TestCircularConvolutionDirection:
         """Offset -1 (index 0) must move a delta impulse from slot 0 to slot N-1."""
         weights, shift = self._delta_inputs(shift_index=0)
 
-        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+        out = keras.ops.convert_to_numpy(circular_convolution(weights, shift))
         last = self.MEMORY_SIZE - 1
 
         assert int(np.argmax(out[0])) == last, (
@@ -1195,7 +1194,7 @@ class TestCircularConvolutionDirection:
         """
         weights, shift = self._delta_inputs(shift_index=1)
 
-        out = ops.convert_to_numpy(circular_convolution(weights, shift))
+        out = keras.ops.convert_to_numpy(circular_convolution(weights, shift))
 
         assert int(np.argmax(out[0])) == 0, (
             "Shift 0 moved the impulse to slot "

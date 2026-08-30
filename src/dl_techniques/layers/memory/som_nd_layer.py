@@ -62,7 +62,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any, Callable
 import numpy as np
 
@@ -369,9 +368,9 @@ class SOMLayer(keras.layers.Layer):
             neuron's integer grid coordinates as float32.
         :rtype: keras.KerasTensor
         """
-        coord_ranges = [ops.cast(ops.arange(d), "float32") for d in self.grid_shape]
-        mesh_coords = ops.meshgrid(*coord_ranges, indexing='ij')
-        position_grid = ops.stack(mesh_coords, axis=-1)
+        coord_ranges = [keras.ops.cast(keras.ops.arange(d), "float32") for d in self.grid_shape]
+        mesh_coords = keras.ops.meshgrid(*coord_ranges, indexing='ij')
+        position_grid = keras.ops.stack(mesh_coords, axis=-1)
         return position_grid
 
     def call(self,
@@ -399,7 +398,7 @@ class SOMLayer(keras.layers.Layer):
         # If in training mode, update the weights
         if training:
             self._update_weights(inputs, bmu_indices)
-            self.iterations.assign_add(ops.cast(ops.shape(inputs)[0], "float32"))
+            self.iterations.assign_add(keras.ops.cast(keras.ops.shape(inputs)[0], "float32"))
 
         # Apply regularization if specified
         if self.regularizer is not None:
@@ -423,27 +422,27 @@ class SOMLayer(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Reshape weights to [total_neurons, input_dim]
-        flat_weights = ops.reshape(self.weights_map, (-1, self.input_dim))
+        flat_weights = keras.ops.reshape(self.weights_map, (-1, self.input_dim))
 
         # Compute distances between inputs and all neurons
         # We use squared Euclidean distance for efficiency
-        squared_distances = ops.sum(
-            ops.square(ops.expand_dims(inputs, 1) - ops.expand_dims(flat_weights, 0)),
+        squared_distances = keras.ops.sum(
+            keras.ops.square(keras.ops.expand_dims(inputs, 1) - keras.ops.expand_dims(flat_weights, 0)),
             axis=2
         )
 
         # Find the index of the minimum distance (BMU)
-        bmu_flat_indices = ops.argmin(squared_distances, axis=1)
+        bmu_flat_indices = keras.ops.argmin(squared_distances, axis=1)
 
         # Convert flat indices to N-dimensional grid coordinates
-        bmu_indices = ops.unravel_index(bmu_flat_indices, self.grid_shape)
-        bmu_indices = ops.stack(bmu_indices, axis=1)
+        bmu_indices = keras.ops.unravel_index(bmu_flat_indices, self.grid_shape)
+        bmu_indices = keras.ops.stack(bmu_indices, axis=1)
 
         # Compute the quantization error (minimum distance)
-        min_distances = ops.min(squared_distances, axis=1)
-        quantization_errors = ops.sqrt(min_distances)
+        min_distances = keras.ops.min(squared_distances, axis=1)
+        quantization_errors = keras.ops.sqrt(min_distances)
 
-        return ops.cast(bmu_indices, "int32"), quantization_errors
+        return keras.ops.cast(bmu_indices, "int32"), quantization_errors
 
     def _update_weights(self, inputs: keras.KerasTensor, bmu_indices: keras.KerasTensor) -> None:
         """
@@ -473,44 +472,44 @@ class SOMLayer(keras.layers.Layer):
         # got tf.float32 != tf.float16`. Do NOT cast the grid to float16
         # instead: distant neurons underflow to 0.0. See decisions.md D-062.
         geom_dtype = "float32"
-        inputs = ops.cast(inputs, geom_dtype)
+        inputs = keras.ops.cast(inputs, geom_dtype)
         current_learning_rate = self.decay_function(self.iterations, self.max_iterations)
-        current_learning_rate = ops.cast(
-            ops.maximum(current_learning_rate, 0.0), geom_dtype)
+        current_learning_rate = keras.ops.cast(
+            keras.ops.maximum(current_learning_rate, 0.0), geom_dtype)
         current_sigma = self.sigma * (1.0 - self.iterations / self.max_iterations)
         # Prevent division by zero.
-        current_sigma = ops.cast(ops.maximum(current_sigma, 1e-4), geom_dtype)
+        current_sigma = keras.ops.cast(keras.ops.maximum(current_sigma, 1e-4), geom_dtype)
 
-        bmu_coords = ops.cast(bmu_indices, dtype=geom_dtype)
+        bmu_coords = keras.ops.cast(bmu_indices, dtype=geom_dtype)
 
         # Expand dimensions for broadcasting
-        bmu_coords_expanded = ops.reshape(
-            bmu_coords, [ops.shape(inputs)[0]] + [1] * self.grid_dim + [self.grid_dim]
+        bmu_coords_expanded = keras.ops.reshape(
+            bmu_coords, [keras.ops.shape(inputs)[0]] + [1] * self.grid_dim + [self.grid_dim]
         )
-        grid_pos_expanded = ops.expand_dims(self.grid_positions, axis=0)
+        grid_pos_expanded = keras.ops.expand_dims(self.grid_positions, axis=0)
 
         # Compute neighborhood values for all neurons for each BMU in the batch
-        squared_dist_to_bmus = ops.sum(
-            ops.square(grid_pos_expanded - bmu_coords_expanded), axis=-1
+        squared_dist_to_bmus = keras.ops.sum(
+            keras.ops.square(grid_pos_expanded - bmu_coords_expanded), axis=-1
         )
 
         # Two neighbourhood shapes. 'gaussian' falls off smoothly; 'bubble' is
         # a hard 0/1 cut at current_sigma. __init__ allows nothing else, so the
         # else branch is 'bubble'.
         if self.neighborhood_function == 'gaussian':
-            neighborhood = ops.exp(-squared_dist_to_bmus / (2 * ops.square(current_sigma)))
+            neighborhood = keras.ops.exp(-squared_dist_to_bmus / (2 * keras.ops.square(current_sigma)))
         else:
-            dist_to_bmus = ops.sqrt(squared_dist_to_bmus)
-            neighborhood = ops.cast(dist_to_bmus <= current_sigma, geom_dtype)
+            dist_to_bmus = keras.ops.sqrt(squared_dist_to_bmus)
+            neighborhood = keras.ops.cast(dist_to_bmus <= current_sigma, geom_dtype)
 
         # Compute the weight update delta for each input
-        neighborhood_expanded = ops.expand_dims(neighborhood, axis=-1)
-        inputs_expanded = ops.reshape(
-            inputs, [ops.shape(inputs)[0]] + [1] * self.grid_dim + [self.input_dim]
+        neighborhood_expanded = keras.ops.expand_dims(neighborhood, axis=-1)
+        inputs_expanded = keras.ops.reshape(
+            inputs, [keras.ops.shape(inputs)[0]] + [1] * self.grid_dim + [self.input_dim]
         )
-        weights_map = ops.cast(self.weights_map, geom_dtype)
+        weights_map = keras.ops.cast(self.weights_map, geom_dtype)
         delta_per_input = neighborhood_expanded * (
-            inputs_expanded - ops.expand_dims(weights_map, 0))
+            inputs_expanded - keras.ops.expand_dims(weights_map, 0))
 
         # AVERAGE the deltas over the batch, then apply the learning rate.
         #
@@ -519,7 +518,7 @@ class SOMLayer(keras.layers.Layer):
         # which for B=32 and eta=0.1 exceeds 1 for any neuron near several
         # BMUs; the update then overshoots past the inputs and oscillates.
         # Averaging bounds the coefficient by eta at any batch size.
-        weight_update = current_learning_rate * ops.mean(delta_per_input, axis=0)
+        weight_update = current_learning_rate * keras.ops.mean(delta_per_input, axis=0)
         self.weights_map.assign_add(weight_update)
 
     def get_weights_map(self) -> keras.KerasTensor:

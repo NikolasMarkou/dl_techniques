@@ -93,7 +93,6 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Tuple, Optional, Union, Dict, Any
 
 # ---------------------------------------------------------------------
@@ -394,11 +393,11 @@ class SoftSOMLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Create coordinate ranges for each dimension
-        coord_ranges = [ops.cast(ops.arange(d), "float32") for d in self.grid_shape]
+        coord_ranges = [keras.ops.cast(keras.ops.arange(d), "float32") for d in self.grid_shape]
 
         # Create meshgrid and stack into position tensor
-        mesh_coords = ops.meshgrid(*coord_ranges, indexing='ij')
-        position_grid = ops.stack(mesh_coords, axis=-1)
+        mesh_coords = keras.ops.meshgrid(*coord_ranges, indexing='ij')
+        position_grid = keras.ops.stack(mesh_coords, axis=-1)
 
         return position_grid
 
@@ -471,14 +470,14 @@ class SoftSOMLayer(keras.layers.Layer):
         # Expand inputs to broadcast with weights_map
         expanded_inputs = inputs
         for _ in range(self.grid_dim):
-            expanded_inputs = ops.expand_dims(expanded_inputs, axis=1)
+            expanded_inputs = keras.ops.expand_dims(expanded_inputs, axis=1)
 
         # Expand weights for broadcasting
-        expanded_weights = ops.expand_dims(self.weights_map, axis=0)
+        expanded_weights = keras.ops.expand_dims(self.weights_map, axis=0)
 
         # Compute squared distances: (batch_size, *grid_shape)
-        squared_distances = ops.sum(
-            ops.square(expanded_inputs - expanded_weights),
+        squared_distances = keras.ops.sum(
+            keras.ops.square(expanded_inputs - expanded_weights),
             axis=-1
         )
 
@@ -514,7 +513,7 @@ class SoftSOMLayer(keras.layers.Layer):
             spatial_axis = dim_idx + 1
 
             # Apply softmax with negative distances (closer = higher probability)
-            dim_softmax = ops.softmax(-distances / self.temperature, axis=spatial_axis)
+            dim_softmax = keras.ops.softmax(-distances / self.temperature, axis=spatial_axis)
             dim_softmaxes.append(dim_softmax)
 
         # Combine dimension-wise softmaxes multiplicatively
@@ -524,7 +523,7 @@ class SoftSOMLayer(keras.layers.Layer):
 
         # Normalize to ensure probabilities sum to 1 across spatial dimensions
         spatial_axes = list(range(1, self.grid_dim + 1))
-        total = ops.sum(combined, axis=spatial_axes, keepdims=True)
+        total = keras.ops.sum(combined, axis=spatial_axes, keepdims=True)
         combined = combined / (total + 1e-8)
 
         return combined, dim_softmaxes
@@ -544,14 +543,14 @@ class SoftSOMLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Flatten spatial dimensions for global softmax
-        batch_size = ops.shape(distances)[0]
-        flat_distances = ops.reshape(distances, (batch_size, -1))
+        batch_size = keras.ops.shape(distances)[0]
+        flat_distances = keras.ops.reshape(distances, (batch_size, -1))
 
         # Apply global softmax over all neurons
-        flat_softmax = ops.softmax(-flat_distances / self.temperature, axis=1)
+        flat_softmax = keras.ops.softmax(-flat_distances / self.temperature, axis=1)
 
         # Reshape back to original grid shape
-        return ops.reshape(flat_softmax, (batch_size,) + self.grid_shape)
+        return keras.ops.reshape(flat_softmax, (batch_size,) + self.grid_shape)
 
     def _soft_reconstruction(self, soft_assignments: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -569,17 +568,17 @@ class SoftSOMLayer(keras.layers.Layer):
         # weights_map: (*grid_shape, input_dim)
 
         # Expand assignments for element-wise multiplication
-        expanded_assignments = ops.expand_dims(soft_assignments, axis=-1)
+        expanded_assignments = keras.ops.expand_dims(soft_assignments, axis=-1)
 
         # Expand weights for broadcasting
-        expanded_weights = ops.expand_dims(self.weights_map, axis=0)
+        expanded_weights = keras.ops.expand_dims(self.weights_map, axis=0)
 
         # Compute weighted prototype vectors
         weighted_neurons = expanded_assignments * expanded_weights
 
         # Sum over all spatial dimensions to get reconstruction
         spatial_axes = list(range(1, self.grid_dim + 1))
-        reconstruction = ops.sum(weighted_neurons, axis=spatial_axes)
+        reconstruction = keras.ops.sum(weighted_neurons, axis=spatial_axes)
 
         return reconstruction
 
@@ -601,7 +600,7 @@ class SoftSOMLayer(keras.layers.Layer):
         :return: Scalar MSE, averaged over batch and features.
         :rtype: keras.KerasTensor
         """
-        mse_loss = ops.mean(ops.square(inputs - reconstruction))
+        mse_loss = keras.ops.mean(keras.ops.square(inputs - reconstruction))
         return mse_loss
 
     def _topological_loss(self, soft_assignments: keras.KerasTensor) -> keras.KerasTensor:
@@ -620,31 +619,31 @@ class SoftSOMLayer(keras.layers.Layer):
         :return: Scalar loss. Typically negative.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(soft_assignments)[0]
+        batch_size = keras.ops.shape(soft_assignments)[0]
 
         # Flatten grid positions and assignments for pairwise computations
-        total_neurons = ops.prod(ops.convert_to_tensor(self.grid_shape))
-        flat_positions = ops.reshape(self.grid_positions, (total_neurons, self.grid_dim))
-        flat_assignments = ops.reshape(soft_assignments, (batch_size, total_neurons))
+        total_neurons = keras.ops.prod(keras.ops.convert_to_tensor(self.grid_shape))
+        flat_positions = keras.ops.reshape(self.grid_positions, (total_neurons, self.grid_dim))
+        flat_assignments = keras.ops.reshape(soft_assignments, (batch_size, total_neurons))
 
         # Compute pairwise spatial distances between all grid positions
-        position_diff = ops.expand_dims(flat_positions, axis=1) - ops.expand_dims(flat_positions, axis=0)
-        position_distances = ops.sqrt(ops.sum(ops.square(position_diff), axis=-1) + 1e-8)
+        position_diff = keras.ops.expand_dims(flat_positions, axis=1) - keras.ops.expand_dims(flat_positions, axis=0)
+        position_distances = keras.ops.sqrt(keras.ops.sum(keras.ops.square(position_diff), axis=-1) + 1e-8)
 
         # Create neighborhood weights (exponential decay with distance).
         # NOTE: scaling controlled by `topological_sigma` (default 1.0 preserves
         # legacy `exp(-d)` behavior numerically).
-        neighborhood_weights = ops.exp(-position_distances / self.topological_sigma)
+        neighborhood_weights = keras.ops.exp(-position_distances / self.topological_sigma)
 
         # Compute activation correlations between neurons across batch
-        normalized_assignments = flat_assignments - ops.mean(flat_assignments, axis=0, keepdims=True)
-        assignment_correlations = ops.matmul(
-            ops.transpose(normalized_assignments),
+        normalized_assignments = flat_assignments - keras.ops.mean(flat_assignments, axis=0, keepdims=True)
+        assignment_correlations = keras.ops.matmul(
+            keras.ops.transpose(normalized_assignments),
             normalized_assignments
-        ) / ops.cast(ops.maximum(batch_size - 1, 1), "float32")
+        ) / keras.ops.cast(keras.ops.maximum(batch_size - 1, 1), "float32")
 
         # Topological loss: promote correlation between spatially close neurons
-        topo_loss = -ops.mean(neighborhood_weights * assignment_correlations)
+        topo_loss = -keras.ops.mean(neighborhood_weights * assignment_correlations)
 
         return topo_loss
 
@@ -668,7 +667,7 @@ class SoftSOMLayer(keras.layers.Layer):
         :return: Scalar mean entropy across the grid axes.
         :rtype: keras.KerasTensor
         """
-        total_entropy = ops.convert_to_tensor(0.0, dtype="float32")
+        total_entropy = keras.ops.convert_to_tensor(0.0, dtype="float32")
 
         for dim_idx, softmax_tensor in enumerate(dim_softmaxes):
             # The spatial axis along which softmax was computed
@@ -676,11 +675,11 @@ class SoftSOMLayer(keras.layers.Layer):
 
             # Compute entropy: H(p) = -Σ(p * log(p))
             # Add small epsilon for numerical stability
-            log_probs = ops.log(softmax_tensor + 1e-9)
-            entropy = -ops.sum(softmax_tensor * log_probs, axis=spatial_axis)
+            log_probs = keras.ops.log(softmax_tensor + 1e-9)
+            entropy = -keras.ops.sum(softmax_tensor * log_probs, axis=spatial_axis)
 
             # Average entropy across batch and remaining spatial dimensions
-            total_entropy += ops.mean(entropy)
+            total_entropy += keras.ops.mean(entropy)
 
         # Return average entropy across all spatial dimensions
         return total_entropy / len(dim_softmaxes)
