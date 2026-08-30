@@ -2343,6 +2343,11 @@ def create_ntm(
     shift_range: int = 3,
     return_sequences: bool = True,
     return_state: bool = False,
+    # DECISION plan-2026-08-30T063229-ccd6ad17/D-015
+    # These four are appended LAST, not grouped with the other config
+    # arguments. Do NOT reorder them to mirror NTMConfig's field order: the
+    # first 10 parameters are positional-call compatible and moving them
+    # silently re-maps every existing positional call. See decisions.md D-015.
     addressing_mode: AddressingMode = AddressingMode.HYBRID,
     use_memory_init: bool = True,
     memory_init_seed: int = 42,
