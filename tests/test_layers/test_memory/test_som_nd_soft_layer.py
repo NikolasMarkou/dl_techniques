@@ -1094,3 +1094,77 @@ class TestUnsatisfiableSharpnessWeight:
                 use_per_dimension_softmax=False,
                 sharpness_weight=-0.1,
             )
+
+
+class TestSoftSOMDefaultsAreFreshPerInstance:
+    """``kernel_regularizer`` must not be a single object shared by every layer.
+
+    It used to default to a LIVE ``keras.regularizers.L2(1e-5)`` evaluated once,
+    at import time, so every caller who omitted the argument received the SAME
+    object. The contract has two halves and both are load-bearing: the resolved
+    regularizers must be DISTINCT (the defect) and EQUIVALENT (a fix that
+    swapped in a different class would satisfy distinctness alone). The class is
+    asserted by NAME, so a fix that resolves the sentinel after
+    ``keras.regularizers.get(...)`` -- which returns ``None`` -- cannot pass
+    vacuously with ``NoneType`` on both sides.
+    """
+
+    @staticmethod
+    def _two_layers():
+        """Two independently constructed layers, both omitting the argument."""
+        return (
+            SoftSOMLayer(grid_shape=(4, 3), input_dim=5),
+            SoftSOMLayer(grid_shape=(4, 3), input_dim=5),
+        )
+
+    def test_kernel_regularizer_is_a_fresh_object_per_instance(self):
+        """Two default-constructed layers hold DISTINCT kernel regularizers."""
+        a, b = self._two_layers()
+
+        assert a.kernel_regularizer is not None
+        assert type(a.kernel_regularizer).__name__ == 'L2'
+        assert a.kernel_regularizer is not b.kernel_regularizer
+
+    def test_kernel_regularizer_default_is_equivalent_across_instances(self):
+        """Distinct, but the SAME class and the SAME serialized configuration."""
+        a, b = self._two_layers()
+
+        assert type(a.kernel_regularizer) is type(b.kernel_regularizer)
+        assert (
+            keras.regularizers.serialize(a.kernel_regularizer)
+            == keras.regularizers.serialize(b.kernel_regularizer)
+        )
+        assert (
+            keras.regularizers.serialize(a.kernel_regularizer)['config']['l2']
+            == pytest.approx(1e-5)
+        )
+
+    def test_get_config_emits_the_resolved_object_not_the_sentinel(self):
+        """``get_config()`` must serialize the RESOLVED default, never ``None``."""
+        config = SoftSOMLayer(grid_shape=(4, 3), input_dim=5).get_config()
+
+        assert config['kernel_regularizer'] is not None
+        assert config['kernel_regularizer']['class_name'] == 'L2'
+        assert config['kernel_regularizer']['config']['l2'] == pytest.approx(1e-5)
+
+    def test_from_config_reconstructs_the_same_class(self):
+        """A round trip through ``from_config`` keeps the class and the config."""
+        original = SoftSOMLayer(grid_shape=(4, 3), input_dim=5)
+        restored = SoftSOMLayer.from_config(original.get_config())
+
+        assert type(restored.kernel_regularizer) is type(original.kernel_regularizer)
+        assert (
+            keras.regularizers.serialize(restored.kernel_regularizer)
+            == keras.regularizers.serialize(original.kernel_regularizer)
+        )
+
+    def test_an_explicit_none_kernel_regularizer_still_means_no_regularizer(self):
+        """CONTROL: green both before and after the fix; NOT counted among the REDs.
+
+        ``kernel_regularizer`` is ``Optional[...]``, so ``None`` is a legal value
+        today meaning "no regularizer at all". It is why this parameter takes a
+        module-level sentinel rather than plain ``None``.
+        """
+        layer = SoftSOMLayer(grid_shape=(4, 3), input_dim=5, kernel_regularizer=None)
+
+        assert layer.kernel_regularizer is None

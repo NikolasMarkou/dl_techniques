@@ -103,6 +103,18 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+# module constants
+# ---------------------------------------------------------------------
+
+# Sentinel for ``SoftSOMLayer.kernel_regularizer``. That parameter is
+# ``Optional[...]``, so ``None`` is already a legal value meaning "no
+# regularizer at all"; plain ``None`` therefore cannot double as "argument
+# omitted" without silently handing a regularizer to a caller who asked for
+# none. Deliberately NOT imported from ``neuro_grid.py``: a sentinel shared
+# between two unrelated modules would be a coupling, not data.
+_KERNEL_REGULARIZER_DEFAULT: Any = object()  # unique; never an interned literal
+
+# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.memory.som_nd_soft_layer")
@@ -232,8 +244,11 @@ class SoftSOMLayer(keras.layers.Layer):
     :param kernel_initializer: Initializer for the prototype weight map.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer on the weight map. Defaults to
-        ``keras.regularizers.L2(1e-5)``, not None.
+    :param kernel_regularizer: Regularizer on the weight map. The rendered
+        signature default is a sentinel, not the effective value: omitting the
+        argument builds a fresh ``keras.regularizers.L2(1e-5)``, so two layers
+        never share one, while passing ``None`` explicitly still means no
+        regularizer at all.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Forwarded to ``keras.layers.Layer.__init__``.
     :type kwargs: Any
@@ -262,7 +277,7 @@ class SoftSOMLayer(keras.layers.Layer):
         topological_sigma: float = 1.0,
         sharpness_weight: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = _KERNEL_REGULARIZER_DEFAULT,
         **kwargs: Any
     ) -> None:
         """
@@ -327,6 +342,14 @@ class SoftSOMLayer(keras.layers.Layer):
         self.topological_weight = topological_weight
         self.topological_sigma = topological_sigma
         self.sharpness_weight = sharpness_weight
+
+        # DECISION plan-2026-08-30T063229-ccd6ad17/D-019
+        # Resolve BEFORE the keras.regularizers.get(...) call below. Do NOT move
+        # this after it: get(None) returns None, so the weight map would
+        # silently lose its regularizer while an `is not` guard passed.
+        # See decisions.md D-019.
+        if kernel_regularizer is _KERNEL_REGULARIZER_DEFAULT:
+            kernel_regularizer = keras.regularizers.L2(1e-5)
 
         # Store initializers and regularizers for serialization
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
