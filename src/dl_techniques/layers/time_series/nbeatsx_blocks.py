@@ -145,9 +145,11 @@ class ExogenousBlock(NBeatsBlock):
         ``block(x)``. Calling it without covariates raises ValueError.
 
     Note:
-        Two things differ from the parent and are measured, not assumed.
-        The copied dense stack applies RMSNorm but skips the parent's
-        Dropout layers, so ``dropout_rate`` has no effect here. The final
+        The dense stack is copied from the parent rather than delegated to,
+        because the exogenous basis must be built before theta is projected.
+        It applies the same RMSNorm AND the same four Dropout layers as the
+        parent, in the same order, so ``dropout_rate`` behaves identically
+        here. One thing still differs, measured and not assumed: the final
         reshape multiplies the length by a literal 1, so the outputs stay
         single-channel even when ``input_dim`` or ``output_dim`` is larger
         than 1.
@@ -257,12 +259,20 @@ class ExogenousBlock(NBeatsBlock):
 
         x = self.dense1(inputs, training=training)
         if self.use_normalization: x = self.norm1(x)
+        if self.dropout_rate > 0:
+            x = self.dropout1(x, training=training)
         x = self.dense2(x, training=training)
         if self.use_normalization: x = self.norm2(x)
+        if self.dropout_rate > 0:
+            x = self.dropout2(x, training=training)
         x = self.dense3(x, training=training)
         if self.use_normalization: x = self.norm3(x)
+        if self.dropout_rate > 0:
+            x = self.dropout3(x, training=training)
         x = self.dense4(x, training=training)
         if self.use_normalization: x = self.norm4(x)
+        if self.dropout_rate > 0:
+            x = self.dropout4(x, training=training)
 
         # 2. Generate Theta Coefficients (Weights for the Basis)
         # -----------------------------------------------------------
