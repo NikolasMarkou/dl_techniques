@@ -18,9 +18,10 @@ That is the study's central result and it is robust.
 
 **2. Most of the original margin was configuration, not architecture.** The
 transformer's deficit against the best arm was first reported as **1.9275 nats**.
-Repair its positional encoding and shorten its context — two config changes, no
-architecture change — and it is **0.2937**. Roughly **85% of the headline gap was
-a misconfigured baseline.** The defensible claim is ~0.3 nats, not ~1.9.
+Repair its positional encoding **or** shorten its context — either alone
+recovers most of it — and with both it is **0.2937**. Roughly **85% of the
+headline gap was a misconfigured baseline.** The defensible claim is ~0.3 nats,
+not ~1.9.
 
 **3. The two model families want opposite settings, so no fixed setting is
 neutral.** The transformer is best at 64 context + sinusoidal positions on *both*
@@ -42,7 +43,7 @@ on 9 of 9 cells, with no retraining.
 | Run 2a | 512 | learned | 28 | complete (the original full study) |
 | Run 2b | 512 | sinusoidal | 28 | complete |
 | Run 3 | 64 | sinusoidal | 28 | complete |
-| Run 4 | 64 | learned | 28 | **running** — completes the 2x2 |
+| Run 4 | 64 | learned | 28 | **running** — `ascii_bert` arm complete (n=7), conv arms pending |
 
 Runs 2-4 are 4 arms x 7 seeds at `tiny`/`mean`, 6000 MLM + 2000 contrastive
 steps, `max_train_samples=60000`, and are paired cell-by-cell on
@@ -68,12 +69,12 @@ python -m train.embeddings_experimental.sweep \
 
 ## MLM validation loss (nats), mean ± sd over 7 seeds
 
-| arm | 512 / learned | 512 / sinusoidal | 64 / sinusoidal |
-|---|---:|---:|---:|
-| `ascii_bert` | 2.8248 ±0.008 | 1.6218 ±0.025 | **1.2999** ±0.012 |
-| `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 |
-| `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 |
-| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | 1.0061 ±0.008 |
+| arm | 512 / learned | 512 / sinusoidal | 64 / sinusoidal | 64 / learned |
+|---|---:|---:|---:|---:|
+| `ascii_bert` | 2.8248 ±0.008 | 1.6218 ±0.025 | **1.2999** ±0.012 | 1.4285 ±0.055 |
+| `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 | *pending* |
+| `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 | *pending* |
+| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | 1.0061 ±0.008 | *pending* |
 
 Reference points: a uniform guess over the 101-id vocabulary costs `ln(101)` =
 **4.615 nats**; predicting from character frequencies alone, with no context,
@@ -81,7 +82,45 @@ costs **3.1135 nats** (measured on the exact packed stream, 3,121,152 ids). The
 block ordering — `convnext_v2 < convnext < clifford < bert` — is **identical
 under all three configurations.**
 
-### Effect 1: positional encoding (paired, 512 context, n=7)
+### The two settings substitute for each other — they do not add
+
+Run 4 completes the transformer's 2x2, n=7 in every cell, and it corrects the
+account this file gave earlier.
+
+| `ascii_bert` | learned | sinusoidal |
+|---|---:|---:|
+| **512 context** | 2.8248 ±0.008 | 1.6218 ±0.025 |
+| **64 context** | **1.4285** ±0.055 | **1.2999** ±0.012 |
+
+| effect | applied alone | applied second |
+|---|---:|---:|
+| positions, learned → sinusoidal | **−1.2030** ±0.024 *(at 512)* | −0.1287 ±0.047 *(at 64)* |
+| context, 512 → 64 | **−1.3963** ±0.059 *(at learned)* | −0.3220 ±0.024 *(at sinusoidal)* |
+
+Each change is worth ~1.2–1.4 nats on its own and ~0.13–0.32 once the other is
+already in place. **Either one alone recovers most of the collapse**, and 64 +
+learned (1.4285) is in fact slightly better than 512 + sinusoidal (1.6218), so
+shortening the context is marginally the stronger single fix.
+
+> **Correction, 2026-08-30.** An earlier version of this section was titled *"The
+> two effects compound"* and reported the path 2.8248 → 1.6218 → 1.2999 as
+> "−1.52 nats from two configuration changes". The arithmetic was right and the
+> framing was wrong: it named the positional encoding as the defect and context
+> length as a secondary interaction, purely because they were found in that
+> order. **Neither is the cause.** The failure requires long context *and* a weak
+> positional signal together, and naming a primary one misleads.
+
+**The mechanism this implies.** Attention over `S` positions with a near-uniform
+softmax gives each neighbour ~`1/S` of the attended value. A positional signal
+that starts at the token signal's magnitude and then *shrinks* during training
+(row norm 0.1987 → 0.1612, while the word table grows to 0.3283) cannot overcome
+that dilution at `S` = 512. Cut the dilution (64 positions) **or** raise the
+positional signal (a sinusoidal table, ~40x larger) and attention becomes usable.
+Doing both adds little, because the first one already fixed it.
+
+### Both settings act on the arms in opposite directions
+
+Positional encoding, paired at 512 context, n=7:
 
 | arm | sinusoidal − learned |
 |---|---:|
@@ -90,13 +129,7 @@ under all three configurations.**
 | `ascii_convnext_bert` | +0.0719 ±0.021 |
 | `ascii_convnext_v2_bert` | +0.0782 ±0.019 |
 
-All 7 of 7 seeds agree in every arm. The transformer's effect is ~50x its own
-seed spread. The three convolutional arms each pay a small, near-identical price
-— they already have positional structure, and a sinusoidal table (mean row norm
-~9.3 against a learned table's ~0.2) dominates the embedding LayerNorm and
-compresses the token signal from 11.07 to 0.42.
-
-### Effect 2: context length (paired, sinusoidal, n=7)
+Context length, paired at sinusoidal, n=7:
 
 | arm | 64 − 512 |
 |---|---:|
@@ -105,22 +138,28 @@ compresses the token signal from 11.07 to 0.42.
 | `ascii_convnext_bert` | +0.0314 ±0.004 |
 | `ascii_convnext_v2_bert` | +0.0306 ±0.004 |
 
-**Context length is an interaction, not a main effect.** Shorter context helps
-only the transformer and mildly hurts all three convolutional arms — confirmed
-on 4/4 arms. A near-uniform softmax over `S` positions gives each neighbour
-~`1/S` of the attended value, so more positions means more dilution; a
-convolution has a fixed span, so extra context is just a little more material.
+All 7 of 7 seeds agree in every arm of both tables. **Every change that helps the
+transformer mildly hurts all three convolutional arms** — they already carry
+positional structure in the block, so a large sinusoidal table only compresses
+their token signal (11.07 → 0.42 through the embedding LayerNorm), and a fixed
+convolutional span means extra context is simply a little more material to model,
+not dilution.
 
-### The two effects compound
+That is why finding 3 in the TL;DR holds: there is no setting that is neutral.
 
-| `ascii_bert` | val loss |
+### The consequence for the study's central claim
+
+The transformer's deficit against the best convolutional arm:
+
+| configuration | deficit |
 |---|---:|
-| 512, learned — as originally reported | 2.8248 |
-| 512, sinusoidal | 1.6218 (−1.20) |
-| 64, sinusoidal | **1.2999** (−0.32 more) |
+| 512 + learned — as originally reported | **1.9275** |
+| 64 + sinusoidal | **0.2937** |
 
-**−1.52 nats from two configuration changes and no architecture change**, closing
-**85%** of the deficit against the best arm (1.9275 → 0.2937).
+**85% of the headline gap was a misconfigured baseline**, closed with two
+configuration changes and no architecture change. The convolutional arms still
+win — on all four configurations — but the defensible size of that claim is
+~0.3 nats, not ~1.9.
 
 ---
 
@@ -227,6 +266,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix — and R@1 does not move. Clifford also lost 10x with anisotropy slightly *improving*, and across arms the anisotropy rise is *anti-correlated* with the damage. |
 | **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes sinusoidal models **worse** (0.0040 → 0.0013). The content is genuinely absent there — though this hypothesis is *correct* for the learned-position conv arms, which is where the 3.3x came from. |
+| **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
 | **"A longer run could close or reverse it"** — Run 1's own explanation | Stated in this file's first version as "a statement about training speed at this budget". False: the arm had stopped moving. The convolutional prior is a real advantage, but it is not what produced Run 1's number. |
 
 ---
