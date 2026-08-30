@@ -1073,25 +1073,30 @@ class TestOddDimensionInvertibility:
     ) -> None:
         """The static half must land back in its original slots.
 
-        With reverse=True the entry rotation moves the static half to the
-        front; the exit rotation must put it back. The static half is
-        input_dim - split_dim wide and starts at index split_dim.
+        With reverse=True the entry rotation moves z[split_dim:2*split_dim] to
+        the front, so that slice is the untransformed half. The exit rotation
+        must put it back where it came from, leaving those columns of the
+        output equal to the same columns of the input.
         """
         layer, z, context = self._build_coupling(input_dim, True, seed=5)
         split_dim = layer.split_dim
+        static_slice = slice(split_dim, 2 * split_dim)
 
         y = layer.forward(z, context)
         z_np = keras.ops.convert_to_numpy(z)
         y_np = keras.ops.convert_to_numpy(y)
 
         np.testing.assert_allclose(
-            z_np[..., split_dim:], y_np[..., split_dim:],
+            z_np[..., static_slice], y_np[..., static_slice],
             rtol=1e-6, atol=1e-6,
             err_msg=(
-                "reverse=True must leave z[..., split_dim:] untouched in the "
-                "output ordering"
+                "reverse=True must return z[split_dim:2*split_dim] to its own "
+                "columns in the output"
             )
         )
+        assert not np.allclose(
+            z_np[..., :split_dim], y_np[..., :split_dim]
+        ), "the transformed columns must actually change"
 
     @pytest.mark.parametrize(
         "output_dimension,num_flow_steps",
