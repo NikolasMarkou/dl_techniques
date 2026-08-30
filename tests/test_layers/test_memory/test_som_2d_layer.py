@@ -374,11 +374,12 @@ class TestSOM2dLayer:
             # Generate prediction with loaded model
             loaded_prediction = loaded_model(small_input_tensor, training=False)
 
-            # Check predictions match within tolerance
+            # Check predictions match BIT-EXACTLY: a round trip restores
+            # weights by copy, so it is a restoration and not a computation.
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_prediction),
                 keras.ops.convert_to_numpy(loaded_prediction),
-                rtol=1e-5, atol=1e-5,
+                rtol=0.0, atol=0.0,
                 err_msg="Predictions should match after save/load cycle"
             )
 

@@ -142,8 +142,8 @@ class TestNeuroGrid:
         outputs = NeuroGrid(**basic_2d_config)(inputs)
         model = keras.Model(inputs, outputs)
 
-        # Get original prediction
-        original_pred = model(sample_2d_input)
+        # Get original prediction (inference path, explicitly)
+        original_pred = model(sample_2d_input, training=False)
 
         # Save and load
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -151,13 +151,14 @@ class TestNeuroGrid:
             model.save(filepath)
 
             loaded_model = keras.models.load_model(filepath)
-            loaded_pred = loaded_model(sample_2d_input)
+            loaded_pred = loaded_model(sample_2d_input, training=False)
 
-            # Verify identical predictions
+            # Verify BIT-IDENTICAL predictions: a round trip restores weights by
+            # copy, so it is a restoration and not a computation.
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_pred),
                 keras.ops.convert_to_numpy(loaded_pred),
-                rtol=1e-6, atol=1e-6,
+                rtol=0.0, atol=0.0,
                 err_msg="2D predictions differ after serialization"
             )
 
@@ -167,19 +168,19 @@ class TestNeuroGrid:
         outputs = NeuroGrid(**basic_3d_config)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original_pred = model(sample_3d_input)
+        original_pred = model(sample_3d_input, training=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = os.path.join(tmpdir, 'test_model_3d.keras')
             model.save(filepath)
 
             loaded_model = keras.models.load_model(filepath)
-            loaded_pred = loaded_model(sample_3d_input)
+            loaded_pred = loaded_model(sample_3d_input, training=False)
 
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_pred),
                 keras.ops.convert_to_numpy(loaded_pred),
-                rtol=1e-6, atol=1e-6,
+                rtol=0.0, atol=0.0,
                 err_msg="3D predictions differ after serialization"
             )
 

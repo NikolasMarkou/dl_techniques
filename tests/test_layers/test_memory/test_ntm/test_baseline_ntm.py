@@ -787,7 +787,7 @@ class TestNeuralTuringMachine:
 
         # Generate inputs
         input_data = keras.random.normal((2, 5, 16), seed=42)
-        output_before = model(input_data)
+        output_before = model(input_data, training=False)
 
         # Save and load
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -796,13 +796,15 @@ class TestNeuralTuringMachine:
 
             model_loaded = keras.models.load_model(model_path)
 
-        output_after = model_loaded(input_data)
+        output_after = model_loaded(input_data, training=False)
 
+        # BIT-EXACT: a round trip restores weights by copy, so it is a
+        # restoration and not a computation.
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(output_before),
             keras.ops.convert_to_numpy(output_after),
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=0.0,
+            atol=0.0,
             err_msg="Loaded model should produce same output",
         )
 

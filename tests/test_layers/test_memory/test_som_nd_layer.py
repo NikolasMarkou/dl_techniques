@@ -430,8 +430,10 @@ class TestSOMLayer:
 
         model = keras.Model(inputs=inputs, outputs=outputs)
 
-        # Generate predictions before saving
-        original_prediction = model.predict(input_data_2d[:8])
+        # Generate predictions before saving (inference path, explicitly)
+        original_prediction = keras.ops.convert_to_numpy(
+            model(input_data_2d[:8], training=False)
+        )
 
         # Create temporary directory for model
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -447,10 +449,17 @@ class TestSOMLayer:
             )
 
             # Generate prediction with loaded model
-            loaded_prediction = loaded_model.predict(input_data_2d[:8])
+            loaded_prediction = keras.ops.convert_to_numpy(
+                loaded_model(input_data_2d[:8], training=False)
+            )
 
-            # Check predictions match
-            assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
+            # Check predictions match BIT-EXACTLY: a round trip restores
+            # weights by copy, so it is a restoration and not a computation.
+            np.testing.assert_allclose(
+                original_prediction, loaded_prediction,
+                rtol=0.0, atol=0.0,
+                err_msg="Predictions should match after save/load cycle"
+            )
 
             # Check layer type is preserved
             som_layer = loaded_model.get_layer("som_layer")

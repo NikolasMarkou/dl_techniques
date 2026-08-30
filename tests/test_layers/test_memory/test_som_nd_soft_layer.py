@@ -851,8 +851,10 @@ class TestSoftSOMLayer:
         outputs = keras.layers.Dense(1, activation='sigmoid')(reconstruction)
         model = keras.Model(inputs=inputs, outputs=outputs)
 
-        # Generate predictions before saving
-        original_prediction = model.predict(input_data_2d[:8], verbose=0)
+        # Generate predictions before saving (inference path, explicitly)
+        original_prediction = keras.ops.convert_to_numpy(
+            model(input_data_2d[:8], training=False)
+        )
 
         # Create temporary directory for model
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -865,12 +867,15 @@ class TestSoftSOMLayer:
             loaded_model = keras.models.load_model(model_path)
 
             # Generate prediction with loaded model
-            loaded_prediction = loaded_model.predict(input_data_2d[:8], verbose=0)
+            loaded_prediction = keras.ops.convert_to_numpy(
+                loaded_model(input_data_2d[:8], training=False)
+            )
 
-            # Check predictions match (allowing for small numerical differences)
+            # Check predictions match BIT-EXACTLY: a round trip restores
+            # weights by copy, so it is a restoration and not a computation.
             np.testing.assert_allclose(
                 original_prediction, loaded_prediction,
-                rtol=1e-5, atol=1e-5,
+                rtol=0.0, atol=0.0,
                 err_msg="Predictions should match after serialization"
             )
 
