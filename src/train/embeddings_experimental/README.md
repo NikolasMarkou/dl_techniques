@@ -22,33 +22,65 @@ sweep.py                 the grid driver, one subprocess per cell
 report.py                aggregation -> summary.md + CSVs
 ```
 
-## One setting you should not change casually
+## Two settings that decide the answer, not just the run
 
-`ExperimentConfig.position_embedding_type` defaults to **`'sinusoidal'`**, not
-to the encoder's own `'learned'`. It is a config field rather than an inherited
-default precisely so that it lands in every run's `config.json`.
+`position_embedding_type` and `max_seq_length` are not neutral knobs here. Each
+changes the four-arm comparison by more than the differences the study exists to
+measure, and they act in **opposite directions on different arms** — so there is
+no setting that is fair to everyone. Pick deliberately, record the pick, and
+report it. Full numbers in [`RESULTS.md`](RESULTS.md).
+
+### `position_embedding_type`
+
+`ExperimentConfig` defaults to `'sinusoidal'`, overriding the encoder's own
+`'learned'`. It is a config field rather than an inherited default precisely so
+that it lands in every run's `config.json`.
 
 A learned table is initialized at `initializer_range=0.02`, which puts it at
 essentially the word table's norm (0.1985 against 0.1987) — and training then
-*abandons* it, shrinking it to 0.1612 over 3000 steps while the word table grows
-to 0.3283. The transformer arm could not bootstrap position-dependent attention
-from that and converged to a **bag of characters**: reordering its entire
-context moved the output by 0.83% of activation scale while replacing the
-context moved 52.58%. Switching this one field bought **0.85 nats** at 256
-context.
+*abandons* it, shrinking it to 0.1612 while the word table grows to 0.3283. The
+transformer arm could not bootstrap position-dependent attention from that and
+converged to a **bag of characters**: reordering its whole context moved the
+output 0.83% of activation scale, replacing the context moved 52.58%.
 
-**It is not a free win for every arm.** Measured at 256 context, 3000 steps:
-`ascii_bert` −0.85 nats, `ascii_clifford_bert` **+0.14** (worse). The
-convolutional blocks already have positional structure, and a sinusoidal signal
-large enough to dominate LayerNorm compresses their token signal. The study
-holds one setting across all arms deliberately — the design compares *blocks*
-under one encoder — so this is a cost the comparison pays knowingly, and it is
-reported rather than tuned away.
+| effect of switching to sinusoidal, 512 context, n=7 | |
+|---|---:|
+| `ascii_bert` MLM | **−1.2030 nats** |
+| the three convolutional arms, MLM | +0.07 to +0.11 |
+| every arm's SQuAD recall@1 | **1.3x to 10x worse** |
+
+So it buys a large amount of the pretraining objective and sells a large amount
+of the downstream embedding quality. **The retrieval penalty is a long-context
+effect**: at `max_seq_length=64` it nearly vanishes, and `ascii_bert` reaches its
+best retrieval of any configuration measured.
+
+### `max_seq_length`
+
+Context length is an **interaction**. Going 512 → 64 at matched tokens per step
+helps only the transformer (**−0.3220** nats) and mildly hurts all three
+convolutional arms (+0.017 to +0.031) — attention dilutes a near-uniform softmax
+over every position, while a convolution has a fixed span.
+
+If you change it, hold **tokens per step** constant (`mlm_batch_size x
+max_seq_length`), or you cannot tell "shorter context helps" from "less training
+hurts".
+
+### Report retrieval whitened as well as raw
+
+Raw cosine understates these encoders by **~3.3x**. ZCA whitening lifts the
+learned-position convolutional arms from R@1 ~0.060 to ~0.21 on 9 of 9 cells,
+needs no retraining, and survives being fitted on an unrelated corpus. The
+harness does **not** currently compute it — `eval.json` is raw cosine only — so
+any retrieval claim taken from it is a lower bound, and the whitened ordering is
+not the same as the raw one.
+
+### The guard
 
 `tests/test_train/test_embeddings_experimental/test_the_positional_signal_survives_the_embedding_sum.py`
-pins both directions. Read its docstring before moving the threshold: the
-obvious oracle (reorder-vs-replace) is decisive on a trained model and **blind
-at initialization**, which is why the guard measures signal magnitude instead.
+pins the positional signal in both directions. Read its docstring before moving
+the threshold: the obvious oracle (reorder-vs-replace) is decisive on a *trained*
+model and **blind at initialization** — 0.0806 learned against 0.0925 sinusoidal
+— which is why the guard measures signal magnitude instead.
 
 ## What is measured
 
@@ -439,18 +471,34 @@ for m in (1, 3, 18):
 CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m train.embeddings_experimental.train_embeddings \
     --model ascii_bert --variant small --pooling-strategy mean --gpu 0
 
-# the study (defaults: both arms x 3 pooling strategies x 6 seeds)
+# the study as actually run: 4 arms x 7 seeds = 28 cells, ~4.9 h on one 4090
 CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m train.embeddings_experimental.sweep \
-    --variants tiny --gpu 0
+    --variants tiny --pooling mean --seeds 0 1 2 3 4 5 6 --gpu 0 \
+    --sweep-root results/embeddings_study_512_sinusoidal \
+    --trainer-arg=--max-seq-length=512 \
+    --trainer-arg=--steps-per-epoch=6000 \
+    --trainer-arg=--contrastive-steps-per-epoch=2000 \
+    --trainer-arg=--max-train-samples=60000 \
+    --trainer-arg=--position-embedding-type=sinusoidal
 
-# the report
-.venv/bin/python -m train.embeddings_experimental.report --in-dir results/embeddings_study
+# the report (the sweep does NOT run it for you)
+.venv/bin/python -m train.embeddings_experimental.report --in-dir results/embeddings_study_512_sinusoidal
 ```
+
+Bare `sweep.py` defaults to every registered arm x 3 pooling strategies x 7
+seeds, which is 84 cells and about 15 hours — pass `--pooling` and `--variants`
+explicitly unless that is what you want. Each cell is a subprocess, and
+**`cell.log` is only written when that subprocess exits**, so a running cell is
+invisible; watch the sweep log or count `results.json` files instead.
+
+A sweep at this length must survive its launching shell. Under an agent harness
+that reaps the process group, use `setsid nohup ... &` — a plain background job
+was killed after one cell and reported exit code 0 while having done nothing.
 
 `--dry-run` prints the grid and exits, which is the cheap way to check a cell
 budget before spending GPU hours.
 
-## Three things worth knowing before changing anything here
+## Things worth knowing before changing anything here
 
 **Stage 1 is packed, not padded.** Every row is exactly `max_seq_length` real
 characters and the attention mask is all ones. This is not a throughput

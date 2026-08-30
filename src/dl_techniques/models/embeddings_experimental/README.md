@@ -43,7 +43,7 @@ At `max_position_embeddings=128`, ASCII vocabulary (101 ids):
 and width-matched, not parameter-matched, which is why the study reports the
 parameter column beside every result.
 
-## Two caveats that decide how the study must be run
+## Three caveats that decide how the study must be run
 
 **1. Padding is not neutral for the Clifford arm.** `CliffordNetBlock` sets
 `supports_masking = False`. Three separate facts, each measured and each pinned
@@ -97,6 +97,24 @@ so matching them on `kernel_size` does not match them on span — the Clifford
 span is `2 * convnext - 1`. At the Clifford layer's default `K=3` a 4-block
 stack sees **17 characters**. Both arms therefore default to `K=7`, and both
 warn when the span is shorter than `max_position_embeddings`.
+
+**3. The encoder's positional default is not the study's.** `EmbeddingEncoder`
+defaults to `position_embedding_type='learned'`; the study overrides it. This is
+not cosmetic — a learned table starts at essentially the word table's norm
+(0.1985 against 0.1987) and is *abandoned* during training, shrinking to 0.1612
+while the word table grows to 0.3283. `ascii_bert` cannot bootstrap
+position-dependent attention from that and converges to a bag of characters:
+reordering its whole context moves the output 0.83% of activation scale while
+replacing the context moves 52.58%.
+
+The three attention-free arms are far less sensitive, because their blocks carry
+positional structure in the architecture rather than in the embedding. That
+asymmetry is the point: **switching to sinusoidal is worth −1.20 nats to
+`ascii_bert` and costs the convolutional arms +0.07 to +0.11.** It also interacts
+with `max_seq_length`, and it moves retrieval and language-modelling quality in
+opposite directions. Any comparison across these arms must state which setting it
+used. The numbers are in
+[`RESULTS.md`](../../../train/embeddings_experimental/RESULTS.md).
 
 ## Usage
 
