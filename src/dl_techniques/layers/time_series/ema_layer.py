@@ -51,11 +51,11 @@ class ExponentialMovingAverage(keras.layers.Layer):
     .. code-block:: text
 
         Input: x [B, T] or [B, T, F]
-                       │
+                        │
                        ▼
-        ┌──────────────────────────────────┐
-        │ rank 2 → expand to [B, T, 1]     │
-        └────────────────┬─────────────────┘
+        ┌───────────────────────────────────┐
+        │ rank 2 → expand to [B, T, 1]      │
+        └────────────────┬──────────────────┘
                          │
                          ├─► T == 1: return input unchanged
                          ▼
@@ -65,15 +65,15 @@ class ExponentialMovingAverage(keras.layers.Layer):
         └────────────────┬─────────────────┘
                          │ carry [B, F]
                          ▼
-        ┌──────────────────────────────────┐
-        │ ops.scan over t = 1 .. T-1       │
-        │   c     = α·x_t + (1-α)·EMA_{t-1}│
-        │   w_t   = 1 - (1-α)^(t+1)        │
-        │   EMA_t = c / w_t   (adjust)     │
-        │   EMA_t = c         (else)       │
-        │ EMA_t is the carry, so a divided │
-        │ value feeds the next step        │
-        └────────────────┬─────────────────┘
+        ┌───────────────────────────────────┐
+        │ ops.scan over t = 1 .. T-1        │
+        │   c     = α·x_t + (1-α)·EMA_{t-1} │
+        │   w_t   = 1 - (1-α)^(t+1)         │
+        │   EMA_t = c / w_t   (adjust)      │
+        │   EMA_t = c         (else)        │
+        │ EMA_t is the carry, so a divided  │
+        │ value feeds the next step         │
+        └────────────────┬──────────────────┘
                          │ [T-1, B, F]
                          ▼
         ┌──────────────────────────────────┐

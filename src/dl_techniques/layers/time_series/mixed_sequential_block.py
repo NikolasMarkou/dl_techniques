@@ -99,7 +99,7 @@ class MixedSequentialBlock(keras.layers.Layer):
 
         Input x  [B, T, embed_dim]
                           │
-                     block_type
+                          │  switch on block_type
             ┌─────────────┼─────────────┐
             ▼             ▼             ▼
          'lstm'     'transformer'    'mixed'

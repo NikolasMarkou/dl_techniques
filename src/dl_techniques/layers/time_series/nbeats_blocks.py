@@ -499,10 +499,10 @@ class GenericBlock(NBeatsBlock):
         Input: (batch, backcast_length * input_dim)
                           │
                           ▼
-             ┌────────────────────────┐
-             │ NBeatsBlock base       │
-             │ 4 Dense + 2 theta heads│
-             └───────────┬────────────┘
+             ┌─────────────────────────┐
+             │ NBeatsBlock base        │
+             │ 4 Dense + 2 theta heads │
+             └───────────┬─────────────┘
              ┌───────────┴────────────┐
              ▼                        ▼
         theta_backcast           theta_forecast
@@ -668,10 +668,10 @@ class TrendBlock(NBeatsBlock):
         Input: (batch, backcast_length * input_dim)
                           │
                           ▼
-             ┌────────────────────────┐
-             │ NBeatsBlock base       │
-             │ 4 Dense + 2 theta heads│
-             └───────────┬────────────┘
+             ┌─────────────────────────┐
+             │ NBeatsBlock base        │
+             │ 4 Dense + 2 theta heads │
+             └───────────┬─────────────┘
              ┌───────────┴────────────┐
              ▼                        ▼
         theta_backcast           theta_forecast
@@ -915,10 +915,10 @@ class SeasonalityBlock(NBeatsBlock):
         Input: (batch, backcast_length * input_dim)
                           │
                           ▼
-             ┌────────────────────────┐
-             │ NBeatsBlock base       │
-             │ 4 Dense + 2 theta heads│
-             └───────────┬────────────┘
+             ┌─────────────────────────┐
+             │ NBeatsBlock base        │
+             │ 4 Dense + 2 theta heads │
+             └───────────┬─────────────┘
              ┌───────────┴────────────┐
              ▼                        ▼
         theta_backcast           theta_forecast

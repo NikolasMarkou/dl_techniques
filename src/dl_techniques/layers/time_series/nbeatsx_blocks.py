@@ -76,11 +76,11 @@ class ExogenousBlock(NBeatsBlock):
                 │                 x_fore [B, F_len, E]
                 ▼                          │
         ┌───────────────┐                  ▼
-        │ Dense1..Dense4│         ┌──────────────────┐
-        │ + RMSNorm opt │         │ concat on time   │
-        │ (NBeatsBlock  │         │ [B, T, E]        │
-        │  spine)       │         │ T = B_len+F_len  │
-        └───────┬───────┘         └────────┬─────────┘
+        │ Dense1-Dense4 │         ┌───────────────────┐
+        │ + RMSNorm opt │         │ concat on time    │
+        │ (NBeatsBlock  │         │ [B, T, E]         │
+        │  spine)       │         │ T = B_len+F_len   │
+        └───────┬───────┘         └────────┬──────────┘
                 │ [B, units]               ▼
                 │                 ┌──────────────────┐
                 │                 │ TCN encoder      │
