@@ -110,10 +110,22 @@ class TestDeepKernelPCA:
     # compute_output_shape gating
     # -----------------------------------------------------------------
 
-    def test_compute_output_shape_before_build_raises(self):
-        layer = DeepKernelPCA(num_levels=3, components_per_level=None)
-        with pytest.raises(ValueError, match="requires the layer to be built"):
-            layer.compute_output_shape((None, 8))
+    def test_compute_output_shape_before_build_matches_after_build(self):
+        """Unbuilt and built must agree, on the adaptive path too.
+
+        This test used to assert the opposite -- that an unbuilt
+        ``compute_output_shape`` RAISES. That pinned a §3.4 violation as if it
+        were the contract. The component counts now come from one pure helper
+        that ``build`` and ``compute_output_shape`` share, so there is nothing
+        left for a build to resolve.
+        """
+        unbuilt = DeepKernelPCA(num_levels=3, components_per_level=None)
+        predicted = unbuilt.compute_output_shape((None, 8))
+        assert not unbuilt.built
+
+        built = DeepKernelPCA(num_levels=3, components_per_level=None)
+        built.build((None, 8))
+        assert predicted == built.compute_output_shape((None, 8))
 
     def test_compute_output_shape_after_build(self, basic_layer, batch_size, input_dim):
         basic_layer.build((batch_size, input_dim))

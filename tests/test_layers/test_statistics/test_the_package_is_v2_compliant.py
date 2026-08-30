@@ -151,14 +151,21 @@ class TestTheScalerCanInvertAfterItHasBeenTraced:
 class TestDeepKernelPcaComputesItsOutputShapeUnbuilt:
     """§3.4 / Pitfall 14: ``compute_output_shape`` must work from stored config.
 
-    ``deep_kernel_pca.py:1151`` raises unless ``self.built``. 8 of the package's 9
-    classes already satisfy this; this is the only failure.
+    ``deep_kernel_pca.py`` raised unless ``self.built``. 8 of the package's 9
+    classes already satisfy this; this was the only failure.
     """
 
     INPUT_SHAPE = (None, 16)
 
+    # [8, 4], not [3, 2]. The layer's own anchored precondition (the dynamic
+    # slice projection_matrix[:batch_size, :]) requires feature_dim >= batch_size
+    # at EVERY level, and [3, 2] makes level 1's feature_dim 3 while the probe
+    # below runs a batch of 4. That is a property of the fixture, not of the
+    # claim under test, and it raised before the layer could produce a shape.
+    EXPLICIT = [8, 4]
+
     @pytest.mark.parametrize(
-        "components_per_level", [[3, 2], None], ids=["explicit", "adaptive"]
+        "components_per_level", [EXPLICIT, None], ids=["explicit", "adaptive"]
     )
     def test_compute_output_shape_works_before_build(self, components_per_level):
         layer = DeepKernelPCA(num_levels=2, components_per_level=components_per_level)
@@ -172,7 +179,7 @@ class TestDeepKernelPcaComputesItsOutputShapeUnbuilt:
         assert isinstance(shape[1], int) and shape[1] > 0
 
     @pytest.mark.parametrize(
-        "components_per_level", [[3, 2], None], ids=["explicit", "adaptive"]
+        "components_per_level", [EXPLICIT, None], ids=["explicit", "adaptive"]
     )
     def test_the_unbuilt_shape_equals_the_built_shape(self, components_per_level):
         """The real contract: the pre-build answer must be the post-build answer."""

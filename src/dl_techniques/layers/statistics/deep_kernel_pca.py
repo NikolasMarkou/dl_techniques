@@ -307,6 +307,12 @@ class DeepKernelPCA(keras.layers.Layer):
             raise ValueError(f"coupling_strength must be in [0, 1], got {coupling_strength}")
         if regularization_lambda < 0:
             raise ValueError(f"regularization_lambda must be non-negative, got {regularization_lambda}")
+        if components_per_level is not None and len(components_per_level) != num_levels:
+            raise ValueError(
+                f"components_per_level must have one entry per level: got "
+                f"{len(components_per_level)} entries ({components_per_level}) "
+                f"for num_levels={num_levels}"
+            )
 
         # Store configuration
         self.num_levels = num_levels
@@ -373,47 +379,78 @@ class DeepKernelPCA(keras.layers.Layer):
         self.train_kernel_rowmean = []
         self.train_kernel_allmean = []
 
+    @staticmethod
+    def _unwrap_input_shape(
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Unwrap a nested list-of-shapes into the single shape this layer takes.
+
+        The functional API may pass a LIST OF SHAPES for multi-input layers; this
+        layer is single-input, so unwrap only a true nested list-of-shapes. A
+        plain shape serialized as a list (e.g. ``[None, 8]``) must NOT be
+        unwrapped: its first element is an int or ``None``, not a shape.
+
+        :param input_shape: Shape tuple, possibly wrapped in a one-element list.
+        :type input_shape: tuple[int | None, ...]
+        :return: The unwrapped shape.
+        :rtype: tuple[int | None, ...]
+        """
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
+            return input_shape[0]
+        return input_shape
+
+    def _resolve_components_per_level(self, input_dim: int) -> List[int]:
+        """Resolve how many components each level extracts.
+
+        The single place this arithmetic lives. It is a pure function of
+        ``input_dim`` and the constructor arguments, which is what lets
+        ``compute_output_shape`` answer before ``build`` has run.
+
+        With an explicit ``components_per_level`` the answer is that list.
+        With ``None`` the sizes are derived adaptively, shrinking the dimension
+        by the golden ratio at each level and never dropping below 1.
+
+        :param input_dim: Size of the last input dimension.
+        :type input_dim: int
+        :return: One component count per level.
+        :rtype: list[int]
+        """
+        if self._components_per_level_init is not None:
+            return list(self._components_per_level_init)
+
+        components = []
+        current_dim = input_dim
+        for _ in range(self.num_levels):
+            # Use golden ratio for smooth reduction
+            next_dim = max(int(current_dim * 0.618), 1)
+            components.append(min(next_dim, current_dim))
+            current_dim = next_dim
+        return components
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create weights for multi-level kernel PCA.
 
         Also resolves ``components_per_level`` when it was left as "None", using
-        a golden-ratio reduction of ``input_dim`` at each level.
+        ``_resolve_components_per_level``.
 
         :param input_shape: Shape tuple of the input tensor. A nested
             list-of-shapes from the functional API is unwrapped.
         :type input_shape: tuple[int | None, ...]
         :return: Nothing.
         :rtype: None
-        :raises ValueError: if the last input dimension is undefined, if
-            ``components_per_level`` does not have ``num_levels`` entries, or if
-            a level asks for more components than it has dimensions.
+        :raises ValueError: if the last input dimension is undefined, or if a
+            level asks for more components than it has dimensions. The
+            ``components_per_level`` length contract is enforced in ``__init__``,
+            which is where it can be seen.
         """
-        # Functional API may pass a LIST OF SHAPES for multi-input layers; this
-        # is single-input, so unwrap only a true nested list-of-shapes. A plain
-        # shape serialized as a list (e.g. [None, 8]) must NOT be unwrapped —
-        # its first element is an int/None, not a shape.
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
-                and isinstance(input_shape[0], (list, tuple)):
-            input_shape = input_shape[0]
+        input_shape = self._unwrap_input_shape(input_shape)
 
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input must be defined")
 
-        # Determine components per level if not specified
-        if self.components_per_level is None:
-            # Adaptive sizing: progressively reduce dimensions
-            components = []
-            current_dim = input_dim
-            for i in range(self.num_levels):
-                # Use golden ratio for smooth reduction
-                next_dim = max(int(current_dim * 0.618), 1)
-                components.append(min(next_dim, current_dim))
-                current_dim = next_dim
-            self.components_per_level = components
-        else:
-            if len(self.components_per_level) != self.num_levels:
-                raise ValueError(f"components_per_level length must match num_levels")
+        self.components_per_level = self._resolve_components_per_level(input_dim)
 
         # Create weights for each level
         current_input_dim = input_dim
@@ -1134,28 +1171,26 @@ class DeepKernelPCA(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
-        The total number of output components is only resolved after ``build``
-        (the adaptive ``components_per_level=None`` path is filled in there), so
-        this method requires the layer to be built.
+        Works on an unbuilt layer. The component counts come from
+        ``_resolve_components_per_level``, the same pure helper ``build`` uses, so
+        the answer before ``build`` is the answer after it.
 
         :param input_shape: Shape tuple of the input tensor. A nested
             list-of-shapes from the functional API is unwrapped.
         :type input_shape: tuple[int | None, ...]
         :return: ``(batch_size, sum(components_per_level))``.
         :rtype: tuple[int | None, ...]
-        :raises ValueError: if the layer is not built yet.
+        :raises ValueError: if the last input dimension is undefined.
         """
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
-                and isinstance(input_shape[0], (list, tuple)):
-            input_shape = input_shape[0]
-        if not self.built or self.components_per_level is None:
+        input_shape = self._unwrap_input_shape(input_shape)
+        input_dim = input_shape[-1]
+        if input_dim is None:
             raise ValueError(
-                "compute_output_shape requires the layer to be built "
-                "(components_per_level is resolved in build()). Build the layer "
-                "or call it on a concrete input first."
+                f"Last dimension of input must be defined, got "
+                f"input_shape={tuple(input_shape)}"
             )
         batch_size = input_shape[0]
-        total_components = sum(self.components_per_level)
+        total_components = sum(self._resolve_components_per_level(input_dim))
         return (batch_size, total_components)
 
     def get_explained_variance_ratio(self) -> List[float]:
