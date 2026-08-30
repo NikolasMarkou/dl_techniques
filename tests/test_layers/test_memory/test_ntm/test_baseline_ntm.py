@@ -1207,6 +1207,90 @@ class TestCircularConvolutionDirection:
         )
 
 
+class TestMemoryInitSeedPaths:
+    """The `memory_init_seed` must survive serialization and reach the cell's memory.
+
+    Two defects, one concept. `NTMMemory.get_config` dropped the seed, so a
+    `from_config` round-trip silently reset 7 to the default 42; and `NTMCell`
+    built its `NTMMemory` without a seed, so the memory module kept 42 whatever
+    its `NTMConfig` declared.
+
+    Both guards run on the `NTMMemory` object directly, so neither depends on
+    `NTMConfig.use_memory_init` -- that flag selects between the cell's learned
+    `_initial_memory` weight and the cell's OWN seeded draw in
+    `get_initial_state`, and `NTMMemory.initialize_state` is on neither of
+    those branches. What is under test here is the seed the memory module
+    carries, which is what a caller driving `BaseMemory` directly observes.
+    """
+
+    def test_get_config_round_trip_preserves_memory_init_seed(self):
+        """A non-default seed must survive `get_config` -> `from_config`.
+
+        Asserted on the RECONSTRUCTED object's attribute, not merely on the
+        presence of the key, so a key emitted under the wrong name would still
+        fail.
+        """
+        memory = NTMMemory(memory_size=8, memory_dim=4, memory_init_seed=7)
+        assert memory.memory_init_seed == 7
+
+        config = memory.get_config()
+        restored = NTMMemory.from_config(config)
+
+        assert restored.memory_init_seed == 7, (
+            "get_config/from_config round-trip reset memory_init_seed to "
+            f"{restored.memory_init_seed}, expected 7; emitted keys were "
+            f"{sorted(config.keys())}"
+        )
+
+    def test_cell_memory_carries_the_configured_seed(self):
+        """The seed an `NTMConfig` declares must reach the `NTMMemory` the cell builds."""
+        config = NTMConfig(
+            memory_size=8,
+            memory_dim=4,
+            controller_dim=6,
+            memory_init_seed=7,
+        )
+        cell = NTMCell(config)
+
+        assert cell.memory.memory_init_seed == 7, (
+            "NTMCell built its NTMMemory with seed "
+            f"{cell.memory.memory_init_seed}, but its NTMConfig declares 7"
+        )
+
+    def test_cell_memory_draw_is_seed_dependent(self):
+        """The behavioural half: different configured seeds must draw different memory.
+
+        `initialize_state` is the only place the memory module's seed reaches a
+        number, so this is what "the seed reached the memory" MEANS. The
+        same-seed pair is the control: it proves the difference below comes
+        from the seed and not from an unseeded stateful draw.
+        """
+        def _memory_of(seed):
+            config = NTMConfig(
+                memory_size=8,
+                memory_dim=4,
+                controller_dim=6,
+                memory_init_seed=seed,
+            )
+            cell = NTMCell(config)
+            state = cell.memory.initialize_state(2)
+            return keras.ops.convert_to_numpy(state.memory)
+
+        first_seven = _memory_of(7)
+        second_seven = _memory_of(7)
+        nine_ninety_nine = _memory_of(999)
+
+        # Control: the same seed must repeat exactly.
+        np.testing.assert_allclose(first_seven, second_seven, rtol=0, atol=0)
+
+        diff = float(np.max(np.abs(first_seven - nine_ninety_nine)))
+        assert diff > 0.0, (
+            "Two NTMCells configured with memory_init_seed 7 and 999 drew "
+            f"IDENTICAL initial memory (max abs diff {diff}); the configured "
+            "seed never reached NTMMemory"
+        )
+
+
 # ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------
