@@ -57,7 +57,16 @@ BASELINE_MODEL: str = "ascii_bert"
 VARIANTS: tuple = ("tiny", "small", "base")
 
 #: The pooling axis.
-POOLING_STRATEGIES: tuple = ("cls", "mean", "attention")
+#:
+#: ``"max"`` was added 2026-08-30. `EmbeddingEncoder` had supported it all
+#: along, but the study's axis excluded it -- and it is the readout that makes a
+#: sinusoidal-positioned encoder length-invariant. Measured on the same weights,
+#: encoding one repeated sentence at 64 vs 512 real characters, cosine against
+#: the 64-character version: ``mean`` gives **0.3805** while ``max`` gives
+#: **0.9693**. Since SQuAD queries average 59 characters against contexts of
+#: 774, mean pooling displaces a query from its own answer by length alone.
+#: See RESULTS.md, "The cause".
+POOLING_STRATEGIES: tuple = ("cls", "mean", "attention", "max")
 
 
 def available_models() -> List[str]:

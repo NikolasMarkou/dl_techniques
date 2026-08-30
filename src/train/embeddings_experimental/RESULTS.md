@@ -32,7 +32,13 @@ decides part of the answer. The strong two-way interaction behind this is
 **specific to the attention arm** — the convolutional arms show only a small
 same-signed penalty from each setting.
 
-**4. Every raw retrieval number below understates these encoders by ~3.3x.** ZCA
+**4. The sinusoidal retrieval collapse is a `mean`-pooling artifact.** A
+sinusoidal model's pooled vector depends on sequence length — the same content at
+512 characters is nearly orthogonal to itself at 64 (cosine **0.3805**, against
+0.9705 for learned positions). SQuAD queries average 59 characters and contexts
+774, so they are displaced apart before content is considered.
+
+**5. Every raw retrieval number below understates these encoders by ~3.3x.** ZCA
 whitening lifts the learned-position convolutional arms from R@1 ~0.060 to ~0.21,
 on 9 of 9 cells, with no retraining.
 
@@ -213,7 +219,91 @@ measured — double its original.
 SST-2 probe accuracy stays within 0.03 of 0.60 in **every** cell of every run, so
 content remains linearly decodable throughout. What moves is specifically cosine
 retrieval. That gap — a linear probe steady while cosine collapses — is the
-signature that led to the whitening result below.
+signature that led to the whitening result below, and eventually to the cause.
+
+### The cause: a sinusoidal model's pooled embedding depends on LENGTH
+
+Earlier revisions of this file said the effect was measured and the cause was
+not established. It is now established, and it is not really about retrieval.
+
+Encode **one sentence repeated** to different real lengths, so the content
+distribution is identical and only length changes. Cosine against the 64-
+character version:
+
+| | L=64 | L=128 | L=256 | L=512 |
+|---|---:|---:|---:|---:|
+| `ascii_bert` / learned | 1.0000 | 0.9895 | 0.9794 | **0.9705** |
+| `ascii_bert` / **sinusoidal** | 1.0000 | 0.9433 | 0.6441 | **0.3805** |
+| `ascii_clifford_bert` / learned | 1.0000 | 0.9789 | 0.9733 | **0.9666** |
+| `ascii_clifford_bert` / **sinusoidal** | 1.0000 | 0.9629 | 0.8899 | **0.7521** |
+
+Learned-position models are essentially length-invariant across an 8x range.
+Sinusoidal ones are not: the same content at 512 characters is **nearly
+orthogonal to itself at 64** (0.3805). Mean-pooling averages positions
+`0..L-1`, and with a positional table of row norm ~9.3 that mean is dominated by
+a term that differs with `L`.
+
+**SQuAD queries average 59 characters; contexts average 774.** So a query and its
+own answer land in different regions of the space *because of the length
+difference alone*, before content is considered at all.
+
+That single mechanism accounts for every observation:
+
+| observation | explanation |
+|---|---|
+| retrieval collapses, up to 10x | query/document length mismatch, ~59 vs ~774 |
+| SST-2 probe unmoved | one narrow length band, so the offset is a constant a linear probe absorbs |
+| centering does nothing | the offset varies per text; centering removes one global mean |
+| whitening makes it worse | same reason, plus it amplifies the low-variance directions where content survives |
+| the 64-context run shows no penalty | packed training makes every sequence exactly 64 — no mismatch to expose |
+| MLM ordering unaffected in all 16 cells | MLM is scored per position and never pooled, so it never touches the readout |
+
+It also predicts the truncation curve that found it. Truncating **both** queries
+and contexts to a common length, `ascii_clifford_bert`/sinusoidal scores 0.0560,
+0.0640, 0.0560 at 64, 128 and 256 — level with its learned-position twin — then
+falls to **0.0060** at 512, where contexts fill the window and queries do not.
+
+**Two hypotheses died on the way, and the second death was the informative one.**
+A padding-mismatch version of this story is wrong: encoding the same text padded
+to 128, 256 and 512 gives *identical* embeddings, because pooling is mask-aware.
+Ruling that out is what forced the distinction between padded length and real
+length, which is the one that matters.
+
+### It is the readout, and `max` pooling fixes it
+
+Nothing above says sinusoidal positions are bad. It says **`mean` pooling is the
+wrong readout for an encoder with a large positional signal** — and the readout
+can be swapped on the *same trained weights*, with no retraining. Same probe,
+same checkpoints, cosine against the 64-character version:
+
+| model | `mean` | `cls` | `last` | `max` |
+|---|---:|---:|---:|---:|
+| `ascii_bert` / sinusoidal | **0.3805** | 0.7810 | 0.2482 | **0.9693** |
+| `ascii_clifford_bert` / sinusoidal | 0.7521 | 1.0000 | 0.0248 | **0.9963** |
+| `ascii_bert` / learned | 0.9705 | 0.9948 | 0.9911 | 0.9945 |
+| `ascii_clifford_bert` / learned | 0.9666 | 1.0000 | 0.2636 | 0.9984 |
+
+`max` is length-invariant on both sinusoidal models where `mean` collapses,
+because a per-dimension extremum does not accumulate a positional mean that grows
+with `L`.
+
+**Read the `cls` column carefully.** `ascii_clifford_bert` scores exactly 1.0000
+at every length, which is *not* readout invariance: that block's span is 49
+tokens, so position 0 cannot see beyond it and the rest of the sequence is
+literally unreachable. `ascii_bert`, whose attention does see the whole
+sequence, gives 0.7810 — the honest number for `cls`.
+
+**`max` was not in the study's pooling axis.** `EmbeddingEncoder` has supported
+it since the beginning (`SUPPORTED_POOLING`), but `POOLING_STRATEGIES` listed
+only `cls`, `mean` and `attention`, and the trainer's `--pooling-strategy`
+validates against that tuple — so the readout that fixes this was unreachable
+from the study. Added 2026-08-30.
+
+**Length-invariance is a property of the readout, not yet a retrieval result.**
+Whether it actually recovers SQuAD recall has to be measured on a trained cell,
+because stage 2 trains the contrastive objective *through* the pooling. That run
+is in progress; until it lands, the claim here is only that the readout is
+length-invariant.
 
 ---
 
@@ -296,7 +386,8 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while both conv arms measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. |
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix — and R@1 does not move. Clifford also lost 10x with anisotropy slightly *improving*, and across arms the anisotropy rise is *anti-correlated* with the damage. |
-| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes sinusoidal models **worse** (0.0040 → 0.0013). The content is genuinely absent there — though this hypothesis is *correct* for the learned-position conv arms, which is where the 3.3x came from. |
+| **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes sinusoidal models **worse** (0.0040 → 0.0013). Correct for the learned-position conv arms — that is where the 3.3x came from — but wrong here. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
+| **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
 | **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
 | **"A longer run could close or reverse it"** — Run 1's own explanation | Stated in this file's first version as "a statement about training speed at this budget". False: the arm had stopped moving. The convolutional prior is a real advantage, but it is not what produced Run 1's number. |
 

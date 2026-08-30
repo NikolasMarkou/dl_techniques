@@ -487,8 +487,8 @@ CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m train.embeddings_exper
 .venv/bin/python -m train.embeddings_experimental.report --in-dir results/embeddings_study_512_sinusoidal
 ```
 
-Bare `sweep.py` defaults to every registered arm x 3 pooling strategies x 7
-seeds, which is 84 cells and about 15 hours — pass `--pooling` and `--variants`
+Bare `sweep.py` defaults to every registered arm x 4 pooling strategies x 7
+seeds, which is 112 cells and about 20 hours — pass `--pooling` and `--variants`
 explicitly unless that is what you want. Each cell is a subprocess, and
 **`cell.log` is only written when that subprocess exits**, so a running cell is
 invisible; watch the sweep log or count `results.json` files instead.
