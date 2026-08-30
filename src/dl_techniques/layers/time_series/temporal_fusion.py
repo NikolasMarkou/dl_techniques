@@ -383,15 +383,13 @@ class TemporalFusionLayer(keras.layers.Layer):
         """
         Run both forecast pathways and blend them with the gate.
 
-        Note on ``activity_regularizer``: this method calls ``add_loss`` on the
-        output itself, and Keras 3's ``Layer.__call__`` already applies the
-        same ``activity_regularizer`` to the layer's output. With an
-        ``activity_regularizer`` set, the penalty is therefore counted twice.
+        Note on ``activity_regularizer``: the penalty is charged exactly ONCE,
+        and it is Keras 3's ``Layer.__call__`` that charges it, by applying
+        ``self.activity_regularizer`` to this method's return value. This
+        method therefore deliberately does NOT call ``add_loss`` itself.
         Measured with ``L1(1.0)`` on a ``(2, 5)`` context and a ``(2, 4)`` lag
-        tensor: ``len(layer.losses) == 2``, and both entries equal each other
-        and a manual ``activity_regularizer(output)`` call. The value itself
-        depends on the seed, so no figure is quoted here. This is a code
-        defect, reported and left unfixed here.
+        tensor: ``len(layer.losses) == 1``, and that one entry equals a manual
+        ``activity_regularizer(output)`` call.
 
         :param inputs: A list of two tensors. ``inputs[0]`` is the context of
             shape ``(batch_size, context_dim)``, ``inputs[1]`` is the lag
@@ -437,10 +435,11 @@ class TemporalFusionLayer(keras.layers.Layer):
             fusion_gate * lag_forecast
         )
 
-        # Apply activity regularization if specified
-        if self.activity_regularizer is not None:
-            self.add_loss(self.activity_regularizer(final_forecast))
-
+        # DECISION plan-2026-08-30T020716-ebbaf641/D-007
+        # Keras 3's Layer.__call__ already applies self.activity_regularizer to
+        # this return value. Do NOT re-add an `add_loss` of `activity_regularizer`
+        # here: it charged the penalty twice (measured len(layer.losses) == 2, both
+        # entries equal). Guarded by test_the_temporal_fusion_regularizer_is_charged_once.
         return final_forecast
 
     def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
