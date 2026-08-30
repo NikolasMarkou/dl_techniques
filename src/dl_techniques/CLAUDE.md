@@ -113,7 +113,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 | `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 265 of 300 modules carry `:param ` |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 87 Sphinx-only, 8 both, 112 neither, over 287 `.py` files |
-| `losses/` | Google (`Args:`) majority | 32 of 43 carry `Args:`, 9 carry `:param `, 1 both |
+| `losses/` | Google (`Args:`) majority | 32 of 44 carry `Args:`, 10 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
 | `utils/` | Google majority | 22 of 41 / 11, 3 both |
 | `optimization/` | Google majority | 9 of 14 / 2 |
