@@ -84,6 +84,7 @@ from .config import (
     ExperimentConfig,
     available_models,
     build_model,
+    resolve_contrastive_seq_length,
 )
 from .data import build_packed_mlm_dataset
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -440,10 +441,14 @@ def run_contrastive_stage(
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
+    # Stage 2 may run SHORTER than stage 1, to hold the number of in-batch
+    # negatives fixed while the pretraining context varies; see
+    # ExperimentConfig.contrastive_seq_length.
+    stage2_len = resolve_contrastive_seq_length(config)
     train_ds = with_dummy_targets(
         build_packed_mlm_dataset(
             train_texts,
-            seq_len=config.max_seq_length,
+            seq_len=stage2_len,
             batch_size=config.contrastive_batch_size,
             training=True,
             repeat=True,
@@ -452,7 +457,7 @@ def run_contrastive_stage(
     val_ds = with_dummy_targets(
         build_packed_mlm_dataset(
             val_texts,
-            seq_len=config.max_seq_length,
+            seq_len=stage2_len,
             batch_size=config.contrastive_batch_size,
             training=False,
         )
@@ -569,7 +574,7 @@ def run_study_cell(config: ExperimentConfig) -> Dict[str, Any]:
                 run_dir,
                 EvalConfig(
                     tfds_data_dir=config.tfds_data_dir,
-                    max_length=config.max_seq_length,
+                    max_length=resolve_contrastive_seq_length(config),
                     max_queries=config.eval_max_queries,
                     probe_train_n=config.eval_probe_train_n,
                     batch_size=config.eval_batch_size,
@@ -672,6 +677,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     model_group.add_argument(
         "--stochastic-depth-rate", type=float, default=defaults.stochastic_depth_rate
+    )
+    model_group.add_argument(
+        "--contrastive-seq-length", type=int,
+        default=defaults.contrastive_seq_length,
+        help=(
+            "Sequence length for stage 2 and the evaluation. Default: follow "
+            "--max-seq-length. Set it SHORTER to hold the number of in-batch "
+            "InfoNCE negatives fixed while the pretraining context varies -- "
+            "batch 64 at 1024 does not fit on a 24 GB card, and halving the "
+            "batch would make the contrastive task easier in the same direction "
+            "as any improvement the longer context should show."
+        ),
     )
     model_group.add_argument(
         "--position-embedding-type", type=str,
