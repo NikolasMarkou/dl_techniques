@@ -414,3 +414,73 @@ transformer baseline.
 References:
     - Su et al., 2021. Whitening Sentence Representations for Better Semantics
       and Faster Retrieval. (https://arxiv.org/abs/2103.15316)
+
+
+## Run 3 — 64 context, sinusoidal, 28 cells, 2026-08-30
+
+Same grid at `max_seq_length=64` with `mlm_batch_size=256`, so tokens per step
+are **16384, identical to Run 2's 32 x 512**. Matching tokens is what separates
+"shorter context helps" from "less training hurts"; the price is that batch size
+is no longer constant across runs, which is the lesser confound.
+
+### Context length is an interaction, not a main effect
+
+Paired 512 -> 64 at sinusoidal, n=7 per arm:
+
+| arm | delta | |
+|---|---:|---|
+| `ascii_bert` | **−0.3220** ±0.024 | helped, ~13x its seed spread |
+| `ascii_clifford_bert` | +0.0170 ±0.009 | mildly hurt |
+| `ascii_convnext_bert` | +0.0314 ±0.004 | mildly hurt |
+| `ascii_convnext_v2_bert` | +0.0306 ±0.004 | mildly hurt |
+
+Shorter context helps **only** the transformer, and mildly hurts all three
+convolutional arms — the dilution prediction, confirmed on 4/4 arms. A
+near-uniform softmax over `S` positions gives each neighbour ~`1/S` of the
+attended value, so more positions means more dilution; a convolution has a fixed
+span, so extra context is a small amount of extra material to model.
+
+### The cumulative effect on the baseline, and on the study's claim
+
+| `ascii_bert` | val loss |
+|---|---:|
+| 512, learned — as originally reported | 2.8248 |
+| 512, sinusoidal | 1.6218 (−1.20) |
+| 64, sinusoidal | **1.2999** (−0.32 more) |
+
+**−1.52 nats from two configuration changes and zero architecture changes.** The
+transformer's deficit against the best convolutional arm falls from **1.9275 to
+0.2937 — 85% of it closed.**
+
+The convolutional arms still win, on every configuration tested, and that
+conclusion is robust. But "attention-free blocks beat the transformer by 1.9
+nats" was substantially a statement about a misconfigured baseline. The
+defensible version is ~0.3 nats.
+
+### The sinusoidal retrieval penalty is a LONG-CONTEXT effect
+
+Run 2 reported that sinusoidal positions cost 1.3x-10x retrieval. That is not a
+property of sinusoidal encodings — it is a property of sinusoidal encodings **at
+512 context**:
+
+| arm, SQuAD R@1 | 512 learned | 512 sinusoidal | 64 sinusoidal |
+|---|---:|---:|---:|
+| `ascii_bert` | 0.0129 | 0.0019 | **0.0261** |
+| `ascii_clifford_bert` | 0.0587 | 0.0061 | 0.0531 |
+| `ascii_convnext_bert` | 0.0594 | 0.0170 | 0.0511 |
+| `ascii_convnext_v2_bert` | 0.0681 | 0.0507 | 0.0575 |
+
+At 64 the penalty nearly vanishes, and `ascii_bert` reaches its best retrieval of
+any configuration measured — **double** its original. `sst2_probe_accuracy` stays
+within 0.03 everywhere, as it has throughout.
+
+**So the two families want opposite configurations.** The transformer is best at
+64 + sinusoidal on *both* endpoints simultaneously (MLM 1.2999, R@1 0.0261). The
+convolutional arms are best at 512 + learned on both (MLM 0.897-1.069, R@1
+0.0587-0.0681). There is no single setting that is best for every arm, which
+means a fixed-setting four-arm comparison necessarily handicaps someone — and
+which setting is chosen decides part of the answer.
+
+This does not undo Run 2's finding that the mechanism is not anisotropy; centering
+and whitening refuted that independently of context length. It narrows *when* the
+penalty applies.
