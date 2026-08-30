@@ -11,6 +11,8 @@ Tests cover:
 - Serialization (save/load cycle)
 - Edge cases and error handling
 - Various configurations and batch sizes
+- Gradient flow to the affine weights, per variable (§13.2.2)
+- The `eps` knob pinned with the §13.3.2 VALUE-knob instrument
 """
 
 import os
@@ -22,6 +24,11 @@ import keras
 from keras import ops
 
 from dl_techniques.layers.statistics.scaler import UnifiedScaler
+
+from .v2_compliance_oracle import (
+    assert_gradients_reach_every_trainable_weight,
+    assert_value_knob_moves_output_not_shapes,
+)
 
 
 # ---------------------------------------------------------------------
@@ -676,15 +683,62 @@ class TestParametrized:
 
         assert output.shape == input_3d.shape
 
+    def test_epsilon_moves_the_output_and_leaves_the_weight_shapes_alone(self):
+        """`eps` is a VALUE knob, pinned with the §13.3.2 value-knob instrument.
+
+        This replaces a sweep that constructed four scalers and asserted only
+        `output.shape == inputs.shape`. §13.5 lists that as the "shape-only knob sweep"
+        anti-pattern, and names why it passes: normalization is shape-preserving, so the
+        assertion is invariant under `eps` being dropped on the floor entirely. Deleting
+        the `+ self.eps` from `scaler.py:391` leaves that version green.
+
+        The correct instrument for a value knob asserts the opposite pair: the OUTPUTS
+        must differ, while the weight-shape signature stays IDENTICAL (a knob that
+        changed the shapes would be a structural knob and would need the other
+        instrument).
+
+        The sweep is 1e-7 / 1e-5 / 1e-3 / 1e-1, not the original 1e-3 / 1e-5 / 1e-7 /
+        1e-9. MEASURED on this fixture (16x10 standard normal, float32), consecutive
+        max-abs output deltas:
+
+            1e-7 vs 1e-5   2.098e-05
+            1e-5 vs 1e-3   2.118e-03
+            1e-3 vs 1e-1   1.846e-01
+
+        and, for the pair that was dropped:
+
+            1e-9 vs 1e-7   4.768e-07   -> np.allclose True
+
+        4.768e-07 is the float32 unit-roundoff scale on an O(1) output, so 1e-9 and 1e-7
+        are not distinguishable here by any instrument. Sweeping them proves nothing about
+        the knob; keeping them in a value-knob test would only make it permanently RED
+        (§13.5: "tolerances below the dtype noise floor").
+        """
+        inputs = np.random.default_rng(1234).normal(size=(16, 10)).astype("float32")
+        # Bind `eps` as a default argument: a bare closure over the loop variable
+        # captures the LAST value for every entry and makes all four builders identical.
+        builders = {
+            eps: (lambda eps=eps: UnifiedScaler(num_features=10, eps=eps))
+            for eps in (1e-7, 1e-5, 1e-3, 1e-1)
+        }
+        assert_value_knob_moves_output_not_shapes(builders, inputs)
+
     @pytest.mark.parametrize("eps", [1e-3, 1e-5, 1e-7, 1e-9])
-    def test_different_epsilon_values(self, eps):
-        """Test layer with different epsilon values."""
+    def test_any_positive_epsilon_still_produces_a_finite_same_shaped_output(self, eps):
+        """The shape-and-finiteness half of the old sweep, kept as its own claim.
+
+        Separate from the knob test above on purpose: this one is about the layer
+        surviving a wide `eps` range, including the two values that are numerically
+        indistinguishable, and it asserts finiteness -- which the original did not, so a
+        NaN at eps=1e-9 would have passed it.
+        """
         layer = UnifiedScaler(num_features=10, eps=eps)
 
-        inputs = np.random.randn(16, 10).astype(np.float32)
+        inputs = np.random.default_rng(99).normal(size=(16, 10)).astype("float32")
         output = layer(inputs)
 
         assert output.shape == inputs.shape
+        assert np.all(np.isfinite(ops.convert_to_numpy(output)))
 
     @pytest.mark.parametrize("affine", [True, False])
     def test_with_and_without_affine(self, affine, sample_3d_input):
@@ -884,6 +938,73 @@ class TestNumericalStability:
         std_after = ops.convert_to_numpy(layer.stored_std)
         assert not np.allclose(std_after, std_init, atol=1e-6), \
             "stored std did not update under tf.function"
+
+
+# ---------------------------------------------------------------------
+# Gradient flow
+# ---------------------------------------------------------------------
+
+
+class TestGradientFlow:
+    """Gradients reach the affine weights.
+
+    Before this class the file had ZERO gradient tests, while
+    `UnifiedScaler(affine=True)` creates two trainable weights. §13.5's closing note --
+    "defects cluster at entry points with zero tests" -- applies to weights with zero
+    gradient tests just as directly: a weight nothing differentiates through is
+    indistinguishable from a weight that is not wired in at all.
+    """
+
+    def test_gradients_reach_both_affine_weights(self, sample_3d_input):
+        """Non-`None` AND non-zero, named by `var.path` (§13.2.2).
+
+        `grad is not None` alone is not enough: §13.2.2 measured that formulation
+        reporting green while 61 of 61 trainable weights carried identically-zero
+        gradients. `affine_bias` is the one at risk here -- it enters the output purely
+        additively, so a version that dropped it would still produce a plausible
+        normalized output and a non-`None` gradient for `affine_weight`.
+        """
+        layer = UnifiedScaler(num_features=10, axis=1, affine=True)
+        assert_gradients_reach_every_trainable_weight(layer, sample_3d_input)
+
+        paths = sorted(v.path.split("/")[-1] for v in layer.trainable_variables)
+        assert paths == ["affine_bias", "affine_weight"], (
+            f"expected exactly the two affine weights, got {paths}"
+        )
+
+    def test_a_scaler_without_affine_has_nothing_to_differentiate(self):
+        """The twin of the test above (§13.2.4): `affine=False` must create NO trainable
+        weight, so the gradient test cannot silently be passing on a layer that always
+        builds them."""
+        layer = UnifiedScaler(num_features=10, axis=1, affine=False)
+        layer(np.random.default_rng(3).normal(size=(8, 10, 10)).astype("float32"))
+        assert layer.trainable_variables == []
+
+    def test_the_gradient_actually_updates_the_affine_weights_under_sgd(self):
+        """Liveness is not correctness, but a dead weight is definitely not correct.
+
+        §11.3: "a zero gradient is not a freeze" -- and the converse also needs pinning.
+        One SGD step must MOVE both affine weights; a gradient that exists but never
+        reaches an optimizer is the failure mode a tape-only test cannot see.
+        """
+        inputs = np.random.default_rng(5).normal(size=(8, 10, 10)).astype("float32")
+        targets = np.random.default_rng(6).normal(size=(8, 10, 10)).astype("float32")
+
+        keras.utils.set_random_seed(0)
+        inp = keras.Input(shape=(10, 10))
+        scaler = UnifiedScaler(num_features=10, axis=1, affine=True, name="scaler")
+        model = keras.Model(inp, scaler(inp))
+        model.compile(optimizer=keras.optimizers.SGD(learning_rate=0.5), loss="mse")
+
+        before = [ops.convert_to_numpy(v).copy() for v in scaler.trainable_variables]
+        model.fit(inputs, targets, epochs=1, batch_size=8, verbose=0)
+        after = [ops.convert_to_numpy(v) for v in scaler.trainable_variables]
+
+        assert len(before) == 2
+        for variable, start, end in zip(scaler.trainable_variables, before, after):
+            assert not np.allclose(start, end), (
+                f"{variable.path} did not move after one SGD step"
+            )
 
 
 # ---------------------------------------------------------------------
