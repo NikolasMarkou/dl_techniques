@@ -584,13 +584,11 @@ class NeuroGrid(keras.layers.Layer):
 
         # Build einsum equation dynamically based on grid dimensions
         batch_idx = 'b'
-        # Grid axes take one letter each from GRID_EINSUM_SUBSCRIPTS. Do NOT go
-        # back to `chr(ord('i') + j)` capped by a number: the run 'i'..'z' is 18
-        # characters but its 18th IS 'z', which this equation already spends on
-        # the latent axis, so 18 emits 'ijklmnopqrstuvwxyz,ijklmnopqrstuvwxyzz->bz'
-        # and TensorFlow raises InvalidArgumentError on the repeated 'z'. The
-        # honest maximum is 17 and it lives in the constant, where a test can
-        # address it. Only n_dims <= 6 reaches here, so the slice never truncates.
+        # DECISION plan-2026-08-30T063229-ccd6ad17/D-017
+        # Grid axes take letters from GRID_EINSUM_SUBSCRIPTS ('i'..'y', 17).
+        # Do NOT "fix" this back to a numeric cap: 'i'..'z' is 18 characters but
+        # the 18th IS 'z', which this equation spends on the latent axis, and
+        # TensorFlow raises InvalidArgumentError on the repeat. See D-017.
         grid_indices = GRID_EINSUM_SUBSCRIPTS[:self.n_dims]
         latent_idx = 'z'
 
