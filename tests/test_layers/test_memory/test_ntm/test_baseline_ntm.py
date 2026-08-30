@@ -1500,6 +1500,175 @@ class TestBiasInitializerReachesEveryProjection:
         )
 
 
+
+class TestBiasInitializerIsClonedPerProjection:
+    """Guard for C-15: every Dense must draw an INDEPENDENT bias.
+
+    Each construction site in `baseline_ntm.py` cloned the KERNEL initializer
+    (`clone_initializer(self.kernel_initializer)`) but handed the BIAS
+    initializer INSTANCE straight through. A Keras 3 initializer instance
+    self-assigns a seed on first use and then re-emits it, so every projection
+    in a head drew a bit-identical bias -- `erase` and `add` included, the two
+    operations the D-068 anchor calls OPPOSITE. This is the D-068 defect class
+    on the bias side, and the same one C-5 fixed in `neuro_grid.py`.
+
+    Three properties make this guard able to see the defect at all:
+
+    * `memory_dim == shift_range`, so `key`/`shift`/`erase`/`add` share one
+      shape and "identical" is a meaningful question for them.
+    * the initializer is an explicit UNSEEDED `RandomNormal`. The `'zeros'`
+      default makes every bias constant and therefore identical either way,
+      which is exactly how this survived every test in the suite. A SEEDED
+      initializer cannot redden it either: `clone_initializer` preserves an
+      explicit seed by design, so seeded clones stay bit-identical.
+    * the census admits SCALAR tensors. `beta`/`gate`/`gamma` are shape `(1,)`,
+      so the `std > 0` non-constant test the C-5 guard uses would silently drop
+      three of a read head's five biases; a scalar's standard deviation is
+      always exactly 0.0. Admissibility here is "not identically zero" instead,
+      which rules out the all-zeros false-identical trap without excluding the
+      scalars this defect most needs to be checked on.
+    """
+
+    #: `memory_dim` and `shift_range` are deliberately equal -- see the class
+    #: docstring; unequal values leave every wide bias without a same-shaped
+    #: partner and the census cannot see the defect.
+    DIM = 5
+
+    @staticmethod
+    def _initializers():
+        """Unseeded random initializers for both kernel and bias."""
+        return {
+            "kernel_initializer": keras.initializers.RandomNormal(),
+            "bias_initializer": keras.initializers.RandomNormal(),
+        }
+
+    @staticmethod
+    def _biases(obj):
+        """Enumerate (path, values) for every built bias, from the weight set.
+
+        Read off `obj.weights` rather than named by hand, so a projection added
+        later is covered without editing this class.
+        """
+        return [
+            (w.path, np.asarray(keras.ops.convert_to_numpy(w)))
+            for w in obj.weights
+            if w.path.endswith("/bias")
+        ]
+
+    @staticmethod
+    def _admissible(values: np.ndarray) -> bool:
+        """A tensor participates in the census unless it is identically zero."""
+        return bool(np.max(np.abs(values)) > 0.0)
+
+    def _assert_no_identical_pair(self, obj, label, min_pairs):
+        """No two same-shaped admissible biases may be bit-identical.
+
+        `min_pairs` is the number of same-shaped pairs the configuration is
+        expected to actually COMPARE. It is asserted first, because a
+        configuration whose biases all have distinct shapes compares nothing
+        and would pass this test no matter how the code behaved.
+        """
+        biases = [(p, v) for p, v in self._biases(obj) if self._admissible(v)]
+
+        comparable = [
+            (pi, pj, np.array_equal(vi, vj))
+            for a, (pi, vi) in enumerate(biases)
+            for pj, vj in biases[a + 1:]
+            if vi.shape == vj.shape
+        ]
+        assert len(comparable) >= min_pairs, (
+            f"{label}: the census compared {len(comparable)} same-shaped bias "
+            f"pairs, expected at least {min_pairs}; with fewer this assertion "
+            f"cannot see the defect. Admissible biases: "
+            f"{[(p, v.shape) for p, v in biases]}"
+        )
+
+        identical = [(pi, pj) for pi, pj, same in comparable if same]
+        assert identical == [], (
+            f"{label}: {len(identical)} of {len(comparable)} same-shaped bias "
+            f"pairs are bit-identical, so they share one initializer instance: "
+            f"{identical}"
+        )
+
+    @pytest.mark.parametrize(
+        "head_cls,addressing_mode,memory_dim,min_pairs",
+        [
+            # HYBRID read head: {key, shift} at width `DIM` plus the three
+            # scalars {beta, gate, gamma} -> 1 + 3 comparable pairs.
+            (NTMReadHead, AddressingMode.HYBRID, DIM, 4),
+            # A CONTENT read head builds only `key` and `beta`. At `DIM` their
+            # shapes differ and NOTHING is comparable, so this case is run at
+            # `memory_dim=1`, where `key` is also a scalar. Without that the
+            # case would pass vacuously against the unfixed code.
+            (NTMReadHead, AddressingMode.CONTENT, 1, 1),
+            # HYBRID write head: {key, shift, erase, add} at width `DIM` (6
+            # pairs) plus the three scalars (3 pairs).
+            (NTMWriteHead, AddressingMode.HYBRID, DIM, 9),
+            # CONTENT write head: {key, erase, add} (3 pairs); `beta` is the
+            # only scalar and has no partner.
+            (NTMWriteHead, AddressingMode.CONTENT, DIM, 3),
+        ],
+    )
+    def test_head_biases_are_independent(
+        self, head_cls, addressing_mode, memory_dim, min_pairs
+    ):
+        """Within one head, no two same-shaped biases may coincide."""
+        head = head_cls(
+            memory_size=8,
+            memory_dim=memory_dim,
+            addressing_mode=addressing_mode,
+            shift_range=memory_dim,
+            **self._initializers(),
+        )
+        head.build((2, 6))
+        self._assert_no_identical_pair(
+            head, f"{head_cls.__name__}/{addressing_mode.value}", min_pairs=min_pairs
+        )
+
+    @pytest.mark.parametrize(
+        "addressing_mode", [AddressingMode.HYBRID, AddressingMode.CONTENT]
+    )
+    def test_cell_biases_are_independent_across_heads(self, addressing_mode):
+        """Sibling heads built in a loop must not share a bias initializer.
+
+        `NTMCell` builds `num_read_heads` read heads and `num_write_heads`
+        write heads from one comprehension each, so an un-cloned instance
+        makes head 0 and head 1 identical as well as making one head's own
+        projections identical.
+        """
+        config = NTMConfig(
+            memory_size=8,
+            memory_dim=self.DIM,
+            controller_dim=12,
+            num_read_heads=2,
+            num_write_heads=2,
+            addressing_mode=addressing_mode,
+            shift_range=self.DIM,
+        )
+        cell = NTMCell(config, **self._initializers())
+        cell.build((2, 6))
+        self._assert_no_identical_pair(
+            cell, f"NTMCell/{addressing_mode.value}", min_pairs=20
+        )
+
+    def test_full_ntm_biases_are_independent(self):
+        """The end-to-end model, including its own output projection."""
+        config = NTMConfig(
+            memory_size=8,
+            memory_dim=self.DIM,
+            controller_dim=12,
+            num_read_heads=2,
+            num_write_heads=2,
+            addressing_mode=AddressingMode.HYBRID,
+            shift_range=self.DIM,
+        )
+        ntm = NeuralTuringMachine(
+            config=config, output_dim=7, **self._initializers()
+        )
+        ntm.build((2, 4, 6))
+        self._assert_no_identical_pair(ntm, "NeuralTuringMachine", min_pairs=20)
+
+
 # ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------

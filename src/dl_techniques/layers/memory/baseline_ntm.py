@@ -367,7 +367,9 @@ class NTMReadHead(BaseHead):
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for the Dense biases. Every
-        projection this head creates receives it, `key_dense` included.
+        projection this head creates receives it, `key_dense` included,
+        and each gets its OWN clone of it -- a single instance handed to
+        all of them would draw the same bias for every projection.
         Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
@@ -432,8 +434,8 @@ class NTMReadHead(BaseHead):
         :param kernel_initializer: Initializer for the Dense kernels.
             Defaults to `'glorot_uniform'`.
         :type kernel_initializer: str | keras.initializers.Initializer
-        :param bias_initializer: Initializer for the Dense biases.
-            Defaults to `'zeros'`.
+        :param bias_initializer: Initializer for the Dense biases. Each
+            projection gets its own clone. Defaults to `'zeros'`.
         :type bias_initializer: str | keras.initializers.Initializer
         :param kernel_regularizer: Regularizer shared by every Dense
             kernel. Defaults to None.
@@ -467,7 +469,7 @@ class NTMReadHead(BaseHead):
             # 22 identical pairs of 17 non-constant tensors, and 0 after it. `erase` and `add`
             # are OPPOSITE ops and the two heads address memory independently: see decisions.md D-068.
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
@@ -475,7 +477,7 @@ class NTMReadHead(BaseHead):
             1,
             activation="softplus",
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
@@ -489,7 +491,7 @@ class NTMReadHead(BaseHead):
                 1,
                 activation="sigmoid",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
             )
@@ -497,7 +499,7 @@ class NTMReadHead(BaseHead):
                 shift_range,
                 activation="softmax",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
             )
@@ -505,7 +507,7 @@ class NTMReadHead(BaseHead):
                 1,
                 activation="softplus",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="gamma",
             )
@@ -778,7 +780,9 @@ class NTMWriteHead(BaseHead):
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for the Dense biases. Every
-        projection this head creates receives it, `key_dense` included.
+        projection this head creates receives it, `key_dense` included,
+        and each gets its OWN clone of it -- a single instance handed to
+        all of them would draw the same bias for every projection.
         Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
@@ -848,8 +852,8 @@ class NTMWriteHead(BaseHead):
         :param kernel_initializer: Initializer for the Dense kernels.
             Defaults to `'glorot_uniform'`.
         :type kernel_initializer: str | keras.initializers.Initializer
-        :param bias_initializer: Initializer for the Dense biases.
-            Defaults to `'zeros'`.
+        :param bias_initializer: Initializer for the Dense biases. Each
+            projection gets its own clone. Defaults to `'zeros'`.
         :type bias_initializer: str | keras.initializers.Initializer
         :param kernel_regularizer: Regularizer shared by every Dense
             kernel. Defaults to None.
@@ -878,7 +882,7 @@ class NTMWriteHead(BaseHead):
         self.key_dense = keras.layers.Dense(
             memory_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
         )
@@ -886,7 +890,7 @@ class NTMWriteHead(BaseHead):
             1,
             activation="softplus",
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="beta",
         )
@@ -898,7 +902,7 @@ class NTMWriteHead(BaseHead):
                 1,
                 activation="sigmoid",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="gate",
             )
@@ -906,7 +910,7 @@ class NTMWriteHead(BaseHead):
                 shift_range,
                 activation="softmax",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="shift",
             )
@@ -914,7 +918,7 @@ class NTMWriteHead(BaseHead):
                 1,
                 activation="softplus",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="gamma",
             )
@@ -928,7 +932,7 @@ class NTMWriteHead(BaseHead):
             memory_dim,
             activation="sigmoid",
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="erase",
         )
@@ -936,7 +940,7 @@ class NTMWriteHead(BaseHead):
             memory_dim,
             activation="tanh",
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="add",
         )
@@ -1157,7 +1161,7 @@ class NTMController(BaseController):
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for the Dense biases.
-        Defaults to `'zeros'`.
+        Each consumer gets its own clone of it. Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense
         kernel. Defaults to None.
@@ -1195,7 +1199,7 @@ class NTMController(BaseController):
             `'glorot_uniform'`.
         :type kernel_initializer: str | keras.initializers.Initializer
         :param bias_initializer: Initializer for the Dense biases.
-            Defaults to `'zeros'`.
+            Each consumer gets its own clone. Defaults to `'zeros'`.
         :type bias_initializer: str | keras.initializers.Initializer
         :param kernel_regularizer: Regularizer shared by every Dense
             kernel. Defaults to None.
@@ -1218,7 +1222,7 @@ class NTMController(BaseController):
             self.core = keras.layers.LSTMCell(
                 self.controller_dim,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
             )
@@ -1226,7 +1230,7 @@ class NTMController(BaseController):
             self.core = keras.layers.GRUCell(
                 self.controller_dim,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_cell",
             )
@@ -1235,7 +1239,7 @@ class NTMController(BaseController):
                 self.controller_dim,
                 activation="relu",
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name="controller_dense",
             )
@@ -1451,7 +1455,7 @@ class NTMCell(keras.layers.Layer):
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for the Dense biases.
-        Defaults to `'zeros'`.
+        Each consumer gets its own clone of it. Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense
         kernel. Defaults to None.
@@ -1497,7 +1501,7 @@ class NTMCell(keras.layers.Layer):
             `'glorot_uniform'`.
         :type kernel_initializer: str | keras.initializers.Initializer
         :param bias_initializer: Initializer for the Dense biases.
-            Defaults to `'zeros'`.
+            Each consumer gets its own clone. Defaults to `'zeros'`.
         :type bias_initializer: str | keras.initializers.Initializer
         :param kernel_regularizer: Regularizer shared by every Dense
             kernel. Defaults to None.
@@ -1530,7 +1534,7 @@ class NTMCell(keras.layers.Layer):
             self.config.controller_dim,
             self.config.controller_type,
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="controller",
         )
@@ -1542,7 +1546,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.addressing_mode,
                 self.config.shift_range,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
                 name=f"read_head_{i}",
@@ -1557,7 +1561,7 @@ class NTMCell(keras.layers.Layer):
                 self.config.addressing_mode,
                 self.config.shift_range,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 epsilon=self.config.epsilon,
                 name=f"write_head_{i}",
@@ -1999,7 +2003,7 @@ class NeuralTuringMachine(BaseNTM):
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
     :param bias_initializer: Initializer for the Dense biases.
-        Defaults to `'zeros'`.
+        Each consumer gets its own clone of it. Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense
         kernel. Defaults to None.
@@ -2051,7 +2055,8 @@ class NeuralTuringMachine(BaseNTM):
             Defaults to `'glorot_uniform'`.
         :type kernel_initializer: str | keras.initializers.Initializer
         :param bias_initializer: Initializer for the Dense
-            biases. Defaults to `'zeros'`.
+            biases. Each consumer gets its own clone.
+            Defaults to `'zeros'`.
         :type bias_initializer: str | keras.initializers.Initializer
         :param kernel_regularizer: Regularizer shared by every
             Dense kernel. Defaults to None.
@@ -2073,7 +2078,7 @@ class NeuralTuringMachine(BaseNTM):
         self.ntm_cell = NTMCell(
             self.config,
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="ntm_cell",
         )
@@ -2088,7 +2093,7 @@ class NeuralTuringMachine(BaseNTM):
         self.output_projection = keras.layers.Dense(
             output_dim,
             kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            bias_initializer=clone_initializer(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="output_projection",
         )
