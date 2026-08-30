@@ -20,9 +20,11 @@ study's central result and it is robust.
 **2. Most of the original margin was configuration, not architecture.** The
 transformer's deficit against the best arm was first reported as **1.9275 nats**.
 Repair its positional encoding **or** shorten its context — either alone
-recovers most of it — and with both it is **0.2937**. Roughly **85% of the
-headline gap was a misconfigured baseline.** The defensible claim is ~0.3 nats,
-not ~1.9.
+recovers most of it. At each arm's own best cell the deficit is **0.4025**, a
+**79%** repair; averaged over all four configurations it is 0.8353, a 57%
+repair. (The 85% figure this file used to lead with compares the two extreme
+corners of the 2x2 — see the note in "The consequence for the study's central
+claim".) The defensible claim is ~0.4 nats, not ~1.9.
 
 **3. The two model families want opposite settings, so no fixed setting is
 neutral.** The transformer's best cell is 64 + sinusoidal, on *both* endpoints at
@@ -219,15 +221,23 @@ The transformer's deficit against the best convolutional arm:
 | comparison | deficit | gap closed |
 |---|---:|---:|
 | 512 + learned, as originally reported | **1.9275** | — |
-| both arms at 64 + sinusoidal | **0.2938** | **85%** |
-| **each arm at its own best cell** (bert 1.2999, `convnext_v2` 0.8973) | **0.4026** | **79%** |
+| both arms at 64 + sinusoidal | **0.2937** | 85% |
+| **each arm at its own best cell** (bert 1.2999, `convnext_v2` 0.8973) | **0.4025** | **79%** |
+| averaged over all four configurations | **0.8353** | 57% |
 
-The second row is the like-for-like comparison at a shared setting; the third
-lets every arm use the configuration that suits it, which is the harder test and
-the fairer one. Both are reported because they answer different questions, and
-quoting only the flattering one would overstate the repair.
+The third row is the one to quote. It lets every arm use the configuration that
+suits it, which is the harder test and the fairer one.
 
-Either way, **~80% of the headline gap was a misconfigured baseline**, closed
+> **Read the 85% row with care.** Both its numbers are corners of the 2x2, and
+> in opposite directions. `512/learned` is simultaneously `convnext_v2`'s **best**
+> cell and `ascii_bert`'s **worst**; `64/sinusoidal` is `convnext_v2`'s **worst**
+> and `ascii_bert`'s **best**. So 85% is the ratio between the maximum-spread and
+> minimum-spread corners of the design, and it is the largest number the data
+> can be made to yield. Averaged over all four configurations the deficit is
+> 0.8353 and the gap closed is **57%**. The honest range is 57%–85%, with 79%
+> the defensible single figure.
+
+So **most of the headline gap was a misconfigured baseline**, closed
 with configuration changes and no architecture change. The convolutional arms
 still win — on all four configurations and at every arm's own best — but the
 defensible size of that claim is ~0.3–0.4 nats, not ~1.9.
