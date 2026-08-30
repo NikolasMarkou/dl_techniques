@@ -60,11 +60,14 @@ class ResidualACFLayer(keras.layers.Layer):
     Set ``regularization_weight`` and the layer also adds a loss during
     training::
 
-        weight * (mean_k ACF(k)^2 + mean_k max(0, |ACF(k)| - threshold)^2)
+        weight * (mean ACF^2 + mean max(0, |ACF| - threshold)^2)
 
-    The mean runs over the lags in ``target_lags``. The first term pushes every
-    targeted autocorrelation toward zero. The second term adds a hinge that only
-    bites once a lag exceeds ``acf_threshold``.
+    Both means call ``ops.mean`` with no axis, so each averages over every
+    element of the selected-lag slice: batch, lags and features. That slice is
+    shaped ``(batch, len(target_lags), features)``, so each term is a single
+    scalar, not one value per lag. The first term pushes every targeted
+    autocorrelation toward zero. The second term adds a hinge that only bites
+    once a lag exceeds ``acf_threshold``.
 
     The layer owns no weights and adds nothing to the forward computation, so
     monitoring-only mode (``regularization_weight=None``) is free apart from the

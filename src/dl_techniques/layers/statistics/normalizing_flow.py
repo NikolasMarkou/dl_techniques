@@ -152,25 +152,33 @@ class AffineCouplingLayer(keras.layers.Layer):
 
     .. code-block:: text
 
-           forward()  z ─► y             inverse()  y ─► z
-        ┌────────────────────────┐    ┌────────────────────────┐
-        │ z_a, z_b = split(z)    │    │ y_a, y_b = split(y)    │
-        └───────────┬────────────┘    └───────────┬────────────┘
-                    ▼                             ▼
-        ┌────────────────────────┐    ┌────────────────────────┐
-        │ s, t = net(z_a, ctx)   │◄══►│ s, t = net(y_a, ctx)   │
-        │   SHARED WEIGHTS       │    │   SHARED WEIGHTS       │
-        └───────────┬────────────┘    └───────────┬────────────┘
-                    ▼                             ▼
-        ┌────────────────────────┐    ┌────────────────────────┐
-        │ y_b = z_b * s + t      │    │ z_b = (y_b - t) / s    │
-        └───────────┬────────────┘    └───────────┬────────────┘
-                    ▼                             ▼
-        ┌────────────────────────┐    ┌────────────────────────┐
-        │ y = concat([z_a, y_b]) │    │ z = concat([y_a, z_b]) │
-        │ returns y              │    │ returns (z, ldj)       │
-        │                        │    │ ldj = sum(log(s), -1)  │
-        └────────────────────────┘    └────────────────────────┘
+             forward()  z ─► y               inverse()  y ─► z
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ _apply_split_and_reverse │    │ _apply_split_and_reverse │
+        └────────────┬─────────────┘    └────────────┬─────────────┘
+                     ▼                               ▼
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ z_a, z_b = split(z)      │    │ y_a, y_b = split(y)      │
+        └────────────┬─────────────┘    └────────────┬─────────────┘
+                     ▼                               ▼
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ s, t = net(z_a, ctx)     │◄══►│ s, t = net(y_a, ctx)     │
+        │   SHARED WEIGHTS         │    │   SHARED WEIGHTS         │
+        └────────────┬─────────────┘    └────────────┬─────────────┘
+                     ▼                               ▼
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ y_b = z_b * s + t        │    │ z_b = (y_b - t) / s      │
+        └────────────┬─────────────┘    └────────────┬─────────────┘
+                     ▼                               ▼
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ y = concat([z_a, y_b])   │    │ z = concat([y_a, z_b])   │
+        └────────────┬─────────────┘    └────────────┬─────────────┘
+                     ▼                               ▼
+        ┌──────────────────────────┐    ┌──────────────────────────┐
+        │ _apply_split_and_reverse │    │ _apply_split_and_reverse │
+        │ returns y                │    │ returns (z, ldj)         │
+        │                          │    │ ldj = sum(log(s), -1)    │
+        └──────────────────────────┘    └──────────────────────────┘
 
     ``y_a`` and ``z_a`` are the same tensor, because the static half is never
     touched. That is why one ``transformation_net`` call serves both
@@ -224,11 +232,14 @@ class AffineCouplingLayer(keras.layers.Layer):
 
     Note:
         An odd ``input_dim`` with ``reverse=True`` is not invertible. The same
-        rotation is applied on the way in and on the way out, and rotating a
-        length-``input_dim`` vector twice by ``split_dim`` only returns to the
-        start when the two halves are equal in size. Measured at
-        ``input_dim=5``: ``inverse(forward(z))`` differs from ``z`` by 2.493,
-        against 1.2e-07 at ``reverse=False``. Use an even ``input_dim``.
+        rotation is applied on the way in and on the way out. Rotating a
+        length-``input_dim`` vector twice by ``split_dim`` returns to the start
+        only when the two halves are equal in size. Measured at
+        ``input_dim=5``, ``context_dim=3``, batch 8: ``inverse(forward(z))``
+        differs from ``z`` by an O(1) amount, against ~1e-07 float32 round-off
+        at ``reverse=False``. The O(1) size is a random-init artifact and
+        changes with the seed, so only the order of magnitude reproduces. Use
+        an even ``input_dim``.
     """
 
     def __init__(
@@ -409,7 +420,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         y_b = z_b * s + t
         y = ops.concatenate([z_a, y_b], axis=-1)
 
-        # Apply reverse permutation to restore original ordering
+        # Re-apply the SAME rotation. It restores the original ordering
+        # only when input_dim is even; see the class Note on odd input_dim.
         y = self._apply_split_and_reverse(y)
 
         return y
@@ -451,7 +463,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         z_b = (y_b - t) / s
         z = ops.concatenate([y_a, z_b], axis=-1)
 
-        # Apply reverse permutation to restore original ordering
+        # Re-apply the SAME rotation. It restores the original ordering
+        # only when input_dim is even; see the class Note on odd input_dim.
         z = self._apply_split_and_reverse(z)
 
         # Compute log-determinant of Jacobian (sum of log scale factors)
@@ -615,9 +628,12 @@ class NormalizingFlowLayer(keras.layers.Layer):
         An odd ``output_dimension`` breaks invertibility as soon as
         ``num_flow_steps`` is 2 or more, because the odd-indexed coupling
         layers cannot undo their own rotation. Measured at
-        ``output_dimension=5, num_flow_steps=2``: a sample round-tripped
-        through ``call`` and back differs by 2.887, against exactly 0.0 at
-        ``output_dimension=4``. Use an even ``output_dimension``.
+        ``output_dimension=5, num_flow_steps=2``, ``context_dim=3``, batch 8: a
+        tensor round-tripped through ``call`` and forward again differs by an
+        O(1) amount, against ~1e-07 float32 round-off at
+        ``output_dimension=4``. The O(1) size is a random-init artifact and
+        changes with the seed, so only the order of magnitude reproduces. Use
+        an even ``output_dimension``.
     """
 
     def __init__(

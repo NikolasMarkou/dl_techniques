@@ -33,10 +33,12 @@ Two classes ship here:
 pre-image solve. It maps components back to RFF space with the trainable
 ``reconstruction_matrix``, then decodes RFF space to input space by multiplying
 with the transposed random frequency matrix and dividing by
-``n_random_features + regularization``. Both steps are linear and both sets of
-weights are learned by gradient descent. Reconstruction quality is only as good
-as those weights make it. The method's own docstring lists the exact five-step
-path.
+``n_random_features + regularization``. Both steps are linear. Gradient
+descent learns ``projection_matrix`` and ``reconstruction_matrix``. The
+frequency decoder is fixed: it reuses ``frequencies``, which trains only when
+``trainable_frequencies=True`` (default ``False``). Reconstruction quality is
+only as good as ``reconstruction_matrix`` makes it. The method's own docstring
+lists the exact five-step path.
 
 Foundational Mathematics:
 Bochner's theorem says any shift-invariant kernel `k(x, y) = k(x - y)` is the
@@ -100,12 +102,14 @@ class InvertibleKernelPCA(keras.layers.Layer):
 
         ``inverse_transform`` is a **LEARNED APPROXIMATION**, NOT a true
         kernel-PCA pre-image solve. It uses a trainable
-        ``reconstruction_matrix`` followed by a fixed linear frequency decoder,
-        both trained by gradient descent. The ``laplacian`` and ``cauchy``
-        kernel options draw Gaussian frequencies, not the exact Cauchy
-        frequencies those kernels require. No online eigendecomposition runs
-        anywhere. See ``inverse_transform`` for the exact reconstruction path.
-        This is a self-consistent working layer, not a canonical ikPCA.
+        ``reconstruction_matrix`` followed by a fixed linear frequency decoder.
+        Only ``reconstruction_matrix`` is trained by gradient descent. The
+        decoder reuses ``frequencies``, which trains only when
+        ``trainable_frequencies=True`` (default ``False``). The ``laplacian``
+        and ``cauchy`` kernel options draw Gaussian frequencies, not the exact
+        Cauchy frequencies those kernels require. No online eigendecomposition
+        runs anywhere. See ``inverse_transform`` for the exact reconstruction
+        path. This is a self-consistent working layer, not a canonical ikPCA.
 
     **Architecture Overview:**
 
@@ -141,9 +145,11 @@ class InvertibleKernelPCA(keras.layers.Layer):
         │ components (batch, n_components)         │
         └──────────────────────────────────────────┘
 
-    ``feature_mean``, ``projection_matrix`` and ``eigenvalues`` are weights, but
-    ``adapt`` sets them, not gradient descent. ``phases`` never trains.
-    ``frequencies`` trains only when ``trainable_frequencies=True``.
+    ``adapt`` writes ``feature_mean``, ``projection_matrix`` and
+    ``eigenvalues``. Of those three only ``projection_matrix`` is created with
+    ``trainable=True``, so gradient descent moves it afterwards. The other two
+    are ``trainable=False``. ``phases`` never trains. ``frequencies`` trains
+    only when ``trainable_frequencies=True`` (default ``False``).
 
     **Forward vs Inverse:**
 
@@ -169,7 +175,7 @@ class InvertibleKernelPCA(keras.layers.Layer):
         ┌───────────────────────────┐   ┌─────────────┴─────────────┐
         │ @ projection_matrix       │   │ @ reconstruction_matrix   │
         │ (D, n_components)         │   │ (n_components, D)         │
-        │ fitted by adapt()         │   │ LEARNED trained weight    │
+        │ adapt() + trainable=True  │   │ LEARNED trained weight    │
         └─────────────┬─────────────┘   └─────────────┬─────────────┘
                       ▼                               ▲
         ┌───────────────────────────┐   ┌─────────────┴─────────────┐
@@ -610,10 +616,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
         rff_features = self.compute_random_features(inputs)
 
         # DECISION plan_2026-06-08_a5f40f4f/D-006: call() runs NO stateful
-        # update. DO NOT reintroduce an in-call `.assign` "online update":
-        # the removed `update_pca_components` assigned to feature_mean and
-        # projection_matrix from inside the forward graph, which is unsafe in
-        # TF graph mode. Fitting happens in adapt(); see D-005.
+        # update. DO NOT reintroduce an in-call `.assign` "online update": the
+        # removed `update_pca_components` assigned to feature_mean and
+        # projection_matrix inside the forward graph, unsafe in TF graph mode.
+        # adapt() fits both; projection_matrix is trainable=True. See D-005.
 
         # Center features if requested
         if self.center_features:
