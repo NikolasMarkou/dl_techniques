@@ -1,280 +1,94 @@
 """
-Differentiable Soft Self-Organizing Map (Soft SOM) Layer.
+Differentiable soft Self-Organizing Map (Soft SOM) layer for Keras.
 
-This Keras layer implements a fully differentiable variant of the classical
-Self-Organizing Map (SOM). It is designed for end-to-end training within larger
-neural networks using standard backpropagation and gradient-based optimizers
-(e.g., Adam, SGD). The layer learns to map high-dimensional input data onto a
-low-dimensional, topologically ordered grid of neurons, making it useful for
-differentiable clustering, feature extraction, and dimensionality reduction.
+A classical SOM picks one winning neuron per input and edits its weights in
+place. That argmax is not differentiable, so a classical SOM cannot sit in
+the middle of a network trained by gradient descent. This layer replaces the
+winner-take-all step with a softmax over the whole grid, which makes the
+whole forward pass differentiable.
 
----
-What it Does
----
-At its core, a Soft SOM learns a "codebook" or "prototype" vector for each
-neuron on a predefined grid (e.g., 10x10). For any given input vector, the layer
-determines how closely it matches each of these prototype vectors. Instead of
-selecting a single "winner" neuron (Best Matching Unit or BMU) like a classical
-SOM, this layer calculates a soft, probabilistic assignment across all neurons.
-The layer's primary output is a "soft reconstruction" of the input, which is a
-weighted average of all neuron prototypes, where the weights are determined by
-the soft assignments. This process preserves the topological structure of the
-input data on its grid, meaning similar inputs will activate nearby neurons.
+The practical difference from `SOMLayer` in `som_nd_layer.py` is where the
+learning happens. `SOMLayer` owns a NON-trainable weight map and edits it
+inside `call()` with `assign_add`; no optimizer is involved. `SoftSOMLayer`
+owns a TRAINABLE weight map and never assigns to it. Its prototypes move
+only because an optimizer applies gradients, from the enclosing model's loss
+and from the losses this layer adds itself. Do not read the update rule of
+one class into the other.
 
----
-How it Does It
----
-The differentiability of the layer is achieved by replacing the non-differentiable
-"winner-takes-all" mechanism of classical SOMs with continuous, differentiable
-operations. The process for each input vector is as follows:
+The forward pass is three steps:
 
-1.  **Distance Calculation**: The squared Euclidean distance is computed between the
-    input vector and the prototype vector of every neuron in the grid. This
-    results in a distance tensor with the same spatial dimensions as the grid.
+1. Squared Euclidean distance from the input to every prototype, giving a
+   tensor of shape `(batch, *grid_shape)`.
+2. Softmax of the negative distances, so a close prototype gets a high
+   weight. `temperature` sets the sharpness: low is nearly one-hot, high is
+   nearly uniform. Two modes are available, see below.
+3. Soft reconstruction `y = sum_i a_i * w_i`, a weighted average of all
+   prototypes. This is the layer output and has the same shape as the input.
 
-2.  **Soft Assignment Generation**: These distances are converted into a probability
-    distribution over the grid, representing the "soft assignments." This is
-    the key innovation.
-    -   **Per-Dimension Softmax (Default)**: Instead of a single softmax over all
-        neurons, the layer applies a separate softmax operation along each spatial
-        dimension of the grid (e.g., one for height and one for width in a 2D grid).
-        The results are combined multiplicatively and re-normalized. This allows
-        the model to reason about spatial location independently in each dimension,
-        which can lead to more structured and disentangled representations.
-    -   **Global Softmax**: Alternatively, a standard global softmax can be
-        applied across all flattened neurons.
-    -   **Temperature (`temperature`)**: A temperature parameter controls the
-        "sharpness" of the softmax output. Low temperatures create a peaky
-        distribution (closer to a one-hot winner), while high temperatures create
-        a smoother, more distributed assignment.
+The two softmax modes are not interchangeable.
 
-3.  **Soft Reconstruction (Layer Output)**: The layer's output is a weighted average
-    of all neuron prototype vectors. The weights used in this average are the
-    soft assignments computed in the previous step. This operation is fully
-    differentiable.
+    global (use_per_dimension_softmax=False)
+        One softmax over all prod(grid_shape) neurons.
+        a_i = softmax(-||x - w_i||^2 / tau)
 
-4.  **Learning via Backpropagation**: The neuron prototypes (`weights_map`) are
-    trainable variables. Gradients from a downstream loss function (e.g.,
-    classification cross-entropy) or from the layer's own internal losses can
-    flow back through the reconstruction process to update these prototypes.
+    per-dimension (use_per_dimension_softmax=True, the default)
+        One independent softmax along each grid axis, then the elementwise
+        product across axes, then renormalization. The joint assignment is
+        FACTORIZED:
+        a_{i1..id} ~ prod_k softmax_axis_k(-||x - w||^2 / tau)
+        This is not a joint softmax. It biases the map toward axis-aligned,
+        separable prototypes.
 
-5.  **Internal Regularization Losses**: The layer can add two types of losses
-    during training to guide the learning process:
-    -   **Reconstruction Loss**: An optional Mean Squared Error (MSE) loss between
-        the original input and its soft reconstruction. This encourages the neuron
-        prototypes to form a good codebook for representing the data manifold.
-    -   **Topological Loss**: This loss encourages nearby neurons on the grid to
-        have similar prototype vectors. It works by measuring the similarity of
-        activation patterns (soft assignments) across a batch and rewarding cases
-        where spatially close neurons have similar activation patterns. This is
-        what enforces the classic map-like, topological structure of the SOM.
+With `training=True` the layer can add up to three losses. Each has its own
+gate, and they are not all independent:
 
----
-How the Prototype Vectors are Defined
----
-The prototype vectors (also called the "codebook" or `weights_map`) are the
-central learnable parameters of the Soft SOM layer.
+    reconstruction MSE   use_reconstruction_loss AND
+                         reconstruction_weight > 0
+    topological          topological_weight > 0
+                         (there is no on/off flag for this one)
+    sharpness entropy    sharpness_weight > 0 AND
+                         use_per_dimension_softmax
+                         (the global path produces no per-axis softmaxes,
+                         so this loss cannot be added there at all)
 
--   **Structure**: They are stored in a single Keras weight tensor with a shape of
-    `(*grid_shape, input_dim)`. For example, a Soft SOM with a `grid_shape` of
-    `(10, 10)` for input data of dimension `784` will have a `weights_map` tensor
-    of shape `(10, 10, 784)`. Each element `weights_map[i, j, :]` is a vector
-    of length `784` that represents the prototype for the neuron at grid
-    position `(i, j)`.
+The topological loss is what makes the grid map-like: it rewards nearby grid
+positions for having correlated activation patterns across the batch, using
+`exp(-d / topological_sigma)` as the neighbourhood kernel.
 
--   **Initialization**: When the layer is built, this tensor is created and
-    initialized using a standard Keras initializer (e.g., 'glorot_uniform').
-    Initially, the prototype vectors are just random points in the high-dimensional
-    input space.
+Uses: a differentiable clustering or bottleneck layer, a topologically
+ordered feature extractor, a regularizer on an autoencoder latent space, or
+a continuous content-addressable memory.
 
--   **Learning**: Because the `weights_map` is marked as `trainable=True`, its values
-    are updated during the training process. The optimizer (e.g., Adam) adjusts
-    these vectors based on the gradients flowing from the total loss. Over time,
-    this "self-organizing" process moves the vectors to positions in the input
-    space that effectively model the underlying data distribution and its topology.
+Example:
+    >>> # Standalone: an 8x8 grid over 64-dimensional vectors.
+    >>> som = SoftSOMLayer(grid_shape=(8, 8), input_dim=64, temperature=0.5)
+    >>> reconstruction = som(x)          # same shape as x
+    >>> assignments = som.get_soft_assignments(x)   # (batch, 8, 8)
+    >>>
+    >>> # As a topological bottleneck inside an autoencoder.
+    >>> h = keras.layers.Dense(128, activation='relu')(encoder_input)
+    >>> z = SoftSOMLayer(grid_shape=(16, 16), input_dim=128,
+    ...                  reconstruction_weight=1.0,
+    ...                  topological_weight=0.5)(h)
+    >>>
+    >>> # Sharper assignments, or the global softmax path instead.
+    >>> sharp = SoftSOMLayer(grid_shape=(5, 5), input_dim=32,
+    ...                      temperature=0.01)
+    >>> flat = SoftSOMLayer(grid_shape=(5, 5), input_dim=32,
+    ...                     use_per_dimension_softmax=False)
 
----
-What it Can Be Used For
----
-This layer is a versatile tool that can be integrated into deep learning models
-for various tasks:
+    The layer's internal losses reach the enclosing model automatically
+    through `add_loss`, so nothing has to be wired up at compile time.
 
--   **Differentiable Clustering and Visualization**: After training, the soft
-    assignments for input data can be used to visualize how data clusters onto
-    the 2D or 3D grid, revealing the underlying structure of the dataset.
-
--   **Topological Feature Extraction**: Use it as an intermediate layer in a deep
-    network to extract features that are not only descriptive but also have a
-    meaningful spatial organization. This can be beneficial for downstream
-    tasks that rely on structured representations.
-
--   **Regularized Autoencoders**: The Soft SOM can serve as a bottleneck layer
-    in an autoencoder. The topological constraint acts as a powerful regularizer,
-    forcing the latent space to be structured and continuous, which can improve
-    generalization and interpretability.
-
--   **Generative Modeling**: The learned grid of prototypes represents the data
-    manifold. One can potentially sample from this manifold by interpolating
-    between neuron prototypes on the grid.
-
--   **Continuous Associative Memory**: The soft reconstruction mechanism allows
-    the layer to function as a content-addressable memory system where noisy or
-    incomplete inputs can be mapped to their closest learned prototype.
-
-Examples
---------
->>> import keras
->>> import numpy as np
-
->>> # --- Example 1: Basic Usage as a Standalone Layer ---
->>> # Create a Soft SOM for 64-dimensional input data on an 8x8 grid.
->>> som_layer = SoftSOMLayer(
-...     grid_shape=(8, 8),
-...     input_dim=64,
-...     temperature=0.5,
-...     name="soft_som"
-... )
->>>
->>> # Create some dummy input data (batch of 4 vectors)
->>> dummy_input = np.random.rand(4, 64).astype("float32")
->>>
->>> # The layer's output is the "soft reconstruction" of the input.
->>> # It has the same shape as the input.
->>> reconstruction = som_layer(dummy_input)
->>> print(f"Input shape: {dummy_input.shape}")
->>> print(f"Output (reconstruction) shape: {reconstruction.shape}")
-Input shape: (4, 64)
-Output (reconstruction) shape: (4, 64)
-
->>> # --- Example 2: Use as a Feature Extractor in a Classification Model ---
->>> # The Soft SOM learns to map similar inputs to nearby locations on its
->>> # grid, creating a topologically ordered feature representation.
->>> inputs = keras.Input(shape=(784,), name="input_digits")
->>> x = keras.layers.Dense(256, activation='relu')(inputs)
->>>
->>> # The Soft SOM layer processes the dense features. Its output (a soft
->>> # reconstruction) serves as a structured feature vector for the next layer.
->>> som_features = SoftSOMLayer(
-...     grid_shape=(10, 10),
-...     input_dim=256,
-...     name="som_feature_extractor"
-... )(x)
->>>
->>> outputs = keras.layers.Dense(10, activation='softmax')(som_features)
->>> classification_model = keras.Model(inputs, outputs)
->>>
->>> # The model's total loss will automatically include the SOM's internal
->>> # reconstruction and topological losses, regularizing the training.
->>> classification_model.compile(
-...     optimizer='adam',
-...     loss='categorical_crossentropy'
-... )
->>> # To train with real data:
->>> # (x_train, y_train), _ = keras.datasets.mnist.load_data()
->>> # x_train = np.reshape(x_train, (-1, 784)).astype("float32") / 255
->>> # y_train = keras.utils.to_categorical(y_train)
->>> # classification_model.fit(x_train, y_train, epochs=5, batch_size=64)
-
->>> # --- Example 3: Use as a Bottleneck in an Autoencoder ---
->>> # The SOM acts as a powerful regularizer, forcing the latent space to
->>> # be structured and continuous.
->>> encoder_input = keras.Input(shape=(784,), name="encoder_input")
->>> x = keras.layers.Dense(128, activation='relu')(encoder_input)
->>>
->>> # The Soft SOM forms the topological bottleneck.
->>> bottleneck = SoftSOMLayer(
-...     grid_shape=(16, 16),
-...     input_dim=128,
-...     reconstruction_weight=1.0, # Weight for SOM's internal recon. loss
-...     topological_weight=0.5,  # Weight for topological regularization
-...     name="som_bottleneck"
-... )(x)
->>>
->>> # The decoder reconstructs the original input from the SOM's output.
->>> x = keras.layers.Dense(128, activation='relu')(bottleneck)
->>> decoder_output = keras.layers.Dense(784, activation='sigmoid')(x)
->>>
->>> autoencoder = keras.Model(
-...     encoder_input, decoder_output, name="som_autoencoder"
-... )
->>>
->>> # The autoencoder is trained on its own reconstruction loss (e.g., MSE).
->>> # The SOM's internal losses are added automatically, providing powerful
->>> # regularization on the latent space.
->>> autoencoder.compile(optimizer='adam', loss='mse')
-
->>> # --- Example 4: Visualization and Clustering Analysis ---
->>> # After training, you can analyze how the SOM has organized the data.
->>> # Let's use the 'autoencoder' model from Example 3.
->>> som_layer = autoencoder.get_layer("som_bottleneck")
->>>
->>> # First, create a sub-model to get the SOM's input (the encoded data).
->>> encoder_model = keras.Model(autoencoder.input, som_layer.input)
->>>
->>> # Create some dummy test images.
->>> test_images = np.random.rand(5, 784).astype("float32")
->>>
->>> # Pass the images through the encoder to get the latent vectors.
->>> encoded_vectors = encoder_model.predict(test_images, verbose=0)
->>>
->>> # Now, use the SOM layer's 'get_soft_assignments' method.
->>> assignments = som_layer.get_soft_assignments(encoded_vectors)
->>> print(f"Shape of soft assignments: {assignments.shape}")
-Shape of soft assignments: (5, 16, 16)
->>>
->>> # To find the Best Matching Unit (BMU) for each image, find the neuron
->>> # with the highest activation probability.
->>> assignments_flat = np.reshape(assignments, (assignments.shape[0], -1))
->>> bmu_indices = np.argmax(assignments_flat, axis=1)
->>>
->>> # Convert the flat index back to grid coordinates.
->>> bmu_coords = np.unravel_index(bmu_indices, som_layer.grid_shape)
->>> bmu_coords_stacked = np.stack(bmu_coords, axis=1)
->>>
->>> print(f"BMU flat indices: {bmu_indices}")
->>> print(f"BMU coordinates for each input:\\n{bmu_coords_stacked}")
-
->>> # --- Example 5: Controlling Behavior with Parameters ---
->>> # Sharper, more "winner-take-all" assignments with a very low temperature.
->>> sharp_som = SoftSOMLayer(grid_shape=(5, 5), input_dim=32, temperature=0.01)
->>>
->>> # Smoother, more distributed assignments with a high temperature.
->>> smooth_som = SoftSOMLayer(grid_shape=(5, 5), input_dim=32, temperature=10.0)
->>>
->>> # Disable the internal reconstruction loss and rely only on the topological
->>> # loss and the main model's loss.
->>> topo_only_som = SoftSOMLayer(
-...     grid_shape=(5, 5),
-...     input_dim=32,
-...     use_reconstruction_loss=False,
-...     topological_weight=0.5
-... )
->>>
->>> # Use a global softmax instead of the default per-dimension softmax, which
->>> # can be simpler but may lose some dimensional independence.
->>> global_softmax_som = SoftSOMLayer(
-...     grid_shape=(5, 5),
-...     input_dim=32,
-...     use_per_dimension_softmax=False
-... )
->>>
->>> # Encourage sharper assignments by penalizing high-entropy distributions.
->>> sharp_assignments_som = SoftSOMLayer(
-...     grid_shape=(5, 5),
-...     input_dim=32,
-...     sharpness_weight=0.1
-... )
-
-References
-----------
-[1] Kohonen, T. (1982). Self-organized formation of topologically correct feature
-       maps. Biological Cybernetics, 43(1), 59-69.
-[2] Ritter, H., & Schulten, K. (1988). Convergence properties of Kohonen's topology
-       conserving maps: fluctuations, stability, and dimension selection.
-       Biological Cybernetics, 60(1), 59-71.
-[3] The concept of using soft assignments for differentiable clustering and
-       representation learning is explored in various forms across deep learning
-       literature, forming the basis for this implementation.
+References:
+    [1] Kohonen, T. (1982). Self-organized formation of topologically correct
+        feature maps. Biological Cybernetics, 43(1), 59-69.
+    [2] Ritter, H., & Schulten, K. (1988). Convergence properties of
+        Kohonen's topology conserving maps: fluctuations, stability, and
+        dimension selection. Biological Cybernetics, 60(1), 59-71.
+    [3] Soft assignment as a differentiable stand-in for hard clustering is
+        used in many forms across the deep learning literature; this
+        implementation follows that general idea rather than one paper.
 """
 
 import keras
@@ -294,90 +108,141 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.memory.som_nd_soft_layer")
 class SoftSOMLayer(keras.layers.Layer):
     """
-    Differentiable Soft Self-Organizing Map layer for end-to-end training.
+    Differentiable soft Self-Organizing Map layer.
 
-    Implements a soft, differentiable SOM variant trainable via backpropagation.
-    Two softmax paths are supported:
+    Learns a grid of prototype vectors and returns a soft reconstruction of
+    its input, ``y = sum_i a_i * w_i``, where the assignment weights ``a``
+    come from a softmax over the negative squared distances to the
+    prototypes. Every operation is differentiable.
 
-    * **Global path** (``use_per_dimension_softmax=False``): a single softmax
-      over all ``prod(grid_shape)`` neurons,
-      ``a_i = softmax(-||x - w_i||^2 / tau)``.
-    * **Per-dimension path** (``use_per_dimension_softmax=True``, default): an
-      **independent** softmax is applied along each grid axis of the distance
-      tensor, then the per-axis marginals are combined via the outer
-      (element-wise) product across axes and renormalized — i.e. the joint
-      assignment is **factorized** as
-      ``a_{i_1,...,i_d} ~ prod_k softmax_axis_k(-||x - w||^2 / tau)``.
-      This is *not* equivalent to a joint softmax; it biases the assignment
-      toward axis-aligned (separable) prototypes.
+    This layer trains by BACKPROPAGATION. ``weights_map`` is a trainable
+    variable and ``call()`` never assigns to it; an optimizer moves it. That
+    is the opposite of ``SOMLayer`` in ``som_nd_layer.py``, whose weight map
+    is non-trainable and is edited in place by a competitive update. Nothing
+    here picks a single winner.
 
-    The output is a soft reconstruction
-    ``y = sum_i a_i * w_i`` which serves as a differentiable
-    approximation through the learned prototype codebook. Optional regularization
-    losses (reconstruction MSE + topological preservation + sharpness entropy)
-    guide the training process.
+    Two assignment modes are available and they are not equivalent. The
+    global mode runs one softmax over all ``prod(grid_shape)`` neurons. The
+    per-dimension mode (the default) runs one softmax per grid axis and takes
+    the product, so the joint assignment is factorized and the map is biased
+    toward axis-aligned prototypes.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────────────┐
-        │              SoftSOMLayer                    │
-        │                                              │
-        │  Input(batch, input_dim)                     │
-        │         │                                    │
-        │         ▼                                    │
-        │  Distance: ||x - w_{i,j}||^2                 │
-        │         │                                    │
-        │         ▼                                    │
-        │  Soft Assignment:                            │
-        │    softmax(-dist / temperature)              │
-        │    (per-dim or global)                       │
-        │         │                                    │
-        │         ▼                                    │
-        │  Reconstruction: sum(a_{i,j} * w_{i,j})      │
-        │         │                                    │
-        │         ├──► L_recon (MSE, optional)         │
-        │         ├──► L_topo  (topological, optional) │
-        │         ├──► L_sharp (entropy, optional)     │
-        │         ▼                                    │
-        │  Output(batch, input_dim)                    │
-        └──────────────────────────────────────────────┘
+        inputs (batch, input_dim)  -- INPUT tensor, not a weight
+                 │
+                 ▼
+        ┌────────────────────────────────────────────────┐
+        │ squared distance to every prototype            │
+        │ reads weights_map (*grid_shape, input_dim)     │
+        └────────────────────────────────────────────────┘
+                 │  squared_distances (batch, *grid_shape)
+                 ▼
+          use_per_dimension_softmax
+                 │
+           ┌─────┴────────────────────┐
+          True                      False
+           │                          │
+           ▼                          ▼
+        ┌───────────────────────┐  ┌───────────────────────┐
+        │ softmax(-d / tau)     │  │ flatten the grid      │
+        │ once per grid axis    │  │ softmax(-d / tau)     │
+        │ product across axes   │  │ over all neurons      │
+        │ renormalize           │  │ reshape back          │
+        │ keeps dim_softmaxes   │  │ dim_softmaxes = None  │
+        └───────────────────────┘  └───────────────────────┘
+           │                          │
+           └─────────────┬────────────┘
+                         ▼
+             soft_assignments (batch, *grid_shape)
+                         │
+                         ▼
+        ┌────────────────────────────────────────────────┐
+        │ y = sum over the grid of a_i * w_i             │
+        │ reconstruction (batch, input_dim)              │
+        └────────────────────────────────────────────────┘
+                         │
+                         ▼
+        training=True only; add_loss, each gated alone:
+          ├─► MSE(inputs, reconstruction)      (optional)
+          │     use_reconstruction_loss and weight > 0
+          ├─► topological(soft_assignments)    (optional)
+          │     topological_weight > 0
+          └─► sharpness(dim_softmaxes)         (optional)
+                sharpness_weight > 0 and the per-dim
+                path ran; never on the global path
+                         │
+                         ▼
+             return reconstruction (batch, input_dim)
 
-    :param grid_shape: Shape of the SOM neuron grid, e.g. ``(10, 10)`` for 2D.
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``.
+
+    Output shape:
+        2D tensor of shape ``(batch_size, input_dim)`` -- the same shape as
+        the input.
+
+    Example:
+        >>> som = SoftSOMLayer(grid_shape=(8, 8), input_dim=64,
+        ...                    temperature=0.5)
+        >>> reconstruction = som(x)
+        >>> assignments = som.get_soft_assignments(x)
+
+    Note:
+        The sharpness loss reads the per-axis softmaxes, which only the
+        per-dimension path produces. Setting ``sharpness_weight`` while
+        ``use_per_dimension_softmax=False`` adds nothing and raises nothing.
+
+    :param grid_shape: Shape of the neuron grid, e.g. ``(10, 10)`` for 2D.
+        All entries must be positive integers.
     :type grid_shape: Tuple[int, ...]
-    :param input_dim: Dimensionality of input data vectors.
+    :param input_dim: Width of each input vector. Must be positive.
     :type input_dim: int
-    :param temperature: Temperature for softmax operations. Lower = sharper.
-        Defaults to 1.0.
+    :param temperature: Softmax temperature ``tau``. Lower gives sharper,
+        more one-hot assignments. Must be positive. Defaults to 1.0.
     :type temperature: float
-    :param use_per_dimension_softmax: Whether to use per-dimension softmax.
-        Defaults to True.
+    :param use_per_dimension_softmax: Use the factorized per-axis softmax
+        instead of one global softmax. Defaults to True.
     :type use_per_dimension_softmax: bool
-    :param use_reconstruction_loss: Whether to add MSE reconstruction loss.
-        Defaults to True.
+    :param use_reconstruction_loss: Add the internal MSE reconstruction
+        loss. Also needs ``reconstruction_weight > 0``. Defaults to True.
     :type use_reconstruction_loss: bool
-    :param reconstruction_weight: Weight for reconstruction loss. Defaults to 1.0.
+    :param reconstruction_weight: Multiplier on the reconstruction loss.
+        Must be non-negative; 0 disables it. Defaults to 1.0.
     :type reconstruction_weight: float
-    :param topological_weight: Weight for topological preservation loss.
-        Defaults to 0.1.
+    :param topological_weight: Multiplier on the topological preservation
+        loss. Must be non-negative; 0 disables it, and there is no separate
+        on/off flag. Defaults to 0.1.
     :type topological_weight: float
-    :param topological_sigma: Length-scale (sigma) of the exponential
-        neighborhood kernel used inside the topological preservation loss:
-        ``h(d) = exp(-d / sigma)``. Larger values produce broader neighborhoods.
-        Default ``1.0`` preserves the previous fixed-scale behavior numerically.
+    :param topological_sigma: Length scale of the neighbourhood kernel
+        ``h(d) = exp(-d / sigma)`` inside the topological loss. Larger means
+        broader neighbourhoods. Must be positive. Defaults to 1.0, which
+        reproduces the earlier fixed-scale ``exp(-d)`` behaviour.
     :type topological_sigma: float
-    :param sharpness_weight: Weight for entropy-based sharpness loss.
-        Defaults to 0.0 (disabled).
+    :param sharpness_weight: Multiplier on the entropy sharpness loss. Must
+        be non-negative. Defaults to 0.0, which disables it.
     :type sharpness_weight: float
-    :param kernel_initializer: Initialization method for SOM weight map.
+    :param kernel_initializer: Initializer for the prototype weight map.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for weight parameters.
-        Defaults to ``L2(1e-5)``.
+    :param kernel_regularizer: Regularizer on the weight map. Defaults to
+        ``keras.regularizers.L2(1e-5)``, not None.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional keyword arguments for the Layer base class.
+    :param kwargs: Forwarded to ``keras.layers.Layer.__init__``.
     :type kwargs: Any
+
+    :ivar grid_dim: Rank of the grid, ``len(grid_shape)``.
+    :vartype grid_dim: int
+    :ivar weights_map: Trainable variable of shape
+        ``(*grid_shape, input_dim)`` holding one prototype per neuron.
+        Created in ``build()``.
+    :vartype weights_map: keras.Variable
+    :ivar grid_positions: Plain tensor of shape ``(*grid_shape, grid_dim)``
+        holding each neuron's grid coordinates, used by the topological
+        loss. Not a variable.
+    :vartype grid_positions: keras.KerasTensor
     """
 
     def __init__(
@@ -395,7 +260,18 @@ class SoftSOMLayer(keras.layers.Layer):
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
         **kwargs: Any
     ) -> None:
-        """Initialize the Soft SOM layer."""
+        """
+        Validate and store the configuration. Weights are created in
+        ``build()``.
+
+        See the class docstring for the meaning of every parameter.
+
+        :raises ValueError: If ``grid_shape`` holds a non-positive or
+            non-integer entry; if ``input_dim`` or ``temperature`` is not
+            positive; if ``topological_sigma`` is not positive; or if
+            ``reconstruction_weight``, ``topological_weight`` or
+            ``sharpness_weight`` is negative.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -436,10 +312,13 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build the Soft SOM layer by creating trainable weight parameters.
+        Create the trainable prototype map and the grid coordinates.
 
-        :param input_shape: Shape tuple ``(batch_size, input_dim)``.
+        :param input_shape: Shape of the input tensor. Must be
+            ``(batch_size, input_dim)``.
         :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not rank 2, its last axis
+            is None, or its last axis is not ``input_dim``.
         """
         # Verify input shape compatibility
         if len(input_shape) != 2:
@@ -454,13 +333,15 @@ class SoftSOMLayer(keras.layers.Layer):
                 f"last dimension={input_shape[-1]}"
             )
 
-        # Create trainable weight map - core learnable parameters
+        # trainable=True: this map is moved by the optimizer, through the
+        # gradients of the soft reconstruction. SOMLayer's map is the opposite
+        # -- non-trainable, and edited in place by a competitive update.
         self.weights_map = self.add_weight(
             name="som_weights",
             shape=(*self.grid_shape, self.input_dim),
             initializer=self.kernel_initializer,
             regularizer=self.kernel_regularizer,
-            trainable=True  # Enable backpropagation
+            trainable=True
         )
 
         # Create grid positions for topological regularization
@@ -476,9 +357,13 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _create_grid_positions(self) -> keras.KerasTensor:
         """
-        Create N-dimensional grid position coordinates for topological regularization.
+        Build the neuron coordinate grid used by the topological loss.
 
-        :return: Grid position tensor of shape ``(*grid_shape, grid_dim)``.
+        Returns a plain tensor, not a variable, so mixed precision leaves it
+        alone.
+
+        :return: Tensor of shape ``(*grid_shape, grid_dim)`` holding each
+            neuron's integer grid coordinates as float32.
         :rtype: keras.KerasTensor
         """
         # Create coordinate ranges for each dimension
@@ -496,11 +381,17 @@ class SoftSOMLayer(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Forward pass implementing soft competitive learning.
+        Assign the input softly across the grid and reconstruct it.
+
+        No weight is modified here. With ``training=True`` up to three
+        regularization losses are added through ``add_loss``; see the class
+        docstring for which flag gates which loss. The return value is the
+        same either way.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode (controls regularization losses).
+        :param training: Whether to add the regularization losses. Defaults
+            to None, which adds none.
         :type training: Optional[bool]
         :return: Soft reconstruction of shape ``(batch_size, input_dim)``.
         :rtype: keras.KerasTensor
@@ -532,11 +423,18 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _compute_soft_assignments(self, inputs: keras.KerasTensor) -> Tuple[keras.KerasTensor, Optional[list]]:
         """
-        Compute soft assignments between inputs and prototype vectors.
+        Turn distances to the prototypes into soft assignments.
+
+        Broadcasts the input against the whole weight map to get squared
+        distances of shape ``(batch_size, *grid_shape)``, then routes to
+        whichever softmax mode is configured.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :return: Tuple of (soft assignments, per-dim softmax list or None).
+        :return: ``(soft_assignments, dim_softmaxes)``. The assignments have
+            shape ``(batch_size, *grid_shape)``. ``dim_softmaxes`` is the
+            list of per-axis softmaxes on the per-dimension path, and None on
+            the global path.
         :rtype: Tuple[keras.KerasTensor, Optional[list]]
         """
         # Compute squared distances from inputs to all neurons
@@ -566,11 +464,19 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _per_dimension_softmax(self, distances: keras.KerasTensor) -> Tuple[keras.KerasTensor, list]:
         """
-        Apply softmax separately along each spatial dimension of the grid.
+        Softmax along each grid axis, then combine multiplicatively.
 
-        :param distances: Distance tensor of shape ``(batch_size, *grid_shape)``.
+        Runs one softmax per grid axis over the negative distances, takes
+        the elementwise product of those marginals, and renormalizes over
+        the spatial axes. The result is a factorized joint assignment, not a
+        joint softmax.
+
+        :param distances: Squared distances of shape
+            ``(batch_size, *grid_shape)``.
         :type distances: keras.KerasTensor
-        :return: Tuple of (combined soft assignments, per-dim softmax list).
+        :return: ``(combined, dim_softmaxes)``. ``combined`` has shape
+            ``(batch_size, *grid_shape)`` and sums to 1 over the grid;
+            ``dim_softmaxes`` holds one tensor per grid axis, in axis order.
         :rtype: Tuple[keras.KerasTensor, list]
         """
         # Apply softmax along each grid dimension independently
@@ -598,11 +504,16 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _global_softmax(self, distances: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Apply global softmax over all neurons in the grid.
+        One softmax over every neuron in the grid.
 
-        :param distances: Distance tensor of shape ``(batch_size, *grid_shape)``.
+        Flattens the spatial axes, softmaxes the negative distances across
+        all neurons, then reshapes back to the grid.
+
+        :param distances: Squared distances of shape
+            ``(batch_size, *grid_shape)``.
         :type distances: keras.KerasTensor
-        :return: Global soft assignments of shape ``(batch_size, *grid_shape)``.
+        :return: Soft assignments of shape ``(batch_size, *grid_shape)``,
+            summing to 1 over the whole grid.
         :rtype: keras.KerasTensor
         """
         # Flatten spatial dimensions for global softmax
@@ -617,11 +528,14 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _soft_reconstruction(self, soft_assignments: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Reconstruct inputs using soft-weighted prototype vectors.
+        Average the prototypes, weighted by the soft assignments.
 
-        :param soft_assignments: Soft assignment weights of shape ``(batch_size, *grid_shape)``.
+        Computes ``y = sum_i a_i * w_i`` by summing over every grid axis.
+
+        :param soft_assignments: Assignment weights of shape
+            ``(batch_size, *grid_shape)``.
         :type soft_assignments: keras.KerasTensor
-        :return: Reconstructed inputs of shape ``(batch_size, input_dim)``.
+        :return: Reconstruction of shape ``(batch_size, input_dim)``.
         :rtype: keras.KerasTensor
         """
         # soft_assignments: (batch_size, *grid_shape)
@@ -648,13 +562,16 @@ class SoftSOMLayer(keras.layers.Layer):
         reconstruction: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Compute Mean Squared Error reconstruction loss.
+        Mean squared error between the input and its reconstruction.
 
-        :param inputs: Original input tensor of shape ``(batch_size, input_dim)``.
+        Pushes the prototypes to form a codebook that can represent the
+        data.
+
+        :param inputs: Original input of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param reconstruction: Reconstructed tensor of shape ``(batch_size, input_dim)``.
+        :param reconstruction: Reconstruction of the same shape.
         :type reconstruction: keras.KerasTensor
-        :return: Scalar MSE loss.
+        :return: Scalar MSE, averaged over batch and features.
         :rtype: keras.KerasTensor
         """
         mse_loss = ops.mean(ops.square(inputs - reconstruction))
@@ -662,11 +579,18 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _topological_loss(self, soft_assignments: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Compute topological preservation loss to maintain spatial organization.
+        Reward nearby neurons for activating together.
 
-        :param soft_assignments: Soft assignment weights of shape ``(batch_size, *grid_shape)``.
+        Builds a neighbourhood kernel ``exp(-d / topological_sigma)`` over
+        the pairwise grid distances, correlates the batch-centred assignment
+        patterns of every neuron pair, and returns the NEGATIVE mean of the
+        product. Minimizing it therefore raises the correlation between
+        spatially close neurons, which is what makes the grid map-like.
+
+        :param soft_assignments: Assignment weights of shape
+            ``(batch_size, *grid_shape)``.
         :type soft_assignments: keras.KerasTensor
-        :return: Scalar topological loss.
+        :return: Scalar loss. Typically negative.
         :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(soft_assignments)[0]
@@ -699,11 +623,17 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def _sharpness_loss(self, dim_softmaxes: list) -> keras.KerasTensor:
         """
-        Compute entropy-based sharpness loss ``H(p) = -sum(p * log(p))``.
+        Average entropy of the per-axis assignments.
 
-        :param dim_softmaxes: List of per-dimension softmax tensors.
+        Computes ``H(p) = -sum(p * log(p))`` along each grid axis and
+        averages. Minimizing it pushes the assignments toward one-hot.
+        Returns 0.0 for an empty list, which happens on the global softmax
+        path.
+
+        :param dim_softmaxes: One softmax tensor per grid axis, in axis
+            order, as returned by ``_per_dimension_softmax``.
         :type dim_softmaxes: list
-        :return: Scalar average entropy loss across spatial dimensions.
+        :return: Scalar mean entropy across the grid axes.
         :rtype: keras.KerasTensor
         """
         if not dim_softmaxes:
@@ -728,11 +658,12 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def get_weights_map(self) -> keras.KerasTensor:
         """
-        Get the learned prototype weight map.
+        Return the learned prototype map.
 
-        :return: Weight map tensor of shape ``(*grid_shape, input_dim)``.
+        :return: Trainable weight map of shape
+            ``(*grid_shape, input_dim)``.
         :rtype: keras.KerasTensor
-        :raises RuntimeError: If called before the layer is built.
+        :raises RuntimeError: If the layer has not been built yet.
         """
         if self.weights_map is None:
             raise RuntimeError("Layer must be built before accessing weights_map")
@@ -740,11 +671,15 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def get_soft_assignments(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Get soft assignment probabilities for given inputs.
+        Return the soft assignments for an input, without reconstructing.
+
+        Useful for inspecting where data lands on the grid: the argmax over
+        the grid axes is the closest thing this layer has to a BMU.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :return: Soft assignments of shape ``(batch_size, *grid_shape)``.
+        :return: Assignments of shape ``(batch_size, *grid_shape)``, summing
+            to 1 over the grid.
         :rtype: keras.KerasTensor
         """
         soft_assignments, _ = self._compute_soft_assignments(inputs)
@@ -752,20 +687,25 @@ class SoftSOMLayer(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
-        Compute output tensor shape (same as input for reconstruction).
+        Return the output shape, which equals the input shape.
 
-        :param input_shape: Input tensor shape tuple.
+        The output is a reconstruction of the input, so nothing changes.
+
+        :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output tensor shape tuple.
+        :return: The same shape, as a tuple.
         :rtype: Tuple[Optional[int], ...]
         """
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get layer configuration for serialization.
+        Return the config needed to rebuild this layer.
 
-        :return: Dictionary containing complete layer configuration.
+        Includes every constructor argument, with the initializer and the
+        regularizer serialized.
+
+        :return: Config dictionary.
         :rtype: Dict[str, Any]
         """
         config = super().get_config()
