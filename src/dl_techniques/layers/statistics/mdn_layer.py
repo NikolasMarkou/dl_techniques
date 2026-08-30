@@ -1,33 +1,35 @@
 """
-Mixture Density Network (MDN) Layer with Intermediate Processing
+Mixture Density Network (MDN) layer.
 
-This implementation extends the traditional MDN layer with practical improvements
-for better training stability and performance:
+An MDN replaces a network's single point output with the parameters of a
+Gaussian mixture. For one input the layer emits three things: the component
+means mu, the component standard deviations sigma, and the mixture weights pi.
+The predicted density is::
 
-1. Intermediate processing layers before each head (Dense -> BN -> Activation)
-2. Diversity regularization to prevent component collapse
-3. Sigma constraint at a configurable minimum to prevent overconfident predictions
-4. Configurable bias usage
-5. Improved numerical stability and modern Keras 3 compliance
+    p(y|x) = sum_i pi_i(x) * N(y | mu_i(x), sigma_i(x))
 
-Theory:
-    MDNs extend traditional neural networks by replacing the single output value
-    with a mixture of probability distributions (typically Gaussians). For each
-    input, the network outputs:
+That lets the model say "the answer is either here or there" instead of
+averaging the two into a value it never expects to see.
 
-    1. The means (μ) for each mixture component
-    2. The standard deviations (σ) for each mixture component
-    3. The mixture weights (π) that determine component importance
+**What this version adds over a textbook MDN:**
 
-    The resulting predicted distribution is:
-        p(y|x) = Σ π_i(x) * N(y | μ_i(x), σ_i(x))
+- Each of the three heads gets its own Dense -> BatchNormalization ->
+  activation path, so the three parameter types can learn different features.
+- Optional diversity regularization pushes the component means apart, which is
+  the lever against component collapse.
+- Sigma is floored at ``min_sigma``, so no component can claim zero variance.
+- ``use_bias`` switches off the Dense biases and the BatchNormalization centers
+  together, for bias-free setups.
+- The negative log-likelihood runs in log space, so it does not underflow at
+  large ``output_dimension`` and needs no epsilon clamp.
 
-Applications:
-    - Time series forecasting with uncertainty
-    - Control systems with multiple possible outcomes
-    - Robotics and reinforcement learning
-    - Modeling inverse problems
-    - Financial modeling with risk assessment
+**Uses:**
+
+- Time series forecasting with uncertainty
+- Control systems with multiple possible outcomes
+- Robotics and reinforcement learning
+- Inverse problems
+- Financial modeling with risk assessment
 
 References:
     - Bishop, C. M. (1994). Mixture Density Networks.
@@ -56,73 +58,172 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # Constants
 # ---------------------------------------------------------------------
 
-MIN_SIGMA_DEFAULT = 1e-3      # Default minimum sigma value
+# Default floor for sigma. Keeps a component from claiming zero variance.
+MIN_SIGMA_DEFAULT = 1e-3
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.statistics.mdn_layer")
 class MDNLayer(keras.layers.Layer):
-    """Mixture Density Network layer with separated processing paths.
+    """Mixture Density Network layer with three separate parameter heads.
 
-    Outputs parameters for a mixture of Gaussian distributions with the predicted
-    density ``p(y|x) = sum_i pi_i(x) N(y | mu_i(x), sigma_i(x))``. Each parameter
-    head (means mu, standard deviations sigma, mixture weights pi) has its own
-    intermediate processing path consisting of Dense, optional BatchNormalization,
-    and activation layers before the final projection, enabling specialized
-    representation learning per parameter type. Diversity regularization penalizes
-    component collapse by adding ``exp(-||mu_i - mu_j||^2)`` terms.
+    The layer turns one input vector into the parameters of a Gaussian mixture
+    over the target space::
+
+        p(y|x) = sum_i pi_i(x) * N(y | mu_i(x), sigma_i(x))
+
+    There are ``num_mixtures`` components and the target has
+    ``output_dimension`` dimensions. Each component is axis-aligned, so there is
+    one sigma per component per output dimension.
+
+    The three parameter groups do not share a path. Means, standard deviations
+    and mixture weights each get their own Dense layer, an optional
+    BatchNormalization and an activation, then their own final projection. All
+    three read the same input tensor and nothing else.
+
+    A Keras layer returns one tensor, so the three projections are concatenated
+    on the last axis. ``split_mixture_params`` takes that tensor apart again.
+
+    Set ``diversity_regularizer_strength`` above 0 and the layer adds
+    ``exp(-||mu_i - mu_j||^2)`` over every distinct component pair as a training
+    loss. That pushes the means apart and is the lever against component
+    collapse.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────┐
-        │  Input (batch, input_dim)│
-        └────┬─────┬─────┬────────┘
-             │     │     │
-             ▼     ▼     ▼
-        ┌────┐ ┌────┐ ┌────┐
-        │ mu │ │ sig│ │ pi │   Intermediate Dense + BN + Act
-        │path│ │path│ │path│
-        └──┬─┘ └──┬─┘ └──┬─┘
-           ▼      ▼      ▼
-        ┌────┐ ┌────┐ ┌────┐
-        │ mu │ │sig │ │ pi │   Final Dense projections
-        │out │ │out │ │out │
-        └──┬─┘ └──┬─┘ └──┬─┘
-           └──┬───┘──┬───┘
-              ▼
-        ┌──────────────────────────┐
-        │  Concatenate [mu,sig,pi] │
-        │  (batch, total_params)   │
-        └──────────────────────────┘
+        ┌─────────────────────────────────────────────────────────────────────┐
+        │ inputs                                          (batch, input_dim) │
+        └──────────┬───────────────────────┬───────────────────────┬──────────┘
+                   ▼                       ▼                       ▼
+        ┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+        │ intermediate_mu     │ │ intermediate_sigma  │ │ intermediate_pi     │
+        │   _dense            │ │   _dense            │ │   _dense            │
+        │ intermediate_mu_bn  │ │ intermediate_sigma  │ │ intermediate_pi_bn  │
+        │   (optional)        │ │   _bn   (optional)  │ │   (optional)        │
+        │ activation          │ │ activation          │ │ activation          │
+        └──────────┬──────────┘ └──────────┬──────────┘ └──────────┬──────────┘
+                   │ (B, inter)            │ (B, inter)            │ (B, inter)
+                   ▼                       ▼                       ▼
+        ┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+        │ mdn_mus             │ │ mdn_sigmas          │ │ mdn_pi              │
+        │ Dense, linear       │ │ Dense               │ │ Dense, NO activation│
+        │                     │ │ softplus + min_sigma│ │ emits raw logits    │
+        └──────────┬──────────┘ └──────────┬──────────┘ └──────────┬──────────┘
+                   │ [B, M*D]              │ [B, M*D]              │ [B, M]
+                   └───────────────────────┼───────────────────────┘
+                                           ▼
+                     ┌───────────────────────────────────────────┐
+                     │ ops.concatenate([mu, sigma, pi], axis=-1) │
+                     │ [B, 2*M*D + M]                            │
+                     └───────────────────────────────────────────┘
 
-    :param output_dimension: Dimensionality of the target output space. Must be positive.
+    ``B`` is the batch, ``M`` is ``num_mixtures``, ``D`` is ``output_dimension``
+    and ``inter`` is ``intermediate_units``. The three towers are independent:
+    they share no weights, only the input tensor. The BatchNormalization stages
+    exist only when ``use_batch_norm`` is True.
+
+    One branch is not drawn, because it produces no output tensor. When
+    ``diversity_regularizer_strength`` is above 0 and ``training`` is True,
+    ``mu_output`` also feeds ``_compute_diversity_loss`` and the resulting
+    scalar goes to ``add_loss``.
+
+    **Output Layout:**
+
+    .. code-block:: text
+
+        The single output tensor packs all three groups on axis -1.
+        Getting these offsets wrong is the classic bug in this layer.
+
+        0              M*D          2*M*D     2*M*D + M
+        ├────────────────┼──────────────┼─────────────┤
+        │       mu       │    sigma     │     pi      │
+        │   M*D values   │  M*D values  │  M values   │
+        └───────┬────────┴───────┬──────┴──────┬──────┘
+                ▼                ▼             ▼
+          -> [B, M, D]     -> [B, M, D]  [B, M] as-is
+
+        split_mixture_params cuts it back apart:
+
+            mu_end    = num_mix * output_dim
+            sigma_end = mu_end + num_mix * output_dim
+            out_mu    = y_pred[..., :mu_end]
+            out_sigma = y_pred[..., mu_end:sigma_end]
+            out_pi    = y_pred[..., sigma_end:]
+
+    Only ``mu`` and ``sigma`` are reshaped to ``[B, M, D]``. ``pi`` stays
+    two-dimensional at ``[B, M]``, because there is one mixture weight per
+    component, not one per output dimension. Every consumer of ``pi`` in this
+    module relies on that.
+
+    :param output_dimension: Number of dimensions in the target space. Must be
+        positive.
     :type output_dimension: int
-    :param num_mixtures: Number of Gaussian mixture components. Must be positive.
+    :param num_mixtures: Number of Gaussian components. Must be positive.
     :type num_mixtures: int
-    :param use_bias: Whether to use bias vectors in Dense layers. Defaults to ``True``.
+    :param use_bias: Whether the Dense layers get bias vectors. Also sets
+        ``center`` on the BatchNormalization layers, so a bias-free layer stays
+        bias-free end to end. Defaults to "True".
     :type use_bias: bool
-    :param diversity_regularizer_strength: Strength of diversity regularization.
-        Defaults to 0.0.
+    :param diversity_regularizer_strength: Weight on the pairwise repulsion
+        between component means. 0.0 disables it. Defaults to 0.0.
     :type diversity_regularizer_strength: float
-    :param intermediate_units: Units in intermediate dense layers. Defaults to 32.
+    :param intermediate_units: Width of the three intermediate Dense layers.
+        Must be positive. Defaults to 32.
     :type intermediate_units: int
-    :param use_batch_norm: Whether to include BatchNormalization. Defaults to ``True``.
+    :param use_batch_norm: Whether each head gets a BatchNormalization between
+        its Dense layer and its activation. Defaults to "True".
     :type use_batch_norm: bool
-    :param intermediate_activation: Activation for intermediate layers. Defaults to ``"relu"``.
+    :param intermediate_activation: Activation applied after each intermediate
+        stage. Stored through ``deserialize_activation``, so a callable
+        round-trips. Defaults to "relu".
     :type intermediate_activation: str
-    :param kernel_initializer: Initializer for kernel weights. Defaults to ``'glorot_normal'``.
+    :param kernel_initializer: Initializer for the Dense kernels. Each Dense
+        gets its own clone, never the shared instance. Defaults to
+        "glorot_normal".
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for bias vectors. Defaults to ``'zeros'``.
+    :param bias_initializer: Initializer for the Dense biases, cloned the same
+        way. Defaults to "zeros".
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for kernel weights. Defaults to ``L2(1e-5)``.
+    :param kernel_regularizer: Regularizer for the Dense kernels. Defaults to
+        ``L2(1e-5)``.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param bias_regularizer: Regularizer for bias vectors. Defaults to ``L2(1e-6)``.
+    :param bias_regularizer: Regularizer for the Dense biases. Defaults to
+        ``L2(1e-6)``.
     :type bias_regularizer: keras.regularizers.Regularizer | None
-    :param min_sigma: Minimum standard deviation value. Defaults to 1e-3.
+    :param min_sigma: Floor on every standard deviation. Added after the
+        softplus in ``mdn_sigmas``, and applied again in ``loss_func`` and
+        ``sample``. Defaults to 1e-3.
     :type min_sigma: float
-    :param kwargs: Additional Layer base class arguments.
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any
+
+    :raises ValueError: If ``output_dimension``, ``num_mixtures`` or
+        ``intermediate_units`` is not positive, or if
+        ``diversity_regularizer_strength`` is negative.
+
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``.
+
+    Output shape:
+        2D tensor of shape
+        ``(batch_size, 2 * num_mixtures * output_dimension + num_mixtures)``.
+
+    Example:
+        >>> mdn = MDNLayer(output_dimension=2, num_mixtures=5)
+        >>> params = mdn(features)
+        >>> mu, sigma, pi_logits = mdn.split_mixture_params(params)
+        >>> nll = mdn.loss_func(y_true, params)
+
+    Note:
+        ``mdn_pi`` emits raw logits. Apply exactly one softmax or log_softmax to
+        that slice. A second one changes the mixture, because
+        ``softmax(softplus(z))`` is not ``softmax(z)``.
+
+    Note:
+        The diversity loss is added only when ``training`` is exactly ``True``.
+        Passing ``training=None`` skips it.
     """
 
     def __init__(
@@ -141,6 +242,15 @@ class MDNLayer(keras.layers.Layer):
         min_sigma: float = MIN_SIGMA_DEFAULT,
         **kwargs: Any
     ) -> None:
+        """Initialize the MDN layer and create all six Dense sub-layers.
+
+        The sub-layers are created here and built in ``build``. See the class
+        docstring for the parameters.
+
+        :raises ValueError: If ``output_dimension``, ``num_mixtures`` or
+            ``intermediate_units`` is not positive, or if
+            ``diversity_regularizer_strength`` is negative.
+        """
         super().__init__(**kwargs)
 
         # === Parameter Validation ===
@@ -171,11 +281,11 @@ class MDNLayer(keras.layers.Layer):
         # This follows the "Create vs. Build" golden rule.
 
         # --- Intermediate processing layers ---
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per head.
-        # Do NOT collapse these back to the shared instance: MEASURED, mdn_mus.kernel ==
-        # mdn_sigmas.kernel and all three intermediate heads were bit-identical
-        # (max|delta| = 0.0), so the mixture mean, scale and weight pathways were one
-        # pathway at initialization.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200: every Dense below gets
+        # its own clone_initializer(...). Do NOT pass the shared instance back
+        # in: MEASURED, mdn_mus.kernel == mdn_sigmas.kernel and all three
+        # intermediate heads came out bit-identical (max|delta| = 0.0) at init.
+        # See decisions.md D-200.
         self.intermediate_mu_dense = keras.layers.Dense(
             self.intermediate_units, use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
@@ -218,13 +328,11 @@ class MDNLayer(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_sigmas'
         )
-        # DECISION plan_2026-06-08_a5f40f4f/D-004: mdn_pi emits RAW LOGITS (linear, no
-        # activation). Do NOT re-add softplus/softmax here. Every pi consumer
-        # (loss_func, sample, get_point_estimate, get_uncertainty,
-        # check_component_diversity, experiments/mdn/forecasting.py) applies a
-        # single softmax/log_softmax to this slice. A softplus here caused a
-        # double-activation (softmax(softplus(z)) != softmax(z)) that compressed
-        # the mixture logits and degraded the weights. See decisions.md D-004.
+        # DECISION plan_2026-06-08_a5f40f4f/D-004: mdn_pi takes NO activation and
+        # emits raw logits. Do NOT re-add softplus or softmax here. Every pi
+        # consumer (loss_func, sample, get_point_estimate, get_uncertainty,
+        # check_component_diversity) applies exactly one softmax or log_softmax
+        # to this slice; a softplus here compressed the logits and degraded pi.
         self.mdn_pi = keras.layers.Dense(
             self.num_mix, use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer), bias_initializer=clone_initializer(self.bias_initializer),
@@ -235,7 +343,12 @@ class MDNLayer(keras.layers.Layer):
         logger.info(f"Initialized MDN layer with {num_mixtures} mixtures and {output_dimension}D output")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer's weights and sub-layers.
+        """Build every sub-layer explicitly.
+
+        The three intermediate Dense layers take the raw input. Everything after
+        them takes ``(batch, intermediate_units)``, so the later builds use that
+        shape instead of ``input_shape``. Building explicitly keeps the weights
+        materialized on a ``.keras`` reload.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
@@ -269,13 +382,21 @@ class MDNLayer(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through three parallel processing paths for mu, sigma, and pi.
+        """Run the three heads and concatenate their outputs.
+
+        The mu, sigma and pi paths are independent and run in any order. Only
+        the diversity loss depends on ``training``: it is added when
+        ``diversity_regularizer_strength`` is above 0 and ``training`` is
+        exactly ``True``. The returned tensor is the same either way.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean flag for training mode.
+        :param training: Training-mode flag, forwarded to the sub-layers and
+            gating the diversity loss.
         :type training: bool | None
-        :return: Concatenated mixture parameters ``[mu, sigma, pi]``.
+        :return: Mixture parameters packed as ``[mu, sigma, pi]`` on axis -1,
+            of shape ``(batch_size, 2 * num_mix * output_dim + num_mix)``. See
+            the Output Layout diagram in the class docstring.
         :rtype: keras.KerasTensor
         """
         # === Process MU (Means) Path ===
@@ -305,9 +426,10 @@ class MDNLayer(keras.layers.Layer):
             self.add_loss(diversity_loss)
 
         # === Concatenate Output ===
-        # ops.concatenate (not keras.layers.concatenate): the layer-fn creates a
-        # new graph node per call. Layout stays [mu, sigma, pi] on axis -1 so
-        # split_mixture_params / compute_output_shape remain unchanged.
+        # ops.concatenate, not keras.layers.concatenate: the layer function
+        # creates a new graph node on every call. The order stays
+        # [mu, sigma, pi] on axis -1, which is what split_mixture_params and
+        # compute_output_shape assume.
         return ops.concatenate(
             [mu_output, sigma_output, pi_output],
             axis=-1
@@ -317,11 +439,25 @@ class MDNLayer(keras.layers.Layer):
         self,
         mu_output: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Compute diversity loss to prevent component collapse.
+        """Penalize component means that sit on top of each other.
 
-        :param mu_output: Mean outputs of shape ``(batch_size, num_mix * output_dim)``.
+        Reshapes the flat means to ``[B, M, D]`` and takes the squared distance
+        between every pair of components. ``exp(-distance)`` turns that into a
+        penalty: close components score near 1, far ones score near 0. The
+        diagonal is zeroed by a mask, so a component is never compared with
+        itself.
+
+        The mean runs over the whole ``M`` by ``M`` matrix, zeroed diagonal
+        included, so the divisor is ``M * M`` and not the pair count.
+
+        Returns an exact 0.0 when there is only one component, since there is
+        no pair to separate.
+
+        :param mu_output: Mean outputs of shape
+            ``(batch_size, num_mix * output_dim)``.
         :type mu_output: keras.KerasTensor
-        :return: Scalar diversity loss.
+        :return: Scalar loss, already scaled by
+            ``diversity_regularizer_strength``.
         :rtype: keras.KerasTensor
         """
         if self.num_mix <= 1:
@@ -343,9 +479,14 @@ class MDNLayer(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
+        The last axis holds ``2 * output_dim * num_mix + num_mix`` values: the
+        means, then the standard deviations, then the mixture logits. Leading
+        axes pass through unchanged.
+
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
-        :return: Output shape tuple.
+        :return: Same shape with the last axis replaced by the packed
+            parameter width.
         :rtype: tuple[int | None, ...]
         """
         output_size = (2 * self.output_dim * self.num_mix) + self.num_mix
@@ -355,11 +496,17 @@ class MDNLayer(keras.layers.Layer):
             self,
             y_pred: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """Split the concatenated network output into parameter tensors.
+        """Split the packed output back into mu, sigma and pi.
 
-        :param y_pred: Concatenated prediction tensor.
+        The slice offsets are drawn in the class docstring's Output Layout
+        diagram. ``mu`` and ``sigma`` are reshaped to ``[B, M, D]``. ``pi`` is
+        left at ``[B, M]`` and still holds raw logits, not probabilities.
+
+        :param y_pred: Packed prediction tensor of shape
+            ``(batch_size, 2 * num_mix * output_dim + num_mix)``.
         :type y_pred: keras.KerasTensor
-        :return: Tuple of ``(mu, sigma, pi)`` tensors.
+        :return: Tuple of ``(mu, sigma, pi_logits)`` with shapes
+            ``[B, M, D]``, ``[B, M, D]`` and ``[B, M]``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
         mu_end = self.num_mix * self.output_dim
@@ -380,37 +527,63 @@ class MDNLayer(keras.layers.Layer):
             y_true: keras.KerasTensor,
             y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute MDN negative log-likelihood loss ``L = -log(sum_i pi_i N(y | mu_i, sigma_i))``.
+        """Negative log-likelihood of the targets under the predicted mixture.
 
-        :param y_true: Ground truth targets.
+        Computes ``L = -mean_b log(sum_i pi_i N(y | mu_i, sigma_i))``. The whole
+        reduction runs in log space, via ``log_softmax`` on the pi logits and
+        ``logsumexp`` over the mixture axis. A prob-space product then sum
+        underflows at large ``output_dim`` and needs an epsilon clamp; this
+        does not.
+
+        Shapes through the computation, with ``B`` the batch, ``M``
+        ``num_mixtures`` and ``D`` ``output_dimension``::
+
+            y_true (reshaped)          [B, D]
+            out_mu, out_sigma          [B, M, D]
+            out_pi                     [B, M]      logits
+            log_mix_weights            [B, M]
+            y_true_expanded            [B, 1, D]
+            log_component              [B, M, D]   before the sum
+            log_component              [B, M]      after the sum over D
+            log_prob                   [B]
+            loss                       scalar
+
+        Sigma is floored at ``min_sigma`` again here. ``mdn_sigmas`` already
+        applies that floor, but this method also accepts caller-supplied raw
+        parameters.
+
+        :param y_true: Ground truth targets. Reshaped to ``[-1, output_dim]``,
+            so any leading-axis layout is accepted.
         :type y_true: keras.KerasTensor
-        :param y_pred: Concatenated prediction parameters from ``call()``.
+        :param y_pred: Packed prediction parameters from ``call``.
         :type y_pred: keras.KerasTensor
-        :return: Scalar loss value.
+        :return: Scalar loss, averaged over the batch.
         :rtype: keras.KerasTensor
         """
         y_true = ops.reshape(y_true, [-1, self.output_dim])
         out_mu, out_sigma, out_pi = self.split_mixture_params(y_pred)
 
-        # Floor sigma (the sigma Dense already applies softplus + min_sigma, but
-        # keep a defensive floor for caller-supplied raw params).
+        # Floor sigma. The sigma Dense already applies softplus + min_sigma;
+        # this covers caller-supplied raw params.
         out_sigma = ops.maximum(out_sigma, self.min_sigma)
 
-        # === NLL in LOG-SPACE (no prob-space prod/sum -> no underflow at high
-        # output_dim, no epsilon-clamp hack). out_pi is treated as LOGITS. ===
-        # log mixture weights via log_softmax(pi_logits)
-        log_mix_weights = keras.activations.log_softmax(out_pi, axis=-1)  # [B, M]
+        # Everything below stays in log space. out_pi is treated as logits.
+        # See the shape chain in this method's docstring.
+        log_mix_weights = keras.activations.log_softmax(out_pi, axis=-1)
 
-        y_true_expanded = ops.expand_dims(y_true, 1)  # [B, 1, D]
+        y_true_expanded = ops.expand_dims(y_true, 1)
+
         # log N(y|mu,sigma) = -0.5*log(2pi) - log(sigma) - 0.5*((y-mu)/sigma)^2
         log_2pi = ops.log(ops.cast(2.0 * np.pi, out_mu.dtype))
         z = (y_true_expanded - out_mu) / out_sigma
         log_component = -0.5 * log_2pi - ops.log(out_sigma) - 0.5 * ops.square(z)
-        # sum over output dims (independent Gaussians)
-        log_component = ops.sum(log_component, axis=-1)  # [B, M]
 
-        # combine weights + component log-probs, reduce mixtures with logsumexp
-        log_prob = ops.logsumexp(log_mix_weights + log_component, axis=-1)  # [B]
+        # Sum over the output dimensions. The dimensions are independent
+        # Gaussians, so their log-densities add.
+        log_component = ops.sum(log_component, axis=-1)
+
+        # Add the log weights, then reduce the mixture axis with logsumexp.
+        log_prob = ops.logsumexp(log_mix_weights + log_component, axis=-1)
         loss = -ops.mean(log_prob)
 
         return loss
@@ -421,16 +594,28 @@ class MDNLayer(keras.layers.Layer):
             temperature: float = 1.0,
             seed: Optional[int] = None
     ) -> keras.KerasTensor:
-        """Sample from the predicted mixture distribution via ancestral sampling.
+        """Draw one sample per row by ancestral sampling.
 
-        :param y_pred: Concatenated prediction parameters.
+        Two steps. First pick a component: the pi logits go through a softmax
+        and a Gumbel-max draw selects one index per row. Then draw from that
+        component's Gaussian, ``mu + sigma * normal()``. The selection is done
+        with a one-hot mask and a sum, so it stays a tensor op.
+
+        ``temperature`` divides the pi logits before the softmax. Below 1.0 the
+        draw concentrates on the dominant component; above 1.0 it spreads out.
+        It scales which component is picked, not how wide that component is.
+
+        The output shape does not depend on ``temperature`` or ``seed``. Both
+        branches return ``(batch_size, output_dim)``.
+
+        :param y_pred: Packed prediction parameters from ``call``.
         :type y_pred: keras.KerasTensor
-        :param temperature: Sampling temperature controlling diversity. Defaults to 1.0.
+        :param temperature: Divisor applied to the mixture logits before the
+            softmax. Defaults to 1.0, which leaves them alone.
         :type temperature: float
-        :param seed: Optional integer seed for reproducible sampling. When provided,
-            both the categorical (Gumbel) draw and the Gaussian draw are derived from
-            it (offset by 1 for the Gaussian) so a fixed ``seed`` yields identical
-            samples across calls. Defaults to ``None`` (nondeterministic).
+        :param seed: Seed for reproducible sampling. Both draws are derived
+            from it: the Gumbel draw uses ``seed``, the Gaussian draw uses
+            ``seed + 1``. Defaults to "None", which is nondeterministic.
         :type seed: int | None
         :return: Sampled values of shape ``(batch_size, output_dim)``.
         :rtype: keras.KerasTensor
@@ -441,14 +626,11 @@ class MDNLayer(keras.layers.Layer):
         if temperature != 1.0:
             out_pi = out_pi / temperature
 
-        # DECISION plan_2026-06-09_be55db55/D-004: `sample` accepts an explicit
-        # `seed` threaded into BOTH keras.random draws. The plan assumed the prior
-        # iteration already added seed support here — it had NOT (sample took only
-        # temperature). Do NOT drop the seed param or assume a global RNG: MDNModel
-        # computes `seed + i` per sample to decorrelate draws, and that value was
-        # being discarded (model.py latent bug), so per-sample seeds MUST reach the
-        # random ops. The Gaussian draw uses `seed + 1` so it does not alias the
-        # categorical draw's stream. See decisions.md D-004.
+        # DECISION plan_2026-06-09_be55db55/D-004: `seed` must reach BOTH
+        # keras.random draws. Do NOT drop the parameter or fall back to a global
+        # RNG: MDNModel.sample passes `seed + i` per sample, and that value used
+        # to be computed and discarded, which made `seed=` a silent no-op. The
+        # Gaussian draw uses `seed + 1` so it does not alias the Gumbel stream.
         pi_seed = seed
         normal_seed = None if seed is None else seed + 1
 
@@ -472,7 +654,11 @@ class MDNLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: Configuration dictionary.
+        Every constructor argument is round-tripped. The activation goes
+        through ``serialize_activation``, so a plain callable survives a
+        ``.keras`` save and reload.
+
+        :return: Configuration dictionary accepted by the constructor.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -494,7 +680,9 @@ class MDNLayer(keras.layers.Layer):
 
 
 # ---------------------------------------------------------------------
-# Utility Functions for MDN Analysis
+# Utility functions for analysing a trained MDN.
+# Each one runs model.predict and then unpacks the result with the layer's
+# own split_mixture_params, so none of them assumes an offset of its own.
 # ---------------------------------------------------------------------
 
 
@@ -503,15 +691,24 @@ def get_point_estimate(
     x_data: np.ndarray,
     mdn_layer: MDNLayer
 ) -> np.ndarray:
-    """Calculate point estimates as ``E[y|x] = sum_i pi_i(x) mu_i(x)``.
+    """Compute the mixture mean ``E[y|x] = sum_i pi_i(x) mu_i(x)``.
 
-    :param model: Trained model with an MDNLayer.
+    Softmaxes the pi logits, weights the component means by them and sums over
+    the mixture axis.
+
+    This is the mean of a multi-modal distribution, so it can land in a region
+    the model considers unlikely. With two well-separated modes it returns the
+    midpoint between them. Use ``MDNLayer.sample`` when a plausible value
+    matters more than the average.
+
+    :param model: Trained model whose output is an ``MDNLayer`` output.
     :type model: keras.Model
-    :param x_data: Input data for which to generate predictions.
+    :param x_data: Input data to predict on.
     :type x_data: np.ndarray
-    :param mdn_layer: The MDNLayer instance from the model.
+    :param mdn_layer: The ``MDNLayer`` instance from that model, used to unpack
+        the prediction.
     :type mdn_layer: MDNLayer
-    :return: Point estimates with shape ``[batch_size, output_dim]``.
+    :return: Point estimates of shape ``(batch_size, output_dim)``.
     :rtype: np.ndarray
     """
     y_pred = model.predict(x_data)
@@ -534,17 +731,35 @@ def get_uncertainty(
     mdn_layer: MDNLayer,
     point_estimates: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Decompose predictive uncertainty via the law of total variance.
+    """Split the predictive variance into its two parts.
 
-    :param model: Trained model with an MDNLayer.
+    The law of total variance splits it in two::
+
+        aleatoric = sum_i pi_i * sigma_i^2
+        epistemic = sum_i pi_i * (mu_i - mean)^2
+        total     = aleatoric + epistemic
+
+    The aleatoric term is the average width of the components: noise the model
+    believes is in the data. The epistemic term is how far apart the components
+    sit: disagreement between the modes. Only the total and the aleatoric part
+    are returned; subtract them to get the epistemic part.
+
+    ``point_estimates`` must come from ``get_point_estimate`` on the SAME
+    ``x_data``. Passing estimates from other inputs inflates the epistemic term
+    without raising anything.
+
+    :param model: Trained model whose output is an ``MDNLayer`` output.
     :type model: keras.Model
-    :param x_data: Input data for prediction.
+    :param x_data: Input data to predict on.
     :type x_data: np.ndarray
-    :param mdn_layer: The MDNLayer instance from the model.
+    :param mdn_layer: The ``MDNLayer`` instance from that model, used to unpack
+        the prediction.
     :type mdn_layer: MDNLayer
-    :param point_estimates: Point estimates (weighted average of means).
+    :param point_estimates: Mixture means for the same inputs, of shape
+        ``(batch_size, output_dim)``.
     :type point_estimates: np.ndarray
-    :return: Tuple of ``(total_variance, aleatoric_variance)``.
+    :return: Tuple of ``(total_variance, aleatoric_variance)``, each of shape
+        ``(batch_size, output_dim)``.
     :rtype: tuple[np.ndarray, np.ndarray]
     """
     y_pred = model.predict(x_data)
@@ -557,14 +772,14 @@ def get_uncertainty(
     pi_expanded = np.expand_dims(pi_np, axis=-1)
     point_expanded = np.expand_dims(point_estimates, axis=1)
 
-    # Aleatoric uncertainty (weighted average of component variances)
+    # Aleatoric part: the weighted average of the component variances.
     aleatoric_variance = np.sum(pi_expanded * sigma_np ** 2, axis=1)
 
-    # Epistemic uncertainty (weighted variance of component means)
+    # Epistemic part: the weighted spread of the component means around the
+    # mixture mean.
     squared_diff = (mu_np - point_expanded) ** 2
     epistemic_variance = np.sum(pi_expanded * squared_diff, axis=1)
 
-    # Total predictive variance
     total_variance = aleatoric_variance + epistemic_variance
 
     return total_variance, aleatoric_variance
@@ -575,16 +790,28 @@ def get_prediction_intervals(
     total_variance: np.ndarray,
     confidence_level: float = 0.95
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Calculate Gaussian prediction intervals ``mu +/- z * sigma``.
+    """Build symmetric Gaussian intervals ``mu +/- z * sigma``.
 
-    :param point_estimates: Point estimates from the model.
+    Takes the z-score for ``confidence_level`` from ``scipy.stats.norm`` and
+    applies it to the square root of ``total_variance``.
+
+    The interval is Gaussian, but the predicted distribution is a mixture and
+    generally is not. On a multi-modal prediction this interval is centred on a
+    point between the modes and can cover a region the model rates as unlikely.
+    Treat it as a rough band, not as a calibrated quantile.
+
+    :param point_estimates: Interval centres, of shape
+        ``(batch_size, output_dim)``.
     :type point_estimates: np.ndarray
-    :param total_variance: Total predictive variance from the model.
+    :param total_variance: Total predictive variance for the same inputs.
     :type total_variance: np.ndarray
-    :param confidence_level: Desired confidence level. Defaults to 0.95.
+    :param confidence_level: Two-sided coverage, between 0 and 1. Defaults to
+        0.95.
     :type confidence_level: float
-    :return: Tuple of ``(lower_bound, upper_bound)`` arrays.
+    :return: Tuple of ``(lower_bound, upper_bound)``, each the shape of
+        ``point_estimates``.
     :rtype: tuple[np.ndarray, np.ndarray]
+    :raises ImportError: If ``scipy`` is not installed.
     """
     try:
         from scipy import stats
@@ -606,15 +833,34 @@ def check_component_diversity(
     x_data: np.ndarray,
     mdn_layer: MDNLayer
 ) -> Dict[str, Any]:
-    """Analyze mixture component diversity to diagnose collapse.
+    """Report how far apart the mixture components are.
 
-    :param model: Trained model with an MDNLayer.
+    Measures the Euclidean distance between the means of every distinct
+    component pair, then summarises those distances along with the sigmas and
+    the mixture weights. A mean separation near zero with one weight near 1 is
+    the signature of component collapse: the mixture has become one Gaussian.
+
+    With ``num_mix == 1`` there is no pair, and the separation statistics are
+    reported as 0.0 rather than raising.
+
+    Returned keys:
+
+    - ``mean_component_separation`` -- scalar, average pairwise distance.
+    - ``std_component_separation`` -- scalar, spread of those distances.
+    - ``mean_sigma_values`` -- scalar, average sigma over every component and
+      output dimension.
+    - ``mean_mixture_weights`` -- array of shape ``(num_mix,)``, the average
+      weight per component.
+    - ``std_mixture_weights`` -- array of shape ``(num_mix,)``.
+
+    :param model: Trained model whose output is an ``MDNLayer`` output.
     :type model: keras.Model
-    :param x_data: Sample input data for analysis.
+    :param x_data: Sample inputs to analyse.
     :type x_data: np.ndarray
-    :param mdn_layer: The MDNLayer instance from the model.
+    :param mdn_layer: The ``MDNLayer`` instance from that model, used to unpack
+        the prediction and to read ``num_mix``.
     :type mdn_layer: MDNLayer
-    :return: Dictionary containing diversity metrics.
+    :return: Diversity metrics keyed as listed above.
     :rtype: dict[str, Any]
     """
     y_pred = model.predict(x_data)
