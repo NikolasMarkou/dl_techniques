@@ -253,10 +253,13 @@ class NAMCell(keras.layers.Layer):
         self.op_classifier = keras.layers.Dense(4, name="op_classifier")
 
         # --- NTM memory ---
+        # `NTMMemory` no longer takes `epsilon`: it stored and serialized the
+        # value without ever reading it, and it was retired under
+        # plan-2026-08-30T120217-7f6cedd1/D-002. `NAMConfig.epsilon` is still
+        # live -- `_fixed_divide` below uses it -- so the field stays.
         self.memory = NTMMemory(
             memory_size=config.memory_size,
             memory_dim=h,
-            epsilon=config.epsilon,
             name="ntm_memory",
         )
         # DECISION plan-2026-08-17T183311-79c63e38/D-014
