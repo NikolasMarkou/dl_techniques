@@ -147,8 +147,8 @@ SUBJECTS: List[Subject] = [
     Subject(
         # AffineCouplingLayer has no `call`; `forward` is its public entry point, so it
         # is driven through the oracle's serializable MethodAdapter. Calling `forward`
-        # directly bypasses `Layer.__call__` entirely -- see
-        # TestForwardBypassesTheLayerNameScope for what that costs.
+        # directly still bypasses `Layer.__call__` entirely, but no longer costs the
+        # name scope -- see TestForwardAgreesWithBuildOnTheLayerNameScope.
         "AffineCouplingLayer",
         lambda: MethodAdapter(
             AffineCouplingLayer(input_dim=4, context_dim=3, name="coupling"),
@@ -442,25 +442,28 @@ class TestJitCompiledAgreesWithEager:
 
 
 # ---------------------------------------------------------------------
-# a discovery this sweep made: `forward` is not `__call__`
+# a discovery this sweep made: `forward` is not `__call__` -- now fixed
 # ---------------------------------------------------------------------
 
 
-class TestForwardBypassesTheLayerNameScope:
-    def test_calling_forward_directly_leaves_the_weights_outside_the_layer_scope(self):
-        """``AffineCouplingLayer.forward`` never enters ``Layer.__call__``.
+class TestForwardAgreesWithBuildOnTheLayerNameScope:
+    def test_calling_forward_directly_produces_the_same_weight_paths_as_build(self):
+        """``AffineCouplingLayer.forward`` still never enters ``Layer.__call__``.
 
-        MEASURED. Built through ``build()``, the weights are
-        ``coupling/transformation_net/dense_1/kernel``. Built by calling ``forward``
-        directly on a fresh instance, the very same weights are
-        ``transformation_net/dense_1/kernel`` -- the owning layer's name segment is
-        missing, because ``forward`` bypasses ``__call__`` and therefore its name scope.
+        It no longer costs anything. MEASURED before
+        ``plan-2026-08-30T175846-3e8a6ff3``: built through ``build()`` the weights were
+        ``coupling/transformation_net/dense_1/kernel``, but built by calling ``forward``
+        on a fresh instance the very same weights were ``transformation_net/dense_1/kernel``
+        -- the owning layer's name segment gone, because ``forward`` bypasses ``__call__``
+        and therefore its name scope. That is the §7.2 hazard ("public methods that bypass
+        lazy build") in its weight-path form, and it is what breaks by-name weight transfer.
 
-        This is the §7.2 hazard ("public methods that bypass lazy build") in its
-        weight-path form: two instances of one class disagree about where their weights
-        live depending on which entry point built them, which is exactly what breaks
-        by-name weight transfer. It is pinned rather than fixed because changing it moves
-        weight paths, and that is a checkpoint-affecting change (§6.3).
+        ``_compute_scale_and_shift`` now builds the layer first if nothing else has, so
+        ``forward``, ``inverse`` and ``build`` agree. The paths ``build()`` produced were
+        PRESERVED, not replaced: this asserts the ``coupling/`` prefix explicitly rather
+        than only asserting the two agree, since two identically-broken entry points would
+        also agree. The wider claim -- ``build`` / ``forward`` / ``inverse`` / ``sample``
+        all agreeing -- lives in ``test_the_four_carried_defects_are_fixed.py``.
         """
         sample = [_draw(8, 4), _draw(8, 3)]
 
@@ -473,8 +476,9 @@ class TestForwardBypassesTheLayerNameScope:
         )
 
         assert [w.path for w in explicit.weights][0].startswith("coupling/")
-        assert [w.path for w in via_forward.weights][0].startswith("transformation_net/")
-        assert relative_weight_paths(explicit) != relative_weight_paths(via_forward)
+        assert [w.path for w in via_forward.weights][0].startswith("coupling/")
+        assert relative_weight_paths(explicit) == relative_weight_paths(via_forward)
+        assert via_forward.built is True
 
     def test_the_method_adapter_restores_the_scope(self):
         """The positive arm: routed through ``__call__``, the paths agree again.

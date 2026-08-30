@@ -411,6 +411,15 @@ class AffineCouplingLayer(keras.layers.Layer):
         :return: Tuple of ``(scale, shift)`` parameters.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
+        # DECISION plan-2026-08-30T175846-3e8a6ff3/D-004
+        # Build here, once, if no one has. `forward`/`inverse` are public and do
+        # NOT go through `Layer.__call__`, so without this the first touch built
+        # `transformation_net` outside this layer's name scope and its weights
+        # landed at a bare `dense_1/kernel`. Do NOT instead give this class a
+        # `call()`: that changes the public API. decisions.md D-004.
+        if not self.built:
+            self.build([(None, self.input_dim), (None, self.context_dim)])
+
         # Concatenate static part and context for transformation network input
         net_input = ops.concatenate([static_part, context], axis=-1)
 
@@ -877,6 +886,14 @@ class NormalizingFlowLayer(keras.layers.Layer):
         """
         if num_samples < 1:
             raise ValueError(f"num_samples must be >= 1, got {num_samples}")
+
+        # DECISION plan-2026-08-30T175846-3e8a6ff3/D-004
+        # Build the whole stack HERE, not per coupling layer. `sample` bypasses
+        # `Layer.__call__`, and letting each child build itself on first touch
+        # puts its weights outside this layer's name scope: the 12 weights then
+        # read as 6 duplicated bare `dense_1/kernel` paths. decisions.md D-004.
+        if not self.built:
+            self.build([(None, self.output_dim), (None, self.context_dim)])
 
         batch_size = ops.shape(context)[0]
 
