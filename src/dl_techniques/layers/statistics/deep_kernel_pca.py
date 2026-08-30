@@ -531,6 +531,12 @@ class DeepKernelPCA(keras.layers.Layer):
         # Non-trainable record of the fit: 0.0 = un-fitted (random projection),
         # 1.0 = fitted (genuine Nystrom kernel PCA). Created here so it
         # serializes. call() branches on len(self.nystrom_alphas), not on this.
+
+        # DECISION plan-2026-08-30T152113-67a8cc1e/D-001: _fit_flag is written
+        # and never read. That is intended. DO NOT delete it as dead code:
+        # load_own_variables detects a fitted checkpoint by COUNTING weights,
+        # so removing it drops n_base 6 -> 5 and every existing .keras file
+        # then reads a scalar's .shape[0] and raises IndexError.
         self._fit_flag = self.add_weight(
             name='fit_flag',
             shape=(),
