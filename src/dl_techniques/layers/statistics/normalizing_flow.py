@@ -71,9 +71,10 @@ class AffineCouplingLayer(keras.layers.Layer):
     The Jacobian is triangular, so ``log|det(J)| = sum(log(s))``. That is
     ``O(input_dim)`` work.
 
-    Set ``reverse=True`` and the layer rotates the input by ``split_dim`` before
-    splitting, so the OTHER half gets transformed. A stack that alternates the
-    flag transforms every dimension eventually.
+    Set ``reverse=True`` and the layer rotates the input left by ``split_dim``
+    before splitting, so the OTHER half gets transformed, then rotates right by
+    ``split_dim`` on the way out to restore the original ordering. A stack that
+    alternates the flag transforms every dimension eventually.
 
     **Architecture Overview:**
 
@@ -95,7 +96,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         └─────────────────────────┬────────────────────────┘
                                   ▼
         ┌──────────────────────────────────────────────────┐
-        │ _apply_split_and_reverse, the same rotation again│
+        │ _undo_split_and_reverse                          │
+        │ identity, or rotate right by split_dim           │
         └─────────────────────────┬────────────────────────┘
                                   ▼
         ┌──────────────────────────────────────────────────┐
@@ -175,7 +177,7 @@ class AffineCouplingLayer(keras.layers.Layer):
         └────────────┬─────────────┘    └────────────┬─────────────┘
                      ▼                               ▼
         ┌──────────────────────────┐    ┌──────────────────────────┐
-        │ _apply_split_and_reverse │    │ _apply_split_and_reverse │
+        │ _undo_split_and_reverse  │    │ _undo_split_and_reverse  │
         │ returns y                │    │ returns (z, ldj)         │
         │                          │    │ ldj = sum(log(s), -1)    │
         └──────────────────────────┘    └──────────────────────────┘
@@ -231,15 +233,15 @@ class AffineCouplingLayer(keras.layers.Layer):
         >>> z_back, log_det = layer.inverse(y, context)
 
     Note:
-        An odd ``input_dim`` with ``reverse=True`` is not invertible. The same
-        rotation is applied on the way in and on the way out. Rotating a
-        length-``input_dim`` vector twice by ``split_dim`` returns to the start
-        only when the two halves are equal in size. Measured at
-        ``input_dim=5``, ``context_dim=3``, batch 8: ``inverse(forward(z))``
-        differs from ``z`` by an O(1) amount, against ~1e-07 float32 round-off
-        at ``reverse=False``. The O(1) size is a random-init artifact and
-        changes with the seed, so only the order of magnitude reproduces. Use
-        an even ``input_dim``.
+        The layer round-trips at every ``input_dim >= 2`` and both ``reverse``
+        settings. The exit rotation is the inverse of the entry rotation: the
+        entry rotates the last axis left by ``split_dim``, the exit rotates it
+        right by the same amount. Measured at ``input_dim`` in 2 through 7,
+        ``context_dim=3``, batch 8: ``inverse(forward(z))`` differs from ``z``
+        by ~1e-07 float32 round-off in every case. At an even ``input_dim`` the
+        two rotations move by the same number of positions and produce the same
+        tensor, so even-dimension outputs are bit-identical to those of the
+        earlier code that reused the left rotation on both sides.
     """
 
     def __init__(
@@ -643,15 +645,13 @@ class NormalizingFlowLayer(keras.layers.Layer):
         >>> draws = flow.sample(100, context)
 
     Note:
-        An odd ``output_dimension`` breaks invertibility as soon as
-        ``num_flow_steps`` is 2 or more, because the odd-indexed coupling
-        layers cannot undo their own rotation. Measured at
-        ``output_dimension=5, num_flow_steps=2``, ``context_dim=3``, batch 8: a
-        tensor round-tripped through ``call`` and forward again differs by an
-        O(1) amount, against ~1e-07 float32 round-off at
-        ``output_dimension=4``. The O(1) size is a random-init artifact and
-        changes with the seed, so only the order of magnitude reproduces. Use
-        an even ``output_dimension``.
+        Any ``output_dimension >= 2`` round-trips, odd or even, at any
+        ``num_flow_steps``. The odd-indexed coupling layers run with
+        ``reverse=True``, and each undoes its own entry rotation with the
+        inverse rotation on exit. Measured at ``output_dimension`` in 3 through
+        7 and ``num_flow_steps`` in 2 through 4, ``context_dim=3``, batch 8: a
+        tensor round-tripped through ``call`` and forward again differs by
+        ~1e-07 float32 round-off.
     """
 
     def __init__(
