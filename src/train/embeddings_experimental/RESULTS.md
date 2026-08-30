@@ -247,9 +247,18 @@ sinusoidal encodings.** At 512 it is severe (up to 10x); at 64 it nearly
 vanishes, and `ascii_bert` reaches its best retrieval of any configuration
 measured — double its original.
 
-SST-2 probe accuracy stays within 0.03 of 0.60 in **every** cell of every run, so
-content remains linearly decodable throughout. What moves is specifically cosine
-retrieval. That gap — a linear probe steady while cosine collapses — is the
+SST-2 probe accuracy spans **0.5252–0.6514** over all 118 cells and
+**0.5767–0.6355** at the 7-seed arm-configuration mean, so content remains
+linearly decodable throughout while cosine retrieval moves by up to 10x. What
+moves is specifically cosine retrieval.
+
+> **Correction, 2026-08-30 (review).** This used to read "stays within 0.03 of
+> 0.60 in **every** cell of every run". That bound is wrong at both readings of
+> "cell": **30 of 118** individual cells fall outside [0.57, 0.63], and so do
+> **2 of 16** arm-configuration means. The conclusion is unaffected — the probe
+> moves ~0.06 across everything while retrieval moves 10x — but the probe is
+> also not arm-neutral, which the old phrasing implied: `ascii_bert` sits at
+> 0.577–0.593 in every configuration and the convolutional arms at 0.61–0.64. That gap — a linear probe steady while cosine collapses — is the
 signature that led to the whitening result below, and eventually to the cause.
 
 ### The cause: a sinusoidal model's pooled embedding depends on LENGTH
@@ -499,7 +508,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **Missing external residual** | `TransformerLayer` is self-contained — it adds its own two residuals. Unlike the conv blocks, which are transform-only and get an external add in their wrappers. |
 | **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while both conv arms measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. |
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
-| **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix — and R@1 does not move. Clifford also lost 10x with anisotropy slightly *improving*, and across arms the anisotropy rise is *anti-correlated* with the damage. |
+| **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0001 — a complete fix — and R@1 does not move (re-verified 2026-08-30 at 7 seeds: `ascii_bert` 0.0129 → 0.0124, `ascii_clifford_bert` 0.0587 → 0.0606). **The two supporting facts this row used to give were both wrong** and are withdrawn: clifford's anisotropy *worsens* under sinusoidal positions (0.2821 → 0.3568), it does not "slightly improve"; and across arms the anisotropy rise is **positively** correlated with the damage (r = +0.324, n=4), not anti-correlated. The refutation rests on the centering result alone, which holds. |
 | **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **three of the four** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059, `convnext_v2` 0.0507 → 0.0386). Correct for the learned-position conv arms — that is where the 3.3x-3.9x came from — but wrong for those three. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
 | **"A length-invariant readout will fix retrieval"** — my own prediction | `max` pooling IS length-invariant (0.9693 vs `mean`'s 0.3805) and does not fix it: bert falls to chance (0.00033) while clifford improves 3.6x (0.02167), neither reaching its learned-position baseline. Length drift is real and contributory, not sufficient. |
 | **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
@@ -528,11 +537,16 @@ unless given explicitly.
 > `hidden_dropout_rate` to every arm, so it had embedding dropout like the
 > others. What it lacked was *block* dropout.
 
-Measured **inert as a cause** of the transformer's collapse (2.8307 at dropout
-0.0), so no conclusion in this file changes. But it was an uncontrolled
-difference between arms, and **Runs 1-4 were all measured before the fix** — any
-future run of the clifford arm is not comparable to the numbers above without
-re-running it.
+**The inertness evidence does not cover the arm the confound is in.** This file
+used to say the difference was "measured inert as a cause (2.8307 at dropout
+0.0), so no conclusion changes". That measurement is of the **transformer** arm
+and its collapse. The arm that trained with no block dropout is **clifford**, and
+no clifford measurement with and without block dropout exists anywhere in the
+artifacts. So the confound is disclosed but **not** dismissed: it is an
+uncontrolled difference between arms, **Runs 1-4 were all measured before the
+fix**, and any future run of the clifford arm is not comparable to the numbers
+above without re-running it. Settling it needs a paired clifford re-run at block
+dropout 0.0 against 0.1, which has not been done.
 
 `tests/test_models/test_embeddings_shared/test_every_arm_is_equally_regularized.py`
 now pins it. Note what that guard had to learn: a first version compared two
