@@ -29,15 +29,20 @@ The flow composes ``K`` invertible maps ``f_1 ... f_K``::
 
     y = f_K(f_{K-1}(... f_1(z) ...)),      z ~ N(0, I)
 
-Change of variables gives the exact log-likelihood::
+Change of variables gives the exact log-likelihood. The Jacobian term is
+SUBTRACTED when it is the forward map's::
 
-    log p(y) = log N(z; 0, I) + sum_i log|det(df_i / dz_{i-1})|
+    log p(y) = log N(z; 0, I) - sum_i log|det(df_i / dz_{i-1})|
+
+``inverse`` reports the log-determinant of the ``y -> z`` map it performs,
+which is the negative of that, so ``loss_func`` adds what ``inverse`` returns.
 
 For one affine coupling step, with the input split into ``z_a`` and ``z_b``::
 
     y_a = z_a
     y_b = z_b * s(z_a, context) + t(z_a, context)
-    log|det(J)| = sum(log(s))
+    log|det(dy/dz)| = sum(log(s))        forward
+    log|det(dz/dy)| = -sum(log(s))       inverse, and what inverse() returns
 
 Sampling runs the chain forward, ``z`` to ``y``. Density estimation runs it
 backward, ``y`` to ``z``. Both directions use the same weights.
@@ -68,8 +73,10 @@ class AffineCouplingLayer(keras.layers.Layer):
     is unchanged, the same ``s`` and ``t`` can be recovered in either direction,
     which is what makes the step invertible.
 
-    The Jacobian is triangular, so ``log|det(J)| = sum(log(s))``. That is
-    ``O(input_dim)`` work.
+    The Jacobian is triangular, so the forward map has
+    ``log|det(dy/dz)| = sum(log(s))`` and the inverse has ``-sum(log(s))``.
+    ``inverse`` returns the latter, the log-determinant of the map it performs.
+    That is ``O(input_dim)`` work.
 
     Set ``reverse=True`` and the layer rotates the input left by ``split_dim``
     before splitting, so the OTHER half gets transformed, then rotates right by
@@ -454,8 +461,9 @@ class AffineCouplingLayer(keras.layers.Layer):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Map data ``y`` back to latent ``z``. This is the likelihood direction.
 
-        Returns the log-determinant of the Jacobian alongside ``z``, which the
-        change-of-variables formula needs.
+        Returns ``log|det(dz/dy)| = -sum(log(s))`` alongside ``z`` -- the
+        log-determinant of the map THIS method performs, not of the forward
+        map. ``loss_func`` adds it directly.
 
         :param y: Transformed data tensor, shape ``(batch_size, input_dim)``.
         :type y: keras.KerasTensor
@@ -487,8 +495,12 @@ class AffineCouplingLayer(keras.layers.Layer):
         # Undo the entry rotation, restoring the original ordering.
         z = self._undo_split_and_reverse(z)
 
-        # Compute log-determinant of Jacobian (sum of log scale factors)
-        log_det_jacobian = ops.sum(ops.log(s), axis=-1)
+        # Log-determinant of the map THIS method performs, y -> z.
+        # z_b = (y_b - t) / s, so dz/dy is diag(1/s) on the transformed half and
+        # identity on the static half, giving -sum(log s). The rotations are
+        # permutations and contribute nothing. Reporting +sum(log s) here (the
+        # FORWARD map's value) is what made loss_func's NLL wrong.
+        log_det_jacobian = -ops.sum(ops.log(s), axis=-1)
 
         return z, log_det_jacobian
 
@@ -795,7 +807,10 @@ class NormalizingFlowLayer(keras.layers.Layer):
             ops.sum(z ** 2, axis=-1)
         )
 
-        # Change of variables: log p(y) = log π(z) + log|det(J)|
+        # Change of variables. total_log_det_jacobian is log|det(dz/dy)|,
+        # the log-determinant of the y -> z map call() performed, so it is
+        # ADDED here. It equals -sum(log s); adding +sum(log s) instead is the
+        # CD-10 defect and makes p(y) integrate to ~4.8 rather than 1.
         log_prob_y = log_prob_z + total_log_det_jacobian
 
         # Return negative log-likelihood for minimization

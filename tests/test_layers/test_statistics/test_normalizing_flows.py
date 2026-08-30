@@ -927,8 +927,11 @@ class TestNormalizingFlowStep5Fixes:
             keras.ops.convert_to_numpy(data),
             keras.ops.convert_to_numpy(z_rec),
             atol=1e-6, err_msg="Small-scale forward/inverse must be exact inverses")
-        # log-det == sum(log s) == dim_t * (-9) per row (no epsilon offset).
-        expected_ldj = dim_t * (-9.0)
+        # inverse() reports the log-det of the y->z map it performs, which is
+        # -sum(log s) == dim_t * (+9) per row. No epsilon offset either way;
+        # that is what this assertion is really pinning. The expectation used to
+        # read dim_t * (-9), encoding the sign CD-10 identified as wrong.
+        expected_ldj = dim_t * 9.0
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(ldj),
             np.full((5,), expected_ldj), atol=1e-4,
@@ -1334,3 +1337,50 @@ class TestLogDetSignConvention:
                 f"log|det| = {float(log_abs_det)}. An exact sign flip means it "
                 f"is reporting the FORWARD map's log-determinant instead."
             )
+
+    def test_the_density_integrates_to_one(self) -> None:
+        """A probability density must integrate to 1. This is the strongest
+        available check because it shares no machinery with the layer's own
+        log-determinant bookkeeping -- it only needs ``call`` and the base
+        density, and it fails for ANY error in the Jacobian term, not just a
+        sign flip.
+
+        Numerically integrates ``p(y)`` over a 2-D grid at fixed context.
+        Measured 0.994 with the correct sign (the shortfall is mass outside the
+        box) and 4.794 with the sign CD-10 fixed.
+        """
+        keras.utils.set_random_seed(0)
+        output_dim = 2
+        flow = NormalizingFlowLayer(
+            output_dimension=output_dim,
+            num_flow_steps=2,
+            context_dim=2,
+            hidden_units_coupling=8,
+        )
+
+        axis = np.linspace(-6.0, 6.0, 220)
+        grid_x, grid_y = np.meshgrid(axis, axis)
+        points = ops.convert_to_tensor(
+            np.stack([grid_x.ravel(), grid_y.ravel()], axis=1).astype("float32")
+        )
+        context = ops.convert_to_tensor(
+            np.tile(
+                np.random.RandomState(3).randn(1, 2).astype("float32"),
+                (points.shape[0], 1),
+            )
+        )
+
+        z, log_det = flow([points, context])
+        log_prob = -0.5 * (
+            output_dim * np.log(2 * np.pi)
+            + np.sum(ops.convert_to_numpy(z) ** 2, axis=-1)
+        ) + ops.convert_to_numpy(log_det)
+
+        cell_area = (axis[1] - axis[0]) ** 2
+        integral = float(np.sum(np.exp(log_prob)) * cell_area)
+
+        assert 0.97 < integral < 1.01, (
+            f"p(y) integrates to {integral}, not ~1, so it is not a probability "
+            f"density. An integral far above 1 means the Jacobian term is being "
+            f"ADDED where it must be SUBTRACTED."
+        )
