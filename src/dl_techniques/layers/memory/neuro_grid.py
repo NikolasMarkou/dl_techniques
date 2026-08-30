@@ -1029,21 +1029,24 @@ class NeuroGrid(keras.layers.Layer):
             quality_measure: str = 'overall_quality'
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Split a batch into a high-quality and a low-quality half.
+        Partition the scored items into a high-quality and a low-quality set.
 
-        Scores every input with ``compute_input_quality``, compares one chosen
-        measure against the threshold, and gathers the two subsets along axis
-        0. The comparison is ``>=`` for the high half.
+        Scores every item with ``compute_input_quality``, compares one chosen
+        measure against the threshold, and gathers the two subsets. The
+        comparison is ``>=`` for the high half and ``<`` for the low half, so
+        the two sets are disjoint and, for finite scores, cover every item.
 
-        BROKEN as written, at every input rank. Measured on keras 3.8.0,
-        2026-08-30: single-argument ``keras.ops.where`` returns a LIST of
-        index arrays, so the ``[:, 0]`` slice below raises
-        ``TypeError: list indices must be integers or slices, not tuple``
-        before any partition happens. Nothing in the repository calls this
-        method and no test covers it. Do not build on it until it is fixed
-        and given a test.
+        The unit being partitioned is the unit ``compute_input_quality``
+        scores. For a rank-2 input that is the ``batch`` rows; for a rank-3
+        input it is the ``batch * seq_len`` TOKENS, which are scored
+        individually. Both returned subsets are therefore rank 2, shaped
+        ``(n_selected, input_dim)`` -- a rank-3 input comes back flattened to
+        its token axis, not re-assembled into sequences, because an arbitrary
+        threshold does not select whole sequences. ``high_quality_mask`` and
+        ``quality_scores`` keep the shape ``compute_input_quality`` gave them,
+        so the mask is the map back to the original layout.
 
-        :param inputs: Input tensor.
+        :param inputs: Input tensor, rank 2 or rank 3.
         :type inputs: keras.KerasTensor
         :param quality_threshold: Cut-off applied to the chosen measure.
         :type quality_threshold: float
@@ -1051,13 +1054,12 @@ class NeuroGrid(keras.layers.Layer):
             threshold on.
         :type quality_measure: str
         :return: Dictionary with ``'high_quality_inputs'``,
-            ``'low_quality_inputs'``, ``'high_quality_mask'`` and
-            ``'quality_scores'``.
+            ``'low_quality_inputs'`` (both ``(n_selected, input_dim)``),
+            ``'high_quality_mask'`` and ``'quality_scores'`` (both shaped like
+            the measure).
         :rtype: Dict[str, keras.KerasTensor]
         :raises ValueError: If ``quality_measure`` is not one of the six
             measure names, or if the layer has not been built.
-        :raises TypeError: Always, on the ``keras.ops.where`` slice described
-            above.
         """
         quality_measures = self.compute_input_quality(inputs)
 
@@ -1068,17 +1070,25 @@ class NeuroGrid(keras.layers.Layer):
         high_quality_mask = quality_scores >= quality_threshold
         low_quality_mask = quality_scores < quality_threshold
 
-        # KNOWN DEFECT (measured 2026-08-30, keras 3.8.0): the two lines below
-        # raise TypeError at EVERY input rank, so this method cannot run. A
-        # single-argument keras.ops.where returns a LIST, and a list rejects the
-        # [:, 0] tuple index. It has zero call sites and zero tests, which is why
-        # the suite is green over it. The comment below is an older fix attempt
-        # that was never carried out. Fix needs a RED-first guard.
-        high_quality_indices = keras.ops.where(high_quality_mask)[:, 0]
-        low_quality_indices = keras.ops.where(low_quality_mask)[:, 0]
+        # Flatten to the ITEM axis that compute_input_quality scores: rank-2
+        # rows stay as they are, rank-3 tokens collapse from (batch, seq_len)
+        # to (batch * seq_len). Gathering rank-3 input along axis 0 with the
+        # mask's row indices would gather whole sequences, repeatedly.
+        items = keras.ops.reshape(inputs, (-1, keras.ops.shape(inputs)[-1]))
+        high_quality_mask_flat = keras.ops.reshape(high_quality_mask, (-1,))
+        low_quality_mask_flat = keras.ops.reshape(low_quality_mask, (-1,))
 
-        high_quality_inputs = keras.ops.take(inputs, high_quality_indices, axis=0)
-        low_quality_inputs = keras.ops.take(inputs, low_quality_indices, axis=0)
+        # A SINGLE-argument keras.ops.where returns a LIST holding one index
+        # tensor per axis of the condition -- verified by execution on keras
+        # 3.8.0 -- not a stacked (n_selected, rank) index matrix. For the 1-D
+        # masks above the list has exactly one entry: the item indices. Do not
+        # reintroduce a `[:, 0]` slice here; a list rejects a tuple index and
+        # the method raised TypeError at every input rank until 2026-08-30.
+        high_quality_indices = keras.ops.where(high_quality_mask_flat)[0]
+        low_quality_indices = keras.ops.where(low_quality_mask_flat)[0]
+
+        high_quality_inputs = keras.ops.take(items, high_quality_indices, axis=0)
+        low_quality_inputs = keras.ops.take(items, low_quality_indices, axis=0)
 
         return {
             'high_quality_inputs': high_quality_inputs,

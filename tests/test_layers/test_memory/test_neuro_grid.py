@@ -751,3 +751,112 @@ class TestNeuroGridProjectionIndependence:
             f"{identical_pairs}; max abs diff for pair (0, 1) = "
             f"{np.max(np.abs(biases[0] - biases[1]))}"
         )
+
+
+class TestNeuroGridQualityThresholdFilter:
+    """Guard for C-1: ``filter_by_quality_threshold`` must actually run and partition.
+
+    Measured on keras 3.8.0: a SINGLE-argument ``keras.ops.where(mask)`` returns a
+    LIST of index arrays (one per axis of ``mask``), not a stacked index matrix, so
+    the ``[:, 0]`` slice the method used raised
+    ``TypeError: list indices must be integers or slices, not tuple`` before any
+    partitioning happened. The method has zero call sites and had zero tests, which
+    is why the package suite was green over a public method that could not run at
+    any input rank.
+
+    Both ranks are covered because the defect was measured at both, and because the
+    two ranks take genuinely different paths: ``compute_input_quality`` scores a
+    rank-3 input PER TOKEN and returns ``(batch, seq_len)`` scores, so the partition
+    is over ``batch * seq_len`` items, not over ``batch`` rows. A "fix" that merely
+    changed ``[:, 0]`` to ``[0]`` would still be wrong at rank 3, where ``where``
+    returns ROW indices with duplicates.
+
+    The assertions pin the documented contract, not merely "it did not raise":
+
+    * the two halves' sizes SUM to the number of items scored, and their index sets
+      are DISJOINT -- together, a partition;
+    * each half's rows are exactly the scored items on its side of the threshold,
+      in order, compared against the input itself;
+    * the returned mask keeps the shape of the returned scores.
+
+    The threshold is the MEDIAN of the measured scores rather than a fixed constant,
+    so both halves are guaranteed non-empty; an all-on-one-side split would let a
+    broken partition pass.
+    """
+
+    LATENT_DIM = 8
+    INPUT_DIM = 12
+
+    def _build(self, inputs: np.ndarray) -> NeuroGrid:
+        """Build a NeuroGrid on ``inputs`` by invoking it once."""
+        layer = NeuroGrid(grid_shape=[4, 3], latent_dim=self.LATENT_DIM)
+        layer(keras.ops.convert_to_tensor(inputs))
+        return layer
+
+    def _assert_partitions(self, inputs: np.ndarray) -> None:
+        """Assert the method returns a coherent partition of the scored items."""
+        layer = self._build(inputs)
+        tensor = keras.ops.convert_to_tensor(inputs)
+
+        scores = np.array(
+            keras.ops.convert_to_numpy(
+                layer.compute_input_quality(tensor)['overall_quality']))
+        threshold = float(np.median(scores))
+
+        result = layer.filter_by_quality_threshold(
+            tensor, quality_threshold=threshold)
+
+        for key in ('high_quality_inputs', 'low_quality_inputs',
+                    'high_quality_mask', 'quality_scores'):
+            assert key in result, f"missing key {key!r}"
+
+        returned_scores = np.array(
+            keras.ops.convert_to_numpy(result['quality_scores']))
+        mask = np.array(
+            keras.ops.convert_to_numpy(result['high_quality_mask'])).astype(bool)
+        assert returned_scores.shape == scores.shape
+        assert mask.shape == scores.shape, (
+            f"mask shape {mask.shape} does not match scores shape {scores.shape}")
+
+        n_items = int(scores.size)
+        high_indices = np.flatnonzero(mask.reshape(-1))
+        low_indices = np.flatnonzero(~mask.reshape(-1))
+
+        assert 0 < high_indices.size < n_items, (
+            "median threshold must split the items; got "
+            f"{high_indices.size} high of {n_items}")
+        assert set(high_indices.tolist()).isdisjoint(low_indices.tolist()), (
+            "high and low index sets overlap")
+        assert sorted(high_indices.tolist() + low_indices.tolist()) == list(
+            range(n_items)), "the two index sets do not cover every scored item"
+
+        high = np.array(keras.ops.convert_to_numpy(result['high_quality_inputs']))
+        low = np.array(keras.ops.convert_to_numpy(result['low_quality_inputs']))
+
+        assert high.shape[0] + low.shape[0] == n_items, (
+            f"partition sizes {high.shape[0]} + {low.shape[0]} do not sum to the "
+            f"{n_items} items scored")
+        assert high.shape[0] == high_indices.size
+        assert low.shape[0] == low_indices.size
+        assert high.shape[1:] == (self.INPUT_DIM,)
+        assert low.shape[1:] == (self.INPUT_DIM,)
+
+        items = inputs.reshape(n_items, self.INPUT_DIM)
+        np.testing.assert_allclose(high, items[high_indices], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(low, items[low_indices], rtol=1e-6, atol=1e-6)
+
+        flat_scores = scores.reshape(-1)
+        assert np.all(flat_scores[high_indices] >= threshold)
+        assert np.all(flat_scores[low_indices] < threshold)
+
+    def test_partition_is_coherent_on_rank_2_input(self):
+        """Rank-2 ``(batch, input_dim)``: partition over the batch."""
+        rng = np.random.default_rng(0)
+        inputs = rng.normal(size=(9, self.INPUT_DIM)).astype('float32')
+        self._assert_partitions(inputs)
+
+    def test_partition_is_coherent_on_rank_3_input(self):
+        """Rank-3 ``(batch, seq_len, input_dim)``: partition over batch * seq_len."""
+        rng = np.random.default_rng(1)
+        inputs = rng.normal(size=(4, 5, self.INPUT_DIM)).astype('float32')
+        self._assert_partitions(inputs)
