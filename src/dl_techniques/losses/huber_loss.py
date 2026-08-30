@@ -89,7 +89,7 @@ class HuberLoss(keras.losses.Loss):
             y_pred: The predicted values.
 
         Returns:
-            Huber loss value.
+            Per-sample Huber loss values of shape `(batch_size,)`.
         """
         y_true = ops.cast(y_true, y_pred.dtype)
 
@@ -103,7 +103,13 @@ class HuberLoss(keras.losses.Loss):
         # Combine them using a threshold
         loss = ops.where(abs_error <= self.delta, quadratic, linear)
 
-        return ops.mean(loss)
+        # Reduce over the FEATURE axis only, leaving the batch axis intact, so
+        # that `call()` returns one value per sample -- the same shape stock
+        # `keras.losses.Huber` returns. `keras.losses.Loss.__call__` multiplies
+        # by `sample_weight` BEFORE reducing, so a scalar returned here would
+        # broadcast and charge every row the batch aggregate, making both
+        # `sample_weight` and `reduction=` dead knobs.
+        return keras.ops.mean(loss, axis=-1)
 
     def get_config(self) -> dict:
         """Get loss configuration."""
