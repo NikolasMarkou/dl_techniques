@@ -13,8 +13,9 @@ by name rather than quietly edited out.
 
 ## TL;DR
 
-**1. The convolutional arms beat the transformer on every configuration tested.**
-That is the study's central result and it is robust.
+**1. The convolutional arms beat the transformer in all 16 cells of the
+context x position factorial**, and at every arm's own best setting. That is the
+study's central result and it is robust.
 
 **2. Most of the original margin was configuration, not architecture.** The
 transformer's deficit against the best arm was first reported as **1.9275 nats**.
@@ -24,10 +25,12 @@ headline gap was a misconfigured baseline.** The defensible claim is ~0.3 nats,
 not ~1.9.
 
 **3. The two model families want opposite settings, so no fixed setting is
-neutral.** The transformer is best at 64 context + sinusoidal positions on *both*
-endpoints at once; the convolutional arms are best at 512 + learned on both. Any
+neutral.** The transformer's best cell is 64 + sinusoidal, on *both* endpoints at
+once; all three convolutional arms peak at 512 + learned, on both. Any
 fixed-setting four-arm comparison handicaps someone, and the choice of setting
-decides part of the answer.
+decides part of the answer. The strong two-way interaction behind this is
+**specific to the attention arm** — the convolutional arms show only a small
+same-signed penalty from each setting.
 
 **4. Every raw retrieval number below understates these encoders by ~3.3x.** ZCA
 whitening lifts the learned-position convolutional arms from R@1 ~0.060 to ~0.21,
@@ -43,7 +46,7 @@ on 9 of 9 cells, with no retraining.
 | Run 2a | 512 | learned | 28 | complete (the original full study) |
 | Run 2b | 512 | sinusoidal | 28 | complete |
 | Run 3 | 64 | sinusoidal | 28 | complete |
-| Run 4 | 64 | learned | 28 | **running** — `ascii_bert` arm complete (n=7), conv arms pending |
+| Run 4 | 64 | learned | 28 | complete — closes the 2x2 |
 
 Runs 2-4 are 4 arms x 7 seeds at `tiny`/`mean`, 6000 MLM + 2000 contrastive
 steps, `max_train_samples=60000`, and are paired cell-by-cell on
@@ -72,9 +75,12 @@ python -m train.embeddings_experimental.sweep \
 | arm | 512 / learned | 512 / sinusoidal | 64 / sinusoidal | 64 / learned |
 |---|---:|---:|---:|---:|
 | `ascii_bert` | 2.8248 ±0.008 | 1.6218 ±0.025 | **1.2999** ±0.012 | 1.4285 ±0.055 |
-| `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 | *pending* |
-| `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 | *pending* |
-| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | 1.0061 ±0.008 | *pending* |
+| `ascii_clifford_bert` | **1.0693** ±0.019 | 1.1746 ±0.009 | 1.1916 ±0.007 | 1.1192 ±0.006 |
+| `ascii_convnext_bert` | **0.9213** ±0.019 | 0.9933 ±0.009 | 1.0246 ±0.009 | 0.9750 ±0.008 |
+| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | 1.0061 ±0.008 | 0.9549 ±0.008 |
+
+All 16 cells are n=7. **Bold marks each arm's best configuration** — and the
+transformer's is a different cell from every other arm's.
 
 Reference points: a uniform guess over the 101-id vocabulary costs `ln(101)` =
 **4.615 nats**; predicting from character frequencies alone, with no context,
@@ -82,25 +88,24 @@ costs **3.1135 nats** (measured on the exact packed stream, 3,121,152 ids). The
 block ordering — `convnext_v2 < convnext < clifford < bert` — is **identical
 under all three configurations.**
 
-### The two settings substitute for each other — they do not add
+### The two settings substitute for each other — for the transformer only
 
-Run 4 completes the transformer's 2x2, n=7 in every cell, and it corrects the
-account this file gave earlier.
+The completed 2x2, n=7 in every one of its four cells:
 
 | `ascii_bert` | learned | sinusoidal |
 |---|---:|---:|
 | **512 context** | 2.8248 ±0.008 | 1.6218 ±0.025 |
 | **64 context** | **1.4285** ±0.055 | **1.2999** ±0.012 |
 
-| effect | applied alone | applied second |
-|---|---:|---:|
-| positions, learned → sinusoidal | **−1.2030** ±0.024 *(at 512)* | −0.1287 ±0.047 *(at 64)* |
-| context, 512 → 64 | **−1.3963** ±0.059 *(at learned)* | −0.3220 ±0.024 *(at sinusoidal)* |
+| effect | applied alone | applied second | attenuation |
+|---|---:|---:|---:|
+| positions, learned → sinusoidal | **−1.2030** *(at 512)* | −0.1287 *(at 64)* | **9.3x** |
+| context, 512 → 64 | **−1.3963** *(at learned)* | −0.3220 *(at sinusoidal)* | **4.3x** |
 
-Each change is worth ~1.2–1.4 nats on its own and ~0.13–0.32 once the other is
-already in place. **Either one alone recovers most of the collapse**, and 64 +
-learned (1.4285) is in fact slightly better than 512 + sinusoidal (1.6218), so
-shortening the context is marginally the stronger single fix.
+Each change is worth ~1.2–1.4 nats on its own and ~0.13–0.32 once the other is in
+place. **Either alone recovers most of the collapse**, and 64 + learned (1.4285)
+is slightly better than 512 + sinusoidal (1.6218), so shortening the context is
+marginally the stronger single fix.
 
 > **Correction, 2026-08-30.** An earlier version of this section was titled *"The
 > two effects compound"* and reported the path 2.8248 → 1.6218 → 1.2999 as
@@ -108,7 +113,25 @@ shortening the context is marginally the stronger single fix.
 > framing was wrong: it named the positional encoding as the defect and context
 > length as a secondary interaction, purely because they were found in that
 > order. **Neither is the cause.** The failure requires long context *and* a weak
-> positional signal together, and naming a primary one misleads.
+> positional signal together.
+
+**The strong interaction is specific to the attention arm.** Run 4 makes this
+checkable — the same two effects, measured at both levels of the other, for all
+four arms:
+
+| arm | positions @512 | positions @64 | context @learned | context @sinusoidal |
+|---|---:|---:|---:|---:|
+| `ascii_bert` | **−1.2030** | −0.1287 | **−1.3963** | −0.3220 |
+| `ascii_clifford_bert` | +0.1053 | +0.0725 | +0.0499 | +0.0170 |
+| `ascii_convnext_bert` | +0.0719 | +0.0496 | +0.0536 | +0.0314 |
+| `ascii_convnext_v2_bert` | +0.0782 | +0.0512 | +0.0576 | +0.0306 |
+
+Two qualitatively different regimes. For the transformer both settings are **large
+fixes that substitute** — attenuating 9.3x and 4.3x. For the three convolutional
+arms both are **small penalties** (+0.02 to +0.11, always the same sign) that
+attenuate only ~1.5–2x. The convolutional arms have no failure to rescue, so
+there is nothing for a second fix to be redundant with; they simply pay a little
+for each setting, and pay slightly less for the second.
 
 **The mechanism this implies.** Attention over `S` positions with a near-uniform
 softmax gives each neighbour ~`1/S` of the attended value. A positional signal
@@ -116,7 +139,9 @@ that starts at the token signal's magnitude and then *shrinks* during training
 (row norm 0.1987 → 0.1612, while the word table grows to 0.3283) cannot overcome
 that dilution at `S` = 512. Cut the dilution (64 positions) **or** raise the
 positional signal (a sinusoidal table, ~40x larger) and attention becomes usable.
-Doing both adds little, because the first one already fixed it.
+Doing both adds little, because the first already fixed it. A convolution has
+neither problem — its span is fixed and its positional structure is in the block
+— which is exactly why it shows no such interaction.
 
 ### Both settings act on the arms in opposite directions
 
@@ -151,15 +176,21 @@ That is why finding 3 in the TL;DR holds: there is no setting that is neutral.
 
 The transformer's deficit against the best convolutional arm:
 
-| configuration | deficit |
-|---|---:|
-| 512 + learned — as originally reported | **1.9275** |
-| 64 + sinusoidal | **0.2937** |
+| comparison | deficit | gap closed |
+|---|---:|---:|
+| 512 + learned, as originally reported | **1.9275** | — |
+| both arms at 64 + sinusoidal | **0.2938** | **85%** |
+| **each arm at its own best cell** (bert 1.2999, `convnext_v2` 0.8973) | **0.4026** | **79%** |
 
-**85% of the headline gap was a misconfigured baseline**, closed with two
-configuration changes and no architecture change. The convolutional arms still
-win — on all four configurations — but the defensible size of that claim is
-~0.3 nats, not ~1.9.
+The second row is the like-for-like comparison at a shared setting; the third
+lets every arm use the configuration that suits it, which is the harder test and
+the fairer one. Both are reported because they answer different questions, and
+quoting only the flattering one would overstate the repair.
+
+Either way, **~80% of the headline gap was a misconfigured baseline**, closed
+with configuration changes and no architecture change. The convolutional arms
+still win — on all four configurations and at every arm's own best — but the
+defensible size of that claim is ~0.3–0.4 nats, not ~1.9.
 
 ---
 
@@ -167,12 +198,12 @@ win — on all four configurations — but the defensible size of that claim is
 
 Chance is **0.00048** (1 of 2,067 unique paragraphs).
 
-| arm | 512 / learned | 512 / sinusoidal | 64 / sinusoidal |
-|---|---:|---:|---:|
-| `ascii_bert` | 0.0129 | 0.0019 | **0.0261** |
-| `ascii_clifford_bert` | **0.0587** | 0.0061 | 0.0531 |
-| `ascii_convnext_bert` | **0.0594** | 0.0170 | 0.0511 |
-| `ascii_convnext_v2_bert` | **0.0681** | 0.0507 | 0.0575 |
+| arm | 512 / learned | 512 / sinusoidal | 64 / sinusoidal | 64 / learned |
+|---|---:|---:|---:|---:|
+| `ascii_bert` | 0.0129 ±0.003 | 0.0019 ±0.001 | **0.0261** ±0.004 | 0.0109 ±0.004 |
+| `ascii_clifford_bert` | **0.0587** ±0.009 | 0.0061 ±0.001 | 0.0531 ±0.004 | 0.0533 ±0.004 |
+| `ascii_convnext_bert` | **0.0594** ±0.004 | 0.0170 ±0.007 | 0.0511 ±0.004 | 0.0574 ±0.005 |
+| `ascii_convnext_v2_bert` | **0.0681** ±0.003 | 0.0507 ±0.007 | 0.0575 ±0.006 | 0.0613 ±0.005 |
 
 **The sinusoidal retrieval penalty is a long-context effect, not a property of
 sinusoidal encodings.** At 512 it is severe (up to 10x); at 64 it nearly
