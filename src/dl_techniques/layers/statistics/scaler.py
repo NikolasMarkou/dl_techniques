@@ -447,6 +447,24 @@ class UnifiedScaler(keras.layers.Layer):
 
         return x_norm
 
+    def _stats_are_usable(self) -> bool:
+        """Report whether the per-call statistics can still be read.
+
+        A tensor created inside a traced ``call`` is scoped to that trace.
+        Touching it afterwards raises ``TypeError`` from whatever operation
+        happens to reach it first, which tells the caller nothing. Probing it
+        here turns that into one legible error.
+
+        :return: True when ``_last_mean`` and ``_last_std`` can be used.
+        :rtype: bool
+        """
+        try:
+            ops.shape(self._last_mean)
+            ops.shape(self._last_std)
+        except Exception:
+            return False
+        return True
+
     def inverse_transform(self, scaled_inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Transform normalized data back to the original scale.
 
@@ -464,6 +482,23 @@ class UnifiedScaler(keras.layers.Layer):
             raise RuntimeError(
                 "Cannot perform inverse transformation: statistics not computed. "
                 "Call the layer with input data first to compute statistics."
+            )
+
+        # The statistics are PER-SAMPLE, so they carry the batch axis and cannot
+        # be held in a keras.Variable, which needs a fully defined shape. They
+        # are therefore plain tensors, and a tensor produced inside a traced
+        # call() dies with the trace. Detect that and say so, rather than
+        # letting the caller hit `TypeError: ... is out of scope` from deep
+        # inside the multiply below.
+        if not self._stats_are_usable():
+            raise RuntimeError(
+                "Cannot perform inverse transformation: the stored statistics "
+                "came from a traced call (tf.function, model.fit or predict) "
+                "and do not outlive it. They are per-sample, so they belong to "
+                "a batch that no longer exists. Call the layer eagerly on the "
+                "data you want to invert, then call inverse_transform. For a "
+                "persistent batch-averaged summary instead, construct with "
+                "store_stats=True and read get_stats()."
             )
 
         x = scaled_inputs

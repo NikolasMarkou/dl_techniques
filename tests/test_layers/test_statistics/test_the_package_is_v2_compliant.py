@@ -81,14 +81,31 @@ def _find_method(class_node, name):
 # =====================================================================
 # V10 [HIGH] -- UnifiedScaler.inverse_transform dies after tracing
 # =====================================================================
-class TestTheScalerCanInvertAfterItHasBeenTraced:
-    """``_last_mean`` / ``_last_std`` (``scaler.py`` ~:396) are plain Python attributes.
+class TestTheScalerFailsLegiblyWhenItsStatisticsDiedWithTheTrace:
+    """``inverse_transform`` must never surface a raw ``TypeError`` from tracing.
 
-    Under a traced call they capture GRAPH tensors, so a later
-    ``inverse_transform`` raises ``TypeError: <tf.Tensor ...> is out of scope and
-    cannot be used here``. MEASURED: eager works, ``tf.function`` and ``model.fit``
-    both raise. The fix (step 2) makes them non-trainable ``keras.Variable``s created
-    in ``build()``, the idiom the same file already uses for ``stored_mean``.
+    **This class was rewritten after its original claim was REFUTED.** It first
+    asserted that ``inverse_transform`` SUCCEEDS after a traced call and after
+    ``model.fit``. That is not achievable, and the reason is structural rather
+    than a missing idiom:
+
+    ``_last_mean`` is ``ops.mean(x, axis=self.axis, keepdims=True)``, which keeps
+    the batch axis -- MEASURED shape ``(8, 1)`` against ``stored_mean``'s ``(1,)``.
+    A ``keras.Variable`` needs a fully defined shape and refuses a ``None``
+    dimension, so a per-sample statistic cannot live in one. A raw ``tf.Variable``
+    with an unknown shape does accept it, and was built and measured: the two
+    arms below went green and eager numerics were untouched, but ``model.fit``
+    then died with ``tf2xla conversion failed ... AssignVariableOp`` under
+    ``jit_compile="auto"``, which is Keras' default training path.
+
+    The honest reading: the per-sample statistics of a traced batch belong to a
+    batch that no longer exists, so no container makes them outlive the trace.
+    The defect was never the mechanism -- it was that the failure arrived as
+    ``TypeError: <tf.Tensor ...> is out of scope`` from deep inside a multiply,
+    telling the caller nothing. See decisions.md D-005.
+
+    The positive arm is kept deliberately: without it, both assertions below are
+    satisfied by a layer that raises unconditionally.
     """
 
     @staticmethod
@@ -97,15 +114,18 @@ class TestTheScalerCanInvertAfterItHasBeenTraced:
         return rng.normal(loc=3.0, scale=2.0, size=(8, 5)).astype("float32")
 
     def test_inverse_transform_reconstructs_the_input_eagerly(self):
-        """The regime that already works. Pinned so the fix cannot regress it."""
+        """The supported regime, pinned so the legible-failure path cannot eat it.
+
+        This is the anti-vacuity twin of the two raising assertions below.
+        """
         x = self._data()
         scaler = UnifiedScaler(axis=-1)
         y = scaler(x)
         recovered = keras.ops.convert_to_numpy(scaler.inverse_transform(y))
         np.testing.assert_allclose(recovered, x, atol=1e-4, rtol=0)
 
-    def test_inverse_transform_reconstructs_the_input_after_a_traced_call(self):
-        """RED pre-fix: TypeError, the captured graph tensor is out of scope."""
+    def test_a_traced_call_leaves_a_legible_error_not_a_raw_type_error(self):
+        """RED pre-fix: a bare ``TypeError`` from inside the multiply."""
         x = self._data()
         scaler = UnifiedScaler(axis=-1)
         y = keras.ops.convert_to_numpy(scaler(x))
@@ -116,19 +136,11 @@ class TestTheScalerCanInvertAfterItHasBeenTraced:
 
         traced(tf.constant(x))
 
-        recovered = keras.ops.convert_to_numpy(scaler.inverse_transform(y))
-        np.testing.assert_allclose(recovered, x, atol=1e-4, rtol=0)
+        with pytest.raises(RuntimeError, match="came from a traced call"):
+            scaler.inverse_transform(y)
 
-    def test_inverse_transform_reconstructs_the_input_after_model_fit(self):
-        """RED pre-fix: the same TypeError, reached through the real training path.
-
-        ``y`` is captured EAGERLY BEFORE ``fit`` and never recomputed afterwards. An
-        eager call after ``fit`` would overwrite ``_last_mean`` with a fresh eager
-        tensor and the guard would pass on unfixed source -- measured, it did.
-        ``batch_size`` covers the whole array and ``shuffle=False``, so the single
-        training batch carries exactly the statistics of ``x`` and the post-fix
-        reconstruction is the same one the eager arm asserts.
-        """
+    def test_model_fit_leaves_a_legible_error_not_a_raw_type_error(self):
+        """RED pre-fix: the same bare ``TypeError``, via the real training path."""
         x = self._data()
         scaler = UnifiedScaler(axis=-1, name="scaler")
 
@@ -138,11 +150,10 @@ class TestTheScalerCanInvertAfterItHasBeenTraced:
         model.compile(optimizer="sgd", loss="mse")
 
         y = keras.ops.convert_to_numpy(scaler(x))
-
         model.fit(x, x, epochs=1, batch_size=x.shape[0], shuffle=False, verbose=0)
 
-        recovered = keras.ops.convert_to_numpy(scaler.inverse_transform(y))
-        np.testing.assert_allclose(recovered, x, atol=1e-4, rtol=0)
+        with pytest.raises(RuntimeError, match="came from a traced call"):
+            scaler.inverse_transform(y)
 
 
 # =====================================================================
