@@ -402,6 +402,11 @@ class ForecastabilityGate(layers.Layer):
         not the shape the model really emits and the runtime shape must be
         read instead. Passing ``forecast_length`` removes the caveat.
 
+        The FEATURE axis is carried through unchanged from the shape this
+        method is handed, so a caller whose ``deep_forecast`` carries a
+        different feature count than the backcast will see a declared shape
+        that follows the input rather than the forecast branch.
+
         :param input_shape: One shape tuple, or a list of the three call shapes.
         :type input_shape: tuple or list
         :return: ``(batch, forecast_length, features)`` when ``forecast_length``
@@ -421,6 +426,11 @@ class ForecastabilityGate(layers.Layer):
             return (reference[0], self.forecast_length) + reference[2:]
 
         if not is_call_shape_list:
+            # DECISION plan-2026-08-30T020716-ebbaf641/D-004: warn and return
+            # the backcast shape. Do NOT promote this to a raise, however wrong
+            # the returned shape is: create_manokhin_compliant_model builds a
+            # functional graph whose construction calls this method, so raising
+            # breaks model construction, not merely shape introspection.
             logger.warning(
                 "ForecastabilityGate.compute_output_shape was given only the "
                 "backcast shape %s and has no forecast_length, so it is "
@@ -840,12 +850,24 @@ def create_manokhin_compliant_model(
     :rtype: keras.Model
 
     Note:
-        The gate's ``compute_output_shape`` sees only the ``inputs`` shape here,
-        so the graph declares output 1 as ``(None, Tb, feat)`` while the tensor
-        it produces is ``(batch, Tf, feat)``. Measured with
-        ``input_shape=(24, 3)`` and ``forecast_length=8``: ``model.outputs[0]``
-        reports ``(None, 24, 3)`` and ``predict`` on 5 samples returns
-        ``(5, 8, 3)``. Trust the runtime shape.
+        The gate is constructed with ``forecast_length``, so the graph declares
+        output 1 as ``(None, Tf, feat)`` — the shape it really emits. Measured
+        with ``input_shape=(24, 3)`` and ``forecast_length=8``:
+        ``model.outputs[0]`` reports ``(None, 8, 3)`` and ``predict`` on 5
+        samples returns ``(5, 8, 3)``.
+
+    Note:
+        The returned model does not currently survive a ``.keras`` save/load
+        round-trip. ``model.save(path)`` succeeds, but ``keras.saving.
+        load_model(path)`` raises ``TypeError: <class 'keras.src.models.
+        functional.Functional'> could not be deserialized properly ... Exception
+        encountered: 'NoneType' object is not subscriptable``, because the saved
+        Functional config comes back empty (``'config': {}``,
+        ``'build_config': {'input_shape': None}``). This is not caused by the
+        gate's ``forecast_length`` argument: the same graph rebuilt with the
+        gate constructed WITHOUT ``forecast_length`` fails identically, so the
+        defect predates it. Persist weights instead — ``model.save_weights`` /
+        ``model.load_weights`` onto a freshly built model — until it is fixed.
     """
     # Input
     inputs = keras.Input(shape=input_shape, name='input')

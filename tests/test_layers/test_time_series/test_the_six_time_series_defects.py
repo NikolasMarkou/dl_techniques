@@ -247,6 +247,230 @@ def test_the_exogenous_block_honours_input_and_output_dim():
         assert tuple(block.compute_output_shape(y.shape)[1]) == (4, fore_len * out_dim)
 
 
+class _WrongLayoutBlock(ExogenousBlock):
+    """
+    The ONE plausible wrong fix for D-4, as a subclass — the control for the
+    layout guard below.
+
+    It reshapes theta CHANNEL-major, ``(batch, basis_channels, dim)``, contracts
+    ``einsum('btc,bci->bti')`` and transposes to ``(batch, dim, time)`` before
+    the flatten, so flat entry ``i*T + t`` is step ``t`` of channel ``i`` — the
+    dim-major stream the anchor at ``nbeatsx_blocks.py`` says not to produce. It
+    passes every assertion in the shape guard above at both ``use_tcn``
+    settings, which is why the layout guard exists. Only the dense spine is
+    trimmed (dropout and normalization are off in this module's fixtures); the
+    projection is a faithful transcription of the wrong ordering.
+    """
+
+    def call(self, inputs, training=None, exogenous_inputs=None, **kwargs):
+        x_back, x_fore = exogenous_inputs
+        x = self.dense1(inputs, training=training)
+        x = self.dense2(x, training=training)
+        x = self.dense3(x, training=training)
+        x = self.dense4(x, training=training)
+        theta_b = self.theta_backcast(x, training=training)
+        theta_f = self.theta_forecast(x, training=training)
+
+        full = keras.ops.concatenate([x_back, x_fore], axis=1)
+        basis = self.encoder(full, training=training) if self.use_tcn else full
+        basis_b = basis[:, :self.backcast_length, :]
+        basis_f = basis[:, self.backcast_length:, :]
+
+        theta_b_r = keras.ops.reshape(theta_b, (-1, self.basis_channels, self.input_dim))
+        theta_f_r = keras.ops.reshape(theta_f, (-1, self.basis_channels, self.output_dim))
+        back = keras.ops.einsum('btc,bci->bti', basis_b, theta_b_r)
+        fore = keras.ops.einsum('btc,bco->bto', basis_f, theta_f_r)
+        back = keras.ops.transpose(back, (0, 2, 1))
+        fore = keras.ops.transpose(fore, (0, 2, 1))
+        back = keras.ops.reshape(back, (-1, self.backcast_length * self.input_dim))
+        fore = keras.ops.reshape(fore, (-1, self.forecast_length * self.output_dim))
+        return back, fore
+
+
+def _flat_backcast_channel_columns(block_cls, use_tcn, theta_slot):
+    """
+    Drive exactly one theta slot and report which FLAT backcast columns move.
+
+    ``theta_backcast`` is a bias-free ``Dense``, so zeroing every column of its
+    kernel except ``theta_slot`` makes ``theta_b`` a one-hot vector: at most one
+    output channel of the projection can be non-zero, whatever ordering the
+    block uses internally. The returned column indices are therefore a direct
+    readout of the flat layout, obtained WITHOUT recomputing the block's own
+    einsum — an oracle rebuilt from the code under test would inherit the code's
+    ordering and could not tell the two layouts apart.
+
+    :return: ``(sorted non-zero column indices, flat width, basis_channels)``.
+    """
+    back_len, fore_len, in_dim, out_dim, exog_dim = 10, 4, 3, 2, 2
+    block = block_cls(
+        exogenous_dim=exog_dim, units=16, thetas_dim=4,
+        backcast_length=back_len, forecast_length=fore_len,
+        input_dim=in_dim, output_dim=out_dim,
+        dropout_rate=0.0, tcn_dropout_rate=0.0, use_tcn=use_tcn,
+    )
+    y = _f32(4, back_len * in_dim, seed=1)
+    exog = (_f32(4, back_len, exog_dim, seed=2), _f32(4, fore_len, exog_dim, seed=3))
+    block(y, exogenous_inputs=exog)  # build the weights
+
+    kernel = np.zeros(block.theta_backcast.kernel.shape, dtype="float32")
+    # A varied column, not a constant one: a constant column would read
+    # sum(x), which can cancel to zero and make the whole measurement vacuous.
+    kernel[:, theta_slot] = np.linspace(1.0, 2.0, kernel.shape[0], dtype="float32")
+    block.theta_backcast.set_weights([kernel])
+
+    back, _ = block(y, exogenous_inputs=exog)
+    flat = np.asarray(keras.ops.convert_to_numpy(back))
+    columns = sorted({int(col) for col in np.nonzero(flat)[1]})
+    return columns, flat.shape[1], block.basis_channels
+
+
+def test_the_exogenous_block_interleaves_the_flat_stream_time_major():
+    """
+    ``ExogenousBlock``'s flat output must be TIME-major: entry ``t*dim + i`` is
+    step ``t`` of channel ``i``, matching ``NBeatsNet``'s flatten/reshape and
+    both interpretable siblings.
+
+    The shape guard above cannot see this — the dim-major stream ``i*T + t`` has
+    the identical shape, equals ``GenericBlock``'s, and satisfies both
+    ``compute_output_shape`` assertions. So this guard reads the layout off a
+    one-hot theta instead: driving a single theta slot leaves exactly one output
+    channel live, and the discriminating quantity is WHERE its ``T`` non-zero
+    entries land. Time-major puts them on one residue class mod ``dim``, spread
+    with stride ``dim`` across the full width; dim-major puts them in a
+    contiguous run of length ``T``. ``_WrongLayoutBlock`` is the control: it
+    implements the dim-major ordering and this test rejects it (measured
+    ``[20..29]`` where the shipped block gives ``[1, 4, ..., 28]``).
+    """
+    back_len, in_dim, theta_slot = 10, 3, 2
+
+    for use_tcn in (True, False):
+        columns, width, basis_channels = _flat_backcast_channel_columns(
+            ExogenousBlock, use_tcn, theta_slot
+        )
+        assert width == back_len * in_dim
+        # Anti-vacuity: a channel that never moves would pass any layout claim.
+        assert len(columns) == back_len, (
+            f"use_tcn={use_tcn}: driving one theta slot moved {len(columns)} "
+            f"flat columns, expected {back_len} (one per time step); the probe "
+            "measured nothing"
+        )
+
+        residues = {col % in_dim for col in columns}
+        assert len(residues) == 1, (
+            f"use_tcn={use_tcn}: the live channel's entries fall on residues "
+            f"{sorted(residues)} mod {in_dim}, so the flat stream is not "
+            f"time-major; columns={columns}"
+        )
+
+        # Under the dim-major theta reshape the block documents, slot
+        # `theta_slot` belongs to channel `theta_slot // basis_channels`.
+        channel = theta_slot // basis_channels
+        expected = [t * in_dim + channel for t in range(back_len)]
+        assert columns == expected, (
+            f"use_tcn={use_tcn}: flat backcast moves at columns {columns}, "
+            f"expected {expected} (t*{in_dim}+{channel}); a contiguous run "
+            f"would mean the dim-major layout i*T+t"
+        )
+
+
+def test_the_layout_guard_rejects_the_dim_major_layout():
+    """
+    The RED proof for the guard above: the dim-major subclass must FAIL it.
+
+    A layout assertion that has only ever been run against the shipped code is
+    not known to discriminate. ``_WrongLayoutBlock`` produces a contiguous run
+    of ``T`` columns rather than one residue class mod ``dim``, so both the
+    residue assertion and the exact-column assertion must reject it.
+    """
+    back_len, in_dim, theta_slot = 10, 3, 2
+
+    for use_tcn in (True, False):
+        columns, _, basis_channels = _flat_backcast_channel_columns(
+            _WrongLayoutBlock, use_tcn, theta_slot
+        )
+        assert len(columns) == back_len, "the control probe measured nothing"
+        expected = [t * in_dim + theta_slot // basis_channels for t in range(back_len)]
+        assert columns != expected, (
+            "the dim-major control produced the time-major columns "
+            f"{columns}; the layout guard cannot discriminate"
+        )
+        assert columns == list(range(min(columns), min(columns) + back_len)), (
+            f"the dim-major control gave {columns}, expected a contiguous run"
+        )
+
+
+class _NotOne(int):
+    """
+    An ``int`` worth ``1`` that compares unequal to ``1``.
+
+    ``ExogenousBlock.call`` selects its fast path with
+    ``if self.input_dim == 1 and self.output_dim == 1``. Assigning this to
+    ``input_dim`` after ``build`` falsifies that one expression while every
+    arithmetic use of ``input_dim`` (the theta reshape, the flatten width) still
+    reads ``1`` — so the general branch runs on unchanged weights at ``dim == 1``
+    without transcribing the block's projection into the test, which is what a
+    hand-written subclass would have required.
+    """
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    def __hash__(self):
+        return hash(int(self))
+
+
+def test_the_two_exogenous_projection_branches_agree_at_dim_one():
+    """
+    The ``dim == 1`` fast path and the general ``else`` path compute the same
+    quantity two ways, so they must agree.
+
+    They are algebraically identical but not bit-identical: D-010 measured the
+    float32 reassociation delta between the two contraction paths at
+    ``4.768e-07`` on CPU (5 of 45 trials non-zero) and exactly ``0.0`` on GPU,
+    which is why the tolerance is ``1e-5`` and not ``0.0``. That rarity is the
+    hazard — an edit to one branch alone would show up almost nowhere — so this
+    guard runs both branches on ONE built block with identical weights and
+    compares. The branch predicate itself is asserted, so the test cannot pass
+    by silently taking the fast path twice.
+    """
+    for use_tcn in (True, False):
+        block = _exog_block(use_tcn=use_tcn, input_dim=1, output_dim=1)
+        y = _f32(4, 10, seed=1)
+        exog = (_f32(4, 10, 2, seed=2), _f32(4, 4, 2, seed=3))
+
+        assert block.input_dim == 1 and block.output_dim == 1
+        fast_back, fast_fore = block(y, exogenous_inputs=exog)
+
+        block.input_dim = _NotOne(1)
+        # Control: this is the exact expression `call` branches on.
+        assert not (block.input_dim == 1 and block.output_dim == 1), (
+            "the fast-path predicate is still true, so the general branch "
+            "never ran and this comparison is vacuous"
+        )
+        assert int(block.input_dim) == 1 and block.backcast_length * block.input_dim == 10
+        general_back, general_fore = block(y, exogenous_inputs=exog)
+
+        for name, fast, general in (
+            ("backcast", fast_back, general_back),
+            ("forecast", fast_fore, general_fore),
+        ):
+            fast_np = np.asarray(keras.ops.convert_to_numpy(fast))
+            general_np = np.asarray(keras.ops.convert_to_numpy(general))
+            assert fast_np.shape == general_np.shape, (
+                f"use_tcn={use_tcn}: {name} shapes diverged, "
+                f"{fast_np.shape} vs {general_np.shape}"
+            )
+            np.testing.assert_allclose(
+                fast_np, general_np, atol=1e-5, rtol=0,
+                err_msg=(
+                    f"use_tcn={use_tcn}: the dim==1 fast path and the general "
+                    f"path disagree on the {name} beyond float32 reassociation"
+                ),
+            )
+
 # =========================================================================
 # D-5 / D-6
 # =========================================================================
