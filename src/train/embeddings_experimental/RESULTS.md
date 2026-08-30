@@ -258,8 +258,10 @@ moves is specifically cosine retrieval.
 > **2 of 16** arm-configuration means. The conclusion is unaffected — the probe
 > moves ~0.06 across everything while retrieval moves 10x — but the probe is
 > also not arm-neutral, which the old phrasing implied: `ascii_bert` sits at
-> 0.577–0.593 in every configuration and the convolutional arms at 0.61–0.64. That gap — a linear probe steady while cosine collapses — is the
-signature that led to the whitening result below, and eventually to the cause.
+> 0.577–0.593 in every configuration and the convolutional arms at 0.61–0.64.
+
+That gap — a linear probe steady while cosine collapses — is the signature that
+led to the whitening result below, and eventually to the cause.
 
 ### The cause: a sinusoidal model's pooled embedding depends on LENGTH
 
@@ -277,18 +279,43 @@ character version:
 | `ascii_clifford_bert` / learned | 1.0000 | 0.9789 | 0.9733 | **0.9666** |
 | `ascii_clifford_bert` / **sinusoidal** | 1.0000 | 0.9629 | 0.8899 | **0.7521** |
 
-Learned-position models are essentially length-invariant across an 8x range.
-Sinusoidal ones are not: the same content at 512 characters is **nearly
-orthogonal to itself at 64** (0.3805). Mean-pooling averages positions
-`0..L-1`, and with a positional table of row norm exactly 8.0 at `d`=128 that
-mean is dominated by
-a term that differs with `L`.
+Under **this probe** learned-position models are essentially length-invariant
+across an 8x range, and sinusoidal ones are not: the same content at 512
+characters is nearly orthogonal to itself at 64 (0.3805). Mean-pooling averages
+positions `0..L-1`, and with a positional table of row norm exactly 8.0 at
+`d`=128 that mean is dominated by a term that differs with `L`.
 
 **SQuAD queries average 59 characters; contexts average 774.** So a query and its
-own answer land in different regions of the space *because of the length
-difference alone*, before content is considered at all.
+own answer land in different regions of the space partly *because of the length
+difference*, before content is considered.
 
-That single mechanism accounts for every observation:
+> **Correction, 2026-08-30 (review). The 0.9705-vs-0.3805 separation is an
+> artifact of the repeated-sentence probe, and it does not survive on natural
+> text.** In that probe the content is literally identical at every length, so
+> the positional term is the only thing that *can* move the vector. Re-run on 20
+> real SQuAD contexts, prefix-truncated, cosine against the same text at L=64:
+>
+> | model | readout | repeated @512 | **natural text @512** |
+> |---|---|---:|---:|
+> | `ascii_bert` / sinusoidal | mean | 0.4690 | **0.3879 ±0.040** |
+> | `ascii_bert` / **learned** | mean | 0.9518 | **0.5294 ±0.190** |
+> | `ascii_clifford_bert` / sinusoidal | mean | 0.6918 | **0.4314 ±0.133** |
+> | `ascii_clifford_bert` / **learned** | mean | 0.9691 | **0.5666 ±0.137** |
+> | `ascii_convnext_v2_bert` / **learned** | mean | 0.9318 | **0.4571 ±0.149** |
+>
+> The learned-vs-sinusoidal gap collapses from ~0.48 to **~0.14**.
+> Learned-position models drift nearly as much as sinusoidal ones on the kind of
+> text being retrieved — while retrieving **9.7x better** on the same cells
+> (clifford 0.0587 against 0.0061). **A 0.14 difference in cosine cannot account
+> for an order-of-magnitude retrieval gap**, so the claim below that this single
+> mechanism accounts for every observation is withdrawn.
+>
+> What survives: length drift is real, it is worse under sinusoidal positions,
+> and `max` pooling genuinely removes it — on natural text and for every arm,
+> `max` scores 0.977–0.979 at L=512 where `mean` scores 0.39–0.57.
+
+That mechanism accounts for several observations, and is stated here as a
+contributor rather than as the cause:
 
 | observation | explanation |
 |---|---|
@@ -299,10 +326,28 @@ That single mechanism accounts for every observation:
 | the 64-context run shows no penalty | packed training makes every sequence exactly 64 — no mismatch to expose |
 | MLM ordering unaffected in all 16 cells | MLM is scored per position and never pooled, so it never touches the readout |
 
-It also predicts the truncation curve that found it. Truncating **both** queries
-and contexts to a common length, `ascii_clifford_bert`/sinusoidal scores 0.0560,
-0.0640, 0.0560 at 64, 128 and 256 — level with its learned-position twin — then
-falls to **0.0060** at 512, where contexts fill the window and queries do not.
+It also predicts the truncation curve that found it. Re-measured 2026-08-30 at
+3 seeds, truncating **both** queries and contexts to a common length:
+
+| arm / positions | L=64 | L=128 | L=256 | L=512 |
+|---|---:|---:|---:|---:|
+| `ascii_clifford_bert` / **sinusoidal** | 0.0505 | 0.0532 | 0.0443 | **0.0055** |
+| `ascii_clifford_bert` / learned | 0.0515 | 0.0592 | 0.0595 | 0.0612 |
+| `ascii_convnext_v2_bert` / **sinusoidal** | 0.0532 | 0.0542 | 0.0515 | **0.0523** |
+| `ascii_convnext_v2_bert` / learned | 0.0545 | 0.0623 | 0.0665 | 0.0695 |
+
+The clifford row reproduces the curve this file reported (0.0560, 0.0640, 0.0560,
+0.0060) in shape and magnitude.
+
+> **But the curve does not isolate length mismatch.** Queries average 59
+> characters, so "truncating to L" leaves them untouched at every L; only the
+> contexts grow. The mismatch therefore rises monotonically — 1x, 2x, 4.3x, 8.7x
+> — while retrieval stays flat to L=256 and then collapses, which is a threshold
+> rather than the smooth dependence a length-proportional offset predicts. More
+> decisively, **`ascii_convnext_v2_bert`/sinusoidal has exactly the same
+> query/context length mismatch at 512 and does not collapse** (0.0523, level
+> across all four lengths). An arm with identical mismatch and no damage means
+> mismatch alone is not sufficient.
 
 **Two hypotheses died on the way, and the second death was the informative one.**
 A padding-mismatch version of this story is *mostly* wrong: encoding the same
