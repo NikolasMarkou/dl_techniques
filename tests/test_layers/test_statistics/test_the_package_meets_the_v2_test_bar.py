@@ -205,10 +205,16 @@ XFAILS: Dict[Tuple[str, str], str] = {
     ("InvertibleKernelPCA", "gradients"): (
         "measured: `no gradient for ikpca/reconstruction_matrix`. That weight is "
         "trainable=True but is read only by inverse_transform(), which call() never "
-        "runs, so a loss on the forward output cannot reach it. Fixing it means "
-        "deciding whether the weight should be trainable at all -- out of scope for a "
-        "test build-out. Note the sibling InvertibleKernelPCADenoiser PASSES this item, "
-        "because its call() runs transform followed by inverse_transform"
+        "runs, so a loss on the forward output cannot reach it. This row is PERMANENT, "
+        "not deferred: this item drives the layer through call() alone, and call() "
+        "returning components without decoding them is the design. The weight is not "
+        "dead -- the full public surface reaches it, pinned by "
+        "TestEveryTrainableWeightIsReachableFromThePublicSurface in "
+        "test_the_four_carried_defects_are_fixed.py, and the sibling "
+        "InvertibleKernelPCADenoiser PASSES this item because its call() runs transform "
+        "followed by inverse_transform. Making the decoder self-fitting was refuted by "
+        "measurement (decisions.md D-001): held-out relative reconstruction error 0.9992 "
+        "against a 1.0000 return-zeros baseline"
     ),
 }
 

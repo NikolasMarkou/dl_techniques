@@ -38,8 +38,11 @@ descent learns ``projection_matrix``, ``reconstruction_matrix`` and
 ``reconstruction_bias``. The
 frequency decoder is fixed: it reuses ``frequencies``, which trains only when
 ``trainable_frequencies=True`` (default ``False``). Reconstruction quality is
-only as good as ``reconstruction_matrix`` makes it. The method's own docstring
-lists the exact five-step path.
+CAPPED by that fixed decode, not by ``reconstruction_matrix``: measured, an
+unconstrained best-case linear decoder over the same components still leaves a
+relative error of ~0.76, and fitting ``reconstruction_matrix`` by least squares
+moves a held-out 1.0000 return-zeros baseline only to 0.9992. The method's own
+docstring lists the exact five-step path.
 
 Foundational Mathematics:
 Bochner's theorem says any shift-invariant kernel `k(x, y) = k(x - y)` is the
@@ -112,11 +115,28 @@ class InvertibleKernelPCA(keras.layers.Layer):
         gives them no gradient, because they are reached only through
         ``inverse_transform``. Straight after ``adapt``, reconstruction is no
         better than returning zeros: relative error 0.9985 on 20 Gaussian
-        samples at seed 0. Put ``inverse_transform`` in a loss first. The ``laplacian``
-        and ``cauchy`` kernel options draw Gaussian frequencies, not the exact
-        Cauchy frequencies those kernels require. No online eigendecomposition
-        runs anywhere. See ``inverse_transform`` for the exact reconstruction
-        path. This is a self-consistent working layer, not a canonical ikPCA.
+        samples at seed 0. Put ``inverse_transform`` in a loss first.
+
+        **How good can it get?** Not good, and the ceiling is not
+        ``reconstruction_matrix``'s fault. Measured: fitting that weight by
+        least squares on the landmarks inside ``adapt`` gives a held-out
+        relative reconstruction error of **0.9992**, against **1.0000** for a
+        decoder that returns zeros -- i.e. essentially no improvement. An
+        *unconstrained best-case* linear decoder over the same components
+        reaches only **~0.76**. The bottleneck is the FIXED ``frequencies^T``
+        decode step, which no amount of training the matrix in front of it can
+        undo. So this layer is not, and cannot be made, self-inverting by
+        fitting its decoder; treat ``inverse_transform`` as a decoder the CALLER
+        trains for a specific task, and expect a coarse reconstruction even
+        then. ``InvertibleKernelPCADenoiser`` is the in-package example: its
+        ``call`` runs transform then inverse transform, so an ordinary training
+        loop does reach these weights.
+
+        The ``laplacian`` and ``cauchy`` kernel options draw Gaussian
+        frequencies, not the exact Cauchy frequencies those kernels require. No
+        online eigendecomposition runs anywhere. See ``inverse_transform`` for
+        the exact reconstruction path. This is a self-consistent working layer,
+        not a canonical ikPCA.
 
     **Architecture Overview:**
 
