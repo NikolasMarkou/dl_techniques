@@ -354,3 +354,63 @@ comparison must be read at a fixed setting.
 Absolute caution: every retrieval number here is near chance (0.00048). The best
 cell, `convnext_v2` with learned positions at 0.0681, is ~141x chance and still
 under 7%. These are 6000-step `tiny` models.
+
+
+## The largest retrieval win here is free, and the study was not measuring it
+
+Chasing the *cause* of the sinusoidal retrieval collapse turned up something
+bigger than the question. Two hypotheses died first, and both deaths matter:
+
+1. **Shared offset.** Refuted by centering (above): anisotropy goes to −0.0002
+   and R@1 does not move.
+2. **Variance drowning.** SST-2 (a linear probe, free to reweight dimensions) is
+   unchanged while cosine similarity (which weights dimensions equally)
+   collapses — the signature of content surviving in low-variance directions.
+   Refuted **for the sinusoidal models**: ZCA whitening makes them *worse*
+   (`ascii_bert` 0.0040 -> 0.0013). The content really is gone there.
+
+But hypothesis 2 is **correct for the learned-position convolutional arms**, and
+the effect is large. Full 2000-query protocol, 3 seeds per cell:
+
+| arm | learned raw | learned + ZCA | gain | sinusoidal raw | sinusoidal + ZCA |
+|---|---:|---:|---:|---:|---:|
+| `ascii_bert` | 0.0102 | 0.0102 | **1.00x** | 0.0040 | 0.0013 |
+| `ascii_clifford_bert` | 0.0598 | **0.2178** | 3.64x | 0.0435 | 0.0212 |
+| `ascii_convnext_bert` | 0.0590 | **0.2075** | 3.52x | 0.0280 | 0.0047 |
+| `ascii_convnext_v2_bert` | 0.0647 | **0.2110** | 3.26x | 0.0535 | 0.0297 |
+
+**9 of 9 learned conv cells gain (3.09x–3.97x, no exceptions); 12 of 12
+sinusoidal cells lose.** `ascii_bert` with learned positions gains exactly
+nothing — which is its own confirmation, since that model is a bag of characters
+with no drowned content structure to recover.
+
+**It is not transductive.** Fitting the whitening on 3000 SST-2 sentences —
+movie reviews, a different domain from the Wikipedia paragraphs being retrieved —
+and applying it unchanged keeps ~90% of the gain:
+
+| arm | raw | ZCA fit on the pool | ZCA fit on SST-2 |
+|---|---:|---:|---:|
+| `ascii_clifford_bert` | 0.0575 | 0.2145 | **0.1865** |
+| `ascii_convnext_bert` | 0.0595 | 0.2060 | **0.1925** |
+| `ascii_convnext_v2_bert` | 0.0620 | 0.2085 | **0.1940** |
+
+So the transform is a property of the embedding space, not of the retrieval
+corpus. It can be fitted once on arbitrary text and shipped with the encoder; no
+index-time corpus access is required and no retraining is involved.
+
+This is the known BERT-whitening result (Su et al., 2021) reproducing on
+character-level encoders, which is a reason to trust it rather than a reason to
+discount it.
+
+**Consequences for how this study reports retrieval.** Every `squad_*` number in
+Run 1 and Run 2 is a *raw* cosine number, and raw cosine understates these
+encoders by ~3.3x. The study's best reported cell (`convnext_v2`, learned,
+0.0681) is really ~0.21 under a transform that costs nothing. Any future
+comparison should quote both, because the ordering is not preserved: raw ranks
+`convnext_v2 > convnext ~ clifford`, whitened ranks them within 0.01 of each
+other, and the transform's *benefit* is what separates the arms from the
+transformer baseline.
+
+References:
+    - Su et al., 2021. Whitening Sentence Representations for Better Semantics
+      and Faster Retrieval. (https://arxiv.org/abs/2103.15316)
