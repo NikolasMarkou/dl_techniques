@@ -117,8 +117,8 @@ axis to explore; for retrieval use learned positions.
 
 ### Report retrieval whitened as well as raw
 
-Raw cosine understates these encoders by **3.3x-3.9x**. ZCA whitening lifts the
-learned-position convolutional arms from R@1 ~0.060 to ~0.23 on **21 of 21
+Raw cosine understates these encoders by **~3.9x**. ZCA whitening lifts the
+learned-position convolutional arms from R@1 ~0.059 to ~0.23 on **14 of 14
 cells**, needs no retraining, and keeps ~93% of the gain when fitted on half the
 pool (and *improves* when fitted on the queries), so it is not transductive. Every `squad_*` metric now has a
 `squad_whitened_*` twin, fitted on the context pool (embeddings only — no
@@ -327,7 +327,7 @@ embeddings. If the space is healthy this is near 0: unrelated texts point in
 unrelated directions. As it approaches 1 every embedding points the same way,
 the classic "cone collapse" of an undertrained encoder, and cosine similarity
 stops discriminating because everything is similar to everything. Range -1 to 1,
-lower generally healthier. **Anchor:** 0.132 (convnext_v2, well spread) to 0.616
+lower generally healthier. **Anchor:** 0.146 (convnext, well spread) to 0.616
 (clifford, quite concentrated); the same baseline model measured 0.856 after
 only 5 steps and 0.429 after 3000, so it falls as training proceeds.
 
@@ -388,8 +388,8 @@ is better**: it rewards using the whole space. A fully collapsed model scores
 contrastive learning trades off — pull matching pairs together (alignment) while
 pushing everything else apart (uniformity). **Anchor, and it is a good
 illustration:** clifford has the *best* alignment (0.872) and the *worst*
-uniformity (-1.420), while convnext_v2 has the worst alignment (1.445) and the
-best uniformity (-3.161). Neither is simply "better"; they sit at different
+uniformity (-1.420), while convnext has the worst alignment and the best
+uniformity. Neither is simply "better"; they sit at different
 points on that trade-off, which is also why clifford's anisotropy is highest.
 
 ```python
@@ -536,7 +536,7 @@ for m in (1, 3, 18):
 CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m train.embeddings_experimental.train_embeddings \
     --model ascii_bert --variant small --pooling-strategy mean --gpu 0
 
-# the study as actually run: 4 arms x 7 seeds = 28 cells, ~4.9 h on one 4090
+# the study as actually run: 3 arms x 7 seeds = 21 cells, ~3.7 h on one 4090
 CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m train.embeddings_experimental.sweep \
     --variants tiny --pooling mean --seeds 0 1 2 3 4 5 6 --gpu 0 \
     --sweep-root results/embeddings_study_512_sinusoidal \
@@ -596,14 +596,12 @@ are stated in `summary.md` rather than buried.
 - Evaluation cannot pack, so padding returns. `embed_texts` sorts by length and
   pads to the batch maximum, and each corpus reports its pad fraction. Measured
   on a real encoder at `max_length=64`: contexts 0.000, questions 0.061, SST-2
-  0.026. **The arm this actually bites is `ascii_convnext_v2_bert`, not
-  `ascii_clifford_bert`.** Measured 2026-08-30 on trained encoders, the same text
-  at pad widths 128/256/512 moves `convnext_v2` by 1.663e-01 (cosine 0.9863) via
-  its mask-unaware GRN, while clifford, convnext and bert move by 1.8e-07 to
-  3.6e-07. Clifford is sensitive to pad *presence*, not pad *width*, and its
-  global branch is off by default. The length sorting above is what keeps this
-  harmless: at the 1-3% pad fractions it produces, the distortion is under 0.001
-  in cosine. Pinned by
+  0.026. **Pad WIDTH is inert for all three arms** (max |Δ| 1.8e-07 to 3.6e-07,
+  measured 2026-08-30 on trained encoders): mean pooling is mask-aware, and
+  clifford is sensitive to pad *presence*, not pad *width*, with its global
+  branch off by default. A fourth arm was not — the withdrawn
+  `ascii_convnext_v2_bert` moved 1.663e-01 across pad widths via its mask-unaware
+  GRN, which is part of why it is gone. Pinned for every registered arm by
   `tests/test_models/test_embeddings_shared/test_the_arms_differ_in_reach.py`.
 - Stage 2 saves the encoder, not the SimCSE wrapper, so the metrics use
   `pooled_output`; the contrastive loss lives in projection space and the two can
