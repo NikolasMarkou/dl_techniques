@@ -83,40 +83,45 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
 
     .. code-block:: text
 
-        Context (batch, context_dim)          Lags (batch, num_lags)
-                │                                     │
-                ├──────────────┐                      │
-                ▼              ▼                      │
-        ┌──────────────┐ ┌──────────┐                 │
-        │Dense(num_lags│ │ Dense(1) │                 │
-        │  sigmoid)    │ │ sigmoid  │                 │
-        └──────┬───────┘ └────┬─────┘                 │
-               │              │                       │
-               ▼              │                       ▼
-        Attention Weights     │              ┌────────────────┐
-        (batch, num_lags)     │              │  Element-wise  │
-               │              │              │  Multiply      │
-               └──────────────┼──► w * lags ─┘
-                              │         │
-                              │         ▼
-                              │    ops.sum(axis=-1)
-                              │         │
-                              │         ▼
-                              │   Weighted Sum (batch,)
-                              │         │
-                              ▼         ▼
-                         Gate (batch,1) │
-                              │ squeeze │
-                              ▼         ▼
-                          (batch,)      │
-                              │         │
-                              ▼         ▼
-                        ┌───────────────────┐
-                        │  g * weighted_sum │
-                        └─────────┬─────────┘
-                                  │
-                                  ▼
-                        Output (batch, 1)
+            Context [B, C]                           Lags [B, L]
+                  │                                        │
+             ┌────┴──────┐                                 │
+             ▼           ▼                                 │
+        ┌─────────┐ ┌─────────┐                            │
+        │ Dense(1)│ │ Dense(L)│                            │
+        │ sigmoid │ │ sigmoid │                            │
+        └────┬────┘ └────┬────┘                            │
+          g [B, 1]    w [B, L]                             │
+             │           │                                 │
+             │           └────────────┬────────────────────┘
+             │                        ▼
+             │                ┌───────────────┐
+             │                │   w * lags    │
+             │                └───────┬───────┘
+             │                     [B, L]
+             │                        ▼
+             │                ┌───────────────┐
+             │                │    sum(-1)    │
+             │                └───────┬───────┘
+             │                      [B,]
+             ▼                        │
+         squeeze(-1)                  │
+            [B,]                      │
+             │                        │
+             └────────────┬───────────┘
+                          ▼
+                  ┌───────────────┐
+                  │    g * sum    │
+                  └───────┬───────┘
+                        [B,]
+                          ▼
+                   expand_dims(-1)
+                          │
+                          ▼
+                   Output [B, 1]
+
+    B = batch, C = ``context_dim``, L = ``num_lags``. Only the two Dense
+    heads own weights; the lag tensor is read, never projected.
 
     The lag tensor is used as data only. No weights are attached to it, so
     the layer's parameter count depends on the context width, not on the lags.
