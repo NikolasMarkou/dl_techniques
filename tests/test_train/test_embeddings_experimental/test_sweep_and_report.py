@@ -25,6 +25,8 @@ from train.embeddings_experimental.sweep import (
     build_run_specs,
     collect_results,
     parse_args,
+    failures_log_path,
+    write_failures_log,
 )
 
 
@@ -469,3 +471,41 @@ class TestCorrectionRaisesTheSeedFloor:
         report = build_report(self._records(7, 3))
         rows = [r for r in report["paired"] if r["role"] == "primary"]
         assert rows and all(r["verdict"] == "BETTER" for r in rows)
+
+
+class TestTheFailureLogDoesNotOutliveTheFailure:
+    """A cell that failed and was re-run to completion must leave no trace.
+
+    Until 2026-08-30 the sweep only ever WROTE this file, never removed it, so
+    `results/embeddings_study_512_sinusoidal_maxpool/failures.log` still names
+    two `ascii_clifford_bert` cells that OOMed in the contrastive stage and were
+    then re-run to completion with byte-identical argv. The log could only be
+    interpreted by comparing its mtime against each cell's `results.json`, and a
+    reader who trusted it would have thrown away two good cells.
+    """
+
+    def test_a_failure_writes_the_log(self, tmp_path) -> None:
+        path = write_failures_log(str(tmp_path), [("arm/tiny/mean/seed_0", "boom")])
+        assert path is not None and os.path.exists(path)
+        assert "arm/tiny/mean/seed_0" in open(path).read()
+
+    def test_a_clean_run_writes_nothing(self, tmp_path) -> None:
+        assert write_failures_log(str(tmp_path), []) is None
+        assert not os.path.exists(failures_log_path(str(tmp_path)))
+
+    def test_a_clean_RERUN_removes_the_previous_failure_log(self, tmp_path) -> None:
+        """The regression itself: success after failure must clear the file."""
+        write_failures_log(str(tmp_path), [("arm/tiny/mean/seed_1", "OOM")])
+        assert os.path.exists(failures_log_path(str(tmp_path)))
+
+        write_failures_log(str(tmp_path), [])
+
+        assert not os.path.exists(failures_log_path(str(tmp_path))), (
+            "a successful re-run left the previous run's failures.log in place, "
+            "so the sweep root claims failures it no longer has"
+        )
+
+    def test_the_path_has_one_producer(self, tmp_path) -> None:
+        """Reader and writer must not be able to disagree about the location."""
+        written = write_failures_log(str(tmp_path), [("c", "t")])
+        assert written == failures_log_path(str(tmp_path))
