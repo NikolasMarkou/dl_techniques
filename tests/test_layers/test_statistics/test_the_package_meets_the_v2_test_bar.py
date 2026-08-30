@@ -210,18 +210,6 @@ XFAILS: Dict[Tuple[str, str], str] = {
         "test build-out. Note the sibling InvertibleKernelPCADenoiser PASSES this item, "
         "because its call() runs transform followed by inverse_transform"
     ),
-    ("DeepKernelPCA", "dtype-mixed_float16"): (
-        "measured: InvalidArgumentError at deep_kernel_pca.py:714, "
-        "`cannot compute AddV2 as input #1 was expected to be a half tensor but is a "
-        "float tensor` -- `ops.eye(batch_size)` returns float32 regardless of the "
-        "compute dtype. A never-narrow dtype defect, out of scope for a test build-out"
-    ),
-    ("DeepKernelPCA", "dtype-float64"): (
-        "measured: InvalidArgumentError at deep_kernel_pca.py:1170, "
-        "`cannot compute Mul as input #1 was expected to be a float tensor but is a "
-        "double tensor` -- `ops.exp(-0.1 * i)` builds a float32 scalar from a Python "
-        "float and multiplies it into float64 features. Same defect class as the fp16 arm"
-    ),
     ("InvertibleKernelPCA", "dtype-mixed_float16"): (
         "measured: InvalidArgumentError at invertible_kernel_pca.py:611, "
         "`ops.sqrt(2.0 / self.n_random_features)` produces a float32 scale that is "
