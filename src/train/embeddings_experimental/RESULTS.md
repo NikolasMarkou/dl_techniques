@@ -32,11 +32,13 @@ decides part of the answer. The strong two-way interaction behind this is
 **specific to the attention arm** — the convolutional arms show only a small
 same-signed penalty from each setting.
 
-**4. The sinusoidal retrieval collapse is a `mean`-pooling artifact.** A
-sinusoidal model's pooled vector depends on sequence length — the same content at
-512 characters is nearly orthogonal to itself at 64 (cosine **0.3805**, against
-0.9705 for learned positions). SQuAD queries average 59 characters and contexts
-774, so they are displaced apart before content is considered.
+**4. The sinusoidal retrieval collapse involves a length artifact, but is not
+only that.** A sinusoidal model's pooled vector depends on sequence length — the
+same content at 512 characters is nearly orthogonal to itself at 64 (cosine
+**0.3805**, against 0.9705 for learned positions), and SQuAD queries average 59
+characters against contexts of 774. But swapping to a length-invariant readout
+does **not** recover retrieval: it helps one arm 3.6x and sends the other to
+chance. For retrieval, use **learned positions**.
 
 **5. Every raw retrieval number below understates these encoders by ~3.3x.** ZCA
 whitening lifts the learned-position convolutional arms from R@1 ~0.060 to ~0.21,
@@ -299,11 +301,49 @@ only `cls`, `mean` and `attention`, and the trainer's `--pooling-strategy`
 validates against that tuple — so the readout that fixes this was unreachable
 from the study. Added 2026-08-30.
 
-**Length-invariance is a property of the readout, not yet a retrieval result.**
-Whether it actually recovers SQuAD recall has to be measured on a trained cell,
-because stage 2 trains the contrastive objective *through* the pooling. That run
-is in progress; until it lands, the claim here is only that the readout is
-length-invariant.
+### But swapping the readout does NOT recover retrieval — measured
+
+Length-invariance turned out to be **necessary and not sufficient**. Trained
+cells at 512 / sinusoidal with `max` pooling, 3 seeds, against the `mean`-pooled
+cells (n=7) and the learned-position baseline (n=7):
+
+| arm | sinusoidal + `mean` | sinusoidal + `max` | learned + `mean` |
+|---|---:|---:|---:|
+| `ascii_bert` | 0.00186 | **0.00033** | 0.01286 |
+| `ascii_clifford_bert` | 0.00607 | **0.02167** | 0.05871 |
+
+Chance is 0.00048.
+
+**The prediction failed, and it failed asymmetrically.** `max` pooling improves
+`ascii_clifford_bert` **3.6x** (all three seeds 0.017-0.030, no overlap with the
+`mean` cells) but drives `ascii_bert` **to chance**. Neither reaches its own
+learned-position baseline — clifford recovers to 37% of it, bert to 3%.
+
+The direction is the opposite of what the length-drift account alone predicts.
+`ascii_bert` had by far the worse drift under `mean` pooling (0.3805 against
+clifford's 0.7521) and therefore the most to gain from a length-invariant
+readout; it gained nothing and lost what little it had. So length drift is a real
+property of these embeddings and a real contributor to the collapse, but it is
+not the whole of it: a per-dimension extremum over 128 dimensions discards enough
+information to cost more than the drift did, and how much more depends on the
+arm.
+
+Whitening does not rescue the `max`-pooled cells either — it lowers them
+(clifford 0.0217 raw to 0.0065 whitened), consistent with `max` already having
+flattened the variance structure the transform exploits.
+
+**What survives, and what does not.** The length-drift measurement stands: it is
+direct, reproducible, and it still explains the flat SST-2 probe, the failure of
+centering and whitening, the absent penalty at 64 context, and the untouched MLM
+ordering. What is refuted is the *fix* proposed from it. On the evidence here,
+the practical recommendation for retrieval is **learned positions with `mean`
+pooling** — the configuration the study started with — and the sinusoidal
+positional repair belongs to the language-modelling objective, not to the
+embedding.
+
+Two cells of this run first failed with a CUDA OOM in the contrastive stage and
+were re-run to completion on an idle GPU with no config change; the numbers above
+are all from clean cells.
 
 ---
 
@@ -387,6 +427,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix — and R@1 does not move. Clifford also lost 10x with anisotropy slightly *improving*, and across arms the anisotropy rise is *anti-correlated* with the damage. |
 | **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes sinusoidal models **worse** (0.0040 → 0.0013). Correct for the learned-position conv arms — that is where the 3.3x came from — but wrong here. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
+| **"A length-invariant readout will fix retrieval"** — my own prediction | `max` pooling IS length-invariant (0.9693 vs `mean`'s 0.3805) and does not fix it: bert falls to chance (0.00033) while clifford improves 3.6x (0.02167), neither reaching its learned-position baseline. Length drift is real and contributory, not sufficient. |
 | **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
 | **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
 | **"A longer run could close or reverse it"** — Run 1's own explanation | Stated in this file's first version as "a statement about training speed at this budget". False: the arm had stopped moving. The convolutional prior is a real advantage, but it is not what produced Run 1's number. |
