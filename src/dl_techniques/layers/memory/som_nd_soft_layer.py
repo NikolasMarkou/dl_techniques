@@ -298,6 +298,13 @@ class SoftSOMLayer(keras.layers.Layer):
             raise ValueError("topological_sigma must be positive.")
         if sharpness_weight < 0:
             raise ValueError("sharpness_weight must be non-negative.")
+        # DECISION plan-2026-08-30T063229-ccd6ad17/D-016
+        # Refuse the combination; before this it was accepted and the weight
+        # silently ignored. Do NOT soften to a warning and do NOT wire the loss
+        # into the global path -- a config that trains a lie is worse than one
+        # that refuses to build. Safe to narrow: 134 archives carry no such
+        # config, and both trainers hardcode or default the other corner.
+        # See decisions.md D-016 and D-010.
         if sharpness_weight > 0 and not use_per_dimension_softmax:
             raise ValueError(
                 "sharpness_weight > 0 requires use_per_dimension_softmax=True. "
