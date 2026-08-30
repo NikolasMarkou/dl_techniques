@@ -53,7 +53,7 @@ output 0.83% of activation scale, while replacing the context moves 52.58%.
 | switching to sinusoidal, 512 context | effect |
 |---|---:|
 | `ascii_bert` MLM | **−1.2030 nats** |
-| the three convolutional arms, MLM | +0.07 to +0.11 |
+| both convolutional arms, MLM | +0.07 to +0.10 |
 | every arm's SQuAD recall@1 | **1.3x to 10x worse** |
 
 So it buys a large amount of the pretraining objective and sells a large amount
@@ -62,7 +62,7 @@ of the embedding quality. The two objectives genuinely disagree here.
 ### `max_seq_length` — an interaction, and it substitutes for the above
 
 Going 512 → 64 at matched tokens per step helps only the transformer
-(**−0.3220** nats) and mildly hurts all three convolutional arms (+0.017 to
+(**−0.3220** nats) and mildly hurts both convolutional arms (+0.017 to
 +0.031): attention dilutes a near-uniform softmax over every position, while a
 convolution has a fixed span.
 
