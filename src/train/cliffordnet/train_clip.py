@@ -277,15 +277,34 @@ class ContrastiveCliffordCLIP(keras.Model):
     def _contrastive_loss(
         self, outputs: Dict[str, keras.KerasTensor]
     ) -> keras.KerasTensor:
-        # Shared entry point: `CLIPContrastiveLoss.reduced_loss` calls
-        # `call(None, ...)` and means the per-sample losses. Calling
-        # `self.loss_fn(None, ...)` instead RAISES -- the base `Loss.__call__`
-        # converts `y_true` to a tensor. See decisions.md D-030.
-        return self.loss_fn.reduced_loss(
-            {
-                "logits_per_image": outputs["logits_per_image"],
-                "logits_per_text": outputs["logits_per_text"],
-            }
+        # DECISION plan-2026-08-30T203107-30455f66/D-001: reduce POLYMORPHICALLY.
+        # The contract this site requires is now only what every
+        # `keras.losses.Loss` already has: a `call(y_true, y_pred)` accepting the
+        # {logits_per_image, logits_per_text} dict schema. Do NOT go back to
+        # `self.loss_fn.reduced_loss(...)`: that method exists only on
+        # `CLIPContrastiveLoss`, so `--loss siglip` -- an advertised CLI choice
+        # built at :257-261 -- died on its FIRST batch, train or eval, with
+        # `AttributeError: 'SigLIPContrastiveLoss' object has no attribute
+        # 'reduced_loss'`. Adding `reduced_loss` to SigLIP would fix that one
+        # instance and leave the trap armed for the next `--loss` entry; this
+        # removes the class of bug. `ops.mean(call(None, ...))` is byte-for-byte
+        # what `CLIPContrastiveLoss.reduced_loss` does internally
+        # (`clip_contrastive_loss.py:549`), so the CLIP path's scalar is
+        # unchanged (pinned at atol=1e-6 by the guard below). Do NOT call
+        # `self.loss_fn(None, ...)` either -- the base `Loss.__call__` converts
+        # `y_true` to a tensor and RAISES on None (decisions.md D-030), which is
+        # why `call` is invoked directly. `CLIPContrastiveLoss.reduced_loss`
+        # stays: `src/train/clip/train_clip.py:300,345` still use it.
+        # Guard: tests/test_train/test_cliffordnet/
+        # test_the_siglip_loss_path_runs_a_step.py. See decisions.md D-001.
+        return keras.ops.mean(
+            self.loss_fn.call(
+                None,
+                {
+                    "logits_per_image": outputs["logits_per_image"],
+                    "logits_per_text": outputs["logits_per_text"],
+                },
+            )
         )
 
     # DECISION plan-2026-07-15T114613-5add9baa/D-003: custom train_step RETAINED
@@ -297,7 +316,8 @@ class ContrastiveCliffordCLIP(keras.Model):
     # -> KeyError "path ('logits_per_image',) ... can't be found"; per-key dict
     # loss -> ValueError "Unsupported y_pred format: SymbolicTensor" (the loss
     # is fed one key's tensor, but it needs BOTH keys at once). So the wrapper
-    # calls CLIPContrastiveLoss.reduced_loss(dict_output) in _contrastive_loss.
+    # reduces the loss's own `call(None, dict_output)` in _contrastive_loss
+    # (polymorphically since D-001; it was CLIPContrastiveLoss.reduced_loss).
     # Revisit only if CliffordCLIP.call returns a single tensor. See D-003.
     def train_step(self, data):
         if isinstance(data, tuple):
