@@ -1,20 +1,29 @@
 """
-Baseline Neural Turing Machine Implementation.
+Neural Turing Machine, after Graves et al., 2014.
 
-This module provides a production-ready implementation of the Neural Turing
-Machine described in Graves et al., 2014, updated for Keras 3 compatibility
-with robust serialization and graph-safe operations.
+A Neural Turing Machine is a controller network coupled to an external
+memory matrix. Read and write heads address that memory by content and
+by location. Every addressing step is differentiable, so the whole
+thing trains by ordinary backpropagation.
+
+This module holds the concrete Keras 3 implementation. The contracts it
+implements live in `ntm_interface.py`: the abstract base classes, the
+`NTMConfig` dataclass, the state records, and the three addressing
+helpers (`cosine_similarity`, `circular_convolution`, `sharpen_weights`).
 
 Classes:
-    NTMMemory: External memory module with read/write operations.
-    NTMReadHead: Read head with content/location addressing.
-    NTMWriteHead: Write head with erase/add operations.
-    NTMController: Configurable LSTM/GRU/feedforward controller.
-    NTMCell: Single timestep NTM cell (RNN compatible).
-    NeuralTuringMachine: Complete NTM layer with RNN wrapper.
+    NTMMemory: The memory matrix, with read and erase-then-add write.
+    NTMReadHead: Read head, content or content-plus-location addressing.
+    NTMWriteHead: Write head, the same addressing plus erase and add.
+    NTMController: LSTM, GRU or feedforward controller.
+    NTMCell: One timestep, shaped for `keras.layers.RNN`.
+    NeuralTuringMachine: The full layer, an RNN wrapped around NTMCell.
 
 Functions:
-    create_ntm: Factory function to create NTM instances.
+    create_ntm: Build a NeuralTuringMachine from plain arguments.
+
+Throughout, `N` is the number of memory slots (`memory_size`) and `M` is
+the width of one slot (`memory_dim`), matching `ntm_interface.py`.
 """
 
 import keras
@@ -50,36 +59,64 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMMemory(BaseMemory):
     """
-    Standard NTM Memory Matrix.
+    The NTM memory matrix, and the read and write operations on it.
 
-    Manages read/write operations on the memory matrix using the erase-then-add
-    mechanism: ``M_t = M_{t-1} * (1 - w_t e_t^T) + w_t a_t^T`` where ``w_t`` are
-    write weights, ``e_t`` is the erase vector, and ``a_t`` is the add vector.
+    The memory is a STATE tensor of shape `(batch, N, M)`, not a
+    weight. This layer creates no weights of its own. It reads that
+    tensor and returns a new one.
+
+    A read is a weighted sum over slots. A write is erase-then-add:
+    `M' = M * (1 - w e) + w a`, with the write weights `w` broadcast
+    over slot width and the erase and add vectors broadcast over
+    slots.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │  Memory M (batch, N, M)      │
-        └──────────┬───────────────────┘
-                   │
-           ┌───────┴───────┐
-           ▼               ▼
-        ┌──────┐     ┌──────────┐
-        │ Read │     │  Write   │
-        │w^T M │     │ Erase+Add│
-        └──┬───┘     └────┬─────┘
-           ▼              ▼
-        read_vec     updated M
+        memory_state.memory, M (batch, N, M) -- a STATE
+        tensor. This layer creates NO weights.
 
-    :param memory_size: Number of memory slots.
+        ┌─ read(memory_state, read_weights) ───────────────┐
+        │ read_weights w (batch, N)                        │
+        │ expand_dims(w, -1)  ──►  (batch, N, 1)           │
+        │ sum(M * w, axis=1)                               │
+        └───────────────────┬──────────────────────────────┘
+                            ▼
+        read vector (batch, M)
+
+        ┌─ write(memory_state, w, erase, add) ─────────────┐
+        │ w (batch, N, 1);  erase e, add a (batch, 1, M)   │
+        │ erase:  M * (1 - w * e)                          │
+        │ add:    ... + w * a                              │
+        └───────────────────┬──────────────────────────────┘
+                            ▼
+        MemoryState(memory=M', usage/temporal_links/
+        precedence carried through unchanged)
+
+    Note:
+        `epsilon` is stored and serialized by `BaseMemory`, but
+        neither `read` nor `write` reads it. It is an inert knob on
+        this class. The heads carry their own `epsilon`, which does
+        reach code.
+
+    :param memory_size: Number of memory slots, N. Must be positive.
     :type memory_size: int
-    :param memory_dim: Dimension of each memory slot.
+    :param memory_dim: Width of one memory slot, M. Must be positive.
     :type memory_dim: int
-    :param epsilon: Small constant for numerical stability.
+    :param epsilon: Small constant for numerical stability. Stored and
+        serialized, but unused here. Defaults to 1e-6.
     :type epsilon: float
-    :param kwargs: Additional layer arguments.
+    :param memory_init_seed: Seed for the symmetry-breaking draw in
+        `initialize_state`. It is fixed, so that draw is stateless and
+        repeats exactly. Defaults to 42. NOT serialized -- `get_config`
+        does not emit it, so a `from_config` round-trip resets it to 42.
+    :type memory_init_seed: int
+    :param kwargs: Forwarded to `BaseMemory.__init__`.
+    :type kwargs: Any
+
+    :ivar memory_init_seed: The seed given to `__init__`.
+    :vartype memory_init_seed: int
     """
 
     def __init__(
@@ -90,6 +127,27 @@ class NTMMemory(BaseMemory):
         memory_init_seed: int = 42,
         **kwargs: Any,
     ) -> None:
+        """
+        Store the two sizes, epsilon and the init seed.
+
+        `BaseMemory.__init__` stores the sizes and epsilon;
+        `memory_init_seed` is stored here and is the only field this
+        subclass adds.
+
+        :param memory_size: Number of memory slots, N.
+        :type memory_size: int
+        :param memory_dim: Width of one memory slot, M.
+        :type memory_dim: int
+        :param epsilon: Small constant for numerical stability.
+            Stored and serialized, but unused by this class.
+            Defaults to 1e-6.
+        :type epsilon: float
+        :param memory_init_seed: Seed for the draw in
+            `initialize_state`. Defaults to 42.
+        :type memory_init_seed: int
+        :param kwargs: Forwarded to `BaseMemory.__init__`.
+        :type kwargs: Any
+        """
         super().__init__(
             memory_size=memory_size,
             memory_dim=memory_dim,
@@ -100,16 +158,23 @@ class NTMMemory(BaseMemory):
 
     def initialize_state(self, batch_size: int) -> MemoryState:
         """
-        Initialize memory state for a new sequence.
+        Build a starting memory state for a new sequence.
 
-        Uses small random values to break symmetry across memory slots,
-        ensuring that content-based addressing produces differentiated
-        cosine similarities and non-zero gradients through the addressing
-        mechanism.
+        Fills memory with a small random draw (stddev 1e-3) so the
+        slots are not identical. Content addressing over identical
+        slots gives one flat softmax and no useful gradient, so the
+        draw is what makes the addressing mechanism trainable at
+        step one. Usage is all zeros.
+
+        `NTMCell` does NOT call this. The cell draws its own initial
+        memory in `get_initial_state`, using the seed from its
+        `NTMConfig`. This method is for a caller driving `BaseMemory`
+        directly.
 
         :param batch_size: Number of sequences in the batch.
         :type batch_size: int
-        :return: Initial memory state with small random values.
+        :return: Memory of shape (batch, N, M) and zero usage of
+            shape (batch, N).
         :rtype: MemoryState
         """
         # See the D-058 anchor on `NTMCell.get_initial_state` for why this seed
@@ -129,13 +194,17 @@ class NTMMemory(BaseMemory):
         read_weights: Any,
     ) -> Any:
         """
-        Read from memory using attention weights.
+        Read one vector per batch element, by weighted sum over slots.
 
-        :param memory_state: Current memory state.
+        The weights are broadcast over slot width and the slot axis
+        is summed away.
+
+        :param memory_state: The state holding the memory to read.
         :type memory_state: MemoryState
-        :param read_weights: Attention weights of shape (batch, num_slots).
+        :param read_weights: A distribution over slots, shape
+            (batch, N). Nothing here requires it to be normalized.
         :type read_weights: Any
-        :return: Read vector of shape (batch, memory_dim).
+        :return: Read vector of shape (batch, M).
         :rtype: Any
         """
         weights_expanded = keras.ops.expand_dims(read_weights, axis=-1)
@@ -150,17 +219,28 @@ class NTMMemory(BaseMemory):
         add_vector: Any,
     ) -> MemoryState:
         """
-        Write to memory using erase-then-add mechanism.
+        Write to memory, erase first and then add.
 
-        :param memory_state: Current memory state.
+        `M' = M * (1 - w e) + w a`. The write weights are broadcast
+        over slot width and the erase and add vectors over slots, so
+        each slot is modified in proportion to its weight. A slot
+        with weight 0 is left exactly as it was.
+
+        `usage`, `temporal_links` and `precedence` are carried
+        through unchanged; this class does not maintain them.
+
+        :param memory_state: The state holding the memory to write to.
         :type memory_state: MemoryState
-        :param write_weights: Write attention weights of shape (batch, num_slots).
+        :param write_weights: A distribution over slots, shape
+            (batch, N).
         :type write_weights: Any
-        :param erase_vector: Erase vector of shape (batch, memory_dim), values in [0, 1].
+        :param erase_vector: Erase vector of shape (batch, M). The
+            write head produces it through a sigmoid, so it is in
+            [0, 1]; nothing here enforces that.
         :type erase_vector: Any
-        :param add_vector: Add vector of shape (batch, memory_dim).
+        :param add_vector: Add vector of shape (batch, M).
         :type add_vector: Any
-        :return: Updated memory state.
+        :return: A new state carrying the updated memory.
         :rtype: MemoryState
         """
         prev_memory = memory_state.memory
@@ -187,9 +267,14 @@ class NTMMemory(BaseMemory):
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Delegates entirely to `BaseMemory.get_config`, which emits
+        `memory_size`, `memory_dim` and `epsilon`. `memory_init_seed`
+        is NOT emitted, so a `from_config` round-trip resets it to
+        the default 42.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         return super().get_config()
@@ -203,64 +288,106 @@ class NTMMemory(BaseMemory):
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMReadHead(BaseHead):
     """
-    Standard NTM Read Head.
+    NTM read head: turns the controller output into read weights.
 
-    Projects controller output to addressing parameters and computes attention
-    weights for reading from memory. **Which parameters exist depends on
-    ``addressing_mode``** — the chain below is the ``HYBRID`` one; under
-    ``CONTENT`` the gate / shift / gamma projections are not created at all and
-    the content weights ARE the addressing (D-073). This paragraph and the
-    diagram described the hybrid chain as unconditional until 2026-08-18, four
-    months after the branch landed; ``shift_range`` in particular is read only
-    on the ``HYBRID`` path, and a CONTENT head silently ignores it.
+    The head projects the controller output to addressing parameters,
+    then computes a distribution over the N memory slots. `NTMCell`
+    hands those weights to `NTMMemory.read`.
 
-    **Architecture Overview (HYBRID):**
+    Which projections exist depends on `addressing_mode`. Under
+    `AddressingMode.HYBRID` (the default) the head runs the full NTM
+    chain and owns five Dense layers. Under `AddressingMode.CONTENT`
+    the content weights ARE the addressing, and the gate, shift and
+    gamma projections are never created.
+
+    **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────┐
-        │  controller_output        │
-        └──────────┬────────────────┘
-                   ▼
-        ┌───────────────────────────┐
-        │  Dense projections:       │
-        │  key, beta                │
-        │  (+ gate, shift, gamma    │
-        │   only under HYBRID)      │
-        └──────────┬────────────────┘
-                   ▼
-        ┌───────────────────────────┐
-        │  HYBRID:  content ─► gate │
-        │           ─► shift ─►     │
-        │           sharpen         │
-        │  CONTENT: content         │
-        └──────────┬────────────────┘
-                   ▼
-        ┌───────────────────────────┐
-        │  weights (batch, N)       │
-        └───────────────────────────┘
+        controller_output (batch, controller_dim) -- INPUT
+                          │
+                          ▼
+        ┌─ Dense projections, always created ────────────┐
+        │ key_dense    ──► key  (batch, M)               │
+        │ beta_dense   ──► beta (batch, 1), softplus     │
+        └─────────────────┬──────────────────────────────┘
+                          ▼
+        ┌─ content_addressing ───────────────────────────┐
+        │ cosine_similarity(key, memory, epsilon)        │
+        │ softmax(beta * similarity, axis=-1)            │
+        └─────────────────┬──────────────────────────────┘
+                          │  content_weights (batch, N)
+            ┌─────────────┴──────────────────────────┐
+            ▼                                        ▼
+            CONTENT                                  HYBRID
+            │                                        ▼
+            │                           ┌─────────────────────────┐
+            │                           │ gate_dense   (optional) │
+            │                           │ shift_dense  (optional) │
+            │                           │ gamma_dense  (optional) │
+            │                           └────────────┬────────────┘
+            │                                        ▼
+            │                    ┌──────────────────────────────────────┐
+            │                    │ gate * content_weights               │
+            │                    │   + (1 - gate) * prev_weights        │
+            │                    │ circular_convolution(w, shift)       │
+            │                    │ sharpen_weights(w, gamma, epsilon)   │
+            │                    └───────────────────┬──────────────────┘
+            │                                        │
+            └─────────────┬──────────────────────────┘
+                          ▼
+        weights (batch, N), HeadState
 
-    :param memory_size: Number of memory slots.
+    :param memory_size: Number of memory slots, N. Must be positive.
     :type memory_size: int
-    :param memory_dim: Dimension of each memory slot.
+    :param memory_dim: Width of one memory slot, M. Must be positive.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
-        (the default) runs the full NTM chain: content -> interpolation -> circular
-        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
-        directly and does not create the gate / shift / gamma projections at all, so a
-        CONTENT head has strictly fewer parameters than a HYBRID one.
+    :param addressing_mode: Which addressing chain to run.
+        `AddressingMode.HYBRID`, the default, runs content, then
+        interpolation with `prev_weights`, then circular shift, then
+        sharpening. `AddressingMode.CONTENT` returns the content weights
+        directly and does not create the gate / shift / gamma projections
+        at all, so a CONTENT head has strictly fewer parameters.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing. Read
-        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
-        shift projection, so this value is silently ignored there.
+    :param shift_range: Width of the circular-shift distribution, S. Read
+        ONLY on the HYBRID path; a CONTENT head creates no shift
+        projection, so the value is silently ignored there. Defaults to 3.
     :type shift_range: int
-    :param kernel_initializer: Initializer for dense layers.
+    :param kernel_initializer: Initializer for the Dense kernels. Each
+        projection gets its own clone of it. Defaults to
+        `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases.
+    :param bias_initializer: Initializer for the Dense biases. Defaults
+        to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers.
+    :param kernel_regularizer: Regularizer shared by every Dense kernel.
+        Defaults to None.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional layer arguments.
+    :param epsilon: Small constant handed to the two addressing helpers.
+        It is added inside each L2 norm in `cosine_similarity`, so a
+        zero-length key or an all-zero memory slot gives `sqrt(epsilon)`
+        rather than a divide by zero; and on the HYBRID path it is added
+        to the base and the denominator in `sharpen_weights`, so an
+        exactly-zero weight raised to a large gamma stays differentiable.
+        Under CONTENT only the `cosine_similarity` use is reached.
+        Defaults to 1e-6.
+    :type epsilon: float
+    :param kwargs: Forwarded to `BaseHead.__init__`.
+    :type kwargs: Any
+
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or None.
+    :vartype kernel_regularizer: keras.regularizers.Regularizer | None
+    :ivar gate_dense: Interpolation gate projection, or None under
+        CONTENT.
+    :vartype gate_dense: keras.layers.Dense | None
+    :ivar shift_dense: Circular-shift projection, or None under CONTENT.
+    :vartype shift_dense: keras.layers.Dense | None
+    :ivar gamma_dense: Sharpening projection, or None under CONTENT.
+    :vartype gamma_dense: keras.layers.Dense | None
     """
 
     def __init__(
@@ -275,6 +402,39 @@ class NTMReadHead(BaseHead):
         epsilon: float = 1e-6,
         **kwargs: Any,
     ) -> None:
+        """
+        Resolve the initializers and create the Dense projections.
+
+        `key_dense` and `beta_dense` are always created. The three
+        location-addressing projections are created only under
+        `AddressingMode.HYBRID`; otherwise they are set to None.
+
+        :param memory_size: Number of memory slots, N.
+        :type memory_size: int
+        :param memory_dim: Width of one memory slot, M.
+        :type memory_dim: int
+        :param addressing_mode: Which addressing chain to run.
+            Defaults to `AddressingMode.HYBRID`.
+        :type addressing_mode: AddressingMode
+        :param shift_range: Width of the circular-shift
+            distribution, S. Defaults to 3.
+        :type shift_range: int
+        :param kernel_initializer: Initializer for the Dense kernels.
+            Defaults to `'glorot_uniform'`.
+        :type kernel_initializer: str | keras.initializers.Initializer
+        :param bias_initializer: Initializer for the Dense biases.
+            Defaults to `'zeros'`.
+        :type bias_initializer: str | keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer shared by every Dense
+            kernel. Defaults to None.
+        :type kernel_regularizer: keras.regularizers.Regularizer | None
+        :param epsilon: Small constant handed to `cosine_similarity`
+            and, on the HYBRID path, to `sharpen_weights`.
+            Defaults to 1e-6.
+        :type epsilon: float
+        :param kwargs: Forwarded to `BaseHead.__init__`.
+        :type kwargs: Any
+        """
         super().__init__(
             memory_size=memory_size,
             memory_dim=memory_dim,
@@ -292,16 +452,10 @@ class NTMReadHead(BaseHead):
         self.key_dense = keras.layers.Dense(
             memory_dim,
             # DECISION plan-2026-08-19T163559-499b6f0e/D-068
-            # EVERY consumer clones. Handing the SAME initializer instance to
-            # all of a head's projections made them bit-identical: MEASURED
-            # before this change, `read_head_0/key == write_head_0/key ==
-            # write_head_0/erase == write_head_0/add` and all six of
-            # `{read,write}_head_0/{beta,gate,gamma}` -- 22 identical pairs of
-            # 17 non-constant tensors. `erase` and `add` are OPPOSITE
-            # operations on memory and the two heads address it independently,
-            # so this is the D-057 defect case. `self.kernel_initializer` is
-            # untouched, so `get_config` still reports the caller's argument.
-            # See decisions.md D-068.
+            # EVERY consumer clones. Do NOT hand the SAME initializer instance to all of a
+            # head's projections: that made them bit-identical -- MEASURED before this change,
+            # 22 identical pairs of 17 non-constant tensors, and 0 after it. `erase` and `add`
+            # are OPPOSITE ops and the two heads address memory independently: see decisions.md D-068.
             kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="key",
@@ -315,14 +469,10 @@ class NTMReadHead(BaseHead):
             name="beta",
         )
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
-        # `addressing_mode` used to be threaded in, stored and serialized while
-        # `compute_addressing` ran content -> gate -> shift -> sharpen unconditionally, so
-        # `AddressingMode.CONTENT` round-tripped with NO effect. Under CONTENT the three
-        # location-addressing projections are NOT created at all. Do NOT "simplify" this by
-        # always creating them and only skipping their use in `call` — that reinstates the
-        # very defect (parameters that exist, train and serialize while nothing reads them)
-        # this branch closes, and it makes the CONTENT checkpoint carry HYBRID-shaped
-        # weights. See decisions.md D-073.
+        # Under CONTENT the three location-addressing projections are NOT created at all.
+        # Do NOT "simplify" this by always creating them and skipping their use instead:
+        # that revives the defect this closes (parameters that exist, train and serialize
+        # unread) and makes a CONTENT checkpoint HYBRID-shaped. See decisions.md D-073.
         if self.addressing_mode is AddressingMode.HYBRID:
             self.gate_dense = keras.layers.Dense(
                 1,
@@ -355,9 +505,13 @@ class NTMReadHead(BaseHead):
 
     def build(self, input_shape: tuple) -> None:
         """
-        Build sub-layers explicitly.
+        Build every Dense projection this head created.
 
-        :param input_shape: Shape of controller output (batch, controller_dim).
+        The three location-addressing projections are built only
+        under HYBRID, because under CONTENT they do not exist.
+
+        :param input_shape: Shape of the controller output,
+            `(batch, controller_dim)`.
         :type input_shape: tuple
         """
         self.key_dense.build(input_shape)
@@ -375,15 +529,20 @@ class NTMReadHead(BaseHead):
         memory: Any,
     ) -> Any:
         """
-        Compute content-based attention weights.
+        Score every memory slot against the key.
 
-        :param key: Key vector of shape (batch, 1, memory_dim).
+        Cosine similarity between the key and each slot, scaled by
+        the key strength `beta`, then softmax over slots. A large
+        `beta` sharpens the distribution toward the closest slot.
+
+        :param key: Key vector of shape (batch, 1, M).
         :type key: Any
-        :param beta: Key strength of shape (batch, 1).
+        :param beta: Key strength of shape (batch, 1), non-negative
+            because the projection is softplus.
         :type beta: Any
-        :param memory: Memory matrix of shape (batch, num_slots, memory_dim).
+        :param memory: Memory matrix of shape (batch, N, M).
         :type memory: Any
-        :return: Content weights of shape (batch, num_slots).
+        :return: Content weights of shape (batch, N), summing to 1.
         :rtype: Any
         """
         similarity = cosine_similarity(key, memory, epsilon=self.epsilon)
@@ -396,15 +555,27 @@ class NTMReadHead(BaseHead):
         prev_weights: Any,
     ) -> tuple[Any, HeadState]:
         """
-        Compute attention weights using the full addressing mechanism.
+        Turn the controller output into read weights.
 
-        :param controller_output: Output from controller, shape (batch, controller_dim).
+        Projects the key and key strength, scores the memory, and
+        then either returns those content weights directly
+        (CONTENT) or runs interpolation, circular shift and
+        sharpening on top of them (HYBRID).
+
+        `prev_weights` is read only on the HYBRID path.
+
+        :param controller_output: Controller output of shape
+            (batch, controller_dim).
         :type controller_output: Any
-        :param memory_state: Current memory state.
+        :param memory_state: The state holding the memory to score.
         :type memory_state: MemoryState
-        :param prev_weights: Previous attention weights, shape (batch, num_slots).
+        :param prev_weights: This head's weights from the previous
+            timestep, shape (batch, N). Unused under CONTENT.
         :type prev_weights: Any
-        :return: Tuple of (new_weights, head_state).
+        :return: The weights of shape (batch, N), and a `HeadState`
+            carrying them plus the projected parameters. Under
+            CONTENT the state's `gate`, `shift` and `gamma` stay
+            None.
         :rtype: tuple[Any, HeadState]
         """
         # 1. Project controller output to head parameters
@@ -420,8 +591,8 @@ class NTMReadHead(BaseHead):
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
         # Under CONTENT the content weights ARE the addressing: no interpolation with the
         # previous weights, no circular shift, no sharpening. `prev_weights` is therefore
-        # unused in this mode by construction, which is exactly what "content-only
-        # addressing" means. See decisions.md D-073.
+        # not read in this mode, which is exactly what "content-only addressing" means.
+        # See decisions.md D-073.
         if self.addressing_mode is not AddressingMode.HYBRID:
             return content_weights, HeadState(
                 weights=content_weights,
@@ -459,12 +630,17 @@ class NTMReadHead(BaseHead):
         **kwargs: Any,
     ) -> Any:
         """
-        Forward pass (placeholder for layer compatibility).
+        Return the input unchanged.
 
-        :param inputs: Input tensor.
+        A head does no work through `call`. `NTMCell` drives it
+        through `compute_addressing` instead. This method exists so
+        the class satisfies the `keras.layers.Layer` interface.
+
+        :param inputs: Any tensor.
         :type inputs: Any
-        :param kwargs: Additional arguments.
-        :return: Input unchanged (heads are called via compute_addressing).
+        :param kwargs: Ignored.
+        :type kwargs: Any
+        :return: `inputs`, unchanged.
         :rtype: Any
         """
         return inputs
@@ -474,20 +650,24 @@ class NTMReadHead(BaseHead):
         input_shape: tuple[int | None, ...],
     ) -> tuple[int | None, ...]:
         """
-        Compute output shape.
+        Return the shape of the attention weights.
 
-        :param input_shape: Shape of controller output.
-        :type input_shape: tuple
-        :return: Shape of attention weights.
-        :rtype: tuple
+        :param input_shape: Shape of the controller output.
+        :type input_shape: tuple[int | None, ...]
+        :return: `(batch, memory_size)`.
+        :rtype: tuple[int | None, ...]
         """
         return (input_shape[0], self.memory_size)
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Extends `BaseHead.get_config` (which emits `memory_size`,
+        `memory_dim`, `addressing_mode`, `shift_range` and
+        `epsilon`) with the two initializers and the regularizer.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -511,31 +691,111 @@ class NTMReadHead(BaseHead):
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMWriteHead(BaseHead):
     """
-    Standard NTM Write Head.
+    NTM write head: read weights plus the erase and add vectors.
 
-    Includes erase and add vectors for memory modification.
+    The addressing chain is identical to `NTMReadHead`'s. On top of it
+    this head projects two more vectors, `erase` and `add`, which
+    `NTMCell` hands to `NTMMemory.write` together with the weights.
+    Both are always created, in either addressing mode.
 
-    :param memory_size: Number of memory slots.
+    Which ADDRESSING projections exist depends on `addressing_mode`,
+    exactly as for `NTMReadHead`: the gate, shift and gamma projections
+    are created only under `AddressingMode.HYBRID`.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        controller_output (batch, controller_dim) -- INPUT
+                          │
+                          ▼
+        ┌─ Dense projections, always created ────────────┐
+        │ key_dense    ──► key  (batch, M)               │
+        │ beta_dense   ──► beta (batch, 1), softplus     │
+        │ erase_dense  ──► e    (batch, M), sigmoid      │
+        │ add_dense    ──► a    (batch, M), tanh         │
+        └─────────────────┬──────────────────────────────┘
+                          ▼
+        ┌─ content_addressing ───────────────────────────┐
+        │ cosine_similarity(key, memory, epsilon)        │
+        │ softmax(beta * similarity, axis=-1)            │
+        └─────────────────┬──────────────────────────────┘
+                          │  content_weights (batch, N)
+            ┌─────────────┴──────────────────────────┐
+            ▼                                        ▼
+            CONTENT                                  HYBRID
+            │                                        ▼
+            │                           ┌─────────────────────────┐
+            │                           │ gate_dense   (optional) │
+            │                           │ shift_dense  (optional) │
+            │                           │ gamma_dense  (optional) │
+            │                           └────────────┬────────────┘
+            │                                        ▼
+            │                    ┌──────────────────────────────────────┐
+            │                    │ gate * content_weights               │
+            │                    │   + (1 - gate) * prev_weights        │
+            │                    │ circular_convolution(w, shift)       │
+            │                    │ sharpen_weights(w, gamma, epsilon)   │
+            │                    └───────────────────┬──────────────────┘
+            │                                        │
+            └─────────────┬──────────────────────────┘
+                          ▼
+        weights (batch, N), HeadState
+
+    :param memory_size: Number of memory slots, N. Must be positive.
     :type memory_size: int
-    :param memory_dim: Dimension of each memory slot.
+    :param memory_dim: Width of one memory slot, M. Must be positive.
     :type memory_dim: int
-    :param addressing_mode: Type of addressing mechanism. ``AddressingMode.HYBRID``
-        (the default) runs the full NTM chain: content -> interpolation -> circular
-        shift -> sharpening. ``AddressingMode.CONTENT`` returns the content weights
-        directly and does not create the gate / shift / gamma projections at all, so a
-        CONTENT head has strictly fewer parameters than a HYBRID one.
+    :param addressing_mode: Which addressing chain to run.
+        `AddressingMode.HYBRID`, the default, runs content, then
+        interpolation with `prev_weights`, then circular shift, then
+        sharpening. `AddressingMode.CONTENT` returns the content weights
+        directly and does not create the gate / shift / gamma projections
+        at all, so a CONTENT head has strictly fewer parameters.
     :type addressing_mode: AddressingMode
-    :param shift_range: Range of allowed shifts for location addressing. Read
-        ONLY under ``AddressingMode.HYBRID``; a ``CONTENT`` head creates no
-        shift projection, so this value is silently ignored there.
+    :param shift_range: Width of the circular-shift distribution, S. Read
+        ONLY on the HYBRID path; a CONTENT head creates no shift
+        projection, so the value is silently ignored there. Defaults to 3.
     :type shift_range: int
-    :param kernel_initializer: Initializer for dense layers.
+    :param kernel_initializer: Initializer for the Dense kernels. Each
+        projection gets its own clone of it. Defaults to
+        `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases.
+    :param bias_initializer: Initializer for the Dense biases. Defaults
+        to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers.
+    :param kernel_regularizer: Regularizer shared by every Dense kernel.
+        Defaults to None.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional layer arguments.
+    :param epsilon: Small constant handed to the two addressing helpers.
+        It is added inside each L2 norm in `cosine_similarity`, so a
+        zero-length key or an all-zero memory slot gives `sqrt(epsilon)`
+        rather than a divide by zero; and on the HYBRID path it is added
+        to the base and the denominator in `sharpen_weights`, so an
+        exactly-zero weight raised to a large gamma stays differentiable.
+        Under CONTENT only the `cosine_similarity` use is reached.
+        Defaults to 1e-6.
+    :type epsilon: float
+    :param kwargs: Forwarded to `BaseHead.__init__`.
+    :type kwargs: Any
+
+    :ivar kernel_initializer: The resolved kernel initializer.
+    :vartype kernel_initializer: keras.initializers.Initializer
+    :ivar bias_initializer: The resolved bias initializer.
+    :vartype bias_initializer: keras.initializers.Initializer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or None.
+    :vartype kernel_regularizer: keras.regularizers.Regularizer | None
+    :ivar gate_dense: Interpolation gate projection, or None under
+        CONTENT.
+    :vartype gate_dense: keras.layers.Dense | None
+    :ivar shift_dense: Circular-shift projection, or None under CONTENT.
+    :vartype shift_dense: keras.layers.Dense | None
+    :ivar gamma_dense: Sharpening projection, or None under CONTENT.
+    :vartype gamma_dense: keras.layers.Dense | None
+    :ivar erase_dense: Erase-vector projection, sigmoid. Always created.
+    :vartype erase_dense: keras.layers.Dense
+    :ivar add_dense: Add-vector projection, tanh. Always created.
+    :vartype add_dense: keras.layers.Dense
     """
 
     def __init__(
@@ -550,6 +810,40 @@ class NTMWriteHead(BaseHead):
         epsilon: float = 1e-6,
         **kwargs: Any,
     ) -> None:
+        """
+        Resolve the initializers and create the Dense projections.
+
+        `key_dense`, `beta_dense`, `erase_dense` and `add_dense` are
+        always created. The three location-addressing projections
+        are created only under `AddressingMode.HYBRID`; otherwise
+        they are set to None.
+
+        :param memory_size: Number of memory slots, N.
+        :type memory_size: int
+        :param memory_dim: Width of one memory slot, M.
+        :type memory_dim: int
+        :param addressing_mode: Which addressing chain to run.
+            Defaults to `AddressingMode.HYBRID`.
+        :type addressing_mode: AddressingMode
+        :param shift_range: Width of the circular-shift
+            distribution, S. Defaults to 3.
+        :type shift_range: int
+        :param kernel_initializer: Initializer for the Dense kernels.
+            Defaults to `'glorot_uniform'`.
+        :type kernel_initializer: str | keras.initializers.Initializer
+        :param bias_initializer: Initializer for the Dense biases.
+            Defaults to `'zeros'`.
+        :type bias_initializer: str | keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer shared by every Dense
+            kernel. Defaults to None.
+        :type kernel_regularizer: keras.regularizers.Regularizer | None
+        :param epsilon: Small constant handed to `cosine_similarity`
+            and, on the HYBRID path, to `sharpen_weights`.
+            Defaults to 1e-6.
+        :type epsilon: float
+        :param kwargs: Forwarded to `BaseHead.__init__`.
+        :type kwargs: Any
+        """
         super().__init__(
             memory_size=memory_size,
             memory_dim=memory_dim,
@@ -631,9 +925,14 @@ class NTMWriteHead(BaseHead):
 
     def build(self, input_shape: tuple) -> None:
         """
-        Build sub-layers explicitly.
+        Build every Dense projection this head created.
 
-        :param input_shape: Shape of controller output (batch, controller_dim).
+        The three location-addressing projections are built only
+        under HYBRID, because under CONTENT they do not exist.
+        `erase_dense` and `add_dense` are always built.
+
+        :param input_shape: Shape of the controller output,
+            `(batch, controller_dim)`.
         :type input_shape: tuple
         """
         self.key_dense.build(input_shape)
@@ -653,15 +952,20 @@ class NTMWriteHead(BaseHead):
         memory: Any,
     ) -> Any:
         """
-        Compute content-based attention weights.
+        Score every memory slot against the key.
 
-        :param key: Key vector of shape (batch, 1, memory_dim).
+        Cosine similarity between the key and each slot, scaled by
+        the key strength `beta`, then softmax over slots. A large
+        `beta` sharpens the distribution toward the closest slot.
+
+        :param key: Key vector of shape (batch, 1, M).
         :type key: Any
-        :param beta: Key strength of shape (batch, 1).
+        :param beta: Key strength of shape (batch, 1), non-negative
+            because the projection is softplus.
         :type beta: Any
-        :param memory: Memory matrix of shape (batch, num_slots, memory_dim).
+        :param memory: Memory matrix of shape (batch, N, M).
         :type memory: Any
-        :return: Content weights of shape (batch, num_slots).
+        :return: Content weights of shape (batch, N), summing to 1.
         :rtype: Any
         """
         similarity = cosine_similarity(key, memory, epsilon=self.epsilon)
@@ -674,15 +978,28 @@ class NTMWriteHead(BaseHead):
         prev_weights: Any,
     ) -> tuple[Any, HeadState]:
         """
-        Compute attention weights and write vectors.
+        Turn the controller output into write weights and vectors.
 
-        :param controller_output: Output from controller, shape (batch, controller_dim).
+        Projects the key, key strength, erase vector and add vector,
+        scores the memory, and then either returns those content
+        weights directly (CONTENT) or runs interpolation, circular
+        shift and sharpening on top of them (HYBRID).
+
+        The erase and add vectors are projected in both modes and
+        always reach the returned `HeadState`.
+
+        :param controller_output: Controller output of shape
+            (batch, controller_dim).
         :type controller_output: Any
-        :param memory_state: Current memory state.
+        :param memory_state: The state holding the memory to score.
         :type memory_state: MemoryState
-        :param prev_weights: Previous attention weights, shape (batch, num_slots).
+        :param prev_weights: This head's weights from the previous
+            timestep, shape (batch, N). Unused under CONTENT.
         :type prev_weights: Any
-        :return: Tuple of (new_weights, head_state).
+        :return: The weights of shape (batch, N), and a `HeadState`
+            carrying them, the projected parameters, and the erase
+            and add vectors. Under CONTENT the state's `gate`,
+            `shift` and `gamma` stay None.
         :rtype: tuple[Any, HeadState]
         """
         # 1. Project parameters
@@ -699,6 +1016,7 @@ class NTMWriteHead(BaseHead):
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-073
         # Content-only addressing: the content weights are the final weights.
+        # See decisions.md D-073.
         if self.addressing_mode is not AddressingMode.HYBRID:
             return content_weights, HeadState(
                 weights=content_weights,
@@ -739,20 +1057,24 @@ class NTMWriteHead(BaseHead):
         input_shape: tuple[int | None, ...],
     ) -> tuple[int | None, ...]:
         """
-        Compute output shape.
+        Return the shape of the attention weights.
 
-        :param input_shape: Shape of controller output.
-        :type input_shape: tuple
-        :return: Shape of attention weights.
-        :rtype: tuple
+        :param input_shape: Shape of the controller output.
+        :type input_shape: tuple[int | None, ...]
+        :return: `(batch, memory_size)`.
+        :rtype: tuple[int | None, ...]
         """
         return (input_shape[0], self.memory_size)
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Extends `BaseHead.get_config` (which emits `memory_size`,
+        `memory_dim`, `addressing_mode`, `shift_range` and
+        `epsilon`) with the two initializers and the regularizer.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -776,22 +1098,57 @@ class NTMWriteHead(BaseHead):
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMController(BaseController):
     """
-    Controller network for the Neural Turing Machine.
+    The controller network, the "CPU" of the NTM.
 
-    Acts as the "CPU" of the NTM, processing external inputs and previous
-    read vectors to generate control signals for memory operations.
+    It reads the timestep input concatenated with the previous read
+    vectors, and emits the control signal every head projects from.
+    `NTMCell` owns one of these.
 
-    :param controller_dim: Dimension of controller hidden state.
+    Exactly ONE core is created, in `__init__`, from
+    `controller_type`. A feedforward controller is a single
+    `Dense(relu)` and owns no recurrent weights at all; its
+    `initialize_state` returns None and its `call` returns an empty
+    state list.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (batch, input_dim + num_read_heads * M)
+        state: 2 tensors for lstm, 1 for gru, None for ff
+                          │
+                          ▼
+        ┌─ self.core, ONE branch, chosen in __init__ ────────┐
+        │ controller_type 'lstm' ──► keras.layers.LSTMCell   │
+        │ controller_type 'gru'  ──► keras.layers.GRUCell    │
+        │ anything else           ──► Dense(relu)            │
+        └─────────────────┬──────────────────────────────────┘
+                          ▼
+        controller_output (batch, controller_dim)
+        new_states: 2 tensors for lstm, 1 for gru, [] for ff
+
+    :param controller_dim: Width of the controller hidden state.
+        Must be positive.
     :type controller_dim: int
-    :param controller_type: Type of controller ('lstm', 'gru', 'feedforward').
+    :param controller_type: One of `'lstm'`, `'gru'`,
+        `'feedforward'`. Anything other than the first two takes the
+        feedforward branch. Defaults to `'lstm'`.
     :type controller_type: str
-    :param kernel_initializer: Initializer for dense layers.
+    :param kernel_initializer: Initializer for the Dense kernels.
+        Each consumer gets its own clone of it. Defaults to
+        `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases.
+    :param bias_initializer: Initializer for the Dense biases.
+        Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers.
+    :param kernel_regularizer: Regularizer shared by every Dense
+        kernel. Defaults to None.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional layer arguments.
+    :param kwargs: Forwarded to `BaseController.__init__`.
+    :type kwargs: Any
+
+    :ivar core: The one cell or layer chosen by `controller_type`.
+    :vartype core: keras.layers.Layer
     """
 
     def __init__(
@@ -803,6 +1160,31 @@ class NTMController(BaseController):
         kernel_regularizer: keras.regularizers.Regularizer | None = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Resolve the initializers and create the one core layer.
+
+        Exactly one of `LSTMCell`, `GRUCell` or `Dense(relu)` is
+        created, chosen by `controller_type`. Anything other than
+        `'lstm'` or `'gru'` takes the Dense branch.
+
+        :param controller_dim: Width of the controller hidden state.
+        :type controller_dim: int
+        :param controller_type: One of `'lstm'`, `'gru'`,
+            `'feedforward'`. Defaults to `'lstm'`.
+        :type controller_type: str
+        :param kernel_initializer: Initializer for the Dense kernels.
+            Each consumer gets its own clone. Defaults to
+            `'glorot_uniform'`.
+        :type kernel_initializer: str | keras.initializers.Initializer
+        :param bias_initializer: Initializer for the Dense biases.
+            Defaults to `'zeros'`.
+        :type bias_initializer: str | keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer shared by every Dense
+            kernel. Defaults to None.
+        :type kernel_regularizer: keras.regularizers.Regularizer | None
+        :param kwargs: Forwarded to `BaseController.__init__`.
+        :type kwargs: Any
+        """
         super().__init__(
             controller_dim=controller_dim,
             controller_type=controller_type,
@@ -844,7 +1226,12 @@ class NTMController(BaseController):
         """
         Build the core layer.
 
-        :param input_shape: Shape of input tensor (batch, input_dim).
+        Unwraps a nested shape first: `keras.layers.RNN` can hand
+        down a list of shapes, and the core wants the first one.
+
+        :param input_shape: Shape of the controller input,
+            `(batch, input_dim)`, or a list whose first entry is
+            that shape.
         :type input_shape: tuple
         """
         if isinstance(input_shape, (list, tuple)):
@@ -858,11 +1245,16 @@ class NTMController(BaseController):
 
     def initialize_state(self, batch_size: int) -> list[keras.KerasTensor] | None:
         """
-        Initialize controller state for a new sequence.
+        Build the starting controller state, all zeros.
+
+        An LSTM core needs two tensors (hidden and cell), a GRU
+        core one, and a feedforward core none.
 
         :param batch_size: Number of sequences in the batch.
         :type batch_size: int
-        :return: List of initial state tensors, or None for feedforward.
+        :return: Two zero tensors of shape
+            (batch, controller_dim) for `'lstm'`, one for
+            `'gru'`, and None for a feedforward controller.
         :rtype: list[keras.KerasTensor] | None
         """
         if self.controller_type == "lstm":
@@ -881,15 +1273,23 @@ class NTMController(BaseController):
         training: bool | None = None,
     ) -> tuple[Any, list[keras.KerasTensor]]:
         """
-        Process inputs through the controller.
+        Run the input through the core for one timestep.
 
-        :param inputs: Input tensor of shape (batch, input_dim).
+        A recurrent core also takes and returns state; a
+        feedforward core ignores `state` and returns an empty
+        state list. When a recurrent core is called with
+        `state=None`, a zero state is built here.
+
+        :param inputs: Input of shape (batch, input_dim).
         :type inputs: Any
-        :param state: Previous controller state.
+        :param state: The state from the previous timestep, or
+            None to start from zeros. Defaults to None.
         :type state: list[keras.KerasTensor] | None
-        :param training: Whether in training mode.
+        :param training: Keras training flag. Defaults to None.
         :type training: bool | None
-        :return: Tuple of (controller_output, new_states).
+        :return: The controller output of shape
+            (batch, controller_dim), and the new state list
+            (empty for a feedforward controller).
         :rtype: tuple[Any, list[keras.KerasTensor]]
         """
         if self.controller_type in ["lstm", "gru"]:
@@ -913,12 +1313,14 @@ class NTMController(BaseController):
         input_shape: tuple[int | None, ...],
     ) -> tuple[tuple[int | None, ...], list[tuple[int | None, ...]]]:
         """
-        Compute output shape.
+        Return the output shape and the state shapes.
 
-        :param input_shape: Shape of input tensor.
-        :type input_shape: tuple
-        :return: Tuple of (output_shape, state_shapes).
-        :rtype: tuple
+        :param input_shape: Shape of the controller input.
+        :type input_shape: tuple[int | None, ...]
+        :return: `(batch, controller_dim)`, and a list of two
+            such shapes for `'lstm'`, one for `'gru'`, empty for
+            a feedforward controller.
+        :rtype: tuple[tuple[int | None, ...], list[tuple[int | None, ...]]]
         """
         batch_size = input_shape[0]
         output_shape = (batch_size, self.controller_dim)
@@ -935,9 +1337,13 @@ class NTMController(BaseController):
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Extends `BaseController.get_config` (which emits
+        `controller_dim` and `controller_type`) with the two
+        initializers and the regularizer.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -961,21 +1367,90 @@ class NTMController(BaseController):
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NTMCell(keras.layers.Layer):
     """
-    Core NTM Cell for processing a single timestep.
+    One NTM timestep, shaped for `keras.layers.RNN`.
 
-    This layer implements the recurrent step logic required by keras.layers.RNN.
-    It manages a complex state tuple containing controller state, memory matrix,
-    read vectors, and attention weights.
+    The cell owns the memory module, the controller and every head,
+    and carries the whole NTM state as the flat tensor list
+    `keras.layers.RNN` requires. `state_size` and `output_size` are
+    computed once in `__init__`.
 
-    :param config: NTM configuration object or dictionary.
+    Write heads run BEFORE read heads, and each write rebinds the
+    memory state, so a read head in the same timestep sees the
+    memory the write heads just produced.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (batch, input_dim);  states, the flat list below
+                          │
+                          ▼
+        ┌─ unpack states, in this exact order ─────────────────┐
+        │ controller  2 x (batch, controller_dim) for lstm,    │
+        │               1 x for gru, none for feedforward      │
+        │ memory      1 x (batch, N, M)                        │
+        │ read vecs   num_read_heads x (batch, M)              │
+        │ read wts    num_read_heads x (batch, N)              │
+        │ write wts   num_write_heads x (batch, N)             │
+        └─────────────────┬────────────────────────────────────┘
+                          ▼
+        ┌─ controller step ────────────────────────────────────┐
+        │ concatenate(inputs, prev read vecs)                  │
+        │ self.controller ──► controller_output                │
+        └─────────────────┬────────────────────────────────────┘
+                          │  (batch, controller_dim)
+                          ▼
+        ┌─ write heads FIRST ──────────────────────────────────┐
+        │ for each write head:                                 │
+        │   compute_addressing ──► w, erase, add               │
+        │   self.memory.write ──► memory is REBOUND            │
+        │ so a read head sees the memory the write             │
+        │ heads just produced, not the incoming one            │
+        └─────────────────┬────────────────────────────────────┘
+                          ▼
+        ┌─ read heads SECOND ──────────────────────────────────┐
+        │ for each read head:                                  │
+        │   compute_addressing ──► w                           │
+        │   self.memory.read ──► read vector (batch, M)        │
+        └─────────────────┬────────────────────────────────────┘
+                          ▼
+        cell_output = concatenate(controller_output, read vecs)
+          (batch, controller_dim + num_read_heads * M)
+        new_states: same order as the unpack above
+
+    Input shape:
+        2D tensor of shape `(batch_size, input_dim)`, one timestep.
+
+    Output shape:
+        `(batch_size, controller_dim + num_read_heads * memory_dim)`.
+
+    :param config: The NTM configuration, or a dict from
+        `NTMConfig.to_dict()`. A dict is rebuilt with
+        `NTMConfig.from_dict`.
     :type config: NTMConfig | dict[str, Any]
-    :param kernel_initializer: Initializer for dense layers.
+    :param kernel_initializer: Initializer for the Dense kernels.
+        Each consumer gets its own clone of it. Defaults to
+        `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases.
+    :param bias_initializer: Initializer for the Dense biases.
+        Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers.
+    :param kernel_regularizer: Regularizer shared by every Dense
+        kernel. Defaults to None.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional layer arguments.
+    :param kwargs: Forwarded to `keras.layers.Layer.__init__`.
+    :type kwargs: Any
+
+    :ivar config: The resolved `NTMConfig`.
+    :vartype config: NTMConfig
+    :ivar memory: The memory module.
+    :vartype memory: NTMMemory
+    :ivar controller: The controller.
+    :vartype controller: NTMController
+    :ivar read_heads: One `NTMReadHead` per configured read head.
+    :vartype read_heads: list[NTMReadHead]
+    :ivar write_heads: One `NTMWriteHead` per configured write head.
+    :vartype write_heads: list[NTMWriteHead]
     """
 
     def __init__(
@@ -986,6 +1461,32 @@ class NTMCell(keras.layers.Layer):
         kernel_regularizer: keras.regularizers.Regularizer | None = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Build the memory, controller and every head.
+
+        A dict `config` is rebuilt into an `NTMConfig` first.
+        `state_size` and `output_size` are computed here, once,
+        because `keras.layers.RNN` reads them before `build`.
+
+        The learnable initial memory is NOT created here; it is
+        a weight and so belongs in `build`.
+
+        :param config: The NTM configuration, or a dict from
+            `NTMConfig.to_dict()`.
+        :type config: NTMConfig | dict[str, Any]
+        :param kernel_initializer: Initializer for the Dense kernels.
+            Each consumer gets its own clone. Defaults to
+            `'glorot_uniform'`.
+        :type kernel_initializer: str | keras.initializers.Initializer
+        :param bias_initializer: Initializer for the Dense biases.
+            Defaults to `'zeros'`.
+        :type bias_initializer: str | keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer shared by every Dense
+            kernel. Defaults to None.
+        :type kernel_regularizer: keras.regularizers.Regularizer | None
+        :param kwargs: Forwarded to `keras.layers.Layer.__init__`.
+        :type kwargs: Any
+        """
         super().__init__(**kwargs)
 
         # Handle dict config from deserialization
@@ -1056,16 +1557,40 @@ class NTMCell(keras.layers.Layer):
 
     @property
     def state_size(self) -> list[Any]:
-        """Return state sizes for RNN compatibility."""
+        """
+        The state sizes, as `keras.layers.RNN` expects them.
+
+        :return: One entry per state tensor, in the order
+            `call` unpacks them.
+        :rtype: list[Any]
+        """
         return self._state_size
 
     @property
     def output_size(self) -> int:
-        """Return output size for RNN compatibility."""
+        """
+        The width of one timestep's output.
+
+        :return: `controller_dim + num_read_heads * memory_dim`.
+        :rtype: int
+        """
         return self._output_size
 
     def _calculate_state_size(self) -> list[Any]:
-        """Calculate state sizes for all state components."""
+        """
+        Compute the state sizes, in the order `call` unpacks them.
+
+        The order is: controller state (two entries for
+        `'lstm'`, one for `'gru'`, none for feedforward), then
+        the memory, then one read vector per read head, then one
+        read-weight vector per read head, then one write-weight
+        vector per write head.
+
+        :return: One entry per state tensor. The memory entry is
+            the tuple `(memory_size, memory_dim)`; the others are
+            plain widths.
+        :rtype: list[Any]
+        """
         sizes = []
 
         # Controller State
@@ -1093,9 +1618,18 @@ class NTMCell(keras.layers.Layer):
 
     def build(self, input_shape: tuple) -> None:
         """
-        Build controller and heads with correct shapes.
+        Build the controller and every head, and the initial memory.
 
-        :param input_shape: Shape of input tensor (batch, feature_dim).
+        The controller is built on the concatenation of the
+        timestep input with every read vector, so its input width
+        is `input_dim + num_read_heads * memory_dim`. Every head
+        is built on the controller output.
+
+        The learnable initial memory weight is created here, and
+        only when `config.use_memory_init` is set.
+
+        :param input_shape: Shape of one timestep's input,
+            `(batch, feature_dim)`.
         :type input_shape: tuple
         """
         feature_dim = input_shape[-1]
@@ -1130,15 +1664,27 @@ class NTMCell(keras.layers.Layer):
         training: bool | None = None,
     ) -> tuple[keras.KerasTensor, list[keras.KerasTensor]]:
         """
-        Process one timestep of the NTM.
+        Run one NTM timestep.
 
-        :param inputs: Input tensor of shape (batch, input_dim).
+        Unpacks the flat state list, runs the controller on the
+        input concatenated with the previous read vectors, then
+        the write heads, then the read heads.
+
+        Write heads run FIRST and each write rebinds the memory
+        state, so the read heads see the memory the write heads
+        just produced rather than the one that came in.
+
+        :param inputs: This timestep's input, shape
+            (batch, input_dim).
         :type inputs: keras.KerasTensor
-        :param states: List of state tensors.
+        :param states: The state tensors, in the order
+            `_calculate_state_size` lists them.
         :type states: list[keras.KerasTensor]
-        :param training: Training mode flag.
+        :param training: Keras training flag. Defaults to None.
         :type training: bool | None
-        :return: Tuple of (output, new_states).
+        :return: The output of shape
+            `(batch, controller_dim + num_read_heads * memory_dim)`,
+            and the new state list in the same order as `states`.
         :rtype: tuple[keras.KerasTensor, list[keras.KerasTensor]]
         """
         # Unpack State
@@ -1243,15 +1789,29 @@ class NTMCell(keras.layers.Layer):
         dtype: str | None = None,
     ) -> list[keras.KerasTensor]:
         """
-        Initialize all states to zero/initial values.
+        Build the starting state for a new sequence.
 
-        :param inputs: Optional input tensor to infer batch size.
+        The controller state, read vectors and both sets of
+        weights start at zero, except that the weights start
+        uniform (`1 / memory_size` in every slot) rather than at
+        zero, so the first timestep reads a plain average rather
+        than nothing.
+
+        The memory starts either from the learnable
+        `initial_memory` weight, when `config.use_memory_init` is
+        set, or from a small seeded random draw.
+
+        :param inputs: A tensor to take the batch size from, used
+            only when `batch_size` is None. Defaults to None.
         :type inputs: keras.KerasTensor | None
-        :param batch_size: Batch size for state initialization.
+        :param batch_size: Number of sequences in the batch.
+            Defaults to None.
         :type batch_size: int | None
-        :param dtype: Data type for states.
+        :param dtype: Accepted for the `keras.layers.RNN`
+            interface and not used. Defaults to None.
         :type dtype: str | None
-        :return: List of initial state tensors.
+        :return: The state tensors, in the order
+            `_calculate_state_size` lists them.
         :rtype: list[keras.KerasTensor]
         """
         if batch_size is None and inputs is not None:
@@ -1276,15 +1836,10 @@ class NTMCell(keras.layers.Layer):
             )
         else:
             # DECISION plan-2026-08-14T233721-d4f9beb2/D-058
-            # A FIXED seed, so this draw is stateless and identical on every
-            # call. DO NOT drop it: without a seed `keras.random.normal` draws
-            # from the global stateful stream, so with `use_memory_init=False`
-            # the initial memory differed on every invocation and
-            # `model.predict(x)` twice returned DIFFERENT values (stddev 1e-3 --
-            # small, and exactly the size that makes a numeric test flaky rather
-            # than red). The draw still breaks symmetry across memory slots,
-            # which is its whole purpose; nothing here wanted per-call variation.
-            # See decisions.md D-058.
+            # A FIXED seed, so this draw is stateless and repeats exactly. DO NOT drop it: an
+            # unseeded `keras.random.normal` draws from the global stateful stream, so with
+            # `use_memory_init=False` the memory differed per call and `model.predict(x)` twice
+            # returned DIFFERENT values -- at stddev 1e-3, flaky rather than red. See decisions.md D-058.
             memory = keras.random.normal(
                 (batch_size, self.config.memory_size, self.config.memory_dim),
                 mean=0.0,
@@ -1313,20 +1868,23 @@ class NTMCell(keras.layers.Layer):
         input_shape: tuple[int | None, ...],
     ) -> tuple[int | None, ...]:
         """
-        Compute output shape.
+        Return the shape of one timestep's output.
 
-        :param input_shape: Shape of input tensor.
-        :type input_shape: tuple
-        :return: Output shape.
-        :rtype: tuple
+        :param input_shape: Shape of one timestep's input.
+        :type input_shape: tuple[int | None, ...]
+        :return: `(batch, controller_dim + num_read_heads * memory_dim)`.
+        :rtype: tuple[int | None, ...]
         """
         return (input_shape[0], self._output_size)
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        The `NTMConfig` is emitted as a plain dict via
+        `NTMConfig.to_dict()`; `from_config` rebuilds it.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -1345,11 +1903,11 @@ class NTMCell(keras.layers.Layer):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "NTMCell":
         """
-        Create layer from configuration.
+        Rebuild the cell from `get_config`'s output.
 
-        :param config: Configuration dictionary.
+        :param config: The output of `get_config`.
         :type config: dict[str, Any]
-        :return: NTMCell instance.
+        :return: A new cell.
         :rtype: NTMCell
         """
         return cls(**config)
@@ -1363,25 +1921,79 @@ class NTMCell(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.memory.baseline_ntm")
 class NeuralTuringMachine(BaseNTM):
     """
-    Complete Neural Turing Machine Layer.
+    The complete NTM layer: an RNN wrapped around `NTMCell`.
 
-    Wraps NTMCell in an RNN layer for sequence processing.
+    `__init__` builds an `NTMCell`, hands it to a
+    `keras.layers.RNN`, and adds a `Dense` output projection.
+    `call` runs those two in order.
 
-    :param config: NTM configuration object or dictionary.
+    This class does NOT run the step loop `BaseNTM.call` provides.
+    `keras.layers.RNN` drives `NTMCell` instead. Consequently
+    `step()` and `initialize_state()` exist only to satisfy the
+    abstract base class and are not on the forward path: both raise
+    `NotImplementedError`, as does `get_memory_state()`, and
+    `reset_memory()` is a no-op. Use `NTMCell.get_initial_state(...)`
+    and `return_state=True` to reach the state.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (batch, seq_len, input_dim) -- INPUT
+        initial_state (optional)
+                          │
+                          ▼
+        ┌─ self.rnn ─────────────────────────────────────────┐
+        │ keras.layers.RNN(self.ntm_cell)                    │
+        │ drives NTMCell.call once per timestep              │
+        └─────────────────┬──────────────────────────────────┘
+                          │  (batch, seq_len, cell_out) when
+                          │  return_sequences, else (batch, cell_out)
+                          ▼
+        ┌─ self.output_projection ───────────────────────────┐
+        │ Dense(output_dim)                                  │
+        └─────────────────┬──────────────────────────────────┘
+                          ▼
+        output; plus the final RNN states when return_state
+
+    Input shape:
+        3D tensor of shape `(batch_size, seq_len, input_dim)`.
+
+    Output shape:
+        `(batch_size, seq_len, output_dim)` when `return_sequences`
+        is True, otherwise `(batch_size, output_dim)`.
+
+    :param config: The NTM configuration, or a dict from
+        `NTMConfig.to_dict()`. A dict is rebuilt with
+        `NTMConfig.from_dict`.
     :type config: NTMConfig | dict[str, Any]
-    :param output_dim: Dimension of the output projection.
+    :param output_dim: Width of the output projection. Required.
     :type output_dim: int
-    :param return_sequences: Whether to return outputs at all timesteps.
+    :param return_sequences: Whether to return every timestep rather
+        than only the last. Defaults to True.
     :type return_sequences: bool
-    :param return_state: Whether to return final states.
+    :param return_state: Whether to also return the final RNN
+        states. Defaults to False.
     :type return_state: bool
-    :param kernel_initializer: Initializer for dense layers.
+    :param kernel_initializer: Initializer for the Dense kernels.
+        Each consumer gets its own clone of it. Defaults to
+        `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for dense layer biases.
+    :param bias_initializer: Initializer for the Dense biases.
+        Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for dense layers.
+    :param kernel_regularizer: Regularizer shared by every Dense
+        kernel. Defaults to None.
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional layer arguments.
+    :param kwargs: Forwarded to `BaseNTM.__init__`.
+    :type kwargs: Any
+
+    :ivar ntm_cell: The wrapped cell.
+    :vartype ntm_cell: NTMCell
+    :ivar rnn: The `keras.layers.RNN` driving the cell.
+    :vartype rnn: keras.layers.RNN
+    :ivar output_projection: The final Dense projection.
+    :vartype output_projection: keras.layers.Dense
     """
 
     def __init__(
@@ -1396,6 +2008,38 @@ class NeuralTuringMachine(BaseNTM):
         **kwargs: Any,
     ) -> None:
         # Handle dict config
+        """
+        Build the cell, the RNN around it, and the projection.
+
+        A dict `config` is rebuilt into an `NTMConfig` first.
+        Three sub-layers are created: an `NTMCell`, the
+        `keras.layers.RNN` that drives it, and the `Dense`
+        output projection.
+
+        :param config: The NTM configuration, or a dict from
+            `NTMConfig.to_dict()`.
+        :type config: NTMConfig | dict[str, Any]
+        :param output_dim: Width of the output projection.
+        :type output_dim: int
+        :param return_sequences: Whether to return every
+            timestep. Defaults to True.
+        :type return_sequences: bool
+        :param return_state: Whether to also return the final
+            RNN states. Defaults to False.
+        :type return_state: bool
+        :param kernel_initializer: Initializer for the Dense
+            kernels. Each consumer gets its own clone.
+            Defaults to `'glorot_uniform'`.
+        :type kernel_initializer: str | keras.initializers.Initializer
+        :param bias_initializer: Initializer for the Dense
+            biases. Defaults to `'zeros'`.
+        :type bias_initializer: str | keras.initializers.Initializer
+        :param kernel_regularizer: Regularizer shared by every
+            Dense kernel. Defaults to None.
+        :type kernel_regularizer: keras.regularizers.Regularizer | None
+        :param kwargs: Forwarded to `BaseNTM.__init__`.
+        :type kwargs: Any
+        """
         if isinstance(config, dict):
             config = NTMConfig.from_dict(config)
 
@@ -1432,9 +2076,14 @@ class NeuralTuringMachine(BaseNTM):
 
     def build(self, input_shape: tuple) -> None:
         """
-        Build sub-layers.
+        Build the RNN and the output projection.
 
-        :param input_shape: Shape of input (batch, seq_len, input_dim).
+        The projection is built on the RNN's output, which
+        keeps the time axis only when `return_sequences` is
+        set.
+
+        :param input_shape: Shape of the input sequence,
+            `(batch, seq_len, input_dim)`.
         :type input_shape: tuple
         """
         self.rnn.build(input_shape)
@@ -1453,14 +2102,21 @@ class NeuralTuringMachine(BaseNTM):
         batch_size: int,
     ) -> tuple[MemoryState, list[HeadState], Any | None]:
         """
-        Always raises NotImplementedError.
+        Always raises. Not on this layer's forward path.
 
-        `NeuralTuringMachine` wraps `NTMCell` inside a `keras.layers.RNN`, which
-        owns state initialization through `NTMCell.get_initial_state(...)`. The
-        `BaseNTM` step/state APIs are only meaningful for direct (non-wrapped)
-        `BaseNTM` subclasses. Use the cell's API instead.
+        This layer wraps `NTMCell` in a `keras.layers.RNN`,
+        and the RNN owns state initialization through
+        `NTMCell.get_initial_state(...)`. The `BaseNTM`
+        step and state API is only meaningful for a subclass
+        that runs the parent's step loop; this one does not.
 
-        :raises NotImplementedError: Always.
+        :param batch_size: Number of sequences in the batch.
+            Not used.
+        :type batch_size: int
+        :return: Never returns.
+        :rtype: tuple[MemoryState, list[HeadState], Any | None]
+        :raises NotImplementedError: Always. Use
+            `NTMCell.get_initial_state(...)` instead.
         """
         raise NotImplementedError(
             "NeuralTuringMachine.initialize_state is not implemented; this layer "
@@ -1477,14 +2133,28 @@ class NeuralTuringMachine(BaseNTM):
         training: bool | None = None,
     ) -> NTMOutput:
         """
-        Always raises NotImplementedError.
+        Always raises. Not on this layer's forward path.
 
-        `NeuralTuringMachine` does not implement the BaseNTM single-step API;
-        sequence stepping is handled internally by `keras.layers.RNN(NTMCell)`.
-        Call this layer directly on a `(batch, seq_len, input_dim)` tensor
-        instead of invoking `step(...)` manually.
+        Stepping is done inside `keras.layers.RNN(NTMCell)`,
+        which calls `NTMCell.call` once per timestep. Call
+        this layer on a whole `(batch, seq_len, input_dim)`
+        sequence rather than stepping it yourself.
 
-        :raises NotImplementedError: Always.
+        :param inputs: This timestep's input. Not used.
+        :type inputs: Any
+        :param memory_state: The memory state. Not used.
+        :type memory_state: MemoryState
+        :param head_states: The head states. Not used.
+        :type head_states: list[HeadState]
+        :param controller_state: The controller state. Not used.
+        :type controller_state: Any | None
+        :param training: Keras training flag. Not used.
+            Defaults to None.
+        :type training: bool | None
+        :return: Never returns.
+        :rtype: NTMOutput
+        :raises NotImplementedError: Always. Call the layer
+            on a full sequence instead.
         """
         raise NotImplementedError(
             "NeuralTuringMachine.step is not implemented; the wrapped RNN(NTMCell) "
@@ -1499,16 +2169,28 @@ class NeuralTuringMachine(BaseNTM):
         training: bool | None = None,
     ) -> keras.KerasTensor | tuple[keras.KerasTensor, list[keras.KerasTensor]]:
         """
-        Process input sequence through NTM.
+        Run a sequence through the RNN and the projection.
 
-        :param inputs: Input tensor of shape (batch, seq_len, input_dim).
+        Two steps: the `keras.layers.RNN` drives `NTMCell`
+        over the time axis, then the `Dense` projection maps
+        the result to `output_dim`.
+
+        This does NOT run the step loop `BaseNTM.call`
+        provides. See the class docstring.
+
+        :param inputs: Input sequence of shape
+            `(batch, seq_len, input_dim)`.
         :type inputs: keras.KerasTensor
-        :param initial_state: Optional initial states.
+        :param initial_state: State to start the RNN from.
+            When None the cell builds its own. Defaults to
+            None.
         :type initial_state: list[keras.KerasTensor] | None
-        :param training: Training mode flag.
+        :param training: Keras training flag. Defaults to None.
         :type training: bool | None
-        :return: Output tensor(s) and optionally final states.
-        :rtype: keras.KerasTensor | tuple
+        :return: The projected output. When `return_state` is
+            set, a tuple of that output and the final RNN
+            state list instead.
+        :rtype: keras.KerasTensor | tuple[keras.KerasTensor, list[keras.KerasTensor]]
         """
         rnn_result = self.rnn(inputs, initial_state=initial_state, training=training)
 
@@ -1527,13 +2209,18 @@ class NeuralTuringMachine(BaseNTM):
 
     def get_memory_state(self) -> MemoryState | None:
         """
-        Always raises NotImplementedError.
+        Always raises. There is no single memory state here.
 
-        Wrapped-RNN mode does not expose a single accessible memory state — the
-        memory tensor lives inside the per-step RNN state owned by `NTMCell`.
-        Inspect intermediate states via the `return_state=True` call path.
+        The memory tensor lives inside the per-timestep RNN
+        state owned by `NTMCell`, so there is nothing on this
+        layer to hand back. Construct the layer with
+        `return_state=True` and read the final RNN states
+        instead.
 
-        :raises NotImplementedError: Always.
+        :return: Never returns.
+        :rtype: MemoryState | None
+        :raises NotImplementedError: Always. Use
+            `return_state=True`.
         """
         raise NotImplementedError(
             "NeuralTuringMachine.get_memory_state is not implemented; the memory "
@@ -1543,9 +2230,14 @@ class NeuralTuringMachine(BaseNTM):
 
     def reset_memory(self, batch_size: int) -> None:
         """
-        Reset memory (no-op in wrapped mode).
+        Does nothing.
+
+        There is no memory held between calls to reset:
+        `keras.layers.RNN` builds fresh state at the start of
+        every call. The method exists to satisfy `BaseNTM`.
 
         :param batch_size: Number of sequences in the batch.
+            Not used.
         :type batch_size: int
         """
         pass
@@ -1555,12 +2247,15 @@ class NeuralTuringMachine(BaseNTM):
         input_shape: tuple[int | None, ...],
     ) -> tuple[int | None, ...]:
         """
-        Compute output shape.
+        Return the shape of the projected output.
 
-        :param input_shape: Shape of input (batch, seq_len, input_dim).
-        :type input_shape: tuple
-        :return: Output shape.
-        :rtype: tuple
+        :param input_shape: Shape of the input sequence,
+            `(batch, seq_len, input_dim)`.
+        :type input_shape: tuple[int | None, ...]
+        :return: `(batch, seq_len, output_dim)` when
+            `return_sequences` is set, otherwise
+            `(batch, output_dim)`.
+        :rtype: tuple[int | None, ...]
         """
         batch_size = input_shape[0]
         seq_len = input_shape[1]
@@ -1571,9 +2266,13 @@ class NeuralTuringMachine(BaseNTM):
 
     def get_config(self) -> dict[str, Any]:
         """
-        Get layer configuration.
+        Return the constructor arguments, for serialization.
 
-        :return: Configuration dictionary.
+        Extends `BaseNTM.get_config` (which emits the config
+        and `output_dim`) with the two flags, the two
+        initializers and the regularizer.
+
+        :return: The configuration dictionary.
         :rtype: dict[str, Any]
         """
         config = super().get_config()
@@ -1593,11 +2292,11 @@ class NeuralTuringMachine(BaseNTM):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "NeuralTuringMachine":
         """
-        Create layer from configuration.
+        Rebuild the layer from `get_config`'s output.
 
-        :param config: Configuration dictionary.
+        :param config: The output of `get_config`.
         :type config: dict[str, Any]
-        :return: NeuralTuringMachine instance.
+        :return: A new layer.
         :rtype: NeuralTuringMachine
         """
         return cls(**config)
@@ -1621,29 +2320,75 @@ def create_ntm(
     return_state: bool = False,
 ) -> NeuralTuringMachine:
     """
-    Factory function to create a Neural Turing Machine layer.
+    Build a `NeuralTuringMachine` from plain arguments.
 
-    :param memory_size: Number of memory slots.
+    Packs the memory and controller arguments into an `NTMConfig`,
+    then constructs the layer. The returned layer is unbuilt.
+
+    Four `NTMConfig` fields are NOT exposed here and keep their
+    defaults: `addressing_mode` (HYBRID), `use_memory_init` (True),
+    `memory_init_seed` (42) and `epsilon` (1e-6). Construct
+    `NTMConfig` yourself and call `NeuralTuringMachine` directly to
+    set any of them.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        the 10 keyword arguments below
+                          │
+                          ▼
+        ┌─ NTMConfig ────────────────────────────────────────┐
+        │ memory_size, memory_dim, num_read_heads,           │
+        │ num_write_heads, controller_dim,                   │
+        │ controller_type, shift_range                       │
+        └─────────────────┬──────────────────────────────────┘
+                          │  addressing_mode, use_memory_init,
+                          │  memory_init_seed and epsilon are NOT
+                          │  exposed here; they keep NTMConfig defaults
+                          ▼
+        ┌─ NeuralTuringMachine ──────────────────────────────┐
+        │ config, output_dim, return_sequences, return_state │
+        └─────────────────┬──────────────────────────────────┘
+                          ▼
+        an unbuilt NeuralTuringMachine layer
+
+    Example:
+        .. code-block:: python
+
+            import keras
+            from dl_techniques.layers.memory.baseline_ntm import create_ntm
+
+            ntm = create_ntm(memory_size=64, memory_dim=32, output_dim=8)
+            inputs = keras.Input(shape=(10, 16))
+            outputs = ntm(inputs)
+
+    :param memory_size: Number of memory slots, N. Defaults to 128.
     :type memory_size: int
-    :param memory_dim: Dimension of each memory slot.
+    :param memory_dim: Width of one memory slot, M. Defaults to 64.
     :type memory_dim: int
-    :param output_dim: Dimension of output.
+    :param output_dim: Width of the output projection. Defaults to 10.
     :type output_dim: int
-    :param controller_dim: Dimension of controller hidden state.
+    :param controller_dim: Width of the controller hidden state.
+        Defaults to 256.
     :type controller_dim: int
-    :param controller_type: Type of controller ('lstm', 'gru', 'feedforward').
+    :param controller_type: One of `'lstm'`, `'gru'`,
+        `'feedforward'`. Defaults to `'lstm'`.
     :type controller_type: str
-    :param num_read_heads: Number of read heads.
+    :param num_read_heads: Number of read heads. Defaults to 1.
     :type num_read_heads: int
-    :param num_write_heads: Number of write heads.
+    :param num_write_heads: Number of write heads. Defaults to 1.
     :type num_write_heads: int
-    :param shift_range: Range of allowed shifts.
+    :param shift_range: Width of the circular-shift distribution, S.
+        Defaults to 3.
     :type shift_range: int
-    :param return_sequences: Whether to return full sequence.
+    :param return_sequences: Whether to return every timestep.
+        Defaults to True.
     :type return_sequences: bool
-    :param return_state: Whether to return final state.
+    :param return_state: Whether to also return the final RNN
+        states. Defaults to False.
     :type return_state: bool
-    :return: Configured NeuralTuringMachine layer.
+    :return: An unbuilt NTM layer.
     :rtype: NeuralTuringMachine
     """
     config = NTMConfig(

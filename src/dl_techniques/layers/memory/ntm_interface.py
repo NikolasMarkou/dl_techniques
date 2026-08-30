@@ -981,6 +981,12 @@ class BaseNTM(keras.layers.Layer, ABC):
     The loop in `call()` is a plain Python `for` over `range(seq_len)`, so the
     sequence length must be known statically at trace time.
 
+    That `call()` is a DEFAULT, not a requirement. A subclass may
+    override it and never run the loop, in which case `step()` and
+    `initialize_state()` exist only to satisfy this class. The shipped
+    `NeuralTuringMachine` does exactly that: it wraps its cell in a
+    `keras.layers.RNN` and lets the RNN do the stepping.
+
     **Architecture Overview:**
 
     .. code-block:: text
