@@ -165,6 +165,14 @@ class CliffordEncoderBlock(keras.layers.Layer):
     :param drop_path_rate: Stochastic-depth rate for this block's residual
         branch. Defaults to 0.0.
     :type drop_path_rate: float
+    :param dropout_rate: Dropout applied to the block's update before the
+        external residual add -- the same position `ConvNextV1Block` and
+        `ConvNextV2Block` apply theirs, so the arms are comparably regularized.
+        `CliffordNetBlock` has no dropout parameter of its own and is shared
+        with other packages, so this lives in the wrapper rather than in the
+        layer. Defaults to 0.0. **This arm trained at 0.0 for Runs 1-4 while
+        every other arm carried 0.1**; see RESULTS.md.
+    :type dropout_rate: float
     :param normalization_type: Normalization inside the block. ``None`` keeps
         the layer's own sequence-mode default. Defaults to ``None``.
     :type normalization_type: str | None
@@ -187,6 +195,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
         context_kernel_size: int = 3,
         layer_scale_init: float = 1e-5,
         drop_path_rate: float = 0.0,
+        dropout_rate: float = 0.0,
         normalization_type: Optional[str] = None,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
@@ -212,6 +221,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
         self.context_kernel_size = context_kernel_size
         self.layer_scale_init = layer_scale_init
         self.drop_path_rate = drop_path_rate
+        self.dropout_rate = dropout_rate
         self.normalization_type = normalization_type
         self.use_bias = use_bias
         self.kernel_initializer = kernel_initializer
@@ -233,6 +243,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
             block_kwargs["normalization_type"] = normalization_type
 
         self.block = CliffordNetBlock(name="clifford_block", **block_kwargs)
+        self.dropout = keras.layers.Dropout(dropout_rate, name="dropout")
         self.drop_path = StochasticDepth(
             drop_path_rate=drop_path_rate, name="drop_path"
         )
@@ -244,6 +255,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
         :type input_shape: Any
         """
         self.block.build(input_shape)
+        self.dropout.build(input_shape)
         self.drop_path.build(input_shape)
         super().build(input_shape)
 
@@ -278,6 +290,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
             block_input = inputs * keep
 
         update = self.block(block_input, training=training)
+        update = self.dropout(update, training=training)
         # External residual. `x = block(x)` would annihilate the signal; see
         # the class docstring.
         return inputs + self.drop_path(update, training=training)
@@ -309,6 +322,7 @@ class CliffordEncoderBlock(keras.layers.Layer):
                 "context_kernel_size": self.context_kernel_size,
                 "layer_scale_init": self.layer_scale_init,
                 "drop_path_rate": self.drop_path_rate,
+                "dropout_rate": self.dropout_rate,
                 "normalization_type": self.normalization_type,
                 "use_bias": self.use_bias,
                 "kernel_initializer": self.kernel_initializer,
@@ -647,6 +661,7 @@ def build_clifford_block(
     context_kernel_size: int = 3,
     layer_scale_init: float = 1e-5,
     drop_path_rate: float = 0.0,
+    dropout_rate: float = 0.0,
     normalization_type: Optional[str] = None,
     use_bias: bool = True,
     kernel_initializer: Any = "glorot_uniform",
@@ -671,6 +686,8 @@ def build_clifford_block(
     :type layer_scale_init: float
     :param drop_path_rate: Stochastic-depth rate.
     :type drop_path_rate: float
+    :param dropout_rate: Dropout on the update before the external residual.
+    :type dropout_rate: float
     :param normalization_type: Normalization override, or ``None`` for the
         block's own sequence-mode default.
     :type normalization_type: str | None
@@ -690,6 +707,7 @@ def build_clifford_block(
         context_kernel_size=context_kernel_size,
         layer_scale_init=layer_scale_init,
         drop_path_rate=drop_path_rate,
+        dropout_rate=dropout_rate,
         normalization_type=normalization_type,
         use_bias=use_bias,
         kernel_initializer=kernel_initializer,

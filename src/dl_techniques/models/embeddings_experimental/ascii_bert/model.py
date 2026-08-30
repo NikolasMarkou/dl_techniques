@@ -119,7 +119,7 @@ class AsciiBert(EmbeddingEncoder):
         attention_type: str = "multi_head",
         ffn_type: str = "mlp",
         normalization_position: str = "post",
-        attention_probs_dropout_rate: float = 0.1,
+        attention_probs_dropout_rate: Optional[float] = None,
         hidden_act: str = "gelu",
         **kwargs: Any,
     ) -> None:
@@ -134,6 +134,15 @@ class AsciiBert(EmbeddingEncoder):
         self.attention_type = attention_type
         self.ffn_type = ffn_type
         self.normalization_position = normalization_position
+        # `None` means "follow hidden_dropout_rate". It previously defaulted to
+        # a hard 0.1, which made the study's `hidden_dropout_rate` knob a
+        # PARTIAL control of this arm: setting it to 0.0 left attention dropout
+        # at 0.1 and still perturbed two training passes by 3.50e-03. A config
+        # field that silently governs only part of a model is the defect class
+        # `tests/test_train/test_config_fields_are_live.py` exists to catch.
+        # Pass a float to override the two independently.
+        if attention_probs_dropout_rate is None:
+            attention_probs_dropout_rate = kwargs.get("hidden_dropout_rate", 0.1)
         self.attention_probs_dropout_rate = attention_probs_dropout_rate
         self.hidden_act = hidden_act
 

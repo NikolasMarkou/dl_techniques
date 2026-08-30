@@ -304,13 +304,36 @@ They are recorded because knowing what is *not* the cause is most of the value.
 
 ## Known defects and confounds
 
-**The arms are not equally regularized.** `ascii_bert` carries attention-probability
-dropout 0.1 *and* FFN dropout 0.1; the convnext arms carry 0.1; `ascii_clifford_bert`
-carries **none** — it never puts `dropout_rate` in its `block_config` and
-`build_clifford_block` has no such parameter. Measured **inert** as a cause
-(2.8307 at dropout 0.0), but it is an uncontrolled difference between arms and
-should be equalized before the comparison is restated. Not yet fixed: it requires
-a layer change, not a config change.
+**The blocks were not equally regularized — fixed 2026-08-30, after Runs 1-4.**
+Through every run in this file, `ascii_bert`'s block carried attention-probability
+dropout *and* FFN dropout, both convnext blocks carried `dropout_rate`, and
+`ascii_clifford_bert`'s block carried **none**: `build_clifford_block` had no such
+parameter and `CliffordNetBlock` has none of its own.
+
+Repairing it exposed a second defect of the same family in the transformer arm.
+`AsciiBert.attention_probs_dropout_rate` was hard-defaulted to 0.1 and never
+wired to `hidden_dropout_rate`, so the study's dropout knob was a **partial**
+control of that arm — setting it to 0.0 left attention dropout at 0.1 and still
+perturbed two training passes by 3.50e-03. It now follows `hidden_dropout_rate`
+unless given explicitly.
+
+> **Correction.** An earlier revision said the clifford arm "trains
+> unregularized". Too strong: `BertEmbeddings` applies dropout at
+> `hidden_dropout_rate` to every arm, so it had embedding dropout like the
+> others. What it lacked was *block* dropout.
+
+Measured **inert as a cause** of the transformer's collapse (2.8307 at dropout
+0.0), so no conclusion in this file changes. But it was an uncontrolled
+difference between arms, and **Runs 1-4 were all measured before the fix** — any
+future run of the clifford arm is not comparable to the numbers above without
+re-running it.
+
+`tests/test_models/test_embeddings_shared/test_every_arm_is_equally_regularized.py`
+now pins it. Note what that guard had to learn: a first version compared two
+training-mode passes of the assembled *model* and was **vacuous**, because the
+shared embedding dropout makes every arm stochastic regardless of its block; and
+its successor needed a **scale-free** oracle, because `layer_scale_init=1e-5`
+shrinks the clifford update so far that live dropout moves it only 1.4e-06.
 
 **Train/eval overlap.** SQuAD contexts *are* Wikipedia paragraphs and the MLM
 corpus is Wikipedia. Every arm shares the overlap, so the ordering survives; the

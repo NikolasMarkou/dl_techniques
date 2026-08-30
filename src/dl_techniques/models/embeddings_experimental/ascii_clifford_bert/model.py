@@ -157,6 +157,11 @@ class AsciiCliffordBert(EmbeddingEncoder):
             "context_kernel_size": context_kernel_size,
             "layer_scale_init": layer_scale_init,
             "normalization_type": block_normalization_type,
+            # Matches the convnext arms, which pass the same value into their
+            # block. Without this the arm trains UNREGULARIZED while every
+            # other arm carries 0.1 -- an uncontrolled difference in a study
+            # whose whole point is that the arms differ only in the block.
+            "dropout_rate": kwargs.get("hidden_dropout_rate", 0.1),
         }
 
         super().__init__(
