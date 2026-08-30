@@ -305,10 +305,25 @@ and contexts to a common length, `ascii_clifford_bert`/sinusoidal scores 0.0560,
 falls to **0.0060** at 512, where contexts fill the window and queries do not.
 
 **Two hypotheses died on the way, and the second death was the informative one.**
-A padding-mismatch version of this story is wrong: encoding the same text padded
-to 128, 256 and 512 gives *identical* embeddings, because pooling is mask-aware.
-Ruling that out is what forced the distinction between padded length and real
-length, which is the one that matters.
+A padding-mismatch version of this story is *mostly* wrong: encoding the same
+text padded to 128, 256 and 512 gives identical embeddings on three of the four
+arms, because pooling is mask-aware. Ruling that out is what forced the
+distinction between padded length and real length, which is the one that matters.
+
+> **Correction, 2026-08-30 (review).** "Identical" holds for `ascii_bert`,
+> `ascii_clifford_bert` and `ascii_convnext_bert` (max |Δ| 1.8e-07 to 3.6e-07).
+> It does **not** hold for `ascii_convnext_v2_bert`: the same 100-character text
+> at pad widths 128/256/512 moves by **1.663e-01**, cosine **0.9863**. The cause
+> is `GlobalResponseNormalization`, whose per-channel score reduces over axes
+> `1..N-2` — the sequence axis, once the block lifts to `(B, 1, L, D)`. GRN is
+> mask-unaware and sequence-global.
+>
+> **This is immaterial to every number in this file**, because length-sorted
+> batching holds the evaluation's pad fractions at 0.011 (contexts) and 0.027
+> (questions), where the distortion is below 0.001 in cosine (measured: cosine
+> 0.9997 at 22% padding). It is recorded because both READMEs attribute the
+> padding hazard to the wrong arm — `ascii_clifford_bert`, which is in fact
+> pad-width-inert at 2.4e-07, exactly as its own guard already pins.
 
 ### It is the readout, and `max` pooling fixes it
 
@@ -506,7 +521,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | hypothesis | how it died |
 |---|---|
 | **Missing external residual** | `TransformerLayer` is self-contained — it adds its own two residuals. Unlike the conv blocks, which are transform-only and get an external add in their wrappers. |
-| **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while both conv arms measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. |
+| **Dead attention / inverted mask** | Attention moves information 25 positions: **2.106e-03**, while `ascii_clifford_bert` and `ascii_convnext_bert` measure **exactly 0.000** beyond their spans. Stage 1 is packed, so the mask is all-ones anyway. **Corrected 2026-08-30: it is not "both conv arms" but two of three.** `ascii_convnext_v2_bert` moves information **7.210e-02 at d=25, 8.378e-02 at d=60 and 3.989e-02 at d=120** — beyond its nominal 25-token span, at magnitudes above the transformer's. Its GRN is a sequence-global operator; see the note below. |
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0001 — a complete fix — and R@1 does not move (re-verified 2026-08-30 at 7 seeds: `ascii_bert` 0.0129 → 0.0124, `ascii_clifford_bert` 0.0587 → 0.0606). **The two supporting facts this row used to give were both wrong** and are withdrawn: clifford's anisotropy *worsens* under sinusoidal positions (0.2821 → 0.3568), it does not "slightly improve"; and across arms the anisotropy rise is **positively** correlated with the damage (r = +0.324, n=4), not anti-correlated. The refutation rests on the centering result alone, which holds. |
 | **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **three of the four** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059, `convnext_v2` 0.0507 → 0.0386). Correct for the learned-position conv arms — that is where the 3.3x-3.9x came from — but wrong for those three. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
@@ -518,6 +533,30 @@ They are recorded because knowing what is *not* the cause is most of the value.
 ---
 
 ## Known defects and confounds
+
+**`ascii_convnext_v2_bert` is not span-bounded — found 2026-08-30 by review.**
+This file repeatedly explains the settings asymmetry with "a convolution has a
+fixed span". That is true of `ascii_clifford_bert` (49) and
+`ascii_convnext_bert` (25) and **false of `ascii_convnext_v2_bert`**, whose
+`GlobalResponseNormalization` reduces over the sequence axis and therefore mixes
+every position with every other. Perturbing position 0 alone and measuring
+`max |Δ|` at position `d`, on trained encoders:
+
+| arm | nominal span | d=10 | d=25 | d=60 | d=120 |
+|---|---|---:|---:|---:|---:|
+| `ascii_bert` | full | 3.130e-02 | 4.188e-02 | 2.661e-02 | 1.696e-02 |
+| `ascii_clifford_bert` | 49 | 2.041e-01 | 0.000 | 0.000 | 0.000 |
+| `ascii_convnext_bert` | 25 | 2.664e-03 | 0.000 | 0.000 | 0.000 |
+| `ascii_convnext_v2_bert` | 25 | 3.484e-02 | **7.210e-02** | **8.378e-02** | **3.989e-02** |
+
+The study's best arm has an always-on global mixing operator. That does not
+change any measured number here, but it does weaken the architectural reading:
+the four arms are not "one attention arm and three fixed-span convolutions" —
+they are one attention arm, two fixed-span convolutions, and one convolution
+with a global branch. Consistently, `convnext_v2` is the convolutional arm least
+hurt by sinusoidal positions at 512 (1.34x retrieval penalty against clifford's
+9.67x).
+
 
 **The blocks were not equally regularized — fixed 2026-08-30, after Runs 1-4.**
 Through every run in this file, `ascii_bert`'s block carried attention-probability
