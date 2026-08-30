@@ -25,7 +25,7 @@ Files:
 
 - `ntm_interface.py` — abstract base classes (`BaseMemory`, `BaseHead`,
   `BaseController`, `BaseNTM`), state dataclasses (`MemoryState`, `HeadState`,
-  `NTMOutput`, `NTMConfig`), enums (`AddressingMode`, `MemoryAccessType`), and
+  `NTMOutput`, `NTMConfig`), the `AddressingMode` enum, and
   addressing utilities (`cosine_similarity`, `circular_convolution`,
   `sharpen_weights`).
 - `baseline_ntm.py` — production NTM: `NTMMemory`, `NTMReadHead`,
@@ -87,7 +87,7 @@ and are exactly the contents of its `__all__`.
 
 | Name | Kind | Module | Family |
 |------|------|--------|--------|
-| `AddressingMode`, `MemoryAccessType` | Enum | `ntm_interface` | NTM |
+| `AddressingMode` | Enum | `ntm_interface` | NTM |
 | `MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig` | dataclass | `ntm_interface` | NTM |
 | `BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM` | ABC | `ntm_interface` | NTM |
 | `cosine_similarity`, `circular_convolution`, `sharpen_weights` | function | `ntm_interface` | NTM |
@@ -96,9 +96,6 @@ and are exactly the contents of its `__all__`.
 | `SOMLayer`, `SOM2dLayer`, `SoftSOMLayer` | Layer | `som_nd_layer`, `som_2d_layer`, `som_nd_soft_layer` | SOM |
 | `NeuroGrid` | Layer | `neuro_grid` | NeuroGrid |
 | `create_mann`, `create_som_2d` | factory fn | `factory` | MANN, SOM |
-
-`MemoryAccessType` has no consumer in this package. It is exported so a variant
-can label its own components.
 
 ## Usage
 

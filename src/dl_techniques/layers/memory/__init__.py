@@ -11,7 +11,7 @@ standalone grid layer:
 * **SOM** (Kohonen, 1982): Self-Organizing Maps, in 2D, N-D and soft variants.
 * **NeuroGrid**: a topographic memory grid with differentiable soft assignment.
 
-`__all__` re-exports 26 names. Import from the package, not the modules.
+`__all__` re-exports 25 names. Import from the package, not the modules.
 
 **Package Surface:**
 
@@ -33,7 +33,7 @@ standalone grid layer:
 
 Exported names, by group:
 
-* Enums: `AddressingMode`, `MemoryAccessType`.
+* Enums: `AddressingMode`.
 * State and config: `MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig`.
 * Abstract bases: `BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM`.
 * Addressing utilities: `cosine_similarity`, `circular_convolution`,
@@ -62,7 +62,6 @@ Example:
 from .ntm_interface import (
     # Enumerations
     AddressingMode,
-    MemoryAccessType,
     # State dataclasses
     MemoryState,
     HeadState,
@@ -114,7 +113,6 @@ from .factory import create_mann, create_som_2d
 __all__ = [
     # NTM — enumerations
     "AddressingMode",
-    "MemoryAccessType",
     # NTM — state / config dataclasses
     "MemoryState",
     "HeadState",

@@ -27,7 +27,7 @@ A CONTENT head stops after the first stage and never builds the projections
 that produce `g`, `s` or `gamma`.
 
 Contents:
-    `AddressingMode`, `MemoryAccessType` -- enums.
+    `AddressingMode` -- enum.
     `MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig` -- dataclasses.
     `BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM` -- abstract bases.
     `cosine_similarity`, `circular_convolution`, `sharpen_weights` -- pure
@@ -90,35 +90,6 @@ class AddressingMode(Enum):
 
     CONTENT = auto()
     HYBRID = auto()
-
-
-class MemoryAccessType(Enum):
-    """
-    How a memory module or head may touch memory.
-
-    This is a label for variants that need to distinguish read-only from
-    write-only components. Nothing in `layers/memory/` reads it today; it is
-    exported so a variant can tag its own components without inventing a
-    second enum.
-
-    **Architecture Overview:**
-
-    .. code-block:: text
-
-        member      what selects it        what it means
-        ──────────  ─────────────────────  ────────────────────
-        READ        a variant tags a head  the head only reads
-        WRITE       a variant tags a head  the head only writes
-        READ_WRITE  a variant tags a head  the head does both
-
-    :cvar READ: Read-only access.
-    :cvar WRITE: Write-only access.
-    :cvar READ_WRITE: Both read and write access.
-    """
-
-    READ = auto()
-    WRITE = auto()
-    READ_WRITE = auto()
 
 
 # ---------------------------------------------------------------------
