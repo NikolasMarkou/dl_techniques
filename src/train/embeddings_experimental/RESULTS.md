@@ -32,13 +32,16 @@ decides part of the answer. The strong two-way interaction behind this is
 **specific to the attention arm** — the convolutional arms show only a small
 same-signed penalty from each setting.
 
-**4. The sinusoidal retrieval collapse involves a length artifact, but is not
-only that.** A sinusoidal model's pooled vector depends on sequence length — the
-same content at 512 characters is nearly orthogonal to itself at 64 (cosine
-**0.3805**, against 0.9705 for learned positions), and SQuAD queries average 59
-characters against contexts of 774. But swapping to a length-invariant readout
-does **not** recover retrieval: it helps one arm 3.6x and sends the other to
-chance. For retrieval, use **learned positions**.
+**4. The sinusoidal retrieval collapse involves a length artifact, but length
+drift is one contributor, not the cause.** A pooled vector does depend on
+sequence length, and more so under sinusoidal positions. But on **natural text**
+learned-position models drift almost as much (cosine 0.53 against sinusoidal's
+0.39 at L=512) while retrieving **9.7x better**, so drift does not separate them;
+the dramatic 0.9705-vs-0.3805 figure comes from a repeated-sentence probe where
+content is held identical by construction. Swapping to a length-invariant readout
+on the same trained weights **does** help — clifford 3.9x, p=0.0156, 7/7 seeds —
+but reaches only 41% of the learned-position baseline. For retrieval, use
+**learned positions**.
 
 **5. Every raw retrieval number below understates these encoders by ~3.3x-3.9x.**
 ZCA whitening lifts the learned-position convolutional arms from R@1 ~0.060 to
@@ -400,45 +403,69 @@ only `cls`, `mean` and `attention`, and the trainer's `--pooling-strategy`
 validates against that tuple — so the readout that fixes this was unreachable
 from the study. Added 2026-08-30.
 
-### But swapping the readout does NOT recover retrieval — measured
+### Swapping the readout DOES help — but not enough. Measured twice.
 
-Length-invariance turned out to be **necessary and not sufficient**. Trained
-cells at 512 / sinusoidal with `max` pooling, 3 seeds, against the `mean`-pooled
-cells (n=7) and the learned-position baseline (n=7):
+This section previously concluded that the fix was refuted. **It was testing a
+different experiment from the one the prediction names**, and the correct test
+does not refute it.
 
-| arm | sinusoidal + `mean` | sinusoidal + `max` | learned + `mean` |
+**Test 1 — the prediction as stated: swap the readout on the same trained
+weights, no retraining.** Mean-trained 512/sinusoidal checkpoints, readout
+swapped at evaluation, **n=7**, paired by seed:
+
+| arm | `mean` (as trained) | `max` (swapped) | `cls` (swapped) | paired `max` − `mean` |
+|---|---:|---:|---:|---|
+| `ascii_bert` | 0.00186 | **0.00293** | 0.00157 | +0.00107, p=0.1875, 5/7 |
+| `ascii_clifford_bert` | 0.00607 | **0.02386** | 0.01000 | **+0.01779, p=0.0156, 7/7** |
+
+Chance is 0.00048. `ascii_clifford_bert` improves **293%**, significant at the
+n=7 floor with every seed agreeing. `ascii_bert` improves slightly and
+non-significantly — and, importantly, **does not fall to chance**: 0.00293 is 6x
+chance and better than its own `mean` readout.
+
+**Test 2 — cells RETRAINED at `pooling=max`** (a separate sweep root, its own
+`encoder.keras`, stage 2 trained under `max`), 3 seeds:
+
+| arm | sinusoidal + `mean` (n=7) | sinusoidal + `max`, retrained (n=3) | learned + `mean` (n=7) |
 |---|---:|---:|---:|
-| `ascii_bert` | 0.00186 | **0.00033** | 0.01286 |
-| `ascii_clifford_bert` | 0.00607 | **0.02167** | 0.05871 |
+| `ascii_bert` | 0.00186 | 0.00033 | 0.01286 |
+| `ascii_clifford_bert` | 0.00607 | 0.02167 | 0.05871 |
 
-Chance is 0.00048.
+> **Correction, 2026-08-30 (review).** The old text read the second table as
+> refuting the prediction — *"`max` pooling ... drives `ascii_bert` to chance"*.
+> Three problems:
+>
+> 1. **It is not the stated experiment.** This file defines the fix as a readout
+>    "swapped on the *same trained weights*, with no retraining". Retraining
+>    under `max` changes the stage-2 contrastive objective as well as the
+>    readout. Done as stated, bert goes to 0.00293, not 0.00033.
+> 2. **n=3 cannot refute anything here.** By this study's own power rule the
+>    smallest reachable p at n=3 is **0.250**, and both paired comparisons on the
+>    shared seeds 0–2 return exactly that floor (bert −0.00067, clifford
+>    +0.01617). The study labels such comparisons `UNDERPOWERED` everywhere else.
+> 3. **bert's retrained cells are 1, 0 and 1 hits out of 2000.** "3% of its
+>    learned baseline" is a ratio on single-digit counts.
+>
+> What survives is the weaker half, and it is still worth having: **neither
+> readout reaches the learned-position baseline** — clifford recovers to 41% of
+> it (0.0239 against 0.0587), bert to 23% (0.0029 against 0.0129). So
+> length-invariance is **necessary and not sufficient**, exactly as this section
+> always said. What is withdrawn is "does not fix it" and "falls to chance".
 
-**The prediction failed, and it failed asymmetrically.** `max` pooling improves
-`ascii_clifford_bert` **3.6x** (all three seeds 0.017-0.030, no overlap with the
-`mean` cells) but drives `ascii_bert` **to chance**. Neither reaches its own
-learned-position baseline — clifford recovers to 37% of it, bert to 3%.
+A per-dimension extremum over 128 dimensions does discard information, and how
+much depends on the arm — but on the stated test it costs less than the drift it
+removes for clifford, and roughly breaks even for bert.
 
-The direction is the opposite of what the length-drift account alone predicts.
-`ascii_bert` had by far the worse drift under `mean` pooling (0.3805 against
-clifford's 0.7521) and therefore the most to gain from a length-invariant
-readout; it gained nothing and lost what little it had. So length drift is a real
-property of these embeddings and a real contributor to the collapse, but it is
-not the whole of it: a per-dimension extremum over 128 dimensions discards enough
-information to cost more than the drift did, and how much more depends on the
-arm.
+Whitening does not rescue the retrained `max` cells — it lowers them (clifford
+0.0217 raw to 0.0065 whitened), consistent with `max` already having flattened
+the variance structure the transform exploits.
 
-Whitening does not rescue the `max`-pooled cells either — it lowers them
-(clifford 0.0217 raw to 0.0065 whitened), consistent with `max` already having
-flattened the variance structure the transform exploits.
-
-**What survives, and what does not.** The length-drift measurement stands: it is
-direct, reproducible, and it still explains the flat SST-2 probe, the failure of
-centering and whitening, the absent penalty at 64 context, and the untouched MLM
-ordering. What is refuted is the *fix* proposed from it. On the evidence here,
-the practical recommendation for retrieval is **learned positions with `mean`
-pooling** — the configuration the study started with — and the sinusoidal
-positional repair belongs to the language-modelling objective, not to the
-embedding.
+**Practical recommendation, unchanged.** For retrieval use **learned positions
+with `mean` pooling**: it beats every sinusoidal configuration measured, with or
+without a swapped readout, and it whitens to ~0.23. The sinusoidal positional
+repair belongs to the language-modelling objective. `max` is worth reaching for
+when a sinusoidal encoder is already trained and retraining is not an option —
+it recovers a significant fraction for the clifford arm at zero cost.
 
 Two cells of this run first failed with a CUDA OOM in the contrastive stage and
 were re-run to completion on an idle GPU with no config change; the numbers above
@@ -570,7 +597,7 @@ They are recorded because knowing what is *not* the cause is most of the value.
 | **post-LN, warmup, dropout, weight decay** | Seven configurations — pre-LN, warmup 0.10, dropout 0.0, weight decay 0.0, and combinations — span **0.0024 nats**. All inert. |
 | **Shared offset / anisotropy** (retrieval) | Centering drives anisotropy to −0.0001 — a complete fix — and R@1 does not move (re-verified 2026-08-30 at 7 seeds: `ascii_bert` 0.0129 → 0.0124, `ascii_clifford_bert` 0.0587 → 0.0606). **The two supporting facts this row used to give were both wrong** and are withdrawn: clifford's anisotropy *worsens* under sinusoidal positions (0.2821 → 0.3568), it does not "slightly improve"; and across arms the anisotropy rise is **positively** correlated with the damage (r = +0.324, n=4), not anti-correlated. The refutation rests on the centering result alone, which holds. |
 | **Variance drowning** (retrieval, sinusoidal) | ZCA whitening makes **three of the four** sinusoidal arms worse (`ascii_bert` 0.0019 → 0.0010, `convnext` 0.0170 → 0.0059, `convnext_v2` 0.0507 → 0.0386). Correct for the learned-position conv arms — that is where the 3.3x-3.9x came from — but wrong for those three. NOT wrong for `ascii_clifford_bert`/sinusoidal, which **gains 7.72x on 7 of 7 cells**; an earlier revision of this row claimed all 12 sinusoidal cells lose. An earlier revision concluded from this that "the content is genuinely absent"; that was premature. The content is present and the vector is displaced by a length-dependent offset, which no global transform can undo. |
-| **"A length-invariant readout will fix retrieval"** — my own prediction | `max` pooling IS length-invariant (0.9693 vs `mean`'s 0.3805) and does not fix it: bert falls to chance (0.00033) while clifford improves 3.6x (0.02167), neither reaching its learned-position baseline. Length drift is real and contributory, not sufficient. |
+| **"A length-invariant readout will fix retrieval"** — my own prediction | **Partly survives; the earlier refutation was of the wrong experiment.** Swapped on the same trained weights as the prediction states (n=7, paired), `max` improves `ascii_clifford_bert` **3.9x** (0.00607 → 0.02386, p=0.0156, 7/7 seeds) and moves `ascii_bert` to 0.00293 — 6x chance, *better* than `mean`, **not** to chance. The "falls to chance (0.00033)" figure came from cells RETRAINED under `max` at n=3, where this study's own power rule makes the minimum reachable p 0.250. What holds is that neither readout reaches the learned-position baseline (41% and 23%), so length-invariance is necessary and not sufficient. |
 | **"Padding-length mismatch"** (retrieval) | Encoding one text padded to 128, 256 and 512 gives identical embeddings — pooling is mask-aware, so padding cannot be the cause. Ruling it out forced the distinction between padded and REAL length, which is the actual mechanism. |
 | **"The two effects compound"** — this file's own framing | Corrected 2026-08-30. Naming the positional encoding as the defect and context length as secondary reflected the order they were found, not the data. Each setting is worth ~1.2–1.4 nats alone and ~0.13–0.32 second; they **substitute**. The collapse needs both conditions together, so neither is primary. |
 | **"A longer run could close or reverse it"** — Run 1's own explanation | Stated in this file's first version as "a statement about training speed at this budget". False: the arm had stopped moving. The convolutional prior is a real advantage, but it is not what produced Run 1's number. |
