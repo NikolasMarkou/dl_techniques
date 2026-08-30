@@ -270,3 +270,87 @@ weak positional signal, diluted over 512 positions", not as "a transformer".
 Reproduction scripts are throwaway and live outside the repo; the configuration
 changes they test are `position_embedding_type="sinusoidal"` and
 `max_seq_length`, both already exposed by `EmbeddingEncoder`.
+
+
+## Run 2 — 512 context, sinusoidal positions, 28 cells, 2026-08-30
+
+A full rerun of Run 1's grid with `position_embedding_type='sinusoidal'`, 7
+seeds x 4 arms. Because Run 1 predates that field, **it is the learned-position
+arm of the same factorial** — every number below is paired cell-by-cell on
+(model, variant, pooling, seed), not compared as two independent means.
+
+### MLM: the fix is worth 1.20 nats to the transformer and costs the others ~0.08
+
+| arm | learned | sinusoidal | paired delta (n=7) |
+|---|---:|---:|---:|
+| `ascii_bert` | 2.8248 ±0.008 | **1.6218** ±0.025 | **−1.2030** ±0.024 |
+| `ascii_clifford_bert` | 1.0693 ±0.019 | 1.1746 ±0.009 | +0.1053 ±0.019 |
+| `ascii_convnext_bert` | 0.9213 ±0.019 | 0.9933 ±0.009 | +0.0719 ±0.021 |
+| `ascii_convnext_v2_bert` | **0.8973** ±0.016 | 0.9756 ±0.010 | +0.0782 ±0.019 |
+
+Every arm moves the same direction on all 7 of its 7 seeds, and the transformer's
+effect is ~50x its own seed spread.
+
+**The block ordering is unchanged** — `convnext_v2 < convnext < clifford < bert`
+under both settings — so Run 1's central conclusion survives. What changes is the
+size of the claim: the transformer's deficit against the best arm falls from
+**1.9275 to 0.6463 nats, closing 66% of it.** Two thirds of Run 1's headline was
+the baseline's broken positional signal, not the blocks.
+
+### Retrieval: every arm gets dramatically worse, and it is not anisotropy
+
+| arm | R@1 learned | R@1 sinusoidal | ratio |
+|---|---:|---:|---:|
+| `ascii_bert` | 0.0129 | 0.0019 | **x0.14** |
+| `ascii_clifford_bert` | 0.0587 | 0.0061 | **x0.10** |
+| `ascii_convnext_bert` | 0.0594 | 0.0170 | x0.29 |
+| `ascii_convnext_v2_bert` | 0.0681 | 0.0507 | x0.75 |
+
+So the setting that makes the language model far better makes the **embeddings**
+— this study's actual deliverable — 1.3x to 10x worse. `sst2_probe_accuracy`
+moves by at most 2% in either direction for every arm, so content remains
+linearly decodable; it is specifically cosine retrieval that collapses.
+
+**The obvious explanation is wrong, and was refuted three separate ways.** A
+sinusoidal table has row norm ~9.3 against a learned table's ~0.2 and is
+identical for every sequence of a given length, so mean-pooling should turn it
+into a large shared offset — which would inflate anisotropy and break cosine
+similarity without destroying information. Anisotropy did rise (`ascii_bert`
+0.298 -> 0.745, `cos_to_centroid` 0.705 -> 0.931). But:
+
+1. **Centering does not recover retrieval.** Subtracting the pool mean drives
+   anisotropy to −0.0002 and `cos_to_centroid` to 0.0001 — a complete fix of the
+   offset — and R@1 stays at 0.0040, R@10 at 0.0120, unchanged to four decimals.
+2. **Clifford collapsed 10x with essentially no anisotropy change** (0.494 ->
+   0.465, slightly *better*) at seed 0.
+3. **Across arms the two quantities are anti-correlated.** Clifford has the
+   *smallest* anisotropy rise (x1.26) and the *largest* retrieval loss (x0.10);
+   convnext_v2 has a larger anisotropy rise (x1.45) and by far the smallest loss
+   (x0.75).
+
+| arm | anisotropy ratio | R@1 ratio |
+|---|---:|---:|
+| `ascii_bert` | x2.50 | x0.14 |
+| `ascii_clifford_bert` | **x1.26** | **x0.10** |
+| `ascii_convnext_bert` | x1.63 | x0.29 |
+| `ascii_convnext_v2_bert` | **x1.45** | **x0.75** |
+
+The information is genuinely absent from the pooled vector, not merely hidden
+behind a shift. **Why** is not established — a plausible story is that a model
+handed a strong positional signal solves MLM with position-indexed local
+structure instead of building content summaries, and mean-pooling then has less
+content to average. That is untested speculation; the effect is measured, the
+cause is not.
+
+### What to take from this
+
+`position_embedding_type` is a genuine trade-off axis for this study, not a bug
+with a fix. It buys a large amount of the pretraining objective and sells a large
+amount of the downstream embedding quality, and the exchange rate differs sharply
+by block (convnext_v2 barely pays; clifford pays most). Whichever default the
+study settles on, **it must be reported as a choice with a cost**, and the arm
+comparison must be read at a fixed setting.
+
+Absolute caution: every retrieval number here is near chance (0.00048). The best
+cell, `convnext_v2` with learned positions at 0.0681, is ~141x chance and still
+under 7%. These are 6000-step `tiny` models.
