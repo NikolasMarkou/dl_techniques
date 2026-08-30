@@ -473,6 +473,24 @@ class MDNLayer(keras.layers.Layer):
 
         return self.diversity_regularizer_strength * diversity_loss
 
+    def _param_offsets(self) -> Tuple[int, int, int]:
+        """Return the packed-output layout: ``(mu_end, sigma_end, total_width)``.
+
+        The one place the packed layout is computed. ``compute_output_shape``
+        takes the width and ``split_mixture_params`` takes the two slice
+        boundaries, so a change to the packing cannot land in only one of them.
+
+        The layout is ``[mu | sigma | pi]``: ``num_mix * output_dim`` means,
+        the same number of standard deviations, then ``num_mix`` mixture logits.
+
+        :return: ``(mu_end, sigma_end, total_width)`` along the last axis.
+        :rtype: tuple[int, int, int]
+        """
+        block = self.num_mix * self.output_dim
+        mu_end = block
+        sigma_end = mu_end + block
+        return mu_end, sigma_end, sigma_end + self.num_mix
+
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
@@ -489,7 +507,7 @@ class MDNLayer(keras.layers.Layer):
             parameter width.
         :rtype: tuple[int | None, ...]
         """
-        output_size = (2 * self.output_dim * self.num_mix) + self.num_mix
+        _, _, output_size = self._param_offsets()
         return tuple(list(input_shape)[:-1] + [output_size])
 
     def split_mixture_params(
@@ -509,8 +527,7 @@ class MDNLayer(keras.layers.Layer):
             ``[B, M, D]``, ``[B, M, D]`` and ``[B, M]``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
         """
-        mu_end = self.num_mix * self.output_dim
-        sigma_end = mu_end + (self.num_mix * self.output_dim)
+        mu_end, sigma_end, _ = self._param_offsets()
 
         out_mu = y_pred[..., :mu_end]
         out_sigma = y_pred[..., mu_end:sigma_end]

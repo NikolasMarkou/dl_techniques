@@ -391,7 +391,8 @@ class AffineCouplingLayer(keras.layers.Layer):
     def _compute_scale_and_shift(
         self,
         static_part: keras.KerasTensor,
-        context: keras.KerasTensor
+        context: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Predict the scale and shift from the static half and the context.
 
@@ -402,6 +403,11 @@ class AffineCouplingLayer(keras.layers.Layer):
         :type static_part: keras.KerasTensor
         :param context: The conditioning context vector.
         :type context: keras.KerasTensor
+        :param training: Boolean for training mode, forwarded to
+            ``transformation_net``. That network is a plain ``Dense`` stack
+            today, so forwarding it changes no output; it is threaded so a
+            future sub-layer with training-dependent behaviour is reached.
+        :type training: bool | None
         :return: Tuple of ``(scale, shift)`` parameters.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
@@ -409,7 +415,7 @@ class AffineCouplingLayer(keras.layers.Layer):
         net_input = ops.concatenate([static_part, context], axis=-1)
 
         # Get transformation parameters from network
-        params = self.transformation_net(net_input)
+        params = self.transformation_net(net_input, training=training)
 
         # Split into scale (log) and shift parameters
         dim_to_transform = self.input_dim - self.split_dim
@@ -429,7 +435,8 @@ class AffineCouplingLayer(keras.layers.Layer):
     def forward(
         self,
         z: keras.KerasTensor,
-        context: keras.KerasTensor
+        context: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Map latent ``z`` to data ``y``. This is the sampling direction.
 
@@ -439,6 +446,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         :type z: keras.KerasTensor
         :param context: Conditioning context, shape ``(batch_size, context_dim)``.
         :type context: keras.KerasTensor
+        :param training: Boolean for training mode, threaded to the conditioner.
+        :type training: bool | None
         :return: Transformed tensor y, shape ``(batch_size, input_dim)``.
         :rtype: keras.KerasTensor
         """
@@ -451,7 +460,7 @@ class AffineCouplingLayer(keras.layers.Layer):
         z_b = z[..., self.split_dim:]
 
         # Compute transformation parameters from static part and context
-        s, t = self._compute_scale_and_shift(z_a, context)
+        s, t = self._compute_scale_and_shift(z_a, context, training=training)
 
         # Apply affine transformation to dynamic part
         y_b = z_b * s + t
@@ -465,7 +474,8 @@ class AffineCouplingLayer(keras.layers.Layer):
     def inverse(
         self,
         y: keras.KerasTensor,
-        context: keras.KerasTensor
+        context: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Map data ``y`` back to latent ``z``. This is the likelihood direction.
 
@@ -477,6 +487,8 @@ class AffineCouplingLayer(keras.layers.Layer):
         :type y: keras.KerasTensor
         :param context: Conditioning context, shape ``(batch_size, context_dim)``.
         :type context: keras.KerasTensor
+        :param training: Boolean for training mode, threaded to the conditioner.
+        :type training: bool | None
         :return: Tuple of ``(z, log_det_jacobian)``, shaped
             ``(batch_size, input_dim)`` and ``(batch_size,)``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
@@ -491,7 +503,7 @@ class AffineCouplingLayer(keras.layers.Layer):
         y_b = y[..., self.split_dim:]
 
         # Compute transformation parameters from static part and context
-        s, t = self._compute_scale_and_shift(y_a, context)
+        s, t = self._compute_scale_and_shift(y_a, context, training=training)
 
         # Apply inverse transformation to dynamic part.
         # s = exp(...) is strictly positive, so no epsilon is needed; adding one
@@ -780,8 +792,9 @@ class NormalizingFlowLayer(keras.layers.Layer):
 
         :param inputs: List of ``[data, context]`` tensors.
         :type inputs: list[keras.KerasTensor]
-        :param training: Boolean for training mode. Not read; the layer behaves
-            the same either way.
+        :param training: Boolean for training mode. Forwarded down to every
+            coupling layer's conditioner. No coupling sub-layer reads it today,
+            so the outputs are the same either way.
         :type training: bool | None
         :return: Tuple of ``(z, total_log_det_jacobian)``, shaped
             ``(batch_size, output_dimension)`` and ``(batch_size,)``.
@@ -802,7 +815,7 @@ class NormalizingFlowLayer(keras.layers.Layer):
         # Apply inverse transformations in reverse order (y → z)
         z = y
         for layer in reversed(self.coupling_layers):
-            z, ldj = layer.inverse(z, context)
+            z, ldj = layer.inverse(z, context, training=training)
             total_log_det_jacobian += ldj
 
         return z, total_log_det_jacobian
@@ -842,7 +855,8 @@ class NormalizingFlowLayer(keras.layers.Layer):
     def sample(
         self,
         num_samples: int,
-        context: keras.KerasTensor
+        context: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Draw samples from the learned conditional distribution.
 
@@ -853,6 +867,9 @@ class NormalizingFlowLayer(keras.layers.Layer):
         :type num_samples: int
         :param context: Conditioning context, shape ``(batch_size, context_dim)``.
         :type context: keras.KerasTensor
+        :param training: Boolean for training mode, threaded to every coupling
+            layer's conditioner.
+        :type training: bool | None
         :return: Samples of shape
             ``(batch_size, num_samples, output_dimension)``.
         :rtype: keras.KerasTensor
@@ -883,7 +900,7 @@ class NormalizingFlowLayer(keras.layers.Layer):
 
         # Apply forward transformations (z → y)
         for layer in self.coupling_layers:
-            y_flat = layer.forward(y_flat, context_flat)
+            y_flat = layer.forward(y_flat, context_flat, training=training)
 
         # Reshape back to the original sample structure: (batch, num_samples, output_dim)
         y = ops.reshape(y_flat, (batch_size, num_samples, self.output_dim))
