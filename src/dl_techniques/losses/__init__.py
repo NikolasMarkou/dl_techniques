@@ -120,6 +120,12 @@ from .hrm_loss import HRMLoss, StableMaxCrossEntropy, create_hrm_loss
 
 from .huber_loss import HuberLoss
 
+# from .infonce_loss
+from .infonce_loss import (
+    SymmetricInfoNCELoss,
+    create_symmetric_infonce_loss,
+)
+
 from .lpips_loss import LPIPSLoss
 
 from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
@@ -266,6 +272,9 @@ __all__ = [
     "create_hrm_loss",
     # huber_loss
     "HuberLoss",
+    # infonce_loss
+    "SymmetricInfoNCELoss",
+    "create_symmetric_infonce_loss",
     # lpips_loss
     "LPIPSLoss",
     # mase_loss
