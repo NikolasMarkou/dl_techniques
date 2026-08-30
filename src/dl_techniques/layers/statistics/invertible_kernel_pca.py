@@ -1,42 +1,48 @@
 """
-An invertible Kernel PCA using Random Fourier Features.
+Kernel PCA with a reconstruction path, built on Random Fourier Features.
 
-This layer addresses the classical "pre-image problem" of Kernel Principal
-Component Analysis (KPCA). While traditional KPCA is effective for non-linear
-feature extraction, it lacks a natural way to reconstruct the original data
-from its principal components. This implementation solves this by approximating
-the kernel function with an explicit, finite-dimensional feature map based on
-Random Fourier Features (RFF), making the transformation analytically invertible.
+Kernel PCA extracts non-linear features well. It gives you no natural way back
+from principal components to the original data. That gap is the classical
+"pre-image problem".
 
-Architecture and Design Philosophy:
-The architecture transforms the implicit, non-linear KPCA problem into an
-explicit, linear PCA problem in a higher-dimensional feature space. The process
-involves two main stages:
+The published method attacks the gap by replacing the implicit kernel with an
+explicit, finite-dimensional feature map. Ordinary linear PCA then runs in a
+space you can write down. This module does the forward half that way. Its
+inverse is a learned linear decoder, not the paper's analytic pre-image solve.
+Read "What the inverse actually is" below before you trust a reconstruction.
 
-1.  **Random Feature Mapping**: The input data is first projected into a
-    higher-dimensional space using a fixed, non-linear function defined by
-    Random Fourier Features. This mapping, `z(x)`, is designed such that the
-    dot product between transformed points, `z(x)ᵀz(y)`, approximates a desired
-    shift-invariant kernel function, `k(x, y)`.
+Two classes ship here:
 
-2.  **Linear PCA**: Standard Principal Component Analysis is then performed on
-    these explicit random features `z(x)`. This involves computing the
-    covariance of the feature matrix and finding its principal components
-    (eigenvectors).
+- ``InvertibleKernelPCA`` maps inputs to Random Fourier Features, then projects
+  them onto principal components. ``adapt`` fits the projection.
+  ``inverse_transform`` maps components back toward input space.
+- ``InvertibleKernelPCADenoiser`` wraps one of those. It denoises by running
+  transform then inverse transform, optionally zeroing small components first.
 
-Because the feature map `z(x)` is explicit and its inverse can be
-approximated, the entire process becomes reversible. The reconstruction is
-achieved by projecting the components back to the RFF space and then applying
-the approximate inverse of the `z(x)` mapping to return to the original data
-space. This avoids the need for a separate, supervised "decoder" network for
-reconstruction.
+**How the forward path works:**
+
+1. Random feature mapping. The input is projected into a higher-dimensional
+   space by a fixed non-linear map ``z(x)``. The dot product ``z(x)^T z(y)``
+   approximates a shift-invariant kernel ``k(x, y)``.
+2. Linear PCA. Standard PCA runs on those explicit features. ``adapt``
+   eigendecomposes their covariance and stores the top eigenvectors.
+
+**What the inverse actually is:**
+
+``inverse_transform`` is a LEARNED APPROXIMATION, not a true kernel-PCA
+pre-image solve. It maps components back to RFF space with the trainable
+``reconstruction_matrix``, then decodes RFF space to input space by multiplying
+with the transposed random frequency matrix and dividing by
+``n_random_features + regularization``. Both steps are linear and both sets of
+weights are learned by gradient descent. Reconstruction quality is only as good
+as those weights make it. The method's own docstring lists the exact five-step
+path.
 
 Foundational Mathematics:
-The method is built upon Bochner's theorem, which states that any
-shift-invariant kernel `k(x, y) = k(x - y)` is the Fourier transform of a
-non-negative measure. The Random Fourier Features method, introduced by
-Rahimi and Recht, leverages this by approximating the kernel as the expected
-value of a randomized feature map.
+Bochner's theorem says any shift-invariant kernel `k(x, y) = k(x - y)` is the
+Fourier transform of a non-negative measure. Rahimi and Recht turned that into
+a sampling scheme: approximate the kernel as the mean of a randomized feature
+map.
 
 For a shift-invariant kernel `k`, its approximation is:
 `k(x, y) ≈ z(x)ᵀz(y)`
@@ -49,14 +55,14 @@ where:
     (RBF) kernel `k(x, y) = exp(-γ||x-y||²)`, `p(ω)` is a Gaussian distribution.
 -   `bᵢ` are random phase shifts sampled uniformly from `[0, 2π]`.
 
-By projecting the input data `X` into this feature space `Z`, the kernel
-matrix `K ≈ ZZᵀ`. The problem is now reduced to performing standard PCA on `Z`.
-The principal components are the eigenvectors of the covariance matrix `ZᵀZ`.
-The reconstruction from components `c` back to the original space `x` involves
-approximately solving `z(x) = Vc` for `x`, where `V` are the principal
-components. This is made possible by the explicit form of `z(x)`, primarily
-by applying the `arccos` function and solving a linear system involving the
-pseudo-inverse of the frequency matrix `ω`.
+Project the input data `X` into this feature space `Z` and the kernel matrix is
+`K ≈ ZZᵀ`. The problem is now standard linear PCA on `Z`: the principal
+components are the eigenvectors of the covariance of `Z`.
+
+Note:
+    The `laplacian` and `cauchy` kernel options draw their frequencies from the
+    same Gaussian as `rbf`, not from the Cauchy distribution those kernels call
+    for. They are working surrogates, not exact RFF maps.
 
 References:
     - [Gedon, A., et al. (2023). Invertible Kernel PCA with Random Fourier
@@ -77,92 +83,176 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.statistics.invertible_kernel_pca")
 class InvertibleKernelPCA(keras.layers.Layer):
     """
-    Invertible Kernel PCA layer using Random Fourier Features approximation.
+    Kernel PCA in an explicit Random Fourier Feature space, with a decoder.
 
-    Implements ikPCA, which solves the kernel PCA reconstruction problem through
-    Random Fourier Features (RFF) approximation based on Bochner's theorem. The
-    kernel ``k(x, y)`` is approximated as ``z(x)^T z(y)`` where
-    ``z(x) = sqrt(2/D) cos(omega^T x + b)`` with random frequencies ``omega``
-    sampled from the Fourier transform of the kernel and phases ``b`` sampled
-    uniformly from ``[0, 2pi]``. Standard PCA is then performed in this explicit
-    feature space.
+    The layer maps its input through the RFF map
+    ``z(x) = sqrt(2/D) cos(x @ frequencies + phases)``, where ``D`` is
+    ``n_random_features``. The dot product ``z(x)^T z(y)`` approximates a
+    shift-invariant kernel, so PCA on ``z(x)`` behaves like kernel PCA while
+    staying ordinary linear algebra. ``call`` returns the principal components.
+
+    Call ``adapt(data)`` once before you use the output. It eigendecomposes the
+    RFF covariance and writes ``feature_mean``, ``projection_matrix`` and
+    ``eigenvalues``. Skip it and the layer still runs, but its output is a
+    random projection.
 
     .. warning::
 
-        Despite the name and the analytic-invertibility narrative above, this
-        implementation's ``inverse_transform`` is a **LEARNED APPROXIMATION**
-        (trainable ``reconstruction_matrix`` + fixed linear frequency decoder),
-        NOT a true kernel-PCA pre-image solve. The ``laplacian``/``cauchy``
-        kernels use a Gaussian-frequency surrogate (not exact Cauchy
-        frequencies). No online eigendecomposition is performed; the projection
-        and reconstruction weights are learned by gradient descent. See
-        ``inverse_transform`` for the exact reconstruction path. This is a
-        self-consistent "working" layer, not a canonical ikPCA.
+        ``inverse_transform`` is a **LEARNED APPROXIMATION**, NOT a true
+        kernel-PCA pre-image solve. It uses a trainable
+        ``reconstruction_matrix`` followed by a fixed linear frequency decoder,
+        both trained by gradient descent. The ``laplacian`` and ``cauchy``
+        kernel options draw Gaussian frequencies, not the exact Cauchy
+        frequencies those kernels require. No online eigendecomposition runs
+        anywhere. See ``inverse_transform`` for the exact reconstruction path.
+        This is a self-consistent working layer, not a canonical ikPCA.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────────────┐
-        │   Input (batch, input_dim)  │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │  RFF: z(x) = sqrt(2/D)      │
-        │       cos(omega^T x + b)    │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │  Center Features (optional) │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │  PCA Projection in RFF      │
-        │  Space ─► Components        │
-        └─────────────┬───────────────┘
-                      ▼
-        ┌─────────────────────────────┐
-        │  Output (batch, n_comp)     │
-        └─────────────────────────────┘
+        ┌──────────────────────────────────────────┐
+        │ inputs (batch, input_dim)                │
+        └────────────────────┬─────────────────────┘
+                             ▼
+        ┌──────────────────────────────────────────┐
+        │ compute_random_features                  │
+        │ weights: frequencies (input_dim, D)      │
+        │ and phases (D,)                          │
+        │ D = n_random_features                    │
+        └────────────────────┬─────────────────────┘
+                             ▼ (batch, D)
+        ┌──────────────────────────────────────────┐
+        │ subtract feature_mean        (optional)  │
+        │ only when center_features=True           │
+        └────────────────────┬─────────────────────┘
+                             ▼ (batch, D)
+        ┌──────────────────────────────────────────┐
+        │ matmul with projection_matrix            │
+        │ (D, n_components)                        │
+        └────────────────────┬─────────────────────┘
+                             ▼ (batch, n_components)
+        ┌──────────────────────────────────────────┐
+        │ divide by sqrt(|eigenvalues|)            │
+        │ (optional) only when whiten=True         │
+        └────────────────────┬─────────────────────┘
+                             ▼
+        ┌──────────────────────────────────────────┐
+        │ components (batch, n_components)         │
+        └──────────────────────────────────────────┘
 
-        Reconstruction (inverse_transform):
-        ┌──────────┐    ┌───────────┐    ┌───────────┐
-        │Components├──► │RFF Space  ├──► │ arccos +  │──► Original
-        │          │    │(unproject)│    │ pseudo-inv│    Space
-        └──────────┘    └───────────┘    └───────────┘
+    ``feature_mean``, ``projection_matrix`` and ``eigenvalues`` are weights, but
+    ``adapt`` sets them, not gradient descent. ``phases`` never trains.
+    ``frequencies`` trains only when ``trainable_frequencies=True``.
 
-    :param n_components: Number of principal components to extract.
-        Defaults to ``None`` (keep all components).
+    **Forward vs Inverse:**
+
+    .. code-block:: text
+
+           transform / call            inverse_transform
+        ┌───────────────────────────┐   ┌───────────────────────────┐
+        │ inputs (b, input_dim)     │   │ output (b, input_dim)     │
+        └─────────────┬─────────────┘   └─────────────┬─────────────┘
+                      ▼ (b, D)                        ▲ (b, D)
+        ┌───────────────────────────┐   ┌─────────────┴─────────────┐
+        │ compute_random_features   │   │ + reconstruction_bias     │
+        │ sqrt(2/D) *               │   │ (optional: use_bias)      │
+        │ cos(x @ freq + phases)    │   │ @ transpose(frequencies)  │
+        │                           │   │ / (D + regularization)    │
+        └─────────────┬─────────────┘   └─────────────┬─────────────┘
+                      ▼                               ▲
+        ┌───────────────────────────┐   ┌─────────────┴─────────────┐
+        │ - feature_mean            │   │ + feature_mean            │
+        │ (optional: centering)     │   │ (optional: centering)     │
+        └─────────────┬─────────────┘   └─────────────┬─────────────┘
+                      ▼                               ▲
+        ┌───────────────────────────┐   ┌─────────────┴─────────────┐
+        │ @ projection_matrix       │   │ @ reconstruction_matrix   │
+        │ (D, n_components)         │   │ (n_components, D)         │
+        │ fitted by adapt()         │   │ LEARNED trained weight    │
+        └─────────────┬─────────────┘   └─────────────┬─────────────┘
+                      ▼                               ▲
+        ┌───────────────────────────┐   ┌─────────────┴─────────────┐
+        │ / sqrt(|eigenvalues|)     │   │ * sqrt(|eigenvalues|)     │
+        │ (optional: whiten)        │   │ (optional: whiten)        │
+        └─────────────┬─────────────┘   └─────────────┬─────────────┘
+                      ▼                               ▲
+                components (b, n_components)
+
+    The two columns share ``frequencies``, ``phases``, ``feature_mean`` and
+    ``eigenvalues``. They do NOT share the projection: the inverse uses its own
+    ``reconstruction_matrix``, which is why the round trip is approximate even
+    after ``adapt``. The forward column applies a cosine; the inverse column has
+    no matching non-linearity, only the transposed frequency matmul.
+
+    :param n_components: Number of principal components to keep. Must be
+        positive and no larger than ``n_random_features``. Defaults to "None",
+        which resolves in ``build`` to ``min(n_random_features, input_dim)``.
     :type n_components: int | None
-    :param n_random_features: Number of random Fourier features. Defaults to 256.
+    :param n_random_features: Size of the RFF space, ``D``. Larger values give
+        a closer kernel approximation and cost more memory. Must be positive.
+        Defaults to 256.
     :type n_random_features: int
-    :param kernel_type: Type of kernel to approximate. Options: ``'rbf'``,
-        ``'laplacian'``, ``'cauchy'``. Defaults to ``'rbf'``.
+    :param kernel_type: Kernel to approximate. One of "rbf", "laplacian",
+        "cauchy". The last two use a Gaussian frequency surrogate, not their
+        exact frequency distribution. Defaults to "rbf".
     :type kernel_type: str
-    :param gamma: Kernel bandwidth parameter. If ``None``, defaults to
-        ``1.0 / input_dim``.
+    :param gamma: Kernel bandwidth. Defaults to "None", which resolves in
+        ``build`` to ``1.0 / input_dim``.
     :type gamma: float | None
-    :param center_features: Whether to center the RFF features before PCA.
-        Defaults to ``True``.
+    :param center_features: Subtract ``feature_mean`` from the RFF features
+        before projecting, and add it back on the way out. Defaults to "True".
     :type center_features: bool
-    :param whiten: Whether to whiten the principal components. Defaults to ``False``.
+    :param whiten: Divide components by ``sqrt(|eigenvalues|)`` so each has
+        unit variance. Defaults to "False".
     :type whiten: bool
-    :param regularization: Regularization parameter for numerical stability.
-        Defaults to 1e-6.
+    :param regularization: Ridge term. It is added to the diagonal of the RFF
+        covariance in ``adapt`` and to the divisor in ``inverse_transform``.
+        Must be non-negative. Defaults to 1e-6.
     :type regularization: float
-    :param random_seed: Random seed for reproducibility. Defaults to ``None``.
+    :param random_seed: Seed for the frequency and phase draws. The phases use
+        ``random_seed + 1`` so the two streams do not alias. Defaults to
+        "None", which is nondeterministic.
     :type random_seed: int | None
-    :param trainable_frequencies: Whether random frequencies are trainable.
-        Defaults to ``False``.
+    :param trainable_frequencies: Let gradient descent update ``frequencies``.
+        Doing so breaks the kernel approximation the RFF map is derived from.
+        Defaults to "False".
     :type trainable_frequencies: bool
-    :param use_bias: Whether to include bias term in reconstruction.
-        Defaults to ``True``.
+    :param use_bias: Add a trainable ``reconstruction_bias`` at the end of
+        ``inverse_transform``. Defaults to "True".
     :type use_bias: bool
-    :param kernel_regularizer: Optional regularizer for frequency weights.
+    :param kernel_regularizer: Regularizer for ``frequencies``. It is attached
+        only when ``trainable_frequencies=True``. Defaults to "None".
     :type kernel_regularizer: keras.regularizers.Regularizer | None
-    :param bias_regularizer: Optional regularizer for bias weights.
+    :param bias_regularizer: Regularizer for ``reconstruction_bias``. Defaults
+        to "None".
     :type bias_regularizer: keras.regularizers.Regularizer | None
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments passed to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: if ``n_components`` is not positive, if
+        ``n_random_features`` is not positive, if ``kernel_type`` is not one of
+        the three supported names, or if ``regularization`` is negative.
+
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``. The last dimension must
+        be known at build time.
+
+    Output shape:
+        2D tensor of shape ``(batch_size, n_components)``.
+
+    Example:
+        .. code-block:: python
+
+            layer = InvertibleKernelPCA(n_components=8, n_random_features=128)
+            layer.adapt(train_x)
+            codes = layer(train_x)
+            approx = layer.inverse_transform(codes)
+
+    Note:
+        ``build`` overwrites ``self.gamma`` and ``self.n_components`` when they
+        were passed as "None". ``get_config`` serializes the raw constructor
+        values instead, so ``from_config(get_config())`` rebuilds a layer that
+        resolves them the same way against a new input shape.
     """
 
     def __init__(
@@ -181,6 +271,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
             bias_regularizer: Optional[regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
+        """Validate the configuration and store it. No weights are created.
+
+        Weights arrive in ``build``, which also resolves ``gamma`` and
+        ``n_components`` when they were passed as "None". See the class
+        docstring for every parameter and for the errors raised here.
+        """
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -225,10 +321,23 @@ class InvertibleKernelPCA(keras.layers.Layer):
         self.reconstruction_bias = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create Random Fourier Features and PCA projection weights.
+        """Create the RFF and PCA weights.
 
-        :param input_shape: Shape tuple of the input tensor.
+        Resolves ``gamma`` to ``1.0 / input_dim`` and ``n_components`` to
+        ``min(n_random_features, input_dim)`` when either was passed as "None",
+        then creates ``frequencies``, ``phases``, ``projection_matrix``,
+        ``eigenvalues``, ``feature_mean`` (only when ``center_features``),
+        ``reconstruction_matrix`` and ``reconstruction_bias`` (only when
+        ``use_bias``).
+
+        :param input_shape: Shape tuple of the input tensor. Its last entry
+            must be a known integer.
         :type input_shape: tuple[int | None, ...]
+        :return: Nothing.
+        :rtype: None
+        :raises ValueError: if the last dimension of ``input_shape`` is
+            ``None``, if ``n_components`` exceeds ``n_random_features``, or if
+            ``kernel_type`` is not recognised.
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -263,20 +372,19 @@ class InvertibleKernelPCA(keras.layers.Layer):
                 seed=initializer_seed
             )
         elif self.kernel_type == 'laplacian':
-            # APPROXIMATION (documented limitation): the exact Laplacian kernel
-            # requires frequencies sampled from a Cauchy distribution (which has
-            # infinite variance). We deliberately approximate it with a scaled
-            # Gaussian (stddev=gamma). This is a "working" Gaussian-frequency
-            # surrogate, NOT an exact Laplacian RFF map.
+            # DOCUMENTED APPROXIMATION. The exact Laplacian kernel needs
+            # frequencies drawn from a Cauchy distribution, which has infinite
+            # variance. This branch substitutes a scaled Gaussian
+            # (stddev=gamma). It is a working surrogate, not an exact
+            # Laplacian RFF map.
             freq_initializer = initializers.RandomNormal(
                 mean=0.0,
                 stddev=self.gamma,
                 seed=initializer_seed
             )
         elif self.kernel_type == 'cauchy':
-            # APPROXIMATION (documented limitation): same Gaussian-frequency
-            # surrogate as the laplacian branch — not an exact Cauchy-kernel RFF
-            # map. Kept as a Gaussian approximation per the working-bar contract.
+            # DOCUMENTED APPROXIMATION. Same Gaussian surrogate as the
+            # laplacian branch above, not an exact Cauchy-kernel RFF map.
             freq_initializer = initializers.RandomNormal(
                 mean=0.0,
                 stddev=self.gamma,
@@ -295,25 +403,25 @@ class InvertibleKernelPCA(keras.layers.Layer):
         )
 
         # Random phase vector b ~ Uniform(0, 2π)
-        # DECISION plan-2026-08-22T035419-a11304c8/D-304 -- the guard is
-        # `is not None`, NOT truthiness. `random_seed=0` is a legitimate,
-        # widely-used seed and it is FALSY, so a bare `if initializer_seed`
-        # silently dropped the phase draw back to unseeded while the frequency
-        # draw above stayed seeded. The layer was then HALF-seeded at exactly
-        # the seed its own tests use: 60 builds at `random_seed=0` produced 60
-        # DISTINCT sklearn correlations spanning 0.1244..0.9958. Do NOT
-        # "simplify" this back to a truthiness test.
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-304: the seed guard is
+        # `is not None`, never truthiness. `random_seed=0` is falsy, so a bare
+        # `if initializer_seed` left the phases unseeded while the frequencies
+        # above stayed seeded: 60 builds at seed 0 gave 60 DISTINCT sklearn
+        # correlations, 0.1244..0.9958. See decisions.md D-304.
         phase_initializer = initializers.RandomUniform(
             minval=0.0,
             maxval=2 * np.pi,
             seed=initializer_seed + 1 if initializer_seed is not None else None
         )
 
+        # Phases stay fixed. Training them would break the RFF kernel
+        # approximation, and no option exposes them.
         self.phases = self.add_weight(
             name='phases',
             shape=(self.n_random_features,),
             initializer=phase_initializer,
-            trainable=False  # Phases are typically not trainable
+            trainable=False
         )
 
         # PCA projection matrix (from RFF space to principal components)
@@ -363,35 +471,34 @@ class InvertibleKernelPCA(keras.layers.Layer):
         super().build(input_shape)
 
     def adapt(self, data: Union[np.ndarray, keras.KerasTensor]) -> None:
-        # DECISION plan_2026-06-09_be55db55/D-005: this is the correctness-
-        # establishing fit. It mirrors keras.layers.Normalization.adapt:
-        # eager, OUTSIDE call(), assigning into already-existing weights.
-        #
-        # DO NOT move this logic (or any .assign) into call(): an in-call
-        # variable assignment is illegal/unsafe in TF graph mode and was
-        # deleted by plan_2026-06-08_a5f40f4f/D-006. The genuine kernel-PCA
-        # fit is a DATASET-LEVEL operation (eigendecomposition of the full RFF
-        # covariance) and CANNOT be computed per-batch inside call(). Without
-        # this adapt() the layer's projection_matrix stays orthogonal-init and
-        # the output is a random projection (sklearn corr ~chance, see
-        # findings/pca-correctness.md). See decisions.md D-005.
-        """Fit the kernel-PCA projection to ``data`` (genuine RFF kernel PCA).
+        """Fit the kernel-PCA projection to ``data``.
 
-        Mirrors ``keras.layers.Normalization.adapt``. Computes the Random
-        Fourier Features of ``data``, then eigendecomposes their covariance and
-        stores the top-``n_components`` eigenvectors into ``projection_matrix``,
-        the corresponding eigenvalues (descending) into ``eigenvalues``, and the
-        RFF mean into ``feature_mean``. All ``.assign`` calls run eagerly,
-        OUTSIDE ``call`` (legal, like ``Normalization.adapt``).
+        This is the step that makes the layer's output mean anything. It
+        mirrors ``keras.layers.Normalization.adapt``: it runs eagerly, outside
+        ``call``, and assigns into weights that already exist.
 
-        Until ``adapt`` is called the layer still RUNS (random-init projection),
-        but its output is a meaningless random projection of the RFF features.
+        It computes the Random Fourier Features of ``data``, eigendecomposes
+        their covariance, then stores the top ``n_components`` eigenvectors in
+        ``projection_matrix``, the matching eigenvalues in descending order in
+        ``eigenvalues``, and the RFF mean in ``feature_mean``.
+
+        Until you call it, the layer still runs. Its ``projection_matrix``
+        stays at its orthogonal init, so the output is a random projection of
+        the RFF features and correlates with true kernel PCA at chance.
 
         :param data: Calibration data of shape ``(n_samples, input_dim)``.
         :type data: numpy.ndarray | keras.KerasTensor
+        :return: Nothing. The fitted values are written into the weights.
+        :rtype: None
         :raises ValueError: if ``n_samples`` is too small to estimate the
             RFF covariance for the requested ``n_components``.
         """
+        # DECISION plan_2026-06-09_be55db55/D-005: keep this fit here, eager
+        # and outside call(). DO NOT move it (or any .assign) into call():
+        # in-call variable assignment is unsafe in TF graph mode. The fit is
+        # DATASET-LEVEL (eigendecomposition of the full RFF covariance) and
+        # cannot be computed per batch.
+
         # Build (creates the weights) if not yet built.
         data = ops.convert_to_tensor(data, dtype="float32")
         if not self.built:
@@ -399,10 +506,12 @@ class InvertibleKernelPCA(keras.layers.Layer):
 
         n_samples = int(data.shape[0])
 
-        # RFF features (existing, mathematically-correct map) -> numpy.
+        # RFF features -> numpy, shape (n_samples, n_random_features).
+        # float64 because eigh on a near-rank-deficient covariance is
+        # sensitive to precision.
         rff = ops.convert_to_numpy(self.compute_random_features(data)).astype(
             np.float64
-        )  # (n_samples, n_random_features)
+        )
 
         # Under-determination guard: a reliable covariance estimate needs more
         # samples than the requested components (rank of the empirical
@@ -415,8 +524,8 @@ class InvertibleKernelPCA(keras.layers.Layer):
                 f"or reduce n_components."
             )
 
-        # Center the RFF features.
-        feature_mean_value = np.mean(rff, axis=0)  # (n_random_features,)
+        # Center the RFF features. feature_mean_value is (n_random_features,).
+        feature_mean_value = np.mean(rff, axis=0)
         rff_centered = rff - feature_mean_value
 
         # RFF covariance (n_random_features, n_random_features), diagonally
@@ -431,8 +540,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
         eigvals = eigvals[::-1]
         eigvecs = eigvecs[:, ::-1]
 
-        top_eigvecs = eigvecs[:, : self.n_components]  # (n_random_features, k)
-        top_eigvals = eigvals[: self.n_components]  # (k,)
+        # top_eigvecs is (n_random_features, k) and top_eigvals is (k,),
+        # where k is n_components.
+        top_eigvecs = eigvecs[:, : self.n_components]
+        top_eigvals = eigvals[: self.n_components]
 
         # Assign the fitted state into the existing weights (eager / outside
         # call -> legal). Cast back to the weights' dtype.
@@ -452,6 +563,10 @@ class InvertibleKernelPCA(keras.layers.Layer):
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Compute Random Fourier Features for the input.
+
+        Returns ``sqrt(2/D) * cos(inputs @ frequencies + phases)``, with ``D``
+        equal to ``n_random_features``. The scale is what makes
+        ``z(x)^T z(y)`` approximate the kernel rather than ``D`` times it.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
@@ -478,11 +593,15 @@ class InvertibleKernelPCA(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass transforming inputs to principal components.
+        """Map inputs to principal components.
+
+        RFF map, then optional centering, then the projection, then optional
+        whitening. The class docstring draws the whole path. ``training`` is
+        accepted for the Keras contract and changes nothing here.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Boolean flag for training mode.
+        :param training: Keras training flag. Unused.
         :type training: bool | None
         :return: Principal components of shape ``(batch_size, n_components)``.
         :rtype: keras.KerasTensor
@@ -490,16 +609,11 @@ class InvertibleKernelPCA(keras.layers.Layer):
         # Compute Random Fourier Features
         rff_features = self.compute_random_features(inputs)
 
-        # DECISION plan_2026-06-08_a5f40f4f/D-006: NO stateful update is run from
-        # call(). The former `update_pca_components` did
-        # `self.feature_mean.assign(...)` and
-        # `self.projection_matrix.assign(...)` from inside the forward graph,
-        # which is illegal/unsafe in TF graph mode (variable assignment reachable
-        # from call). DO NOT reintroduce an in-call `.assign` "online update".
-        # `feature_mean` / `projection_matrix` are plain weights learned via
-        # gradient descent (projection_matrix trainable=True); `feature_mean`
-        # stays at its zeros init unless externally set. This is a learned
-        # approximation, NOT an online-EVD update. See decisions.md D-006.
+        # DECISION plan_2026-06-08_a5f40f4f/D-006: call() runs NO stateful
+        # update. DO NOT reintroduce an in-call `.assign` "online update":
+        # the removed `update_pca_components` assigned to feature_mean and
+        # projection_matrix from inside the forward graph, which is unsafe in
+        # TF graph mode. Fitting happens in adapt(); see D-005.
 
         # Center features if requested
         if self.center_features:
@@ -520,7 +634,9 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Transform inputs to principal components (alias for call).
+        """Map inputs to principal components with ``training=False``.
+
+        A thin alias for ``call``, kept for the scikit-learn-shaped API.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
@@ -533,41 +649,36 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             components: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Reconstruct original data from principal components.
+        """Reconstruct data from principal components.
 
         .. note::
 
             This is a **LEARNED APPROXIMATION**, NOT an analytic kernel-PCA
-            pre-image. Despite the module docstring's reference to arccos +
-            frequency-matrix pseudo-inverse, this implementation does NOT solve
-            the true pre-image problem. It follows a single, self-consistent
-            learned path:
+            pre-image. The path is a single linear chain:
 
             1. (optional) un-whiten the components,
-            2. map components back to RFF space via the trainable
+            2. map components back to RFF space with the trainable
                ``reconstruction_matrix`` ``(n_components, n_random_features)``,
             3. (optional) add back ``feature_mean``,
-            4. linearly project RFF space back to input space using the
-               (transposed) random ``frequencies`` ``(input_dim, D)`` as a
-               fixed linear decoder, scaled by ``1/(D + regularization)``,
+            4. decode RFF space to input space with the transposed random
+               ``frequencies`` ``(input_dim, D)`` as a fixed linear decoder,
+               scaled by ``1/(D + regularization)``,
             5. (optional) add the trainable ``reconstruction_bias``.
 
-            The arccos / regularized frequency-Gram pseudo-inverse solver that
-            the original code half-implemented (``freq_gram``/``freq_proj``) is
-            intentionally removed: those intermediates were computed and then
-            never used, and the genuine pre-image solve is out of scope for this
-            DEAD layer's "working" bar. Reconstruction quality is therefore only
-            as good as the trainable weights make it.
+            Step 4 has no counterpart to the cosine applied on the way in, so
+            the round trip is approximate no matter how well ``adapt`` fits the
+            forward projection. Reconstruction quality is only as good as the
+            trainable weights make it.
 
         :param components: Principal components of shape ``(batch_size, n_components)``.
         :type components: keras.KerasTensor
         :return: Reconstructed data of shape ``(batch_size, input_dim)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-06-08_a5f40f4f/D-007: single consistent LEARNED
-        # inverse path. DO NOT reintroduce the dead arccos + freq_gram/freq_proj
-        # pseudo-inverse code — those tensors were computed and discarded, and
-        # the real pre-image solver is out of scope (F2). See decisions.md D-007.
+        # DECISION plan_2026-06-08_a5f40f4f/D-007: one LEARNED inverse path.
+        # DO NOT reintroduce the removed arccos + freq_gram/freq_proj
+        # pseudo-inverse code: those tensors were computed and discarded, and
+        # a real pre-image solver is out of scope.
 
         # Un-whiten if whitening was applied
         if self.whiten:
@@ -598,14 +709,22 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Fit the model and transform inputs in one step.
+        """Run ``call`` twice and return the second result.
+
+        .. warning::
+
+            This method does NOT fit anything, despite the name. ``call`` is
+            stateless, so the discarded ``training=True`` pass changes nothing
+            and the result equals ``transform(inputs)``. The fit lives in
+            ``adapt``. Call that instead.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
         :return: Principal components of shape ``(batch_size, n_components)``.
         :rtype: keras.KerasTensor
         """
-        # First pass to fit the model
+        # The first pass is a no-op held over from an earlier in-call fit that
+        # D-006 removed. It is kept so the public signature does not change.
         _ = self.call(inputs, training=True)
 
         # Second pass to transform
@@ -615,11 +734,15 @@ class InvertibleKernelPCA(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Compute reconstruction error for the inputs.
+        """Compute per-sample reconstruction error.
+
+        Runs ``transform`` then ``inverse_transform`` and returns the mean
+        squared error against the input, one value per sample. Expect it to be
+        large until the reconstruction weights have been trained.
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :return: Reconstruction error (MSE) for each sample.
+        :return: Mean squared error of shape ``(batch_size,)``.
         :rtype: keras.KerasTensor
         """
         # Transform to components
@@ -634,12 +757,26 @@ class InvertibleKernelPCA(keras.layers.Layer):
         return error
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
+        :return: ``(batch_size, n_components)``.
+        :rtype: tuple[int | None, ...]
+        """
         batch_size = input_shape[0]
         return (batch_size, self.n_components)
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
+        """Return the constructor configuration for serialization.
+
+        Emits the RAW ``n_components`` and ``gamma`` the caller passed, not the
+        values ``build`` resolved them to, so ``from_config(get_config())``
+        rebuilds an identical pre-build layer.
+
+        :return: Serializable config dictionary.
+        :rtype: dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             # Serialize the RAW constructor sentinels (not the build-mutated
@@ -663,57 +800,102 @@ class InvertibleKernelPCA(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.statistics.invertible_kernel_pca")
 class InvertibleKernelPCADenoiser(keras.layers.Layer):
     """
-    Denoising layer based on Invertible Kernel PCA.
+    Denoiser that projects through an ``InvertibleKernelPCA`` and back.
 
-    Uses ikPCA for denoising by projecting to a lower-dimensional principal
-    component space and reconstructing, effectively removing noise components
-    that correspond to small eigenvalues. The noise level can be estimated
-    via median absolute deviation (MAD) or standard deviation, and the number
-    of retained components can be set adaptively based on this estimate.
+    The layer owns one ``InvertibleKernelPCA`` child, built with
+    ``whiten=True`` and ``center_features=True``. It transforms the noisy input
+    to components, then inverse transforms. Directions the fit gave small
+    eigenvalues carry little signal, so squeezing the data through
+    ``n_components`` of them drops most of the noise.
+
+    Set ``adaptive_components=True`` and the layer also hard-thresholds the
+    components during training. It estimates a per-sample noise level from the
+    input and zeroes every component whose magnitude falls at or below
+    ``noise_level * sqrt(2.0)``. This fork runs ONLY when ``training`` is true.
+    At inference the components pass through untouched.
+
+    Call ``adapt(data)`` before use. It forwards to the child, which is where
+    the actual kernel-PCA fit happens.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────────────────┐
-        │  Noisy Input (batch, dim) │
-        └────────────┬──────────────┘
-                     ▼
-        ┌───────────────────────────┐
-        │  ikPCA Forward Transform  │
-        │  (project to components)  │
-        └────────────┬──────────────┘
-                     ▼
-        ┌───────────────────────────┐
-        │  Adaptive Thresholding    │
-        │  (optional noise filter)  │
-        └────────────┬──────────────┘
-                     ▼
-        ┌───────────────────────────┐
-        │  ikPCA Inverse Transform  │
-        │  (reconstruct denoised)   │
-        └────────────┬──────────────┘
-                     ▼
-        ┌───────────────────────────┐
-        │  Denoised Output          │
-        └───────────────────────────┘
+        ┌──────────────────────────────────────────────┐
+        │ noisy inputs (batch, input_dim)              │
+        └──────────────────────┬───────────────────────┘
+                               ▼
+        ┌──────────────────────────────────────────────┐
+        │ self.ikpca(inputs, training)                 │
+        │ child InvertibleKernelPCA owns the weights   │
+        └──────────────────────┬───────────────────────┘
+                               ▼ components (batch, n_components)
+               adaptive_components and training ?
+                        ┌──────┴────────────────────────┐
+                       yes                             no
+                        ▼                               ▼
+        ┌────────────────────────────────┐    ┌────────────────────┐
+        │ estimate_noise_level(inputs)   │    │ components pass    │
+        │ threshold = noise * sqrt(2.0)  │    │ through unchanged  │
+        │ zero every |c| <= threshold    │    │ (no thresholding)  │
+        └───────────────┬────────────────┘    └─────────┬──────────┘
+                        └──────┬────────────────────────┘
+                               ▼ (batch, n_components)
+        ┌──────────────────────────────────────────────┐
+        │ self.ikpca.inverse_transform(components)     │
+        └──────────────────────┬───────────────────────┘
+                               ▼
+        ┌──────────────────────────────────────────────┐
+        │ denoised (batch, input_dim)                  │
+        └──────────────────────────────────────────────┘
 
-    :param n_components: Number of components to keep (int) or fraction of
-        variance to preserve (float in ``(0, 1]``). Defaults to 0.95.
+    This layer creates no weights of its own. Every weight belongs to the
+    ``ikpca`` child, and both boxes that touch it reference the same instance.
+
+    :param n_components: How many components to keep. An int is used as is. A
+        float in ``(0, 1]`` is read as a fraction and ``build`` turns it into
+        ``max(1, int(n_random_features * fraction))``. Defaults to 0.95.
     :type n_components: int | float
-    :param n_random_features: Number of random Fourier features. Defaults to 512.
+    :param n_random_features: Size of the child's RFF space. Defaults to 512.
     :type n_random_features: int
-    :param kernel_type: Type of kernel. Defaults to ``'rbf'``.
+    :param kernel_type: Kernel passed to the child. Defaults to "rbf".
     :type kernel_type: str
-    :param gamma: Kernel bandwidth. Defaults to ``None`` (auto).
+    :param gamma: Kernel bandwidth passed to the child. Defaults to "None",
+        which lets the child resolve it to ``1.0 / input_dim``.
     :type gamma: float | None
-    :param adaptive_components: Whether to adaptively select components
-        based on noise level estimation. Defaults to ``False``.
+    :param adaptive_components: Enable the training-time hard threshold on the
+        components. Defaults to "False".
     :type adaptive_components: bool
-    :param noise_estimation: Method for noise estimation. Options: ``'mad'``,
-        ``'std'``. Defaults to ``'mad'``.
+    :param noise_estimation: How ``estimate_noise_level`` works. "mad" uses
+        ``1.4826 * median(|x - median(x)|)``. "std" uses the standard deviation
+        of the first difference along the last axis. Defaults to "mad".
     :type noise_estimation: str
-    :param kwargs: Additional arguments for Layer base class.
+    :param kwargs: Additional arguments passed to ``keras.layers.Layer``.
+    :type kwargs: Any
+    :raises ValueError: if ``n_components`` is a float outside ``(0, 1]``.
+
+    :ivar ikpca: The child ``InvertibleKernelPCA``. ``None`` until ``build``
+        creates it, or until ``from_config`` restores a saved one.
+    :vartype ikpca: InvertibleKernelPCA | None
+
+    Input shape:
+        2D tensor of shape ``(batch_size, input_dim)``.
+
+    Output shape:
+        Same as the input, ``(batch_size, input_dim)``.
+
+    Example:
+        .. code-block:: python
+
+            denoiser = InvertibleKernelPCADenoiser(n_components=0.5)
+            denoiser.adapt(clean_x)
+            clean = denoiser(noisy_x)
+
+    Note:
+        The float ``n_components`` is NOT a variance fraction, despite reading
+        like one. ``build`` multiplies it by ``n_random_features`` without
+        looking at any eigenvalue, so the default 0.95 keeps 486 of 512
+        components.
     """
 
     def __init__(
@@ -726,6 +908,14 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             noise_estimation: Literal['mad', 'std'] = 'mad',
             **kwargs: Any
     ) -> None:
+        """Store the configuration and split the ``n_components`` argument.
+
+        An int goes straight to ``self.n_components`` and leaves
+        ``self.variance_threshold`` at ``None``. A float goes the other way,
+        and ``build`` resolves it. The raw argument is kept on
+        ``self.n_components_param`` for ``get_config``. No child layer and no
+        weights are created here. See the class docstring for the parameters.
+        """
         super().__init__(**kwargs)
 
         self.n_components_param = n_components
@@ -750,14 +940,20 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         self.ikpca = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the denoising layer.
+        """Resolve ``n_components`` and build the ``ikpca`` child.
+
+        Reuses an existing child when ``from_config`` already restored one, so
+        deserialization does not silently replace saved weights with a fresh
+        layer.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
+        :return: Nothing.
+        :rtype: None
         """
-        # Determine number of components if using variance threshold
+        # Turn a float n_components into a count. This scales by
+        # n_random_features only; it does not inspect any eigenvalue.
         if self.variance_threshold is not None:
-            # Estimate based on random features and typical variance distribution
             self.n_components = max(
                 1,
                 int(self.n_random_features * self.variance_threshold)
@@ -765,13 +961,15 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
 
         # Create ikPCA child layer only if it was not already provided by
         # from_config (deserialization rebuilds the child from its saved config).
+        # whiten=True puts every retained component on the same scale, so the
+        # single adaptive threshold below applies to all of them equally.
         if self.ikpca is None:
             self.ikpca = InvertibleKernelPCA(
                 n_components=self.n_components,
                 n_random_features=self.n_random_features,
                 kernel_type=self.kernel_type,
                 gamma=self.gamma,
-                whiten=True,  # Whitening helps with denoising
+                whiten=True,
                 center_features=True,
                 name='ikpca_denoiser'
             )
@@ -788,12 +986,20 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """Estimate noise level in the input.
+        """Estimate the per-sample noise level of the input.
 
-        :param inputs: Input tensor.
+        With ``noise_estimation="mad"`` it takes the median absolute deviation
+        along the last axis and scales by 1.4826, the factor that makes MAD an
+        unbiased standard-deviation estimate for Gaussian data. With ``"std"``
+        it takes the standard deviation of the first difference
+        ``inputs[:, 1:] - inputs[:, :-1]``, which suppresses smooth structure
+        and leaves the high-frequency part.
+
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :return: Estimated noise level.
+        :return: Noise level of shape ``(batch_size, 1)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: if ``noise_estimation`` is neither "mad" nor "std".
         """
         if self.noise_estimation == 'mad':
             # Median Absolute Deviation
@@ -811,14 +1017,17 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         return noise_level
 
     def adapt(self, data: Union[np.ndarray, keras.KerasTensor]) -> None:
-        """Fit the underlying ikPCA child to ``data`` (delegates).
+        """Fit the ``ikpca`` child to ``data``.
 
-        Builds the denoiser (and its ``ikpca`` child) if needed, then calls
-        ``self.ikpca.adapt(data)`` so the denoising forward (transform ->
-        inverse) operates in the fitted principal subspace.
+        Builds this layer and its child if needed, then delegates to
+        ``self.ikpca.adapt(data)`` so the transform-and-back path runs in the
+        fitted principal subspace. Skip this and the denoiser projects through
+        a random subspace.
 
         :param data: Calibration data of shape ``(n_samples, input_dim)``.
         :type data: numpy.ndarray | keras.KerasTensor
+        :return: Nothing.
+        :rtype: None
         """
         data = ops.convert_to_tensor(data, dtype="float32")
         if not self.built:
@@ -830,13 +1039,17 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Denoise inputs using ikPCA.
+        """Denoise inputs by projecting through the ikPCA child and back.
 
-        :param inputs: Noisy input tensor.
+        The adaptive threshold branch runs only when
+        ``adaptive_components=True`` AND ``training`` is true. The class
+        docstring draws both leaves.
+
+        :param inputs: Noisy input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param training: Training flag.
+        :param training: Keras training flag. Gates the adaptive threshold.
         :type training: bool | None
-        :return: Denoised tensor.
+        :return: Denoised tensor of shape ``(batch_size, input_dim)``.
         :rtype: keras.KerasTensor
         """
         # Transform to principal components
@@ -845,9 +1058,10 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         # Adaptive component selection based on noise level
         if self.adaptive_components and training:
             noise_level = self.estimate_noise_level(inputs)
-            # Threshold components based on noise level
-            # Components with variance below noise level are likely noise
-            threshold = noise_level * ops.sqrt(2.0)  # Factor for confidence
+            # Zero every component at or below the noise floor. sqrt(2.0) is
+            # the confidence factor: a component must clear the estimated
+            # noise by that margin to survive.
+            threshold = noise_level * ops.sqrt(2.0)
             mask = ops.abs(components) > threshold
             components = components * ops.cast(mask, components.dtype)
 
@@ -857,16 +1071,26 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
         return denoised
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Output shape equals input shape (denoising preserves dimensions)."""
+        """Return the output shape, which equals the input shape.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple[int | None, ...]
+        :return: The same shape tuple.
+        :rtype: tuple[int | None, ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization.
+        """Return the constructor configuration for serialization.
 
-        Serializes the raw ``n_components`` constructor argument
-        (``n_components_param``) plus the child ``ikpca`` config (when built) so
-        that ``from_config`` can rebuild the exact child layer instead of
-        re-deriving it. ``from_config`` consumes the nested ``ikpca_config``.
+        Emits the raw ``n_components`` argument from ``n_components_param``,
+        plus the nested ``ikpca`` config once the child exists. ``from_config``
+        consumes that nested entry and restores the exact child instead of
+        letting ``build`` derive a new one.
+
+        :return: Serializable config dictionary. ``ikpca_config`` is ``None``
+            until the layer is built.
+        :rtype: dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -887,7 +1111,14 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "InvertibleKernelPCADenoiser":
-        """Reconstruct the denoiser, restoring the nested ikPCA child if present."""
+        """Rebuild the denoiser, restoring the nested ikPCA child if present.
+
+        :param config: Config dictionary from ``get_config``.
+        :type config: dict[str, Any]
+        :return: A denoiser whose ``ikpca`` attribute is the deserialized
+            child, or ``None`` when the saved layer was never built.
+        :rtype: InvertibleKernelPCADenoiser
+        """
         config = dict(config)
         ikpca_config = config.pop('ikpca_config', None)
         instance = cls(**config)
