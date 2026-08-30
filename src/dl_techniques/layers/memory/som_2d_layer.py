@@ -18,9 +18,9 @@ reasons:
 * `get_config()` emits `map_size` rather than `grid_shape`, so `.keras` files
   written before the factory existed still load.
 
-See plan_2026-05-13_8c1dc6fd decisions.md D-002 for the additive-factory
-rationale. That plan directory is gone, so this paragraph is the only
-surviving record of it.
+The additive-factory rationale is the `D-002` anchor at the top of
+`factory.py`. Its owning plan directory, `plan_2026-05-13_8c1dc6fd`, no longer
+exists, so that anchor is where the reasoning is kept.
 
 A SOM maps high-dimensional vectors onto a grid of neurons. Each neuron
 `(i, j)` holds a prototype vector `w_ij` as wide as the input. For an input
@@ -252,8 +252,8 @@ class SOM2dLayer(SOMLayer):
         :return: Config dictionary keyed on ``map_size``, not ``grid_shape``.
         :rtype: Dict[str, Any]
         """
-        # Get the base configuration from parent SOMLayer
-        # (initializer/regularizer already canonically serialized by parent — R7).
+        # The parent already serializes the initializer and the regularizer,
+        # so nothing here needs to touch them.
         config = super().get_config()
 
         # Replace 'grid_shape' with 'map_size' for 2D layer compatibility

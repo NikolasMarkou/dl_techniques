@@ -300,6 +300,10 @@ class NTMReadHead(BaseHead):
     the content weights ARE the addressing, and the gate, shift and
     gamma projections are never created.
 
+    On the HYBRID path `gamma_dense` is softplus and 1.0 is added to its
+    output, so the exponent handed to `sharpen_weights` is always above 1
+    and that helper's own `maximum(gamma, 1.0)` clamp never fires here.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -325,6 +329,7 @@ class NTMReadHead(BaseHead):
             │                           │ gate_dense   (optional) │
             │                           │ shift_dense  (optional) │
             │                           │ gamma_dense  (optional) │
+            │                           │   gamma = out + 1.0     │
             │                           └────────────┬────────────┘
             │                                        ▼
             │                    ┌──────────────────────────────────────┐
@@ -357,8 +362,10 @@ class NTMReadHead(BaseHead):
         projection gets its own clone of it. Defaults to
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for the Dense biases. Defaults
-        to `'zeros'`.
+    :param bias_initializer: Initializer for the Dense biases, EXCEPT
+        `key_dense`, which is constructed without it and so keeps Keras'
+        own `'zeros'` default. A non-default value therefore reaches every
+        projection but the key. Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
         Defaults to None.
@@ -702,6 +709,10 @@ class NTMWriteHead(BaseHead):
     exactly as for `NTMReadHead`: the gate, shift and gamma projections
     are created only under `AddressingMode.HYBRID`.
 
+    On the HYBRID path `gamma_dense` is softplus and 1.0 is added to its
+    output, so the exponent handed to `sharpen_weights` is always above 1
+    and that helper's own `maximum(gamma, 1.0)` clamp never fires here.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -729,6 +740,7 @@ class NTMWriteHead(BaseHead):
             │                           │ gate_dense   (optional) │
             │                           │ shift_dense  (optional) │
             │                           │ gamma_dense  (optional) │
+            │                           │   gamma = out + 1.0     │
             │                           └────────────┬────────────┘
             │                                        ▼
             │                    ┌──────────────────────────────────────┐
@@ -761,8 +773,10 @@ class NTMWriteHead(BaseHead):
         projection gets its own clone of it. Defaults to
         `'glorot_uniform'`.
     :type kernel_initializer: str | keras.initializers.Initializer
-    :param bias_initializer: Initializer for the Dense biases. Defaults
-        to `'zeros'`.
+    :param bias_initializer: Initializer for the Dense biases, EXCEPT
+        `key_dense`, which is constructed without it and so keeps Keras'
+        own `'zeros'` default. A non-default value therefore reaches every
+        projection but the key. Defaults to `'zeros'`.
     :type bias_initializer: str | keras.initializers.Initializer
     :param kernel_regularizer: Regularizer shared by every Dense kernel.
         Defaults to None.

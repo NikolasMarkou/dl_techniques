@@ -627,8 +627,12 @@ class SoftSOMLayer(keras.layers.Layer):
 
         Computes ``H(p) = -sum(p * log(p))`` along each grid axis and
         averages. Minimizing it pushes the assignments toward one-hot.
-        Returns 0.0 for an empty list, which happens on the global softmax
-        path.
+
+        The empty-list guard returns 0.0, but nothing in this class can reach
+        it: ``call()`` only calls this method when ``dim_softmaxes is not
+        None``, and the per-dimension path always returns one tensor per grid
+        axis. On the global path ``dim_softmaxes`` is None and this method is
+        not called at all.
 
         :param dim_softmaxes: One softmax tensor per grid axis, in axis
             order, as returned by ``_per_dimension_softmax``.
