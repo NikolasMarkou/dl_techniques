@@ -1185,3 +1185,152 @@ class TestOddDimensionInvertibility:
                 "nothing to it"
             )
         )
+
+
+class TestLogDetSignConvention:
+    """The sign of the reported log-determinant, and the NLL that consumes it.
+
+    Every test here uses a NON-identity flow on purpose. An identity flow has
+    ``s == 1``, so ``sum(log s) == 0`` and the term these tests exist to pin
+    vanishes exactly. That is why the pre-existing identity-flow NLL test could
+    not see CD-10.
+    """
+
+    @staticmethod
+    def _exact_log_prob(flow, y, context, output_dim):
+        """Exact ``log p(y)`` from an autodiff Jacobian, independent of the layer.
+
+        Computes ``log N(z; 0, I) + log|det dz/dy|`` per sample, where the
+        Jacobian of the ``y -> z`` map comes from ``tape.jacobian`` rather than
+        from anything the layer reports.
+        """
+        import tensorflow as tf
+
+        total = 0.0
+        n = int(y.shape[0])
+        for i in range(n):
+            y_i = tf.constant(y.numpy()[i:i + 1])
+            c_i = tf.constant(context.numpy()[i:i + 1])
+            with tf.GradientTape() as tape:
+                tape.watch(y_i)
+                z_i, _ = flow([y_i, c_i])
+            jac = tape.jacobian(z_i, y_i)[0, :, 0, :].numpy()
+            _, log_abs_det = np.linalg.slogdet(jac)
+            z_np = z_i.numpy()[0]
+            total += (
+                -0.5 * (output_dim * np.log(2 * np.pi) + float((z_np ** 2).sum()))
+                + float(log_abs_det)
+            )
+        return total / n
+
+    @pytest.mark.parametrize("seed", [0, 1, 42])
+    def test_nll_matches_autodiff_oracle_on_a_non_identity_flow(self, seed: int) -> None:
+        """``loss_func`` must agree with the change-of-variables formula.
+
+        The oracle is built from an autodiff Jacobian, so it shares no code path
+        with the layer's own log-determinant accumulation.
+        """
+        import tensorflow as tf
+
+        keras.utils.set_random_seed(seed)
+        output_dim, context_dim = 3, 2
+        flow = NormalizingFlowLayer(
+            output_dimension=output_dim,
+            num_flow_steps=2,
+            context_dim=context_dim,
+            hidden_units_coupling=8,
+        )
+        y = tf.constant(np.random.RandomState(seed).randn(4, output_dim).astype("float32"))
+        context = tf.constant(
+            np.random.RandomState(seed + 5).randn(4, context_dim).astype("float32")
+        )
+
+        z, log_det = flow([y, context])
+        reported = -float(flow.loss_func(None, (z, log_det)))
+        exact = self._exact_log_prob(flow, y, context, output_dim)
+
+        assert abs(reported - exact) < 1e-2 * max(1.0, abs(exact)), (
+            f"loss_func disagrees with the change-of-variables formula: "
+            f"reported mean log p(y) = {reported}, exact = {exact}, "
+            f"difference = {reported - exact}. A difference of about "
+            f"2 * mean(log_det) means the Jacobian term is being ADDED where "
+            f"it must be SUBTRACTED."
+        )
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_the_nll_error_is_not_merely_small(self, seed: int) -> None:
+        """Anti-vacuity: the oracle must be able to SEE a sign flip.
+
+        If the log-determinant term were negligible, the oracle test above would
+        pass under either sign and would guard nothing. This pins the term as
+        materially non-zero on the same configuration.
+        """
+        import tensorflow as tf
+
+        keras.utils.set_random_seed(seed)
+        flow = NormalizingFlowLayer(
+            output_dimension=3, num_flow_steps=2, context_dim=2, hidden_units_coupling=8
+        )
+        y = tf.constant(np.random.RandomState(seed).randn(4, 3).astype("float32"))
+        context = tf.constant(np.random.RandomState(seed + 5).randn(4, 2).astype("float32"))
+
+        _, log_det = flow([y, context])
+        assert float(ops.mean(ops.abs(log_det))) > 1e-3, (
+            "The log-determinant term is ~0 on this configuration, so the "
+            "oracle test cannot distinguish the two signs and guards nothing"
+        )
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    @pytest.mark.parametrize("input_dim", [3, 4, 5, 6])
+    def test_inverse_reports_the_log_det_of_the_map_it_performs(
+        self, input_dim: int, reverse: bool
+    ) -> None:
+        """``inverse`` maps ``y -> z``, so it must report ``log|det dz/dy|``.
+
+        Compares the SIGNED value, not the magnitude. Reporting the forward
+        map's log-determinant here is what made the NLL wrong.
+
+        Uses a batch and asserts the term is materially non-zero first. At batch
+        size 1 this test is vacuous whenever the input drives every hidden ReLU
+        negative: both hidden layers then emit zeros, the output Dense emits its
+        zero-initialised bias, and ``s == exp(tanh(0)) == 1`` exactly, so
+        ``log s == 0`` and the assertion holds under EITHER sign. That is not
+        hypothetical -- it happened at ``input_dim=4, reverse=True``.
+        """
+        import tensorflow as tf
+
+        keras.utils.set_random_seed(0)
+        context_dim = 2
+        layer = AffineCouplingLayer(
+            input_dim=input_dim,
+            context_dim=context_dim,
+            hidden_units=8,
+            reverse=reverse,
+        )
+        batch = 8
+        y = tf.constant(np.random.RandomState(0).randn(batch, input_dim).astype("float32"))
+        context = tf.constant(
+            np.random.RandomState(1).randn(batch, context_dim).astype("float32")
+        )
+
+        _, reported = layer.inverse(y, context)
+
+        assert float(ops.max(ops.abs(reported))) > 1e-3, (
+            "The reported log-determinant is ~0 across the whole batch, so this "
+            "test cannot distinguish the two signs and guards nothing. Likely "
+            "every hidden ReLU is dead at init for these inputs."
+        )
+
+        with tf.GradientTape() as tape:
+            tape.watch(y)
+            z, _ = layer.inverse(y, context)
+        jac = tape.jacobian(z, y).numpy()
+
+        for i in range(batch):
+            _, log_abs_det = np.linalg.slogdet(jac[i, :, i, :])
+            assert abs(float(reported[i]) - float(log_abs_det)) < 1e-4, (
+                f"sample {i}: inverse() reported {float(reported[i])} but the "
+                f"autodiff Jacobian of the y->z map it performs has "
+                f"log|det| = {float(log_abs_det)}. An exact sign flip means it "
+                f"is reporting the FORWARD map's log-determinant instead."
+            )
