@@ -287,6 +287,14 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         p for p in readmes if PRETRAINED_TRUE_RE.search(p.read_text(encoding="utf-8"))
     ]
     assert {p.parent.name for p in with_pretrained_true} == {
+        # The three `ascii_*` packages joined on 2026-08-30
+        # (`plan-2026-08-30T203107-30455f66`), exactly as `colbert` did: each
+        # README names `pretrained=True` only to say the call RAISES, which is
+        # the disclaimed form the window above already accepts. Verified BOTH
+        # halves before pinning -- each README carries the single line
+        # "`pretrained=True` raises `NotImplementedError` -- no weights are
+        # distributed.", and each package's `model.py` genuinely raises it.
+        "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
         "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "gpt2",
         "masked_autoencoder", "mobilenet", "modern_bert", "resnet",
         "tree_transformer", "vit", "wave_field",
