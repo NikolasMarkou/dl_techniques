@@ -35,6 +35,7 @@ __all__ = [
     "ExperimentConfig",
     "available_models",
     "build_model",
+    "resolve_contrastive_seq_length",
 ]
 
 #: ``--model`` string -> factory. Append-only; the keys are public API.
@@ -124,6 +125,24 @@ class ExperimentConfig:
     hidden_dropout_rate: float = 0.1
     stochastic_depth_rate: float = 0.0
 
+    #: Sequence length for stage 2 (contrastive) and for the embedding
+    #: evaluation. ``None`` follows :attr:`max_seq_length`, which is the
+    #: behaviour every run before 2026-08-30 had.
+    #:
+    #: This exists to keep the CONTRASTIVE OBJECTIVE fixed while the PRETRAINING
+    #: context varies. In InfoNCE the batch size IS the number of in-batch
+    #: negatives, so a cell that halves ``contrastive_batch_size`` to fit a
+    #: longer sequence is solving an easier contrastive task -- and it gets
+    #: easier in the same direction as any improvement the longer context is
+    #: supposed to show. Measured: ``ascii_bert`` at 1024 peaks at 12.5 GB at
+    #: batch 16, so batch 64 at 1024 does not fit on a 24 GB card at all, and
+    #: the clifford arm already OOMed once at 512 with batch 64.
+    #:
+    #: Setting this to 512 while ``max_seq_length`` is 1024 keeps stage 2 and
+    #: the evaluation identical across the context axis, so retrieval numbers
+    #: stay comparable and only the pretraining context differs.
+    contrastive_seq_length: Optional[int] = None
+
     #: How positional information is produced. ``'sinusoidal'``, NOT the
     #: encoder's own ``'learned'`` default, and the difference is large enough
     #: that it must be recorded per run rather than inherited silently.
@@ -175,6 +194,22 @@ class ExperimentConfig:
             f"{self.model}/{self.variant}/{self.pooling_strategy}/"
             f"seed_{self.seed}"
         )
+
+
+def resolve_contrastive_seq_length(config: "ExperimentConfig") -> int:
+    """Return the stage-2 / evaluation sequence length for a config.
+
+    ONE producer, called by the contrastive stage and by the evaluation, so the
+    two cannot drift apart -- an encoder contrastively trained at one length and
+    evaluated at another would silently measure a length mismatch on top of
+    whatever it is meant to measure.
+
+    :param config: The experiment configuration.
+    :type config: ExperimentConfig
+    :return: ``contrastive_seq_length`` if set, else ``max_seq_length``.
+    :rtype: int
+    """
+    return config.contrastive_seq_length or config.max_seq_length
 
 
 def build_model(config: ExperimentConfig) -> keras.Model:
