@@ -136,9 +136,11 @@ class QuantileHead(keras.layers.Layer):
 
     Note:
         Pass a 3D tensor only with ``flatten_input=True``. With
-        ``flatten_input=False`` the final reshape folds the sequence axis
-        into the batch axis instead of raising: a (4, 7, 16) input returns
-        (28, 5, 3), which disagrees with ``compute_output_shape``.
+        ``flatten_input=False`` the head requires a 2D ``(batch, features)``
+        input and raises ``ValueError`` in ``build()`` on anything else --
+        that flag means "the caller has already flattened", the pattern
+        ``prism`` uses, where the caller reshapes to 2D before the head and
+        restores the sequence axis after it.
     """
 
     def __init__(
@@ -197,11 +199,21 @@ class QuantileHead(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If ``flatten_input=True`` and input is not 3D or
-            has undefined dimensions.
+            has undefined dimensions, or if ``flatten_input=False`` and the
+            input is not 2D.
         """
         # Handle logical reshaping for the build process
         # If flattening is enabled, the Dense layer needs to see the flattened dimension
         dense_input_shape = input_shape
+
+        if not self.flatten_input and len(input_shape) != 2:
+            raise ValueError(
+                f"flatten_input=False expects a 2D input tensor (Batch, Features), "
+                f"but received shape {input_shape}. flatten_input=False means the "
+                f"caller has ALREADY flattened: reshape to (Batch, Seq * Feat) "
+                f"before this head and restore the sequence axis afterwards, or "
+                f"pass flatten_input=True to let the head flatten for you."
+            )
 
         if self.flatten_input:
             # Expecting (Batch, Seq, Feat)
