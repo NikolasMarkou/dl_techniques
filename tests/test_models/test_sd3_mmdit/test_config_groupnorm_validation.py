@@ -2,7 +2,7 @@
 
 Mirrors ``tests/test_models/test_ideogram4/test_config.py::
 TestConfigValidation::test_vae_channel_not_div_32_raises``, but imports
-``_validate_vae_groupnorm`` from ``sd3_mmdit.config`` -- i.e. it tests the
+``validate_vae_groupnorm`` from ``sd3_mmdit.config`` -- i.e. it tests the
 symbol at the NAME THE SD3 MODULE ACTUALLY EXPOSES, not at its definition site.
 
 That distinction is the whole point of this file. ``sd3_mmdit`` re-defined a
@@ -21,7 +21,7 @@ from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
 )
 from dl_techniques.models.vision_language.sd3_mmdit.config import (
-    _validate_vae_groupnorm,
+    validate_vae_groupnorm,
     get_sd3_config,
 )
 
@@ -32,12 +32,12 @@ class TestVaeGroupnormValidation:
     def test_base_ch_not_divisible_by_32_raises(self):
         ae = AutoEncoderParams(ch=48, ch_mult=(1, 2), z_channels=8)
         with pytest.raises(ValueError, match="divisible by 32"):
-            _validate_vae_groupnorm(ae)
+            validate_vae_groupnorm(ae)
 
     def test_another_non_divisible_base_ch_raises(self):
         ae = AutoEncoderParams(ch=16, ch_mult=(1, 2), z_channels=8)
         with pytest.raises(ValueError, match="divisible by 32"):
-            _validate_vae_groupnorm(ae)
+            validate_vae_groupnorm(ae)
 
     def test_no_integer_ch_mult_can_reach_the_stage_check(self):
         """The ``for m in ch_mult`` branch is UNREACHABLE, proven by exhaustion.
@@ -72,7 +72,7 @@ class TestVaeGroupnormValidation:
             for mult in multipliers:
                 ae = AutoEncoderParams(ch=ch, ch_mult=mult, z_channels=8)
                 try:
-                    _validate_vae_groupnorm(ae)
+                    validate_vae_groupnorm(ae)
                 except ValueError as exc:
                     rejected += 1
                     assert "base ch" in str(exc), (
@@ -91,7 +91,7 @@ class TestVaeGroupnormValidation:
         )
 
     def test_valid_ae_passes(self):
-        _validate_vae_groupnorm(
+        validate_vae_groupnorm(
             AutoEncoderParams(ch=32, ch_mult=(1, 2), z_channels=8)
         )
 
@@ -117,6 +117,6 @@ class TestTheValidatorIsNotRedefinedLocally:
         )
 
         assert (
-            _validate_vae_groupnorm
-            is ideogram4_config._validate_vae_groupnorm
+            validate_vae_groupnorm
+            is ideogram4_config.validate_vae_groupnorm
         )

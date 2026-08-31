@@ -36,13 +36,15 @@ from typing import Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 
 # Reuse the VAE parameter dataclass from ideogram4 -- do NOT redefine it (D-002).
-# `_validate_vae_groupnorm` was a byte-equivalent local copy until
-# plan-2026-08-31-a4e0c303/iter-1/step-3; ideogram4 owns it now. Do NOT re-add a
-# local def: a shadowing copy would keep passing every test that imports from
+# `validate_vae_groupnorm` was a byte-equivalent local copy until
+# plan-2026-08-31-a4e0c303/iter-1/step-3; ideogram4 owns it now, under a PUBLIC
+# name since step 3.2 (it was `_validate_vae_groupnorm`, and importing an
+# underscored name across a package boundary marks as private something that is
+# really ideogram4's API). Do NOT re-add a local def: a shadowing copy would keep passing every test that imports from
 # ideogram4, which is why the sd3-side guard imports it from THIS module.
 from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
-    _validate_vae_groupnorm,
+    validate_vae_groupnorm,
 )
 
 # ---------------------------------------------------------------------
@@ -283,7 +285,7 @@ def get_sd3_config(
     ae = AutoEncoderParams(**preset["ae"])
 
     # VAE GroupNorm divisibility.
-    _validate_vae_groupnorm(ae)
+    validate_vae_groupnorm(ae)
 
     # Cross-check the latent channel linkage against the paired AutoEncoder.
     if config.in_channels != ae.z_channels:

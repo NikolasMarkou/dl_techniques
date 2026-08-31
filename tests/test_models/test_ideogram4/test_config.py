@@ -132,20 +132,20 @@ class TestConfigInvariants:
     def test_vae_channel_not_div_32_raises(self):
         # Build a config whose paired AE has a bad ch; go through get_ideogram4_config
         # is preset-only, so test the validator directly via a crafted AE.
-        from dl_techniques.models.vision_language.ideogram4.config import _validate_vae_groupnorm
+        from dl_techniques.models.vision_language.ideogram4.config import validate_vae_groupnorm
 
         # base ch not divisible by 32 -> caught on the base-ch guard.
         ae_bad_ch = AutoEncoderParams(ch=48, ch_mult=(1, 2), z_channels=8)
         with pytest.raises(ValueError, match="divisible by 32"):
-            _validate_vae_groupnorm(ae_bad_ch)
+            validate_vae_groupnorm(ae_bad_ch)
 
         # another non-/32 base.
         ae_break = AutoEncoderParams(ch=16, ch_mult=(1, 2), z_channels=8)
         with pytest.raises(ValueError, match="divisible by 32"):
-            _validate_vae_groupnorm(ae_break)
+            validate_vae_groupnorm(ae_break)
 
         # valid AE passes (sanity that the guard is not over-eager).
-        _validate_vae_groupnorm(AutoEncoderParams(ch=32, ch_mult=(1, 2), z_channels=8))
+        validate_vae_groupnorm(AutoEncoderParams(ch=32, ch_mult=(1, 2), z_channels=8))
 
 
 class TestRoundTrip:

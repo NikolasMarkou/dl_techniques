@@ -23,7 +23,7 @@ Ideogram4 (PyTorch ``autoencoder.py``). The PyTorch reference is channels-FIRST
 GroupNorm uses the built-in ``keras.layers.GroupNormalization(groups=32,
 epsilon=1e-6)`` directly (no repo-norms wrapper). Every channel count fed to a
 GroupNorm must be divisible by 32; the config invariant (config.py
-``_validate_vae_groupnorm``) guarantees this for the provided presets, and the
+``validate_vae_groupnorm``) guarantees this for the provided presets, and the
 ctor also asserts it defensively.
 
 swish(x) = x * sigmoid(x) is ``keras.activations.silu``.

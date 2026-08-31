@@ -324,11 +324,14 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
         below pass ``(B, T, D)``-shaped ``shift``/``scale`` chunks that are
         already aligned with ``h``.
 
-        This is NOT the same function as the module-level ``_modulate`` in
-        ``layers/transformers/sd3_adaln.py``, despite the shared name: that one
-        takes ``(B, dim)`` chunks and expands them to ``(B, 1, dim)`` itself.
-        The two are deliberately kept separate -- unifying them would silently
-        change which axis the conditioning lands on. Pinned by
+        This is NOT the same function as the module-level ``modulate`` in
+        ``layers/transformers/sd3_adaln.py`` (public since
+        ``plan-2026-08-31-a4e0c303``, because ``sd3_mmdit/blocks.py`` imports it
+        across a package boundary): that one takes ``(B, dim)`` chunks and
+        expands them to ``(B, 1, dim)`` itself. This staticmethod stays private
+        -- it has no out-of-package consumer. The two are deliberately kept
+        separate; unifying them would silently change which axis the
+        conditioning lands on. Pinned by
         ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
         """
         return h * (1.0 + scale) + shift

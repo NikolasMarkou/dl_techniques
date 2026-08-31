@@ -1,12 +1,14 @@
-"""Pins the TWO divergent ``_modulate`` broadcast contracts in this package.
+"""Pins the TWO divergent AdaLN modulation broadcast contracts in this package.
 
-Three functions named ``_modulate`` exist in the tree and they are **not** all
-the same function:
+Two functions spelled ``modulate`` / ``_modulate`` survive in the tree and they
+are **not** the same function:
 
-* ``layers/transformers/sd3_adaln.py::_modulate`` — module level. Takes
+* ``layers/transformers/sd3_adaln.py::modulate`` — module level, PUBLIC. Takes
   ``h`` of shape ``(B, N, D)`` and ``shift``/``scale`` of shape ``(B, D)``, and
   performs the ``(B, 1, D)`` ``expand_dims`` ITSELF. The helper owns the
-  broadcast.
+  broadcast. It was named ``_modulate`` until
+  ``plan-2026-08-31-a4e0c303/iter-1/step-2.1`` promoted it: it has a
+  cross-package consumer, so a leading underscore was a false privacy marker.
 * ``models/vision_language/sd3_mmdit/blocks.py::_modulate`` — deleted by
   ``plan-2026-08-31-a4e0c303/iter-1/step-2``; ``blocks.py`` now imports the
   ``sd3_adaln`` one. This file is the guard that the surviving implementation
@@ -72,12 +74,12 @@ def _oracle_caller_broadcasts(h, shift, scale):
 
 
 class TestSd3AdaLNModulateOwnsTheBroadcast:
-    """``sd3_adaln._modulate`` must expand ``(B, D)`` onto the SAMPLE axis."""
+    """``sd3_adaln.modulate`` must expand ``(B, D)`` onto the SAMPLE axis."""
 
     def test_matches_the_per_sample_numpy_oracle(self, operands):
         h, shift, scale = operands
         got = keras.ops.convert_to_numpy(
-            sd3_adaln._modulate(
+            sd3_adaln.modulate(
                 keras.ops.convert_to_tensor(h),
                 keras.ops.convert_to_tensor(shift),
                 keras.ops.convert_to_tensor(scale),
@@ -97,7 +99,7 @@ class TestSd3AdaLNModulateOwnsTheBroadcast:
             "test above cannot discriminate between them"
         )
         got = keras.ops.convert_to_numpy(
-            sd3_adaln._modulate(
+            sd3_adaln.modulate(
                 keras.ops.convert_to_tensor(h),
                 keras.ops.convert_to_tensor(shift),
                 keras.ops.convert_to_tensor(scale),
@@ -112,7 +114,7 @@ class TestSd3AdaLNModulateOwnsTheBroadcast:
         shift = rng.normal(size=(2, D)).astype("float32")
         scale = rng.normal(size=(2, D)).astype("float32")
         got = keras.ops.convert_to_numpy(
-            sd3_adaln._modulate(
+            sd3_adaln.modulate(
                 keras.ops.convert_to_tensor(h),
                 keras.ops.convert_to_tensor(shift),
                 keras.ops.convert_to_tensor(scale),
@@ -125,12 +127,12 @@ class TestSd3AdaLNModulateOwnsTheBroadcast:
 
 
 class TestSd3MMDiTBlocksUsesTheSharedHelper:
-    """``blocks.py`` must not re-define ``_modulate``; it imports the owner."""
+    """``blocks.py`` must not re-define ``modulate``; it imports the owner."""
 
     def test_blocks_modulate_is_the_sd3_adaln_object(self):
         from dl_techniques.models.vision_language.sd3_mmdit import blocks
 
-        assert blocks._modulate is sd3_adaln._modulate
+        assert blocks.modulate is sd3_adaln.modulate
 
 
 class TestAdaLNZeroStaticMethodDoesNotBroadcast:
@@ -159,7 +161,7 @@ class TestAdaLNZeroStaticMethodDoesNotBroadcast:
         static = keras.ops.convert_to_numpy(
             AdaLNZeroConditionalBlock._modulate(*args)
         )
-        shared = keras.ops.convert_to_numpy(sd3_adaln._modulate(*args))
+        shared = keras.ops.convert_to_numpy(sd3_adaln.modulate(*args))
         assert np.max(np.abs(static - shared)) > 1e-2, (
             "the staticmethod and the sd3_adaln helper agree — either one was "
             "merged onto the other's contract, or this fixture cannot tell "

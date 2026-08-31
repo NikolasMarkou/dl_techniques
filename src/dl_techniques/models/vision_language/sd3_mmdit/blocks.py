@@ -67,11 +67,14 @@ from dl_techniques.layers.transformers.sd3_adaln import (
     AdaLayerNormZero,
     AdaLayerNormZeroX,
     AdaLayerNormContinuous,
-    # `_modulate` was defined identically here until
-    # plan-2026-08-31-a4e0c303/iter-1/step-2; `sd3_adaln` owns it now. It
-    # expands `(B, dim)` shift/scale to `(B, 1, dim)` itself -- do NOT swap it
-    # for `AdaLNZeroConditionalBlock._modulate`, which does not.
-    _modulate,
+    # `modulate` was defined identically here until
+    # plan-2026-08-31-a4e0c303/iter-1/step-2; `sd3_adaln` owns it now, under a
+    # PUBLIC name since step 2.1 (it was `_modulate`, and importing an
+    # underscored name across a package boundary marks as private something
+    # that is really this package's API). It expands `(B, dim)` shift/scale to
+    # `(B, 1, dim)` itself -- do NOT swap it for
+    # `AdaLNZeroConditionalBlock._modulate`, which does not.
+    modulate,
 )
 from dl_techniques.layers.ffn.gelu_mlp_ffn import GELUMLPFFN
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -404,7 +407,7 @@ class MMDiTBlock(keras.layers.Layer):
             hidden_states = hidden_states + _gate(attn2_out, gate_msa2)
 
         # --- image FFN -------------------------------------------------
-        nh = _modulate(self.norm2(hidden_states), shift_mlp, scale_mlp)
+        nh = modulate(self.norm2(hidden_states), shift_mlp, scale_mlp)
         ff_out = self.ff(nh, training=training)
         hidden_states = hidden_states + _gate(ff_out, gate_mlp)
 
@@ -415,7 +418,7 @@ class MMDiTBlock(keras.layers.Layer):
         encoder_hidden_states = encoder_hidden_states + _gate(
             enc_out, c_gate_msa
         )
-        ne = _modulate(
+        ne = modulate(
             self.norm2_context(encoder_hidden_states),
             c_shift_mlp,
             c_scale_mlp,

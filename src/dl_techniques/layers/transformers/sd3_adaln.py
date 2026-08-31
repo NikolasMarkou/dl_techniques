@@ -109,7 +109,7 @@ def _unpack_pair_shape(
     return tuple(x_shape), tuple(cond_shape)
 
 
-def _modulate(
+def modulate(
     h: keras.KerasTensor,
     shift: keras.KerasTensor,
     scale: keras.KerasTensor,
@@ -129,7 +129,11 @@ def _modulate(
        ``(B, dim)`` operand from the sample axis to the sequence axis. Owner of
        this contract: this function, used here and by
        ``models/vision_language/sd3_mmdit/blocks.py`` (which imports it rather
-       than re-defining it). Pinned by
+       than re-defining it). That cross-package consumer is why this name is
+       PUBLIC: it was spelled ``_modulate`` until ``plan-2026-08-31-a4e0c303``,
+       and a leading underscore on a name imported from another package is a
+       privacy marker that lies. The ``AdaLNZeroConditionalBlock`` staticmethod
+       keeps its underscore -- nothing outside its module calls it. Pinned by
        ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
     """
     scale = keras.ops.expand_dims(scale, axis=1)
@@ -243,7 +247,7 @@ class AdaLayerNormZero(keras.layers.Layer):
             scale_mlp,
             gate_mlp,
         ) = keras.ops.split(emb, self._N_CHUNKS, axis=-1)
-        x_norm = _modulate(self.norm(x), shift_msa, scale_msa)
+        x_norm = modulate(self.norm(x), shift_msa, scale_msa)
         return x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
     def compute_output_shape(
@@ -369,8 +373,8 @@ class AdaLayerNormZeroX(keras.layers.Layer):
         ) = keras.ops.split(emb, self._N_CHUNKS, axis=-1)
         # norm(x) computed once, reused for both modulations (PyTorch parity).
         n = self.norm(x)
-        x_norm = _modulate(n, shift_msa, scale_msa)
-        x_norm2 = _modulate(n, shift_msa2, scale_msa2)
+        x_norm = modulate(n, shift_msa, scale_msa)
+        x_norm2 = modulate(n, shift_msa2, scale_msa2)
         return (
             x_norm,
             gate_msa,
@@ -491,7 +495,7 @@ class AdaLayerNormContinuous(keras.layers.Layer):
         x, cond = inputs[0], inputs[1]
         emb = self.linear(self.silu(cond))
         scale, shift = keras.ops.split(emb, self._N_CHUNKS, axis=-1)
-        return _modulate(self.norm(x), shift, scale)
+        return modulate(self.norm(x), shift, scale)
 
     def compute_output_shape(
         self, input_shape: Any

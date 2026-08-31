@@ -212,7 +212,7 @@ class Ideogram4Config:
 # ---------------------------------------------------------------------
 
 
-def _validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
+def validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
     """Assert every GroupNorm(32) channel count is divisible by 32.
 
     The base ``ch`` and every stage channel ``ch * m`` for ``m in ch_mult`` feed
@@ -349,7 +349,7 @@ def get_ideogram4_config(
     ae = AutoEncoderParams(**preset["ae"])
 
     # Invariant 4: VAE GroupNorm divisibility.
-    _validate_vae_groupnorm(ae)
+    validate_vae_groupnorm(ae)
 
     # Cross-check the latent linkage against the paired AutoEncoder.
     if config.z_channels != ae.z_channels:

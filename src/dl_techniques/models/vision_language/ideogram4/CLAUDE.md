@@ -67,7 +67,7 @@ The post-norm-inside-the-residual is unusual but replicated exactly.
 
 - **GroupNorm**: uses the built-in `keras.layers.GroupNormalization(groups=32,
   eps=1e-6)` directly — the repo norms factory has no GroupNorm. The
-  channel/32 invariant is enforced both in `config.py` (`_validate_vae_groupnorm`,
+  channel/32 invariant is enforced both in `config.py` (`validate_vae_groupnorm`,
   which `sd3_mmdit/config.py` imports rather than re-defining -- this package owns
   it) and defensively in `vae.py` ctors.
 - **Time embedding serialization bug avoided**: instead of the existing
