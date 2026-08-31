@@ -1,7 +1,7 @@
 # `models/time_series/` — the forecasting family
 
 There is no README here until 2026-08-18, but **every subpackage already had one**;
-this file is the index and the shared-contract page, not a summary of the seven.
+this file is the index and the shared-contract page, not a summary of the eight.
 
 ## The subpackages
 
@@ -9,6 +9,7 @@ this file is the index and the shared-contract page, not a summary of the seven.
 |:---|:---|:---|
 | `adaptive_ema/` | Adaptive EMA slope filter | [README](adaptive_ema/README.md) |
 | `deepar/` | Autoregressive probabilistic forecasting (Monte-Carlo sampled) | [README](deepar/README.md) |
+| `ets/` | Pure additive exponential smoothing; the one RECURSIVE model here, with trainable smoothing parameters | [README](ets/README.md) |
 | `mdn/` | Mixture-density heads | [README](mdn/README.md) |
 | `nbeats/` | N-BEATS basis expansion, plus the exogenous `nbeatsx` variant | [README](nbeats/README.md) |
 | `prism/` | Partitioned / wavelet-band forecasting with a soft router | [README](prism/README.md) |
@@ -52,6 +53,7 @@ Everything is re-exported at the package root:
 from dl_techniques.models.time_series import (
     AdaptiveEMASlopeFilterModel, create_adaptive_ema_slope_filter,
     DeepAR, create_deepar,
+    ETSModel, create_ets,
     MDNModel, create_mdn_model,
     NBeatsNet, create_nbeats_model,
     NBeatsXNet, create_nbeatsx_model,

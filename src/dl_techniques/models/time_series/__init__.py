@@ -4,14 +4,17 @@ A family of independent forecasting architectures, one subpackage each:
 `deepar/` (autoregressive probabilistic), `nbeats/` (basis expansion, plus the
 exogenous `nbeatsx` variant), `prism/`, `tirex/`, `mdn/` (mixture density
 heads), `xlstm/` (extended LSTM, with a dedicated forecaster wrapper) and
-`adaptive_ema/`. They share the `ForecastMixin` in `forecast.py` but no
-backbone, so there is no single variant table across the family.
+`adaptive_ema/` and `ets/` (pure additive exponential smoothing -- the one
+RECURSIVE forecaster here, with trainable smoothing parameters). They share the
+`ForecastMixin` in `forecast.py` but no backbone, so there is no single variant
+table across the family.
 """
 from .adaptive_ema.model import (
     AdaptiveEMASlopeFilterModel,
     create_adaptive_ema_slope_filter,
 )
 from .deepar.model import DeepAR, create_deepar
+from .ets.model import ETSModel, create_ets
 from .mdn.model import MDNModel, create_mdn_model
 from .nbeats.nbeats import NBeatsNet, create_nbeats_model
 from .nbeats.nbeatsx import NBeatsXNet, create_nbeatsx_model
@@ -23,6 +26,7 @@ from .xlstm.model import xLSTM, create_xlstm
 __all__ = [
     "AdaptiveEMASlopeFilterModel",
     "DeepAR",
+    "ETSModel",
     "MDNModel",
     "NBeatsNet",
     "NBeatsXNet",
@@ -30,6 +34,7 @@ __all__ = [
     "TiRexCore",
     "create_adaptive_ema_slope_filter",
     "create_deepar",
+    "create_ets",
     "create_mdn_model",
     "create_nbeats_model",
     "create_nbeatsx_model",

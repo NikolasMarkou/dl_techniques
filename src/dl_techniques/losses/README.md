@@ -34,10 +34,46 @@ The following loss functions are available in this module:
 | **Segmentation** | `SegmentationWrapperLoss`, `SegmentationLosses`, `DiceLoss`, `TverskyLoss`, `FocalTverskyLoss`, `IoULoss`, `create_segmentation_loss_function` | Serializable Keras `Loss` dispatching by name over Dice, Focal, Tversky, Lovász, and combined losses. Save/load round-trips without `custom_objects`. | Semantic segmentation tasks, especially with class imbalance. |
 | **Tabular Ensembles** | `TabMLoss` | Per-row loss for TabM ensemble training; the batch axis it returns tracks `share_training_batches`, keeping `sample_weight`/`class_weight` correct in both modes. | Training TabM tabular ensembles. |
 | **Time Series Forecasting** | `MASELoss`, `SMAPELoss`, `MQLoss`, `QuantileLoss` | Scale-free error metrics (MASE, SMAPE) and quantile loss (MQL) for probabilistic forecasting. | Evaluating and training forecasting models across series with different scales and for generating prediction intervals. |
+| **Time Series (Multistep)** | `MultistepLoss`, `create_multistep_loss`, `MULTISTEP_AGGREGATIONS` | ADAM's h-steps-ahead estimators over the horizon axis: `mseh` (step h only), `tmse` (trace), `gtmse` (geometric trace), `msce` (cumulative error). `error_power=1.0` gives the MAE analogues. | Aligning the objective with the decision horizon -- a lead time, a planning quarter -- instead of the one-step-ahead error nobody acts on. |
 | **Vision-Language (Sigmoid / Hybrid)** | `AdaptiveSigLIPLoss`, `HybridContrastiveLoss` | An adaptive SigLIP variant, and a hybrid combining the SigLIP objective with a cross-modal denoising penalty (noise injection + squared error; NOT score matching). | Scaling vision-language contrastive training beyond softmax-normalized batches. |
 | **Utilization / Load Balancing** | `MANNUtilizationLoss`, `GNNUtilizationLoss` | Load-balancing penalties that discourage collapse onto a few memory slots or expert/routing branches. | Memory-augmented networks and MoE-style routing where capacity must stay spread. |
 | **Wasserstein GANs** | `WassersteinLoss`, `WassersteinGradientPenaltyLoss`, `WassersteinDivergence`, `create_wgan_gp_losses` | Losses based on the Wasserstein distance for stable training of Generative Adversarial Networks. | Training WGANs and WGAN-GP for high-quality generative modeling. |
 | **YOLOv12 Multi-Task** | `YOLOv12MultiTaskLoss`, `create_yolov12_multitask_loss` | An advanced multi-task loss orchestrator for object detection, segmentation, and classification, with optional uncertainty weighting. | Training complex, multi-headed computer vision models like YOLOv12. |
+
+### Multistep (h-steps-ahead) losses
+
+```python
+from dl_techniques.losses import MultistepLoss, create_multistep_loss
+
+# Optimise the whole 12-step horizon, short and long steps weighted comparably.
+model.compile(optimizer="adam", loss=MultistepLoss("gtmse", h=12))
+
+# Optimise the CUMULATIVE error over a 4-period lead time (inventory decisions).
+model.compile(optimizer="adam", loss=create_multistep_loss("msce", h=4))
+```
+
+Inputs are `(batch, horizon)` or `(batch, horizon, features)`; axis 1 is the horizon.
+Quantile outputs (`[B, H, F, Q]`) are not supported -- a pinball objective is a
+different loss, not a reduction of this one.
+
+**`mseh` starves a direct model.** In ADAM these losses constrain a *recursive*
+model, so step `h`'s error still moves every shared parameter. Most forecasters in
+`models/time_series/` are *direct*: they emit the whole `[B, H, F]` block from
+per-step heads in one pass. Under `mseh` every column other than `h` receives
+**exactly zero gradient** and those heads ship untrained, with no shape symptom and
+no warning. Pinned by `tests/test_losses/test_the_mseh_starves_other_horizons.py`.
+
+**No shrinkage is claimed here.** The result these losses are famous for -- that
+minimising h-step errors shrinks a model's smoothing parameters toward zero -- is
+proven for pure additive ETS/ARIMA and arises through *recursive* error
+accumulation (Svetunkov, Kourentzes & Killick 2023). On a direct model these are a
+principled horizon reweighting; there is no smoothing parameter to shrink.
+
+**`gtmse` is batch-size sensitive** by construction: it takes the log of a
+*batch*-level mean error, the batch standing in for the sample of forecast origins.
+Its per-sample form is a first-order expansion about the detached batch mean whose
+batch mean and gradient both match the exact estimator exactly -- see
+`tests/test_losses/test_the_gtmse_surrogate_matches_the_exact_form.py`.
 
 ## Basic Usage
 

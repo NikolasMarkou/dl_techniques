@@ -52,6 +52,9 @@ from dl_techniques.losses import (
 - `lpips_loss.py` — LPIPS-flavored perceptual loss over a frozen ImageNet VGG16 backbone
 - `mase_loss.py` — Mean Absolute Scaled Error
 - `masked_causal_lm_loss.py` — Masked causal LM loss (skip ignore-tokens during NTP)
+- `multistep_loss.py` — ADAM h-steps-ahead losses (`mseh`/`tmse`/`gtmse`/`msce`) over the
+  horizon axis. `gtmse` is the one non-decomposable member: its per-sample form is a
+  first-order expansion about the DETACHED batch mean, exact in both value and gradient
 - `multi_labels_loss.py` — Multi-label classification loss
 - `multi_task_loss.py` — Multi-task loss aggregator with per-task weighting
 - `nano_vlm_loss.py` — NanoVLM vision-language loss
