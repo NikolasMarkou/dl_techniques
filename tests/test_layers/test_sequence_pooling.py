@@ -1022,7 +1022,19 @@ class TestIntegrationScenarios:
 # which is a `top_k_max` fact) — manufactured noise, not coverage. F-25's
 # guards live in `TestPositionalModesIsolateMaskedPositions` below, on cells
 # chosen to discriminate for these modes.
-ISO_LEAKY_STRATEGIES = ['weighted', 'top_k_mean', 'top_k_max']
+# `max` and `min` were ADDED to this list by
+# `plan-2026-08-31T134711-6271592d` step 5, and their absence was the gap:
+# both computed their mask as `inputs + (1 - mask_expanded) * -+1e9`, the
+# additive form, and this list -- the module's own fp16 isolation coverage --
+# excluded EXACTLY the two unguarded strategies. Under `mixed_float16` the
+# sentinel overflows to `+-inf` and `0 * inf = NaN` lands on every KEPT
+# position. Both now select the sentinel via
+# `keras.ops.where` + `utils.dtype_policy.mask_sentinel`, with the `min`
+# strategy NEGATING it (a min-reduction needs the sentinel ABOVE every real
+# value). Adding them here also makes `test_masked_position_is_isolated`
+# apply: the additive form leaks a masked position's CONTENT into the max
+# (`x + (-1e9)` still varies with `x`), which selection cannot.
+ISO_LEAKY_STRATEGIES = ['weighted', 'top_k_mean', 'top_k_max', 'max', 'min']
 
 ISO_ALL_STRATEGIES = [
     'cls', 'first', 'last', 'middle',
@@ -1325,6 +1337,11 @@ class TestMaskedPositionIsolation:
           at 1 and the output is exactly zero.
         * `top_k_max`  — every selected embedding is replaced by the `-1e4`
           sentinel, so the output is that sentinel.
+        * `max`        — every position is replaced by
+          `utils.dtype_policy.mask_sentinel`, so the output is that sentinel
+          (`-1e9` at the float32 policy this test runs under).
+        * `min`        — the same, NEGATED (`+1e9`): a min-reduction needs its
+          sentinel above every real value.
 
         The point of the test is that all three are FINITE (no NaN from a
         `0 * -inf`, no division by zero) and that the degenerate value is a
@@ -1347,6 +1364,17 @@ class TestMaskedPositionIsolation:
             np.testing.assert_allclose(row, x[1].mean(axis=0), rtol=1e-5, atol=1e-5)
         elif strategy == 'top_k_mean':
             np.testing.assert_allclose(row, np.zeros_like(row), rtol=0, atol=0)
+        elif strategy == 'max':
+            # `max` takes its sentinel from `utils.dtype_policy.mask_sentinel`,
+            # which is -1e9 at the float32 policy this test runs under (the
+            # `top_k_max` branch below keeps its own local -1e4 literal).
+            np.testing.assert_allclose(row, np.full_like(row, -1e9), rtol=1e-6, atol=0)
+        elif strategy == 'min':
+            # The MIRROR: a min-reduction needs the sentinel ABOVE every real
+            # value, so it is the NEGATION. The sign is asserted, not assumed --
+            # a flipped sentinel here inverts the pooling while leaving every
+            # shape and finiteness assertion in this file green.
+            np.testing.assert_allclose(row, np.full_like(row, +1e9), rtol=1e-6, atol=0)
         else:
             np.testing.assert_allclose(row, np.full_like(row, -1e4), rtol=1e-6, atol=0)
 

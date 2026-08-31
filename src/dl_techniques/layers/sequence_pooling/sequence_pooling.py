@@ -81,6 +81,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -584,16 +585,33 @@ class SequencePooling(keras.layers.Layer):
 
         elif strategy == 'max':
             if mask is not None:
-                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
-                masked_inputs = inputs + (1.0 - mask_expanded) * (-1e9)
+                # DECISION plan-2026-08-31T134711-6271592d/D-007
+                # This is a REDUCTION, not a softmax: it cannot route through
+                # `attention.common.apply_attention_mask` (an additive softmax
+                # bias with a rescue). SELECT the sentinel instead of adding
+                # it -- `+ (1 - m) * -1e9` is `0 * -inf = NaN` under fp16.
+                keep = keras.ops.expand_dims(keras.ops.cast(mask, "bool"), -1)
+                sentinel = keras.ops.cast(
+                    mask_sentinel(self.compute_dtype), inputs.dtype
+                )
+                masked_inputs = keras.ops.where(keep, inputs, sentinel)
                 return keras.ops.max(masked_inputs, axis=1)
             else:
                 return keras.ops.max(inputs, axis=1)
 
         elif strategy == 'min':
             if mask is not None:
-                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
-                masked_inputs = inputs + (1.0 - mask_expanded) * 1e9
+                # DECISION plan-2026-08-31T134711-6271592d/D-007
+                # The MIRROR of `max` above, and the sign is the whole point:
+                # a `min` reduction needs the sentinel ABOVE every real value,
+                # so `mask_sentinel` (negative by contract) is NEGATED. Getting
+                # this backwards inverts the pooling while every shape and
+                # finiteness assertion still passes.
+                keep = keras.ops.expand_dims(keras.ops.cast(mask, "bool"), -1)
+                sentinel = keras.ops.cast(
+                    -mask_sentinel(self.compute_dtype), inputs.dtype
+                )
+                masked_inputs = keras.ops.where(keep, inputs, sentinel)
                 return keras.ops.min(masked_inputs, axis=1)
             else:
                 return keras.ops.min(inputs, axis=1)
@@ -666,13 +684,16 @@ class SequencePooling(keras.layers.Layer):
             if validity is None:
                 return keras.ops.max(top_k_embeds, axis=1)
             # Bias the INVALID SELECTED embeddings below every real value before
-            # the max. This mirrors the `max` strategy above, but uses the
-            # `ops.where` form with the finite `-1e4` sentinel rather than
-            # `+ (1 - mask) * -1e9`: the additive form is `0 * -inf = NaN` once
-            # `-1e9` underflows to `-inf` under `mixed_float16`.
+            # the max, in the `ops.where` SELECTION form: the additive
+            # `+ (1 - mask) * -1e9` is `0 * -inf = NaN` once `-1e9` overflows
+            # to `-inf` under `mixed_float16`. The `max` strategy above now
+            # uses the same selection form; it differs only in taking its
+            # magnitude from `utils.dtype_policy.mask_sentinel` rather than
+            # from this local `-1e4` literal, which is pinned by
+            # `test_fully_masked_row_is_finite_and_documented`.
             # A fully-masked row therefore returns the sentinel itself; it is
-            # deliberately NOT rescued (the `max` strategy already returns
-            # `-1e9` in the same situation).
+            # deliberately NOT rescued (the `max` strategy likewise returns its
+            # own sentinel in the same situation).
             validity_expanded = keras.ops.expand_dims(validity, -1)
             biased = keras.ops.where(
                 keras.ops.cast(validity_expanded, "bool"),
