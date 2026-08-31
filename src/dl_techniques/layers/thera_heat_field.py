@@ -1,58 +1,94 @@
 """
-THERA neural heat field as Keras layers: ``ThermalActivation`` + ``HeatField``.
+THERA neural heat field, as two Keras layers: ``ThermalActivation`` and ``HeatField``.
 
-THERA (Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields)
-represents the high-resolution signal as a **spatially-varying** SIREN-style
-field whose activations decay according to a closed-form solution of the heat
-equation. The field is evaluated at query coordinates ``x`` and a query "time"
-``t`` (the heat-diffusion time, which encodes the target downscale / smoothing
-level), giving an analytically aliasing-free response.
+What problem this solves
+------------------------
+Classic super-resolution networks are trained for one fixed upscale factor (2x, 4x, ...).
+Arbitrary-scale methods instead learn a *continuous* image: a small neural network that
+maps a coordinate to a color, so you can sample it at any output resolution you like.
+The catch is that a pixel is not a point. A pixel is a small area, and sampling a
+continuous function at single points ignores that area, which produces aliasing
+(jaggies, moire, shimmering) whenever the output grid is coarser than the detail the
+field contains.
 
-The reference JAX/Flax field (``model/thera.py``) is::
+THERA (Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with Neural
+Heat Fields", TMLR 2025, arXiv:2311.17643) fixes this by construction instead of by
+post-hoc blurring or supersampling. The continuous image is written as a sum of sine
+waves (a SIREN-style field), and each sine wave is multiplied by the closed-form solution
+of the heat equation. Blurring an image is mathematically the same as letting heat
+diffuse for some time ``t``, and in the frequency domain that diffusion is just a
+Gaussian decay factor per frequency. So the "correct amount of blur for this output
+resolution" becomes a single scalar knob, applied analytically, at zero extra cost.
 
-    class Thermal(nn.Module):
-        w0_scale: float = 1.
-        def __call__(self, x, t, norm, k):
-            phase = self.param('phase', uniform(.5), x.shape[-1:])
-            return jnp.sin(self.w0_scale * x + phase) \
-                 * jnp.exp(-(self.w0_scale * norm)**2 * k * t)
+The mental model
+----------------
+    high frequency component  ->  decays fast as t grows
+    low  frequency component  ->  survives
 
-    class HeatField(nn.Module):
-        dim_hidden: int; dim_out: int; w0: float = 1.; c: float = 6.
-        def __call__(self, x, t, k, components):     # x: coord; components: (2, hidden)
-            x = x @ components                                # (..., hidden)
-            norm = jnp.linalg.norm(components, axis=-2)       # (hidden,)
-            x = Thermal(self.w0)(x, t, norm, k)               # (..., hidden)
-            w_std = math.sqrt(self.c / self.dim_hidden) / self.w0
-            x = nn.Dense(self.dim_out, kernel_init=uniform_between(-w_std, w_std),
-                         use_bias=False)(x)
-            return x                                          # (..., dim_out)
+    amplitude = exp(-(w0 * norm)^2 * k * t)
 
-Critical architecture fact (this shapes the Keras interface)
-------------------------------------------------------------
-In THERA the field's ``phase`` (shape ``(hidden,)``) and the final ``Dense``
-``kernel`` (shape ``(hidden, dim_out)``) are **NOT** trainable weights of the
-field -- they are **per-pixel parameters produced by the hypernetwork** (the
-``phi`` parameter tree; ``field.init`` is used only for *shape* inference). Only
-``components`` (shape ``(2, hidden)``) and ``k`` (scalar) are global shared
-params.
+``norm`` is how fast a given sine wave oscillates, ``k`` is a learned heat conductivity,
+and ``t`` is the diffusion time. Decay is *quadratic* in frequency, which is exactly the
+Gaussian low-pass filter you would want as an anti-aliasing pre-filter. Because the
+target scale enters only through ``t``, one trained model is correctly anti-aliased at
+every scale, with no retraining and no per-scale filter bank.
 
-So in this Keras port:
+    t small  ->  fine output grid, little smoothing, keep the detail
+    t large  ->  coarse output grid, more smoothing, drop the detail that would alias
 
-* ``HeatField`` OWNS as trainable weights only ``components`` (shape
-  ``(2, hidden_dim)``, init :class:`LinearUpInitializer`) and ``k`` (scalar).
-* ``HeatField.call`` RECEIVES the per-pixel ``phi`` as **inputs**: ``phi_phase``
-  (``(..., hidden)``) and ``phi_kernel`` (``(..., hidden, dim_out)``), alongside
-  the relative query coordinates ``rel_coords`` (``(..., 2)``) and the heat time
-  ``t`` (``(..., 1)`` or scalar / broadcastable).
+What is in this file
+--------------------
+``ThermalActivation``
+    The pointwise nonlinearity: ``sin(w0 * x + phase) * exp(-(w0 * norm)^2 * k * t)``.
+    A SIREN sine times the heat envelope. It is stateless and owns no weights.
 
-The original JAX implementation ``vmap``s the field over pixels and threads a
-nested parameter tree. Here that is replaced by a single **batched einsum** over
-the leading ``(B, Hq, Wq)`` dims (no ``vmap``, no param-tree -- invariant INV-5).
+``HeatField``
+    The field itself, evaluated on a grid of query coordinates. Forward pass:
+
+        rel_coords (..., 2)
+          -> project through shared frequency ``components`` (2, hidden)   [einsum]
+          -> ThermalActivation with the per-pixel ``phase`` and time ``t``
+          -> project through the per-pixel output ``kernel`` (hidden, out) [einsum]
+          -> out (..., out_dim)
+
+The one thing to understand before editing
+------------------------------------------
+THERA's field is *spatially varying*. A hypernetwork looks at the low-resolution input
+and predicts a different field for every pixel. Concretely, the ``phase`` vector and the
+final output ``kernel`` are per-pixel tensors produced by that hypernetwork (the ``phi``
+tree in the reference code), not parameters of the field. Only the frequency
+``components`` and the conductivity ``k`` are global and shared.
+
+That split is mirrored here:
+
+    components      shared, global   ->  OWNED WEIGHT, shape (2, hidden_dim)
+    k               shared, global   ->  OWNED WEIGHT, scalar
+    phi_phase       per pixel        ->  INPUT to call(), shape (..., hidden_dim)
+    phi_kernel      per pixel        ->  INPUT to call(), shape (..., hidden_dim, out_dim)
+
+Adding ``phase`` or the output kernel as weights of ``HeatField`` would duplicate the
+hypernetwork's outputs and collapse the model to a single shared field for the whole
+image, which destroys the property the architecture is named for. See decision D-004.
+
+Difference from the reference implementation
+--------------------------------------------
+The original JAX/Flax code ``vmap``s one field instance over every pixel and threads a
+nested parameter tree through it. Here that is replaced by ordinary batched einsums whose
+leading dimensions are ``(B, Hq, Wq)``: the per-pixel kernel slab simply rides along the
+batch axes. No ``vmap``, no parameter tree (invariant INV-5). The math is identical.
+
+Defaults
+--------
+``k_init = sqrt(log 4) / (2 * pi^2)`` is the reference value, chosen so the Gaussian heat
+kernel at unit time matches THERA's reference anti-alias filter. ``components_init_scale
+= 16.0`` sets the radius of the frequency disk the initial components are drawn from.
+``c`` is kept for config compatibility only and is read by nothing in this port; see the
+``HeatField`` docstring.
 
 Reference:
-    Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
-    Neural Heat Fields" (original JAX/Flax ``model/thera.py``).
+    Becker, Caye Daudt, Narnhofer, Peters, Metzger, Wegner, Schindler.
+    "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields."
+    TMLR 2025. arXiv:2311.17643. https://github.com/prs-eth/thera (``model/thera.py``)
 """
 
 import keras
