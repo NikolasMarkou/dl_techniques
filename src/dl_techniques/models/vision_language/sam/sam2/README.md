@@ -262,6 +262,26 @@ returns the class once its module is imported (repo-root `MIGRATIONS.md`).
 `SAM2MemoryBank` is the deliberate exception: it is a plain-Python container with no weights
 (§5) and carries no decorator at all. `.keras` round trips are covered by the test gate.
 
+### `SAM2FpnNeck.fpn_interp_model` was narrowed — legacy spellings load, new code raises
+
+The neck's 2x top-down step used to run through a repo-local string-dispatch helper (since
+deleted) that lowercased its argument, stripped it, and accepted `"nn"` as a synonym for
+`"nearest"`. The step is now an owned
+`keras.layers.UpSampling2D(size=(2, 2), interpolation=fpn_interp_model,
+name="top_down_upsample")` sub-layer, created in `__init__` and built in `build()`, and
+`UpSampling2D` accepts none of those spellings. So:
+
+* **`__init__` raises `ValueError`** on anything outside `{"nearest", "bilinear"}` — including
+  `"nn"`, `"NEAREST"` and `" nearest "`, all of which used to work.
+* **`from_config` normalizes and remaps**, logging a warning: `.lower().strip()`, then
+  `"nn" -> "nearest"`. Every archive carrying a legacy spelling still loads.
+
+The substitution changes **no numerics and no weights**: `"nn"` and `"nearest"` reached the
+identical `UpSampling2D(interpolation="nearest")` op before the change, and the sub-layer is
+weightless, so `count_params()` and the weight-path list are unchanged (guarded by
+`tests/test_models/test_sam2/test_neck.py::TestTopDownUpsampleSubLayer`). The shipped `tiny`
+and `hiera_l` variants both default to `"nearest"` and are unaffected.
+
 ### Loading a checkpoint written before this package moved — registrar-first
 
 This package used to live at a different dotted path. A `.keras` file records

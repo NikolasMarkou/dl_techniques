@@ -23,6 +23,7 @@ G4.1 sees a missing drop, G4.2 sees a drop from the wrong end. Neither alone is
 sufficient.
 """
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import keras
@@ -992,3 +993,186 @@ class TestDeadComponentPartition:
         assert float(np.std(finest, axis=(1, 2)).max()) < 1e-5
 
 # ---------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------
+# The owned top-down upsample sub-layer (plan-2026-08-31T095434-b4829a10,
+# step 2 guards G1-G4).
+#
+# The 2x top-down step used to be a repo-local string-dispatch helper
+# CONSTRUCTED inside `call()`. It is now a `keras.layers.UpSampling2D`
+# sub-layer created in `__init__`, built in `build()`, and merely applied in
+# `call()`. That swap narrows the accepted `fpn_interp_model` spellings (the
+# helper lowercased, stripped, and aliased `"nn"`), which is a
+# checkpoint-affecting change to a `get_config()`-round-tripped parameter.
+#
+# G1  constructor rejects the narrowed-away spellings
+# G2  `from_config` still loads them, remapping with a warning
+# G3  the `"bilinear"` arm actually interpolates -- the discriminating
+#     counterpart to `test_nearest_upsample_replicates_rather_than_interpolates`
+#     above, which runs only at the default and so cannot see a hardcoded one
+# G4  the new sub-layer is weightless and the weight tree did not move
+# ---------------------------------------------------------------------
+
+#: The pinned G4 configuration, measured at BASE_SHA 82e390a8c BEFORE the
+#: sub-layer existed. Written here as literals on purpose: re-deriving them
+#: from the neck under test would make the assertion unable to fail.
+PIN_G4_CONFIG: Dict[str, Any] = {
+    "d_model": 32,
+    "backbone_channel_list": (64, 32, 16, 8),
+    "fpn_top_down_levels": (2, 3),
+}
+PIN_G4_INPUT_SHAPES: List[Tuple[int, int, int, int]] = [
+    (1, 16, 16, 8), (1, 8, 8, 16), (1, 4, 4, 32), (1, 2, 2, 64),
+]
+PIN_G4_COUNT_PARAMS = 3968
+PIN_G4_WEIGHT_PATHS: List[str] = [
+    "lateral_conv_0/bias",
+    "lateral_conv_0/kernel",
+    "lateral_conv_1/bias",
+    "lateral_conv_1/kernel",
+    "lateral_conv_2/bias",
+    "lateral_conv_2/kernel",
+    "lateral_conv_3/bias",
+    "lateral_conv_3/kernel",
+]
+
+
+def _relative_weight_paths(layer: keras.layers.Layer) -> List[str]:
+    """Sorted weight paths with the layer's own (auto-numbered) name stripped."""
+    prefix = layer.name + "/"
+    return sorted(
+        weight.path[len(prefix):] if weight.path.startswith(prefix)
+        else weight.path
+        for weight in layer.weights
+    )
+
+
+class TestFpnInterpModelValidation:
+    """G1/G2: the narrowing is loud for new code and silent-but-warned for old."""
+
+    def test_fpn_interp_model_rejects_unsupported_value(self) -> None:
+        """Spellings `keras.layers.UpSampling2D` will not take are refused.
+
+        `"nn"`, `"NEAREST"` and `" nearest "` all WORKED before the sub-layer
+        swap, because the old helper normalized and aliased them. They now
+        fail at construction rather than deep inside `call()`. Looped rather
+        than parametrized so this guard is ONE node id, as its success
+        criterion counts it.
+        """
+        for value in ("nn", "NEAREST", " nearest ", "bicubic"):
+            with pytest.raises(ValueError, match="fpn_interp_model"):
+                _neck(fpn_interp_model=value)
+
+    def test_from_config_remaps_legacy_nn_alias(self, caplog: Any) -> None:
+        """An archive carrying `" NN "` still loads, and says so.
+
+        Asserted on the CAPTURED log record, not on the absence of an
+        exception: a `from_config` that normalized silently would pass an
+        exception-only assertion while losing the migration's only trace.
+        """
+        config = _neck().get_config()
+        config["fpn_interp_model"] = " NN "
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            neck = SAM2FpnNeck.from_config(config)
+        assert neck.fpn_interp_model == "nearest"
+        assert neck.upsample.interpolation == "nearest"
+        warnings = [
+            record for record in caplog.records
+            if record.levelno >= logging.WARNING
+            and "fpn_interp_model" in record.getMessage()
+        ]
+        assert warnings, (
+            "from_config remapped a legacy fpn_interp_model spelling without "
+            f"warning; captured records: {[r.getMessage() for r in caplog.records]}"
+        )
+
+        # Anti-vacuity, in the same node: the warning arm is not always on.
+        # Without this, a from_config that warned unconditionally would pass.
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            conforming = SAM2FpnNeck.from_config(_neck().get_config())
+        assert conforming.fpn_interp_model == "nearest"
+        assert not [
+            record for record in caplog.records
+            if "fpn_interp_model" in record.getMessage()
+        ], "a conforming fpn_interp_model was warned about"
+
+
+class TestBilinearArm:
+    """G3: the `"bilinear"` arm is reachable and really interpolates."""
+
+    def test_bilinear_arm_interpolates_rather_than_replicating(self) -> None:
+        """At least one 2x2 tile is NOT constant.
+
+        The exact mirror of
+        `test_nearest_upsample_replicates_rather_than_interpolates`, under the
+        same isolation: only the coarsest lateral contribution is live and the
+        conv biases are zeroed, so level 2 is nothing but the upsampled level
+        3. That test runs only at the default `"nearest"`, so an
+        implementation that ignored `fpn_interp_model` entirely would satisfy
+        it. This one fails against exactly that.
+        """
+        neck = _neck(fpn_interp_model="bilinear")
+        levels = _trunk_levels(batch=1)
+        neck.build([level.shape for level in levels])
+        quiet = [np.zeros_like(level) for level in levels]
+        quiet[-1] = levels[-1]
+        with zeroed_variables([conv.bias for conv in neck.convs]):
+            out, _ = neck(quiet)
+        level2 = ops.convert_to_numpy(out[2])
+        spreads = [
+            float(np.max(np.abs(
+                level2[0, row:row + 2, col:col + 2, :]
+                - level2[0, row, col, :])))
+            for row in range(0, level2.shape[1], 2)
+            for col in range(0, level2.shape[2], 2)
+        ]
+        assert max(spreads) > 1e-5, (
+            "every 2x2 tile is constant at fpn_interp_model='bilinear' -- the "
+            "top-down step replicated instead of interpolating, so the "
+            "constructor's interpolation value is not reaching the upsample"
+        )
+
+
+class TestTopDownUpsampleSubLayer:
+    """G4: the sub-layer is weightless and the weight tree is byte-for-byte."""
+
+    @staticmethod
+    def _pinned_neck() -> SAM2FpnNeck:
+        keras.utils.set_random_seed(1337)
+        neck = SAM2FpnNeck(**PIN_G4_CONFIG)
+        neck.build(PIN_G4_INPUT_SHAPES)
+        return neck
+
+    def test_upsample_sublayer_is_weightless_and_the_weight_tree_is_unchanged(
+            self) -> None:
+        """Measured against literals pinned BEFORE the sub-layer existed.
+
+        `count_params()` and the relative weight-path list are the instrument;
+        a shape assertion is not, because a weighted replacement of the same
+        output shape would satisfy one and not the other.
+        """
+        neck = self._pinned_neck()
+        assert neck.upsample.name == "top_down_upsample"
+        assert neck.upsample.built
+        assert neck.upsample.count_params() == 0, (
+            f"the top-down upsample acquired "
+            f"{neck.upsample.count_params()} parameters; it must be weightless"
+        )
+        assert neck.count_params() == PIN_G4_COUNT_PARAMS, (
+            f"neck.count_params() moved from {PIN_G4_COUNT_PARAMS} to "
+            f"{neck.count_params()}"
+        )
+        assert _relative_weight_paths(neck) == PIN_G4_WEIGHT_PATHS
+
+        # Nothing is constructed in `call()`: the SAME object services every
+        # invocation and every resolution it is applied at.
+        before = neck.upsample
+        inputs = [
+            np.zeros(shape, dtype="float32") for shape in PIN_G4_INPUT_SHAPES
+        ]
+        neck(inputs)
+        neck(inputs)
+        assert neck.upsample is before
+        assert neck.count_params() == PIN_G4_COUNT_PARAMS
