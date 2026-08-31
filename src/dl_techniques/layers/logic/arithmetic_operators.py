@@ -63,53 +63,7 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-
-# ---------------------------------------------------------------------
-
-
-def _canonical_input_shape(
-        input_shape: Union[
-            Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]
-        ]
-) -> Tuple[Optional[int], ...]:
-    """
-    Return the one shape this layer works from, validating the pair.
-
-    ``build``, ``call`` and ``compute_output_shape`` all have to answer the
-    same three questions -- is this one shape or a list of shapes, are
-    there at most two, and do the two agree -- so they ask them here. A
-    single shape can itself arrive as a list, for example after
-    deserialization, so the list-of-shapes test looks at the first element:
-    a list OF shapes has non-dimension elements.
-
-    :param input_shape: One shape, or a list of one or two shapes.
-    :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
-    :return: The single shape to build from, which is the first one.
-    :rtype: Tuple[Optional[int], ...]
-    :raises ValueError: If more than two shapes are given, or two shapes
-        are given and their dimensions differ.
-    """
-    is_list_of_shapes = (
-        isinstance(input_shape, list)
-        and input_shape
-        and not isinstance(input_shape[0], (int, type(None)))
-    )
-    if not is_list_of_shapes:
-        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
-    if len(input_shape) > 2:
-        raise ValueError(
-            f"Expected 1 or 2 inputs, got {len(input_shape)}"
-        )
-    if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
-        raise ValueError(
-            f"Input tensors must have the same shape for binary operations. "
-            f"Got shapes: {input_shape[0]} and {input_shape[1]}"
-        )
-    return tuple(input_shape[0])
-
-
-# ---------------------------------------------------------------------
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 
 
 @register_dl_technique("dl_techniques.layers.logic.arithmetic_operators")
@@ -490,12 +444,12 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         :raises ValueError: If two shapes differ, more than two shapes are
             given, or ``per_channel`` mode gets an unknown last axis. The
-            first two come from :func:`_canonical_input_shape`.
+            first two come from :func:`canonical_binary_input_shape`.
         """
         # The list-of-shapes detection and the two-shapes-must-agree rule
-        # live in _canonical_input_shape, shared with call() and
+        # live in canonical_binary_input_shape, shared with call() and
         # compute_output_shape().
-        shape_for_channels = tuple(_canonical_input_shape(input_shape))
+        shape_for_channels = tuple(canonical_binary_input_shape(input_shape))
 
         # The learnable selection weights. per_channel mode stores
         # (channels, num_operations) so each channel picks its own
@@ -890,7 +844,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             last axis differs from the one ``build`` sized the weights
             for.
         """
-        _canonical_input_shape([tuple(x1.shape), tuple(x2.shape)])
+        canonical_binary_input_shape([tuple(x1.shape), tuple(x2.shape)])
         if self._build_last_dim is None:
             return
         last = tuple(x1.shape)[-1] if len(x1.shape) else None
@@ -1041,9 +995,9 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         :raises ValueError: If two shapes are given and they differ, or
             more than two are given. Both come from
-            :func:`_canonical_input_shape`.
+            :func:`canonical_binary_input_shape`.
         """
-        return _canonical_input_shape(input_shape)
+        return canonical_binary_input_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """

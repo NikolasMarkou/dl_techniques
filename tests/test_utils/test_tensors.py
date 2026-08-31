@@ -6,7 +6,8 @@ from typing import Tuple
 
 from dl_techniques.utils.tensors import \
     power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel, \
-    resolve_training_factor, log_gamma, is_power_of_two
+    resolve_training_factor, log_gamma, is_power_of_two, \
+    canonical_binary_input_shape
 
 
 @pytest.fixture
@@ -478,3 +479,54 @@ class TestIsPowerOfTwo:
             assert mod.is_power_of_two is is_power_of_two, (
                 f"{mod.__name__}.is_power_of_two is not the utils function"
             )
+
+
+class TestCanonicalBinaryInputShape:
+    """Unit contract for the shape canonicalizer shared by the two
+    ``layers/logic`` binary-operator layers.
+
+    It moved here from byte-identical private copies in
+    ``logic_operators.py`` and ``arithmetic_operators.py`` in
+    ``plan-2026-08-31-a4e0c303/iter-1/step-5``. Every assertion below is a
+    behaviour the pre-move copies already had; nothing was "improved".
+    """
+
+    def test_a_plain_tuple_is_returned_unchanged(self):
+        assert canonical_binary_input_shape((4, 8)) == (4, 8)
+        assert canonical_binary_input_shape((None, 4, 8)) == (None, 4, 8)
+
+    def test_a_single_shape_arriving_as_a_list_is_tupled_not_truncated(self):
+        """The deserialization path. A body reduced to
+        ``tuple(input_shape[0])`` would return ``(4,)`` here."""
+        assert canonical_binary_input_shape([4, 8]) == (4, 8)
+        assert canonical_binary_input_shape([None, 4, 8]) == (None, 4, 8)
+
+    def test_a_list_of_one_shape_returns_that_shape(self):
+        assert canonical_binary_input_shape([(4, 8)]) == (4, 8)
+
+    def test_a_matching_pair_returns_the_first(self):
+        assert canonical_binary_input_shape([(4, 8), (4, 8)]) == (4, 8)
+        assert canonical_binary_input_shape([(None, 8), [None, 8]]) == (None, 8)
+
+    def test_a_mismatched_pair_raises(self):
+        with pytest.raises(
+            ValueError, match="Input tensors must have the same shape"
+        ):
+            canonical_binary_input_shape([(4, 8), (4, 16)])
+
+    def test_three_shapes_raise(self):
+        with pytest.raises(ValueError, match="Expected 1 or 2 inputs"):
+            canonical_binary_input_shape([(4, 8), (4, 8), (4, 8)])
+
+    def test_the_two_consumers_route_through_this_function(self):
+        """No private copy may survive at either former definition site."""
+        from dl_techniques.layers.logic import arithmetic_operators
+        from dl_techniques.layers.logic import logic_operators
+
+        for mod in (arithmetic_operators, logic_operators):
+            assert not hasattr(mod, "_canonical_input_shape"), (
+                f"{mod.__name__} still defines a private copy"
+            )
+            assert (
+                mod.canonical_binary_input_shape is canonical_binary_input_shape
+            ), f"{mod.__name__} is not bound to the utils function"

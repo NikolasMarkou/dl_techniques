@@ -344,22 +344,113 @@ class TestB4EveryConstructorArgumentIsAConfigKey:
 
 class TestB5TheShapeCheckLivesInOnePureHelper:
     """B5. Structural pin plus a behavioural equivalence check across
-    the three call sites."""
+    the three call sites.
 
-    @pytest.mark.parametrize(
-        "filename", ("logic_operators.py", "arithmetic_operators.py")
-    )
-    def test_exactly_one_definition_of_the_detection_per_file(self, filename):
-        text = (PACKAGE_DIR / filename).read_text()
-        assert text.count("is_list_of_shapes = (") == 1
-        assert text.count("def _canonical_input_shape(") == 1
+    Until 2026-08-31 the structural arm read
+    ``text.count("def _canonical_input_shape(") == 1`` **per file** over the two
+    logic modules, i.e. it pinned the helper as duplicated once per module --
+    the only way to express "one pure helper" while the helper was
+    package-local. ``plan-2026-08-31-a4e0c303/iter-1/step-5`` moved the body to
+    ``dl_techniques.utils.tensors.canonical_binary_input_shape`` and replaced
+    that arm with the pair below. **The pair is strictly stronger everywhere
+    except at the single configuration the move deliberately creates.**
 
-    @pytest.mark.parametrize(
-        "filename", ("logic_operators.py", "arithmetic_operators.py")
-    )
+    Failure scenarios of the OLD per-file assertion, and the new verdict:
+
+    * a module holds two definitions -> OLD red; NEW red (tree-wide count is 2
+      or 3, not 1).
+    * a module holds none and does not reach the helper at all -> OLD red;
+      NEW red (``test_both_logic_modules_import_the_shared_helper_by_bare_name``
+      finds no import, and the call-site arm finds no caller).
+    * a module holds none but imports and calls the shared helper -> OLD red,
+      NEW green. This one divergence IS the merge, and is the only one.
+
+    Scenarios the OLD assertion could not see at all, and the new pair does:
+
+    * a third copy of the body appearing ANYWHERE under ``src/`` (the old arm
+      looked at exactly two files, so a copy in a new logic module, or in
+      ``models/``, was invisible).
+    * the surviving definition drifting out of ``utils/tensors.py``.
+    * either module importing the helper under an alias or calling it as
+      ``tensors.canonical_binary_input_shape(...)``. That would turn the call
+      node into an ``ast.Attribute`` and silently blind
+      ``test_build_and_compute_output_shape_both_call_the_helper``, which only
+      counts ``ast.Name`` calls -- so the bare-name import is asserted directly
+      rather than assumed.
+    * only ONE of the two modules being wired to the shared helper.
+
+    The detection substring ``is_list_of_shapes`` is still pinned, but its
+    scope had to be chosen rather than simply widened. Tree-wide it is NOT
+    unique: ``layers/attention/{multi_head_cross_attention,multi_head_latent_attention}.py``
+    inline three near-identical copies of the same idiom, and the comment at
+    ``multi_head_cross_attention.py:505-515`` is an explicit standing refusal to
+    collapse them (they disagree about the ``tuple`` container and about numpy
+    shape elements). Pinning it tree-wide would therefore assert a merge this
+    tree has already refused. It is pinned instead as: exactly once in the
+    owner, and ZERO times anywhere in the ``layers/logic`` PACKAGE -- which is
+    broader than the old per-file arm, since it covers every module in the
+    package rather than the two that happened to hold a copy.
+    """
+
+    #: The one file allowed to define the helper, and the tree searched for
+    #: rival definitions. ``PACKAGE_DIR`` is ``src/dl_techniques/layers/logic``.
+    SRC_ROOT = PACKAGE_DIR.parents[2]
+    OWNER = PACKAGE_DIR.parents[1] / "utils" / "tensors.py"
+    LOGIC_MODULES = ("logic_operators.py", "arithmetic_operators.py")
+
+    def test_exactly_one_definition_of_the_detection_tree_wide(self):
+        """Arm (a): the body exists exactly ONCE under ``src/``, in
+        ``utils/tensors.py``, and the retired private spelling is gone."""
+        definitions = []
+        private = []
+        for path in sorted(self.SRC_ROOT.rglob("*.py")):
+            text = path.read_text()
+            definitions += [path] * text.count(
+                "def canonical_binary_input_shape("
+            )
+            private += [path] * text.count("def _canonical_input_shape(")
+        assert definitions == [self.OWNER], definitions
+        assert private == [], private
+        # DECISION plan-2026-08-31T175140-a4e0c303/D-010
+        # The detection idiom is pinned PACKAGE-scoped, not tree-wide. Do NOT
+        # "strengthen" this to a tree-wide `== 1`: three unrelated sites under
+        # layers/attention/ inline the same idiom and the standing comment at
+        # multi_head_cross_attention.py:505-515 explicitly refuses to collapse
+        # them, so a tree-wide count would assert a merge the tree has already
+        # refused. Tried and reverted during execution. See decisions.md D-010.
+        assert self.OWNER.read_text().count("is_list_of_shapes = (") == 1
+        relapsed = [
+            path
+            for path in sorted(PACKAGE_DIR.rglob("*.py"))
+            if "is_list_of_shapes" in path.read_text()
+        ]
+        assert relapsed == [], relapsed
+
+    @pytest.mark.parametrize("filename", LOGIC_MODULES)
+    def test_both_logic_modules_import_the_shared_helper_by_bare_name(
+        self, filename
+    ):
+        """Arm (b), part 1. The import must bind the BARE name: a module
+        import plus a qualified call would make the call an ``ast.Attribute``
+        and blind the call-site arm below without failing it."""
+        tree = ast.parse((PACKAGE_DIR / filename).read_text())
+        bare = [
+            alias
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "dl_techniques.utils.tensors"
+            for alias in node.names
+            if alias.name == "canonical_binary_input_shape"
+        ]
+        assert len(bare) == 1
+        assert bare[0].asname is None
+
+    @pytest.mark.parametrize("filename", LOGIC_MODULES)
     def test_build_and_compute_output_shape_both_call_the_helper(
         self, filename
     ):
+        """Arm (b), part 2. Unchanged in substance from the pre-move guard --
+        only the name it looks for moved."""
         tree = ast.parse((PACKAGE_DIR / filename).read_text())
         callers = set()
         for node in ast.walk(tree):
@@ -369,7 +460,7 @@ class TestB5TheShapeCheckLivesInOnePureHelper:
                 if (
                     isinstance(inner, ast.Call)
                     and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "_canonical_input_shape"
+                    and inner.func.id == "canonical_binary_input_shape"
                 ):
                     callers.add(node.name)
         assert {"build", "compute_output_shape"} <= callers

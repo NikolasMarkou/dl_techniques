@@ -2,7 +2,7 @@ import keras
 import numpy as np
 from keras import ops
 import tensorflow as tf
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List, Union
 
 # ---------------------------------------------------------------------
 
@@ -35,6 +35,65 @@ def is_power_of_two(n: int) -> bool:
     :rtype: bool
     """
     return n >= 1 and (n & (n - 1)) == 0
+
+# ---------------------------------------------------------------------
+
+
+def canonical_binary_input_shape(
+        input_shape: Union[
+            Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]
+        ]
+) -> Tuple[Optional[int], ...]:
+    """
+    Return the one shape a binary elementwise layer works from, validating the pair.
+
+    ``build``, ``call`` and ``compute_output_shape`` all have to answer the
+    same three questions -- is this one shape or a list of shapes, are
+    there at most two, and do the two agree -- so they ask them here. A
+    single shape can itself arrive as a list, for example after
+    deserialization, so the list-of-shapes test looks at the first element:
+    a list OF shapes has non-dimension elements.
+
+    ``layers/logic/logic_operators.py`` and
+    ``layers/logic/arithmetic_operators.py`` held byte-identical private
+    copies of this, named ``_canonical_input_shape``, until
+    ``plan-2026-08-31-a4e0c303/iter-1/step-5``; both now import this one and
+    call it from three sites each. This module imports nothing from either of
+    them; the dependency is one-way and stays that way.
+
+    .. warning::
+       Do NOT reduce the body to ``return tuple(input_shape[0])``. The
+       single-shape branch is load-bearing -- a plain shape tuple would be
+       truncated to its first dimension -- and the two raise paths are the
+       whole point of the helper. Pinned tree-wide by
+       ``tests/test_layers/test_logic/test_the_nine_source_fixes_stay_fixed.py``
+       ``::TestB5TheShapeCheckLivesInOnePureHelper`` and by
+       ``tests/test_utils/test_tensors.py::TestCanonicalBinaryInputShape``.
+
+    :param input_shape: One shape, or a list of one or two shapes.
+    :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    :return: The single shape to build from, which is the first one.
+    :rtype: Tuple[Optional[int], ...]
+    :raises ValueError: If more than two shapes are given, or two shapes
+        are given and their dimensions differ.
+    """
+    is_list_of_shapes = (
+        isinstance(input_shape, list)
+        and input_shape
+        and not isinstance(input_shape[0], (int, type(None)))
+    )
+    if not is_list_of_shapes:
+        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
+    if len(input_shape) > 2:
+        raise ValueError(
+            f"Expected 1 or 2 inputs, got {len(input_shape)}"
+        )
+    if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
+        raise ValueError(
+            f"Input tensors must have the same shape for binary operations. "
+            f"Got shapes: {input_shape[0]} and {input_shape[1]}"
+        )
+    return tuple(input_shape[0])
 
 # ---------------------------------------------------------------------
 
