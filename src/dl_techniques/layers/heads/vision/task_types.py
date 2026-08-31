@@ -1,7 +1,7 @@
 """Task types and configuration objects for the vision heads.
 
 This module says what a vision task is. It builds no layer. Three classes and
-three functions live here:
+three functions live here.
 
 * :class:`VisionTaskType` -- an enum of 37 task names, with lookup helpers for
   categories, compatible tasks and output shapes.
@@ -472,9 +472,8 @@ class VisionTaskType(Enum):
         """
         Name the category this task is filed under.
 
-        Every member is filed, so ``"Uncategorized"`` is a guard against a
-        member being added to the enum without being added to
-        :meth:`get_task_categories`.
+        Every member is filed. ``"Uncategorized"`` is a guard against a member
+        that is added to the enum but not to :meth:`get_task_categories`.
 
         :return: The category name, or ``"Uncategorized"`` if the member is
             missing from the category map.
@@ -532,8 +531,8 @@ class TaskConfiguration:
     A validated set of tasks for a multi-task vision model.
 
     Construction checks the list, then stores it as a set. The query methods
-    answer what that set contains: a named task, one of nine specific tasks,
-    a single task or several, and the set grouped by category.
+    then answer what that set contains. They report a named task, one of nine
+    specific tasks, a single task or several, and the set grouped by category.
 
     Only two task pairs are rejected as incompatible. The check is a guard
     against two known-bad combinations, not a full compatibility model, and
@@ -939,10 +938,10 @@ class CommonTaskConfigurations:
 
     **Presets:**
 
-    The table lists each preset's task count, how many of those tasks
-    ``create_vision_head`` can actually build a head for, and how many
-    categories the tasks span. ``Heads`` below ``N`` means the preset names a
-    task with no head.
+    The table lists three numbers per preset. They are its task count, how
+    many of those tasks ``create_vision_head`` can build a head for, and how
+    many categories the tasks span. ``Heads`` below ``N`` means the preset
+    names a task with no head.
 
     .. code-block:: text
 
@@ -1153,14 +1152,14 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
     """
     Normalize any accepted task spelling into a TaskConfiguration.
 
-    Five input forms are accepted: an existing configuration, a single enum
-    member, a single task name, a list of enum members, and a list of names.
-    An existing configuration is returned unchanged, so
+    Five input forms are accepted. They are an existing configuration, a
+    single enum member, a single task name, a list of enum members, and a list
+    of names. An existing configuration is returned unchanged, so
     ``validate_compatibility`` is ignored in that case.
 
     A mixed list is not supported. Only the first element decides how the
-    whole list is read. A list starting with an enum but holding a string is
-    stored as given, raising nothing here and failing wherever the string is
+    whole list is read. A list that starts with an enum but holds a string is
+    stored as given. It raises nothing here, and fails wherever the string is
     later used as a task.
 
     :param tasks: Task specification in any supported format.

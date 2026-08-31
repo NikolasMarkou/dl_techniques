@@ -18,7 +18,7 @@ callers build them by calling ``create_multi_task_nlp_head``,
 Design note
 -----------
 The plan that added this facade (``plan_2026-06-08_8b32ca51``, D-004) accepted
-it as a near-single-use abstraction and charged it 1/2 of that plan's
+it as a near-single-use abstraction. It charged the facade 1/2 of that plan's
 complexity budget. It stays thin. The three domain factories keep different
 calling conventions. ``nlp`` takes ``task_config`` and ``input_dim``.
 ``vision`` takes a ``task_type`` plus head kwargs. ``vlm`` takes

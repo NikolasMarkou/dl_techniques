@@ -230,9 +230,9 @@ class BaseVisionHead(keras.layers.Layer):
         The attention branch has three cases. ``'multi_head'`` and ``'cbam'``
         get their own argument sets. Every other type goes through
         ``assemble_attention_config``, which drops any keyword the type does
-        not declare. ``create_attention_layer`` raises ``ValueError`` on a
-        keyword the type does not declare, so passing ``dim`` to a type that
-        has no such parameter would fail construction outright.
+        not declare. ``create_attention_layer`` itself raises ``ValueError``
+        on such a keyword. So passing ``dim`` to a type that has no such
+        parameter would fail construction outright.
 
         Called from ``__init__``, following the package rule that layers are
         created in ``__init__``.
@@ -1818,10 +1818,10 @@ class EnhancementHead(BaseVisionHead):
     ``@register_dl_technique("dl_techniques.layers.heads.vision.factory")``,
     so ``get_registered_name`` resolves
     ``dl_techniques.layers.heads.vision.factory>EnhancementHead``. The helper
-    also mints a legacy ``Custom>EnhancementHead`` alias, which is what a
-    checkpoint written before 2026-08-29 reads, and which was verified on
-    2026-08-29 to resolve to this same class. That alias is keyed on the bare
-    class name, so a rename would drop it and break those archives.
+    also mints a legacy ``Custom>EnhancementHead`` alias. That alias is what a
+    checkpoint written before 2026-08-29 reads, and it was verified on
+    2026-08-29 to resolve to this same class. It is keyed on the bare class
+    name, so a rename would drop it and break those archives.
 
     Input shape:
         ``(batch, height, width, channels)``.
@@ -2557,9 +2557,9 @@ class HeadConfiguration:
         """
         Get the high-performance preset for a task type.
 
-        Starts from :meth:`get_default_config` and overrides eight keys: a
-        wider ``hidden_dim``, more dropout, differential attention, a SwiGLU
-        FFN with a larger expansion, and a zero-centred RMS norm.
+        Starts from :meth:`get_default_config` and overrides eight keys.
+        They give a wider ``hidden_dim``, more dropout, differential attention,
+        a SwiGLU FFN with a larger expansion, and a zero-centred RMS norm.
 
         :param task_type: Task the preset is for.
         :type task_type: VisionTaskType
