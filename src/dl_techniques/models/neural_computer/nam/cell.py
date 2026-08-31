@@ -23,7 +23,6 @@ decimals lose their point (``"1.5 + 2"`` -> ``(15, 2)``). See the ``NAM`` module
 docstring and ``tests/test_models/test_nam/test_operand_derivation_through_call.py``.
 """
 
-import numpy as np
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
@@ -45,7 +44,11 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 
-from dl_techniques.utils.dtype_policy import mask_sentinel
+from dl_techniques.utils.dtype_policy import (
+    accumulation_dtype,
+    mask_sentinel,
+    stability_floor,
+)
 
 from .config import NAMConfig
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -607,11 +610,28 @@ class NAMCell(keras.layers.Layer):
 
         # --- 13. Halt decision ---
         halt_input = ops.sum(hidden * ops.expand_dims(token_mask_float, -1), axis=1)
-        # Dtype-aware floor, same ruling as `NAM.call`'s pooled mean:
-        # `np.float16(1e-9)` is exactly 0.0. See decisions.md D-050.
-        halt_eps = max(1e-9, float(np.finfo(self.compute_dtype).tiny))
-        halt_input = halt_input / (
-            ops.sum(token_mask_float, axis=-1, keepdims=True) + halt_eps
+        # DECISION plan-2026-08-31T134711-6271592d/D-016 (SUPERSEDES the
+        # hand-rolled `max(1e-9, float(np.finfo(self.compute_dtype).tiny))`
+        # that stood here; the D-050 ruling it implemented — `np.float16(1e-9)`
+        # is exactly 0.0, so a bare literal protects nothing — still stands and
+        # is now enforced by `stability_floor`). Do NOT restore the local form:
+        # under a `mixed_bfloat16` policy `compute_dtype` is `"bfloat16"`, and
+        # `np.finfo("bfloat16")` RAISES `ValueError: data type
+        # <class 'ml_dtypes.bfloat16'> not inexact` on numpy 2.0.2, so that
+        # line did not return a wrong epsilon — it made this whole `call`
+        # uncallable. `utils.dtype_policy` resolves bfloat16 via
+        # `ml_dtypes.finfo` instead. The epsilon here is ADDED to a divisor, not
+        # clamped with `ops.maximum`, so the guard shape routes it to
+        # `accumulation_dtype` promotion rather than to a coarsened float16
+        # floor (D-014): both casts are identities at float32/float64, so this
+        # is bit-neutral outside half precision.
+        halt_accum = accumulation_dtype(self.compute_dtype)
+        halt_denominator = ops.cast(
+            ops.sum(token_mask_float, axis=-1, keepdims=True), halt_accum
+        ) + stability_floor(halt_accum, 1e-9)
+        halt_input = ops.cast(
+            ops.cast(halt_input, halt_accum) / halt_denominator,
+            self.compute_dtype,
         )
         halt_logits = self.halt_head(halt_input)  # (B, 2)
         q_halt = halt_logits[..., 0]  # (B,)
