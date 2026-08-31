@@ -26,6 +26,7 @@ the subject to derive its own expected value.
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from dl_techniques.layers.transformers import sd3_adaln
 from dl_techniques.layers.transformers.adaln_zero import (
@@ -170,7 +171,21 @@ class TestAdaLNZeroStaticMethodDoesNotBroadcast:
 
     def test_it_refuses_non_square_conditioning(self):
         """Proof the caller really does own the broadcast: ``(2, D)`` cannot
-        be applied to a ``(2, 5, D)`` tensor without an explicit expand."""
+        be applied to a ``(2, 5, D)`` tensor without an explicit expand.
+
+        The oracle is the MESSAGE, not the type. Measured on the shipped
+        TensorFlow backend the multiply raises
+        ``tensorflow.python.framework.errors_impl.InvalidArgumentError:
+        required broadcastable shapes [Op:Mul]`` -- a type that inherits from
+        ``OpError``, not from ``ValueError``, and that other Keras 3 backends do
+        not raise at all (numpy/jax report the same condition as a plain
+        ``ValueError``). So both plausible types are accepted and the substring
+        ``broadcast`` carries the discrimination. Do NOT widen this back to a
+        bare ``pytest.raises(Exception)``: that also accepts an ``ImportError``,
+        an ``AttributeError`` from a renamed staticmethod or a ``TypeError``
+        from a changed signature, none of which is the refusal this arm claims
+        to prove.
+        """
         rng = np.random.default_rng(11)
         h = keras.ops.convert_to_tensor(
             rng.normal(size=(2, 5, D)).astype("float32")
@@ -181,7 +196,9 @@ class TestAdaLNZeroStaticMethodDoesNotBroadcast:
         scale = keras.ops.convert_to_tensor(
             rng.normal(size=(2, D)).astype("float32")
         )
-        with pytest.raises(Exception):
+        with pytest.raises(
+            (tf.errors.InvalidArgumentError, ValueError), match="broadcast"
+        ):
             keras.ops.convert_to_numpy(
                 AdaLNZeroConditionalBlock._modulate(h, shift, scale)
             )

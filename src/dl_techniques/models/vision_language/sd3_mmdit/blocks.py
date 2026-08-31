@@ -67,6 +67,10 @@ from dl_techniques.layers.transformers.sd3_adaln import (
     AdaLayerNormZero,
     AdaLayerNormZeroX,
     AdaLayerNormContinuous,
+    # DECISION plan-2026-08-31T175140-a4e0c303/D-017
+    # Import `modulate`, never re-define it here. A local copy would drift
+    # from the owner's broadcast contract while every test in this package
+    # kept passing.
     # `modulate` was defined identically here until
     # plan-2026-08-31-a4e0c303/iter-1/step-2; `sd3_adaln` owns it now, under a
     # PUBLIC name since step 2.1 (it was `_modulate`, and importing an

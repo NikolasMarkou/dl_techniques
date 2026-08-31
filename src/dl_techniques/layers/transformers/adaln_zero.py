@@ -315,6 +315,10 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
 
         super().build(input_shape)
 
+    # DECISION plan-2026-08-31T175140-a4e0c303/D-016
+    # The CALLER owns the broadcast here, and this staticmethod stays private.
+    # Do NOT merge it into `sd3_adaln.modulate`, which expands the
+    # conditioning chunks itself.
     @staticmethod
     def _modulate(h: keras.KerasTensor, shift: keras.KerasTensor,
                   scale: keras.KerasTensor) -> keras.KerasTensor:

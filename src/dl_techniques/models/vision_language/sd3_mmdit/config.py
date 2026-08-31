@@ -36,6 +36,10 @@ from typing import Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 
 # Reuse the VAE parameter dataclass from ideogram4 -- do NOT redefine it (D-002).
+# DECISION plan-2026-08-31T175140-a4e0c303/D-018
+# Import `validate_vae_groupnorm` from its ideogram4 owner, never re-declare it
+# here. A shadowing local copy stays green against every test that imports
+# the name from ideogram4 rather than from this module.
 # `validate_vae_groupnorm` was a byte-equivalent local copy until
 # plan-2026-08-31-a4e0c303/iter-1/step-3; ideogram4 owns it now, under a PUBLIC
 # name since step 3.2 (it was `_validate_vae_groupnorm`, and importing an

@@ -12,6 +12,10 @@ DEFAULT_EPSILON = 1e-6
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-08-31T175140-a4e0c303/D-014
+# Keep the explicit `n >= 1` clause below. Do NOT collapse `is_power_of_two`
+# to the bare bit trick: it accepts zero, which admits a zero-width dimension
+# into both binary-tree consumers.
 def is_power_of_two(n: int) -> bool:
     """Report whether ``n`` is a power of two.
 

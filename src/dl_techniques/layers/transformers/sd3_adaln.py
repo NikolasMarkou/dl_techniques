@@ -109,6 +109,10 @@ def _unpack_pair_shape(
     return tuple(x_shape), tuple(cond_shape)
 
 
+# DECISION plan-2026-08-31T175140-a4e0c303/D-015
+# This helper owns its broadcast, and its name is PUBLIC because another
+# package imports it. Do NOT unify it with `AdaLNZeroConditionalBlock.
+# _modulate`, and do NOT re-privatise the name.
 def modulate(
     h: keras.KerasTensor,
     shift: keras.KerasTensor,
