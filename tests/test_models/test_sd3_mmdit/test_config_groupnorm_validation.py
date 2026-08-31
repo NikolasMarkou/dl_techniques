@@ -27,7 +27,7 @@ from dl_techniques.models.vision_language.sd3_mmdit.config import (
 
 
 class TestVaeGroupnormValidation:
-    """Two raise paths and one pass path, at the sd3 name."""
+    """Two raise paths, one pass path, and one unreachability proof."""
 
     def test_base_ch_not_divisible_by_32_raises(self):
         ae = AutoEncoderParams(ch=48, ch_mult=(1, 2), z_channels=8)
@@ -39,17 +39,56 @@ class TestVaeGroupnormValidation:
         with pytest.raises(ValueError, match="divisible by 32"):
             _validate_vae_groupnorm(ae)
 
-    def test_stage_channel_not_divisible_by_32_raises(self):
-        """A legal base ``ch`` with an illegal ``ch * m`` must still raise.
+    def test_no_integer_ch_mult_can_reach_the_stage_check(self):
+        """The ``for m in ch_mult`` branch is UNREACHABLE, proven by exhaustion.
 
-        The ideogram4 test only exercises the base-``ch`` guard, so without
-        this arm the loop over ``ch_mult`` is unpinned on both sides.
+        This replaces an arm that was named ``..._raises`` and asserted that
+        nothing raises, over an ``AutoEncoderParams(ch=32, ch_mult=(1, 2))``
+        that is perfectly legal -- a test whose body contradicted its own name
+        and pinned nothing.
+
+        The proof: the validator checks ``ch % 32 != 0`` FIRST, so anything
+        reaching the loop has ``ch == 32 * k``; ``ch_mult`` is declared
+        ``Tuple[int, ...]``, so ``ch * m == 32 * k * m`` is divisible by 32 for
+        every integer ``m``. No value consistent with the declared type can
+        make the second check fire.
+
+        The oracle is the MESSAGE, not the raise: over 256 base widths x 5
+        multiplier tuples, every rejection must be the BASE-``ch`` message.
+        RED-PROVEN -- weakening the base check to ``ch % 16`` lets ``ch=48``
+        through it and the stage loop then rejects it with the stage message,
+        failing this arm (an earlier draft asserted only "nothing raises on a
+        32-multiple grid" and stayed GREEN under that same mutant).
+
+        The branch IS reachable with a non-integer multiplier (the frozen
+        dataclass does no runtime type check: ``ch_mult=(1, 1.5)`` raises
+        ``ch * 1.5 = 48.0``), but that violates the annotation, and pinning a
+        type-contract violation is not what the deleted arm claimed to do.
         """
-        ae = AutoEncoderParams(ch=32, ch_mult=(1, 3, 5), z_channels=8)
-        # ch * 3 == 96 is fine; the first offender must be reported by value.
-        ae_bad = AutoEncoderParams(ch=32, ch_mult=(1, 2), z_channels=8)
-        _validate_vae_groupnorm(ae_bad)  # sanity: this one is legal
-        _validate_vae_groupnorm(ae)  # 32/96/160 are all divisible by 32
+        multipliers = [(1,), (1, 2), (1, 2, 4, 4), (1, 3, 5), (2, 3, 7)]
+        accepted = 0
+        rejected = 0
+        for ch in range(1, 257):
+            for mult in multipliers:
+                ae = AutoEncoderParams(ch=ch, ch_mult=mult, z_channels=8)
+                try:
+                    _validate_vae_groupnorm(ae)
+                except ValueError as exc:
+                    rejected += 1
+                    assert "base ch" in str(exc), (
+                        f"ch={ch}, ch_mult={mult} was rejected by the STAGE "
+                        f"check ({exc}). For integer ch_mult that branch is "
+                        f"unreachable behind the base check -- reaching it "
+                        f"means the base check was weakened."
+                    )
+                else:
+                    accepted += 1
+        # Anti-vacuity: the grid must exercise BOTH verdicts, or the message
+        # assertion above could be satisfied by never running.
+        assert accepted > 0 and rejected > 0, (
+            f"grid produced {accepted} accepted / {rejected} rejected; it must "
+            f"exercise both sides or it certifies nothing"
+        )
 
     def test_valid_ae_passes(self):
         _validate_vae_groupnorm(

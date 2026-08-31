@@ -219,11 +219,26 @@ def _validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
     ``keras.layers.GroupNormalization(groups=32)`` in the VAE; each must be
     divisible by 32 or the layer raises at build time.
 
+    Note:
+        The stage loop is UNREACHABLE for the declared ``ch_mult:
+        Tuple[int, ...]``. The base check runs first, so anything reaching the
+        loop has ``ch == 32 * k``, and ``32 * k * m`` is divisible by 32 for
+        every integer ``m``. It is kept as defence-in-depth for a non-integer
+        multiplier (the frozen dataclass does no runtime type check, so
+        ``ch_mult=(1, 1.5)`` does raise here). Do NOT write a test asserting
+        that an *integer* ``ch_mult`` reaches this branch -- one was shipped in
+        ``tests/test_models/test_sd3_mmdit/test_config_groupnorm_validation.py``
+        and asserted the opposite of its own name before being replaced by an
+        exhaustive unreachability proof. Nor weaken the base check to a smaller
+        modulus: that is the one edit that makes this branch live for integer
+        input, and the replacement test is RED-proven against exactly it.
+
     Args:
         ae: The AutoEncoder parameters to validate.
 
     Raises:
-        ValueError: If ``ch`` or any ``ch * m`` is not divisible by 32.
+        ValueError: If ``ch`` is not divisible by 32, or -- only for a
+            non-integer multiplier -- if some ``ch * m`` is not.
     """
     if ae.ch % 32 != 0:
         raise ValueError(
