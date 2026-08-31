@@ -61,6 +61,11 @@ References:
 
 import keras
 from typing import Optional, Dict, Any, Union, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

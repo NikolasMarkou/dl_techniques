@@ -59,7 +59,7 @@ import keras
 from typing import Optional, Union, Any, Tuple, Dict, Callable
 
 # ---------------------------------------------------------------------
-# Framework-specific imports
+# local imports
 # ---------------------------------------------------------------------
 
 from .layer_scale import LearnableMultiplier
@@ -225,7 +225,6 @@ class OrthoBlock(keras.layers.Layer):
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined for OrthoBlock")
 
-        # BUILD sub-layers in computational order for proper shape propagation
         self.dense.build(input_shape)
         dense_output_shape = self.dense.compute_output_shape(input_shape)
 

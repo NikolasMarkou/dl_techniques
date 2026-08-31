@@ -295,12 +295,12 @@ from typing import Any, Dict, Literal, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from .single_window_attention import SingleWindowAttention
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from .single_window_attention import SingleWindowAttention
 
 # ---------------------------------------------------------------------
 # Probability types not supported in window attention (score-level routing

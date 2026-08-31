@@ -10,6 +10,11 @@ decoder uses Euclidean distance in accordance with the sHGCN simplifications.
 
 import keras
 from typing import List, Any, Union, Tuple, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

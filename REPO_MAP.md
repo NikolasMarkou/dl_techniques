@@ -37,17 +37,16 @@ and C (conventions, tests, doc routing, the stale-doc ledger) follow below.
 ├── data/                    # LOCAL ONLY — untracked, local datasets
 ├── CLAUDE.md                # repo-wide agent/contributor instructions
 ├── README.md                # project overview
-├── Makefile                 # test / clean / structure / docs targets
+├── Makefile                 # test / clean / structure targets
 ├── pyproject.toml           # src-layout packaging + dependency pins
 ├── requirements.txt         # a SECOND, diverging pin set — see Part C
-├── generate_docs.py         # doc generator; its output tree is NOT committed
 ├── Dockerfile
 └── LICENSE
 ```
 
 Two directories that older docs name do **not** exist here: a committed documentation
-tree (it is generated on demand by `make docs` and never committed) and a second image
-directory. A prototyping tree under `src/` was deleted in `4673fc88`. See the stale-doc
+tree (there is no doc generator either — `generate_docs.py` and the `make docs` target
+were deleted as deprecated) and a second image directory. A prototyping tree under `src/` was deleted in `4673fc88`. See the stale-doc
 ledger in Part C.
 
 `src/` is the import root. The editable install puts it on `sys.path` process-wide, so
@@ -551,7 +550,7 @@ table are named precisely *because* they do not resolve.
 
 <!-- allow-dead-path: src/experiments/ - ledger subject: deleted in 4673fc88; naming it is the point of the row -->
 <!-- allow-dead-path: src/experiments/undivided_attention/ - ledger subject: never committed in any reachable commit -->
-<!-- allow-dead-path: docs/ - ledger subject: generated on demand by `make docs`, never committed -->
+<!-- allow-dead-path: docs/ - ledger subject: never committed; the generator that produced it is deleted -->
 <!-- allow-dead-path: ww-img/ - ledger subject: named by the root CLAUDE.md, absent from disk -->
 <!-- allow-dead-path: .github/ - asserted absent on purpose: this repo has no CI -->
 <!-- allow-dead-path: src/dl_techniques/models/jepa/ - ledger subject: was named by models/CLAUDE.md until ba3ec3122; never existed under that name -->
@@ -573,7 +572,7 @@ table are named precisely *because* they do not resolve.
 |---|---|---|
 | `src/experiments/` is a repo component | root `CLAUDE.md` (structure tree *and* a prose section), `plans/SYSTEM.md` § Components | Deleted in `4673fc88` on 2026-06-16. `git log -1 --format='%h %ad %s' --date=short 4673fc88`; `test -e src/experiments/` fails; `ls -d src/*/` lists only `src/applications/`, `src/dl_techniques/`, `src/train/` |
 | `src/experiments/undivided_attention/`, its test suite and its research note exist | `plans/SYSTEM.md`, in a long, confident, entirely fictional section | **Never committed in any commit reachable from any ref.** `git log --all --oneline -- '*undivided*'` returns nothing; `find src tests -name '*undivided*'` returns nothing. The owning plan ran weeks *after* `src/experiments/` was deleted, wrote into a directory the repo no longer had, and its description was then promoted into the atlas as fact. *Caveat: `plans/` is gitignored, so a cloner cannot see this file — which is exactly why the fabrication survived* |
-| `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist. `test -e docs/` fails. `Makefile` target `docs` runs `generate_docs.py` on demand; nothing is committed. Any `docs/` you find locally is your own build output |
+| `docs/` is a repo directory | root `CLAUDE.md` (tree and quick reference), `plans/SYSTEM.md` | Does not exist, and can no longer be built. `test -e docs/` fails. `generate_docs.py` and the `Makefile` `docs` target were **deleted as deprecated**; the generator was 13 months stale, predating both the `models/` restructure and the registration migration. Any `docs/` you find locally is an old build output of your own |
 | `ww-img/` is an assets directory | root `CLAUDE.md` structure tree | Does not exist. `test -e ww-img/` fails. Only `imgs/` is real |
 | The module map is `{… optimizers, analyzers …}` | `plans/SYSTEM.md`, and — until a later commit in the same change as this file — the root `CLAUDE.md` § core library, which carried the identical two wrong names | Both names are wrong — the real packages are `src/dl_techniques/optimization/` and `src/dl_techniques/analyzer/` — and the map omits `src/dl_techniques/callbacks/`, `src/dl_techniques/constraints/`, `src/dl_techniques/initializers/` and `src/dl_techniques/regularizers/` entirely |
 | "the callbacks live in `src/dl_techniques/callbacks/`" | implied by the structure | 46 files under `src/` name `keras.callbacks.Callback`; only 10 are in `src/dl_techniques/callbacks/` and 31 are under `src/train/`. `grep -rl "keras.callbacks.Callback" src --include=*.py`. See Part B |
@@ -959,7 +958,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Quantity | Value | Command |
 |---|---|---|
 | Python files under `src/` | 1048 | `find src -name '*.py' \| wc -l` |
-| Python files under `tests/` | 1131 | `find tests -name '*.py' \| wc -l` |
+| Python files under `tests/` | 1132 | `find tests -name '*.py' \| wc -l` |
 | In-tree `CLAUDE.md` files (excl. `plans/`) | 19 | `find . -name 'CLAUDE.md' \| grep -v plans \| wc -l` |
 | Subpackages of `src/dl_techniques/` | 13 | `find src/dl_techniques -mindepth 1 -maxdepth 1 -type d ! -name __pycache__ \| wc -l` |
 | `.py` in `src/dl_techniques/layers/` | 300 | `find src/dl_techniques/layers -name '*.py' \| wc -l` |
@@ -1006,7 +1005,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files under `data/` tracked by git | 0 | `git ls-files data \| wc -l` |
 | Notes in `research/` | 122 | `find research -maxdepth 1 -type f -name '*.md' \| wc -l` |
 | Paper dirs under `research/papers/` | 5 | `find research/papers -mindepth 1 -maxdepth 1 -type d \| wc -l` |
-| Lines in `README.md` | 610 | `wc -l < README.md` |
+| Lines in `README.md` | 609 | `wc -l < README.md` |
 | Dicts named `*_REGISTRY` under `src/dl_techniques/` | 10 | `grep -rn "^[A-Z_]*REGISTRY[[:space:]]*[:=]" src/dl_techniques --include=*.py \| wc -l` |
 | Keys in `ATTENTION_REGISTRY` | 33 | `awk 'index($0,"ATTENTION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/attention/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |
 | Keys in `ACTIVATION_REGISTRY` | 22 | `awk 'index($0,"ACTIVATION_REGISTRY")==1{f=1} f&&$0=="}"{f=0} f' src/dl_techniques/layers/activations/factory.py \| grep -cE "^    ['\"][A-Za-z0-9_]+['\"]:"` |

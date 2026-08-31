@@ -1,4 +1,5 @@
-"""Fuse entropy-based byte processing with iterative hierarchical reasoning.
+"""
+Fuse entropy-based byte processing with iterative hierarchical reasoning.
 
 This layer implements a sophisticated architecture designed for complex reasoning
 tasks directly on raw byte sequences. It uniquely combines two powerful concepts:

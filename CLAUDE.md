@@ -14,7 +14,6 @@ Always use the `.venv` virtual environment for running code, tests, and training
 make test       # python -m pytest tests/ -vvv
 make clean      # remove build artifacts and __pycache__
 make structure  # display src tree
-make docs       # generate documentation
 ```
 
 > **Full test suite runtime ≈ 1.5 hours** (this is also the pre-push hook). Do NOT run `make test` or `pytest tests/` as a routine regression check. Instead, scope pytest to the module(s) you changed (e.g. `pytest tests/test_models/test_video_jepa/`) plus any modules that import what you touched. Reserve the full suite for when the user explicitly asks.
@@ -38,7 +37,9 @@ make docs       # generate documentation
 
 > **NEVER delete anything under `results/`.** Not the tree, not a single run directory, not "test artifacts I just created" — no `rm -rf results/`, and no cleanup step that names `results/` by a relative path. `results/` is gitignored and untracked, so **deletion is unrecoverable**: there is no git history and no backup. If a probe or smoke run creates a run directory, leave it; the user removes them. On 2026-08-12 a badly-scoped cleanup instruction ("delete every `results/` dir you create afterwards") destroyed all 62 run directories at once — including a published paper's subject checkpoint — because the agent's own test had written to a pytest `tmp_path` and the relative paths in its log resolved against the repo root instead. Delete only absolute paths recorded at creation time and verified created, or do not delete at all.
 
-There is no committed documentation directory. `make docs` runs `generate_docs.py`, which generates one on demand; nothing exists at that path until you run it, and the output is not committed.
+There is no documentation directory and no doc generator. `generate_docs.py` and the `make docs`
+target were deleted as deprecated; documentation lives in the in-tree `README.md` and `CLAUDE.md`
+files, and `REPO_MAP.md` routes you to the right one.
 
 ### src/dl_techniques/ (core library)
 

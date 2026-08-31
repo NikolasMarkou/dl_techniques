@@ -1,4 +1,5 @@
-"""Load-time provenance gate for bias-free denoiser checkpoints.
+"""
+Load-time provenance gate for bias-free denoiser checkpoints.
 
 Why this module exists
 ----------------------
@@ -82,21 +83,8 @@ def _read_config(config_path: Path) -> Optional[dict]:
 
 
 def require_unit_domain_checkpoint(checkpoint_path: Union[str, Path]) -> None:
-    """Refuse any checkpoint not stamped ``data_range == "[0,1]"``.
-
-    # DECISION plan_2026-07-12_e56909cd/D-005: ONE shared gate, called from ALL FOUR
-    # checkpoint-load paths (the two eval tools, the trainer's --init-from warm-start,
-    # and DenoiserPrior.from_pretrained). Do NOT re-implement this check at a call site:
-    # the whole hazard class here is a *partially* migrated data path, and a gate that
-    # covers 3 of 4 loaders is a gate that reports plausible wrong dB numbers from the
-    # 4th. Do NOT add an `allow_legacy` / `--force` escape hatch either: a switch whose
-    # only purpose is to re-enable a knowingly-broken path is a compat shim by another
-    # name, and the migration mandate forbids one (INV-4). This gate never changes any
-    # math — it only refuses. An ABSENT data_range key must FAIL CLOSED (legacy =>
-    # refuse), because a bias-free net is degree-1 homogeneous with f(0) = 0 and cannot
-    # subtract a DC offset: a legacy checkpoint fed [0,1] data emits a plausible WRONG
-    # image, never an error (INV-1). The fix for a refused checkpoint is to RETRAIN.
-    # See decisions.md D-005.
+    """
+    Refuse any checkpoint not stamped ``data_range == "[0,1]"``.
 
     Args:
         checkpoint_path: A ``.keras`` file, or the results directory holding it.

@@ -52,12 +52,12 @@ The operation preserves all information while changing memory layout.
 import keras
 from keras import ops
 from typing import Optional, Tuple, Any, Dict
-from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 

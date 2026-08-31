@@ -62,13 +62,19 @@ References:
 
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.selective_gradient_mask")
 class SelectiveGradientMask(keras.layers.Layer):
-    """Selectively stop gradients based on a binary mask.
+    """
+    Selectively stop gradients based on a binary mask.
 
     During the forward pass this layer acts as an identity on the signal
     tensor. During backpropagation the dual-path computation

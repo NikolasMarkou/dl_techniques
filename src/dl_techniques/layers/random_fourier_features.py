@@ -74,6 +74,11 @@ The foundational work that introduced Random Fourier Features is:
 import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict, Callable
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
