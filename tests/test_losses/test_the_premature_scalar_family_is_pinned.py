@@ -156,8 +156,6 @@ def _siglip_pair():
 # (module, class, ctor kwargs, input builder)
 STILL_BROKEN = [
     ("mase_loss", "MASELoss", {}, _positive_pair),
-    ("masked_causal_lm_loss", "MaskedCausalLMLoss", {}, _token_pair),
-    ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
     ("focal_causal_lm_loss", "FocalCausalLMLoss", {}, _token_pair),
     ("hrm_loss", "HRMLoss", {}, _hrm_pair),
 ]
@@ -203,6 +201,19 @@ KNOWN_GOOD = [
     # which is what keeps DINOLoss's stateful centering out of this measurement.
     ("dino_loss", "DINOLoss", {"out_dim": 5}, _embedding_pair),
     ("dino_loss", "KoLeoLoss", {}, _embedding_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 5 (Tranche B). These average
+    # over ALL VALID TOKENS IN THE BATCH, so the naive per-sample repair -- each
+    # sequence's OWN mean -- is a DIFFERENT NUMBER at unequal valid-token counts.
+    # Measured at counts [20, 3, 1, 1]: the per-sequence mean gives 5.5544796
+    # against this loss's 3.5734539, 55.4% off, which would silently re-weight
+    # short sequences UP. They instead return
+    # `row_token_sum_i / total_valid_tokens_in_batch * batch`, whose mean under
+    # `sum_over_batch_size` is the original batch-wide token mean (measured
+    # 3.57345390 -> 3.57345438, 4.8e-07, one float32 summation order apart).
+    # NOTE the fixture below is EQUAL-LENGTH and therefore blind to that choice;
+    # the ragged proof lives in the commit message, not here.
+    ("masked_causal_lm_loss", "MaskedCausalLMLoss", {}, _token_pair),
+    ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
 ]
 
 
