@@ -39,6 +39,10 @@ References:
 import keras
 from typing import Optional, Union, Any, Tuple, Callable
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 

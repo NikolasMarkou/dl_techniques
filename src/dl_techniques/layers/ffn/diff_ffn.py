@@ -81,9 +81,9 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 

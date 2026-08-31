@@ -43,6 +43,10 @@ import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, activations
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 

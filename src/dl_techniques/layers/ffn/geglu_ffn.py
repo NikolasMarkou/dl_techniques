@@ -44,8 +44,8 @@ from typing import Optional, Union, Any, Dict, Callable, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
