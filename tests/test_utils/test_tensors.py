@@ -6,7 +6,7 @@ from typing import Tuple
 
 from dl_techniques.utils.tensors import \
     power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel, \
-    resolve_training_factor, log_gamma
+    resolve_training_factor, log_gamma, is_power_of_two
 
 
 @pytest.fixture
@@ -404,3 +404,77 @@ class TestLogGamma:
             np.abs(np.random.default_rng(0).normal(size=(2, 3, 4))) + 0.5
         )
         assert tuple(log_gamma(x).shape) == (2, 3, 4)
+
+
+# ---------------------------------------------------------------------
+
+
+class TestIsPowerOfTwo:
+    """Exhaustive contract for :func:`is_power_of_two` over ``[-8, 64]``.
+
+    Promoted out of two byte-identical private copies
+    (``layers/orthogonal_butterfly.py`` and ``layers/norms/polar_weight_norm.py``)
+    by ``plan-2026-08-31-a4e0c303/iter-1/step-4``. Both consumers only ever
+    called it on a happy-path dimension, so the boundary behaviour below was
+    unpinned by anything in the tree.
+
+    The pinned behaviour is the PRE-EXISTING behaviour of both copies, preserved
+    exactly and deliberately not "improved":
+
+    * ``0`` is **False**. The plausible wrong implementation
+      ``return n & (n - 1) == 0`` accepts it (``0 & -1 == 0``), which would let a
+      zero-width dimension into the butterfly / polar binary tree.
+    * Negative ``n`` is **False**. Measured: the permissive form happens to
+      agree here (clearing the lowest set bit of a negative two's-complement int
+      never yields ``0``, because the leading sign bits survive), so ``0`` is the
+      SOLE discriminating input against that mutant. The negative arm is kept
+      anyway -- it pins the ``n >= 1`` clause against any other rewrite, and both
+      former call sites pass a dimension that could in principle be ``-1`` from
+      an unresolved shape.
+    """
+
+    #: The complete truth set over the tested range. Written out literally --
+    #: deriving it with the same bit trick the subject uses would make this a
+    #: self-referential oracle.
+    POWERS = {1, 2, 4, 8, 16, 32, 64}
+
+    @pytest.mark.parametrize("n", list(range(-8, 65)))
+    def test_exhaustive_over_minus_eight_to_sixty_four(self, n):
+        assert is_power_of_two(n) is (n in self.POWERS), (
+            f"is_power_of_two({n}) disagrees with the literal truth set"
+        )
+
+    def test_zero_is_false(self):
+        """Called out separately: this is the arm the permissive form fails."""
+        assert is_power_of_two(0) is False
+
+    @pytest.mark.parametrize("n", [-1, -2, -4, -8, -16, -32, -64, -3, -7])
+    def test_negatives_are_false(self, n):
+        assert is_power_of_two(n) is False
+
+    def test_returns_a_real_bool_not_a_truthy_int(self):
+        """``n >= 1 and (n & (n-1)) == 0`` can return an int if reordered."""
+        for n in (0, 1, 3, 4, -4):
+            assert isinstance(is_power_of_two(n), bool), (
+                f"is_power_of_two({n}) returned {type(is_power_of_two(n))}"
+            )
+
+    def test_large_powers_and_their_neighbours(self):
+        for k in range(7, 20):
+            p = 1 << k
+            assert is_power_of_two(p) is True
+            assert is_power_of_two(p - 1) is False
+            assert is_power_of_two(p + 1) is False
+
+    def test_the_two_consumers_route_through_this_function(self):
+        """No private copy may survive at either former definition site."""
+        from dl_techniques.layers import orthogonal_butterfly
+        from dl_techniques.layers.norms import polar_weight_norm
+
+        for mod in (orthogonal_butterfly, polar_weight_norm):
+            assert not hasattr(mod, "_is_power_of_two"), (
+                f"{mod.__name__} still defines a private copy"
+            )
+            assert mod.is_power_of_two is is_power_of_two, (
+                f"{mod.__name__}.is_power_of_two is not the utils function"
+            )

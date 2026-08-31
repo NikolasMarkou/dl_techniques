@@ -12,6 +12,33 @@ DEFAULT_EPSILON = 1e-6
 # ---------------------------------------------------------------------
 
 
+def is_power_of_two(n: int) -> bool:
+    """Report whether ``n`` is a power of two.
+
+    Zero and negative values are ``False``, so this is safe to call on any int
+    -- including an unresolved ``-1`` dimension. It is the guard both binary-tree
+    layers use to reject a last dimension they cannot pair:
+    ``layers/orthogonal_butterfly.py`` and ``layers/norms/polar_weight_norm.py``,
+    which held byte-identical private copies until
+    ``plan-2026-08-31-a4e0c303/iter-1/step-4``. This module imports nothing from
+    either of them; the dependency is one-way and stays that way.
+
+    .. warning::
+       Do NOT "simplify" this to ``return n & (n - 1) == 0``. Dropping the
+       ``n >= 1`` clause makes the predicate accept ``0`` (``0 & -1 == 0``),
+       which would admit a zero-width dimension into both trees. Pinned by
+       ``tests/test_utils/test_tensors.py::TestIsPowerOfTwo``.
+
+    :param n: The integer to test.
+    :type n: int
+    :return: ``True`` when ``n >= 1`` and ``n`` has exactly one set bit.
+    :rtype: bool
+    """
+    return n >= 1 and (n & (n - 1)) == 0
+
+# ---------------------------------------------------------------------
+
+
 def reshape_to_2d(
         weights: tf.Tensor,
         name: Optional[str] = None) -> tf.Tensor:

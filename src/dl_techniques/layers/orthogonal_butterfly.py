@@ -85,12 +85,9 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import is_power_of_two
 
 # ---------------------------------------------------------------------
-
-def _is_power_of_two(n: int) -> bool:
-    return n >= 1 and (n & (n - 1)) == 0
-
 
 def _butterfly_apply(
     x: keras.KerasTensor,
@@ -228,7 +225,7 @@ class OrthogonalButterfly(keras.layers.Layer):
         if d is None:
             raise ValueError("The last dimension of the input must be defined.")
         d = int(d)
-        if not _is_power_of_two(d):
+        if not is_power_of_two(d):
             raise ValueError(
                 f"OrthogonalButterfly requires a power-of-two feature dim, got {d}."
             )

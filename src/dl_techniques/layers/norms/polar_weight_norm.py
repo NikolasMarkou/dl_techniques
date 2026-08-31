@@ -127,6 +127,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import is_power_of_two
 
 # ---------------------------------------------------------------------
 # Recursive Cartesian <-> Polar transform (paper Definition 1 / Algorithm 1)
@@ -150,21 +151,6 @@ def _next_power_of_two(n: int) -> int:
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
     return 1 << (n - 1).bit_length()
-
-
-def _is_power_of_two(n: int) -> bool:
-    """Report whether ``n`` is a power of two.
-
-    Zero and negative values are ``False``, so this is safe to call on any int.
-    ``polar_encode`` uses it to reject a last dimension the binary tree cannot
-    pair.
-
-    :param n: The integer to test.
-    :type n: int
-    :return: ``True`` when ``n >= 1`` and ``n`` has exactly one set bit.
-    :rtype: bool
-    """
-    return n >= 1 and (n & (n - 1)) == 0
 
 
 def _level_sizes(d: int) -> List[int]:
@@ -230,7 +216,7 @@ def polar_encode(
     d = x.shape[-1]
     if d is None:
         raise ValueError("polar_encode requires a statically known last dim.")
-    if not _is_power_of_two(d):
+    if not is_power_of_two(d):
         raise ValueError(f"Last dim must be a power of two, got d={d}.")
 
     r = x
