@@ -309,13 +309,6 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "ADDITIVE-FORM DEFECT, converted by step 6. Same dtype guard and same "
         "reasoning as TreeMHA.call above."
     ),
-    ("utils/masking/factory.py", "apply_mask"): (
-        "mask_value: float = -1e9 is a function default on dead, "
-        "opposite-polarity code (its 'mask' means positions to MASK, the "
-        "inverse of apply_attention_mask's 'keep'). DELETED by step 9; this "
-        "entry then becomes inert and the allowlist rot check tolerates it "
-        "because the enclosing file survives."
-    ),
 }
 
 

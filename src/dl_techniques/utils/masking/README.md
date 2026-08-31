@@ -249,7 +249,7 @@ window_mask = MaskFactory.create_sliding_window_mask(seq_len=256, window_size=64
 
 ```python
 import keras
-from dl_techniques.layers.masking import create_mask, apply_mask
+from dl_techniques.layers.masking import create_mask
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # The package string is the defining module's dotted path -- `my_project.<module>` for your
@@ -286,36 +286,6 @@ class MaskedAttention(keras.layers.Layer):
         return attention_output
 ```
 
-### In Instance Segmentation
-
-```python
-# `legacy_alias=False` because `SegmentationHead` is already a registered name in this repo
-# (`dl_techniques.layers.heads.vision.factory>SegmentationHead`), and its legacy
-# `Custom>SegmentationHead` alias is taken; claiming it again raises AliasCollisionError.
-@register_dl_technique("my_project.segmentation_head", legacy_alias=False)
-class SegmentationHead(keras.layers.Layer):
-    def __init__(self, num_queries, **kwargs):
-        super().__init__(**kwargs)
-        self.num_queries = num_queries
-    
-    def call(self, mask_logits, valid_queries=None):
-        # Create query validity mask
-        query_mask = create_mask(
-            'valid_query',
-            num_queries=self.num_queries,
-            valid_queries=valid_queries
-        )
-        
-        # Apply mask to logits
-        masked_logits = apply_mask(
-            mask_logits,
-            query_mask,
-            mask_type='segmentation'
-        )
-        
-        return masked_logits
-```
-
 ### Combining Multiple Masks
 
 ```python
@@ -336,24 +306,6 @@ combined_mask = combine_masks(
     padding_mask,
     combination='or'  # Mask if either condition is true
 )
-```
-
-## Mask Application
-
-### Universal Apply Function
-
-```python
-from dl_techniques.layers.masking import apply_mask
-
-# Apply to attention logits
-logits = keras.random.normal((2, 8, 128, 128))  # (batch, heads, seq, seq)
-mask = create_mask('causal', seq_len=128)
-masked_logits = apply_mask(logits, mask, mask_value=-1e9, mask_type='attention')
-
-# Apply to segmentation predictions
-predictions = keras.random.uniform((2, 10, 64, 64))  # (batch, queries, H, W)
-query_mask = create_mask('valid_query', num_queries=10, valid_queries=5)
-masked_preds = apply_mask(predictions, query_mask, mask_type='segmentation')
 ```
 
 ## Visualization
@@ -476,9 +428,6 @@ WARNING Bounding box masking not fully implemented, returning no mask
 
 #### `create_mask(mask_type=None, config=None, **kwargs)`
 Universal interface for creating masks with validation.
-
-#### `apply_mask(inputs, mask, mask_value=-1e9, mask_type=None)`
-Apply a mask to inputs (attention logits or segmentation predictions).
 
 #### `combine_masks(*masks, combination='or')`
 Combine multiple masks using logical operations ('and', 'or', 'xor').

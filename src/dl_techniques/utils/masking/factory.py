@@ -13,7 +13,6 @@ Classes:
 
 Functions:
     create_mask: Main interface for mask creation
-    apply_mask: Universal mask application function
     combine_masks: Combine multiple masks with logical operations
     visualize_mask: Visualization utility for debugging
 
@@ -25,9 +24,6 @@ Examples:
     >>> # Create a sliding window mask with configuration
     >>> config = MaskConfig(mask_type="sliding_window", seq_len=128, window_size=32)
     >>> mask = create_mask(config=config)
-    >>>
-    >>> # Apply mask to attention logits
-    >>> masked_logits = apply_mask(logits, mask)
 """
 
 import keras
@@ -736,66 +732,6 @@ def create_mask(
 
     else:
         raise ValueError(f"Unknown mask type: {mask_type}")
-
-
-def apply_mask(
-        inputs: keras.KerasTensor,
-        mask: keras.KerasTensor,
-        mask_value: float = -1e9,
-        mask_type: Optional[Literal["attention", "segmentation"]] = None
-) -> keras.KerasTensor:
-    """
-    Apply a mask to inputs (attention logits or segmentation predictions).
-
-    This function provides a universal interface for applying masks, automatically
-    handling different input shapes and mask types.
-
-    Args:
-        inputs: Input tensor to be masked.
-        mask: Boolean mask tensor where True indicates positions to mask.
-        mask_value: Value to use for masked positions (for logits).
-        mask_type: Optional hint about the mask type for better handling.
-
-    Returns:
-        keras.KerasTensor: Masked inputs with the same shape as input.
-
-    Examples:
-        >>> # Apply attention mask to logits
-        >>> logits = keras.random.normal((2, 8, 128, 128))  # (batch, heads, seq, seq)
-        >>> mask = create_mask("causal", seq_len=128)
-        >>> masked_logits = apply_mask(logits, mask, mask_type="attention")
-        >>>
-        >>> # Apply segmentation mask
-        >>> predictions = keras.random.uniform((2, 10, 64, 64))  # (batch, queries, H, W)
-        >>> mask = create_mask("valid_query", num_queries=10, valid_queries=5)
-        >>> masked_preds = apply_mask(predictions, mask, mask_type="segmentation")
-    """
-    # Ensure mask is boolean
-    mask = ops.cast(mask, "bool")
-
-    # Broadcast mask to match input shape if necessary
-    input_shape = ops.shape(inputs)
-    mask_shape = ops.shape(mask)
-
-    # Handle different broadcasting scenarios
-    if len(mask_shape) < len(input_shape):
-        # Determine how to broadcast based on mask type hint and shapes
-        if mask_type == "attention":
-            # Typical attention: inputs are (batch, heads, seq, seq) or (batch, seq, seq)
-            # Mask is usually (seq, seq)
-            if len(mask_shape) == 2:
-                # Add batch and possibly head dimensions
-                for _ in range(len(input_shape) - 2):
-                    mask = ops.expand_dims(mask, axis=0)
-        elif mask_type == "segmentation":
-            # Handle segmentation-specific broadcasting
-            # This is handled case-by-case based on mask dimensions
-            pass
-
-    # Apply mask
-    masked_inputs = ops.where(mask, mask_value, inputs)
-
-    return masked_inputs
 
 
 def combine_masks(

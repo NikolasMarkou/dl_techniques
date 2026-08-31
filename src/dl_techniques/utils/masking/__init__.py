@@ -8,7 +8,6 @@ from .strategies import apply_mlm_masking
 __all__ = [
     # Main interfaces
     "create_mask",
-    "apply_mask",
     "combine_masks",
     "visualize_mask",
     "get_mask_info",
