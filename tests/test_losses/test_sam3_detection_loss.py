@@ -1736,7 +1736,7 @@ class TestSwitches:
         class elsewhere takes the slot. ``Sam3DetectionLoss`` is one of the 14
         class names actually persisted in this repository's ``.keras`` archives,
         so the alias half of `registration_contract` is load-bearing here rather
-        than hypothetical. See ``MIGRATIONS.md``.
+        than hypothetical.
         """
         registration_contract(Sam3DetectionLoss)
 

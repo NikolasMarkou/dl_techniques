@@ -22,8 +22,7 @@ Both classes are registered with `@register_dl_technique(...)` from
 `dl_techniques.models.ntm.model_multitask>NTMMultiTask` — the defining module's dotted
 path, with `models/`'s family directory (`neural_computer`) stripped, since a family there
 is a filing decision rather than a namespace. Archives written before 2026-08-29 still load
-through the legacy `Custom>ClassName` alias the helper also binds (repo-root
-`MIGRATIONS.md`).
+through the legacy `Custom>ClassName` alias the helper also binds.
 
 ## Import form
 

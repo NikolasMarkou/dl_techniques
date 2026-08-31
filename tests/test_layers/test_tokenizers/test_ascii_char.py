@@ -282,7 +282,7 @@ class TestASCIICharTokenizer:
         # Was a lookup by the literal legacy key. That key still resolves (it is
         # kept as an alias, and every ascii-BERT encoder archive under results/
         # names it), but it is no longer the key a NEW save writes -- the shared
-        # predicate pins both. See MIGRATIONS.md.
+        # predicate pins both.
         registration_contract(ASCIICharTokenizer)
 
 

@@ -164,8 +164,7 @@ The code is organized into logical, reusable layers:
   `dl_techniques.models.xlstm.forecaster>xLSTMForecaster`, and
   `dl_techniques.layers.time_series.xlstm_blocks><ClassName>` for the six cells, layers and
   blocks in `dl_techniques/layers/time_series/xlstm_blocks.py`. Pre-2026-08-29 archives
-  still load through the legacy `Custom>ClassName` alias the helper also binds (repo-root
-  `MIGRATIONS.md`)
+  still load through the legacy `Custom>ClassName` alias the helper also binds
 - ✅ **Correct Build Logic**: Separates layer creation (`__init__`) from weight creation (`build`)
 - ✅ **RNN Cell Pattern**: Proper Keras RNN Cell/Layer infrastructure
 - ✅ **Backend Agnostic**: Built with `keras.ops`, runs on TensorFlow, PyTorch, or JAX

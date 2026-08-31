@@ -462,7 +462,7 @@ and recreate exactly the import-order collision the migration removed. Neither n
 in any archive in this repository, so nothing was orphaned. Reach them only through their
 package-qualified keys. Note that the module path alone already separates the two pairs --
 `...pw_fnet.model>Downsample` vs `...ideogram4.vae>Downsample` -- so withholding the alias is
-about the `Custom>` namespace only. Repo-root `MIGRATIONS.md` is the record.
+about the `Custom>` namespace only.
 
 ### Saving and Loading
 

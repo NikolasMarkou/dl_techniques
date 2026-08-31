@@ -145,7 +145,7 @@ class TestSerialization:
         decorator mints, so any other ``IdentityPlusNoise`` in the tree claims
         the identical slot. `registration_contract` (tests/conftest.py) asserts
         both halves of the replacement -- package-qualified new key, and the
-        legacy alias still resolving to the same object. See ``MIGRATIONS.md``.
+        legacy alias still resolving to the same object.
         """
         registration_contract(IdentityPlusNoise)
 

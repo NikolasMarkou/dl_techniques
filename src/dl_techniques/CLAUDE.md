@@ -94,8 +94,8 @@ deserialization of both.
 
 **Legacy archives still load.** The helper also binds `Custom>ClassName` as an alias to the same
 object, which is what a pre-2026-08-29 `.keras` file reads. Four names carry `legacy_alias=False`
-and therefore have no alias. `MIGRATIONS.md` (repo root) is the record: what moved, the four
-exceptions, the `yolov12_losses` case, and the measured control.
+and therefore have no alias. The `dl_techniques.utils.keras_registration` module docstring
+records the mechanism, the exceptions, and the measured control.
 
 ### Code Style
 

@@ -673,7 +673,7 @@ class TestSerialization:
             self, registration_contract) -> None:
         # Was a lookup by the literal `"Custom>SAM2GatedMaskLoss"`. "Its own key"
         # is exactly what a `Custom>` key is NOT -- it is module-independent and
-        # therefore shared with any same-named class. See MIGRATIONS.md.
+        # therefore shared with any same-named class.
         registration_contract(SAM2GatedMaskLoss)
 
 

@@ -337,7 +337,7 @@ The `layer_types` list is a powerful tool for balancing performance and efficien
 
 ## 12. Serialization & Deployment
 
-The `Gemma3` model and its custom `Gemma3TransformerBlock` are fully serializable using Keras 3's modern `.keras` format, thanks to the `@register_dl_technique(...)` decorator from `dl_techniques.utils.keras_registration`. Each registers under the dotted path of the module that DEFINES it, so the two differ: `Gemma3` is `dl_techniques.models.gemma.gemma3>Gemma3` (`gemma3.py` here), while `Gemma3TransformerBlock` lives in `dl_techniques/layers/transformers/gemma3_transformer.py` and is `dl_techniques.layers.transformers.gemma3_transformer>Gemma3TransformerBlock`. Archives written before 2026-08-29 still load: the helper also binds the legacy `Custom>ClassName` alias (repo-root `MIGRATIONS.md`).
+The `Gemma3` model and its custom `Gemma3TransformerBlock` are fully serializable using Keras 3's modern `.keras` format, thanks to the `@register_dl_technique(...)` decorator from `dl_techniques.utils.keras_registration`. Each registers under the dotted path of the module that DEFINES it, so the two differ: `Gemma3` is `dl_techniques.models.gemma.gemma3>Gemma3` (`gemma3.py` here), while `Gemma3TransformerBlock` lives in `dl_techniques/layers/transformers/gemma3_transformer.py` and is `dl_techniques.layers.transformers.gemma3_transformer>Gemma3TransformerBlock`. Archives written before 2026-08-29 still load: the helper also binds the legacy `Custom>ClassName` alias.
 
 ### Saving and Loading
 

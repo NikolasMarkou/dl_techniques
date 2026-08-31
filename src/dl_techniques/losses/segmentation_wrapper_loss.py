@@ -93,7 +93,7 @@ _LOSS_METHOD_MAP: Dict[str, str] = {
 # `@register_keras_serializable`-discoverable at load time without
 # `custom_objects` and so that it conforms to F-004 sibling-loss conventions.
 #
-# SUPERSEDED 2026-08-29 (repo-root `MIGRATIONS.md`): the ruling stands unchanged
+# SUPERSEDED 2026-08-29: the ruling stands unchanged
 # -- registry discoverability at load time is still the reason this class lives in
 # its own module -- but the mechanism is now `@register_dl_technique`, which calls
 # `keras.saving.register_keras_serializable(package=...)` and additionally binds the

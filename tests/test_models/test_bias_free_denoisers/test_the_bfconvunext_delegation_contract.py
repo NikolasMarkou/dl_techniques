@@ -68,7 +68,7 @@ SMALL: Dict[str, Any] = dict(depth=2, initial_filters=8, blocks_per_level=1)
 # checkpoint meaning (a same-process save/load would happily resolve a MOVED key and
 # prove nothing about a graph saved yesterday).
 #
-# Since the 2026-08-29 registration migration (`MIGRATIONS.md`) the second one is the
+# Since the 2026-08-29 registration migration the second one is the
 # LEGACY ALIAS, not the key a new save writes. It is kept, and kept as a literal, for
 # exactly the reason above: it is what a graph saved BEFORE that date names, and that
 # fact cannot be re-derived from today's source.
@@ -521,7 +521,7 @@ class TestKerasRoundTrip:
         is what makes the round-trip above mean something about OLD graphs.
         """
         # DELIBERATELY KEPT AS LITERALS after the 2026-08-29 registration
-        # migration (`MIGRATIONS.md`), which is the one case where a literal is
+        # migration, which is the one case where a literal is
         # the right instrument: these are the keys graphs saved BEFORE that date
         # actually name, so they must not be re-derived from today's source --
         # deriving them would make the pin follow whatever move it exists to

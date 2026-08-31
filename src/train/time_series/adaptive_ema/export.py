@@ -37,7 +37,7 @@ from dl_techniques.utils.logger import logger
 # `dl_techniques.train.time_series.adaptive_ema.train_adaptive_ema>AdaptiveEMATrainingWrapper`
 # and `dl_techniques.models.adaptive_ema.model>AdaptiveEMASlopeFilterModel`; an archive
 # written before 2026-08-29 records the `Custom>` spelling, which the shared
-# `register_dl_technique` helper still binds as an alias (repo-root MIGRATIONS.md).
+# `register_dl_technique` helper still binds as an alias.
 # Either way the resolution needs these imports to have run.
 from dl_techniques.models.time_series.adaptive_ema import AdaptiveEMASlopeFilterModel  # noqa: F401
 from train.time_series.adaptive_ema.train_adaptive_ema import AdaptiveEMATrainingWrapper  # noqa: F401

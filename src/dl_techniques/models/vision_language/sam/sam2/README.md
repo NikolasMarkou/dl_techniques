@@ -258,7 +258,7 @@ being a filing decision rather than a namespace. `SAM2TrainingModel` resolves to
 `keras.saving.get_registered_name`). The helper additionally binds the legacy
 `Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
 archive names, so `keras.saving.get_registered_object("Custom>SAM2TrainingModel")` still
-returns the class once its module is imported (repo-root `MIGRATIONS.md`).
+returns the class once its module is imported.
 `SAM2MemoryBank` is the deliberate exception: it is a plain-Python container with no weights
 (§5) and carries no decorator at all. `.keras` round trips are covered by the test gate.
 
@@ -310,7 +310,7 @@ exactly as effectively as a real reference would.)
 > `keras.saving.get_registered_object` returns `None` for both keys and
 > `training_model` is absent from `sys.modules`. This is a statement about import SIDE
 > EFFECTS, not about how the key is spelled, and the registration migration
-> (`MIGRATIONS.md`) did not change it. SAM 1's and
+> did not change it. SAM 1's and
 > SAM 3's inits both import theirs, which is why this trips people on SAM 2
 > and only on SAM 2. The rule that holds for all three is: **import the module
 > that DEFINES the saved class.**

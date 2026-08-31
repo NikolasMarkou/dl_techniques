@@ -212,7 +212,7 @@ def _sweep_registered_keys() -> Dict[str, List[str]]:
 #: -- it is a plain-Python state container that owns no weights, see D-026).
 #:
 #: These were spelled ``Custom>AxialRoPE2D`` and so on until the 2026-08-29
-#: registration migration (``MIGRATIONS.md``). The package prefix is derived here
+#: registration migration. The package prefix is derived here
 #: rather than pasted onto each of the fourteen: SAM 2 lives under
 #: ``models/vision_language/sam/sam2/``, and the key strips the ``vision_language``
 #: family and ``sam`` subfamily containers because those are a filing decision

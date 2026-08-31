@@ -72,8 +72,7 @@ onto downstream tasks without any architectural change.
    arguments, and a `.keras` save/load needs no `custom_objects` (§12). The `gpt2_gelu`
    activation in the same module registers under the same string, so its key is
    `dl_techniques.models.gpt2.gpt2>gpt2_gelu`; it carried the coarse `dl_techniques>gpt2_gelu`
-   until 2026-08-29, when the tree's last 34 ad-hoc strings were normalized (repo-root
-   `MIGRATIONS.md`).
+   until 2026-08-29, when the tree's last 34 ad-hoc strings were normalized.
 4. **Configurable attention and FFN.** `attention_type` and `ffn_type` are
    passed straight through to `TextDecoder`'s factories, so the classic recipe
    is a default, not a hard-coding.

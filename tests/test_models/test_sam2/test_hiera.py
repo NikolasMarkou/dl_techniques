@@ -690,8 +690,7 @@ class TestSerialization:
         `registration_contract` (tests/conftest.py) replaces it with the two
         halves that matter: the new key is package-qualified and owned, and the
         pre-migration ``Custom>`` alias still resolves to the SAME object so
-        SAM 2 archives written before the migration keep loading
-        (``MIGRATIONS.md``).
+        SAM 2 archives written before the migration keep loading.
         """
         for cls in (HieraPatchEmbed, HieraMultiScaleAttention, HieraBlock,
                     Hiera):

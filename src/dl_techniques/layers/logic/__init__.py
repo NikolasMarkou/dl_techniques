@@ -12,7 +12,7 @@ the key names the defining module: `arithmetic_operators`, `logic_operators` and
 `neural_circuit` (which owns two of the four). Until 2026-08-29 all four shared
 the coarse hand-chosen string `"dl_techniques.layers"`; that was the last batch
 of ad-hoc package strings in `src/` and it was normalized onto the module-path
-rule the other 710 sites already followed (repo-root `MIGRATIONS.md`). Each also
+rule the other 710 sites already followed. Each also
 keeps the `Custom><ClassName>` alias bound to the identical object (verified
 `a is b`).
 

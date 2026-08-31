@@ -259,7 +259,7 @@ it — inside MobileCLIP2 that name is fixed by the module constant
   `dl_techniques.models.fastvit.model>FastVitImageEncoder` here, and
   `dl_techniques.layers.fastvit.<module>><ClassName>` for the eight blocks in
   `dl_techniques/layers/fastvit/`. Pre-2026-08-29 archives still load through the legacy
-  `Custom>ClassName` alias the helper also binds (repo-root `MIGRATIONS.md`).
+  `Custom>ClassName` alias the helper also binds.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \

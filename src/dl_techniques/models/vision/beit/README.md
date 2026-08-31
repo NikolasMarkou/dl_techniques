@@ -880,8 +880,7 @@ All three classes register through `@register_dl_technique("dl_techniques.models
 `BeitForMaskedImageModeling` and `BeitForImageClassification` resolve under
 `dl_techniques.models.beit.model><ClassName>` — and round-trip through the `.keras` format
 with **value** equality (asserted in the test suite at `atol=1e-6`). The legacy
-`Custom>ClassName` alias the helper also binds keeps pre-2026-08-29 archives loading
-(repo-root `MIGRATIONS.md`).
+`Custom>ClassName` alias the helper also binds keeps pre-2026-08-29 archives loading.
 The two head classes serialize their nested backbone via
 `serialize_keras_object` / `deserialize_keras_object`.
 

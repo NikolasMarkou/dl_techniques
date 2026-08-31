@@ -29,7 +29,6 @@ class TestGefenInstantiation:
         Both assertions here used to spell ``"Custom>Gefen"`` -- asserting the
         DEFECT rather than the contract, because a ``Custom>`` key carries no
         owner and a second ``Gefen`` in any other package would silently take it.
-        See ``MIGRATIONS.md``.
         """
         registration_contract(Gefen)
 

@@ -30,7 +30,7 @@ directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
 independent of `__module__`, so two same-named classes claim one slot and the last import
 silently wins. The helper additionally binds `Custom>ClassName` as a legacy alias to the same
 object — which is why the checkpoints written before 2026-08-29 (and before this package merge)
-still load. `MIGRATIONS.md` at the repo root is the record.
+still load.
 
 ## Layers (22 classes, grouped by domain)
 
@@ -125,7 +125,7 @@ still load. `MIGRATIONS.md` at the repo root is the record.
   superseded 2026-08-29 and has been dropped. Every decorator here is now
   `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")` and each class
   carries a package-qualified key. It cost no archive because the helper also mints the legacy
-  `Custom>ClassName` alias (`MIGRATIONS.md`). The **class names** are still verbatim and must
+  `Custom>ClassName` alias. The **class names** are still verbatim and must
   stay so: the alias is keyed on the bare name.*
 - Public API: `from dl_techniques.layers.heads import create_head` (or per-domain
   `from dl_techniques.layers.heads.{nlp,vision,vlm} import ...`).

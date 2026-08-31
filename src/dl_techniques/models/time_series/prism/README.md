@@ -430,8 +430,7 @@ Round-trip works because:
   family directory), `dl_techniques.layers.time_series.prism_blocks><ClassName>` for
   `PRISMLayer` / `PRISMTimeTree` / `PRISMNode` / `FrequencyBandRouter`, and
   `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Pre-2026-08-29
-  archives still load through the legacy `Custom>ClassName` alias the helper also binds
-  (repo-root `MIGRATIONS.md`).
+  archives still load through the legacy `Custom>ClassName` alias the helper also binds.
 - `kernel_initializer` and `kernel_regularizer` are normalized via `keras.initializers.get` / `keras.regularizers.get` in `get_config()`.
 - `quantile_levels` is round-tripped as a list (or `None` in point mode).
 

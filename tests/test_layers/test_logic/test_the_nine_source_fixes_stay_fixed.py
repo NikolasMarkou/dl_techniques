@@ -41,7 +41,7 @@ ALL_CLASSES = (
 
 #: Exact package string each class registers under. These four were pinned on the
 #: hand-chosen ``dl_techniques.layers`` (B7) until 2026-08-29, when the last 34 ad-hoc
-#: strings in ``src/`` were normalized onto the module-path rule (``MIGRATIONS.md``) --
+#: strings in ``src/`` were normalized onto the module-path rule --
 #: so ``CircuitDepthLayer`` and ``LearnableNeuralCircuit``, which share a module, are now
 #: the only two of the four that share a package.
 EXPECTED_PACKAGE = {
@@ -494,7 +494,7 @@ class TestB7TheRegisteredNamesArePackageQualified:
     2026-08-29, 41 of them under ``results/``, 0 hits), so the key change
     cannot orphan a checkpoint.
 
-    UPDATED 2026-08-29 by the tree-wide registration migration (``MIGRATIONS.md``).
+    UPDATED 2026-08-29 by the tree-wide registration migration.
     This class originally asserted the OPPOSITE of what it asserts now for the
     legacy key: ``test_no_bare_custom_key_survives`` required
     ``Custom>{name}`` to be ABSENT. That was correct only while these four were
@@ -517,7 +517,7 @@ class TestB7TheRegisteredNamesArePackageQualified:
 
         The exact package string is still asserted here, but it is no longer the
         hand-chosen ``dl_techniques.layers`` (B7): the 2026-08-29 normalization
-        (``MIGRATIONS.md``) put these four on the same module-path rule as the
+        put these four on the same module-path rule as the
         other 740 sites, which is what makes ``CircuitDepthLayer`` distinguishable
         from a hypothetical same-named class elsewhere under ``layers/``.
         """

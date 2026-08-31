@@ -81,8 +81,7 @@ All four classes carry `@register_dl_technique(...)`, from
 `dl_techniques.utils.keras_registration`. **The string each passes is
 its own module's dotted path.** These four carried the coarse hand-chosen string
 `dl_techniques.layers` until 2026-08-29, when the last 34 ad-hoc `package=` strings in
-`src/` were normalized onto the module-path rule the other 710 sites already followed
-(repo-root `MIGRATIONS.md`).
+`src/` were normalized onto the module-path rule the other 710 sites already followed.
 
 Resolved with `keras.saving.get_registered_name` on 2026-08-29, the keys are
 `dl_techniques.layers.logic.arithmetic_operators>LearnableArithmeticOperator`,

@@ -213,7 +213,7 @@ REGISTRAR_CLASSES = [
     'SpatialLinearAttention',
 ]
 
-# UPDATED 2026-08-29 (`MIGRATIONS.md`): was
+# UPDATED 2026-08-29: was
 # `'dl_techniques.bias_free_denoisers>ConvUNextStem'`, the module this class was
 # defined in before the ConvUNext merge, held byte-stable so pre-merge archives kept
 # loading. The user confirmed there are no checkpoints, which was that exemption's
@@ -226,7 +226,7 @@ STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'
 # `SpatialLinearAttention` carried a BARE `@keras.saving.register_keras_serializable()`
 # (convunext/model.py), whose key was MEASURED to be module-independent on Keras 3.8.0
 # (decisions.md D-008) -- which is why the ConvUNext merge could move the class without
-# breaking checkpoints. The tree-wide registration migration (`MIGRATIONS.md`) then gave it
+# breaking checkpoints. The tree-wide registration migration then gave it
 # a package-qualified key AND kept this one as a legacy alias, so this literal is now a
 # LEGACY-PATH pin: it is the key every checkpoint saved before that date actually names,
 # and it is deliberately NOT derived from anything, because deriving it from today's source
@@ -306,7 +306,7 @@ class TestRegistrarContract:
         at `load_model`. This exact-match assertion is the one that went red. Keep both:
         presence is parametrized over seven classes, exactness is per-key.
 
-        UPDATED 2026-08-29 (`MIGRATIONS.md`): the class now holds TWO keys, and the
+        UPDATED 2026-08-29: the class now holds TWO keys, and the
         assertion is stronger for it. The legacy key is still required -- that half is the
         checkpoint contract, and it is what would go RED if the alias were ever dropped
         "for tidiness" -- and the qualified key is required alongside it, so a `package=`

@@ -123,7 +123,7 @@ DEFAULT_DROPOUT_RATE: float = 0.1
 #      serialized config dict and is never rebuilt from one. Its weights are
 #      saved and restored by attribute path like any other sub-layer.
 #
-# Updated 2026-08-29 (repo-root `MIGRATIONS.md`): the ruling is unchanged; only the
+# Updated 2026-08-29: the ruling is unchanged; only the
 # spelling of the decorator it forbids has moved. The prohibition now reads "do NOT
 # promote it to a public `@register_dl_technique(...)` sibling" -- the bare stock
 # decorator named above no longer appears anywhere in `src/`, and adding EITHER form

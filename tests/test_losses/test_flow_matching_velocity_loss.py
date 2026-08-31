@@ -72,7 +72,7 @@ class TestFlowMatchingVelocityLoss:
     def test_keras_registered(self) -> None:
         """Class is registered with Keras serialization registry."""
         obj = keras.saving.get_registered_object(
-            # normalized 2026-08-29 from the coarse `dl_techniques.losses` (MIGRATIONS.md)
+            # normalized 2026-08-29 from the coarse `dl_techniques.losses`
             "dl_techniques.losses.flow_matching_velocity_loss>FlowMatchingVelocityLoss"
         )
         assert obj is FlowMatchingVelocityLoss

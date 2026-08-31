@@ -68,7 +68,7 @@ a key derived from it would have broken every archive at that moment.
 **Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
 independent of the defining module, so two same-named model classes claim one slot and the last
 import silently wins. The helper still binds `Custom>ClassName` as an alias, which is why
-pre-2026-08-29 archives keep loading; `MIGRATIONS.md` at the repo root is the record.
+pre-2026-08-29 archives keep loading.
 
 ### Docstring style — measurably mixed
 

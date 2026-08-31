@@ -40,8 +40,7 @@ The framework relies on centralized factories to ensure consistency, serializati
     **Never a bare `@keras.saving.register_keras_serializable()`.** Its key is `Custom>ClassName`,
     independent of the defining module, so two same-named classes claim one registry slot and
     whichever imports last silently wins every deserialization of both. The helper additionally
-    binds `Custom>ClassName` as a legacy alias, which is why pre-2026-08-29 archives still load —
-    see `MIGRATIONS.md` at the repo root.
+    binds `Custom>ClassName` as a legacy alias, which is why pre-2026-08-29 archives still load.
 *   **Backend Agnostic:** Use `keras.ops` for all tensor manipulations. Avoid `tf.*` or `torch.*` specific calls.
 
 ---

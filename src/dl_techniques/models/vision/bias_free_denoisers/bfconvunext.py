@@ -73,7 +73,7 @@ from dl_techniques.utils.logger import logger
 # bf test suite imports it from here. Its decorator used to keep
 # `package="dl_techniques.bias_free_denoisers"` so the registry key would not move; that
 # exemption was dropped on 2026-08-29 once the user confirmed there are no checkpoints, and
-# the key is now `dl_techniques.models.convunext.model>ConvUNextStem` (`MIGRATIONS.md`).
+# the key is now `dl_techniques.models.convunext.model>ConvUNextStem`.
 # Do NOT delete this re-export -- the registrar role is independent of the key string.
 from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F401
 
@@ -82,7 +82,7 @@ from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F
 # Keras 3.8.0 (decisions.md D-008), so the move did not change it. Do NOT add a
 # `package=` argument "for symmetry" with `ConvUNextStem` — that WOULD change the key.
 #
-# Updated 2026-08-29 (repo-root `MIGRATIONS.md`). The measurement above stands and still
+# Updated 2026-08-29. The measurement above stands and still
 # describes the archives written before that date: they name `Custom>SpatialLinearAttention`.
 # The present-tense half no longer does. The class registers today as
 # `dl_techniques.models.convunext.model>SpatialLinearAttention` (resolved with

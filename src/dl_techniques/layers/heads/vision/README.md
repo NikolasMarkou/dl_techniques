@@ -79,7 +79,7 @@ outputs = {
 > package use `dl_techniques.layers.heads.vision.factory`. Never a bare
 > `@keras.saving.register_keras_serializable()`: its key `Custom>ClassName` carries no
 > module path, so two same-named classes claim one registry slot and the last import
-> silently wins. See the repo-root `MIGRATIONS.md`.
+> silently wins.
 
 ### Example 1: ViT with Classification Head
 

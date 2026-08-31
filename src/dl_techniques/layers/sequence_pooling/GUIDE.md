@@ -70,7 +70,7 @@ return pool_class(**final_params)
   because the migration ships a legacy alias — `register_dl_technique` binds
   `Custom>ClassName` to the same object in addition to the qualified key, so an old archive
   still resolves (`keras.saving.get_registered_object("Custom>SequencePooling")` returns
-  this class, measured 2026-08-29). The control is recorded in `MIGRATIONS.md`: with the
+  this class, measured 2026-08-29). The measured control: with the
   alias suppressed, a pre-change archive is REFUSED with `TypeError`. Keras does **not**
   fall back to the module path stored alongside `registered_name`. The alias is
   load-bearing, not decorative.
@@ -284,7 +284,7 @@ symbols unchanged via the `__init__.py` re-export.
 **That whole-tree premise expired on 2026-08-29.** No decorator in this package (or
 anywhere under `src/`) is bare now; each class carries a package-qualified key, and
 `Custom>ClassName` survives only as an alias the helper mints, which is what keeps the
-pre-2026-08-29 archives loading (`MIGRATIONS.md`).
+pre-2026-08-29 archives loading.
 
 When migrating any further legacy pooling code into this package:
 1. Register with `register_dl_technique` and let it keep the `Custom>ClassName` alias —

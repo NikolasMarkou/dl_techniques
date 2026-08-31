@@ -88,7 +88,7 @@ Notes
 - Supports both probability outputs and logits (``from_logits=True``)
 - Epsilon is added to confusion matrix entries for numerical stability
 - All classes are serializable via ``@register_dl_technique`` (the shared
-  registration helper; see repo-root ``MIGRATIONS.md``)
+  registration helper)
 
 References
 ----------

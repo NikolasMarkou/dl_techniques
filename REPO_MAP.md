@@ -927,7 +927,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 > `layers/` docstring-style row (`259 of 299` -> `264 of 299`). Every other figure in that file's
 > docstring table and its printed command block was re-run in the same edit and reproduces exactly.
 >
-> **2026-08-29 — the registration migration (`MIGRATIONS.md`) moved five of these rows, and the
+> **2026-08-29 — the registration migration moved five of these rows, and the
 > ownership split is measured, not assumed.** Re-run at this plan's base commit `5ac4f5b71` and at
 > its step-4 commit `36b27f3b3`: eight rows were red at `36b27f3b3`, of which **five turned red
 > during this plan** and are repaired here — `Python files under src/` (1048 -> **1049**), `.py in
@@ -1023,7 +1023,7 @@ file is added or deleted, which is a reviewable event rather than a side effect 
 | Files under `src/` naming `keras.callbacks.Callback` | 46 | `grep -rl "keras.callbacks.Callback" src --include=*.py \| wc -l` |
 | …of those, inside `src/dl_techniques/callbacks/` | 10 | `grep -rl "keras.callbacks.Callback" src/dl_techniques/callbacks --include=*.py \| wc -l` |
 | …of those, under `src/train/` | 31 | `grep -rl "keras.callbacks.Callback" src/train --include=*.py \| wc -l` |
-| Files MENTIONING `@keras.saving.register_keras_serializable` — **this is not the registration count and no longer even a decorator count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper (`MIGRATIONS.md`); it then read 16, and 5 after the same day's prose pass retired the stale mentions. All 5 survivors are docstrings and comments — 4 superseded-in-place DECISION anchors that must keep naming the old form to forbid it, plus the helper itself. There are **0** live bare decorators (`grep -rc "^@keras.saving.register_keras_serializable()" src/`). The row below is the one that counts registrations | 5 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
+| Files MENTIONING `@keras.saving.register_keras_serializable` — **this is not the registration count and no longer even a decorator count.** It read 483 until 2026-08-29, when all 744 registration sites moved onto the `register_dl_technique` helper; it then read 16, and 5 after the same day's prose pass retired the stale mentions. All 5 survivors are docstrings and comments — 4 superseded-in-place DECISION anchors that must keep naming the old form to forbid it, plus the helper itself. There are **0** live bare decorators (`grep -rc "^@keras.saving.register_keras_serializable()" src/`). The row below is the one that counts registrations | 5 | `grep -rl "@keras.saving.register_keras_serializable" src/dl_techniques --include=*.py \| wc -l` |
 | Files using `@register_dl_technique` (the live registration count; anchored at line start, so prose mentions and the helper's own module do not inflate it — the unanchored form read 480 on 2026-08-29 and then 484 once four docstrings began naming the helper) | 479 | `grep -rlE "^@register_dl_technique" src/dl_techniques --include=*.py \| wc -l` |
 | Files defining `get_config` | 484 | `grep -rl "def get_config" src/dl_techniques --include=*.py \| wc -l` |
 | Files using the central logger | 348 | `grep -rl "utils.logger" src/dl_techniques --include=*.py \| wc -l` |

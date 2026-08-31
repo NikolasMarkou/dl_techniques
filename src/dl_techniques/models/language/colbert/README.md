@@ -769,7 +769,7 @@ Every component is registered through `register_dl_technique`
 package string is the defining module's dotted path: `dl_techniques.models.colbert.model>ColBERT`,
 and `dl_techniques.models.colbert.components>{ColBERTProjection,MaxSimScorer}`. The latter two
 carried the coarse `dl_techniques>ClassName` string until 2026-08-29, when the tree's last 34
-ad-hoc strings were normalized (repo-root `MIGRATIONS.md`). `build()` materializes the whole sub-layer tree, which
+ad-hoc strings were normalized. `build()` materializes the whole sub-layer tree, which
 is what makes the reload restore real values rather than fresh random kernels.
 
 The codec is **not** a Keras object and does not travel inside the `.keras` file. Persist it

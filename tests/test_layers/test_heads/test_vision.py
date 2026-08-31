@@ -7,7 +7,7 @@ Covers the two opportunistic bugfixes landed during the merge (SC6):
   ``@register_keras_serializable`` class). It is now at module scope with the
   same name, so it is registered (today under the package-qualified key
   ``dl_techniques.layers.heads.vision.factory>EnhancementHead``, with the
-  pre-migration ``Custom>`` name kept as an alias -- see ``MIGRATIONS.md``) and
+  pre-migration ``Custom>`` name kept as an alias) and
   a build via the factory round-trips through ``.keras`` save/load.
 * **MultiTaskHead dict non-mutation.** ``_create_task_heads`` used to
   ``config.pop('task_type')`` on the caller's dict; it now copies first. We
