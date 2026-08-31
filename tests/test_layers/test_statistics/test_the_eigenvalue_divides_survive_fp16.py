@@ -21,6 +21,19 @@ expected to be a float tensor but is a half tensor`` from
 ``ops.sqrt(2.0 / n_random_features)``. Both layers were DEAD ON FORWARD PASS at
 every float16 policy while 306 tests in this directory stayed green. The first
 test class below pins that separately: an fp16 forward pass must not raise.
+
+**And the first version of that class was itself the defect it guards against.**
+It was named for the whole layer -- "the layers run at all under the compute
+dtype" -- while exercising only the DEFAULT ``kernel_type='rbf'``, so 4 of
+``DeepKernelPCA``'s 5 kernels and 2 of ``InvertibleKernelPCA``'s 3 had zero fp16
+coverage. One of the uncovered branches was broken: MEASURED at
+``ef9712fd0``, ``DeepKernelPCA(kernel_type='cosine')`` on a 4x8 input with one
+zero row returns an ALL-NaN kernel matrix under ``mixed_float16`` and is finite
+under ``float32``, from ``compute_kernel_matrix``'s own ``eps = 1e-10`` -- the
+same defect class, in the same file, one screen above the site this guard was
+written for. The class is now PARAMETRIZED over every accepted ``kernel_type``,
+sourced from each layer's own validator, so a guard cannot again be titled for a
+layer while covering one argument value.
 """
 
 import keras
@@ -38,6 +51,16 @@ BATCH = 4
 FEATURES = 6
 COMPONENTS = 3
 
+#: Every value `DeepKernelPCA.__init__`'s own `valid_kernels` set accepts. Kept
+#: in step with it by `TestTheKernelTypeCoverageIsClosed` below rather than by
+#: hand -- a list that only a human keeps current is how the `cosine` branch
+#: went unguarded in the first place.
+DEEP_KERNEL_TYPES = ("rbf", "polynomial", "linear", "sigmoid", "cosine")
+
+#: Likewise for `InvertibleKernelPCA`, whose `kernel_type` selects the random
+#: Fourier frequency distribution.
+INVERTIBLE_KERNEL_TYPES = ("rbf", "laplacian", "cauchy")
+
 
 class TestTheEigenvalueFloorHazardIsReal:
     """Anti-vacuity: the literal these sites used really is zero in float16."""
@@ -53,16 +76,31 @@ class TestTheEigenvalueFloorHazardIsReal:
         assert stability_floor("float64", 1e-10) == 1e-10
 
 
-def _deep_kernel_pca(dtype_policy):
-    layer = DeepKernelPCA(num_levels=1, components_per_level=[COMPONENTS])
-    x = keras.ops.ones((BATCH, FEATURES), dtype=layer.compute_dtype)
+def _deep_kernel_pca(dtype_policy, kernel_type="rbf", zero_row=False):
+    layer = DeepKernelPCA(
+        num_levels=1,
+        components_per_level=[COMPONENTS],
+        kernel_type=kernel_type,
+    )
+    values = np.ones((BATCH, FEATURES), np.float32)
+    if zero_row:
+        # The `cosine` branch normalizes by each row's own norm, so only a row
+        # whose norm is zero can divide by zero. An all-ones input cannot see
+        # this defect -- which is the other half of why it survived.
+        values = np.linspace(-1.0, 1.0, BATCH * FEATURES, dtype=np.float32)
+        values = values.reshape(BATCH, FEATURES)
+        values[1] = 0.0
+    x = keras.ops.cast(keras.ops.convert_to_tensor(values), layer.compute_dtype)
     layer(x)
     return layer, x
 
 
-def _invertible_kernel_pca(dtype_policy):
+def _invertible_kernel_pca(dtype_policy, kernel_type="rbf"):
     layer = InvertibleKernelPCA(
-        n_components=COMPONENTS, n_random_features=8, whiten=True
+        n_components=COMPONENTS,
+        n_random_features=8,
+        whiten=True,
+        kernel_type=kernel_type,
     )
     x = keras.ops.ones((BATCH, 5), dtype=layer.compute_dtype)
     layer(x)
@@ -77,19 +115,99 @@ class TestTheLayersRunAtAllUnderTheComputeDtype:
     test is the failure mode this plan exists to remove.
     """
 
-    def test_deep_kernel_pca_forward_does_not_raise(self, dtype_policy):
-        layer, x = _deep_kernel_pca(dtype_policy)
+    @pytest.mark.parametrize("kernel_type", DEEP_KERNEL_TYPES)
+    def test_deep_kernel_pca_forward_does_not_raise(self, dtype_policy, kernel_type):
+        layer, x = _deep_kernel_pca(dtype_policy, kernel_type)
         out = layer(x)
         assert keras.backend.standardize_dtype(out.dtype) == layer.compute_dtype
         if dtype_policy == "mixed_float16":
             assert layer.compute_dtype == "float16"
 
-    def test_invertible_kernel_pca_forward_does_not_raise(self, dtype_policy):
-        layer, x = _invertible_kernel_pca(dtype_policy)
+    @pytest.mark.parametrize("kernel_type", DEEP_KERNEL_TYPES)
+    def test_deep_kernel_pca_output_is_finite_for_a_zero_norm_row(
+        self, dtype_policy, kernel_type
+    ):
+        """The arm the `rbf`-only version could not have had.
+
+        MEASURED at `ef9712fd0` with a zero row present: `cosine` returns
+        all-NaN under `mixed_float16` and is finite under `float32`; the other
+        four branches are finite under both. Not raising is not enough -- the
+        `cosine` defect produced a perfectly well-shaped, well-typed tensor of
+        NaN.
+        """
+        layer, x = _deep_kernel_pca(dtype_policy, kernel_type, zero_row=True)
+
+        values = keras.ops.convert_to_numpy(layer(x))
+
+        assert keras.backend.standardize_dtype(x.dtype) == layer.compute_dtype
+        assert np.all(np.isfinite(values)), (
+            f"DeepKernelPCA(kernel_type={kernel_type!r}) went non-finite under "
+            f"{dtype_policy} on an input with a zero-norm row"
+        )
+
+    @pytest.mark.parametrize("kernel_type", INVERTIBLE_KERNEL_TYPES)
+    def test_invertible_kernel_pca_forward_does_not_raise(
+        self, dtype_policy, kernel_type
+    ):
+        layer, x = _invertible_kernel_pca(dtype_policy, kernel_type)
         out = layer(x)
         assert keras.backend.standardize_dtype(out.dtype) == layer.compute_dtype
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
         if dtype_policy == "mixed_float16":
             assert layer.compute_dtype == "float16"
+
+
+class TestTheKernelTypeCoverageIsClosed:
+    """The parametrization must equal each layer's OWN accepted set.
+
+    A hand-written list of branch values rots the moment someone adds a kernel,
+    and the new branch is then unguarded in exactly the silent way `cosine` was.
+    These two tests read the layers' own validators, so adding a sixth kernel
+    reddens here rather than passing invisibly.
+    """
+
+    def test_the_deep_kernel_parametrization_matches_the_layers_validator(self):
+        accepted = set()
+        for candidate in DEEP_KERNEL_TYPES + ("definitely-not-a-kernel",):
+            try:
+                DeepKernelPCA(
+                    num_levels=1,
+                    components_per_level=[COMPONENTS],
+                    kernel_type=candidate,
+                )
+            except ValueError:
+                continue
+            accepted.add(candidate)
+        assert accepted == set(DEEP_KERNEL_TYPES)
+
+    def test_the_invertible_parametrization_matches_the_layers_validator(self):
+        accepted = set()
+        for candidate in INVERTIBLE_KERNEL_TYPES + ("definitely-not-a-kernel",):
+            try:
+                InvertibleKernelPCA(
+                    n_components=COMPONENTS,
+                    n_random_features=8,
+                    kernel_type=candidate,
+                )
+            except ValueError:
+                continue
+            accepted.add(candidate)
+        assert accepted == set(INVERTIBLE_KERNEL_TYPES)
+
+    def test_the_probe_can_actually_reject_something(self):
+        """Anti-vacuity: the loops above must not be accepting everything."""
+        with pytest.raises(ValueError):
+            DeepKernelPCA(
+                num_levels=1,
+                components_per_level=[COMPONENTS],
+                kernel_type="definitely-not-a-kernel",
+            )
+        with pytest.raises(ValueError):
+            InvertibleKernelPCA(
+                n_components=COMPONENTS,
+                n_random_features=8,
+                kernel_type="definitely-not-a-kernel",
+            )
 
 
 class TestTheWhiteningDivideSurvivesAZeroEigenvalue:

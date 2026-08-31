@@ -53,7 +53,10 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
-from dl_techniques.utils.dtype_policy import stability_floor
+from dl_techniques.utils.dtype_policy import (
+    accumulation_dtype,
+    stability_floor,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -625,8 +628,22 @@ class DeepKernelPCA(keras.layers.Layer):
                 params['gamma'] = ops.squeeze(self.kernel_weights[level]['gamma'])
                 params['coef0'] = ops.squeeze(self.kernel_weights[level]['coef0'])
 
-        # Add small epsilon for numerical stability
+        # DECISION plan-2026-08-31T134711-6271592d/D-014
+        # `float16(1e-10)` is exactly 0.0, so this epsilon was ABSENT in the one
+        # dtype that needs it. MEASURED at HEAD: of the five branches below only
+        # `cosine` breaks -- a 4x8 input with one zero row returns an all-NaN
+        # kernel matrix under `mixed_float16` and is finite under `float32`.
+        # The two consumers need DIFFERENT repairs, and what decides which is
+        # the SHAPE of the guard, not the site:
+        #   - `polynomial` CLAMPS with it (`ops.maximum(v, eps)`), where the
+        #     floor is inert while `v > eps`, so lifting it to the dtype's
+        #     smallest normal costs nothing -> `stability_floor`.
+        #   - `cosine` ADDS it under a `sqrt` that is then divided by, so a
+        #     lifted epsilon would bias every row -> promote, keep `1e-10`.
+        # Do NOT collapse these back into one shared value.
         eps = 1e-10
+        clamp_eps = stability_floor(self.compute_dtype, eps)
+        accum = accumulation_dtype(self.compute_dtype)
 
         if kernel_type == 'rbf':
             # RBF kernel: exp(-gamma * ||x - y||^2)
@@ -643,7 +660,9 @@ class DeepKernelPCA(keras.layers.Layer):
             degree = params.get('degree', 3.0)
             coef0 = params.get('coef0', 1.0)
             dot_product = ops.matmul(x, ops.transpose(x))
-            kernel_matrix = ops.power(ops.maximum(dot_product + coef0, eps), degree)
+            kernel_matrix = ops.power(
+                ops.maximum(dot_product + coef0, clamp_eps), degree
+            )
 
         elif kernel_type == 'linear':
             # Linear kernel: x^T y
@@ -657,9 +676,16 @@ class DeepKernelPCA(keras.layers.Layer):
             kernel_matrix = ops.tanh(gamma * dot_product + coef0)
 
         elif kernel_type == 'cosine':
-            # Cosine similarity kernel
-            x_norm = ops.sqrt(ops.sum(ops.square(x), axis=1, keepdims=True) + eps)
-            x_normalized = x / x_norm
+            # Cosine similarity kernel. The norm is reduced in `accum` (float32
+            # under a half policy): the squares of a wide-valued row overflow
+            # float16 on the way in, and the epsilon underflows it on the way
+            # out, so a zero row divided 0/0. See the D-014 note above.
+            x_accum = ops.cast(x, accum)
+            x_norm = ops.sqrt(
+                ops.sum(ops.square(x_accum), axis=1, keepdims=True)
+                + stability_floor(accum, eps)
+            )
+            x_normalized = ops.cast(x_accum / x_norm, x.dtype)
             kernel_matrix = ops.matmul(x_normalized, ops.transpose(x_normalized))
 
         else:
