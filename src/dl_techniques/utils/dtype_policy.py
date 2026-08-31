@@ -1,13 +1,31 @@
-"""Dtype-derived numeric policy: one mask sentinel, one stability floor.
+"""Dtype-derived numeric policy: a mask sentinel, a stability floor, a promotion.
 
-This module holds the two numbers that a mixed-precision forward pass gets wrong
-when each author picks them independently, and it derives both from the target
-dtype's own ``finfo`` rather than from a per-dtype table:
+This module holds the numbers and the dtype choice that a mixed-precision forward
+pass gets wrong when each author picks them independently, and it derives all of
+them from the target dtype's own ``finfo`` rather than from a per-dtype table:
 
 - :func:`mask_sentinel` -- the large-magnitude bias written into a masked
   position before a ``softmax`` / ``max`` / ``min``.
-- :func:`stability_floor` -- the epsilon that guards a divide, ``log`` or
-  ``sqrt``.
+- :func:`stability_floor` -- the epsilon that CLAMPS a divisor, i.e. the value
+  passed to ``ops.maximum(value, floor)``.
+- :func:`accumulation_dtype` -- the dtype a precision-sensitive reduction should
+  be computed in, for the ADDITIVE ``value + eps`` shape, where a coarsened
+  epsilon biases every input rather than only the degenerate ones.
+
+**Which of the last two a site needs** is decided by the SHAPE of the guard, and
+getting it wrong is not a style question -- it was MEASURED to cost up to
+``+6.21`` nats at one of this repository's own ``log`` sites:
+
+============================  ==================  ==============================
+guard shape                   correct tool        why
+============================  ==================  ==============================
+``ops.maximum(value, eps)``   :func:`stability_floor`  inert while ``value > eps``,
+                                                  so a coarse float16 floor only
+                                                  moves already-degenerate values
+``value + eps`` in a ``log``  :func:`accumulation_dtype`  the epsilon is added to
+or a divisor                                      EVERY input, so coarsening it
+                                                  biases the whole regime
+============================  ==================  ==============================
 
 Both failures are silent, both are dtype-dependent, and both therefore survive a
 green float32 suite: ``float16`` tops out at ``65504`` so a ``-1e9`` sentinel is
@@ -229,6 +247,63 @@ def mask_sentinel(dtype: _DTypeLike = None) -> float:
     return -float(np.array(magnitude, dtype=numpy_dtype))
 
 
+def accumulation_dtype(dtype: _DTypeLike = None) -> str:
+    """Return the dtype a precision-sensitive reduction should be computed in.
+
+    ``float16`` and ``bfloat16`` map to ``"float32"``; ``float32`` and
+    ``float64`` map to themselves. So the returned dtype is never NARROWER than
+    the one passed in -- promoting a float64 computation down to float32 would
+    be the same defect in the opposite direction, and is the one bug in the
+    house exemplar this function generalizes
+    (``models/language/colbert/components.py``'s ``_safe_l2_normalize``, which
+    casts to ``"float32"`` unconditionally).
+
+    **Use this, not** :func:`stability_floor`, **whenever the epsilon is ADDED**
+    -- ``ops.log(p + eps)``, ``x / (y + eps)``, ``ops.sqrt(v + eps)``. An added
+    epsilon shifts every input, so raising it to the dtype's smallest normal
+    magnitude (``6.10e-05`` in float16, which is what :func:`stability_floor`
+    must do) buys finiteness by paying accuracy across the whole regime rather
+    than only at the degenerate point. MEASURED in
+    ``layers/time_series/xlstm_blocks.py`` under ``mixed_float16``, with the
+    floor at ``6.10e-05`` and the same input in float32 as reference: the
+    log-forget gate read ``-9.61`` where the correct value is ``-12.00``
+    (``+2.39`` nats), and ``-9.70`` against ``-15.91`` (``+6.21`` nats); the
+    sLSTM output divide lost ``90.9%`` of its magnitude and the mLSTM normalizer
+    ``37.3%``, in regimes that were EXACT under the bare pre-fix literal.
+
+    The idiom is three lines, and it is a NO-OP at ``float32`` and ``float64``
+    by construction -- the casts are identities and ``stability_floor`` returns
+    ``requested`` unchanged -- so it cannot move a number outside half
+    precision::
+
+        accum = accumulation_dtype(self.compute_dtype)
+        y = keras.ops.log(
+            keras.ops.cast(p, accum) + stability_floor(accum, 1e-8)
+        )
+        y = keras.ops.cast(y, self.compute_dtype)
+
+    Keep ``stability_floor`` in that expression rather than inlining the
+    literal: it is the identity at ``accum``, and it keeps the site countable by
+    the same census that finds every other epsilon in the tree.
+
+    Promotion is not free -- the intermediate is twice the width, and the result
+    is cast back, so a value that overflows the compute dtype becomes ``inf``
+    where a coarse floor would have clamped it to something finite-but-wrong.
+    Prefer being wrong loudly.
+
+    :param dtype: the COMPUTE dtype of the surrounding layer, in any spelling
+        :func:`mask_sentinel` accepts.
+    :return: a plain dtype name, never narrower than ``dtype``.
+    :raises ValueError: if ``dtype`` is not a floating-point dtype.
+    """
+    name = _resolve_dtype_name(dtype)
+    _, info = _dtype_facts(name)
+
+    if info.nmant < _dtype_facts("float32")[1].nmant:
+        return "float32"
+    return name
+
+
 def stability_floor(dtype: _DTypeLike, requested: float) -> float:
     """Return an epsilon that is strictly positive once materialized in ``dtype``.
 
@@ -239,6 +314,14 @@ def stability_floor(dtype: _DTypeLike, requested: float) -> float:
     already degraded. In float16 that lifts every floor below ``6.10e-05`` up to
     ``6.10e-05``; in float32 and float64 the requested value is almost always
     returned unchanged.
+
+    **Scope.** That lift is a real loss of resolution, so this function is the
+    right tool ONLY where the epsilon is inert against a healthy value -- the
+    ``ops.maximum(value, floor)`` shape, where nothing moves while
+    ``value > floor``. Where the epsilon is ADDED (``log(p + eps)``,
+    ``x / (y + eps)``), it shifts every input and the lift becomes a measured
+    accuracy regression; use :func:`accumulation_dtype` and apply this floor in
+    the promoted dtype, where ``requested`` is returned unchanged.
 
     This follows the house pattern at
     ``models/language/colbert/components.py:99-113`` (``_safe_l2_normalize``) and
@@ -253,7 +336,8 @@ def stability_floor(dtype: _DTypeLike, requested: float) -> float:
 
     The floor is a magnitude only. Where the whole reduction can afford to run
     in float32 -- as ``_safe_l2_normalize`` does -- promoting is stronger than
-    flooring, and this function does not replace that choice.
+    flooring; :func:`accumulation_dtype` names that dtype, and this function is
+    then called with it (returning ``requested`` unchanged).
 
     :param dtype: the COMPUTE dtype the epsilon will be materialized in,
         in any spelling :func:`mask_sentinel` accepts.

@@ -32,7 +32,11 @@ import numpy as np
 import pytest
 
 from dl_techniques.utils import dtype_policy
-from dl_techniques.utils.dtype_policy import mask_sentinel, stability_floor
+from dl_techniques.utils.dtype_policy import (
+    accumulation_dtype,
+    mask_sentinel,
+    stability_floor,
+)
 
 # ---------------------------------------------------------------------
 # Fixtures and shared tables
@@ -522,12 +526,90 @@ class TestUtilsStaysCycleFree:
 
 
 # ---------------------------------------------------------------------
+# accumulation_dtype: the promotion, and its two boundaries.
+# ---------------------------------------------------------------------
+
+
+class TestAccumulationDtypeNeverNarrows:
+    """The promotion must widen or do nothing -- never the reverse.
+
+    The house exemplar this function generalizes,
+    ``models/language/colbert/components.py``'s ``_safe_l2_normalize``, casts to
+    ``"float32"`` unconditionally, which SILENTLY HALVES the precision of a
+    float64 computation. That is the same defect as the one being fixed, in the
+    other direction, so it is pinned rather than copied.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("float16", "float32"),
+            ("bfloat16", "float32"),
+            ("mixed_float16", "float32"),
+            ("mixed_bfloat16", "float32"),
+            ("float32", "float32"),
+            ("float64", "float64"),
+        ],
+    )
+    def test_the_promotion_table(self, name, expected):
+        assert accumulation_dtype(name) == expected
+
+    def test_no_dtype_is_ever_narrowed(self):
+        for name in DTYPES:
+            promoted = accumulation_dtype(name)
+            assert _finfo(promoted).nmant >= _finfo(name).nmant, name
+            assert _finfo(promoted).max >= _finfo(name).max, name
+
+    def test_the_requested_epsilon_survives_the_promotion(self):
+        """The whole point: at the promoted dtype the floor is the identity.
+
+        This is what makes a promoted site bit-neutral at float32 and float64 --
+        the casts are identities there and the epsilon is not lifted -- and what
+        makes it EXACT under a half policy, where the pair
+        ``(compute_dtype, stability_floor(compute_dtype, eps))`` would otherwise
+        have coarsened ``1e-8`` to ``6.10e-05``.
+        """
+        for name in DTYPES:
+            for requested in (1e-7, 1e-8, 1e-10, 1e-12):
+                accum = accumulation_dtype(name)
+                assert stability_floor(accum, requested) == requested
+        # ...and the sibling call it replaces does NOT, in exactly the dtypes
+        # the promotion exists for. Anti-vacuity: without this the assertion
+        # above is satisfied by a function that returns its argument.
+        assert stability_floor("float16", 1e-8) == pytest.approx(6.104e-05, rel=1e-3)
+        assert stability_floor("float16", 1e-8) > 6000 * 1e-8
+
+    def test_it_accepts_every_spelling_mask_sentinel_accepts(self):
+        assert accumulation_dtype(None) == accumulation_dtype(keras.config.floatx())
+        assert accumulation_dtype(np.float16) == "float32"
+        assert accumulation_dtype(keras.DTypePolicy("mixed_float16")) == "float32"
+
+    def test_it_rejects_a_non_float_dtype(self):
+        with pytest.raises(ValueError):
+            accumulation_dtype("int32")
+        with pytest.raises(ValueError):
+            accumulation_dtype("not-a-dtype")
+
+
+# ---------------------------------------------------------------------
 # SC1: the module's public surface.
 # ---------------------------------------------------------------------
 
 
-class TestTheModuleSurfaceStaysTwoPureFunctions:
-    """SC1. A policy module that grows a class has become a framework."""
+class TestTheModuleSurfaceStaysPureFunctions:
+    """The module's public surface, pinned.
+
+    This pin READ ``["mask_sentinel", "stability_floor"]`` -- the plan's SC1,
+    which fixes the count at 2 -- until the 7.1 completion fix added
+    ``accumulation_dtype``. SC1 is therefore graded FAIL at 3/2 and is
+    deliberately NOT rewritten to match the result (D-005: a criterion missed as
+    written is a FAIL reported as a FAIL). The third function is here because
+    the alternative was a ``"float32" if <reduced precision> else <name>``
+    ternary hand-copied to five call sites in two packages -- the same
+    knowledge-in-N-files leak D-001 created this module to remove. What SC1
+    was really protecting is unchanged and is still asserted below: no class,
+    no decorator, no Keras registration, no tensor.
+    """
 
     @staticmethod
     def _tree() -> ast.Module:
@@ -535,14 +617,18 @@ class TestTheModuleSurfaceStaysTwoPureFunctions:
             pathlib.Path(dtype_policy.__file__).read_text(encoding="utf-8")
         )
 
-    def test_exactly_two_public_module_level_functions(self):
+    def test_exactly_three_public_module_level_functions(self):
         public = [
             node.name
             for node in self._tree().body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and not node.name.startswith("_")
         ]
-        assert sorted(public) == ["mask_sentinel", "stability_floor"]
+        assert sorted(public) == [
+            "accumulation_dtype",
+            "mask_sentinel",
+            "stability_floor",
+        ]
 
     def test_no_classes(self):
         assert not [
@@ -569,10 +655,10 @@ class TestTheModuleSurfaceStaysTwoPureFunctions:
         for module, _ in _imported_modules(source, "dl_techniques.utils"):
             assert module != "keras.ops", "use `keras.ops.x`, not `from keras import ops`"
 
-    def test_both_functions_are_importable_from_the_package_path(self):
-        assert callable(mask_sentinel)
-        assert callable(stability_floor)
-        assert mask_sentinel.__doc__ and stability_floor.__doc__
+    def test_every_function_is_importable_from_the_package_path(self):
+        for function in (mask_sentinel, stability_floor, accumulation_dtype):
+            assert callable(function)
+            assert function.__doc__
 
 
 def test_no_warning_is_emitted_on_the_common_paths():
@@ -582,3 +668,4 @@ def test_no_warning_is_emitted_on_the_common_paths():
         for name in DTYPES:
             mask_sentinel(name)
             stability_floor(name, 1e-8)
+            accumulation_dtype(name)
