@@ -267,7 +267,9 @@ class TestGatedGeometricResidual:
         layer_instance(input_tensor, input_tensor)
         assert layer_instance.built is True
         assert hasattr(layer_instance, "gamma")
-        assert layer_instance.gamma.shape == (layer_instance.channels,)
+        # `gamma` is a LayerScale SUB-LAYER; its per-channel weight is
+        # `gamma.gamma` at path `<block>/gamma_scale/gamma`.
+        assert layer_instance.gamma.gamma.shape == (layer_instance.channels,)
 
     def test_gamma_init_value(self, channels, input_tensor):
         """Gamma is initialised to layer_scale_init."""
@@ -275,7 +277,7 @@ class TestGatedGeometricResidual:
         layer = GatedGeometricResidual(channels=channels, layer_scale_init=init_val)
         layer(input_tensor, input_tensor)
         np.testing.assert_allclose(
-            layer.gamma.numpy(),
+            keras.ops.convert_to_numpy(layer.gamma.gamma),
             np.full((channels,), init_val),
             rtol=1e-6, atol=1e-6,
             err_msg="gamma should be initialised to layer_scale_init",
@@ -1304,7 +1306,7 @@ class TestUseGateCheckpointLayoutInvariant:
 
     CHANNELS = 8
     EXPECTED_PATHS = [
-        "ggr/gamma",
+        "ggr/gamma_scale/gamma",
         "ggr/gate_dense/bias",
         "ggr/gate_dense/kernel",
     ]
@@ -1344,13 +1346,13 @@ class TestUseGateCheckpointLayoutInvariant:
         assert len(paths[False]) == 3
 
     def test_trainable_surface_differs_but_weights_do_not(self):
-        """3 trainable at True, exactly ``ggr/gamma`` at False."""
+        """3 trainable at True, exactly ``ggr/gamma_scale/gamma`` at False."""
         trainable = {
             ug: sorted(w.path for w in self._build(ug).trainable_variables)
             for ug in (True, False)
         }
         assert trainable[True] == self.EXPECTED_PATHS
-        assert trainable[False] == ["ggr/gamma"], trainable[False]
+        assert trainable[False] == ["ggr/gamma_scale/gamma"], trainable[False]
 
     @pytest.mark.parametrize("use_gate", [True, False])
     def test_randomized_round_trip_is_value_exact(self, use_gate):
@@ -1917,6 +1919,36 @@ _MP_CHANNELS = 8
 _MP_SHIFTS = [1, 2]
 
 
+def _mp_reference_draw_order(weights):
+    """The weight order this module's calibrated fp16 tolerance was measured at.
+
+    ``GatedGeometricResidual``'s LayerScale gamma moved from a directly-owned
+    ``add_weight`` (which lands BEFORE the block's sub-layer weights) to a
+    ``LayerScale`` sub-layer weight (which lands after). The reference below
+    draws from ONE sequential ``RandomState``, so drawing in the live order
+    would shift every draw after that point and silently build a DIFFERENT
+    reference model: MEASURED 0.0715 vs 0.0108 for the fp16 delta, from the
+    reordered draw alone. At MATCHED weights the pre- and post-refactor blocks
+    read the identical 0.010770678520202637, i.e. the refactor changed no
+    numerics. Restoring the draw order is therefore what keeps the hand-
+    calibrated 0.05 bound (and the 2.19 defect reading it is calibrated
+    against) meaning what they meant when they were measured.
+
+    :param weights: The block's live weight list.
+    :return: The same weights, reordered as they were before the refactor.
+    """
+    live = list(weights)
+    gamma = [w for w in live if w.path.endswith("/ggr/gamma_scale/gamma")]
+    if not gamma:
+        return live
+    assert len(gamma) == 1, [w.path for w in gamma]
+    rest = [w for w in live if w is not gamma[0]]
+    sibling = min(
+        i for i, w in enumerate(rest) if "/ggr/gate_dense/" in w.path
+    )
+    return rest[:sibling] + gamma + rest[sibling:]
+
+
 def _mp_causal_float32_reference():
     """Weights, input and output of a float32 causal block at ``_MP_SEQ_LEN``.
 
@@ -1942,9 +1974,11 @@ def _mp_causal_float32_reference():
     )
     block.build((1, 1, _MP_SEQ_LEN, _MP_CHANNELS))
     rng = np.random.RandomState(1)
-    weights = [
-        rng.normal(size=w.shape).astype("float32") * 0.5 for w in block.weights
-    ]
+    ordered = _mp_reference_draw_order(block.weights)
+    values = {
+        id(w): rng.normal(size=w.shape).astype("float32") * 0.5 for w in ordered
+    }
+    weights = [values[id(w)] for w in block.weights]
     for var, value in zip(block.weights, weights):
         var.assign(value)
     x = np.random.RandomState(4).normal(
@@ -2932,6 +2966,98 @@ class TestSequencePaddingHazard:
             f"note 8 documents: per-position {per_pos}; the worst pre-boundary "
             f"position moved {early:.6e} = {early / ulp:.2f} ulp of the output "
             f"amplitude {amplitude:.4f}"
+        )
+
+
+# ===========================================================================
+# TestGatedGeometricResidualLayerScaleArguments
+#
+# The two arguments `GatedGeometricResidual.__init__` passes to `LayerScale`
+# are both NON-DEFAULT, and each default fails SILENTLY and NUMERICALLY:
+# `initializer="ones"` starts gamma at 1.0 (100000x too large against the
+# 1e-5 default `layer_scale_init`), and `constraint="non_neg"` clamps a
+# legitimately negative gamma to -0.0. Neither raises, and neither is visible
+# to a shape, config or round-trip oracle. One guard each.
+# ===========================================================================
+
+
+class TestGatedGeometricResidualLayerScaleArguments:
+    """Guards for the two mandatory LayerScale arguments."""
+
+    CHANNELS = 8
+
+    @staticmethod
+    def _built(layer_scale_init: float) -> GatedGeometricResidual:
+        layer = GatedGeometricResidual(
+            channels=8, layer_scale_init=layer_scale_init, name="ggr"
+        )
+        layer.build((None, 4, 4, 8))
+        return layer
+
+    def test_layer_scale_gamma_initializes_to_layer_scale_init(self):
+        """gamma == layer_scale_init, NOT LayerScale's `ones` default."""
+        for init_val in (1e-5, 1e-3, 0.25):
+            layer = self._built(init_val)
+            gamma = keras.ops.convert_to_numpy(layer.gamma.gamma)
+            assert gamma.shape == (self.CHANNELS,)
+            np.testing.assert_array_equal(
+                gamma,
+                np.full((self.CHANNELS,), init_val, dtype=gamma.dtype),
+                err_msg=(
+                    f"gamma must start at layer_scale_init={init_val}; got "
+                    f"{gamma[0]!r}. A reading of 1.0 means the `initializer=` "
+                    f"argument was dropped and LayerScale's `ones` default "
+                    f"took over -- {1.0 / init_val:.0f}x too large on the "
+                    f"residual branch, silently."
+                ),
+            )
+
+    def test_layer_scale_gamma_is_free_to_go_negative(self):
+        """A negative gamma survives a TRAINING STEP and reaches the output.
+
+        MEASURED: a Keras 3 constraint is NOT applied by ``Variable.assign``.
+        It is applied by the optimizer, once per step, as
+        ``variable.assign(variable.constraint(variable))``. So a guard that
+        only assigns and reads back is BLIND to the ``non_neg`` default --
+        this one takes one SGD step at ``learning_rate=0.0``, where the
+        constraint is the ONLY thing that can move the value.
+        """
+        layer = self._built(1e-5)
+        # Force the forward pass so `gate_dense` is built and the trainable
+        # surface is complete before the optimizer is built.
+        x = np.full((2, 4, 4, self.CHANNELS), 3.0, dtype="float32")
+        layer(x, x)
+
+        negative = np.full((self.CHANNELS,), -0.5, dtype="float32")
+        layer.gamma.gamma.assign(negative)
+
+        optimizer = keras.optimizers.SGD(learning_rate=0.0)
+        variables = list(layer.trainable_variables)
+        optimizer.build(variables)
+        optimizer.apply_gradients(
+            [(keras.ops.zeros(v.shape, dtype=v.dtype), v) for v in variables]
+        )
+
+        stored = keras.ops.convert_to_numpy(layer.gamma.gamma)
+        np.testing.assert_array_equal(
+            stored, negative,
+            err_msg=(
+                "a negative gamma was clamped by ONE optimizer step at "
+                "learning_rate=0.0, so the only thing that could have moved "
+                "it is LayerScale's `constraint='non_neg'` default mapping "
+                "-0.5 to -0.0. The call site must pass `constraint=None`."
+            ),
+        )
+
+        # h_mix is `silu(h_norm) + alpha * g_feat`. Feeding the SAME strictly
+        # positive tensor to both inputs makes h_mix provably positive
+        # (silu(x) > 0 and alpha = sigmoid(...) > 0 for x > 0), so the output
+        # sign is a direct readout of gamma's sign.
+        out = keras.ops.convert_to_numpy(layer(x, x))
+        assert np.all(out < 0.0), (
+            "a strictly positive h_mix scaled by gamma=-0.5 must be strictly "
+            f"negative; got max={out.max()!r}. A max of 0.0 (or -0.0) means "
+            "gamma never reached the multiply with its negative value."
         )
 
 
