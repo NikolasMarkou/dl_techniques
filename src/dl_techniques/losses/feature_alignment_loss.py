@@ -112,7 +112,10 @@ class FeatureAlignmentLoss(keras.losses.Loss):
             y_pred: Predicted features from trainable encoder. Shape: (batch_size, feature_dim)
 
         Returns:
-            Computed loss value as a scalar tensor.
+            Per-sample loss values with shape (batch_size,) -- one margin-thresholded
+            cosine term per feature pair. Keras' reduction turns this into the scalar
+            it used to return directly; returning the vector is what makes
+            ``sample_weight`` and ``reduction=`` actually select rows.
         """
         # Normalize features to unit vectors for cosine similarity
         y_true_norm = ops.divide(
@@ -137,7 +140,11 @@ class FeatureAlignmentLoss(keras.losses.Loss):
             loss
         )
 
-        return ops.mean(loss)
+        # Per-sample: `loss` is already (batch_size,). An `ops.mean` here would
+        # collapse the batch axis BEFORE Keras applies `sample_weight`, so the
+        # weights would multiply a scalar and every row would be charged the batch
+        # aggregate. Do not reintroduce it.
+        return loss
 
     def get_config(self) -> dict[str, Any]:
         """Returns the configuration of the loss function.

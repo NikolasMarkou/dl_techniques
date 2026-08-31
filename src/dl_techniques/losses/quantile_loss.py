@@ -84,10 +84,13 @@ class MQLoss(keras.losses.Loss):
 
         Args:
             y_true: Ground truth values.
-            y_pred: The predicted values.
+            y_pred: The predicted values. Shape: (batch_size, ...).
 
         Returns:
-            Quantile loss value.
+            Per-sample pinball loss with shape (batch_size,), averaged over every
+            non-batch axis. Keras' reduction recovers the scalar this used to
+            return; keeping the batch axis is what lets ``sample_weight`` and
+            ``reduction=`` select rows.
         """
         y_true = keras.ops.cast(y_true, y_pred.dtype)
 
@@ -97,7 +100,14 @@ class MQLoss(keras.losses.Loss):
         # Calculate the quantile loss
         loss = keras.ops.maximum(self.quantile * error, (self.quantile - 1) * error)
 
-        return keras.ops.mean(loss)
+        # Average every axis EXCEPT the batch axis. Reducing to a scalar here would
+        # make `sample_weight` multiply a scalar, charging every row the batch
+        # aggregate. Every row holds the same element count, so the mean of this
+        # vector equals the old all-axes mean exactly.
+        non_batch_axes = tuple(range(1, len(loss.shape)))
+        if non_batch_axes:
+            loss = keras.ops.mean(loss, axis=non_batch_axes)
+        return loss
 
     def get_config(self) -> dict:
         """Get loss configuration."""
@@ -166,8 +176,10 @@ class QuantileLoss(keras.losses.Loss):
             y_pred: The predicted quantile values. Shape: (batch_size, horizon, num_quantiles).
 
         Returns:
-            A single scalar loss value, the mean of the pinball loss across all
-            quantiles, time steps, and batch items.
+            Per-sample loss with shape (batch_size,) -- the mean of the pinball
+            loss across quantiles and time steps for each batch item. Keras'
+            reduction recovers the scalar this used to return; keeping the batch
+            axis is what lets ``sample_weight`` and ``reduction=`` select rows.
         """
         y_true = keras.ops.cast(y_true, y_pred.dtype)
 
@@ -200,8 +212,13 @@ class QuantileLoss(keras.losses.Loss):
             scale = keras.ops.maximum(scale, 1.0)
             loss = loss / scale
 
-        # Return the mean over all dimensions to get a single scalar loss
-        return keras.ops.mean(loss)
+        # Mean over the horizon and quantile axes ONLY, keeping the batch axis.
+        # Reducing to a scalar here would make `sample_weight` multiply a scalar,
+        # charging every row the batch aggregate. Each row holds the same
+        # horizon*num_quantiles element count, so the mean of this vector equals
+        # the old all-axes mean exactly -- including under `normalize=True`, whose
+        # `scale` is already per-sample.
+        return keras.ops.mean(loss, axis=(1, 2))
 
     def get_config(self) -> dict:
         """Get loss configuration for serialization."""
