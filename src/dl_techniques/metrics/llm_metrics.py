@@ -21,7 +21,7 @@ Both metrics:
 - carry a fp32 accumulator (AMP-safe even if upstream activations are
   ``mixed_float16``),
 - are decorated with ``@register_dl_technique`` (the shared registration
-  helper; see repo-root ``MIGRATIONS.md``),
+  helper),
 - expose full ``get_config`` round-trip.
 
 The CE math mirrors ``dl_techniques.metrics.perplexity_metric.Perplexity``

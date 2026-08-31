@@ -803,7 +803,7 @@ class TestSerialization:
         """One CLASS per name, under exactly its two keys.
 
         This asserted ``len(matches) == 1`` until the 2026-08-29 registration
-        migration (``MIGRATIONS.md``) and it was RIGHT to: a second key ending in
+        migration and it was RIGHT to: a second key ending in
         ``>SAM2FpnNeck`` used to mean a second CLASS silently sharing the slot.
         There are now two keys per registered object BY DESIGN -- the
         package-qualified one and the legacy ``Custom>`` alias, both bound to the

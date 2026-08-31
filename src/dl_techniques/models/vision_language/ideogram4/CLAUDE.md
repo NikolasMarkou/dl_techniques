@@ -166,8 +166,7 @@ D-002 (net-new `ScalarSinusoidalEmbedding` +
   `Custom>X` key and recreate the import-order collision. `Custom>Downsample` and
   `Custom>Upsample` resolve to **nothing** (measured 2026-08-29). Neither appears in any archive
   in this repository. Never a bare `@keras.saving.register_keras_serializable()`: its
-  `Custom>ClassName` key is independent of `__module__`, which is exactly that collision. See
-  `MIGRATIONS.md` at the repo root.
+  `Custom>ClassName` key is independent of `__module__`, which is exactly that collision.
 - **Config invariant guards** (`config.py` `__post_init__` +
   `get_ideogram4_config`): keep these intact — they prevent silent build-time
   failures downstream:

@@ -506,7 +506,7 @@ model.compile(...)
 
 ## 12. Serialization & Deployment
 
-The `TRM` model and all its custom layers (`TRMInner`, `TRMReasoningModule`) are fully serializable using Keras 3's modern `.keras` format. This is possible because each custom component is decorated with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.tiny_recursive_model.model`, and `TRMInner` / `TRMReasoningModule` under `dl_techniques.models.tiny_recursive_model.components` — the defining module's dotted path, with `models/`'s `language/` family directory stripped. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds (repo-root `MIGRATIONS.md`).
+The `TRM` model and all its custom layers (`TRMInner`, `TRMReasoningModule`) are fully serializable using Keras 3's modern `.keras` format. This is possible because each custom component is decorated with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.tiny_recursive_model.model`, and `TRMInner` / `TRMReasoningModule` under `dl_techniques.models.tiny_recursive_model.components` — the defining module's dotted path, with `models/`'s `language/` family directory stripped. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 ### Saving and Loading
 

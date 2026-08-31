@@ -356,8 +356,7 @@ being a filing decision rather than a namespace. `Sam3TrainingModel` resolves to
 `dl_techniques.models.sam3.sam3_image>Sam3Image` (both measured 2026-08-29 with
 `keras.saving.get_registered_name`). The helper additionally binds the legacy
 `Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
-archive names — this is why the SAM 3 archives on disk keep loading across the re-key
-(repo-root `MIGRATIONS.md`).
+archive names — this is why the SAM 3 archives on disk keep loading across the re-key.
 
 ### Loading a checkpoint written before this package moved — registrar-first
 

@@ -59,7 +59,7 @@ Measured caveats:
   dl_techniques.models.vision_language.sam.sam2``,
   ``keras.saving.get_registered_object`` returns ``None`` for both keys. This is
   a statement about import SIDE EFFECTS, not about how the key is spelled, and
-  the registration migration (repo-root ``MIGRATIONS.md``) did not change it.
+  the registration migration did not change it.
   This ``__init__`` imports ``memory_bank`` and ``model`` only, never
   ``training_model``; SAM 1's and SAM 3's inits both import theirs. So a
   ``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an

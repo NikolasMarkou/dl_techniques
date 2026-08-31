@@ -141,8 +141,7 @@ path with `models/`'s `language/` family directory stripped, so the keys are
 `dl_techniques.models.qwen.components>Qwen3NextBlock`, and
 `dl_techniques.models.qwen.qwen3_embeddings><ClassName>` for `Qwen3EmbeddingLayer`,
 `Qwen3RerankerLayer`, `Qwen3EmbeddingModel` and `Qwen3RerankerModel`. Pre-2026-08-29
-archives still load through the legacy `Custom>ClassName` alias the helper also binds
-(repo-root `MIGRATIONS.md`):
+archives still load through the legacy `Custom>ClassName` alias the helper also binds:
 
 ```python
 import keras

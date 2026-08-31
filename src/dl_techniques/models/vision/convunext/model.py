@@ -123,7 +123,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # NEVER on the defining module (measured on Keras 3.8.0, D-008), so that worked. On
 # 2026-08-29 the user confirmed there are no checkpoints, which was the entire basis for the
 # exemption, and this became one of the last 34 ad-hoc strings in `src/`; it now follows the
-# same module-path rule as the other 710 (repo-root `MIGRATIONS.md`). The `Custom>ConvUNextStem`
+# same module-path rule as the other 710. The `Custom>ConvUNextStem`
 # alias the helper binds is unaffected. Do NOT restore the old string: it is not what the
 # tree registers any more and the tests pin the new key.
 @register_dl_technique("dl_techniques.models.convunext.model")

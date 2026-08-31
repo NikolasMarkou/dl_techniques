@@ -21,8 +21,7 @@ Both metrics:
 
 - Inherit from :class:`keras.metrics.Metric`.
 - Are registered with ``@register_dl_technique("dl_techniques.metrics.brier_score")``
-  (the shared helper in ``dl_techniques.utils.keras_registration``; see
-  repo-root ``MIGRATIONS.md``).
+  (the shared helper in ``dl_techniques.utils.keras_registration``).
 - Implement the full contract: ``update_state``, ``result``, ``reset_state``,
   ``get_config``.
 - Accept ``sample_weight``.

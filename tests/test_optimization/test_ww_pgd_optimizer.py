@@ -406,7 +406,7 @@ class TestWWPGDSerialization:
         These four assertions used to spell ``"Custom>WWTailConfig"`` and
         ``"Custom>WWPGDProjectionCallback"`` -- the DEFECT, since a ``Custom>``
         key is module-independent and any same-named class elsewhere in the tree
-        claims the identical slot. See ``MIGRATIONS.md``.
+        claims the identical slot.
         """
         for cls in (WWTailConfig, WWPGDProjectionCallback):
             registration_contract(cls)

@@ -41,8 +41,8 @@ from dl_techniques.utils.logger import logger
 # key breaks load_model for every stored .keras holding these layers (34/34
 # exact round-trip today). Repo-wide migration, not a local edit. See D-011.
 #
-# SUPERSEDED 2026-08-29 -- the repo-wide migration this anchor asked for HAPPENED
-# (repo-root MIGRATIONS.md). The ruling above is kept verbatim; only its cited
+# SUPERSEDED 2026-08-29 -- the repo-wide migration this anchor asked for HAPPENED.
+# The ruling above is kept verbatim; only its cited
 # measurement is re-taken, because a measured claim is superseded with a new
 # measurement, not silently edited.
 #   measured 2026-08-27: 697 bare registrations across src/, 0 colliding keys

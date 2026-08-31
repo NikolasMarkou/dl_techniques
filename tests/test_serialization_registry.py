@@ -8,7 +8,7 @@ Nothing warns.
 SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 744 of them go
 through `dl_techniques.utils.keras_registration.register_dl_technique`, which mints a
 package-qualified key and binds the old ``Custom>{ClassName}`` as an ALIAS to the same
-object so pre-migration `.keras` archives keep loading. See `MIGRATIONS.md`. This guard is
+object so pre-migration `.keras` archives keep loading. This guard is
 unchanged in intent and still the right one: an alias is a second key for the SAME object,
 which this checker's identity comparison correctly does not count as a collision, and the
 four duplicate-name pairs the alias is deliberately WITHHELD from are exactly the pairs
@@ -43,7 +43,7 @@ the `models.convunext.model` twin was deleted, and the survivor lives in
 so its key stayed byte-stable until 2026-08-29, when the user confirmed there are no
 checkpoints -- the exemption's entire basis -- and it was normalized to
 ``package="dl_techniques.models.convunext.model"`` along with the tree's other 33 ad-hoc
-strings (repo-root `MIGRATIONS.md`).
+strings.
 
 Two of the OTHER right-hand modules have since been DELETED and no longer exist anywhere
 in the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`
@@ -140,7 +140,7 @@ def test_no_duplicate_keras_serialization_keys():
         "LAST silently wins, so saving/loading the other is broken and depends on import "
         "order. Give each an explicit distinct `package=` via "
         "`register_dl_technique(...)`, and pass `legacy_alias=False` on BOTH sides if "
-        "they share a bare class name (see MIGRATIONS.md):\n"
+        "they share a bare class name:\n"
         + "\n".join(
             f"  {key}\n" + "".join(f"       {c}\n" for c in sorted(classes))
             for key, classes in sorted(collisions.items())

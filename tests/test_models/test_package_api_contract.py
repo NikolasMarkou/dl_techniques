@@ -2248,8 +2248,8 @@ class TestRegistryKeysDoNotCollide:
         # has a leg outside `models/`. A narrower subject set is structurally
         # blind to the family this guard exists for.
         #
-        # SUPERSEDED IN PART, 2026-08-29 (plan-2026-08-29T141252-168933da; see
-        # `MIGRATIONS.md`). This comment used to end: "Also do NOT `fix` a future
+        # SUPERSEDED IN PART, 2026-08-29 (plan-2026-08-29T141252-168933da).
+        # This comment used to end: "Also do NOT `fix` a future
         # collision by adding `package=`: that moves the key and breaks every
         # existing checkpoint that stored the old registered_name (D-002)." The
         # premise is still true and the conclusion is now wrong. Adding
@@ -2287,7 +2287,7 @@ class TestRegistryKeysDoNotCollide:
         The bare-vs-package assertion is INVERTED relative to 2026-08-20, and the
         inversion is the point. It used to read ``n_bare >= n_package``, on the
         measurement that the bare decorator was this repo's convention (725 vs
-        36). The 2026-08-29 migration (``MIGRATIONS.md``) made the opposite true:
+        36). The 2026-08-29 migration made the opposite true:
         every registration under ``src/`` now carries an explicit package, and a
         bare one reappearing is a REGRESSION rather than the house style. The
         assertion is kept rather than deleted because it is the only thing here

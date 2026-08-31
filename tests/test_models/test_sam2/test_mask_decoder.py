@@ -985,7 +985,7 @@ class TestSam1Untouched:
         by package in the qualified namespace, and by class name in the flat
         ``Custom>`` alias namespace that pre-migration archives still read. The
         alias namespace is the one where a rename could still make them collide,
-        so it is the one worth asserting. See ``MIGRATIONS.md``.
+        so it is the one worth asserting.
         """
         from dl_techniques.models.vision_language.sam.sam1.mask_decoder import (
             MaskDecoder,

@@ -399,7 +399,7 @@ keras.mixed_precision.set_global_policy('mixed_float16')
 
 ## 12. Serialization & Deployment
 
-BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.byte_latent_transformer.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds (repo-root `MIGRATIONS.md`).
+BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.byte_latent_transformer.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 ```python
 # Save complete model including config

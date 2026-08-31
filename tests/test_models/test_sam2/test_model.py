@@ -976,7 +976,7 @@ class TestRegisteredKeyUniqueness:
 
     def test_sam2_does_not_shadow_a_sam1_key(
             self, registration_contract) -> None:
-        """Kept as a LEGACY-namespace regression test -- see ``MIGRATIONS.md``.
+        """Kept as a LEGACY-namespace regression test.
 
         In the package-qualified namespace ``SAM`` and ``SAM2`` could not collide
         even if they shared a name. In the flat ``Custom>`` alias namespace that

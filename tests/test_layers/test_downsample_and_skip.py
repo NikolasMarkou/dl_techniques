@@ -545,7 +545,7 @@ class TestConfig:
     def test_registered_serializable(self):
         assert (
             keras.saving.get_registered_name(DownsampleAndSkip)
-            # normalized 2026-08-29 from the coarse `dl_techniques.layers` (MIGRATIONS.md)
+            # normalized 2026-08-29 from the coarse `dl_techniques.layers`
             == "dl_techniques.layers.downsample_and_skip>DownsampleAndSkip"
         )
 

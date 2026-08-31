@@ -75,8 +75,6 @@ def golden_reference_device() -> str:
 # is MODULE-INDEPENDENT, so it silently keeps passing while two same-named
 # classes in different packages fight over one registry slot. Ten copies of a
 # spelled-out replacement would drift the same way; one predicate cannot.
-#
-# See `MIGRATIONS.md` for the tree-wide change this predicate encodes.
 def assert_package_qualified_registration(
     cls,
     expected_package: str = None,

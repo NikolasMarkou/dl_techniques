@@ -366,7 +366,7 @@ module path — `@register_dl_technique("dl_techniques.models.convunext.model")`
 It did not always. Until 2026-08-29 it kept the string `dl_techniques.bias_free_denoisers`,
 naming the module it was defined in before the merge, so that the key stayed byte-stable for
 `.keras` artifacts written before the move. The 2026-08-29 registration migration
-(repo-root `MIGRATIONS.md`) moved every site in `src/` from the stock
+moved every site in `src/` from the stock
 `@keras.saving.register_keras_serializable` onto the helper and initially preserved that
 string, along with 37 other pre-existing explicit ones; the same day the user confirmed there
 are no checkpoints, which was the exemption's entire basis, and all 34 non-conforming strings

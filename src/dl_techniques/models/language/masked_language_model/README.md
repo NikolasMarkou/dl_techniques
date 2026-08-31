@@ -1010,7 +1010,7 @@ dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Prefetch batches
 - Ensure the encoder is registered with
   `@register_dl_technique("<its module's dotted path>")` from
   `dl_techniques.utils.keras_registration` (never a bare
-  `@keras.saving.register_keras_serializable()` — see `MIGRATIONS.md`)
+  `@keras.saving.register_keras_serializable()`)
 - Verify `get_config()` includes all constructor parameters
 - Use `.keras` format (not `.h5`)
 

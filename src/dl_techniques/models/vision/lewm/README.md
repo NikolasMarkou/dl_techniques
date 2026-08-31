@@ -425,7 +425,7 @@ path with `models/`'s `vision/` family directory stripped:
 `dl_techniques.models.lewm.model>LeWM`, `dl_techniques.models.lewm.embedder>ActionEmbedder`,
 `dl_techniques.models.lewm.predictor>ARPredictor`,
 `dl_techniques.models.lewm.projector>MLPProjector`. The legacy `Custom>ClassName` alias the
-helper also binds keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`).
+helper also binds keeps pre-2026-08-29 archives loading.
 Round-trip:
 
 ```python

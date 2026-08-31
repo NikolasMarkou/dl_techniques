@@ -139,7 +139,7 @@ convenience adapter that assumes an identity correspondence, and it is defined o
 round-trips through the `.keras` format. `models/`'s `vision/` family directory and its
 `keypoints/` subfamily container are stripped from the package string — both are a filing
 decision rather than a namespace. The legacy `Custom>SuperPoint` alias the helper also binds
-keeps pre-2026-08-29 archives loading (repo-root `MIGRATIONS.md`):
+keeps pre-2026-08-29 archives loading:
 
 ```python
 model.save("superpoint.keras")

@@ -28,7 +28,7 @@ through `.keras` at `atol=1e-6`. Every package string is the defining module's d
 `dl_techniques.models.sd3_mmdit.text_encoders><ClassName>`, and
 `dl_techniques.models.sd3_mmdit.blocks>{MMDiTBlock,MMDiTFinalLayer}`. The last two carried the
 coarse `dl_techniques.models>X` string until 2026-08-29, when the tree's remaining 34 ad-hoc
-strings were normalized (repo-root `MIGRATIONS.md`). Logging is via `dl_techniques.utils.logger` (no `print`).
+strings were normalized. Logging is via `dl_techniques.utils.logger` (no `print`).
 
 ---
 
