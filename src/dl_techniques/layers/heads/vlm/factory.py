@@ -1,9 +1,56 @@
-"""
-VLM Task Head Factory
+"""Vision-language task heads, and the factory that picks one.
 
-A comprehensive factory for building configurable head networks for Visual Language
-Model tasks. Designed to be model-agnostic and work with any VLM foundation
-model (CLIP, BLIP, Flamingo, etc.).
+This module holds six layer classes and three module-level helpers. The
+classes turn vision features and text features into task predictions. The
+helpers pick a class and configure it.
+
+The heads take feature tensors, not images or token ids. Nothing here knows
+which foundation model produced them, so the same head works on CLIP, BLIP or
+Flamingo features.
+
+Classes
+-------
+* :class:`BaseVLMHead` -- shared construction for the fusion stack. Two heads
+  inherit from it. It has no ``call``, so it is not a usable head on its own.
+* :class:`ImageCaptioningHead` -- a transformer decoder over text, cross-
+  attending to vision. It does NOT inherit from :class:`BaseVLMHead`.
+* :class:`VQAHead` -- pools each modality, concatenates, classifies. It does
+  NOT inherit from :class:`BaseVLMHead` either.
+* :class:`VisualGroundingHead` -- scores image regions against a text query
+  and regresses a box from the top-scoring one.
+* :class:`ImageTextMatchingHead` -- a contrastive branch and a fine-grained
+  fusion branch, run in parallel.
+* :class:`MultiTaskVLMHead` -- several heads behind one layer. It does not
+  inherit from :class:`BaseVLMHead`.
+
+Helpers
+-------
+* :func:`get_head_class` -- task type to head class. Four of the 47
+  ``VLMTaskType`` members have a head; every other member raises
+  ``ValueError``.
+* :func:`create_vlm_head` -- build one head from a ``VLMTaskConfig``.
+* :func:`create_multi_task_vlm_head` -- build a :class:`MultiTaskVLMHead`
+  from a list or a dict of configurations.
+
+The task types and the configuration dataclass live in ``vlm/task_types.py``.
+
+Two facts worth knowing before reading any diagram below. ``vision_dim`` and
+``text_dim`` are stored and serialized by three of the classes, but no
+``build`` or ``call`` reads them -- every width comes from the actual input
+shapes. And ``BaseVLMHead.activation_type`` is stored and serialized while
+nothing constructs a layer from it.
+
+Example
+-------
+>>> from dl_techniques.layers.heads.vlm.factory import create_vlm_head
+>>> from dl_techniques.layers.heads.vlm.task_types import (
+...     VLMTaskConfig, VLMTaskType)
+>>> head = create_vlm_head(VLMTaskConfig(
+...     name='vqa', task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING,
+...     num_classes=100))
+>>> out = head({'vision_features': v, 'question_features': q})
+>>> sorted(out)
+['answer_logits']
 """
 
 import inspect
@@ -49,17 +96,19 @@ _WRAPPER_OWNED_HEAD_KWARGS = frozenset({"task_config", "vision_dim", "text_dim"}
 def _accepted_constructor_kwargs(head_class: type) -> frozenset:
     """Return the constructor argument names ``head_class`` actually accepts.
 
-    The five VLM head classes do NOT share a signature: ``ImageCaptioningHead``
-    and ``VQAHead`` derive straight from ``keras.layers.Layer``, while
+    The five VLM head classes do not share a signature. ``ImageCaptioningHead``
+    and ``VQAHead`` derive straight from ``keras.layers.Layer``.
     ``VisualGroundingHead`` and ``ImageTextMatchingHead`` derive from
-    ``BaseVLMHead`` and inherit its fusion arguments. So a kwarg meaningful to
-    one head (``fusion_strategy``) is a hard error on another.
+    ``BaseVLMHead`` and inherit its fusion arguments. So a keyword that is
+    meaningful to one head, such as ``fusion_strategy``, is a hard error on
+    another.
 
-    Walks the MRO and unions each class's OWN explicitly-named parameters,
-    stopping at ``keras.layers.Layer``. ``**kwargs`` is deliberately excluded:
-    every head declares it, but only to forward to ``Layer.__init__``, which
-    rejects unknown keys -- so treating ``**kwargs`` as "accepts anything" would
-    invert the very check this function exists to perform.
+    The function walks the MRO and unions each class's own explicitly named
+    parameters, stopping at ``keras.layers.Layer``.
+
+    ``**kwargs`` is excluded from the result. Every head declares it, but only
+    to forward to ``Layer.__init__``, which rejects unknown keys. Counting it
+    as "accepts anything" would invert the very check this function performs.
 
     :param head_class: A VLM head class.
     :type head_class: type
@@ -107,12 +156,14 @@ def _is_single_shape(shape: Any) -> bool:
     # single shape" -- and a list OF TensorShapes as "single". Not reachable from
     # today's `MultiModalFusion`, which returns plain tuples, but a latent trap
     # for any fusion layer that returns backend shape objects.
+    # A string is iterable but is never a shape.
     if isinstance(shape, (str, bytes)):
-        return False                   # iterable, but never a shape
+        return False
     if isinstance(shape, (list, tuple)):
         entries = shape
+    # Any other sized iterable, such as a `tf.TensorShape`.
     elif hasattr(shape, "__iter__") and hasattr(shape, "__len__"):
-        entries = list(shape)          # e.g. tf.TensorShape
+        entries = list(shape)
     else:
         return False
     return not any(
@@ -137,22 +188,21 @@ def _ffn_width_kwargs(ffn_type: str, width: int) -> Dict[str, int]:
     * Returns ``{}`` for a type absent from ``FFN_REGISTRY``, leaving
       ``create_ffn_layer`` to raise its own unknown-type error rather than
       inventing a second one here.
-    * Raises ``KeyError`` if a registry entry is missing the field entirely. That
-      is deliberate: a silent default would reintroduce the exact defect below.
+    * Raises ``KeyError`` if a registry entry is missing the field entirely. A
+      silent default there would reintroduce the defect below.
+
+    Both call sites once hardcoded ``"output_dim": self.hidden_dim``. For the
+    four types named in the anchor the key was dropped by
+    ``create_ffn_layer``'s parameter filter, and the type then died inside
+    ``validate_ffn_config`` on its own width parameter, which nobody had
+    supplied. ``tests/test_layers/test_heads/test_vlm.py::
+    TestFFNOutputWidthParamRouting`` pins the routing.
 
     # DECISION plan-2026-07-30T140922-8af1028f/D-014
-    Do NOT "simplify" this to ``if "output_dim" in required_params: pass it``.
-    That variant looks identical and is a NO-OP for exactly the 4 types whose
-    width parameter is named something else -- ``gated_mlp`` (``filters``),
-    ``kan`` (``features``), ``power_mlp`` and ``tversky`` (``units``) -- which
-    are precisely the types this routing exists to reach. Both sites previously
-    hardcoded ``"output_dim": self.hidden_dim``; for those 4 the key was silently
-    dropped by ``create_ffn_layer``'s parameter filter and the type then died in
-    ``validate_ffn_config`` on its own width parameter, which nobody had
-    supplied. Pinned by
-    ``tests/test_layers/test_heads/test_vlm.py::TestFFNOutputWidthParamRouting``,
-    whose ``kan``/``power_mlp`` parametrizations go RED against the literal-string
-    variant with "Required parameters missing for kan: ['features']".
+    Read the width parameter's NAME from the registry. Do NOT spell it as the
+    literal ``"output_dim"``: that variant is a no-op for exactly the 4 types
+    named differently, ``gated_mlp`` (``filters``), ``kan`` (``features``),
+    ``power_mlp`` and ``tversky`` (``units``). See decisions.md D-014.
 
     :param ffn_type: An ``FFN_REGISTRY`` key.
     :type ffn_type: str
@@ -219,72 +269,141 @@ def _deserialize_task_config(
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class BaseVLMHead(keras.layers.Layer):
     """
-    Base class for all VLM task heads, using an advanced fusion module.
+    Shared construction for the fusion stack two VLM heads use.
 
-    Provides common functionality for multi-modal tasks, delegating complex
-    fusion logic to the dedicated MultiModalFusion layer.
+    This class creates the layers those heads have in common and stores the
+    configuration they read. It has no ``call``, so it is not a usable head on
+    its own. :class:`VisualGroundingHead` and :class:`ImageTextMatchingHead`
+    inherit from it and supply their own forward pass.
+    :class:`ImageCaptioningHead`, :class:`VQAHead` and
+    :class:`MultiTaskVLMHead` do not inherit from it at all.
+
+    ``__init__`` calls ``_build_common_layers``, which creates four sub-layers.
+    Each subclass then calls :meth:`_build_fusion_stack` from its own ``build``
+    with the shapes it will really pass.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌───────────────┐  ┌──────────────┐
-        │Vision Features│  │Text Features │
-        └──────┬────────┘  └──────┬───────┘
-               └──────┬───────────┘
-                      ▼
-            ┌──────────────────┐
-            │ MultiModalFusion │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │ Post-Fusion Norm │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │ Post-Fusion FFN  │
-            │    (optional)    │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │ Task-Specific    │
-            │    Output Head   │
-            └──────────────────┘
+        _build_common_layers creates these four sub-layers:
 
-    :param task_config: VLMTaskConfig object with task configuration.
+        ┌──────────────────────────────────┐
+        │ fusion          MultiModalFusion │
+        │ post_fusion_norm          always │
+        │ post_fusion_dropout       always │
+        │ post_fusion_ffn       (optional) │
+        └──────────────────────────────────┘
+
+        _build_fusion_stack wires this much, and no more:
+
+        vision_features        text_features
+        (B, N, D_vis)          (B, N, D_txt)
+                  │                 │
+                  └────────┬────────┘
+                           ▼
+                  ┌─────────────────────┐
+                  │ fusion              │
+                  │ MultiModalFusion    │
+                  └──────────┬──────────┘
+                             ▼ (B, N, hidden_dim)
+                       squeeze_axis (optional)
+                             ▼
+                  ┌─────────────────────┐
+                  │ post_fusion_norm    │
+                  └──────────┬──────────┘
+                             ▼
+                  ┌─────────────────────┐
+                  │ post_fusion_dropout │
+                  │ built, never applied│
+                  └──────────┬──────────┘
+                             ▼
+                  ┌─────────────────────┐
+                  │ post_fusion_ffn     │
+                  │ (optional)          │
+                  └──────────┬──────────┘
+                             ▼
+                    the subclass task layers
+
+        The three post-fusion boxes are skipped when a
+        subclass passes build_post_fusion=False.
+
+    Four warnings about that picture.
+
+    ``post_fusion_dropout`` is created and built, but no ``call`` in this
+    module applies it. The one head that runs the post-fusion stack,
+    :class:`ImageTextMatchingHead`, goes from ``post_fusion_norm`` straight to
+    ``post_fusion_ffn``. It is a sub-layer the forward pass never reaches.
+    ``Dropout`` holds no weights, so this costs nothing at inference.
+
+    ``activation_type`` is stored and serialized, and nothing reads it. No
+    layer built here is given an activation from it.
+
+    ``vision_dim`` and ``text_dim`` are stored and serialized, and nothing
+    reads them either. Every width comes from the shapes handed to ``build``.
+
+    :class:`VisualGroundingHead` never runs the post-fusion stack, so it
+    passes ``build_post_fusion=False`` and the norm, dropout and FFN are not
+    built at all. Read the subclass diagram, not this one, for what a given
+    head runs.
+
+    Two fusion strategies are rejected up front. ``cross_attention`` returns
+    one tensor per modality and ``attention_pooling`` returns a rank-2 tensor,
+    and the post-fusion stack consumes a single rank-preserving tensor. Six of
+    the eight strategies pass. See :meth:`_build_fusion_stack`.
+
+    :param task_config: Task configuration. ``hidden_size`` becomes
+        ``hidden_dim``, the working width of the whole stack.
     :type task_config: VLMTaskConfig
-    :param vision_dim: Dimension of vision features.
+    :param vision_dim: Declared vision feature width. Stored and serialized;
+        no layer reads it.
     :type vision_dim: int
-    :param text_dim: Dimension of text features.
+    :param text_dim: Declared text feature width. Stored and serialized; no
+        layer reads it.
     :type text_dim: int
-    :param fusion_strategy: The fusion strategy for the MultiModalFusion layer.
+    :param fusion_strategy: Which ``MultiModalFusion`` strategy to build.
     :type fusion_strategy: FusionStrategy
-    :param fusion_config: Configuration parameters for the MultiModalFusion layer.
+    :param fusion_config: Extra keyword arguments for ``MultiModalFusion``.
     :type fusion_config: Optional[Dict[str, Any]]
-    :param normalization_type: Type of normalization for post-fusion blocks.
+    :param normalization_type: Which registered normalization to build for
+        ``post_fusion_norm``.
     :type normalization_type: NormalizationType
-    :param activation_type: Type of activation function for post-fusion blocks.
+    :param activation_type: Stored and serialized. No layer reads it.
     :type activation_type: ActivationType
-    :param use_post_fusion_ffn: If True, includes an FFN block after fusion.
+    :param use_post_fusion_ffn: Whether to create an FFN after the fusion.
     :type use_post_fusion_ffn: bool
-    :param ffn_type: Type of FFN to use in the post-fusion block.
+    :param ffn_type: Which registered FFN type to build after the fusion.
     :type ffn_type: FFNType
-    :param ffn_expansion_factor: Expansion factor for the post-fusion FFN.
+    :param ffn_expansion_factor: Width multiplier for the post-fusion FFN.
 
-        Reaches the FFN by one of two channels, depending on the ``ffn_type``
-        (D-008 / D-020): a type that REQUIRES an explicit ``hidden_dim`` receives
-        ``hidden_dim * ffn_expansion_factor``; a type that derives its own width
-        receives this factor itself and applies its own rule. Of the 8 registry
-        types in the second group only ``swiglu`` accepts it -- for the other 7
-        (``kan``, ``mixer``, ``tversky``, ...) the concept does not apply and the
-        value does not reach them. It is never passed BOTH ways.
+        It reaches the FFN by one of two channels, chosen by ``ffn_type``
+        (D-008 and D-020). A type that requires an explicit ``hidden_dim``
+        receives ``hidden_dim * ffn_expansion_factor``. A type that derives
+        its own width receives the factor itself and applies its own rule. Of
+        the 8 registry types in the second group only ``swiglu`` accepts it;
+        for the other 7 (``kan``, ``mixer``, ``tversky``, ...) the concept
+        does not apply and the value does not reach them. It is never passed
+        both ways.
 
-        Note the default here is ``ffn_type="mlp"``, which takes the first
-        channel, so the default post-fusion width is
-        ``hidden_dim * ffn_expansion_factor``. ``ImageCaptioningHead`` defaults to
-        ``swiglu`` instead and therefore takes the second.
+        The default is ``ffn_type="mlp"``, which takes the first channel, so
+        the default post-fusion width is
+        ``hidden_dim * ffn_expansion_factor``. :class:`ImageCaptioningHead`
+        defaults to ``swiglu`` and therefore takes the second.
     :type ffn_expansion_factor: int
     :param kwargs: Additional arguments for the base Layer.
+
+    :ivar hidden_dim: Working width, taken from ``task_config.hidden_size``.
+    :vartype hidden_dim: int
+    :ivar fusion: The ``MultiModalFusion`` layer. Always created.
+    :vartype fusion: MultiModalFusion
+    :ivar post_fusion_norm: Normalization after the fusion. Always created.
+    :vartype post_fusion_norm: keras.layers.Layer
+    :ivar post_fusion_dropout: Dropout after the fusion. Always created,
+        never applied.
+    :vartype post_fusion_dropout: keras.layers.Dropout
+    :ivar post_fusion_ffn: FFN after the fusion, created when
+        ``use_post_fusion_ffn`` is set.
+    :vartype post_fusion_ffn: keras.layers.Layer
     """
 
     def __init__(
@@ -301,6 +420,37 @@ class BaseVLMHead(keras.layers.Layer):
         ffn_expansion_factor: int = 4,
         **kwargs: Any,
     ) -> None:
+        """
+        Store the configuration and create the common layers.
+
+        The layer name is derived from ``task_config.name``, so a caller must
+        not pass ``name``. See the class docstring for what each argument
+        means and which ones no layer reads.
+
+        :param task_config: Task configuration for this head.
+        :type task_config: VLMTaskConfig
+        :param vision_dim: Declared vision feature width. Stored only.
+        :type vision_dim: int
+        :param text_dim: Declared text feature width. Stored only.
+        :type text_dim: int
+        :param fusion_strategy: Which ``MultiModalFusion`` strategy to build.
+        :type fusion_strategy: FusionStrategy
+        :param fusion_config: Extra keyword arguments for ``MultiModalFusion``.
+        :type fusion_config: Optional[Dict[str, Any]]
+        :param normalization_type: Which normalization to build after fusion.
+        :type normalization_type: NormalizationType
+        :param activation_type: Stored only. No layer reads it.
+        :type activation_type: ActivationType
+        :param use_post_fusion_ffn: Whether to create the post-fusion FFN.
+        :type use_post_fusion_ffn: bool
+        :param ffn_type: Which registered FFN type to build.
+        :type ffn_type: FFNType
+        :param ffn_expansion_factor: Post-fusion FFN width multiplier.
+        :type ffn_expansion_factor: int
+        :param kwargs: Additional arguments for the base Layer class.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(name=f"{task_config.name}_head", **kwargs)
 
         # Store configuration
@@ -315,22 +465,46 @@ class BaseVLMHead(keras.layers.Layer):
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
 
+        # `VLMTaskConfig.__post_init__` in task_types.py always fills
+        # `hidden_size`, from `max(vision_hidden_size, text_hidden_size)`, so a
+        # head never sees None here. Three sites had drifted to two different
+        # fallback expressions for a value that was never missing.
+        #
         # DECISION plan-2026-07-30T081929-1645aa52/D-014
-        # No `or <fallback>` here: it was unreachable dead code.
-        # `VLMTaskConfig.__post_init__` (task_types.py) already fills
-        # `hidden_size` -- with `max(vision_hidden_size, text_hidden_size)`,
-        # both defaulting to 768 -- so it is never None by the time a head
-        # reads it. Proved: constructing with `hidden_size=None` and dims
-        # 64/96 yielded 768, NOT 96, i.e. the fallback never once decided the
-        # value it appeared to guard. The three sites had drifted to two
-        # DIFFERENT fallback expressions (`max(vision_dim, text_dim)` twice,
-        # bare `text_dim` once), which read as a deliberate per-head policy
-        # and was really just dead code diverging. Do not re-add either form.
+        # Read `hidden_size` straight. Do NOT re-add an `or <fallback>` in any
+        # spelling: the fallback was dead code, proved by constructing with
+        # `hidden_size=None` and dims 64/96, which yielded 768, NOT 96.
+        # See decisions.md D-014.
         self.hidden_dim = task_config.hidden_size
         self._build_common_layers()
 
     def _build_common_layers(self) -> None:
-        """Builds common layers used across different heads."""
+        """
+        Create the four sub-layers every head built on this class shares.
+
+        ``fusion``, ``post_fusion_norm`` and ``post_fusion_dropout`` are always
+        created. ``post_fusion_ffn`` is created only when
+        ``use_post_fusion_ffn`` is set. Nothing is built here; the shapes are
+        not known until a subclass calls :meth:`_build_fusion_stack`.
+
+        Called from ``__init__``, following the package rule that layers are
+        created in ``__init__``.
+
+        This is one of the two FFN construction sites in the module. The other
+        is :class:`ImageCaptioningHead`'s per-layer decoder loop. The two must
+        keep the same three rules, or the same ``ffn_type`` means two different
+        things in one file: pass ``hidden_dim`` only where the registry marks
+        it required, forward ``ffn_expansion_factor`` to a type that derives
+        its own width, and read the output-width parameter's name from the
+        registry through :func:`_ffn_width_kwargs`.
+
+        ``create_ffn_layer`` raises on a keyword the type does not declare, so
+        the keyword set is filtered by ``assemble_ffn_config`` before it is
+        sent.
+
+        :return: None.
+        :rtype: None
+        """
         self.fusion = MultiModalFusion(
             dim=self.hidden_dim,
             fusion_strategy=self.fusion_strategy,
@@ -348,72 +522,23 @@ class BaseVLMHead(keras.layers.Layer):
         )
 
         if self.use_post_fusion_ffn:
+            # The default path is unaffected by the rule below. `ffn_type`
+            # defaults to "mlp", and `mlp` marks `hidden_dim` required, so the
+            # conditional makes the identical call. The types that stay closed
+            # here, and why, are listed once in the `ffn_type` docstring of
+            # `ImageCaptioningHead`.
+            #
             # DECISION plan-2026-07-30T081929-1645aa52/D-008
-            # Supply `hidden_dim` only to FFN types that REQUIRE it, matching
-            # `ImageCaptioningHead` (see the longer note at its own FFN site).
-            # This site used to pass it UNCONDITIONALLY while that one passed it
-            # conditionally -- two contradictory rules for the same question in
-            # one file. The unconditional form silently OVERRIDES the internal
-            # width derivation of any type that lists `hidden_dim` as optional:
-            # measured on `ImageTextMatchingHead` with `ffn_type="swiglu"`, the
-            # post-fusion FFN's parameter count tracked `ffn_expansion_factor`
-            # (55296 / 110592 / 221184 at factor 2 / 4 / 8) instead of staying
-            # invariant, because swiglu derives its own hidden width by the 2/3
-            # rule and had that derivation overwritten.
-            #
-            # The DEFAULT path is unaffected: `ffn_type` defaults to "mlp" here,
-            # and `mlp` lists `hidden_dim` as required, so the conditional makes
-            # the identical call. Do NOT "simplify" this back to an
-            # unconditional kwarg -- the swiglu parameter-count invariance test
-            # is what fails when you do.
-            #
-            # The OUTPUT width is routed by name, not hardcoded -- see
-            # `_ffn_width_kwargs` (D-014) for why `"output_dim"` cannot be
-            # spelled literally here. `ImageCaptioningHead.__init__` calls the
-            # same helper with the same arguments; the two sites must stay
-            # identical (I-4).
-            #
-            # `counting`, `logic` and `mixer` remain UNUSABLE on this head, and
-            # deliberately so: each needs a hyperparameter `VLMTaskConfig` does
-            # not carry and cannot derive -- `count_dim` (counting), `logic_dim`
-            # (logic), `tokens_mlp_dim` + `channels_mlp_dim` (mixer). `tversky`
-            # is in the same position via `num_features` (a feature-bank size,
-            # unrelated to any width). Inventing defaults for those would be new
-            # modelling surface, not a lookup, so they stay closed. See the
-            # `ffn_type` docstring of `ImageCaptioningHead` for the one home of
-            # the full reachability outcome.
-            #
+            # Pass `hidden_dim` only to an FFN type that requires it. Do NOT go
+            # back to an unconditional keyword: that overrides a type's own
+            # width rule, measured on swiglu as post-fusion FFN parameters of
+            # 55296 / 110592 / 221184 at factor 2 / 4 / 8. See decisions.md D-008.
+
             # DECISION plan-2026-07-30T140922-8af1028f/D-034
-            # STILL OPEN: the training-quality impact of the D-008/D-020 rule
-            # above is UNMEASURED, and stays open pending any future VLM
-            # checkpoint. The rule changes FFN weight counts and widths for
-            # `ffn_type="swiglu"` with `use_post_fusion_ffn=True` (see the
-            # measured 55296/110592/221184 and 73728 figures above), which is
-            # ordinary reachable behaviour on this default-constructed path.
-            # Nothing measures it today only because no checkpoint exists to
-            # measure against: a repo-wide scan this cycle found 41 `.keras`
-            # files and 0 containing any VLM head class or
-            # `GatedLinearAttentionBlock`. This is the ONE home of that count;
-            # re-derive it rather than trusting it (measured 2026-07-30):
-            #
-            #   find . -name '*.keras' -not -path './.git/*' | wc -l
-            #   for f in $(find . -name '*.keras' -not -path './.git/*'); do
-            #     unzip -p "$f" config.json | grep -oE 'VLMHead|VQAHead|Image[A-Za-z]*Head|VisualGroundingHead'
-            #   done | sort -u
-            #
-            # (the second command prints nothing today).
-            #
-            # This is a DIFFERENT case from the closure recorded beside
-            # `alpha = ops.sigmoid(...)` in
-            # `layers/transformers/gated_linear_attention_block.py`, and the
-            # difference is the whole point: that one is closed UNANSWERABLE BY
-            # CONSTRUCTION, because a sigmoid makes the changed arithmetic
-            # unreachable from any model, so no checkpoint could ever exercise
-            # it. Here there is no unreachability argument at all -- this path is
-            # the default. Do NOT transfer that closure to this item. The
-            # 0-checkpoint fact is an absence of evidence with an expiry date:
-            # train or obtain one VLM head checkpoint and the question becomes
-            # answerable exactly as it stands.
+            # STILL OPEN: the training-quality impact of D-008 and D-020 is
+            # unmeasured. A repo-wide scan found 41 `.keras` files and 0 holding
+            # any VLM head class, so no checkpoint can answer it yet. Re-derive
+            # that count, do not trust it. See decisions.md D-034.
             ffn_kwargs = {
                 "dropout_rate": self.task_config.dropout_rate,
                 "name": f"{self.name}_post_fusion_ffn",
@@ -427,52 +552,50 @@ class BaseVLMHead(keras.layers.Layer):
             elif "ffn_expansion_factor" in set(
                 _entry.get("required_params", ())
             ) | set(_entry.get("optional_params", {})):
-                # DECISION plan-2026-07-30T081929-1645aa52/D-020
-                # For a type that DERIVES its own hidden width, forward the
-                # factor itself instead of a precomputed width.
-                #
-                # Otherwise `ffn_expansion_factor` -- a documented constructor
-                # parameter of this head -- becomes a silent no-op for it:
-                # `hidden_dim` was the only channel by which the head's value
-                # reached the FFN, and D-020's predecessor stopped sending it.
-                # Measured on `swiglu`: the post-fusion width sat at 73728 for
-                # factor 2, 4 AND 8. Now it tracks the factor through swiglu's
-                # OWN 2/3 rule (rounded to `ffn_multiple_of`), which is the point
-                # of not overriding `hidden_dim`.
-                #
                 # Of the 8 registry types that treat `hidden_dim` as optional,
-                # only `swiglu` accepts this parameter; the other 7 have no
-                # expansion concept (`kan`, `mixer`, `tversky`, ... size
-                # themselves from unrelated params), so for them the head's
-                # factor is genuinely inapplicable rather than dropped.
+                # only `swiglu` accepts this parameter. The other 7 (`kan`,
+                # `mixer`, `tversky`, ...) size themselves from unrelated
+                # parameters, so for them the factor does not apply at all.
+                #
+                # DECISION plan-2026-07-30T081929-1645aa52/D-020
+                # Forward the factor itself to a type that derives its own
+                # width. Do NOT drop it: `hidden_dim` was its only channel to
+                # the FFN, and without this swiglu's post-fusion width sat at
+                # 73728 for factor 2, 4 AND 8. See decisions.md D-020.
                 ffn_kwargs["ffn_expansion_factor"] = self.ffn_expansion_factor
 
+            # Filtering belongs here because `dropout_rate` is this head's own
+            # default, not the caller's intent. This head exposes no `ffn_args`
+            # surface, so the third argument is None. If one is ever added it
+            # goes there, never into `ffn_kwargs` -- see `assemble_ffn_config`
+            # and its D-017 contract.
+            #
             # DECISION plan-2026-07-30T140922-8af1028f/D-019
-            # `dropout_rate` above is THIS HEAD's convenience, injected
-            # unconditionally, and 2 of the 21 registry types do not accept it.
-            # Measured at HEAD before this change: constructing this site with
-            # `ffn_type='kan'` or `'power_mlp'` -- both newly reachable as of
-            # D-014 -- logged `create_ffn_layer(...): dropping 1 unsupported
-            # parameter(s) ['dropout_rate']`. The factory RAISES on a dropped
-            # key now (D-023), so this filter is what keeps those two types
-            # constructible here at all. Filtering HERE is correct: it is our
-            # default, not the caller's intent. This head exposes no `ffn_args` surface, so the
-            # third argument is None; if one is ever added it goes THERE, never
-            # into `ffn_kwargs` -- see `assemble_ffn_config`'s D-017 contract.
+            # Pre-filter the keyword set. `dropout_rate` is injected
+            # unconditionally above and 2 of the 21 registry types do not accept
+            # it. Do NOT drop this filter: the factory raises on a dropped key,
+            # so `kan` and `power_mlp` would stop constructing. See decisions.md D-019.
             ffn_kwargs = assemble_ffn_config(self.ffn_type, ffn_kwargs)
             self.post_fusion_ffn = create_ffn_layer(self.ffn_type, **ffn_kwargs)
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Builds the layer.
+        """
+        Mark the layer built. It builds no sub-layer.
 
-        Deliberately does NOT build the common sub-layers created in
-        ``_build_common_layers()``. It cannot: the shapes they see depend on how
-        each subclass drives them (``VisualGroundingHead`` fuses per-region
-        ``(B, N, D)`` tensors, ``ImageTextMatchingHead`` fuses pooled
-        ``(B, 1, D)`` tensors and then squeezes), and one subclass does not use
-        the post-fusion stack at all. Subclasses call
-        :meth:`_build_fusion_stack` from their own ``build()`` with their actual
-        shapes -- see the note there about not building unused sub-layers.
+        It cannot build the sub-layers ``_build_common_layers`` created,
+        because their shapes depend on how each subclass drives them.
+        :class:`VisualGroundingHead` fuses per-region ``(B, N, D)`` tensors.
+        :class:`ImageTextMatchingHead` fuses pooled ``(B, 1, D)`` tensors and
+        then squeezes. One of them does not use the post-fusion stack at all.
+
+        Each subclass calls :meth:`_build_fusion_stack` from its own ``build``
+        with its real shapes. See the note there about not building a
+        sub-layer the forward pass never uses.
+
+        :param input_shape: Input shape(s), passed straight to the base class.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
         """
         super().build(input_shape)
 
@@ -494,42 +617,35 @@ class BaseVLMHead(keras.layers.Layer):
         :param squeeze_axis: Axis the subclass squeezes off the fusion output
             before the post-fusion stack, or ``None`` if it does not squeeze.
         :type squeeze_axis: Optional[int]
-        :param build_post_fusion: Whether this subclass's ``call()`` actually
-            runs the post-fusion norm/dropout/FFN. **Pass ``False`` when it does
-            not**: building an unused sub-layer would create weights that the
-            lazy path never created, changing the layer's weight count and its
-            ``.keras`` layout for no benefit.
+        :param build_post_fusion: Whether this subclass's ``call`` really runs
+            the post-fusion norm, dropout and FFN. Pass ``False`` when it does
+            not. Building an unused sub-layer creates weights the lazy path
+            never created, which changes the weight count and the ``.keras``
+            layout for no benefit.
         :type build_post_fusion: bool
-        :return: Shape entering the post-fusion stack (post-squeeze).
+        :return: Shape entering the post-fusion stack, after the squeeze.
         :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If the fusion strategy returns one shape per
+            modality, if it does not preserve rank, or if the post-fusion FFN
+            produces a width other than ``hidden_dim``.
         """
         self.fusion.build(fusion_input_shapes)
         fused_shape = self.fusion.compute_output_shape(fusion_input_shapes)
 
+        # `cross_attention` returns one tensor per modality; `attention_pooling`
+        # returns rank 2, having already pooled away the axis the caller means to
+        # squeeze. Both used to reach Keras as a shape and die with an error
+        # naming neither the strategy nor the reason. The two fail identically on
+        # the lazy and the explicit-build path, so this is a capability gap, not
+        # a `build()` defect. The check reads the fusion layer's declared output
+        # contract, not a hardcoded strategy list, so a future strategy that
+        # returns a tuple is rejected on its own terms.
+        #
         # DECISION plan-2026-07-30T081929-1645aa52/D-011
-        # The post-fusion stack (norm -> dropout -> FFN -> task head) consumes ONE
-        # tensor, and each subclass's `call()` squeezes a known axis off it. Two of
-        # `MultiModalFusion`'s eight strategies do not meet that contract:
-        #
-        #   * `cross_attention` returns a TUPLE, one tensor per modality
-        #     (`multimodal_fusion.py::_call_cross_attention` -> `tuple(outputs)`).
-        #   * `attention_pooling` returns rank-2 `(batch, dim)`, having already
-        #     pooled away the axis the caller intends to squeeze.
-        #
-        # Both were reaching Keras as a shape and dying with an error that named
-        # neither the strategy nor the reason: `ValueError: Invalid dtype: tuple`
-        # for the first, and a squeeze/fully-defined-shape complaint for the
-        # second. Measured: 6 of the 8 strategies work on both heads, those 2 fail
-        # IDENTICALLY on the lazy and the explicit-build path -- so this is a
-        # pre-existing capability gap, not a `build()`-contract bug.
-        #
-        # Raise here, at the point of wiring, rather than teaching the post-fusion
-        # stack to consume a per-modality tuple: that would be a new fan-in
-        # mechanism (which tensor feeds the task head? both? concatenated?) and
-        # the answer is a modelling decision nobody has asked for. The check is
-        # derived from the fusion layer's declared OUTPUT CONTRACT rather than
-        # from a hardcoded strategy list, so a future strategy that returns a
-        # tuple is rejected automatically.
+        # Raise on a fusion strategy whose output is not one tensor. 6 of the 8
+        # strategies work. Do NOT instead teach the post-fusion stack to fan in a
+        # per-modality tuple: which tensor feeds the task head is a modelling
+        # decision nobody has asked for. See decisions.md D-011.
         if not _is_single_shape(fused_shape):
             raise ValueError(
                 f"fusion_strategy={self.fusion_strategy!r} produces one output "
@@ -571,23 +687,19 @@ class BaseVLMHead(keras.layers.Layer):
                 self.post_fusion_ffn.build(fused_shape)
                 fused_shape = self.post_fusion_ffn.compute_output_shape(fused_shape)
 
-                # DECISION plan-2026-07-30T140922-8af1028f/D-015
-                # Keras will NOT catch a wrong post-fusion width here, so assert
-                # it. Everything downstream is derived from the line above rather
-                # than from `hidden_dim`, and `ImageTextMatchingHead.
-                # similarity_head` is a plain `Dense` that accepts ANY input
-                # width -- so an FFN emitting the wrong width silently REWIRES
-                # the head and still trains, instead of raising. (Contrast
-                # `ImageCaptioningHead`, whose unprojected `x + ffn_output`
-                # residual add raises loudly on the same mistake; that is why
-                # only this site carries an explicit check.)
+                # The oracle is `compute_output_shape`, the very method the
+                # wiring above consumes, so the assertion cannot pass while the
+                # wiring is wrong. That required fixing
+                # `SwiGLUFFN.compute_output_shape`, which reported its input
+                # width (D-013). `ImageCaptioningHead` needs no such check: its
+                # unprojected `x + ffn_output` residual add raises on the same
+                # mistake.
                 #
-                # The oracle is deliberately `compute_output_shape` -- the very
-                # method the wiring above consumes -- so the assertion cannot
-                # pass while the wiring is wrong. That required fixing
-                # `SwiGLUFFN.compute_output_shape`, which reported its INPUT
-                # width (D-013); `swiglu` is the default FFN of the sibling head
-                # and asserting against a lying oracle would have been theatre.
+                # DECISION plan-2026-07-30T140922-8af1028f/D-015
+                # Assert the post-fusion width. Do NOT drop this check or swap
+                # its oracle: `similarity_head` is a Dense that accepts any input
+                # width, so a wrong FFN width rewires the head silently and it
+                # still trains. See decisions.md D-015.
                 if fused_shape[-1] != self.hidden_dim:
                     raise ValueError(
                         f"post-fusion FFN ffn_type={self.ffn_type!r} produces "
@@ -612,6 +724,7 @@ class BaseVLMHead(keras.layers.Layer):
 
         :param input_shape: Input shape(s); a dict keyed by feature name, a list
             of shapes, or a single shape tuple.
+        :type input_shape: Union[Dict, Tuple, List]
         :return: Output shape ``(batch, hidden_dim)``.
         :rtype: Tuple[Optional[int], ...]
         """
@@ -628,7 +741,15 @@ class BaseVLMHead(keras.layers.Layer):
         return (ref[0], self.hidden_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """Gets layer configuration."""
+        """
+        Return the constructor arguments needed to rebuild this head.
+
+        ``task_config`` is converted to a JSON-safe dict, because its
+        ``task_type`` field holds an enum.
+
+        :return: Serializable layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -671,40 +792,74 @@ class BaseVLMHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class ImageCaptioningHead(keras.layers.Layer):
     """
-    An autoregressive decoder head for generating text conditioned on vision features.
+    A transformer decoder over text, cross-attending to vision features.
 
-    Implements a multi-layer Transformer decoder adapted for image captioning,
-    generating descriptive text one token at a time conditioned on static visual
-    features. Each layer uses causal self-attention for text modeling and
-    cross-attention to incorporate visual information.
+    This head generates a caption one token at a time. Each decoder layer runs
+    three sub-blocks in order: causal self-attention over the text stream,
+    cross-attention onto the vision features, then an FFN. Every sub-block adds
+    its output back onto its input and normalizes afterwards, so this is a
+    post-norm decoder with three residual adds per layer.
+
+    It does NOT inherit from :class:`BaseVLMHead` and has no fusion layer. It
+    derives from ``keras.layers.Layer`` directly.
+
+    The residual adds carry no projection, so the text feature width must
+    already equal ``hidden_dim``. ``vision_dim`` is independent: the vision
+    features only enter as the cross-attention key and value.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌──────────────┐
-        │Vision Features│  │Text Embeddings│
-        └──────┬───────┘  └──────┬───────┘
-               │                 ▼
-               │        ┌────────────────┐
-               │        │ Self-Attention  │
-               │        │ (causal mask)   │
-               │        └───────┬────────┘
-               │                ▼
-               └───────►┌────────────────┐
-                        │Cross-Attention  │
-                        └───────┬────────┘
-                                ▼
-                        ┌────────────────┐
-                        │     FFN        │
-                        └───────┬────────┘
-                                ▼
-                          (x num_layers)
-                                ▼
-                        ┌────────────────┐
-                        │ Output Proj.   │
-                        │ (vocab_size)   │
-                        └────────────────┘
+        vision_features            text_features
+        (B, N_vis, vision_dim)     (B, S, hidden_dim)
+               │                          │
+               │                          ▼ x
+               │              ┌──────────────────────┐
+               │              │ self_attention[i]    │
+               │              │ causal keep mask     │
+               │              └───────────┬──────────┘
+               │                          ▼
+               │              ┌──────────────────────┐
+               │              │ norm[3i](x + attn)   │
+               │              └───────────┬──────────┘
+               │                          ▼
+               │              ┌──────────────────────┐
+               └──── kv ────► │ cross_attention[i]   │
+                              └───────────┬──────────┘
+                                          ▼
+                              ┌──────────────────────┐
+                              │ norm[3i+1](x + cross)│
+                              └───────────┬──────────┘
+                                          ▼
+                              ┌──────────────────────┐
+                              │ ffn_layers[i]        │
+                              └───────────┬──────────┘
+                                          ▼
+                              ┌──────────────────────┐
+                              │ norm[3i+2](x + ffn)  │
+                              └───────────┬──────────┘
+                                          ▼
+                                repeat x num_layers
+                                          ▼
+                              ┌──────────────────────┐
+                              │ output_proj Dense    │
+                              └───────────┬──────────┘
+                              ┌────────┴────────┐
+                              ▼                 ▼
+                          'logits'      'hidden_states'
+                    (B, S, vocab_size)  (B, S, hidden_dim)
+
+    The causal mask comes from ``MaskFactory.create_causal_mask``, not from
+    ``ops.tril``. See the note in ``call``.
+
+    Input shape:
+        ``{'vision_features': (batch, num_vision, vision_dim),
+        'text_features': (batch, seq_len, hidden_dim)}``.
+
+    Output shape:
+        ``{'logits': (batch, seq_len, vocab_size), 'hidden_states':
+        (batch, seq_len, hidden_dim)}``.
 
     :param task_config: Configuration object for the task.
     :type task_config: VLMTaskConfig
@@ -747,10 +902,10 @@ class ImageCaptioningHead(keras.layers.Layer):
         * ``counting``, ``logic``, ``mixer`` -- closed by a hyperparameter
           ``VLMTaskConfig`` does not carry and cannot derive: ``count_dim``,
           ``logic_dim``, and ``tokens_mlp_dim`` + ``channels_mlp_dim``
-          respectively. Inventing defaults for those is a modelling decision, not
-          a lookup, so it was deliberately not done. (``mixer`` additionally has
-          no output-width concept at all -- its output shape IS its input shape,
-          which is why its ``output_dim_param`` is ``None``.)
+          respectively. Inventing defaults for those is a modelling decision,
+          not a lookup, so it was not done. (``mixer`` also has no output-width
+          concept at all. Its output shape is its input shape, which is why its
+          ``output_dim_param`` is ``None``.)
 
         The superseded claim, recorded so it is not re-derived: this docstring
         used to say the failures were caused by ``output_dim`` being hardcoded.
@@ -798,6 +953,40 @@ class ImageCaptioningHead(keras.layers.Layer):
         ffn_expansion_factor: int = 4,
         **kwargs: Any,
     ) -> None:
+        """
+        Store the configuration and create every decoder sub-layer.
+
+        The loop creates, per decoder layer, one self-attention layer, one
+        cross-attention layer, one FFN and three normalization layers. The
+        norms are kept in one flat list, so layer ``i`` owns indices ``3i``,
+        ``3i + 1`` and ``3i + 2``. One final ``Dense`` projects to the
+        vocabulary.
+
+        The layer name is derived from ``task_config.name``, so a caller must
+        not pass ``name``.
+
+        :param task_config: Configuration object for the task.
+        :type task_config: VLMTaskConfig
+        :param vision_dim: Declared vision feature width. Stored only; the
+            cross-attention reads the real width from ``build``.
+        :type vision_dim: int
+        :param text_dim: Declared text feature width. Stored only; the decoder
+            stream carries ``hidden_dim`` throughout.
+        :type text_dim: int
+        :param num_layers: Number of decoder layers.
+        :type num_layers: int
+        :param num_heads: Number of attention heads. ``hidden_dim`` must divide
+            by it.
+        :type num_heads: int
+        :param ffn_type: Which registered FFN type each decoder layer builds.
+        :type ffn_type: FFNType
+        :param ffn_expansion_factor: FFN width multiplier.
+        :type ffn_expansion_factor: int
+        :param kwargs: Additional arguments for the base Layer class.
+        :raises ValueError: If ``hidden_dim`` is not divisible by ``num_heads``.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(name=f"{task_config.name}_head", **kwargs)
         self.task_config = task_config
         self.vision_dim = vision_dim
@@ -948,44 +1137,58 @@ class ImageCaptioningHead(keras.layers.Layer):
         inputs: Dict[str, keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
+        """
+        Run the decoder stack and project to the vocabulary.
+
+        ``text_features`` must already be embedded. This head holds no
+        embedding table, and the residual adds carry no projection, so the text
+        width must equal ``hidden_dim``.
+
+        :param inputs: Dict with ``vision_features`` and ``text_features``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Dict with ``logits`` and ``hidden_states``.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
         vision_features = inputs["vision_features"]
-        text_features = inputs["text_features"]  # Assumes pre-embedded text
+        # The text is assumed pre-embedded; this head holds no embedding table.
+        text_features = inputs["text_features"]
 
         x = text_features
         seq_len = ops.shape(x)[1]
-        # Lower-triangular KEEP mask: 1 = attend (current+past), 0 = future.
+        # Lower-triangular KEEP mask: 1 = attend to current and past, 0 = future.
         #
-        # Built from `MaskFactory.create_causal_mask` (an arange index comparison)
-        # rather than `ops.tril`. `ops.tril` -- and `ops.triu`, which shares the
-        # same implementation and therefore the same trap -- routes through a
-        # `tf.cond` that
-        # rejects a Python-bool predicate once traced, raising
-        # `TypeError: pred must not be a Python bool` -- it works EAGERLY and
-        # fails on every graph path (`tf.function`, `Model.predict`, `.keras`
-        # save/load, `jit_compile=True`), for both static and symbolic sequence
-        # lengths. The same trap is documented at
-        # `models/vision_language/sd3_mmdit/text_encoders.py`. Note that Keras downgrades such a
-        # `call()` crash during build-tracing to a UserWarning, so this was
-        # invisible in a green test suite.
+        # Build it from `MaskFactory.create_causal_mask`, an arange index
+        # comparison, and not from `ops.tril`. `ops.tril` and `ops.triu` share an
+        # implementation that routes through a `tf.cond` rejecting a Python-bool
+        # predicate once traced, raising `TypeError: pred must not be a Python
+        # bool`. That works eagerly and fails on every graph path: `tf.function`,
+        # `Model.predict`, `.keras` save and load, and `jit_compile=True`. It
+        # fails for both static and symbolic sequence lengths. Keras downgrades
+        # such a crash during build tracing to a UserWarning, so a green test
+        # suite could not see it. The same trap is documented in the SD3 MMDiT
+        # text encoders.
         #
-        # MaskFactory returns the BLOCK polarity (True where a position must be
-        # suppressed, i.e. j > i); this site needs the complementary KEEP mask as
-        # a float, hence `logical_not` + cast.
+        # MaskFactory returns the BLOCK polarity, True where a position must be
+        # suppressed. This site needs the complementary KEEP mask as a float,
+        # hence `logical_not` plus a cast.
         #
-        # This block->keep adapter is now duplicated at TWO sites -- here and
-        # `models/vision_language/mobile_clip/components.py`. Two is not yet enough to earn a
-        # shared helper, but a THIRD consumer should promote it into a
-        # keep-polarity variant in `utils/masking/factory.py` rather than copying
-        # this again. Deferred deliberately: promoting it touches two shipped,
-        # mixed-precision-sensitive call sites and must preserve the pinned
-        # `floatx()` cast target below. The cast target is
-        # `backend.floatx()` because that is what the previous `ops.ones(...)`
-        # defaulted to -- keeping the fix numerically inert.
+        # This block-to-keep adapter now exists at two sites: here and in the
+        # MobileCLIP components module. Two is not enough to earn a shared
+        # helper. A third consumer should promote it into a keep-polarity
+        # variant in `utils/masking/factory.py` rather than copying it again.
+        # Promoting it is deferred because it touches two shipped,
+        # mixed-precision-sensitive call sites and must preserve the cast target
+        # below. That target is `backend.floatx()` because it is what the
+        # previous `ops.ones(...)` defaulted to, which keeps the change
+        # numerically inert.
         causal_mask = ops.cast(
             ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
             keras.backend.floatx(),
         )
-        causal_mask = ops.expand_dims(causal_mask, 0)           # (1, S, S) full-mask form
+        # Expand to the (1, S, S) full-mask form the attention layers expect.
+        causal_mask = ops.expand_dims(causal_mask, 0)
 
         for i in range(self.num_layers):
             # Self-attention with causal mask
@@ -1008,7 +1211,14 @@ class ImageCaptioningHead(keras.layers.Layer):
         return {"logits": logits, "hidden_states": x}
 
     def compute_output_shape(self, input_shape):
-        """Returns output-shape dict mirroring call() outputs."""
+        """
+        Return the output shapes, mirroring the ``call`` return value.
+
+        :param input_shape: Shape dict; only ``text_features`` is read.
+        :type input_shape: Dict
+        :return: Shapes for ``logits`` and ``hidden_states``.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        """
         text_shape = input_shape["text_features"]
         batch, seq_len = text_shape[0], text_shape[1]
         return {
@@ -1017,6 +1227,12 @@ class ImageCaptioningHead(keras.layers.Layer):
         }
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this head.
+
+        :return: Serializable layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -1033,7 +1249,18 @@ class ImageCaptioningHead(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ImageCaptioningHead":
-        """Reconstruct the head, deserializing the ``task_config`` dataclass."""
+        """
+        Reconstruct the head, deserializing the ``task_config`` dataclass.
+
+        The layer name is regenerated from ``task_config.name`` in
+        ``__init__``, so the stored ``name`` is dropped to avoid a duplicate
+        keyword.
+
+        :param config: Serialized layer configuration.
+        :type config: Dict[str, Any]
+        :return: A reconstructed head instance.
+        :rtype: ImageCaptioningHead
+        """
         config = dict(config)
         config.pop("name", None)
         config["task_config"] = _deserialize_task_config(config["task_config"])
@@ -1048,51 +1275,98 @@ class ImageCaptioningHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class VQAHead(keras.layers.Layer):
     """
-    A multimodal fusion and classification head for Visual Question Answering.
+    Pools each modality, concatenates them, and classifies the answer.
 
-    Fuses vision and text representations into a joint vector via configurable
-    pooling strategies, then classifies through a multi-layer MLP to predict
-    the final answer from a fixed answer vocabulary.
+    This head picks one answer from a fixed vocabulary. It pools the vision
+    features and the question features to one vector each, joins them end to
+    end, and runs the result through an MLP.
+
+    It does NOT inherit from :class:`BaseVLMHead` and has no fusion layer. It
+    derives from ``keras.layers.Layer`` directly.
+
+    It is also the one head in this module that reads ``question_features``
+    rather than ``text_features``. :class:`MultiTaskVLMHead` fans one input
+    dict to every head, so mixing this head with any other needs both keys.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌────────────────┐
-        │Vision Features│  │Question Features│
-        └──────┬───────┘  └──────┬─────────┘
-               └──────┬──────────┘
-                      ▼
-            ┌──────────────────┐
-            │ Pooling Strategy │
-            │(mean/max/attn.)  │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │  Concatenation   │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │  Hidden Layers   │
-            │  + Dropout       │
-            └────────┬─────────┘
-                     ▼
-            ┌──────────────────┐
-            │  Output Layer    │
-            │  (num_classes)   │
-            └──────────────────┘
+        vision_features           question_features
+        (B, N_vis, D_vis)         (B, S, D_txt)
+                │                          │
+                ▼                          ▼
+        ┌────────────────┐        ┌────────────────┐
+        │ pool vision    │        │ pool question  │
+        │ mean/max/attn  │        │ mean/max/attn  │
+        └───────┬────────┘        └───────┬────────┘
+                ▼ (B, D_v)                ▼ (B, D_q)
+                └────────────┬────────────┘
+                             ▼
+                  ┌─────────────────────┐
+                  │ concatenate axis -1 │
+                  └──────────┬──────────┘
+                             ▼ (B, pooled_width)
+                  ┌─────────────────────┐
+                  │ hidden_layers[i]    │
+                  │ Dense gelu          │
+                  └──────────┬──────────┘
+                             ▼
+                  ┌─────────────────────┐
+                  │ dropout_layers[i]   │
+                  └──────────┬──────────┘
+                             ▼
+                   repeat x len(hidden_dims)
+                             ▼
+                  ┌─────────────────────┐
+                  │ output_layer Dense  │
+                  └──────────┬──────────┘
+                             ▼
+                   'answer_logits' (B, num_classes)
 
-    :param task_config: Configuration object for the task.
+    The ``"attention"`` strategy is not two pooling layers. One
+    cross-attention layer runs in both directions, vision attending to the
+    question and the question attending to vision, and each attended result is
+    then mean-pooled. Running it in reverse needs the two feature widths to
+    match, which is a standing contract of this head.
+
+    ``pooled_width`` depends on the strategy. ``mean`` and ``max`` keep each
+    modality's own channel count, so it is ``D_vis + D_txt``. ``attention``
+    maps both to ``embed_dim``, so it is ``2 * embed_dim``.
+
+    Input shape:
+        ``{'vision_features': (batch, num_vision, vision_dim),
+        'question_features': (batch, seq_len, text_dim)}``.
+
+    Output shape:
+        ``{'answer_logits': (batch, num_classes)}``.
+
+    :param task_config: Configuration object for the task. ``num_classes``
+        must be positive and ``hidden_size`` becomes ``embed_dim``.
     :type task_config: VLMTaskConfig
-    :param vision_dim: Dimension of vision features.
+    :param vision_dim: Declared vision feature width. Stored and serialized;
+        no layer reads it.
     :type vision_dim: int
-    :param text_dim: Dimension of text features.
+    :param text_dim: Declared text feature width. Stored and serialized; no
+        layer reads it.
     :type text_dim: int
-    :param hidden_dims: List of hidden layer dimensions for the classifier MLP.
-    :type hidden_dims: List[int]
-    :param pooling_strategy: Strategy for pooling features ("mean", "max", "attention").
+    :param hidden_dims: Widths of the classifier MLP's hidden layers.
+    :type hidden_dims: Sequence[int]
+    :param pooling_strategy: One of ``"mean"``, ``"max"`` or ``"attention"``.
     :type pooling_strategy: str
     :param kwargs: Additional arguments for the base Layer.
+
+    :ivar embed_dim: Attention width, taken from ``task_config.hidden_size``.
+    :vartype embed_dim: int
+    :ivar attention_pooling: Cross-attention layer, or ``None`` when the
+        strategy is not ``"attention"``.
+    :vartype attention_pooling: Optional[keras.layers.Layer]
+    :ivar hidden_layers: The classifier MLP's ``Dense`` layers.
+    :vartype hidden_layers: List[keras.layers.Dense]
+    :ivar dropout_layers: One ``Dropout`` per hidden layer.
+    :vartype dropout_layers: List[keras.layers.Dropout]
+    :ivar output_layer: Final ``Dense`` to ``num_classes``.
+    :vartype output_layer: keras.layers.Dense
     """
 
     def __init__(
@@ -1104,6 +1378,33 @@ class VQAHead(keras.layers.Layer):
         pooling_strategy: str = "attention",
         **kwargs: Any,
     ) -> None:
+        """
+        Store the configuration and create the pooling and MLP sub-layers.
+
+        ``attention_pooling`` is created only for the ``"attention"``
+        strategy; the other two need no layer. One ``Dense`` and one
+        ``Dropout`` are created per entry in ``hidden_dims``, plus the output
+        ``Dense``.
+
+        The layer name is derived from ``task_config.name``, so a caller must
+        not pass ``name``.
+
+        :param task_config: Configuration object for the task.
+        :type task_config: VLMTaskConfig
+        :param vision_dim: Declared vision feature width. Stored only.
+        :type vision_dim: int
+        :param text_dim: Declared text feature width. Stored only.
+        :type text_dim: int
+        :param hidden_dims: Widths of the classifier MLP's hidden layers.
+        :type hidden_dims: Sequence[int]
+        :param pooling_strategy: One of ``"mean"``, ``"max"``, ``"attention"``.
+        :type pooling_strategy: str
+        :param kwargs: Additional arguments for the base Layer class.
+        :raises ValueError: If ``task_config.num_classes`` is missing or not
+            positive, or if ``pooling_strategy`` is not one of the three.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(name=f"{task_config.name}_head", **kwargs)
 
         if task_config.num_classes is None or task_config.num_classes <= 0:
@@ -1201,6 +1502,21 @@ class VQAHead(keras.layers.Layer):
         inputs: Dict[str, keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
+        """
+        Pool both modalities, concatenate them, and classify.
+
+        ``"mean"`` and ``"max"`` reduce over axis 1, so they need rank-3
+        inputs. ``"attention"`` runs one cross-attention layer in both
+        directions and mean-pools each attended result.
+
+        :param inputs: Dict with ``vision_features`` and ``question_features``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Dict with a single ``answer_logits`` entry.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If ``pooling_strategy`` is not one of the three.
+        """
         vision_features = inputs["vision_features"]
         question_features = inputs["question_features"]
 
@@ -1232,11 +1548,25 @@ class VQAHead(keras.layers.Layer):
         return {"answer_logits": logits}
 
     def compute_output_shape(self, input_shape):
-        """Returns output-shape dict mirroring call() outputs."""
+        """
+        Return the output shape, mirroring the ``call`` return value.
+
+        :param input_shape: Shape dict; only ``vision_features`` is read, for
+            its batch axis.
+        :type input_shape: Dict
+        :return: Shape for ``answer_logits``.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        """
         vision_shape = input_shape["vision_features"]
         return {"answer_logits": (vision_shape[0], self.task_config.num_classes)}
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this head.
+
+        :return: Serializable layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -1251,7 +1581,18 @@ class VQAHead(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "VQAHead":
-        """Reconstruct the head, deserializing the ``task_config`` dataclass."""
+        """
+        Reconstruct the head, deserializing the ``task_config`` dataclass.
+
+        The layer name is regenerated from ``task_config.name`` in
+        ``__init__``, so the stored ``name`` is dropped to avoid a duplicate
+        keyword.
+
+        :param config: Serialized layer configuration.
+        :type config: Dict[str, Any]
+        :return: A reconstructed head instance.
+        :rtype: VQAHead
+        """
         config = dict(config)
         config.pop("name", None)
         config["task_config"] = _deserialize_task_config(config["task_config"])
@@ -1266,38 +1607,93 @@ class VQAHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class VisualGroundingHead(BaseVLMHead):
     """
-    Head for visual grounding tasks.
+    Scores image regions against a text query and boxes the best one.
 
-    Localizes image regions matching a text query by fusing per-region visual
-    features with the pooled text query, scoring each region, and regressing
-    a bounding box from the top-scoring region.
+    This head fuses each visual region with the pooled text query, scores
+    every region, then regresses a bounding box from the single top-scoring
+    region. It inherits from :class:`BaseVLMHead` and uses its ``fusion``
+    layer, defaulting the strategy to ``"gated"``.
+
+    It never runs the post-fusion stack. ``call`` goes straight from
+    ``fusion`` to ``confidence_scorer``, so ``build`` passes
+    ``build_post_fusion=False`` and the norm, dropout and FFN are not built at
+    all. Setting ``use_post_fusion_ffn=True`` adds no post-fusion FFN weights.
+
+    ``vision_features`` must be rank 3. The regions are whatever the caller
+    put on axis 1; this head does not propose them.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌──────────────┐
-        │Vision Regions │  │Text Features │
-        │ [B, N, D_vis]│  │              │
-        └──────┬───────┘  └──────┬───────┘
-               │                 ▼
-               │        ┌────────────────┐
-               │        │ Mean Pooling   │
-               │        └───────┬────────┘
-               │                ▼
-               └───────►┌────────────────┐
-                        │ Gated Fusion   │
-                        │ (per region)   │
-                        └───┬────────┬───┘
-                            ▼        ▼
-                    ┌──────────┐ ┌────────┐
-                    │Confidence│ │  BBox  │
-                    │ Scorer   │ │Regress.│
-                    └──────────┘ └────────┘
+        text_features (B, S, D_txt)
+                             │
+                             ▼
+                  ┌─────────────────────┐
+                  │ mean over axis 1    │
+                  └──────────┬──────────┘
+                             ▼ (B, D_txt)
+                  ┌─────────────────────┐
+                  │ tile to N_regions   │
+                  └──────────┬──────────┘
+                             ▼
+        vision_features ─────┤ (B, N_regions, D_vis)
+                             ▼
+                  ┌─────────────────────┐
+                  │ fusion, gated       │
+                  └──────────┬──────────┘
+                             ▼ (B, N_regions, hidden_dim)
+                  ┌─────────────────────┐
+                  │ confidence_scorer   │
+                  │ Dense 1, sigmoid    │
+                  └──────────┬──────────┘
+                             ▼ squeeze
+                    ┌────────┴────────┐
+                    ▼                 ▼
+             'confidence'      argmax over regions
+            (B, N_regions)     take_along_axis
+                                  │
+                                  ▼ (B, hidden_dim)
+                          ┌───────┴─────────┐
+                          ▼                 ▼
+               ┌─────────────────────┐  'grounded_features'
+               │ bbox_regressor      │
+               │ Dense 4, sigmoid    │
+               └──────────┬──────────┘
+                          ▼
+                    'bbox' (B, 4)
+
+    The region is picked with ``ops.argmax`` and ``ops.take_along_axis``. See
+    the note in ``call`` about why NumPy fancy indexing cannot be used.
+
+    Input shape:
+        ``{'vision_features': (batch, num_regions, vision_dim),
+        'text_features': (batch, seq_len, text_dim)}``. A rank-2
+        ``text_features`` is accepted and used as the query directly.
+
+    Output shape:
+        ``{'bbox': (batch, 4), 'confidence': (batch, num_regions),
+        'grounded_features': (batch, hidden_dim)}``.
+
+    :param kwargs: Arguments for :class:`BaseVLMHead`. ``fusion_strategy``
+        defaults to ``"gated"`` here rather than to the base class value.
+
+    :ivar bbox_regressor: ``Dense`` producing the four box values.
+    :vartype bbox_regressor: keras.layers.Dense
+    :ivar confidence_scorer: ``Dense`` producing one score per region.
+    :vartype confidence_scorer: keras.layers.Dense
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        # A strategy that scores per-region interactions is best.
+        """
+        Default the fusion strategy, then create the two task layers.
+
+        :param kwargs: Arguments for :class:`BaseVLMHead`.
+        :return: None.
+        :rtype: None
+        """
+        # A gated strategy scores per-region interactions, which is what this
+        # head needs; the caller can still override it.
         kwargs.setdefault("fusion_strategy", "gated")
         super().__init__(**kwargs)
 
@@ -1351,7 +1747,19 @@ class VisualGroundingHead(BaseVLMHead):
         inputs: Dict[str, keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
-        vision_features = inputs["vision_features"]  # [B, N_regions, D_vis]
+        """
+        Score every region, then box the top-scoring one.
+
+        :param inputs: Dict with ``vision_features``, shaped
+            ``(B, N_regions, D_vis)``, and ``text_features``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Keras training flag, forwarded to the fusion layer.
+        :type training: Optional[bool]
+        :return: Dict with ``bbox``, ``confidence`` and ``grounded_features``.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If ``vision_features`` is not rank 3.
+        """
+        vision_features = inputs["vision_features"]
         text_features = inputs["text_features"]
 
         if len(ops.shape(vision_features)) != 3:
@@ -1374,16 +1782,18 @@ class VisualGroundingHead(BaseVLMHead):
 
         # Score each aligned region's features.
         region_scores = self.confidence_scorer(fused_per_region)
-        region_scores = ops.squeeze(region_scores, axis=-1)  # [B, N_regions]
+        # Drop the trailing size-1 axis, leaving [B, N_regions].
+        region_scores = ops.squeeze(region_scores, axis=-1)
 
-        # Regress bounding box from the top-scoring region's features.
+        # Regress the bounding box from the top-scoring region's features.
         #
-        # Gather one region per batch element with `ops.take_along_axis`, NOT with
-        # NumPy-style fancy indexing (`fused[batch_indices, top_indices]`). That
-        # form is a NumPy idiom that TF tensors reject outright --
-        # "Only integers, slices (`:`), ellipsis, tf.newaxis and scalar
-        # tf.int32/tf.int64 tensors are valid indices" -- so it failed EAGERLY,
-        # not merely under tracing, leaving this head dead on its forward pass.
+        # Gather one region per batch element with `ops.take_along_axis`, not
+        # with NumPy-style fancy indexing such as
+        # `fused[batch_indices, top_indices]`. TF tensors reject that form
+        # outright: "Only integers, slices (`:`), ellipsis, tf.newaxis and
+        # scalar tf.int32/tf.int64 tensors are valid indices". It failed
+        # eagerly, not only under tracing, which left this head dead on its
+        # forward pass.
         top_indices = ops.argmax(region_scores, axis=1)
         gather_index = ops.reshape(ops.cast(top_indices, "int32"), (-1, 1, 1))
         gather_index = ops.broadcast_to(
@@ -1424,53 +1834,93 @@ class VisualGroundingHead(BaseVLMHead):
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class ImageTextMatchingHead(BaseVLMHead):
     """
-    A projection head for contrastive image-text alignment and fine-grained matching.
+    Runs a contrastive branch and a fine-grained branch in parallel.
 
-    Performs two functions: (1) projects vision and text features into a shared
-    L2-normalized embedding space for CLIP-style contrastive loss scaled by a
-    learnable temperature, and (2) fuses features to produce a fine-grained
-    matching score indicating semantic correspondence.
+    This head answers two questions about the same pair of inputs. The
+    contrastive branch projects both modalities into one L2-normalized space
+    and returns a CLIP-style similarity matrix scaled by a learnable
+    temperature. The fine-grained branch fuses the two pooled vectors and
+    returns one match score per pair. Both branches read the same pooled
+    tensors, and ``call`` returns five keys covering both.
+
+    It inherits from :class:`BaseVLMHead` and defaults ``fusion_strategy`` to
+    ``"concatenation"``. It is the only head in this module that runs the
+    post-fusion stack.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌──────────────┐
-        │Vision Features│  │Text Features │
-        └──┬───────┬───┘  └──┬───────┬───┘
-           │       │         │       │
-           ▼       │         ▼       │
-        ┌──────┐   │      ┌──────┐   │
-        │V Proj│   │      │T Proj│   │
-        └──┬───┘   │      └──┬───┘   │
-           ▼       │         ▼       │
-        ┌──────┐   │      ┌──────┐   │
-        │L2Norm│   │      │L2Norm│   │
-        └──┬───┘   │      └──┬───┘   │
-           └──┬────┘─────────┘       │
-              ▼                      │
-        ┌───────────┐    ┌───────────┘
-        │Similarity │    │
-        │Matrix/τ   │    ▼
-        └───────────┘  ┌──────────┐
-                       │  Fusion  │
-                       └────┬─────┘
-                            ▼
-                       ┌──────────┐
-                       │Match Scr.│
-                       └──────────┘
+        vision_features            text_features
+        (B, N_vis, D_vis)          (B, S, D_txt)
+                │                          │
+                ▼ mean axis 1              ▼ mean axis 1
+          vision_pooled                 text_pooled
+            (B, D_vis)                  (B, D_txt)
+                │                          │
+                └────────────┬─────────────┘
+                             │ both feed both branches
+                   ┌─────────┴─────────────┐
+                   ▼                       ▼
+        ┌─────────────────────┐ ┌─────────────────────┐
+        │ vision_proj Dense   │ │ expand to (B, 1, D) │
+        │ text_proj Dense     │ │ fusion              │
+        │ L2 normalize both   │ │ squeeze axis 1      │
+        │ v_norm @ t_norm.T   │ │ post_fusion_norm    │
+        │ scale by temperature│ │ post_fusion_ffn     │
+        │                     │ │ (optional)          │
+        │                     │ │ similarity_head     │
+        └──────────┬──────────┘ └──────────┬──────────┘
+                   ▼                       ▼
+         'similarity_matrix' (B, B)  'match_score' (B,)
+         'logits'            (B, B)
+         'vision_embeddings' (B, projection_dim)
+         'text_embeddings'   (B, projection_dim)
+
+    ``post_fusion_dropout`` is built by :meth:`BaseVLMHead._build_fusion_stack`
+    and is not in that picture, because ``call`` does not apply it.
+
+    The similarity matrix is computed across the batch, so ``similarity_matrix``
+    and ``logits`` are ``(batch, batch)``. Row ``i``, column ``j`` is image
+    ``i`` against caption ``j``.
+
+    Input shape:
+        ``{'vision_features': (batch, num_vision, vision_dim),
+        'text_features': (batch, seq_len, text_dim)}``. Rank-2 inputs are
+        accepted and used unpooled.
+
+    Output shape:
+        ``{'similarity_matrix': (batch, batch), 'logits': (batch, batch),
+        'match_score': (batch,), 'vision_embeddings': (batch,
+        projection_dim), 'text_embeddings': (batch, projection_dim)}``.
 
     :param task_config: Configuration object for the task.
     :type task_config: VLMTaskConfig
-    :param vision_dim: Dimension of vision features.
+    :param vision_dim: Declared vision feature width. Stored and serialized;
+        no layer reads it.
     :type vision_dim: int
-    :param text_dim: Dimension of text features.
+    :param text_dim: Declared text feature width. Stored and serialized; no
+        layer reads it.
     :type text_dim: int
-    :param projection_dim: Projection dimension for contrastive learning.
+    :param projection_dim: Width of the shared contrastive embedding space.
     :type projection_dim: int
-    :param temperature: Initial temperature for contrastive loss.
+    :param temperature: Starting value of the learnable temperature. The
+        logits are the similarity matrix divided by it.
     :type temperature: float
-    :param kwargs: Additional arguments for the base Layer.
+    :param kwargs: Arguments for :class:`BaseVLMHead`. ``fusion_strategy``
+        defaults to ``"concatenation"`` here.
+
+    :ivar projection_dim: Width of the contrastive embedding space.
+    :vartype projection_dim: int
+    :ivar vision_proj: ``Dense`` into the contrastive space.
+    :vartype vision_proj: keras.layers.Dense
+    :ivar text_proj: ``Dense`` into the contrastive space.
+    :vartype text_proj: keras.layers.Dense
+    :ivar similarity_head: ``Dense`` producing the fine-grained match score.
+    :vartype similarity_head: keras.layers.Dense
+    :ivar temperature: Learnable scalar weight. It is a weight, not a config
+        entry, so a ``.keras`` round-trip restores it with the other weights.
+    :vartype temperature: keras.Variable
     """
 
     def __init__(
@@ -1482,6 +1932,23 @@ class ImageTextMatchingHead(BaseVLMHead):
         temperature: float = 0.07,
         **kwargs: Any,
     ) -> None:
+        """
+        Default the fusion strategy, then create the task layers and weight.
+
+        :param task_config: Configuration object for the task.
+        :type task_config: VLMTaskConfig
+        :param vision_dim: Declared vision feature width. Stored only.
+        :type vision_dim: int
+        :param text_dim: Declared text feature width. Stored only.
+        :type text_dim: int
+        :param projection_dim: Width of the contrastive embedding space.
+        :type projection_dim: int
+        :param temperature: Starting value of the learnable temperature.
+        :type temperature: float
+        :param kwargs: Arguments for :class:`BaseVLMHead`.
+        :return: None.
+        :rtype: None
+        """
         kwargs.setdefault("fusion_strategy", "concatenation")
         super().__init__(
             task_config=task_config, vision_dim=vision_dim, text_dim=text_dim, **kwargs
@@ -1544,6 +2011,21 @@ class ImageTextMatchingHead(BaseVLMHead):
         inputs: Dict[str, keras.KerasTensor],
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
+        """
+        Run both branches on the same pooled tensors and return five keys.
+
+        A rank-3 input is mean-pooled over axis 1. A rank-2 input is used as
+        it is.
+
+        :param inputs: Dict with ``vision_features`` and ``text_features``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Keras training flag, forwarded to the fusion, norm
+            and FFN layers.
+        :type training: Optional[bool]
+        :return: Dict with ``similarity_matrix``, ``logits``, ``match_score``,
+            ``vision_embeddings`` and ``text_embeddings``.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
         vision_features = inputs["vision_features"]
         text_features = inputs["text_features"]
 
@@ -1566,11 +2048,11 @@ class ImageTextMatchingHead(BaseVLMHead):
         similarity_matrix = ops.matmul(vision_norm, ops.transpose(text_norm))
         logits = similarity_matrix / self.temperature
 
-        # 2. Fine-grained Matching Score part
-        # MultiModalFusion (concatenation) requires 3-D (B, S, D) inputs, but the
-        # pooled features are 2-D (B, D). Expand to (B, 1, D) for fusion, then
-        # squeeze the (B, 1, F) output back to (B, F) for the 2-D post-fusion
-        # norm / FFN / similarity head (D-001 scope expansion).
+        # 2. Fine-grained matching score.
+        # MultiModalFusion with the concatenation strategy needs rank-3
+        # (B, S, D) inputs, and the pooled features are rank-2 (B, D). Expand
+        # to (B, 1, D) for the fusion, then squeeze the (B, 1, F) result back
+        # to (B, F) for the rank-2 post-fusion norm, FFN and similarity head.
         vision_pooled_3d = ops.expand_dims(vision_pooled, axis=1)
         text_pooled_3d = ops.expand_dims(text_pooled, axis=1)
         fused = self.fusion([vision_pooled_3d, text_pooled_3d], training=training)
@@ -1606,6 +2088,15 @@ class ImageTextMatchingHead(BaseVLMHead):
         }
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this head.
+
+        ``temperature`` is absent on purpose. It is a weight, so it is
+        restored with the other weights rather than from the config.
+
+        :return: Serializable layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -1624,31 +2115,81 @@ class ImageTextMatchingHead(BaseVLMHead):
 @register_dl_technique("dl_techniques.layers.heads.vlm.factory")
 class MultiTaskVLMHead(keras.layers.Layer):
     """
-    Multi-task head combining multiple VLM task-specific heads.
+    Several VLM heads behind one layer, fed from one shared input dict.
 
-    Routes shared vision and text features to independently configured
-    task-specific heads, enabling joint multi-task VLM training.
+    This wrapper builds one head per entry in ``task_configs`` and hands every
+    head the SAME ``inputs`` dict. There is no per-task projection stage, so
+    the heads see identical tensors and differ only in what they compute.
+
+    It does not inherit from :class:`BaseVLMHead`. It derives from
+    ``keras.layers.Layer`` directly.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────┐  ┌──────────────┐
-        │Vision Features│  │Text Features │
-        └──────┬───────┘  └──────┬───────┘
-               └──────┬──────────┘
-                      ▼
-            ┌──────────────────┐
-            │  Task Router     │
-            └──┬───┬───┬───┬──┘
-               ▼   ▼   ▼   ▼
-            ┌───┐┌───┐┌───┐┌───┐
-            │Cap││VQA││Grd││ITM│...
-            └─┬─┘└─┬─┘└─┬─┘└─┬─┘
-              ▼    ▼    ▼    ▼
-            ┌──────────────────┐
-            │ Task Output Dict │
-            └──────────────────┘
+        ┌────────────────────────────────────────┐
+        │ inputs, one shared dict                │
+        │  {'vision_features': ...,              │
+        │   'text_features': ...,                │
+        │   'question_features': ...}            │
+        └─────────────────────┬──────────────────┘
+                              ▼
+        ┌──────────────────────────────────────────────┐
+        │ call(inputs, task_name=None)                 │
+        └──────────┬───────────────────────┬───────────┘
+                   │ yes                   │ no
+                   ▼                       ▼
+        ┌─────────────────────┐ ┌─────────────────────┐
+        │ task_heads[name]    │ │ every task head     │
+        │ that head's output  │ │ {name: output, ...} │
+        └─────────────────────┘ └─────────────────────┘
+
+    A ``task_name`` that is not in ``task_heads`` raises ``ValueError``.
+
+    Keyword routing has three tiers. Wrapper-owned arguments
+    (``shared_vision_dim``, ``shared_text_dim``, ``task_configs``,
+    ``task_specific_kwargs``) are consumed here. ``task_specific_kwargs``
+    names one head, so it is checked strictly. Everything else is shared and
+    routed to whichever heads accept it, because the head classes do not
+    share a signature. A shared keyword no head accepts raises; partial
+    application is reported through ``logger.info``.
+
+    :class:`VQAHead` reads ``question_features`` while the other four heads
+    read ``text_features``. One dict goes to all of them, so a wrapper mixing
+    VQA with any other task raises ``KeyError`` unless the caller supplies
+    both keys. Duplicating the same tensor under both keys is fine.
+
+    Input shape:
+        One shape dict, keyed by feature name, holding every key any of the
+        configured heads reads.
+
+    Output shape:
+        With ``task_name``, that head's own output. Without it, a dict mapping
+        each task name to that head's output.
+
+    :param task_configs: Mapping of task name to its ``VLMTaskConfig``. One
+        head is built per entry.
+    :type task_configs: Dict[str, VLMTaskConfig]
+    :param shared_vision_dim: Vision feature width handed to every head as
+        ``vision_dim``.
+    :type shared_vision_dim: int
+    :param shared_text_dim: Text feature width handed to every head as
+        ``text_dim``.
+    :type shared_text_dim: int
+    :param task_specific_kwargs: Per-task constructor overrides, keyed by the
+        same task names as ``task_configs``. Merged over the shared keywords,
+        so a per-task value wins.
+    :type task_specific_kwargs: Optional[Dict[str, Dict[str, Any]]]
+    :param kwargs: Shared per-head constructor settings plus this layer's own
+        Keras base arguments. The two are separated in ``__init__``.
+
+    :ivar task_heads: Task name to head instance. Each head is also set as an
+        attribute named ``head_<task_name>``.
+    :vartype task_heads: Dict[str, keras.layers.Layer]
+    :ivar shared_head_kwargs: The shared keywords, with the Keras base
+        arguments removed.
+    :vartype shared_head_kwargs: Dict[str, Any]
     """
 
     def __init__(
@@ -1818,13 +2359,16 @@ class MultiTaskVLMHead(keras.layers.Layer):
     def build(self, input_shape: Dict) -> None:
         """Build every task head against the shared input shapes.
 
-        ``call()`` hands the SAME ``inputs`` dict to every head, so each head is
+        ``call`` hands the same ``inputs`` dict to every head, so each head is
         built from the same shapes. A head that needs a key the caller did not
-        supply raises here rather than at first use -- the same failure ``call()``
-        would produce, just earlier, and deliberately not swallowed.
+        supply raises here rather than at first use. That is the same failure
+        ``call`` would produce, only earlier, and it is not swallowed.
 
         :param input_shape: Shared input shapes, keyed by feature name.
         :type input_shape: Dict
+        :return: None.
+        :rtype: None
+        :raises KeyError: If a head needs an input key the caller omitted.
         """
         if self.built:
             return
@@ -1840,6 +2384,19 @@ class MultiTaskVLMHead(keras.layers.Layer):
         task_name: Optional[str] = None,
         training: Optional[bool] = None,
     ) -> Union[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        """
+        Run one task head, or every one of them.
+
+        :param inputs: One shared input dict, handed to each head unchanged.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param task_name: Which head to run. ``None`` runs them all.
+        :type task_name: Optional[str]
+        :param training: Keras training flag, forwarded to each head.
+        :type training: Optional[bool]
+        :return: That head's output, or a dict of task name to output.
+        :rtype: Union[Dict[str, Any], Dict[str, Dict[str, Any]]]
+        :raises ValueError: If ``task_name`` names no configured task.
+        """
         if task_name:
             if task_name not in self.task_heads:
                 raise ValueError(f"Unknown task: {task_name}")
@@ -1866,6 +2423,15 @@ class MultiTaskVLMHead(keras.layers.Layer):
         }
 
     def get_config(self) -> Dict[str, Any]:
+        """
+        Return the constructor arguments needed to rebuild this wrapper.
+
+        The shared per-head keywords are written back out flat, alongside the
+        wrapper's own arguments, which is the shape ``__init__`` expects.
+
+        :return: Serializable layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update(
             {
@@ -1888,22 +2454,23 @@ class MultiTaskVLMHead(keras.layers.Layer):
     def from_config(cls, config: Dict[str, Any]) -> "MultiTaskVLMHead":
         """Reconstruct the multi-task head, deserializing each ``task_config``.
 
-        # DECISION plan-2026-07-30T081929-1645aa52/D-012
-        Keras base kwargs (``name`` / ``trainable`` / ``dtype``) are deliberately
-        KEPT and forwarded. Do NOT re-add a `config.pop` loop for them.
-
-        This used to pop all three, on the reasoning that they must not leak into
-        per-task head construction. That reasoning is already satisfied one level
-        down: ``__init__`` partitions ``**kwargs`` on
+        This used to pop ``name``, ``trainable`` and ``dtype``, so that they
+        could not leak into per-task head construction. ``__init__`` already
+        stops that leak: it partitions ``**kwargs`` on
         ``_KERAS_BASE_LAYER_KWARGS`` and passes the base ones to
-        ``super().__init__`` only, never to a sub-head. Popping them here on top
-        of that did not prevent a leak -- it silently DISCARDED the values.
+        ``super().__init__`` only, never to a sub-head. The pop prevented
+        nothing and discarded the values instead.
 
-        Measured on a full ``.keras`` round-trip: a head saved with ``name='mt'``
-        and ``trainable=False`` reloaded as ``name='multi_task_vlm_head'`` and
-        ``trainable=True``, with outputs bit-identical -- so a frozen head came
-        back unfrozen and nothing about the numbers gave it away. Freezing a
-        head is exactly the kind of intent a round-trip must not lose.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-012
+        Keep and forward the Keras base kwargs. Do NOT re-add a ``config.pop``
+        loop for them: it discarded the values, so a head saved with
+        ``name='mt'``/``trainable=False`` reloaded as
+        ``name='multi_task_vlm_head'``/``trainable=True``. See decisions.md D-012.
+
+        :param config: Serialized layer configuration.
+        :type config: Dict[str, Any]
+        :return: A reconstructed multi-task head.
+        :rtype: MultiTaskVLMHead
         """
         config = dict(config)
         config["task_configs"] = {
@@ -1920,42 +2487,49 @@ class MultiTaskVLMHead(keras.layers.Layer):
 
 def get_head_class(task_type: VLMTaskType) -> type:
     """
-    Get the appropriate head class for a VLM task type.
+    Return the head class for a VLM task type, or raise.
+
+    Four task types have a real head: image captioning, visual question
+    answering, visual grounding, and image-text matching. Every other member
+    of ``VLMTaskType`` raises. There is no silent fallback, matching the
+    sibling ``heads/vision/factory.py``.
+
+    To add support for a task type, implement its head and map it here. Do not
+    restore a default.
 
     :param task_type: The VLM task type to look up.
     :type task_type: VLMTaskType
-    :return: The head class corresponding to the task type.
+    :return: The head class for that task type.
     :rtype: type
+    :raises ValueError: If no head is implemented for ``task_type``.
     """
     head_mapping = {
         VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
-        VLMTaskType.DENSE_CAPTIONING: BaseVLMHead,  # Placeholder
+        # Mapped to BaseVLMHead and then rejected below. BaseVLMHead has no
+        # call(), so it is not a usable head and cannot stand in for one.
+        VLMTaskType.DENSE_CAPTIONING: BaseVLMHead,
         VLMTaskType.VISUAL_QUESTION_ANSWERING: VQAHead,
         VLMTaskType.VISUAL_GROUNDING: VisualGroundingHead,
         VLMTaskType.IMAGE_TEXT_MATCHING: ImageTextMatchingHead,
-        VLMTaskType.VISUAL_DIALOGUE: BaseVLMHead,  # Placeholder
+        # Mapped to BaseVLMHead and then rejected below, for the same reason.
+        VLMTaskType.VISUAL_DIALOGUE: BaseVLMHead,
     }
-    # NO SILENT FALLBACK, AND `BaseVLMHead` IS NOT A USABLE HEAD.
+    # No silent fallback, and BaseVLMHead is not a usable head.
     #
-    # This used to be `return head_mapping.get(task_type, BaseVLMHead)`, so 41 of the 47
-    # VLMTaskType members silently returned `BaseVLMHead`. That class has NO `call()`
-    # method -- it is fusion + norm + optional FFN and nothing else -- so the factory
-    # handed back an object that CONSTRUCTS fine and then dies the moment it is used:
+    # This used to be `return head_mapping.get(task_type, BaseVLMHead)`, so 41
+    # of the 47 VLMTaskType members quietly returned BaseVLMHead. That class
+    # has no `call()` method -- it is fusion, norm and an optional FFN and
+    # nothing else -- so the factory handed back an object that constructs fine
+    # and then dies the moment it is used:
     #
-    #     create_vlm_head(VLMTaskConfig(task_type=VIDEO_CAPTIONING), ...)   # no error
+    #     create_vlm_head(VLMTaskConfig(task_type=VIDEO_CAPTIONING), ...)
     #     head({'vision_features': v, 'text_features': t})
     #     -> NotImplementedError: Layer BaseVLMHead does not have a call() method
     #
-    # The error names BaseVLMHead, not the task, so the caller has no idea their task type
-    # was never implemented. The same is true of the two entries above that map to
-    # BaseVLMHead explicitly and are commented "# Placeholder": a placeholder that cannot
-    # be called is not a head, so they are rejected here too rather than deferred.
-    #
-    # Only FOUR VLM task types have a real head today (image captioning, VQA, visual
-    # grounding, image-text matching). Say so, at construction time, instead of pretending.
-    # The sibling `heads/vision/factory.py` already raises on an unsupported task; this
-    # matches it. To add support, implement the head and map it -- do not restore the
-    # fallback.
+    # The error names BaseVLMHead, not the task, so the caller had no way to
+    # tell that their task type was never implemented. The same applies to the
+    # two entries above that map to BaseVLMHead by hand: a stand-in that
+    # cannot be called is not a head, so they are rejected here too.
     head_class = head_mapping.get(task_type)
     if head_class is None or head_class is BaseVLMHead:
         implemented = sorted(
@@ -1975,14 +2549,19 @@ def create_vlm_head(
     task_config: Union[VLMTaskConfig, Dict[str, Any]], **kwargs: Any
 ) -> Union[BaseVLMHead, keras.layers.Layer]:
     """
-    Factory function to create VLM task heads.
+    Build one VLM head from a task configuration.
+
+    The task type in ``task_config`` picks the class. An unsupported task type
+    raises rather than returning a default head.
 
     :param task_config: VLMTaskConfig object or dict with task configuration.
     :type task_config: Union[VLMTaskConfig, Dict[str, Any]]
-    :param kwargs: Additional configuration parameters for the head, including
-        ``vision_dim``, ``text_dim``, ``fusion_strategy``, etc.
-    :return: A configured VLM head for the specified task.
+    :param kwargs: Additional configuration for the head, such as
+        ``vision_dim``, ``text_dim`` or ``fusion_strategy``. Which keywords
+        are accepted depends on the head class the task type selects.
+    :return: A configured VLM head for the given task.
     :rtype: Union[BaseVLMHead, keras.layers.Layer]
+    :raises ValueError: If no head is implemented for the task type.
     """
     if isinstance(task_config, dict):
         task_config = VLMTaskConfig(**task_config)
@@ -1996,7 +2575,9 @@ def create_multi_task_vlm_head(
     **kwargs: Any,
 ) -> MultiTaskVLMHead:
     """
-    Create a multi-task VLM head from task configurations.
+    Build a :class:`MultiTaskVLMHead` from task configurations.
+
+    A list is keyed by each configuration's ``name``. A dict is used as it is.
 
     :param task_configs: List or dict of VLMTaskConfig objects.
     :type task_configs: Union[List[VLMTaskConfig], Dict[str, VLMTaskConfig]]
@@ -2019,13 +2600,15 @@ def create_multi_task_vlm_head(
            only a ``logger.info`` recording where it landed. Use
            ``task_specific_kwargs`` when you mean exactly one head.
 
-        Note also that the heads disagree on their input key: ``VQAHead`` reads
+        The heads also disagree on their input key. ``VQAHead`` reads
         ``question_features`` while the other four read ``text_features``, and
-        this wrapper fans ONE input dict to all of them. A wrapper mixing VQA with
-        any other task therefore raises ``KeyError`` unless the caller supplies
-        both keys (duplicating the same tensor is fine).
+        this wrapper fans one input dict to all of them. A wrapper mixing VQA
+        with any other task raises ``KeyError`` unless the caller supplies both
+        keys. Duplicating the same tensor under both is fine.
     :return: Configured multi-task VLM head instance.
     :rtype: MultiTaskVLMHead
+    :raises ValueError: If a keyword is wrapper-owned, is accepted by no head,
+        or names a task absent from ``task_configs``.
     """
     if isinstance(task_configs, list):
         task_configs = {config.name: config for config in task_configs}
