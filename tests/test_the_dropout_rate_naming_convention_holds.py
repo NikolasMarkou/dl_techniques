@@ -20,13 +20,9 @@ three assertions below parse each file and look at `ast.arg` and
 
 WHAT IS DELIBERATELY NOT A RATE
 -------------------------------
-Two parameters contain the substring `dropout` and are NOT rates, so the
-convention does not apply to them and they are pinned by name in
+One parameter contains the substring `dropout` and is NOT a rate, so the
+convention does not apply to it and it is pinned by name in
 :data:`NON_RATE_PARAMS` rather than silently skipped by a pattern:
-
-* ``conv2d_wrapper(dropout_params=, dropout_2d_params=)`` — both typed
-  ``Optional[Dict[str, Any]]``; they are kwargs BAGS forwarded to build a
-  ``Dropout`` / ``SpatialDropout2D``, not floats.
 
 * ``DifferentialMultiHeadAttention._stream(attn_dropout_layer=)`` — typed
   ``Optional[keras.layers.Dropout]``, a LAYER OBJECT passed by reference. It was
@@ -112,8 +108,6 @@ OLD_NAMES: Set[str] = {
 #: ``(file, function, parameter)`` so the exclusion cannot be widened by
 #: loosening a regex.
 NON_RATE_PARAMS: Set[Tuple[str, str, str]] = {
-    ("src/dl_techniques/layers/conv2d_builder.py", "conv2d_wrapper", "dropout_params"),
-    ("src/dl_techniques/layers/conv2d_builder.py", "conv2d_wrapper", "dropout_2d_params"),
     (
         "src/dl_techniques/layers/attention/differential_attention.py",
         "_stream",
