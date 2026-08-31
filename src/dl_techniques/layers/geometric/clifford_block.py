@@ -348,6 +348,7 @@ import keras
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.layer_scale import LayerScale
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -926,7 +927,17 @@ class GatedGeometricResidual(keras.layers.Layer):
         if not self.use_gate:
             self.gate_dense.trainable = False
 
-        self.gamma: Optional[keras.Variable] = None
+        # DECISION plan-2026-08-31T121200-753e0d87/D-005
+        # Both arguments below are MANDATORY: LayerScale defaults to
+        # initializer="ones" (gamma 1.0, a 100000x error against 1e-5) and to
+        # constraint="non_neg" (a negative gamma clamps to -0.0). Do NOT drop
+        # either — both fail silently and numerically. See decisions.md D-005.
+        self.gamma = LayerScale(
+            multiplier_type="CHANNEL",
+            initializer=keras.initializers.Constant(self.layer_scale_init),
+            constraint=None,
+            name="gamma_scale",
+        )
 
     # ------------------------------------------------------------------
 
@@ -940,12 +951,7 @@ class GatedGeometricResidual(keras.layers.Layer):
                 f"{type(self).__name__} expected last dim == channels="
                 f"{self.channels}, got input_shape[-1]={input_shape[-1]}."
             )
-        self.gamma = self.add_weight(
-            name="gamma",
-            shape=(self.channels,),
-            initializer=keras.initializers.Constant(self.layer_scale_init),
-            trainable=True,
-        )
+        self.gamma.build(input_shape)
         self.gate_dense.build((*input_shape[:-1], 2 * self.channels))
         super().build(input_shape)
 
@@ -975,7 +981,7 @@ class GatedGeometricResidual(keras.layers.Layer):
             # breaks strict degree-1 homogeneity (Miyasawa). Do NOT keep it
             # here — use g_feat directly on the homogeneous path.
             h_mix = feat + g_feat
-        return h_mix * self.gamma
+        return self.gamma(h_mix)
 
     # ------------------------------------------------------------------
 

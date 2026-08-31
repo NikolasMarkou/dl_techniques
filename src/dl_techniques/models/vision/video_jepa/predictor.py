@@ -57,6 +57,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
 )
+from dl_techniques.layers.layer_scale import LayerScale
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 #: Variance epsilon for every ``LayerNormalization`` authored in this module.
@@ -160,6 +161,23 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         )
         self.mlp_out = keras.layers.Dense(dim, name="mlp_out")
 
+        # LayerScale gamma vectors: per-channel, initialized to
+        # layer_scale_init. `initializer=` and `constraint=None` are both
+        # mandatory here — see the D-005 anchor in
+        # `layers/geometric/clifford_block.py` for the measured reason.
+        self.gamma_a = LayerScale(
+            multiplier_type="CHANNEL",
+            initializer=keras.initializers.Constant(self.layer_scale_init),
+            constraint=None,
+            name="gamma_attn",
+        )
+        self.gamma_m = LayerScale(
+            multiplier_type="CHANNEL",
+            initializer=keras.initializers.Constant(self.layer_scale_init),
+            constraint=None,
+            name="gamma_mlp",
+        )
+
     def build(self, input_shape: Any) -> None:
         """Build sub-layers with shape ``(B, T, D)``."""
         if len(input_shape) != 3:
@@ -177,19 +195,8 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
             self.mlp_drop.build(mlp_hidden_shape)
         self.mlp_out.build(mlp_hidden_shape)
 
-        # LayerScale γ vectors: per-channel, initialized to layer_scale_init.
-        self.gamma_a = self.add_weight(
-            name="gamma_attn",
-            shape=(self.dim,),
-            initializer=keras.initializers.Constant(self.layer_scale_init),
-            trainable=True,
-        )
-        self.gamma_m = self.add_weight(
-            name="gamma_mlp",
-            shape=(self.dim,),
-            initializer=keras.initializers.Constant(self.layer_scale_init),
-            trainable=True,
-        )
+        self.gamma_a.build(input_shape)
+        self.gamma_m.build(input_shape)
         super().build(input_shape)
 
     def call(
@@ -198,7 +205,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         # --- Attention branch (causal) ---
         h = self.ln1(x)
         a = self.attn(h, h, use_causal_mask=True, training=training)
-        x = x + a * self.gamma_a
+        x = x + self.gamma_a(a)
 
         # --- MLP branch ---
         h = self.ln2(x)
@@ -206,7 +213,7 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         if self.mlp_drop is not None:
             h = self.mlp_drop(h, training=training)
         h = self.mlp_out(h)
-        x = x + h * self.gamma_m
+        x = x + self.gamma_m(h)
         return x
 
     def compute_output_shape(
