@@ -1,18 +1,32 @@
-"""Top-level ``create_head`` dispatch facade for the merged ``heads`` package.
+"""Top-level ``create_head`` dispatch for the ``heads`` package.
 
-This module is a thin *domain dispatcher* over the three per-domain head
-factories (``nlp``, ``vision``, ``vlm``). It does **not** unify their
-signatures: each domain keeps its own native calling convention, and the
-remaining positional/keyword arguments are forwarded verbatim to the selected
-domain factory (see decisions.md D-004).
+One function lives here. :func:`create_head` picks a domain factory and calls
+it. The three domains are ``nlp``, ``vision`` and ``vlm``, and each has its own
+factory inside its own sub-package.
+
+The three domain factories take different arguments. This module does not
+change that. It forwards every positional and keyword argument to the chosen
+factory unchanged.
 
 Scope
 -----
-The facade covers the *single-head* ``create_*_head`` factories only. Multi-task
-heads have domain-specific argument shapes (``task_configs`` lists/dicts) and are
-created directly via the domain functions
-(``create_multi_task_nlp_head`` / ``create_multi_task_head`` /
-``create_multi_task_vlm_head``) — they are intentionally not routed here.
+Only the single-head ``create_*_head`` factories are reachable through this
+module. Multi-task heads take domain-specific ``task_configs`` arguments, so
+callers build them by calling ``create_multi_task_nlp_head``,
+``create_multi_task_head`` or ``create_multi_task_vlm_head`` directly.
+
+Design note
+-----------
+The plan that added this facade (``plan_2026-06-08_8b32ca51``, D-004) accepted
+it as a near-single-use abstraction and charged it 1/2 of that plan's
+complexity budget. It stays thin. The three domain factories keep different
+calling conventions. ``nlp`` takes ``task_config`` and ``input_dim``.
+``vision`` takes a ``task_type`` plus head kwargs. ``vlm`` takes
+``task_config`` plus ``vision_dim`` and ``text_dim``. They stay independent.
+Do not add a unified parameter set here, and do not merge the three
+``Base*Head`` classes. That plan's directory has been deleted, so this
+paragraph and the anchor above :func:`create_head` are the only surviving
+record of the decision.
 
 Example
 -------
@@ -39,19 +53,41 @@ HeadDomain = Literal['nlp', 'vision', 'vlm']
 _VALID_DOMAINS = ('nlp', 'vision', 'vlm')
 
 
-# DECISION plan_2026-06-08_8b32ca51/D-004: This facade is a deliberate
-# near-single-use abstraction (charged 1/2 of the Complexity Budget). It is a
-# THIN dispatcher only — it must NOT grow signature-unification logic across
-# domains. The three domain factories have intentionally divergent calling
-# conventions (nlp: task_config+input_dim; vision: task_type+kwargs; vlm:
-# task_config+kwargs) and stay independent per D-001. Do NOT add a "unified"
-# parameter set or a Base*Head merge here; forward args verbatim. See D-004.
+# DECISION plan_2026-06-08_8b32ca51/D-004: this facade stays a thin dispatcher.
+# Do NOT add signature unification, a unified parameter set, or a Base*Head
+# merge here. The three domain factories keep divergent calling conventions and
+# stay independent. The owning plan directory no longer exists, so the module
+# docstring above carries the rest; there is no decisions.md left to consult.
 def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
     """Create a task head by domain, forwarding to the per-domain factory.
 
-    This is a thin dispatch shim. It selects the domain factory and forwards all
-    remaining positional and keyword arguments verbatim — each domain keeps its
-    own native calling convention (no signature unification; see D-004).
+    The function checks ``domain`` against the three supported values, then
+    calls that domain's own factory. Every remaining positional and keyword
+    argument is forwarded unchanged. The three domain signatures are not
+    unified here.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        create_head(domain, *args, **kwargs)
+                │
+                ▼
+        ┌─────────────────┐            ┌────────────┐
+        │ validate domain │─ unknown ─►│ ValueError │
+        └───────┬─────────┘            └────────────┘
+                │ ok
+                ▼
+            ┌───────────────────────────────────────────────┐
+            │ select the domain factory                     │
+            │ forward *args / **kwargs verbatim             │
+            └───┬───────────────┬───────────────────┬───────┘
+                │               │                   │
+              'nlp'         'vision'              'vlm'
+                ▼               ▼                   ▼
+        ┌───────────────┐ ┌──────────────────┐ ┌───────────────┐
+        │create_nlp_head│ │create_vision_head│ │create_vlm_head│
+        └───────────────┘ └──────────────────┘ └───────────────┘
 
     :param domain: One of ``'nlp'``, ``'vision'``, ``'vlm'``.
     :type domain: HeadDomain
@@ -76,9 +112,9 @@ def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
           create_head('vlm', task_config=vlm_cfg, vision_dim=768, text_dim=768)
 
     .. note::
-       Multi-task heads are not dispatched here; build them via the domain
-       functions (``create_multi_task_nlp_head`` / ``create_multi_task_head`` /
-       ``create_multi_task_vlm_head``) directly.
+       Multi-task heads are not dispatched here. Build them by calling
+       ``create_multi_task_nlp_head``, ``create_multi_task_head`` or
+       ``create_multi_task_vlm_head`` directly.
     """
     if domain not in _VALID_DOMAINS:
         raise ValueError(
@@ -92,5 +128,6 @@ def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
         return create_nlp_head(*args, **kwargs)
     elif domain == 'vision':
         return create_vision_head(*args, **kwargs)
-    else:  # domain == 'vlm'
+    # The only remaining valid domain is 'vlm'.
+    else:
         return create_vlm_head(*args, **kwargs)

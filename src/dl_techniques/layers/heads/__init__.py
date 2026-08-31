@@ -1,32 +1,34 @@
-"""Task-head layers, organized by domain (``nlp``, ``vision``, ``vlm``).
+"""Task-head layers, grouped by domain (``nlp``, ``vision``, ``vlm``).
 
-This package consolidates the formerly-separate ``nlp_heads``, ``vision_heads``,
-and ``vlm_heads`` packages into a single import surface. It re-exports the full
-public API of each domain sub-package, plus a :func:`create_head` dispatch
-facade that routes to the per-domain single-head factories.
+This package merges the former ``nlp_heads``, ``vision_heads`` and
+``vlm_heads`` packages into one import surface. It re-exports the full public
+API of all three domain sub-packages. It also exports :func:`create_head`, a
+dispatcher that routes to the per-domain single-head factory.
 
 Domains
 -------
-- :mod:`~dl_techniques.layers.heads.nlp` — NLP task heads (classification, token
-  classification, QA, multiple-choice, generation, similarity, multi-task). NLP
-  sequence pooling reuses the shared ``SequencePooling`` layer for cls/mean/max
-  (the learnable ``attention`` strategy stays inline — see D-002).
-- :mod:`~dl_techniques.layers.heads.vision` — vision task heads (detection,
-  segmentation, depth, classification, instance segmentation, enhancement,
-  multi-task) + the task-type vocabulary.
-- :mod:`~dl_techniques.layers.heads.vlm` — vision-language model heads
-  (captioning, VQA, visual grounding, image-text matching, multi-task).
+- :mod:`~dl_techniques.layers.heads.nlp` — NLP task heads: classification,
+  token classification, question answering, multiple choice, generation,
+  similarity and multi-task. Sequence pooling for the ``cls``, ``mean``,
+  ``max`` and ``last`` strategies reuses the shared ``SequencePooling`` layer.
+  The learnable ``attention`` strategy stays inline in ``nlp/factory.py``,
+  because it uses a different mechanism and a different weight set.
+- :mod:`~dl_techniques.layers.heads.vision` — vision task heads: detection,
+  segmentation, depth, classification, instance segmentation, enhancement and
+  multi-task, plus the task-type vocabulary.
+- :mod:`~dl_techniques.layers.heads.vlm` — vision-language heads: captioning,
+  VQA, visual grounding, image-text matching and multi-task.
 
 Facade
 ------
-- :func:`create_head` — ``create_head(domain, *args, **kwargs)`` dispatches to
-  the domain's native ``create_*_head`` factory (thin shim, no signature
-  unification — see D-004).
+- :func:`create_head` — ``create_head(domain, *args, **kwargs)`` calls the
+  domain's own ``create_*_head`` factory. It forwards every argument unchanged
+  and does not unify the three signatures.
 
 Task-type vocabulary
 --------------------
-For a single import surface over all task-type enums/configs, use
-:mod:`dl_techniques.layers.heads.task_types`.
+:mod:`dl_techniques.layers.heads.task_types` gives one import surface over
+every task-type enum and config class.
 
 Example
 -------
@@ -68,7 +70,9 @@ from .vision import (
     create_enhancement_head,
     HeadConfiguration,
     VisionTaskType,
-    TaskType,  # back-compat alias for VisionTaskType (D-003)
+    # Back-compat alias: TaskType is VisionTaskType. The anchor is D-003 in
+    # vision/task_types.py.
+    TaskType,
     TaskConfiguration,
     CommonTaskConfigurations,
     parse_task_list,
