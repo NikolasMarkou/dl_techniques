@@ -21,15 +21,9 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-
-# Lazy-import matplotlib to avoid import-time side effects.
-# Callers should set MPLBACKEND=Agg before launching training.
-
-
-def _import_matplotlib():
-    """Import matplotlib.pyplot with lazy loading."""
-    import matplotlib.pyplot as plt
-    return plt
+# Lazy-import matplotlib to avoid import-time side effects; the shared importer
+# FORCES the headless Agg backend, so no MPLBACKEND=Agg prefix is required.
+from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 
 # =====================================================================
@@ -133,7 +127,7 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
         pred_depth: Any,
     ) -> None:
         """Render and save a 3-row comparison grid."""
-        plt = _import_matplotlib()
+        plt = import_pyplot()
         try:
             n = min(self.max_samples, self.val_rgb.shape[0])
             fig, axes = plt.subplots(3, n, figsize=(2.5 * n, 7.5))
@@ -247,7 +241,7 @@ class DepthMetricsCurveCallback(keras.callbacks.Callback):
 
     def _create_plots(self, epoch: int) -> None:
         """Render metric curves as a multi-panel figure."""
-        plt = _import_matplotlib()
+        plt = import_pyplot()
         try:
             # Pair train/val metrics for plotting
             pairs = list(zip(self.train_keys, self.val_keys))

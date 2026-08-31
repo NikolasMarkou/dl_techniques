@@ -26,13 +26,7 @@ from typing import Any, Dict, List, Optional
 import keras
 
 from dl_techniques.utils.logger import logger
-
-
-def _import_mpl():
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    return plt
+from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 
 def _group_metrics(keys: List[str]) -> Dict[str, List[str]]:
@@ -135,7 +129,7 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
             gc.collect()
 
     def _save_groups(self) -> None:
-        plt = _import_mpl()
+        plt = import_pyplot()
         # All keys ever seen (train and val) across history.
         all_keys = sorted({k for row in self._history for k in row.keys()})
         groups = _group_metrics(all_keys)

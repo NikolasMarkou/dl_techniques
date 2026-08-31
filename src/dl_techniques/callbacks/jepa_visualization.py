@@ -15,8 +15,9 @@ and a ``config`` with ``patches_per_side`` / ``mask_prediction_enabled``
 
 Both callbacks:
 
-* lazy-import matplotlib — callers should set ``MPLBACKEND=Agg`` for
-  headless environments;
+* lazy-import matplotlib through
+  :func:`dl_techniques.utils.matplotlib_backend.import_pyplot`, which FORCES
+  the headless ``Agg`` backend (callers no longer need ``MPLBACKEND=Agg``);
 * swallow all exceptions and log a warning via ``dl_techniques.utils.logger``
   so visualization failures never take down training;
 * cache a fixed ``eval_pixels`` batch at construction time for cross-epoch
@@ -34,12 +35,7 @@ import keras.ops as ops
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-
-
-def _import_matplotlib():
-    """Import matplotlib.pyplot with lazy loading."""
-    import matplotlib.pyplot as plt
-    return plt
+from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 
 def _normalize_pixels(eval_pixels: Any) -> np.ndarray:
@@ -168,7 +164,7 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
             gc.collect()
 
     def _save_grid(self, epoch: int, mask_np: np.ndarray) -> None:
-        plt = _import_matplotlib()
+        plt = import_pyplot()
         fig = None
         try:
             B, T, H, W, C = self.eval_pixels.shape
@@ -326,7 +322,7 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
         err_np: np.ndarray,
         mask_np: Optional[np.ndarray],
     ) -> None:
-        plt = _import_matplotlib()
+        plt = import_pyplot()
         fig = None
         try:
             B, T, Hp, Wp = err_np.shape

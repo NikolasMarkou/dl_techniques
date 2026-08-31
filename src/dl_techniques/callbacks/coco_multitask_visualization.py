@@ -24,6 +24,7 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 
 # COCO 80 category names (classification index 0..79; seg index 0=bg, k+1=class k).
@@ -41,14 +42,6 @@ COCO_CLASS_NAMES: List[str] = [
     "refrigerator", "book", "clock", "vase", "scissors", "teddy_bear", "hair_drier",
     "toothbrush",
 ]
-
-
-def _import_mpl():
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib import cm
-    return plt, cm
 
 
 def _seg_to_rgb(mask: np.ndarray, cmap) -> np.ndarray:
@@ -146,7 +139,7 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
         )
 
     def _save_grid(self, epoch: int, pred_seg: np.ndarray, pred_cls: np.ndarray) -> None:
-        plt, cm = _import_mpl()
+        plt, cm = import_pyplot(with_cm=True)
         cmap = cm.get_cmap("tab20", 80)
 
         n = self.max_samples
@@ -194,7 +187,7 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
 
     def _save_det_grid(self, epoch: int, pred_det: np.ndarray) -> None:
         """RGB with GT boxes (green) + predicted boxes (red, argmax class+score)."""
-        plt, _ = _import_mpl()
+        plt, _ = import_pyplot(with_cm=True)
         import matplotlib.patches as mpatches
         from dl_techniques.utils.yolo_decode import (
             decode_predictions, nms_per_class,
