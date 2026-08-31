@@ -57,12 +57,23 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.upsample import upsample
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import (
     PositionEmbeddingSine2D,
 )
 from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
+
+#: Interpolation names :class:`keras.layers.UpSampling2D` accepts here. The
+#: single home for this rule -- ``__init__`` raises against it and
+#: ``from_config`` normalizes into it.
+_SUPPORTED_INTERP_MODELS = frozenset({"nearest", "bilinear"})
+
+#: Spellings accepted by the pre-Keras top-down step that
+#: :class:`keras.layers.UpSampling2D` does not accept. Applied by
+#: ``from_config`` only, after ``.lower().strip()``.
+_LEGACY_INTERP_ALIASES = {"nn": "nearest"}
 
 # ---------------------------------------------------------------------
 
@@ -113,9 +124,11 @@ class SAM2FpnNeck(keras.layers.Layer):
     :param fpn_top_down_levels: Level indices (in ascending-stage indexing)
         that receive a top-down addition. ``None`` means every level.
     :type fpn_top_down_levels: Optional[Sequence[int]]
-    :param fpn_interp_model: Interpolation passed to
-        :func:`dl_techniques.layers.upsample.upsample` for the 2x top-down
-        step.
+    :param fpn_interp_model: Interpolation passed to the owned
+        :class:`keras.layers.UpSampling2D` sub-layer for the 2x top-down step.
+        One of ``'nearest'`` or ``'bilinear'``; anything else raises. The
+        legacy alias ``'nn'`` is accepted by ``from_config`` only, for
+        archives written before this restriction.
     :type fpn_interp_model: str
     :param num_pos_feats: Half the positional-encoding output width.
         ``None`` defers to ``d_model // 2``.
@@ -127,7 +140,8 @@ class SAM2FpnNeck(keras.layers.Layer):
     :raises ValueError: If ``d_model`` is not positive or not even, if
         ``d_model`` is not a multiple of 4 while ``num_pos_feats`` is
         defaulted, if the resolved ``num_pos_feats`` is not positive and even,
-        if ``backbone_channel_list`` is empty or holds a non-positive width, or
+        if ``backbone_channel_list`` is empty or holds a non-positive width,
+        if ``fpn_interp_model`` is outside ``{'nearest', 'bilinear'}``, or
         if a ``fpn_top_down_levels`` entry is out of range.
 
     Example:
@@ -183,6 +197,16 @@ class SAM2FpnNeck(keras.layers.Layer):
             raise ValueError(
                 f"backbone_channel_list entries must be positive, got "
                 f"{tuple(backbone_channel_list)}"
+            )
+        if fpn_interp_model not in _SUPPORTED_INTERP_MODELS:
+            raise ValueError(
+                f"fpn_interp_model must be one of "
+                f"{sorted(_SUPPORTED_INTERP_MODELS)}, got "
+                f"{fpn_interp_model!r}. The legacy alias 'nn' (and any "
+                f"uppercase or whitespace-padded spelling) is accepted by "
+                f"from_config only, so archives written before this "
+                f"restriction still load; new code must pass the exact "
+                f"keras.layers.UpSampling2D interpolation name."
             )
 
         # Store ALL configuration parameters.
@@ -252,6 +276,20 @@ class SAM2FpnNeck(keras.layers.Layer):
             normalize=True,
             name="position_encoding",
         )
+        # DECISION plan-2026-08-31T095434-b4829a10/D-002
+        # Create and build this UNCONDITIONALLY, even when
+        # `_top_down_levels` is empty and it is never applied, and build it
+        # ONCE on a representative shape. Do NOT move the construction into
+        # `call()` (the previous `upsample(previous, ...)` helper did exactly
+        # that; "it is weightless" is a claim about weights, not a licence),
+        # and do NOT expand it into a per-level list. Do NOT widen the
+        # accepted spellings back out in `__init__` either -- `from_config`
+        # owns the legacy `'nn'` migration. See decisions.md D-002/D-003.
+        self.upsample = keras.layers.UpSampling2D(
+            size=(2, 2),
+            interpolation=self.fpn_interp_model,
+            name="top_down_upsample",
+        )
 
     @property
     def num_levels(self) -> int:
@@ -311,6 +349,16 @@ class SAM2FpnNeck(keras.layers.Layer):
         self.position_encoding.build(
             (shapes[0][0], shapes[0][1], shapes[0][2], self.d_model))
 
+        # ONE representative build is correct here, and a per-level list would
+        # be invented complexity: `UpSampling2D` creates no weights and its
+        # build is shape-agnostic, so the same object serves every resolution
+        # it is applied at. The shape is the FUSED one -- the upsample
+        # consumes `previous`, which is post-lateral-convolution and therefore
+        # `d_model`-wide, never a raw trunk width. Same precedent as
+        # `position_encoding` directly above.
+        self.upsample.build(
+            (shapes[0][0], shapes[0][1], shapes[0][2], self.d_model))
+
         logger.debug(
             "SAM2FpnNeck built: %d levels, d_model %d, top-down at %s",
             self.num_levels, self.d_model, self._top_down_levels,
@@ -362,10 +410,11 @@ class SAM2FpnNeck(keras.layers.Layer):
         for i in range(n, -1, -1):
             lateral = self.convs[n - i](xs[i])
             if i in self._top_down_levels and previous is not None:
-                # Parameter-free nearest 2x, reused from layers/upsample.py.
-                # UpSampling2D is weightless, so constructing it here adds no
-                # variables and nothing to track.
-                previous = lateral + upsample(previous, self.fpn_interp_model)
+                # Parameter-free 2x step, run through the owned
+                # `keras.layers.UpSampling2D` sub-layer created in
+                # `__init__` and built in `build`. Nothing is constructed
+                # here.
+                previous = lateral + self.upsample(previous)
             else:
                 previous = lateral
             levels[i] = previous
@@ -415,9 +464,21 @@ class SAM2FpnNeck(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SAM2FpnNeck":
-        """Rebuild from a config, tolerating an odd stored ``num_pos_feats``.
+        """Rebuild from a config, tolerating two superseded stored values.
 
-        Guide section 6.3 migration path. The constructor's evenness rule on
+        Guide section 6.3 migration path, in two clauses.
+
+        **``fpn_interp_model``.** The 2x top-down step used to run through a
+        helper that lowercased, stripped and accepted the alias ``'nn'``; the
+        owned :class:`keras.layers.UpSampling2D` accepts none of that, and the
+        constructor now raises on it. A stored value is therefore normalized
+        with ``.lower().strip()`` and the legacy alias remapped, with a
+        warning. Numerics are UNCHANGED by that substitution: ``'nn'`` and
+        ``'nearest'`` reached the identical
+        ``UpSampling2D(interpolation='nearest')`` before the change, and the
+        sub-layer is weightless, so the rebuilt weight tree is identical too.
+
+        **``num_pos_feats``.** The constructor's evenness rule on
         the resolved ``num_pos_feats`` is a NEW rejection of a value the old
         ``d_model % 2`` check accepted, so an archive written before it must
         still load. A non-conforming value is rounded UP here with a warning,
@@ -435,6 +496,22 @@ class SAM2FpnNeck(keras.layers.Layer):
         :rtype: SAM2FpnNeck
         """
         config = dict(config)
+        interp = config.get("fpn_interp_model")
+        if isinstance(interp, str):
+            normalized = interp.lower().strip()
+            normalized = _LEGACY_INTERP_ALIASES.get(normalized, normalized)
+            if normalized != interp:
+                logger.warning(
+                    "SAM2FpnNeck config carries fpn_interp_model=%r, a legacy "
+                    "spelling the constructor no longer accepts; remapping it "
+                    "to %r. Numerics are UNCHANGED -- both reached the same "
+                    "keras.layers.UpSampling2D(interpolation='%s') step, and "
+                    "that sub-layer is weightless, so the rebuilt weight tree "
+                    "is identical.",
+                    interp, normalized, normalized,
+                )
+                config["fpn_interp_model"] = normalized
+
         d_model = config.get("d_model")
         num_pos_feats = config.get("num_pos_feats")
         if (isinstance(num_pos_feats, int) and num_pos_feats > 0
