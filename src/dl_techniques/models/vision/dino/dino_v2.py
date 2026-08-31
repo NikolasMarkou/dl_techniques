@@ -46,8 +46,8 @@ and is not: position-free is what a register is. Enlarging the table to `1 + R +
 or moving the insertion earlier would give registers a spatial identity they are
 defined not to have.
 
-Each block is pre-norm with LayerScale on both branches, implemented with
-`LearnableMultiplier` in `CHANNEL` mode. Note a deviation from the reference:
+Each block is pre-norm with a layer-scale gain on both branches, implemented
+with the `LayerScale` layer in `CHANNEL` mode. Note a deviation from the reference:
 these multipliers are created with `constraint='non_neg'`, so a LayerScale gamma
 that wants to be negative is clamped to zero; the paper's LayerScale is
 unconstrained. One `StochasticDepth` instance is shared by the attention and FFN
@@ -102,7 +102,7 @@ from dl_techniques.layers.embedding.register_tokens import RegisterTokens
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.layers.layer_scale import LayerScale
 from dl_techniques.models.vision.dino.common import reject_input_shape
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -121,11 +121,11 @@ _DEFAULT_PATCH_SIZE = 14
 @register_dl_technique("dl_techniques.models.dino.dino_v2")
 class DINOv2Block(keras.layers.Layer):
     """
-    DINOv2 Transformer Block with LearnableMultiplier scaling and configurable components.
+    DINOv2 Transformer Block with LayerScale gains and configurable components.
 
     This block implements the DINOv2 transformer architecture with:
     - Pre-normalization layout (LayerNorm → Attention → Residual)
-    - LearnableMultiplier for training stability (replaces LayerScale)
+    - LayerScale gains on both residual branches, for training stability
     - Configurable attention mechanisms via factory
     - Configurable FFN types via factory
     - Optional stochastic depth regularization
@@ -134,9 +134,9 @@ class DINOv2Block(keras.layers.Layer):
     ```
     Input x (B, N, D) ────────────────────────────────────────────────────+
        ↓                                                        │
-    LayerNorm → MultiHeadAttention → LearnableMultiplier → DropPath ──(+)─→ x_mid
+    LayerNorm → MultiHeadAttention → LayerScale → DropPath ───────────(+)─→ x_mid
        ↓                                                                   │
-    LayerNorm → FFN → LearnableMultiplier → DropPath ──────────────────────(+)─→ Output
+    LayerNorm → FFN → LayerScale → DropPath ───────────────────────────────(+)─→ Output
     ```
 
     **Intent**: Implement the core transformer block used in DINOv2 with modern
@@ -176,7 +176,7 @@ class DINOv2Block(keras.layers.Layer):
             `interpolate_offset`, and was silent about this one.)
         ffn_bias: Whether to use bias in FFN layers.
         stochastic_depth_rate: Stochastic depth drop probability.
-        init_values: LearnableMultiplier initialization value (None disables scaling).
+        init_values: LayerScale initialization value (None disables scaling).
         attention_dropout_rate: Dropout rate for attention.
         ffn_dropout_rate: Dropout rate for FFN.
         **kwargs: Additional keyword arguments for the Layer base class.
@@ -302,15 +302,15 @@ class DINOv2Block(keras.layers.Layer):
             **ffn_args
         )
 
-        # LearnableMultiplier for layer scaling (replaces LayerScale)
+        # LayerScale gains for the two residual branches
         if self.init_values is not None:
-            self.ls1 = LearnableMultiplier(
+            self.ls1 = LayerScale(
                 multiplier_type='CHANNEL',
                 initializer=initializers.Constant(self.init_values),
                 constraint='non_neg',
                 name="ls1"
             )
-            self.ls2 = LearnableMultiplier(
+            self.ls2 = LayerScale(
                 multiplier_type='CHANNEL',
                 initializer=initializers.Constant(self.init_values),
                 constraint='non_neg',
@@ -351,7 +351,7 @@ class DINOv2Block(keras.layers.Layer):
         # Build FFN layer
         self.ffn.build(input_shape)
 
-        # Build LearnableMultiplier layers if used
+        # Build LayerScale layers if used
         if self.ls1 is not None:
             self.ls1.build(input_shape)
             self.ls2.build(input_shape)
@@ -465,7 +465,7 @@ class DINOv2VisionTransformer(keras.Model):
         ffn_bias: Enable bias for FFN layers.
         stochastic_depth_rate: Maximum stochastic depth rate.
         drop_path_uniform: Use uniform drop rate across blocks.
-        init_values: LearnableMultiplier initialization value.
+        init_values: LayerScale initialization value.
         attention_type: Type of attention mechanism.
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization.
@@ -934,7 +934,7 @@ class DINOv2VisionTransformer(keras.Model):
             image_size: Input image size.
             patch_size: Patch size for patch embedding.
             num_register_tokens: Number of register tokens to use.
-            init_values: LearnableMultiplier initialization value.
+            init_values: LayerScale initialization value.
             stochastic_depth_rate: Maximum stochastic depth rate.
             input_shape: Input shape. If None, computed from image_size.
             **kwargs: Additional arguments for the model.
@@ -1333,7 +1333,7 @@ def create_dino_v2(
         include_top: Whether to include classification head.
         num_register_tokens: Number of register tokens. ``None`` defers to the
             variant (4 for 'large'/'giant', 0 otherwise).
-        init_values: LearnableMultiplier initialization value.
+        init_values: LayerScale initialization value.
         stochastic_depth_rate: Maximum stochastic depth rate.
         ffn_type: Type of FFN. ``None`` defers to the variant ('swiglu' for
             'giant', 'mlp' otherwise).

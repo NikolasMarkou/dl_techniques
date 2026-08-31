@@ -400,14 +400,14 @@ This package is the image branch only.
 | Detail | Value / rule |
 |---|---|
 | Input resolution | 256 x 256 x 3, channels last (the MobileCLIP setting) |
-| LayerScale | `LearnableMultiplier(CHANNEL, Constant(1e-5), constraint=None)` |
+| LayerScale | `LayerScale(CHANNEL, Constant(1e-5), constraint=None)` |
 | Normalization epsilon | `1e-5`, passed **explicitly** (the factory `setdefault`s `1e-6`) |
 | Attention heads | `dim // 32` |
 | Drop-path schedule | one global linear ramp over `sum(layers)` blocks, sliced stagewise |
 | SE ratios | **two in one network** — `1/16` inside `MobileOneBlock`, `0.25` inside the large-kernel conv |
 | SE ordering | SE runs BEFORE the activation: `act(se(x))` |
 
-`LearnableMultiplier` defaults to `constraint='non_neg'`. Every LayerScale here
+The `LayerScale` layer defaults to `constraint='non_neg'`. Every call site here
 passes `constraint=None` — a gamma clamped at zero would silently halve the
 parameterization, and nothing but a negative-assignment pin would notice.
 

@@ -75,7 +75,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.stochastic_depth import StochasticDepth
-from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.layers.layer_scale import LayerScale
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
@@ -359,15 +359,15 @@ def _make_layer_scale(
     :type init_values: Optional[float]
     :param name: Sub-layer name.
     :type name: str
-    :return: A :class:`LearnableMultiplier` or a ``keras.layers.Identity``.
+    :return: A :class:`LayerScale` or a ``keras.layers.Identity``.
     :rtype: keras.layers.Layer
     """
     # DECISION plan-2026-08-04T044628-4c240b4c/D-086
     # When `init_values is None` this returns a REAL, unconditionally-built
-    # `Identity` layer -- it does NOT return a `LearnableMultiplier` initialized
+    # `Identity` layer -- it does NOT return a `LayerScale` initialized
     # to ones, and the block does NOT branch inside `call()`.
     #
-    # Do NOT "simplify" this to an always-on `LearnableMultiplier`: a trainable
+    # Do NOT "simplify" this to an always-on `LayerScale`: a trainable
     # ones-initialized gain is identity only at step 0, and it would add
     # `dim` parameters per residual branch (2 * 1024 * 32 = 65,536 at the
     # settled config) that the reference model does not have, silently breaking
@@ -375,14 +375,14 @@ def _make_layer_scale(
     # `init_values=None` IS the settled configuration, so this is the live path,
     # not a fallback.
     #
-    # Note also `constraint=None`: `LearnableMultiplier` DEFAULTS to a
+    # Note also `constraint=None`: `LayerScale` DEFAULTS to a
     # `non_neg` constraint (`layers/layer_scale.py`), which the reference's
     # unconstrained layer-scale gain does not have. Reusing the layer by name
     # while inheriting that default would forbid sign flips the reference
     # permits. See decisions.md D-086.
     if init_values is None:
         return keras.layers.Identity(name=name)
-    return LearnableMultiplier(
+    return LayerScale(
         multiplier_type="CHANNEL",
         initializer=keras.initializers.Constant(float(init_values)),
         constraint=None,

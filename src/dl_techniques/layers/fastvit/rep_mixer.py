@@ -33,10 +33,10 @@ reference weights shipped by MobileCLIP2 (which are always evaluated with
 
 Two details are load-bearing and are easy to get silently wrong:
 
-1. **LayerScale must be allowed to go negative.** ``LearnableMultiplier`` defaults
-   to ``constraint='non_neg'``, which would clamp a legitimately-negative LayerScale
-   gamma to zero and silently halve the parameterization. ``constraint=None`` is
-   passed explicitly (MEASURED).
+1. **LayerScale must be allowed to go negative.** The ``LayerScale`` layer defaults
+   to ``constraint='non_neg'``, which would clamp a legitimately-negative gamma to
+   zero and silently halve the parameterization. ``constraint=None`` is passed
+   explicitly at every call site here (MEASURED).
 2. **The ``norm`` block really must have zero conv branches.** Giving it even one
    ``k x k`` branch turns the subtraction into a difference of two conv branches,
    which trains — badly — while every shape assertion still passes.
@@ -61,7 +61,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from .conv_mlp import FastVitConvMlp
-from ..layer_scale import LearnableMultiplier
+from ..layer_scale import LayerScale
 from ..mobile_one_block import MobileOneBlock
 from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 from ..stochastic_depth import StochasticDepth
@@ -77,7 +77,7 @@ _REFERENCE_LAYER_SCALE_INIT = 1e-5
 def _create_layer_scale(
         layer_scale_init_value: Optional[float],
         name: str,
-) -> Optional[LearnableMultiplier]:
+) -> Optional[LayerScale]:
     """Build a FastViT ``LayerScale2d`` equivalent, or ``None`` when disabled.
 
     Shared by :class:`FastVitRepMixer` and :class:`FastVitRepMixerBlock` (and
@@ -91,18 +91,18 @@ def _create_layer_scale(
     :type layer_scale_init_value: Optional[float]
     :param name: Sub-layer name.
     :type name: str
-    :return: A per-channel :class:`LearnableMultiplier` with ``constraint=None``,
+    :return: A per-channel :class:`LayerScale` with ``constraint=None``,
         or ``None`` when ``layer_scale_init_value is None``.
-    :rtype: Optional[LearnableMultiplier]
+    :rtype: Optional[LayerScale]
 
     .. warning::
-       ``constraint=None`` is REQUIRED, not cosmetic. ``LearnableMultiplier``
-       defaults to ``constraint='non_neg'``, which clamps gamma at zero; a
-       LayerScale gamma must be free to take a negative value.
+       ``constraint=None`` is REQUIRED, not cosmetic. The layer's own default
+       is ``constraint='non_neg'``, which clamps gamma at zero; a LayerScale
+       gamma must be free to take a negative value.
     """
     if layer_scale_init_value is None:
         return None
-    return LearnableMultiplier(
+    return LayerScale(
         multiplier_type='CHANNEL',
         initializer=keras.initializers.Constant(layer_scale_init_value),
         constraint=None,

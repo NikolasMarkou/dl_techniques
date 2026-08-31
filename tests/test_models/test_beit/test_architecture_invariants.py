@@ -93,7 +93,7 @@ class TestBeitArchitectureValidation:
         for layer in model.encoder_layers:
             assert layer.use_layer_scale is True
             assert layer.layer_scale_init_value == 1e-5
-            # BEiT's gamma is a SIGNED scale; LearnableMultiplier's own default is a
+            # BEiT's gamma is a SIGNED scale; the LayerScale layer's own default is a
             # non_neg constraint, which TransformerLayer overrides with None.
             assert layer.attention_layer_scale.constraint is None
 

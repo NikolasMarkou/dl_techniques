@@ -195,7 +195,7 @@ class AttentionBlockVLM(keras.layers.Layer):
         # INSIDE each residual branch (transformer.py:926-928, 937-939:
         # ``x = layer_scale(x); out = x + residual``).
         #
-        # It used to be a standalone LearnableMultiplier applied to this block's
+        # It used to be a standalone LayerScale applied to this block's
         # whole output in call(), AFTER the transformer had already added its
         # own residuals — i.e. ``x = gamma * f(x)`` with no skip path at all.
         # With the default layer_scale_init=1e-4 and FastVLM stacking these as

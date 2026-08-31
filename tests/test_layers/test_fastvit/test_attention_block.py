@@ -392,7 +392,7 @@ class TestFastVitAttentionBlock:
     def test_layer_scale_constraints_are_none(self, basic_config):
         """PIN 5: BOTH LayerScale gammas must be free to go negative.
 
-        ``LearnableMultiplier`` defaults to ``constraint='non_neg'``. MEASURED:
+        The ``LayerScale`` layer defaults to ``constraint='non_neg'``. MEASURED:
         the constraint is enforced by the OPTIMIZER, not by ``Variable.assign``,
         so the second arm takes a real SGD step whose gradient drives gamma
         negative.

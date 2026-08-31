@@ -48,7 +48,7 @@ from typing import Optional, Dict, Union, Tuple, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from .layer_scale import LearnableMultiplier
+from .layer_scale import LayerScale
 from .norms.global_response_norm import GlobalResponseNormalization
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
@@ -375,7 +375,7 @@ class ConvNextV2Block(keras.layers.Layer):
 
         # Learnable multiplier (gamma scaling)
         if self.use_gamma:
-            self.gamma = LearnableMultiplier(
+            self.gamma = LayerScale(
                 multiplier_type="CHANNEL",
                 regularizer=keras.regularizers.L2(self.GAMMA_L2_REGULARIZATION),
                 initializer=keras.initializers.Constant(self.gamma_initial_value),

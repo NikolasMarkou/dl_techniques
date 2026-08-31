@@ -123,7 +123,7 @@ class MultiplierType(Enum):
 
 
 @register_dl_technique("dl_techniques.layers.layer_scale")
-class LearnableMultiplier(keras.layers.Layer):
+class LayerScale(keras.layers.Layer):
     """Learnable element-wise multiplier for adaptive feature scaling.
 
     This layer introduces trainable scaling parameters applied either globally

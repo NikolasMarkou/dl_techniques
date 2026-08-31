@@ -2,7 +2,6 @@
 Test suite for custom Keras layers:
 - LayerScale
 - MultiplierType
-- LearnableMultiplier
 
 This module provides comprehensive tests for initialization,
 behavior, serialization, and edge cases following project best practices.
@@ -18,7 +17,7 @@ from typing import Tuple, Dict, Any
 
 from dl_techniques.layers.layer_scale import (
     MultiplierType,
-    LearnableMultiplier
+    LayerScale
 )
 from dl_techniques.utils.logger import logger
 
@@ -79,20 +78,20 @@ class TestMultiplierType:
         assert result is original
 
 
-# LearnableMultiplier Tests
-class TestLearnableMultiplier:
-    """Test cases for LearnableMultiplier layer."""
+# LayerScale Tests
+class TestLayerScale:
+    """Test cases for LayerScale layer."""
 
     @pytest.fixture
     def layer_params(self) -> Dict[str, Any]:
-        """Default parameters for LearnableMultiplier."""
+        """Default parameters for LayerScale."""
         return {
             "multiplier_type": "GLOBAL",
         }
 
     def test_initialization_defaults(self) -> None:
-        """Test LearnableMultiplier initialization with default parameters."""
-        layer = LearnableMultiplier()
+        """Test LayerScale initialization with default parameters."""
+        layer = LayerScale()
 
         # Check default values
         assert layer.multiplier_type == MultiplierType.CHANNEL
@@ -102,10 +101,10 @@ class TestLearnableMultiplier:
         assert isinstance(layer.constraint, keras.constraints.NonNeg)
 
     def test_initialization_custom(self) -> None:
-        """Test LearnableMultiplier initialization with custom parameters."""
+        """Test LayerScale initialization with custom parameters."""
         custom_regularizer = keras.regularizers.L2(1e-4)
 
-        layer = LearnableMultiplier(
+        layer = LayerScale(
             multiplier_type="GLOBAL",
             initializer="zeros",
             regularizer=custom_regularizer,
@@ -120,7 +119,7 @@ class TestLearnableMultiplier:
 
     def test_build_global(self, layer_params: Dict[str, Any], sample_shape: Tuple[int, int, int, int]) -> None:
         """Test build with global multiplier."""
-        layer = LearnableMultiplier(**layer_params)
+        layer = LayerScale(**layer_params)
         layer.build(sample_shape)
 
         # Global multiplier should have shape (1,) for efficient broadcasting
@@ -129,7 +128,7 @@ class TestLearnableMultiplier:
 
     def test_build_channel(self, sample_shape: Tuple[int, int, int, int]) -> None:
         """Test build with channel multiplier."""
-        layer = LearnableMultiplier(multiplier_type="CHANNEL")
+        layer = LayerScale(multiplier_type="CHANNEL")
         layer.build(sample_shape)
 
         # Channel multiplier should have shape (channels,) for efficient broadcasting
@@ -138,7 +137,7 @@ class TestLearnableMultiplier:
 
     def test_build_channel_2d(self, sample_2d_shape: Tuple[int, int]) -> None:
         """Test build with channel multiplier on 2D input."""
-        layer = LearnableMultiplier(multiplier_type="CHANNEL")
+        layer = LayerScale(multiplier_type="CHANNEL")
         layer.build(sample_2d_shape)
 
         # Should work with 2D inputs
@@ -148,7 +147,7 @@ class TestLearnableMultiplier:
         """Test call with global multiplier."""
         # Use a non-identity initializer to ensure multiplication changes values
         layer_params["initializer"] = "zeros"
-        layer = LearnableMultiplier(**layer_params)
+        layer = LayerScale(**layer_params)
         output = layer(sample_input)
 
         # Output shape should match input shape
@@ -160,7 +159,7 @@ class TestLearnableMultiplier:
     def test_call_channel(self, sample_input: tf.Tensor) -> None:
         """Test call with channel multiplier."""
         # Use a specific initializer to test actual multiplication
-        layer = LearnableMultiplier(multiplier_type="CHANNEL", initializer="zeros")
+        layer = LayerScale(multiplier_type="CHANNEL", initializer="zeros")
         output = layer(sample_input)
 
         # Output shape should match input shape
@@ -171,7 +170,7 @@ class TestLearnableMultiplier:
 
     def test_call_with_ones_initializer(self, sample_input: tf.Tensor) -> None:
         """Test call with ones initializer (identity operation)."""
-        layer = LearnableMultiplier(
+        layer = LayerScale(
             multiplier_type="GLOBAL",
             initializer="ones"
         )
@@ -183,7 +182,7 @@ class TestLearnableMultiplier:
     def test_call_with_custom_values(self, sample_input: tf.Tensor) -> None:
         """Test call with custom multiplier values."""
         # Create a layer with constant 2.0 multiplier
-        layer = LearnableMultiplier(
+        layer = LayerScale(
             multiplier_type="GLOBAL",
             initializer=keras.initializers.Constant(2.0)
         )
@@ -195,7 +194,7 @@ class TestLearnableMultiplier:
 
     def test_call_training_mode(self, sample_input: tf.Tensor) -> None:
         """Test call with explicit training mode."""
-        layer = LearnableMultiplier(multiplier_type="GLOBAL")
+        layer = LayerScale(multiplier_type="GLOBAL")
 
         # Test both training modes
         output_train = layer(sample_input, training=True)
@@ -206,7 +205,7 @@ class TestLearnableMultiplier:
 
     def test_compute_output_shape(self) -> None:
         """Test compute_output_shape method."""
-        layer = LearnableMultiplier()
+        layer = LayerScale()
 
         input_shapes = [
             (None, 32),
@@ -220,7 +219,7 @@ class TestLearnableMultiplier:
 
     def test_regularization(self, sample_input: tf.Tensor) -> None:
         """Test that regularization losses are properly applied."""
-        layer = LearnableMultiplier(
+        layer = LayerScale(
             multiplier_type="GLOBAL",
             regularizer=keras.regularizers.L2(0.1)
         )
@@ -236,7 +235,7 @@ class TestLearnableMultiplier:
 
     def test_gradient_flow(self, sample_input: tf.Tensor) -> None:
         """Test gradient flow through the layer."""
-        layer = LearnableMultiplier(multiplier_type="GLOBAL")
+        layer = LayerScale(multiplier_type="GLOBAL")
 
         # Use GradientTape for gradient computation
         with tf.GradientTape() as tape:
@@ -256,7 +255,7 @@ class TestLearnableMultiplier:
 
     def test_serialization(self, layer_params: Dict[str, Any]) -> None:
         """Test serialization and deserialization of the layer."""
-        original_layer = LearnableMultiplier(**layer_params)
+        original_layer = LayerScale(**layer_params)
 
         # Build the layer
         input_shape = (None, 16, 16, 64)
@@ -267,7 +266,7 @@ class TestLearnableMultiplier:
         build_config = original_layer.get_build_config()
 
         # Recreate the layer
-        recreated_layer = LearnableMultiplier.from_config(config)
+        recreated_layer = LayerScale.from_config(config)
         recreated_layer.build_from_config(build_config)
 
         # Check configuration matches
@@ -281,12 +280,12 @@ class TestLearnableMultiplier:
     def test_serialization_edge_cases(self) -> None:
         """Test serialization with various parameter types."""
         layers_to_test = [
-            LearnableMultiplier(multiplier_type="GLOBAL", initializer="ones"),
-            LearnableMultiplier(multiplier_type="CHANNEL", initializer=keras.initializers.Ones()),
-            LearnableMultiplier(multiplier_type="GLOBAL", regularizer="l2"),
-            LearnableMultiplier(multiplier_type="CHANNEL", regularizer=keras.regularizers.L2(0.01)),
-            LearnableMultiplier(multiplier_type="GLOBAL", constraint="non_neg"),
-            LearnableMultiplier(multiplier_type="CHANNEL", constraint=keras.constraints.NonNeg()),
+            LayerScale(multiplier_type="GLOBAL", initializer="ones"),
+            LayerScale(multiplier_type="CHANNEL", initializer=keras.initializers.Ones()),
+            LayerScale(multiplier_type="GLOBAL", regularizer="l2"),
+            LayerScale(multiplier_type="CHANNEL", regularizer=keras.regularizers.L2(0.01)),
+            LayerScale(multiplier_type="GLOBAL", constraint="non_neg"),
+            LayerScale(multiplier_type="CHANNEL", constraint=keras.constraints.NonNeg()),
         ]
 
         for original_layer in layers_to_test:
@@ -295,14 +294,14 @@ class TestLearnableMultiplier:
 
             # Get config and recreate
             config = original_layer.get_config()
-            recreated_layer = LearnableMultiplier.from_config(config)
+            recreated_layer = LayerScale.from_config(config)
 
             # Check key aspects match
             assert recreated_layer.multiplier_type == original_layer.multiplier_type
 
     def test_numerical_stability(self) -> None:
         """Test layer stability with extreme input values."""
-        layer = LearnableMultiplier(multiplier_type="GLOBAL")
+        layer = LayerScale(multiplier_type="GLOBAL")
 
         # Create inputs with different magnitudes
         batch_size = 2
@@ -327,7 +326,7 @@ class TestLearnableMultiplier:
         """Test that invalid parameters raise appropriate errors."""
         # Invalid multiplier type should be caught in enum conversion
         with pytest.raises(ValueError):
-            LearnableMultiplier(multiplier_type="INVALID")
+            LayerScale(multiplier_type="INVALID")
 
 
 @pytest.mark.integration
@@ -338,8 +337,8 @@ class TestModelIntegration:
         """Test layers in a sequential model."""
         model = keras.Sequential([
             keras.layers.InputLayer(sample_input.shape[1:]),
-            LearnableMultiplier(multiplier_type="GLOBAL"),
-            LearnableMultiplier(multiplier_type="CHANNEL")
+            LayerScale(multiplier_type="GLOBAL"),
+            LayerScale(multiplier_type="CHANNEL")
         ])
 
         output = model(sample_input)
@@ -348,9 +347,9 @@ class TestModelIntegration:
     def test_functional_model(self, sample_input: tf.Tensor) -> None:
         """Test layers in a functional model."""
         inputs = keras.Input(shape=sample_input.shape[1:])
-        x = LearnableMultiplier(multiplier_type="CHANNEL", name="multiplier1")(inputs)
+        x = LayerScale(multiplier_type="CHANNEL", name="multiplier1")(inputs)
         x = keras.layers.BatchNormalization()(x)
-        x = LearnableMultiplier(multiplier_type="GLOBAL", name="multiplier2")(x)
+        x = LayerScale(multiplier_type="GLOBAL", name="multiplier2")(x)
         outputs = keras.layers.GlobalAveragePooling2D()(x)
 
         model = keras.Model(inputs=inputs, outputs=outputs)
@@ -363,7 +362,7 @@ class TestModelIntegration:
         """Test saving and loading a model with the custom layer."""
         # Create a model with the custom layer
         inputs = keras.Input(shape=sample_input.shape[1:])
-        x = LearnableMultiplier(multiplier_type="CHANNEL", name="custom_multiplier")(inputs)
+        x = LayerScale(multiplier_type="CHANNEL", name="custom_multiplier")(inputs)
         x = keras.layers.BatchNormalization()(x)
         x = keras.layers.GlobalAveragePooling2D()(x)
         outputs = keras.layers.Dense(10)(x)
@@ -383,7 +382,7 @@ class TestModelIntegration:
             # Load the model
             loaded_model = keras.models.load_model(
                 model_path,
-                custom_objects={"LearnableMultiplier": LearnableMultiplier}
+                custom_objects={"LayerScale": LayerScale}
             )
 
             # Generate prediction with loaded model
@@ -393,13 +392,13 @@ class TestModelIntegration:
             assert np.allclose(original_prediction, loaded_prediction, rtol=1e-5)
 
             # Check layer types are preserved
-            assert isinstance(loaded_model.get_layer("custom_multiplier"), LearnableMultiplier)
+            assert isinstance(loaded_model.get_layer("custom_multiplier"), LayerScale)
 
     def test_training_pipeline(self, sample_input: tf.Tensor) -> None:
         """Test layers in a training pipeline."""
         model = keras.Sequential([
             keras.layers.InputLayer(sample_input.shape[1:]),
-            LearnableMultiplier(multiplier_type="CHANNEL"),
+            LayerScale(multiplier_type="CHANNEL"),
             keras.layers.GlobalAveragePooling2D(),
             keras.layers.Dense(1)
         ])
@@ -426,7 +425,7 @@ class TestModelIntegration:
         # Create a model with the custom layer
         model = keras.Sequential([
             keras.layers.InputLayer(sample_input.shape[1:]),
-            LearnableMultiplier(multiplier_type="CHANNEL"),
+            LayerScale(multiplier_type="CHANNEL"),
             keras.layers.BatchNormalization(),
             keras.layers.GlobalAveragePooling2D(),
             keras.layers.Dense(10)
@@ -472,14 +471,14 @@ class TestEdgeCases:
 
         for shape in shapes:
             # Create a new layer instance for each shape test
-            layer = LearnableMultiplier(multiplier_type="CHANNEL")
+            layer = LayerScale(multiplier_type="CHANNEL")
             test_input = tf.random.normal(shape)
             output = layer(test_input)
             assert output.shape == shape
 
     def test_different_dtypes(self) -> None:
         """Test layer with different input dtypes."""
-        layer = LearnableMultiplier(multiplier_type="GLOBAL")
+        layer = LayerScale(multiplier_type="GLOBAL")
 
         # Test with float32 (default)
         input_f32 = tf.random.normal((2, 4, 4, 8), dtype=tf.float32)
@@ -488,7 +487,7 @@ class TestEdgeCases:
 
     def test_zero_input(self) -> None:
         """Test layer behavior with zero input."""
-        layer = LearnableMultiplier(multiplier_type="GLOBAL")
+        layer = LayerScale(multiplier_type="GLOBAL")
         zero_input = tf.zeros((2, 4, 4, 8))
         output = layer(zero_input)
 

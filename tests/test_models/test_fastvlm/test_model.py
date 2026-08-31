@@ -852,7 +852,7 @@ class TestAttentionBlockVLMSignalPath:
     def test_layer_scale_does_not_annihilate_the_signal(self) -> None:
         """A stack of blocks must not collapse the activation magnitude.
 
-        RED-proof: LayerScale used to be a standalone LearnableMultiplier
+        RED-proof: the LayerScale gain used to be a standalone sub-layer
         applied to the block's output in call(), AFTER TransformerLayer had
         already closed its own residuals -- i.e. ``x = gamma * f(x)`` with no
         skip path. At the default ``layer_scale_init=1e-4`` that attenuates by

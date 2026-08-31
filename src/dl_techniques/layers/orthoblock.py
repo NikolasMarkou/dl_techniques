@@ -62,7 +62,7 @@ from typing import Optional, Union, Any, Tuple, Dict, Callable
 # local imports
 # ---------------------------------------------------------------------
 
-from .layer_scale import LearnableMultiplier
+from .layer_scale import LayerScale
 from .norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 from ..constraints.value_range_constraint import ValueRangeConstraint
 from ..regularizers.binary_preference import BinaryPreferenceRegularizer
@@ -208,7 +208,7 @@ class OrthoBlock(keras.layers.Layer):
         )
 
         # Constrained learnable scaling for feature gating
-        self.constrained_scale = LearnableMultiplier(
+        self.constrained_scale = LayerScale(
             multiplier_type="CHANNEL",
             initializer=keras.initializers.Constant(self.scale_initial_value),
             regularizer=BinaryPreferenceRegularizer(multiplier=1e-4),  # Encourage sparsity

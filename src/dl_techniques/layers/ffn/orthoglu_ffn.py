@@ -139,7 +139,7 @@ class OrthoGLUFFN(keras.layers.Layer):
               added to the layer's regularization losses,
               pulling W^T W towards I
 
-        z ──► ZeroCenteredRMSNorm ──► LearnableMultiplier
+        z ──► ZeroCenteredRMSNorm ──► LayerScale
                                       per channel, clipped
                                       to [0, 1]
                                              │
@@ -154,7 +154,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         Both OrthoBlocks are built with activation=None, so
         OrthoBlock's own activation stage is inert here and the
         only non-linearity in this layer is the gate activation.
-        LearnableMultiplier also carries a BinaryPreferenceRegularizer
+        LayerScale also carries a BinaryPreferenceRegularizer
         (multiplier 1e-4), a second loss not drawn above.
 
     :param hidden_dim: Width of the gate and of the value, each. The input

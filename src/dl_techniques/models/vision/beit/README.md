@@ -228,10 +228,10 @@ package, and none may be added.**
  │   ┌──────────────────────────────────────────────────────────┐ │
  │   │ LayerNorm(eps=1e-12) ─► BeitAttention   ◄── THE ONLY NEW  │ │
  │   │                          (rel. pos. bias, q/v-only bias)  │ │
- │   │ ─► StochasticDepth ─► LearnableMultiplier (LayerScale γ₁) │ │
+ │   │ ─► StochasticDepth ─► LayerScale γ₁                       │ │
  │   │ ─► + residual                                             │ │
  │   │ LayerNorm(eps=1e-12) ─► MLP(GELU)                         │ │
- │   │ ─► StochasticDepth ─► LearnableMultiplier (LayerScale γ₂) │ │
+ │   │ ─► StochasticDepth ─► LayerScale γ₂                       │ │
  │   │ ─► + residual                                             │ │
  │   └──────────────────────────────────────────────────────────┘ │
  └──────────┬─────────────────────────────────────────────────────┘
@@ -254,7 +254,7 @@ package, and none may be added.**
 | CLS token | `ClassTokenPrepend` | `layers/embedding/class_token.py` | reused |
 | Absolute pos. emb. (optional) | `PositionalEmbedding` | `create_embedding_layer('positional_learned', ...)` | reused |
 | Transformer block | `TransformerLayer` | `layers/transformers/transformer.py` | reused |
-| LayerScale (γ₁, γ₂) | `LearnableMultiplier` | inside `TransformerLayer` (`use_layer_scale=True`) | reused |
+| LayerScale (γ₁, γ₂) | `LayerScale` | inside `TransformerLayer` (`use_layer_scale=True`) | reused |
 | Stochastic depth | `StochasticDepth` | inside `TransformerLayer` (`use_stochastic_depth=True`) | reused |
 | DropPath ramp | `linear_drop_path_rates` | `utils/drop_path.py` | reused |
 | Norms / FFN | `LayerNormalization`, `MLPBlock` | via `TransformerLayer`'s factories | reused |
@@ -266,7 +266,7 @@ its per-type attention-parameter table, and the attention factory gained one `'b
 registry entry — both purely additive.
 
 > **Order note (measured, not assumed).** `TransformerLayer` applies `StochasticDepth`
-> *before* `LearnableMultiplier`, whereas the BEiT reference writes
+> *before* `LayerScale`, whereas the BEiT reference writes
 > `x + drop_path(gamma * attn(x))`. The two orders are **numerically identical**:
 > `StochasticDepth` multiplies the whole sample by a scalar (`0` or `1/(1-p)`) and LayerScale
 > multiplies elementwise by `gamma` broadcast over the batch, so the two commute exactly.
