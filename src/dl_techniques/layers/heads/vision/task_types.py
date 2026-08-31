@@ -1,3 +1,24 @@
+"""Task types and configuration objects for the vision heads.
+
+This module says what a vision task is. It builds no layer. Three classes and
+three functions live here:
+
+* :class:`VisionTaskType` -- an enum of 37 task names, with lookup helpers for
+  categories, compatible tasks and output shapes.
+* :class:`TaskConfiguration` -- a validated set of tasks, plus queries for
+  what that set contains.
+* :class:`CommonTaskConfigurations` -- 26 ready-made task sets.
+* :func:`parse_task_list`, :func:`get_task_suggestions` and
+  :func:`validate_task_combination` -- module-level helpers.
+
+``vision/factory.py`` reads these objects and picks the head class to build.
+Only 10 of the 37 task names have a head; the other 27 raise ``ValueError``.
+The table in :class:`VisionTaskType` lists both groups.
+
+``TaskType`` is a module-level alias for :class:`VisionTaskType`, kept so
+older callers keep working. It is the same object, not a copy.
+"""
+
 from enum import Enum, unique
 from typing import List, Set, Dict, Optional
 
@@ -7,72 +28,85 @@ from typing import List, Set, Dict, Optional
 @unique
 class VisionTaskType(Enum):
     """
-    Enumeration of supported computer vision_heads tasks for multi-task models.
+    The 37 computer vision tasks a head can be asked to serve.
 
-    Each task represents a different computer vision_heads capability that can be
-    enabled in the multi-task architecture. Tasks are organized into categories
-    for better understanding and compatibility checking.
+    Each member carries a lowercase string value. That string is the
+    serialization form, and :meth:`from_string` parses it back.
 
-    Core Detection & Segmentation:
-        DETECTION: Object detection with bounding box regression and classification.
-        SEGMENTATION: Pixel-level semantic segmentation.
-        INSTANCE_SEGMENTATION: Segmenting individual object instances.
-        PANOPTIC_SEGMENTATION: Combined semantic and instance segmentation.
-        CLASSIFICATION: Global image-level classification.
+    **Head Dispatch:**
 
-    Geometric Understanding:
-        DEPTH_ESTIMATION: Predicting depth maps from RGB images.
-        SURFACE_NORMALS: Estimating surface normal vectors.
-        STEREO_MATCHING: Depth estimation from stereo image pairs.
+    ``vision/factory.py``'s ``create_vision_head`` decides which head class
+    runs a task. Ten members reach a head. Five get a class of their own.
+    Five reuse another task's class, two of them with a different output
+    channel count. Denoising and super-resolution route through
+    ``create_enhancement_head``, which returns an ``EnhancementHead``. The
+    remaining 27 members have no head and raise ``ValueError``.
 
-    Motion & Temporal:
-        OPTICAL_FLOW: Estimating motion between consecutive frames.
-        MOTION_SEGMENTATION: Segmenting moving objects in video.
+    .. code-block:: text
 
-    Structural Analysis:
-        POSE_ESTIMATION: Estimating object or human poses.
-        KEYPOINT_DETECTION: Detecting and localizing keypoints.
-        EDGE_DETECTION: Detecting edges and boundaries.
-        LINE_DETECTION: Detecting line segments and geometric structures.
+        Own head class
+        --------------------------------------------
+        DETECTION              DetectionHead
+        SEGMENTATION           SegmentationHead
+        INSTANCE_SEGMENTATION  InstanceSegmentationHead
+        CLASSIFICATION         ClassificationHead
+        DEPTH_ESTIMATION       DepthEstimationHead
 
-    Attention & Saliency:
-        SALIENCY_DETECTION: Identifying salient regions in images.
-        ATTENTION_PREDICTION: Predicting human visual attention maps.
+        Reuses another task's head class
+        --------------------------------------------
+        SURFACE_NORMALS     DepthEstimationHead(output_channels=3)
+        OPTICAL_FLOW        DepthEstimationHead(output_channels=2)
+        KEYPOINT_DETECTION  DetectionHead
+        DENOISING           EnhancementHead
+        SUPER_RESOLUTION    EnhancementHead(scale_factor=2)
 
-    Image Enhancement & Restoration:
-        DENOISING: Removing noise from images.
-        SUPER_RESOLUTION: Upscaling images with enhanced detail.
-        INPAINTING: Filling in missing or corrupted parts of images.
-        DEHAZE: Removing haze, fog, or atmospheric effects.
-        SHADOW_REMOVAL: Detecting and removing shadows.
-        REFLECTION_REMOVAL: Removing reflections from images.
+        No head -- raises ValueError("Unsupported task type")
+        --------------------------------------------
+        PANOPTIC_SEGMENTATION, STEREO_MATCHING,
+        MOTION_SEGMENTATION, POSE_ESTIMATION, EDGE_DETECTION,
+        LINE_DETECTION, SALIENCY_DETECTION, ATTENTION_PREDICTION,
+        INPAINTING, DEHAZE, SHADOW_REMOVAL, REFLECTION_REMOVAL,
+        COLORIZATION, STYLE_TRANSFER, WHITE_BALANCE, MATTING,
+        HAIR_SEGMENTATION, SKY_SEGMENTATION, MEDICAL_SEGMENTATION,
+        CELL_COUNTING, TEXT_DETECTION, DOCUMENT_LAYOUT,
+        DEPTH_COMPLETION, SURFACE_RECONSTRUCTION, CAMERA_POSE,
+        IMAGE_QUALITY, AESTHETIC_SCORING
 
-    Color & Style:
-        COLORIZATION: Adding color to grayscale images.
-        STYLE_TRANSFER: Transferring artistic styles between images.
-        WHITE_BALANCE: Correcting color temperature and white balance.
+    **Categories:**
 
-    Advanced Segmentation:
-        MATTING: Extracting foreground objects with soft boundaries.
-        HAIR_SEGMENTATION: Specialized segmentation for hair regions.
-        SKY_SEGMENTATION: Specialized segmentation for sky regions.
+    :meth:`get_task_categories` files every member into one of twelve named
+    categories, listed here with the number of members in each. The filing is
+    descriptive. It does not decide which head class runs a task, and the
+    factory never reads it.
 
-    Medical & Scientific:
-        MEDICAL_SEGMENTATION: Medical image segmentation tasks.
-        CELL_COUNTING: Counting cells or objects in microscopy images.
+    .. code-block:: text
 
-    Document & Text:
-        TEXT_DETECTION: Detecting text regions in natural images.
-        DOCUMENT_LAYOUT: Analyzing document structure and layout.
+        Core Detection & Segmentation     5
+        Geometric Understanding           3
+        Motion & Temporal                 2
+        Structural Analysis               4
+        Attention & Saliency              2
+        Image Enhancement & Restoration   6
+        Color & Style                     3
+        Advanced Segmentation             3
+        Medical & Scientific              2
+        Document & Text                   2
+        3D Understanding                  3
+        Quality Assessment                2
+                                         --
+        total                             37
 
-    3D Understanding:
-        DEPTH_COMPLETION: Completing sparse depth maps.
-        SURFACE_RECONSTRUCTION: Reconstructing 3D surfaces from images.
-        CAMERA_POSE: Estimating camera pose and orientation.
+    Note:
+        The dispatch table restates a mapping that lives in
+        ``create_vision_head``. That function is the arbiter. If the two
+        disagree, the function is right.
 
-    Quality Assessment:
-        IMAGE_QUALITY: Assessing image quality metrics.
-        AESTHETIC_SCORING: Predicting aesthetic quality scores.
+    Example:
+        >>> task = VisionTaskType.from_string("depth_estimation")
+        >>> str(task)
+        'depth_estimation'
+        >>> task.get_category()
+        'Geometric Understanding'
     """
 
     # Core Detection & Segmentation
@@ -139,9 +173,12 @@ class VisionTaskType(Enum):
     @classmethod
     def all_tasks(cls) -> List["VisionTaskType"]:
         """
-        Get all available task types.
+        List every task member in declaration order.
 
-        :return: List of all VisionTaskType enum values.
+        The order is stable, so callers can use it to sort task sets
+        reproducibly. :meth:`TaskConfiguration.get_enabled_tasks` does.
+
+        :return: All 37 VisionTaskType members, in declaration order.
         :rtype: List[VisionTaskType]
         """
         return list(cls)
@@ -149,9 +186,13 @@ class VisionTaskType(Enum):
     @classmethod
     def get_task_categories(cls) -> Dict[str, List["VisionTaskType"]]:
         """
-        Get tasks organized by categories.
+        Group every task member under one of twelve category names.
 
-        :return: Dictionary mapping category names to lists of tasks.
+        Every member appears exactly once, so the twelve lists partition the
+        enum. The grouping is for display and for
+        :meth:`TaskConfiguration.get_tasks_by_category`. No factory reads it.
+
+        :return: Category name mapped to the tasks filed under it.
         :rtype: Dict[str, List[VisionTaskType]]
         """
         return {
@@ -221,11 +262,17 @@ class VisionTaskType(Enum):
     @classmethod
     def get_compatible_tasks(cls, task: "VisionTaskType") -> List["VisionTaskType"]:
         """
-        Get tasks that are commonly combined with the given task.
+        List the tasks commonly trained alongside the given task.
+
+        The suggestion map covers 11 of the 37 members. Anything else returns
+        an empty list, which means "no suggestion recorded", not "nothing is
+        compatible". The map is also not symmetric: a task can appear in
+        another's list without that other appearing in its own.
 
         :param task: The reference task.
         :type task: VisionTaskType
-        :return: List of tasks that work well together with the reference task.
+        :return: Tasks recorded as working well with the reference task, or
+            an empty list when the reference task has no entry.
         :rtype: List[VisionTaskType]
         """
         compatibility_map = {
@@ -284,11 +331,16 @@ class VisionTaskType(Enum):
     @classmethod
     def get_output_types(cls, task: "VisionTaskType") -> Dict[str, str]:
         """
-        Get the expected output types for a given task.
+        Describe the tensors a task is expected to produce.
 
-        :param task: The task to get output types for.
+        The shapes are documentation strings, not runtime shapes. Nothing
+        checks a head against them. 15 of the 37 members have an entry; the
+        rest fall back to the single generic key ``{"output":
+        "float32[...]"}``.
+
+        :param task: The task to describe.
         :type task: VisionTaskType
-        :return: Dictionary mapping output names to their types/shapes.
+        :return: Output name mapped to a shape string.
         :rtype: Dict[str, str]
         """
         output_types = {
@@ -364,7 +416,10 @@ class VisionTaskType(Enum):
     @classmethod
     def from_string(cls, task_str: str) -> "VisionTaskType":
         """
-        Create VisionTaskType from string value.
+        Parse a task name back into its enum member.
+
+        The input is lowercased and stripped first, so ``" Detection "``
+        resolves. An unknown name raises rather than falling back.
 
         :param task_str: String representation of the task.
         :type task_str: str
@@ -386,7 +441,10 @@ class VisionTaskType(Enum):
     @classmethod
     def from_strings(cls, task_strs: List[str]) -> List["VisionTaskType"]:
         """
-        Create list of TaskTypes from list of strings.
+        Parse a list of task names into enum members.
+
+        Calls :meth:`from_string` per element, so the first unknown name
+        raises and no partial list is returned.
 
         :param task_strs: List of string representations of tasks.
         :type task_strs: List[str]
@@ -399,20 +457,27 @@ class VisionTaskType(Enum):
     @classmethod
     def to_strings(cls, tasks: List["VisionTaskType"]) -> List[str]:
         """
-        Convert list of TaskTypes to list of strings.
+        Convert enum members back to their string values.
+
+        This is the inverse of :meth:`from_strings` and preserves order.
 
         :param tasks: List of VisionTaskType enum values.
         :type tasks: List[VisionTaskType]
-        :return: List of string representations.
+        :return: The ``value`` of each member, in the order given.
         :rtype: List[str]
         """
         return [task.value for task in tasks]
 
     def get_category(self) -> str:
         """
-        Get the category this task belongs to.
+        Name the category this task is filed under.
 
-        :return: Category name as string.
+        Every member is filed, so ``"Uncategorized"`` is a guard against a
+        member being added to the enum without being added to
+        :meth:`get_task_categories`.
+
+        :return: The category name, or ``"Uncategorized"`` if the member is
+            missing from the category map.
         :rtype: str
         """
         categories = self.get_task_categories()
@@ -423,22 +488,40 @@ class VisionTaskType(Enum):
 
     def is_compatible_with(self, other: "VisionTaskType") -> bool:
         """
-        Check if this task is compatible with another task.
+        Report whether another task is in this task's suggestion list.
 
-        :param other: Another VisionTaskType to check compatibility with.
+        This reads :meth:`get_compatible_tasks`, which covers 11 of the 37
+        members. For the other 26 the answer is always False, because their
+        suggestion list is empty. False here means "not recorded as a good
+        pair", not "rejected". :class:`TaskConfiguration` does not call this
+        method; its own check uses a separate two-pair reject list.
+
+        :param other: Another VisionTaskType to check against.
         :type other: VisionTaskType
-        :return: True if tasks are compatible, False otherwise.
+        :return: True when ``other`` appears in this task's suggestion list.
         :rtype: bool
         """
         compatible_tasks = self.get_compatible_tasks(self)
         return other in compatible_tasks
 
     def __str__(self) -> str:
-        """String representation of the task type."""
+        """
+        Return the member's string value.
+
+        This is the serialization form :meth:`from_string` parses.
+
+        :return: The lowercase task name, for example ``'depth_estimation'``.
+        :rtype: str
+        """
         return self.value
 
     def __repr__(self) -> str:
-        """Detailed string representation of the task type."""
+        """
+        Return the qualified member name.
+
+        :return: A string of the form ``VisionTaskType.DEPTH_ESTIMATION``.
+        :rtype: str
+        """
         return f"VisionTaskType.{self.name}"
 
 
@@ -446,33 +529,50 @@ class VisionTaskType(Enum):
 
 class TaskConfiguration:
     """
-    Configuration helper for managing task combinations in multi-task models.
+    A validated set of tasks for a multi-task vision model.
 
-    Provides utilities for validating and managing task configurations,
-    ensuring that valid combinations are used and providing helpful error messages.
+    Construction checks the list, then stores it as a set. The query methods
+    answer what that set contains: a named task, one of nine specific tasks,
+    a single task or several, and the set grouped by category.
+
+    Only two task pairs are rejected as incompatible. The check is a guard
+    against two known-bad combinations, not a full compatibility model, and
+    it never consults :meth:`VisionTaskType.get_compatible_tasks`.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────┐
-        │    TaskConfiguration     │
-        │                          │
-        │  ┌────────────────────┐  │
-        │  │  Set[VisionTaskType]     │  │
-        │  │  (enabled tasks)   │  │
-        │  └────────┬───────────┘  │
-        │           ▼              │
-        │  ┌────────────────────┐  │
-        │  │  Compatibility     │  │
-        │  │  Validation        │  │
-        │  └────────────────────┘  │
-        └──────────────────────────┘
+        tasks: List[VisionTaskType]
+                  │
+                  ▼
+        ┌───────────────────────┐         ┌────────────┐
+        │ empty or duplicates?  │─ yes ──►│ ValueError │
+        └──────────┬────────────┘         └────────────┘
+                   │ no
+                   ▼
+        ┌───────────────────────┐         ┌────────────┐
+        │ known-bad pair, and   │─ yes ──►│ ValueError │
+        │ validation enabled?   │         └────────────┘
+        └──────────┬────────────┘
+                   │ no
+                   ▼
+             self._tasks: Set[VisionTaskType]
+                   │
+                   ├─► has_task() and the 9 has_*() predicates
+                   ├─► is_single_task() / is_multi_task()
+                   ├─► get_enabled_tasks() / get_task_names()
+                   ├─► get_tasks_by_category()
+                   ├─► get_output_specifications()
+                   └─► to_dict()
 
     :param tasks: List of VisionTaskType enum values to enable.
     :type tasks: List[VisionTaskType]
-    :param validate_compatibility: Whether to check task compatibility.
+    :param validate_compatibility: Whether to check task compatibility. The
+        check only runs when more than one task is given.
     :type validate_compatibility: bool
+    :raises ValueError: If tasks list is empty, contains duplicates, or
+        contains an incompatible pair (when validation is enabled).
     """
 
     def __init__(self, tasks: List[VisionTaskType], validate_compatibility: bool = True):
@@ -499,13 +599,22 @@ class TaskConfiguration:
             self._validate_task_compatibility()
 
     def _validate_task_compatibility(self) -> None:
-        """Validate that all tasks in the configuration are compatible."""
+        """
+        Reject the two task pairs known not to work together.
+
+        Colorization and denoising want different inputs, as do stereo
+        matching and optical flow. Every other combination passes.
+
+        :return: Nothing.
+        :rtype: None
+        :raises ValueError: If both members of a rejected pair are enabled.
+        """
         task_list = list(self._tasks)
 
         # Check for obviously incompatible combinations
         incompatible_pairs = [
-            (VisionTaskType.COLORIZATION, VisionTaskType.DENOISING),  # Different input requirements
-            (VisionTaskType.STEREO_MATCHING, VisionTaskType.OPTICAL_FLOW),  # Different input types
+            (VisionTaskType.COLORIZATION, VisionTaskType.DENOISING),
+            (VisionTaskType.STEREO_MATCHING, VisionTaskType.OPTICAL_FLOW),
         ]
 
         for task1, task2 in incompatible_pairs:
@@ -514,76 +623,171 @@ class TaskConfiguration:
 
     @property
     def tasks(self) -> Set[VisionTaskType]:
-        """Get the set of enabled tasks."""
+        """
+        The set of enabled tasks.
+
+        A copy is returned, so mutating it does not change the
+        configuration.
+
+        :return: A copy of the enabled task set.
+        :rtype: Set[VisionTaskType]
+        """
         return self._tasks.copy()
 
     def has_task(self, task: VisionTaskType) -> bool:
-        """Check if a specific task is enabled."""
+        """
+        Report whether one named task is enabled.
+
+        The nine ``has_*`` methods below are fixed-task shorthands for this.
+
+        :param task: The task to look for.
+        :type task: VisionTaskType
+        :return: True when the task is in this configuration.
+        :rtype: bool
+        """
         return task in self._tasks
 
     # Core task checks
     def has_detection(self) -> bool:
-        """Check if detection task is enabled."""
+        """
+        Report whether object detection is enabled.
+
+        :return: True when ``VisionTaskType.DETECTION`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.DETECTION in self._tasks
 
     def has_segmentation(self) -> bool:
-        """Check if segmentation task is enabled."""
+        """
+        Report whether semantic segmentation is enabled.
+
+        :return: True when ``VisionTaskType.SEGMENTATION`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.SEGMENTATION in self._tasks
 
     def has_classification(self) -> bool:
-        """Check if classification task is enabled."""
+        """
+        Report whether image-level classification is enabled.
+
+        :return: True when ``VisionTaskType.CLASSIFICATION`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.CLASSIFICATION in self._tasks
 
     # Geometric task checks
     def has_depth_estimation(self) -> bool:
-        """Check if depth estimation task is enabled."""
+        """
+        Report whether depth estimation is enabled.
+
+        :return: True when ``VisionTaskType.DEPTH_ESTIMATION`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.DEPTH_ESTIMATION in self._tasks
 
     def has_surface_normals(self) -> bool:
-        """Check if surface normals estimation task is enabled."""
+        """
+        Report whether surface normal estimation is enabled.
+
+        :return: True when ``VisionTaskType.SURFACE_NORMALS`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.SURFACE_NORMALS in self._tasks
 
     # Instance segmentation checks
     def has_instance_segmentation(self) -> bool:
-        """Check if instance segmentation task is enabled."""
+        """
+        Report whether instance segmentation is enabled.
+
+        :return: True when ``VisionTaskType.INSTANCE_SEGMENTATION`` is in the
+            set.
+        :rtype: bool
+        """
         return VisionTaskType.INSTANCE_SEGMENTATION in self._tasks
 
     def has_panoptic_segmentation(self) -> bool:
-        """Check if panoptic segmentation task is enabled."""
+        """
+        Report whether panoptic segmentation is enabled.
+
+        This task has no head. ``create_vision_head`` raises ``ValueError``
+        for it, so a True answer here does not mean a head can be built.
+
+        :return: True when ``VisionTaskType.PANOPTIC_SEGMENTATION`` is in the
+            set.
+        :rtype: bool
+        """
         return VisionTaskType.PANOPTIC_SEGMENTATION in self._tasks
 
     # Enhancement task checks
     def has_denoising(self) -> bool:
-        """Check if denoising task is enabled."""
+        """
+        Report whether denoising is enabled.
+
+        :return: True when ``VisionTaskType.DENOISING`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.DENOISING in self._tasks
 
     def has_super_resolution(self) -> bool:
-        """Check if super resolution task is enabled."""
+        """
+        Report whether super-resolution is enabled.
+
+        :return: True when ``VisionTaskType.SUPER_RESOLUTION`` is in the set.
+        :rtype: bool
+        """
         return VisionTaskType.SUPER_RESOLUTION in self._tasks
 
     def is_single_task(self) -> bool:
-        """Check if only one task is enabled."""
+        """
+        Report whether exactly one task is enabled.
+
+        :return: True when the set holds one task.
+        :rtype: bool
+        """
         return len(self._tasks) == 1
 
     def is_multi_task(self) -> bool:
-        """Check if multiple tasks are enabled."""
+        """
+        Report whether more than one task is enabled.
+
+        :return: True when the set holds two or more tasks.
+        :rtype: bool
+        """
         return len(self._tasks) > 1
 
     def get_enabled_tasks(self) -> List[VisionTaskType]:
-        """Get list of enabled tasks in a consistent order."""
-        # Return in a consistent order for reproducibility
+        """
+        List the enabled tasks in enum declaration order.
+
+        The set itself has no order. Sorting by
+        :meth:`VisionTaskType.all_tasks` makes the result reproducible across
+        runs, which matters for naming multi-task outputs.
+
+        :return: The enabled tasks, in declaration order.
+        :rtype: List[VisionTaskType]
+        """
         all_tasks = VisionTaskType.all_tasks()
         return [task for task in all_tasks if task in self._tasks]
 
     def get_task_names(self) -> List[str]:
-        """Get list of enabled task names as strings."""
+        """
+        List the enabled task names as strings.
+
+        Same order as :meth:`get_enabled_tasks`.
+
+        :return: The ``value`` of each enabled task.
+        :rtype: List[str]
+        """
         return VisionTaskType.to_strings(self.get_enabled_tasks())
 
     def get_tasks_by_category(self) -> Dict[str, List[VisionTaskType]]:
         """
-        Get enabled tasks organized by category.
+        Group the enabled tasks by category.
 
-        :return: Dictionary mapping category names to lists of enabled tasks.
+        Categories with no enabled task are left out, so the result has at
+        most twelve keys and never an empty list.
+
+        :return: Category name mapped to the enabled tasks filed under it.
         :rtype: Dict[str, List[VisionTaskType]]
         """
         categories = VisionTaskType.get_task_categories()
@@ -598,18 +802,24 @@ class TaskConfiguration:
 
     def get_output_specifications(self) -> Dict[VisionTaskType, Dict[str, str]]:
         """
-        Get output specifications for all enabled tasks.
+        Describe the outputs of every enabled task.
 
-        :return: Dictionary mapping tasks to their output specifications.
+        Each value comes from :meth:`VisionTaskType.get_output_types`, so it
+        is documentation, not a runtime shape check.
+
+        :return: Task mapped to its output name/shape strings.
         :rtype: Dict[VisionTaskType, Dict[str, str]]
         """
         return {task: VisionTaskType.get_output_types(task) for task in self._tasks}
 
     def to_dict(self) -> dict:
         """
-        Convert configuration to dictionary for serialization.
+        Convert the configuration to a flat boolean dictionary.
 
-        :return: Dictionary with task names and their enabled status.
+        All 37 tasks get a key, named ``enable_<task value>``, whether
+        enabled or not. :meth:`from_dict` reads this form back.
+
+        :return: 37 ``enable_*`` keys mapped to True or False.
         :rtype: dict
         """
         result = {}
@@ -620,7 +830,11 @@ class TaskConfiguration:
     @classmethod
     def from_dict(cls, config_dict: dict, validate_compatibility: bool = True) -> "TaskConfiguration":
         """
-        Create TaskConfiguration from dictionary.
+        Build a configuration from a boolean dictionary.
+
+        Reads the ``enable_<task value>`` keys :meth:`to_dict` writes. A
+        missing key counts as False. A dictionary with no key set to True
+        produces an empty task list, and construction then raises.
 
         :param config_dict: Dictionary with boolean flags for tasks.
         :type config_dict: dict
@@ -628,6 +842,8 @@ class TaskConfiguration:
         :type validate_compatibility: bool
         :return: TaskConfiguration instance.
         :rtype: TaskConfiguration
+        :raises ValueError: If no task flag is True, or the enabled tasks
+            contain an incompatible pair.
         """
         tasks = []
 
@@ -641,7 +857,10 @@ class TaskConfiguration:
     @classmethod
     def from_strings(cls, task_strings: List[str], validate_compatibility: bool = True) -> "TaskConfiguration":
         """
-        Create TaskConfiguration from list of task name strings.
+        Build a configuration from a list of task name strings.
+
+        Parses through :meth:`VisionTaskType.from_strings`, so an unknown
+        name raises before the configuration is built.
 
         :param task_strings: List of task names as strings.
         :type task_strings: List[str]
@@ -649,28 +868,61 @@ class TaskConfiguration:
         :type validate_compatibility: bool
         :return: TaskConfiguration instance.
         :rtype: TaskConfiguration
+        :raises ValueError: If a name is unknown, the list is empty, holds
+            duplicates, or holds an incompatible pair.
         """
         tasks = VisionTaskType.from_strings(task_strings)
         return cls(tasks, validate_compatibility=validate_compatibility)
 
     def __str__(self) -> str:
-        """String representation of the configuration."""
+        """
+        Return a short readable summary listing the task values.
+
+        :return: A string such as ``TaskConfiguration(detection,
+            segmentation)``.
+        :rtype: str
+        """
         task_names = self.get_task_names()
         return f"TaskConfiguration({', '.join(task_names)})"
 
     def __repr__(self) -> str:
-        """Detailed string representation of the configuration."""
+        """
+        Return a summary naming the enum members.
+
+        :return: A string such as
+            ``TaskConfiguration([VisionTaskType.DETECTION])``.
+        :rtype: str
+        """
         tasks_repr = [repr(task) for task in self.get_enabled_tasks()]
         return f"TaskConfiguration([{', '.join(tasks_repr)}])"
 
     def __eq__(self, other) -> bool:
-        """Check equality with another TaskConfiguration."""
+        """
+        Compare two configurations by their task sets.
+
+        Order does not matter and neither does
+        ``validate_compatibility``: two configurations holding the same tasks
+        are equal.
+
+        :param other: The object to compare against.
+        :type other: object
+        :return: True when ``other`` is a TaskConfiguration with the same
+            task set.
+        :rtype: bool
+        """
         if not isinstance(other, TaskConfiguration):
             return False
         return self._tasks == other._tasks
 
     def __hash__(self) -> int:
-        """Hash function for TaskConfiguration."""
+        """
+        Hash the task set, so configurations can be dictionary keys.
+
+        Consistent with :meth:`__eq__`: equal configurations hash equal.
+
+        :return: The hash of the frozen task set.
+        :rtype: int
+        """
         return hash(frozenset(self._tasks))
 
 
@@ -679,10 +931,72 @@ class TaskConfiguration:
 # Predefined common task configurations
 class CommonTaskConfigurations:
     """
-    Predefined common task configurations for convenience.
+    26 ready-made :class:`TaskConfiguration` presets.
 
-    This class provides commonly used task combinations as class properties,
-    making it easy to create models with standard configurations.
+    Every attribute is a class-level instance, built once at import time.
+    They are shared, so treat them as read-only; :attr:`TaskConfiguration.tasks`
+    already returns a copy.
+
+    **Presets:**
+
+    The table lists each preset's task count, how many of those tasks
+    ``create_vision_head`` can actually build a head for, and how many
+    categories the tasks span. ``Heads`` below ``N`` means the preset names a
+    task with no head.
+
+    .. code-block:: text
+
+        Preset                                  N  Heads  Cats
+        -------------------------------------  --  -----  ----
+        DETECTION_ONLY                          1      1     1
+        SEGMENTATION_ONLY                       1      1     1
+        CLASSIFICATION_ONLY                     1      1     1
+        DEPTH_ONLY                              1      1     1
+        SURFACE_NORMALS_ONLY                    1      1     1
+        INSTANCE_SEGMENTATION_ONLY              1      1     1
+        PANOPTIC_SEGMENTATION_ONLY              1      0     1
+        DENOISING_ONLY                          1      1     1
+        SUPER_RESOLUTION_ONLY                   1      1     1
+        KEYPOINT_DETECTION_ONLY                 1      1     1
+        DETECTION_SEGMENTATION                  2      2     1
+        DETECTION_CLASSIFICATION                2      2     1
+        SEGMENTATION_CLASSIFICATION             2      2     1
+        DEPTH_NORMALS                           2      2     1
+        SEGMENTATION_DEPTH                      2      2     2
+        DETECTION_DEPTH                         2      2     2
+        DETECTION_INSTANCE_SEG                  2      2     1
+        SEGMENTATION_INSTANCE_SEG               2      2     1
+        DETECTION_SEGMENTATION_DEPTH            3      3     2
+        DETECTION_SEGMENTATION_CLASSIFICATION   3      3     1
+        GEOMETRIC_UNDERSTANDING                 3      2     2
+        PANOPTIC_UNDERSTANDING                  4      4     2
+        IMAGE_ENHANCEMENT                       3      2     1
+        POSE_AND_STRUCTURE                      3      1     1
+        ALL_CORE_TASKS                          5      5     2
+        ALL_TASKS                              37     10    12
+
+        N      = len(get_enabled_tasks())
+        Heads  = tasks create_vision_head dispatches
+        Cats   = len(get_tasks_by_category())
+
+    ``ALL_TASKS`` turns compatibility validation off, because the full enum
+    contains both rejected pairs. Besides it, four presets name a task with
+    no head:
+    ``PANOPTIC_SEGMENTATION_ONLY``, ``GEOMETRIC_UNDERSTANDING``,
+    ``IMAGE_ENHANCEMENT`` and ``POSE_AND_STRUCTURE``.
+
+    Note:
+        The two listing methods do not cover all 26.
+        :meth:`get_all_configurations` returns 25, leaving out ``ALL_TASKS``.
+        :meth:`get_configurations_by_complexity` returns 24, leaving out
+        ``ALL_TASKS`` and ``PANOPTIC_SEGMENTATION_ONLY``.
+
+    Example:
+        >>> cfg = CommonTaskConfigurations.DETECTION_SEGMENTATION_DEPTH
+        >>> len(cfg.tasks)
+        3
+        >>> cfg.has_depth_estimation()
+        True
     """
 
     # Single task configurations - Core tasks
@@ -751,9 +1065,13 @@ class CommonTaskConfigurations:
     @classmethod
     def get_all_configurations(cls) -> List[TaskConfiguration]:
         """
-        Get all predefined configurations.
+        List the presets, except ``ALL_TASKS``.
 
-        :return: List of all predefined TaskConfiguration instances.
+        25 of the 26 presets are returned. ``ALL_TASKS`` is left out because
+        it enables every task and is not a configuration to iterate over.
+        The instances are the shared class attributes, not copies.
+
+        :return: 25 predefined TaskConfiguration instances.
         :rtype: List[TaskConfiguration]
         """
         return [
@@ -796,9 +1114,14 @@ class CommonTaskConfigurations:
     @classmethod
     def get_configurations_by_complexity(cls) -> Dict[str, List[TaskConfiguration]]:
         """
-        Get configurations organized by complexity level.
+        Group presets under four complexity labels.
 
-        :return: Dictionary mapping complexity levels to configuration lists.
+        The labels are "Single Task" (9), "Two Tasks" (8), "Three Tasks" (5)
+        and "Complex Multi-Task" (2), so 24 of the 26 presets appear.
+        ``ALL_TASKS`` and ``PANOPTIC_SEGMENTATION_ONLY`` are not listed.
+        The labels describe task count, not head count.
+
+        :return: Complexity label mapped to its preset instances.
         :rtype: Dict[str, List[TaskConfiguration]]
         """
         return {
@@ -828,12 +1151,21 @@ class CommonTaskConfigurations:
 # Utility functions for backward compatibility and convenience
 def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfiguration:
     """
-    Parse various task input formats into TaskConfiguration.
+    Normalize any accepted task spelling into a TaskConfiguration.
 
-    Accepts TaskConfiguration instances, single or lists of VisionTaskType enums,
-    and single or lists of string task names.
+    Five input forms are accepted: an existing configuration, a single enum
+    member, a single task name, a list of enum members, and a list of names.
+    An existing configuration is returned unchanged, so
+    ``validate_compatibility`` is ignored in that case.
+
+    A mixed list is not supported. Only the first element decides how the
+    whole list is read. A list starting with an enum but holding a string is
+    stored as given, raising nothing here and failing wherever the string is
+    later used as a task.
 
     :param tasks: Task specification in any supported format.
+    :type tasks: Union[TaskConfiguration, VisionTaskType, str,
+        List[VisionTaskType], List[str]]
     :param validate_compatibility: Whether to validate task compatibility.
     :type validate_compatibility: bool
     :return: TaskConfiguration instance.
@@ -863,13 +1195,17 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
 
 def get_task_suggestions(base_task: VisionTaskType, max_suggestions: int = 5) -> List[VisionTaskType]:
     """
-    Get task suggestions that work well with a base task.
+    Suggest tasks that are commonly trained with a base task.
+
+    A thin cap over :meth:`VisionTaskType.get_compatible_tasks`. Only 11 of
+    the 37 members have suggestions, so an empty result is common and means
+    "none recorded".
 
     :param base_task: The base task to find compatible tasks for.
     :type base_task: VisionTaskType
     :param max_suggestions: Maximum number of suggestions to return.
     :type max_suggestions: int
-    :return: List of compatible VisionTaskType suggestions.
+    :return: Up to ``max_suggestions`` compatible tasks, possibly empty.
     :rtype: List[VisionTaskType]
     """
     compatible_tasks = VisionTaskType.get_compatible_tasks(base_task)
@@ -878,11 +1214,17 @@ def get_task_suggestions(base_task: VisionTaskType, max_suggestions: int = 5) ->
 
 def validate_task_combination(tasks: List[VisionTaskType]) -> tuple[bool, Optional[str]]:
     """
-    Validate if a combination of tasks is reasonable.
+    Check a task list without raising.
+
+    Builds a :class:`TaskConfiguration` with validation on and converts the
+    ``ValueError`` into a return value. The message is the exception's text.
+    Empty lists and duplicates are rejected here too, not just incompatible
+    pairs.
 
     :param tasks: List of tasks to validate.
     :type tasks: List[VisionTaskType]
-    :return: Tuple of (is_valid, error_message).
+    :return: ``(True, None)`` when the list is accepted, otherwise
+        ``(False, message)``.
     :rtype: tuple[bool, Optional[str]]
     """
     try:
@@ -894,12 +1236,11 @@ def validate_task_combination(tasks: List[VisionTaskType]) -> tuple[bool, Option
 
 # ---------------------------------------------------------------------
 
-# DECISION plan_2026-06-08_8b32ca51/D-003: keep a `TaskType` alias for the
-# renamed `VisionTaskType`. Do NOT delete this alias as "dead code" — it is a
-# deliberate backward-compat safety net for any missed / out-of-tree caller that
-# still imports `TaskType` from this module (the 4 in-tree callers are migrated
-# to `VisionTaskType`). The enum members/values are identical; the alias is the
-# SAME object, so `isinstance`/`is` checks across both names hold. See decisions.md D-003.
+# DECISION plan_2026-06-08_8b32ca51/D-003: `TaskType` is a backward-compat alias
+# for the renamed `VisionTaskType`. Do NOT delete it as "dead code": an
+# out-of-tree caller may still import `TaskType` from here (the 4 in-tree callers
+# were migrated). It is the SAME object, so `isinstance` and `is` checks hold
+# across both names. The owning plan is gone; this comment is the only record.
 TaskType = VisionTaskType
 
 # ---------------------------------------------------------------------
