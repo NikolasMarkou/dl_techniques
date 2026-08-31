@@ -383,7 +383,7 @@ def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_params: 
     model.save(save_path)
 
     # Import all necessary custom objects
-    from dl_techniques.layers.layer_scale import LearnableMultiplier
+    from dl_techniques.layers.layer_scale import LayerScale
     from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
     from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
     from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
@@ -393,7 +393,7 @@ def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_params: 
         save_path,
         custom_objects={
             "ConvNextV2Block": ConvNextV2Block,
-            "LearnableMultiplier": LearnableMultiplier,
+            "LayerScale": LayerScale,
             "SoftOrthonormalConstraintRegularizer": SoftOrthonormalConstraintRegularizer,
             "ValueRangeConstraint": ValueRangeConstraint,
             "GlobalResponseNormalization": GlobalResponseNormalization,

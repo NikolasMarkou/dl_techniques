@@ -248,8 +248,8 @@ Every model in the family was audited against the core properties of the Cliffor
 | Residual = X_prev + GGR output | Yes | Yes | Yes |
 | Shifts filtered with warning | Yes | Yes | Yes (+ `_head_shifts_for` validation) |
 | Causality preserved | N/A | Left-only DWConv padding + causal cumulative mean | Text tower: causal; vision: bidirectional |
-| Clifford algebra in projection head | N/A | N/A | `SparseRollingGeometricProduct` + `LearnableMultiplier` (CHANNEL) residual |
-| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `LearnableMultiplier`, `AttentionPooling`) |
+| Clifford algebra in projection head | N/A | N/A | `SparseRollingGeometricProduct` + `LayerScale` (CHANNEL) residual |
+| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `LayerScale`, `AttentionPooling`) |
 
 ### Design decisions and their rationale
 

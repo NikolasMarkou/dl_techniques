@@ -19,7 +19,7 @@ def _geo_layer(z_det, z_ctx):
 
 
 def _scale_layer(geo):
-    """Stand-in for the LayerScale/LearnableMultiplier residual gate."""
+    """Stand-in for the LayerScale residual gate."""
     return 0.5 * geo
 
 

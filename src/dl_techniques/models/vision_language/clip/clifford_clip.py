@@ -118,7 +118,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     SparseRollingGeometricProduct,
 )
-from dl_techniques.layers.layer_scale import LearnableMultiplier
+from dl_techniques.layers.layer_scale import LayerScale
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -994,13 +994,13 @@ class CliffordCLIP(keras.Model):
         self.vision_head_scale = None
         self.text_head_scale = None
         if self.head_kind == "learned_query_residual":
-            self.vision_head_scale = LearnableMultiplier(
+            self.vision_head_scale = LayerScale(
                 multiplier_type="CHANNEL",
                 initializer=keras.initializers.Constant(1e-5),
                 constraint=None,
                 name="vision_head_scale",
             )
-            self.text_head_scale = LearnableMultiplier(
+            self.text_head_scale = LayerScale(
                 multiplier_type="CHANNEL",
                 initializer=keras.initializers.Constant(1e-5),
                 constraint=None,

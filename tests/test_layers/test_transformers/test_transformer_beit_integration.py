@@ -284,8 +284,8 @@ class TestBeitBlockComposition:
     def test_layer_scale_gamma_is_signed_and_initialized_to_0_1(self):
         """The gamma weight must carry NO non-negativity constraint.
 
-        Why this can fail if the implementation is wrong: ``LearnableMultiplier``
-        DEFAULTS to a ``non_neg`` constraint; BEiT's layer scale is signed, and a
+        Why this can fail if the implementation is wrong: the ``LayerScale``
+        layer DEFAULTS to a ``non_neg`` constraint; BEiT's layer scale is signed, and a
         clamped gamma cannot represent a negative residual scaling. ``TransformerLayer``
         passes ``constraint=None`` explicitly, and this reads the constraint off the
         real ``keras.Variable`` rather than trusting that.

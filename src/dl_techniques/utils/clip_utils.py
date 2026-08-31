@@ -45,7 +45,7 @@ def apply_clifford_head(
 
     The dispatch is pure Python; the tensor work happens inside ``geo_layer``
     (a ``SparseRollingGeometricProduct``-like callable) and ``scale_layer`` (a
-    ``LayerScale``/``LearnableMultiplier`` gate). Neither takes a ``training``
+    ``LayerScale`` gate). Neither takes a ``training``
     flag in the current CliffordCLIP call sites, so it is not forwarded;
     ``training`` is kept purely for API symmetry with the encode_* signatures.
 
@@ -59,7 +59,7 @@ def apply_clifford_head(
         z_ctx: Context pool ``(B, D)`` — the geometric product's second operand.
         geo_layer: A ``SparseRollingGeometricProduct``-like callable
             ``(z_det, z_ctx) -> (B, D)``.
-        scale_layer: A ``LayerScale``/``LearnableMultiplier`` callable
+        scale_layer: A ``LayerScale`` callable
             ``geo -> (B, D)`` for the residual gate.
         training: Forwarded if the layers need it (kept for API symmetry;
             unused by the current layers).

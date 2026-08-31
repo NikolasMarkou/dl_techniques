@@ -44,8 +44,8 @@ Two further reference details are explicit-or-silently-wrong:
 * ``create_normalization_layer`` ``setdefault``s ``epsilon=1e-6``. The reference
   norm (``BatchNorm2d`` for mci0/1/2, ``LayerNormChannel`` for mci3/mci4) uses
   ``1e-5``, so the epsilon is passed EXPLICITLY.
-* ``LearnableMultiplier`` defaults to ``constraint='non_neg'``, which would clamp
-  a legitimately negative LayerScale gamma at zero. ``constraint=None`` is
+* The ``LayerScale`` layer defaults to ``constraint='non_neg'``, which would clamp
+  a legitimately negative gamma at zero. ``constraint=None`` is
   required; the shared helper in :mod:`.rep_mixer` states it in one place.
 
 .. warning::

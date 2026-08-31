@@ -211,7 +211,7 @@ class TestFastVitRepMixer:
     def test_layer_scale_constraint_is_none_and_gamma_may_go_negative(self):
         """PIN 3: LayerScale gamma must be free to become negative.
 
-        ``LearnableMultiplier`` defaults to ``constraint='non_neg'``. MEASURED:
+        The ``LayerScale`` layer defaults to ``constraint='non_neg'``. MEASURED:
         the constraint is enforced by the OPTIMIZER (``apply_gradients``), not by
         ``Variable.assign`` — a plain negative ``assign`` reads back negative under
         BOTH settings and is therefore a vacuous check. This pin instead takes a
@@ -221,8 +221,8 @@ class TestFastVitRepMixer:
         layer.build((None, 4, 4, 8))
 
         assert layer.layer_scale.constraint is None, (
-            "LayerScale must be built with constraint=None; the "
-            "LearnableMultiplier default 'non_neg' clamps gamma at zero"
+            "LayerScale must be built with constraint=None; the layer's "
+            "own default 'non_neg' clamps gamma at zero"
         )
 
         gamma = layer.layer_scale.gamma

@@ -177,7 +177,7 @@ Two further contracts worth knowing:
   value-identical, which is measured by
   `test_reference_mode_stride_one_odd_kernel_is_value_identical`, and the 256px
   geometry table above is unchanged (measured).
-* **LayerScale constraint.** `LearnableMultiplier` defaults to
+* **LayerScale constraint.** The `LayerScale` layer defaults to
   `constraint='non_neg'`, which would clamp a legitimately negative gamma at zero
   during optimization. `constraint=None` is load-bearing here, not cosmetic.
 * **No pretrained weights** are ported. Architecture only — no accuracy claim.

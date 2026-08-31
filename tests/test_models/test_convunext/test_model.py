@@ -1305,7 +1305,7 @@ class TestResidualAndDropPathWiring:
     def _zero_every_branch(model: keras.Model) -> int:
         """Force every ConvNeXt residual branch to output exactly zero.
 
-        Each block ends in ``gamma * x`` (``LearnableMultiplier`` named
+        Each block ends in ``gamma * x`` (``LayerScale`` named
         ``gamma_scale``), so zeroing that variable annihilates the branch while
         leaving the rest of the graph -- stem, junctions, channel adjusts,
         upsamples, final projection -- untouched. Returns the count zeroed.
