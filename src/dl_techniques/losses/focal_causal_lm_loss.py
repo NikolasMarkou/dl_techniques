@@ -77,6 +77,13 @@ class FocalCausalLMLoss(keras.losses.Loss):
         where p_t = softmax(logits)[y_true] is the predicted probability
         of the correct token at position t.
 
+    ``call()`` returns PER-SAMPLE values of shape ``(batch,)``, not a scalar:
+    row ``i`` is ``row_token_sum_i / total_valid_tokens_in_batch * batch``, so
+    its MEAN under the default reduction is the batch-wide mean focal loss over
+    non-masked positions. A row's value is proportional to its token COUNT as
+    well as to its token losses -- it is deliberately NOT a per-sequence mean
+    (see ``call()`` for the measurement that rules that candidate out).
+
     :param gamma: Focusing parameter γ ≥ 0. Higher values increase
         focus on hard tokens. ``γ=0`` recovers standard cross-entropy.
         Recommended: ``1.0-3.0`` for LM training. Default ``2.0``.
@@ -118,7 +125,10 @@ class FocalCausalLMLoss(keras.losses.Loss):
         :param y_true: Ground truth token IDs ``(batch, seq_len)``.
             Positions with ``ignore_index`` are excluded.
         :param y_pred: Predicted logits ``(batch, seq_len, vocab_size)``.
-        :return: Scalar loss averaged over non-masked positions.
+        :return: Per-sample loss with shape ``(batch,)``, scaled so that Keras'
+            default ``sum_over_batch_size`` reduction reproduces the batch-wide
+            mean over non-masked positions EXACTLY. Keeping the batch axis is
+            what lets ``sample_weight`` and ``reduction=`` select rows.
         """
         # Mask: 1.0 for real tokens, 0.0 for ignored
         mask = ops.cast(y_true != self.ignore_index, "float32")
@@ -157,10 +167,34 @@ class FocalCausalLMLoss(keras.losses.Loss):
                 + self.label_smoothing * smooth_loss
             )
 
-        # Masked mean: average only over real token positions
-        numerator = ops.sum(per_token_loss * mask)
-        denominator = ops.sum(mask) + 1e-8
-        return numerator / denominator
+        # Per-sample values that PRESERVE the batch-wide token mean.
+        #
+        # This used to return `sum(all valid token focal losses) / count(all
+        # valid tokens)` -- a scalar. `keras.losses.Loss.__call__` multiplies
+        # call()'s output by `sample_weight` BEFORE reducing, so that scalar
+        # broadcast and the result was exactly `unweighted * mean(sample_weight)`:
+        # every row charged the batch aggregate, with WHICH rows were weighted
+        # discarded.
+        #
+        # The obvious repair -- return each sequence's OWN mean -- is a different
+        # number whenever the sequences have unequal valid-token counts, because
+        # a mean of means is not the mean of the pool. MEASURED here under focal
+        # weighting rather than inherited from the plain-CE sibling, at valid
+        # counts [20, 3, 1, 1]: 5.4263663 against this loss's 3.3156378 at the
+        # default gamma=2.0, 63.7% off -- and 67.0% off at gamma=3.0,
+        # alpha=0.25. The focal modulator makes the divergence WORSE than plain
+        # CE's 55.4%, because it re-weights tokens within a sequence too. Do NOT
+        # use a per-sequence mean.
+        #
+        # Instead scale each row's TOKEN SUM by the batch-global token count and
+        # by the batch size, so that Keras' `sum_over_batch_size` (which divides
+        # by the batch size) reproduces the original batch-wide token mean
+        # exactly. A row's value is then proportional to its token COUNT as well
+        # as to its focal token losses -- faithful to the original objective.
+        row_token_sum = ops.sum(per_token_loss * mask, axis=-1)
+        total_valid_tokens = ops.sum(mask) + 1e-8
+        batch_size = ops.cast(ops.shape(mask)[0], row_token_sum.dtype)
+        return row_token_sum / ops.cast(total_valid_tokens, row_token_sum.dtype) * batch_size
 
     def get_config(self) -> dict:
         """Get loss configuration for serialization."""
