@@ -384,15 +384,16 @@ class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 
     # DECISION plan_2026-06-12_59a18a10/D-005: this is a thin sub-layer wrapper
-    # of ``UpSampling2D(2, "nearest") + Conv2D(channels, 3, same)``, NOT a call to
-    # ``layers.upsample.upsample(..., "nearest_conv2d_3x3", ...)``. Do NOT replace
-    # it with that function: ``upsample()`` is a FUNCTIONAL-graph builder that
-    # takes a live tensor and returns a tensor (it calls ``UpSampling2D``/
-    # ``conv2d_wrapper`` on its input inline), so it cannot be owned as a
-    # constructed sub-layer inside a subclassed ``keras.Model`` Decoder without
-    # building a Functional sub-model. The op sequence here is byte-identical to
-    # the ``nearest_conv2d_3x3`` branch (UpSampling2D size=2 nearest -> Conv2D
-    # kernel 3, stride 1, padding same). See decisions.md D-005.
+    # of ``UpSampling2D(2, "nearest") + Conv2D(channels, 3, same)``, deliberately
+    # built out of stock Keras layers this class OWNS. Do NOT refactor it to call
+    # a shared string-dispatch helper that takes a live tensor and returns a
+    # tensor: such a helper builds into a functional graph, so it cannot be owned
+    # as a constructed sub-layer inside a subclassed ``keras.Model`` Decoder
+    # without also building a Functional sub-model. The repo once had exactly
+    # such a helper and this class refused it; the helper was deleted in 2026-08
+    # and its only other caller was rewritten into this same owned-sub-layer
+    # shape, so the rule this anchor states is now the house pattern rather than
+    # a local exception. See decisions.md D-005.
 
     :param channels: Output channel count.
     :type channels: int

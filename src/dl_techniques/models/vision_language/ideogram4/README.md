@@ -140,7 +140,7 @@ is deliberately left to the sampling level (the trainer), not the loss.
 | `SwiGLUFFN` | `layers/ffn/swiglu_ffn.py` | the block MLP (configured bias-free, `expansion=1`, `multiple_of=intermediate_size` so the rounded hidden equals `intermediate_size` exactly) |
 | `Sampling` | `layers/sampling.py` | VAE KL reparameterization |
 | `keras.layers.GroupNormalization` | Keras built-in | VAE `GroupNorm32(groups=32, eps=1e-6)` — NOT the repo norms factory (see CLAUDE.md) |
-| upsample (op sequence) | `layers/upsample.py` `nearest_conv2d_3x3` | **D-005**: `upsample()` is a functional-graph builder, not a reusable sub-layer; a thin `Upsample` wrapper (UpSampling2D nearest×2 + Conv2D 3×3 same) byte-identical to that branch was built so the subclassed `Decoder` can OWN it. |
+| upsample (op sequence) | stock Keras (`UpSampling2D` + `Conv2D`) | **D-005**: a thin `Upsample` wrapper (UpSampling2D nearest×2 + Conv2D 3×3 same) built so the subclassed `Decoder` can OWN it. The repo's shared string-dispatch upsample helper was rejected here because it built into a functional graph rather than an ownable sub-layer; that helper was deleted in 2026-08. |
 
 Two layers were deliberately built net-new instead of reusing near-misses
 (**D-002**): `ScalarSinusoidalEmbedding` (the existing `TimestepEmbedding` stores
