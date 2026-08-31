@@ -19,7 +19,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class ClipLayer(keras.layers.Layer):
-    """Layer that clips tensor values to a specified range.
+    """
+    Layer that clips tensor values to a specified range.
 
     This layer applies element-wise clipping to input tensors, constraining
     all values to lie within ``[clip_min, clip_max]``. The operation is
@@ -118,7 +119,8 @@ class ClipLayer(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class NormalizationLayer(keras.layers.Layer):
-    """Layer that normalizes tensor values from source range to target range.
+    """
+    Layer that normalizes tensor values from source range to target range.
 
     This layer performs linear scaling to transform tensor values from
     ``[source_min, source_max]`` to ``[target_min, target_max]``. The
@@ -256,7 +258,8 @@ class NormalizationLayer(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class DenormalizationLayer(keras.layers.Layer):
-    """Layer that denormalizes tensor values from source range to target range.
+    """
+    Layer that denormalizes tensor values from source range to target range.
 
     This layer performs the inverse operation of NormalizationLayer, transforming
     tensor values from a normalized source range back to their original target
@@ -392,7 +395,8 @@ class DenormalizationLayer(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class TensorPreprocessingLayer(keras.layers.Layer):
-    """Composite preprocessing layer combining normalization and clipping.
+    """
+    Composite preprocessing layer combining normalization and clipping.
 
     This layer provides a unified interface for common tensor preprocessing,
     combining normalization from source to target range with optional
@@ -403,7 +407,7 @@ class TensorPreprocessingLayer(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │          Input (any shape)            │
+        │          Input (any shape)           │
         └──────────────┬───────────────────────┘
                        │
                        ▼

@@ -10,6 +10,11 @@ coefficients at each level, halving spatial resolution per dimension.
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

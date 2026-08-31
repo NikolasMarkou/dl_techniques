@@ -55,12 +55,12 @@ PyTorch reference (faithfully ported)::
 import keras
 import numpy as np
 from typing import Any, Dict, Optional, Sequence, Tuple
-from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 

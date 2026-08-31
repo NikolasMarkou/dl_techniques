@@ -304,7 +304,8 @@ def gaussian_pyramid(
         data_format: Optional[str] = None,
         name: Optional[str] = None
 ) -> List[keras.KerasTensor]:
-    """Functional interface for Gaussian pyramid decomposition.
+    """
+    Functional interface for Gaussian pyramid decomposition.
 
     :param inputs: Input tensor.
     :type inputs: keras.KerasTensor

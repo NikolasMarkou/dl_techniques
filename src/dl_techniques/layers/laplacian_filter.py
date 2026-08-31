@@ -63,7 +63,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.layers.laplacian_filter")
 class LaplacianFilter(keras.layers.Layer):
-    """Laplacian filter layer using Difference of Gaussians for edge detection.
+    """
+    Laplacian filter layer using Difference of Gaussians for edge detection.
 
     This filter highlights areas of rapid intensity change in an image by
     applying a Gaussian blur and computing the difference between the blurred
@@ -236,7 +237,8 @@ class LaplacianFilter(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.laplacian_filter")
 class AdvancedLaplacianFilter(keras.layers.Layer):
-    """Advanced Laplacian filter with multiple implementation methods.
+    """
+    Advanced Laplacian filter with multiple implementation methods.
 
     This layer offers three methods to compute the Laplacian operator for edge
     detection: ``'dog'`` (Difference of Gaussians), ``'log'`` (Laplacian of
