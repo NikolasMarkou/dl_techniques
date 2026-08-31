@@ -1,8 +1,19 @@
-"""
-NLP Task Types and Configuration
+"""Task types and configuration objects for the NLP heads.
 
-Comprehensive task type definitions and configuration helpers for NLP multi-task models.
-Designed to work with any NLP foundation model (BERT, GPT, T5, etc.).
+This module says what an NLP task is. It builds no layer. Four objects live
+here:
+
+* :class:`NLPTaskType` -- an enum of 37 task names, with lookup helpers for
+  categories, compatible tasks, output shapes and input requirements.
+* :class:`NLPTaskConfig` -- a dataclass holding the hyperparameters of one
+  task head.
+* :class:`NLPTaskConfiguration` -- a validated set of tasks, plus queries for
+  the capabilities that set needs.
+* :class:`CommonNLPTaskConfigurations` -- eleven ready-made task sets.
+
+``nlp/factory.py`` reads these objects and picks the head class to construct.
+The types name tasks, not models, so heads on BERT, GPT and T5 all take the
+same config.
 """
 
 from enum import Enum, unique
@@ -14,64 +25,75 @@ from typing import List, Set, Dict, Optional, Any
 @unique
 class NLPTaskType(Enum):
     """
-    Enumeration of supported NLP tasks for multi-task models.
+    The 37 NLP tasks a head can be asked to serve.
 
-    Each task represents a different NLP capability that can be
-    enabled in the multi-task architecture. Tasks are organized into
-    categories for better understanding and compatibility checking.
+    Each member carries a lowercase string value. That string is the
+    serialization form, and :meth:`from_string` parses it back.
 
-    Token-Level Tasks:
-        TOKEN_CLASSIFICATION: General token classification (NER, POS, etc.)
-        NAMED_ENTITY_RECOGNITION: Identifying and classifying named entities
-        PART_OF_SPEECH_TAGGING: Grammatical tagging of tokens
-        DEPENDENCY_PARSING: Syntactic dependency relationships
-        SEMANTIC_ROLE_LABELING: Identifying semantic roles
-        WORD_SENSE_DISAMBIGUATION: Determining word meanings in context
+    The members are filed into eight named categories by
+    :meth:`get_task_categories`: token-level, sequence-level, span-level,
+    sentence-pair, generation, regression, structured, and information
+    extraction. That filing is descriptive only. It does not decide which
+    head class runs a task.
 
-    Sequence-Level Tasks:
-        TEXT_CLASSIFICATION: Document/sentence classification
-        SENTIMENT_ANALYSIS: Sentiment polarity detection
-        EMOTION_DETECTION: Fine-grained emotion classification
-        INTENT_CLASSIFICATION: Intent detection for dialogue
-        TOPIC_CLASSIFICATION: Topic categorization
-        SPAM_DETECTION: Spam/ham classification
+    **Head Routing:**
 
-    Span-Level Tasks:
-        QUESTION_ANSWERING: Extractive QA with span selection
-        SPAN_EXTRACTION: General span extraction
-        COREFERENCE_RESOLUTION: Identifying coreferent mentions
-        EVENT_EXTRACTION: Extracting events and arguments
-        RELATION_EXTRACTION: Extracting relations between entities
+    ``nlp/factory.py``'s ``get_head_class`` decides that, and the table below
+    is its mapping. Thirteen members have no head: asking for one raises
+    ``ValueError`` rather than falling back to a default.
 
-    Sentence-Pair Tasks:
-        TEXT_SIMILARITY: Semantic similarity scoring
-        NATURAL_LANGUAGE_INFERENCE: Textual entailment
-        PARAPHRASE_DETECTION: Identifying paraphrases
-        DUPLICATE_DETECTION: Finding duplicate texts
+    .. code-block:: text
 
-    Generation Tasks:
-        TEXT_GENERATION: Autoregressive text generation
-        MASKED_LANGUAGE_MODELING: Predicting masked tokens
-        TEXT_SUMMARIZATION: Abstractive/extractive summarization
-        MACHINE_TRANSLATION: Language translation
-        TEXT_COMPLETION: Completing partial text
-        DIALOGUE_GENERATION: Conversational response generation
+        Task member                 Head class
+        --------------------------  ------------------------
+        TOKEN_CLASSIFICATION        TokenClassificationHead
+        NAMED_ENTITY_RECOGNITION    TokenClassificationHead
+        PART_OF_SPEECH_TAGGING      TokenClassificationHead
+        DEPENDENCY_PARSING          none -- raises ValueError
+        SEMANTIC_ROLE_LABELING      none -- raises ValueError
+        WORD_SENSE_DISAMBIGUATION   none -- raises ValueError
+        TEXT_CLASSIFICATION         TextClassificationHead
+        SENTIMENT_ANALYSIS          TextClassificationHead
+        EMOTION_DETECTION           TextClassificationHead
+        INTENT_CLASSIFICATION       TextClassificationHead
+        TOPIC_CLASSIFICATION        TextClassificationHead
+        SPAM_DETECTION              TextClassificationHead
+        QUESTION_ANSWERING          QuestionAnsweringHead
+        SPAN_EXTRACTION             QuestionAnsweringHead
+        COREFERENCE_RESOLUTION      none -- raises ValueError
+        EVENT_EXTRACTION            none -- raises ValueError
+        RELATION_EXTRACTION         none -- raises ValueError
+        TEXT_SIMILARITY             TextSimilarityHead
+        NATURAL_LANGUAGE_INFERENCE  TextClassificationHead
+        PARAPHRASE_DETECTION        TextSimilarityHead
+        DUPLICATE_DETECTION         TextSimilarityHead
+        TEXT_GENERATION             TextGenerationHead
+        MASKED_LANGUAGE_MODELING    TextGenerationHead
+        TEXT_SUMMARIZATION          TextGenerationHead
+        MACHINE_TRANSLATION         none -- raises ValueError
+        TEXT_COMPLETION             TextGenerationHead
+        DIALOGUE_GENERATION         none -- raises ValueError
+        TEXT_REGRESSION             TextClassificationHead
+        READABILITY_SCORING         TextClassificationHead
+        QUALITY_SCORING             TextClassificationHead
+        MULTIPLE_CHOICE             MultipleChoiceHead
+        RANKING                     none -- raises ValueError
+        SEQUENCE_LABELING           TokenClassificationHead
+        TEXT_MATCHING               none -- raises ValueError
+        KEY_PHRASE_EXTRACTION       none -- raises ValueError
+        FACT_EXTRACTION             none -- raises ValueError
+        OPINION_EXTRACTION          none -- raises ValueError
 
-    Regression Tasks:
-        TEXT_REGRESSION: Continuous value prediction
-        READABILITY_SCORING: Text complexity assessment
-        QUALITY_SCORING: Text quality evaluation
+    Note:
+        The table restates a mapping that lives in ``get_head_class``. That
+        function is the arbiter. If the two disagree, the function is right.
 
-    Structured Tasks:
-        MULTIPLE_CHOICE: Multiple choice question answering
-        RANKING: Text ranking and reranking
-        SEQUENCE_LABELING: General sequence labeling
-        TEXT_MATCHING: Matching texts to references
-
-    Information Extraction:
-        KEY_PHRASE_EXTRACTION: Extracting important phrases
-        FACT_EXTRACTION: Extracting factual claims
-        OPINION_EXTRACTION: Extracting opinions and aspects
+    Example:
+        >>> task = NLPTaskType.from_string("sentiment_analysis")
+        >>> str(task)
+        'sentiment_analysis'
+        >>> NLPTaskType.get_output_types(task)
+        {'output': 'float32[...]'}
     """
 
     # Token-Level Tasks
@@ -129,12 +151,25 @@ class NLPTaskType(Enum):
 
     @classmethod
     def all_tasks(cls) -> List["NLPTaskType"]:
-        """Get all available task types."""
+        """
+        List every task type in declaration order.
+
+        :return: All 37 enum members.
+        :rtype: List[NLPTaskType]
+        """
         return list(cls)
 
     @classmethod
     def get_task_categories(cls) -> Dict[str, List["NLPTaskType"]]:
-        """Get tasks organized by categories."""
+        """
+        Group the task types into their eight named categories.
+
+        The grouping is documentation. It has no effect on which head class
+        serves a task.
+
+        :return: Category name mapped to the members filed under it.
+        :rtype: Dict[str, List[NLPTaskType]]
+        """
         return {
             "Token-Level Tasks": [
                 cls.TOKEN_CLASSIFICATION,
@@ -193,7 +228,17 @@ class NLPTaskType(Enum):
 
     @classmethod
     def get_compatible_tasks(cls, task: "NLPTaskType") -> List["NLPTaskType"]:
-        """Get tasks that are commonly combined with the given task."""
+        """
+        List the tasks commonly trained alongside a given task.
+
+        Seven tasks have an entry. Any other task returns an empty list, which
+        means "no suggestion", not "nothing is compatible".
+
+        :param task: The task to look up.
+        :type task: NLPTaskType
+        :return: Suggested companion tasks, empty when none are recorded.
+        :rtype: List[NLPTaskType]
+        """
         compatibility_map = {
             cls.NAMED_ENTITY_RECOGNITION: [
                 cls.PART_OF_SPEECH_TAGGING,
@@ -241,7 +286,19 @@ class NLPTaskType(Enum):
 
     @classmethod
     def get_output_types(cls, task: "NLPTaskType") -> Dict[str, str]:
-        """Get the expected output types for a given task."""
+        """
+        Describe the tensors a task's head is expected to emit.
+
+        Shapes are written as strings, with ``B`` batch, ``L`` sequence
+        length, ``C`` classes, ``D`` embedding width, ``V`` vocabulary and
+        ``N`` choices. Ten tasks have an entry.
+
+        :param task: The task to look up.
+        :type task: NLPTaskType
+        :return: Output name mapped to its shape string. Tasks with no entry
+            get ``{"output": "float32[...]"}``.
+        :rtype: Dict[str, str]
+        """
         output_types = {
             cls.TOKEN_CLASSIFICATION: {
                 "logits": "float32[B, L, C]",
@@ -265,7 +322,8 @@ class NLPTaskType(Enum):
                 "generated_ids": "int32[B, L]",
             },
             cls.NATURAL_LANGUAGE_INFERENCE: {
-                "logits": "float32[B, 3]",  # entailment, neutral, contradiction
+                # The 3 classes are entailment, neutral, contradiction.
+                "logits": "float32[B, 3]",
                 "probabilities": "float32[B, 3]",
             },
             cls.SPAN_EXTRACTION: {
@@ -278,7 +336,7 @@ class NLPTaskType(Enum):
                 "confidence": "float32[B]",
             },
             cls.MULTIPLE_CHOICE: {
-                "logits": "float32[B, N]",  # N choices
+                "logits": "float32[B, N]",
                 "probabilities": "float32[B, N]",
             },
             cls.RANKING: {
@@ -291,7 +349,19 @@ class NLPTaskType(Enum):
 
     @classmethod
     def get_input_requirements(cls, task: "NLPTaskType") -> Dict[str, Any]:
-        """Get input requirements for a task."""
+        """
+        Describe how a task's inputs must be prepared.
+
+        Six tasks have an entry. Each records an ``input_type``, and may add a
+        ``max_length``, the special tokens the tokenizer must emit, or a flag
+        such as ``autoregressive``.
+
+        :param task: The task to look up.
+        :type task: NLPTaskType
+        :return: Requirement name mapped to its value. Tasks with no entry get
+            ``{"input_type": "single_sequence"}``.
+        :rtype: Dict[str, Any]
+        """
         requirements = {
             cls.TEXT_CLASSIFICATION: {
                 "input_type": "single_sequence",
@@ -329,7 +399,20 @@ class NLPTaskType(Enum):
 
     @classmethod
     def from_string(cls, task_str: str) -> "NLPTaskType":
-        """Create NLPTaskType from string value."""
+        """
+        Parse a task type from its string value.
+
+        The input is lowercased and stripped before matching, so
+        ``" Sentiment_Analysis "`` resolves. Matching is against the enum
+        VALUE, not the member name.
+
+        :param task_str: A task value such as ``"sentiment_analysis"``.
+        :type task_str: str
+        :return: The matching member.
+        :rtype: NLPTaskType
+        :raises ValueError: If no member carries that value. The message lists
+            every valid value.
+        """
         task_str = task_str.lower().strip()
         for task in cls:
             if task.value == task_str:
@@ -342,11 +425,22 @@ class NLPTaskType(Enum):
         )
 
     def __str__(self) -> str:
-        """String representation of the task type."""
+        """
+        Return the enum value, which is the serialization form.
+
+        :return: The lowercase task string, for example
+            ``"sentiment_analysis"``.
+        :rtype: str
+        """
         return self.value
 
     def __repr__(self) -> str:
-        """Detailed string representation of the task type."""
+        """
+        Return the qualified member name for debugging.
+
+        :return: A string such as ``"NLPTaskType.SENTIMENT_ANALYSIS"``.
+        :rtype: str
+        """
         return f"NLPTaskType.{self.name}"
 
 
@@ -355,10 +449,37 @@ class NLPTaskType(Enum):
 @dataclass
 class NLPTaskConfig:
     """
-    Configuration for a specific NLP task.
+    Hyperparameters for one NLP task head.
 
-    Encapsulates all hyperparameters needed to construct an NLP task head,
-    including classification, generation, and regularization settings.
+    One instance describes one task. ``nlp/factory.py`` reads it to build the
+    head. Fields that do not apply to the task type are ignored by the head.
+
+    :meth:`__post_init__` runs three fixups after construction, shown below.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        NLPTaskConfig(name, task_type, ...)
+                    │
+                    ▼
+        ┌──────────────────────────────┐
+        │ mirror num_labels/num_classes│
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐        ┌────────────┐
+        │ classification task without  │─ yes ─►│ ValueError │
+        │ num_classes?                 │        └────────────┘
+        └──────────────┬───────────────┘
+                       │ no
+                       ▼
+        ┌──────────────────────────────┐
+        │ generation task and          │
+        │ vocabulary_size is None?     │─ yes ─► set it to 32000
+        └──────────────┬───────────────┘
+                       │ no
+                       ▼
+                  ready to use
 
     :param name: Unique identifier for the task.
     :type name: str
@@ -392,7 +513,8 @@ class NLPTaskConfig:
     name: str
     task_type: NLPTaskType
     num_classes: Optional[int] = None
-    num_labels: Optional[int] = None  # Alternative naming
+    # Alternative spelling of num_classes; __post_init__ keeps the two equal.
+    num_labels: Optional[int] = None
     max_length: int = 512
     dropout_rate: float = 0.1
     hidden_size: Optional[int] = None
@@ -405,7 +527,19 @@ class NLPTaskConfig:
     temperature: float = 1.0
 
     def __post_init__(self):
-        """Post-initialization validation and setup."""
+        """
+        Reconcile the label fields, then validate and fill defaults.
+
+        ``num_classes`` and ``num_labels`` end up equal when either was given.
+        Classification tasks must carry a class count. Generation tasks get a
+        default vocabulary size when none was supplied.
+
+        :return: Nothing. The instance is modified in place.
+        :rtype: None
+        :raises ValueError: If the task type is a classification task and
+            ``num_classes`` is still None after the label fields are
+            reconciled.
+        """
         # Handle num_classes/num_labels ambiguity
         if self.num_labels is not None and self.num_classes is None:
             self.num_classes = self.num_labels
@@ -427,21 +561,10 @@ class NLPTaskConfig:
         # Set vocabulary size for generation tasks.
         #
         # DECISION plan-2026-08-23T203721-009b7ccf/D-022
-        # This list and `factory.get_head_class`'s generation rows are two
-        # hand-maintained spellings of "which task types need a vocabulary".
-        # They DISAGREED: this list carried MACHINE_TRANSLATION (which
-        # `get_head_class` REFUSES -- no head is implemented for it) and omitted
-        # TEXT_COMPLETION (which `get_head_class` maps to `TextGenerationHead`).
-        # MEASURED: `create_bert_with_head(task_type=TEXT_COMPLETION)` died with
-        # `ValueError: vocabulary_size must be specified for generation tasks`
-        # while its three siblings built fine. TEXT_COMPLETION is added below.
-        # Do NOT remove MACHINE_TRANSLATION to "match" -- `NLPTaskConfig` is
-        # also used by callers that never reach `get_head_class`, so dropping it
-        # would be a behaviour change, not a tidy-up. The lockstep itself is the
-        # defect; it is now CHECKED rather than trusted, by
-        # `tests/test_models/test_bert/test_every_head_family_output_contract.py`,
-        # which asserts every type `get_head_class` routes to
-        # `TextGenerationHead` gets a non-None `vocabulary_size` here.
+        # TEXT_COMPLETION is listed here: without it `create_bert_with_head`
+        # died with `ValueError: vocabulary_size must be specified for
+        # generation tasks`. Do NOT drop MACHINE_TRANSLATION to match
+        # `get_head_class`: callers skipping it need it. See decisions.md D-022.
         generation_tasks = [
             NLPTaskType.TEXT_GENERATION,
             NLPTaskType.MASKED_LANGUAGE_MODELING,
@@ -451,18 +574,47 @@ class NLPTaskConfig:
         ]
 
         if self.task_type in generation_tasks and self.vocabulary_size is None:
-            self.vocabulary_size = 32000  # Default vocab size
+            self.vocabulary_size = 32000
 
 
 # ---------------------------------------------------------------------
 
 class NLPTaskConfiguration:
     """
-    Configuration helper for managing task combinations in NLP multi-task models.
+    A validated set of tasks for a multi-task NLP model.
 
-    Validates and stores a set of NLP tasks, providing utilities for querying
-    capability requirements such as token-level processing, sequence pairs,
-    and generation.
+    Construction checks the list, then stores it as a set. The query methods
+    answer what that set needs: token-level outputs, paired inputs,
+    generation, and a sequence length wide enough for every member.
+
+    Only two task pairs are rejected as incompatible. The check is a guard
+    against two known-bad combinations, not a full compatibility model.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        tasks: List[NLPTaskType]
+                  │
+                  ▼
+        ┌───────────────────────┐         ┌────────────┐
+        │ empty or duplicates?  │─ yes ──►│ ValueError │
+        └──────────┬────────────┘         └────────────┘
+                   │ no
+                   ▼
+        ┌───────────────────────┐         ┌────────────┐
+        │ known-bad pair, and   │─ yes ──►│ ValueError │
+        │ validation enabled?   │         └────────────┘
+        └──────────┬────────────┘
+                   │ no
+                   ▼
+             self._tasks: Set[NLPTaskType]
+                   │
+                   ├─► requires_token_level()
+                   ├─► requires_sequence_pair()
+                   ├─► requires_generation()
+                   ├─► get_max_sequence_length()
+                   └─► to_dict()
 
     :param tasks: List of NLPTaskType enum values to enable.
     :type tasks: List[NLPTaskType]
@@ -499,7 +651,13 @@ class NLPTaskConfiguration:
             self._validate_task_compatibility()
 
     def _validate_task_compatibility(self) -> None:
-        """Validate that all tasks in the configuration are compatible."""
+        """
+        Reject the two task pairs known not to work together.
+
+        :return: Nothing.
+        :rtype: None
+        :raises ValueError: If both members of a rejected pair are enabled.
+        """
         task_list = list(self._tasks)
 
         # Check for incompatible combinations
@@ -516,15 +674,39 @@ class NLPTaskConfiguration:
 
     @property
     def tasks(self) -> Set[NLPTaskType]:
-        """Get the set of enabled tasks."""
+        """
+        Return the enabled tasks.
+
+        The returned set is a copy, so mutating it does not change this
+        configuration.
+
+        :return: The enabled task types.
+        :rtype: Set[NLPTaskType]
+        """
         return self._tasks.copy()
 
     def has_task(self, task: NLPTaskType) -> bool:
-        """Check if a specific task is enabled."""
+        """
+        Report whether one task is enabled.
+
+        :param task: The task to look for.
+        :type task: NLPTaskType
+        :return: True when the task is in this configuration.
+        :rtype: bool
+        """
         return task in self._tasks
 
     def requires_token_level(self) -> bool:
-        """Check if any task requires token-level processing."""
+        """
+        Report whether any enabled task needs per-token outputs.
+
+        Five task types count: token classification, named entity
+        recognition, part-of-speech tagging, dependency parsing and semantic
+        role labeling.
+
+        :return: True when at least one of those is enabled.
+        :rtype: bool
+        """
         token_tasks = {
             NLPTaskType.TOKEN_CLASSIFICATION,
             NLPTaskType.NAMED_ENTITY_RECOGNITION,
@@ -535,7 +717,15 @@ class NLPTaskConfiguration:
         return bool(self._tasks & token_tasks)
 
     def requires_sequence_pair(self) -> bool:
-        """Check if any task requires sequence pair inputs."""
+        """
+        Report whether any enabled task takes two sequences as input.
+
+        Four task types count: natural language inference, text similarity,
+        paraphrase detection and question answering.
+
+        :return: True when at least one of those is enabled.
+        :rtype: bool
+        """
         pair_tasks = {
             NLPTaskType.NATURAL_LANGUAGE_INFERENCE,
             NLPTaskType.TEXT_SIMILARITY,
@@ -545,7 +735,18 @@ class NLPTaskConfiguration:
         return bool(self._tasks & pair_tasks)
 
     def requires_generation(self) -> bool:
-        """Check if any task requires generation capabilities."""
+        """
+        Report whether any enabled task produces text.
+
+        Five task types count: text generation, summarization, completion,
+        machine translation and dialogue generation. Masked language
+        modeling is NOT one of them here, though
+        :meth:`NLPTaskConfig.__post_init__` does treat it as generation when
+        it fills in a default vocabulary size.
+
+        :return: True when at least one of those is enabled.
+        :rtype: bool
+        """
         generation_tasks = {
             NLPTaskType.TEXT_GENERATION,
             NLPTaskType.TEXT_SUMMARIZATION,
@@ -556,8 +757,17 @@ class NLPTaskConfiguration:
         return bool(self._tasks & generation_tasks)
 
     def get_max_sequence_length(self) -> int:
-        """Get the maximum sequence length required across all tasks."""
-        max_length = 512  # Default
+        """
+        Return a sequence length wide enough for every enabled task.
+
+        The floor is 512. Any generation task raises it to 1024, and text
+        summarization raises it to 2048.
+
+        :return: The maximum required sequence length in tokens.
+        :rtype: int
+        """
+        # Floor, raised below when a task needs more.
+        max_length = 512
 
         if self.requires_generation():
             max_length = max(max_length, 1024)
@@ -568,7 +778,18 @@ class NLPTaskConfiguration:
         return max_length
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary for serialization."""
+        """
+        Serialize the configuration to plain Python types.
+
+        Tasks become their string values. The four derived capability
+        answers are stored alongside them, so a reader does not have to
+        recompute them.
+
+        :return: A dictionary with keys ``tasks``, ``requires_token_level``,
+            ``requires_sequence_pair``, ``requires_generation`` and
+            ``max_sequence_length``.
+        :rtype: Dict[str, Any]
+        """
         return {
             "tasks": [task.value for task in self._tasks],
             "requires_token_level": self.requires_token_level(),
@@ -581,7 +802,47 @@ class NLPTaskConfiguration:
 # ---------------------------------------------------------------------
 
 class CommonNLPTaskConfigurations:
-    """Predefined common NLP task configurations."""
+    """
+    Eleven ready-made :class:`NLPTaskConfiguration` presets.
+
+    Every attribute is a class-level instance, built once at import time.
+    They are shared, so treat them as read-only; :attr:`tasks` already
+    returns a copy.
+
+    **Presets:**
+
+    The table lists each preset's task count and the four capability answers
+    its configuration reports.
+
+    .. code-block:: text
+
+        Preset                     N  Token  Pair  Gen  MaxLen
+        ------------------------  --  -----  ----  ---  ------
+        TEXT_CLASSIFICATION_ONLY   1  no     no    no      512
+        NER_ONLY                   1  yes    no    no      512
+        SENTIMENT_ONLY             1  no     no    no      512
+        QA_ONLY                    1  no     yes   no      512
+        GENERATION_ONLY            1  no     no    yes    1024
+        TOKEN_TASKS                3  yes    no    no      512
+        CLASSIFICATION_SUITE       3  no     no    no      512
+        INFORMATION_EXTRACTION     3  yes    no    no      512
+        COMPREHENSION_SUITE        3  no     yes   no      512
+        SIMILARITY_SUITE           3  no     yes   no      512
+        GLUE_TASKS                 5  no     yes   no      512
+
+        N      = len(tasks)
+        Token  = requires_token_level()
+        Pair   = requires_sequence_pair()
+        Gen    = requires_generation()
+        MaxLen = get_max_sequence_length()
+
+    Example:
+        >>> cfg = CommonNLPTaskConfigurations.GLUE_TASKS
+        >>> len(cfg.tasks)
+        5
+        >>> cfg.requires_sequence_pair()
+        True
+    """
 
     # Single task configurations
     TEXT_CLASSIFICATION_ONLY = NLPTaskConfiguration([NLPTaskType.TEXT_CLASSIFICATION])
