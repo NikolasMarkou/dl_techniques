@@ -156,8 +156,16 @@ from typing import Optional, Union, Tuple, Dict, Any, List, Literal
 
 `keras.ops` is the backend-agnostic surface. Reaching for the backend directly (`tf.*`) in a forward
 path ties the layer to one backend and usually breaks XLA. Where a genuinely unmigratable op is
-needed (`ifft`, `svd`, `grid_sample`), isolate it and say so in a comment. An accepted exception is
+needed (`ifft`, `svd`), isolate it and say so in a comment. An accepted exception is
 fine; an undocumented one is a trap for the next reader.
+
+**Test the "unmigratable" claim before you accept it.** This line used to name `grid_sample`
+as the third example. Keras has no `grid_sample`, but the operation it stands for — sampling a
+feature map at continuous coordinates — turned out to be perfectly expressible: `tf.gather_nd`
+became a linearized index plus `keras.ops.take`, and the port measured **bit-identical** to the
+raw-`tf` original (max abs diff 0.0 across shapes and both interpolation orders, and 0.0 with a
+float16 grid). See `layers/spatial_layer.py`. An exception that nobody re-measures becomes
+permanent by default.
 
 ### 2.2 The Registration Decorator
 

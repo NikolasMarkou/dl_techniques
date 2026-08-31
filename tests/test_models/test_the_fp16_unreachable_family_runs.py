@@ -13,8 +13,12 @@ package               measured failure site at HEAD
 ``kan``               ``layers/ffn/kan_linear.py:389`` — float32 knot grid
 ``mamba``             ``models/language/mamba/components.py:472`` — float32 scan state
 ``mamba`` (v2)        ``models/language/mamba/components_v2.py:292`` — idem
-``thera``             ``layers/grid_sample.py:134`` — ``convert_to_tensor``
-                      with ``dtype=tf.float32`` on a float16 tensor
+``thera``             ``interpolate_grid`` — ``convert_to_tensor`` with an
+                      explicit float32 dtype on a float16 tensor. That function
+                      lived in ``layers/grid_sample.py`` and now lives in
+                      ``layers/spatial_layer.py``; the RULE, not the address, is
+                      that its index math is float32 while its RETURN carries the
+                      grid's own dtype (D-046). Arm 6 below is the guard.
 ===================== ====================================================
 
 Three properties are asserted for every subject, because each of the three has
@@ -283,11 +287,36 @@ def test_the_epsilons_this_family_relied_on_are_degenerate_in_float16():
 @pytest.mark.parametrize("order", [0, 1])
 @pytest.mark.parametrize("dtype", ["float16", "float32"])
 def test_interpolate_grid_returns_the_grid_dtype(order, dtype):
-    from dl_techniques.layers.grid_sample import interpolate_grid
+    from dl_techniques.layers.spatial_layer import interpolate_grid
 
     rs = np.random.RandomState(3)
     coords = tf.constant(rs.uniform(-0.5, 0.5, (1, 5, 5, 2)).astype(dtype))
     grid = tf.constant(rs.randn(1, 4, 4, 3).astype(dtype))
     out = interpolate_grid(coords, grid, order=order)
-    assert out.dtype.name == dtype
+    assert keras.backend.standardize_dtype(out.dtype) == dtype
+    assert np.isfinite(np.asarray(tf.cast(out, "float32"))).all()
+
+
+@pytest.mark.parametrize("order", [0, 1])
+@pytest.mark.parametrize(
+    "coord_dtype,grid_dtype",
+    [("float16", "float32"), ("float32", "float16")],
+)
+def test_interpolate_grid_follows_the_grid_not_the_coords(
+    order, coord_dtype, grid_dtype
+):
+    """The MIXED case D-046 contemplates but the arm above cannot see.
+
+    Arm 6 gives ``coords`` and ``grid`` the same dtype, so it is satisfied by an
+    implementation that returns *either* operand's dtype. D-046 says the return
+    follows the GRID (the values), while the coords are only index math — so
+    the two must be pulled apart to test the actual rule.
+    """
+    from dl_techniques.layers.spatial_layer import interpolate_grid
+
+    rs = np.random.RandomState(4)
+    coords = tf.constant(rs.uniform(-0.5, 0.5, (1, 5, 5, 2)).astype(coord_dtype))
+    grid = tf.constant(rs.randn(1, 4, 4, 3).astype(grid_dtype))
+    out = interpolate_grid(coords, grid, order=order)
+    assert keras.backend.standardize_dtype(out.dtype) == grid_dtype
     assert np.isfinite(np.asarray(tf.cast(out, "float32"))).all()

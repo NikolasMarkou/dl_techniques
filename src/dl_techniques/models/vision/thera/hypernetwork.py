@@ -15,7 +15,7 @@ Pipeline (reference ``model/hyper.py`` ``get_params_at_coords`` +
     phi_phase, phi_kernel = split_and_reshape(phi)         # per-pixel field params
 
     # decoder: local relative coordinate of the query w.r.t. its source pixel
-    source_grid   = make_grid(encoding H, W)               # pixel-center grid
+    source_grid   = coordinate_grid(encoding H, W)               # pixel-center grid
     interp_coords = interpolate_grid(coords, source_grid, order=0)  # NEAREST
     rel           = coords - interp_coords
     rel[..., 0]  *= Hs ; rel[..., 1] *= Ws                 # scale to pixel units
@@ -65,7 +65,7 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.grid_sample import make_grid, interpolate_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid, interpolate_grid
 from dl_techniques.layers.thera_heat_field import HeatField, DEFAULT_K_INIT
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -136,7 +136,7 @@ class TheraHypernetwork(keras.layers.Layer):
     Example:
         >>> hyper = TheraHypernetwork(hidden_dim=32, out_dim=3)
         >>> encoding = keras.random.normal((2, 8, 8, 16))
-        >>> coords = keras.ops.broadcast_to(make_grid(12)[None], (2, 12, 12, 2))
+        >>> coords = keras.ops.broadcast_to(coordinate_grid(12)[None], (2, 12, 12, 2))
         >>> t = keras.ops.ones((2, 1))
         >>> out = hyper.decode(encoding, coords, t)   # (2, 12, 12, 3)
     """
@@ -308,7 +308,7 @@ class TheraHypernetwork(keras.layers.Layer):
     def _source_grid(self, encoding: Any) -> Any:
         """Build a pixel-center source coordinate grid at the encoding resolution.
 
-        Matches the step-2 :func:`make_grid` convention EXACTLY (channel order
+        Matches the :func:`coordinate_grid` "centers" / "ij" convention EXACTLY (channel order
         ``[h, w]``, ``linspace(-0.5 + 1/(2n), 0.5 - 1/(2n), n)``, ``indexing='ij'``).
         Prefers static Python ints (training uses a fixed patch size); falls back
         to a dynamic ``keras.ops.linspace`` build when either spatial dim is None.
@@ -323,8 +323,8 @@ class TheraHypernetwork(keras.layers.Layer):
         ws_static = encoding.shape[2]
 
         if hs_static is not None and ws_static is not None:
-            # Static fast path: reuse the verified numpy make_grid verbatim.
-            grid = make_grid((int(hs_static), int(ws_static)))  # (Hs, Ws, 2)
+            # Static fast path: reuse the verified numpy coordinate_grid verbatim.
+            grid = coordinate_grid((int(hs_static), int(ws_static)))  # (Hs, Ws, 2)
             return ops.convert_to_tensor(grid, dtype="float32")
 
         # Dynamic path: build with keras.ops using THERA's pixel-center formula.
@@ -338,7 +338,7 @@ class TheraHypernetwork(keras.layers.Layer):
         space_w = ops.linspace(-0.5 + off_w, 0.5 - off_w, dyn[2])  # (Ws,)
         # indexing='ij': mesh_h varies along axis 0, mesh_w along axis 1.
         mesh_h, mesh_w = ops.meshgrid(space_h, space_w, indexing="ij")  # (Hs, Ws)
-        # Stack [h, w] on the last axis to match make_grid (index 0 = h, 1 = w).
+        # Stack [h, w] on the last axis to match coordinate_grid (index 0 = h, 1 = w).
         return ops.stack([mesh_h, mesh_w], axis=-1)  # (Hs, Ws, 2)
 
     # -----------------------------------------------------------------

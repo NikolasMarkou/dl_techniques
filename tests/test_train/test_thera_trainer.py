@@ -24,7 +24,7 @@ import keras
 # backbone for speed -- 'pro'/'plus' Swin/ConvNeXt tails are heavy).
 from dl_techniques.models.vision.thera import EDSRBackbone, build_thera_tail
 from dl_techniques.models.vision.thera.model import Thera, DEFAULT_K_INIT
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 
 from train.thera.train_thera import TheraTrainingModel, TheraConfig, main  # noqa: F401
 from train.thera.data import build_arbitrary_scale_dataset
@@ -186,7 +186,7 @@ class TestTheraTrainer:
         # source, target_coords grid, heat-time t). call() returns the inner
         # Thera RAW residual field -- the deterministic, weight-only path.
         source = keras.random.normal((2, 8, 8, 3))
-        coords = keras.ops.convert_to_tensor(make_grid(10)[None, ...])
+        coords = keras.ops.convert_to_tensor(coordinate_grid(10)[None, ...])
         coords = keras.ops.broadcast_to(coords, (2, 10, 10, 2))
         t = keras.ops.ones((2, 1))
         y_before = keras.ops.convert_to_numpy(model((source, coords, t)))

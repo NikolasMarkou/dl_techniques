@@ -11,7 +11,7 @@ import pytest
 import tensorflow as tf
 
 from train.thera.data import build_arbitrary_scale_dataset, _make_grid_tf
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 
 
 SOURCE_SIZE = 48
@@ -125,18 +125,24 @@ def test_second_batch_differs(corpus):
 
 # ---------------------------------------------------------------------
 # A9(d) (review): the dynamic-side pipeline grid `_make_grid_tf` must match the
-# static inference grid `make_grid` elementwise, so the training-time query
+# static inference grid `coordinate_grid` elementwise, so the training-time query
 # coords and the inference-time coords share ONE pixel-center convention. A
 # divergence would silently shift every training query off the inference grid.
+#
+# `_make_grid_tf` is a deliberate fork (D-011: it takes a DYNAMIC side, which the
+# numpy constructor cannot), so this is the only thing preventing it drifting.
+# Swept over several sides rather than the single n=5 it used to check: the two
+# conventions differ by a per-axis offset of 1/(2n), which SHRINKS with n, so a
+# one-size check is weakest exactly where the defect is largest.
 # ---------------------------------------------------------------------
 
 
-def test_make_grid_matches_grid_sample():
-    n = 5
+@pytest.mark.parametrize("n", [1, 2, 5, 17, 48])
+def test_pipeline_grid_matches_coordinate_grid(n):
     pipeline = _make_grid_tf(tf.constant(n, dtype=tf.int32)).numpy()  # (n, n, 2)
-    inference = make_grid(n)  # (n, n, 2) numpy, int side
+    inference = coordinate_grid(n)  # (n, n, 2) numpy, int side
     assert pipeline.shape == inference.shape == (n, n, 2)
-    np.testing.assert_allclose(pipeline, inference, atol=1e-6)
+    np.testing.assert_allclose(pipeline, inference, atol=1e-6, rtol=0)
 
 
 # ---------------------------------------------------------------------

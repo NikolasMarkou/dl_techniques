@@ -153,9 +153,9 @@ class Thera(keras.Model):
         >>> model = build_thera(out_dim=3, backbone="edsr-baseline", size="air")
         >>> source = keras.random.normal((2, 16, 16, 3))
         >>> import numpy as np
-        >>> from dl_techniques.layers.grid_sample import make_grid
+        >>> from dl_techniques.layers.spatial_layer import coordinate_grid
         >>> coords = keras.ops.broadcast_to(
-        ...     keras.ops.convert_to_tensor(make_grid(24))[None], (2, 24, 24, 2))
+        ...     keras.ops.convert_to_tensor(coordinate_grid(24))[None], (2, 24, 24, 2))
         >>> t = keras.ops.ones((2, 1))
         >>> out = model((source, coords, t))   # (2, 24, 24, 3)
     """

@@ -38,7 +38,7 @@ and `pro` use `hidden_dim=512` (D-009).
 | File | Role |
 |---|---|
 | `initializers/linear_up_initializer.py` | `LinearUpInitializer`: 2D-disk frequency init `r = scale·√U[0,1]` for the heat-field components. |
-| `layers/grid_sample.py` | TF-native `make_grid` (pixel-center grid) + `interpolate_grid` (gather+lerp sampler, order 0/1). |
+| `layers/spatial_layer.py` | `coordinate_grid` (configurable coordinate grid; THERA uses `alignment='centers'`, `channel_order='ij'`, `normalization='none'`) + `interpolate_grid` (gather+lerp sampler, order 0/1), both `keras.ops`. |
 | `layers/thera_heat_field.py` | `ThermalActivation` (`sin(w0·x+φ)·exp(-(w0·‖·‖)²·k·t)`) + `HeatField` (per-pixel einsum field). |
 | `models/vision/thera/edsr_backbone.py` | `EDSRBackbone` — no-upsampling EDSR feature extractor. |
 | `models/vision/thera/rdn_backbone.py` | `RDNBackbone` — residual dense feature extractor. |
@@ -68,10 +68,13 @@ reimplementing them:
 - **`train/common`** scaffold (`setup_gpu`, `set_seeds`, `create_callbacks`,
   `save_config_json`, `EpochMetricsPlotCallback`, `collect_image_paths`).
 
-What was **NOT** reused: `SpatialLayer` (`layers/spatial_layer.py`) was considered
-for `make_grid` but rejected — it samples linspace *endpoints* and z-score
-normalizes, whereas THERA needs the un-normalized pixel-*center* grid (see §3,
-the corrected finding).
+`SpatialLayer` (`layers/spatial_layer.py`) *was* initially rejected for
+`make_grid`, on the grounds that it samples linspace *endpoints* and z-score
+normalizes where THERA needs the un-normalized pixel-*center* grid. That was
+true of the code and false of the concept: on 2026-08-31 the two conventions
+became knobs (`alignment`, `channel_order`, `normalization`), the pixel-center
+constructor moved into that module as `coordinate_grid`, and
+`layers/grid_sample.py` was deleted. See §3 H4.
 
 ---
 
@@ -121,19 +124,35 @@ THERA tiles large-image inference with `chunkax`. **Not ported.** If a future
 large-image inference path OOMs, a plain-Python coord-axis tiling loop is the
 documented fallback (INV-6 allows it for inference only).
 
-### H4 — no Keras `grid_sample`/`map_coordinates` → TF-native `interpolate_grid`
-Keras 3 has no `grid_sample`. `layers/grid_sample.py` provides a **TF-native
-gather+lerp sampler** (`interpolate_grid`, order 0 = nearest, order 1 =
-differentiable bilinear) and a faithful **`make_grid`** (D-003). The coordinate
-convention was source-verified against the reference `model/utils.py`:
-pixel-center normalized grid `linspace(-0.5+1/(2n), 0.5-1/(2n), n)`, output
-`(h, w, 2)` with channel order `[h, w]`, `indexing='ij'`; coord→pixel map
-`pix = coord·size + (size-1)/2`; border `mode='nearest'` = clamp to `[0, size-1]`.
+### H4 — no Keras `grid_sample` → a `keras.ops` gather+lerp sampler
+Keras 3 has no `grid_sample`. `layers/spatial_layer.py` provides a
+**`keras.ops` gather+lerp sampler** (`interpolate_grid`, order 0 = nearest,
+order 1 = differentiable bilinear) and the coordinate constructor
+`coordinate_grid` (D-003). The convention was source-verified against the
+reference `model/utils.py`: pixel-center normalized grid
+`linspace(-0.5+1/(2n), 0.5-1/(2n), n)`, output `(h, w, 2)` with channel order
+`[h, w]`, `indexing='ij'`; coord→pixel map `pix = coord·size + (size-1)/2`;
+border `mode='nearest'` = clamp to `[0, size-1]`. THERA therefore calls
+`coordinate_grid(size)` — whose defaults are exactly `alignment='centers'`,
+`channel_order='ij'`, `normalization='none'`.
 
-> **Corrected finding:** an earlier finding claimed `SpatialLayer` covers
-> `make_grid`. It does **not** — `SpatialLayer` uses linspace *endpoints* and
-> z-score normalizes the channels. THERA needs the un-normalized pixel-center
-> grid, so `make_grid` is reimplemented faithfully (verified vs scipy).
+> **Two corrections to what this section used to say**, both dated 2026-08-31.
+>
+> 1. **"`SpatialLayer` does not cover `make_grid`."** True of the code as
+>    written — it was hard-coded to linspace *endpoints* with z-score
+>    normalization — and false of the concept. The two were the same generator
+>    under different conventions. Making alignment, channel order and
+>    normalization explicit knobs collapsed them into one module, and the
+>    duplicate `layers/grid_sample.py` was deleted.
+>    `tests/test_layers/test_spatial_layer.py` pins the equality at `atol=0`.
+> 2. **"Keras 3 has no `map_coordinates`."** It does: `keras.ops.image.map_coordinates`
+>    exists in keras 3.8. It is not used here because it has no batch
+>    semantics — every input axis, batch and channel included, must be supplied
+>    as its own coordinate plane — so a batched `(B,Hq,Wq,C)` sampler through it
+>    would materialize four full index grids. The heading no longer claims
+>    otherwise. The sampler was also ported off raw `tf` (`tf.gather_nd` → a
+>    linearized `keras.ops.take`) and measured bit-identical: max abs diff 0.0
+>    across shapes and orders, and 0.0 with a float16 grid.
 
 These are pure functions (not a Layer): they are stateless, and the Jacobian-TV
 helper must call `interpolate_grid` *bare* inside a nested tape (D-003).
@@ -157,7 +176,7 @@ and the hypernetwork `out_conv.kernel`, and the nested tape composes under
 `model.fit`'s `tf.function` graph mode with no `run_eagerly` needed (D-012).
 
 ### The differentiability nuance
-THERA's `interpolate_grid` is **order=0 NEAREST**. The TV coordinate-Jacobian does
+THERA's use of `interpolate_grid` is **order=0 NEAREST**. The TV coordinate-Jacobian does
 **not** flow through the sampler — it flows through the *direct* `coords` term of
 `rel = coords − nearest(coords)` (nearest is piecewise-constant, zero-gradient
 a.e.) into the heat field. Therefore the sampler need not be differentiable for

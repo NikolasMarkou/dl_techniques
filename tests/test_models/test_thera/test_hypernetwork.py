@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 import pytest
 
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
 
 
@@ -22,8 +22,8 @@ def _finite(t) -> bool:
 
 
 def _coords(batch: int, hq: int, wq: int):
-    """A batched pixel-center query grid via the step-2 make_grid."""
-    grid = make_grid((hq, wq))  # (hq, wq, 2) numpy
+    """A batched pixel-center query grid via coordinate_grid."""
+    grid = coordinate_grid((hq, wq))  # (hq, wq, 2) numpy
     g = keras.ops.convert_to_tensor(grid, dtype="float32")
     return keras.ops.broadcast_to(g[None, ...], (batch, hq, wq, 2))
 

@@ -24,7 +24,7 @@ Per-sample logic (mirrors the reference, ``source_size`` = LR side = 48,
    input, fixed ``48 x 48``). ``source_nearest`` = nearest upsample of
    ``source`` back to ``target_size`` (the residual base).
 #. Build a pixel-center coordinate grid for ``target_size`` (matching the
-   step-2 ``make_grid`` convention exactly), pick ``target_samples ** 2`` random
+   ``coordinate_grid`` convention exactly), pick ``target_samples ** 2`` random
    query points, and gather ``target_coords`` / ``target`` pixels /
    ``source_nearest`` pixels at those points, reshaped to
    ``(target_samples, target_samples, C)``.
@@ -37,11 +37,15 @@ doing them here would double-apply.
 - Do NOT reach for PyTorch / PIL — TF 2.18 ``tf.image`` covers decode + bicubic
   (``method='bicubic'``, ``antialias=True`` for the downscale, E6 resolved) +
   nearest resampling, all graph-safe.
-- Do NOT import the numpy ``make_grid`` from ``layers/grid_sample.py`` here: it
-  needs a STATIC int side, but ``target_size`` is a dynamic tensor inside the
-  map. ``_make_grid_tf`` rebuilds the identical pixel-center convention
-  (``linspace(-0.5 + 1/(2n), 0.5 - 1/(2n), n)``, ``meshgrid(indexing='ij')``,
-  channel order ``[h, w]``) with ``tf.linspace`` so it matches step-2 exactly.
+- Do NOT import the numpy ``coordinate_grid`` from ``layers/spatial_layer.py``
+  here: it needs a STATIC int side, but ``target_size`` is a dynamic tensor
+  inside the map. ``_make_grid_tf`` rebuilds the identical pixel-center
+  convention (``linspace(-0.5 + 1/(2n), 0.5 - 1/(2n), n)``,
+  ``meshgrid(indexing='ij')``, channel order ``[h, w]``) with ``tf.linspace``,
+  i.e. ``coordinate_grid(n, alignment='centers', channel_order='ij',
+  normalization='none')``, so the two match exactly. That equality is what
+  ``tests/test_train/test_thera_data.py`` pins -- it is the only thing keeping
+  this fork from drifting off the inference grid.
 - Do NOT standardize images here (trainer owns the data statistics).
 """
 
@@ -60,7 +64,7 @@ from train.common.datasets import collect_image_paths
 def _make_grid_tf(n: tf.Tensor) -> tf.Tensor:
     """Build a pixel-center normalized coordinate grid for a dynamic side ``n``.
 
-    Reproduces the step-2 ``make_grid`` convention EXACTLY but for a dynamic
+    Reproduces the ``coordinate_grid`` convention EXACTLY but for a dynamic
     (tensor) side length, so it can run inside the ``tf.data`` map graph: for an
     axis of length ``n`` the sample positions are the centers of ``n`` equal
     cells tiling ``[-0.5, 0.5]``, i.e. ``linspace(-0.5 + 1/(2n), 0.5 - 1/(2n),
