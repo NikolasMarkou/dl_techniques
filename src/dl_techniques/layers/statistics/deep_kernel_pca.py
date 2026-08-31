@@ -53,6 +53,7 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
+from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -741,8 +742,14 @@ class DeepKernelPCA(keras.layers.Layer):
         # every level, so a large batch over few features raises here.
         components = ops.matmul(kernel_matrix_reg, projection_matrix[:batch_size, :])
 
-        # Normalize by eigenvalues (approximate scaling)
-        components = components / (ops.sqrt(ops.abs(eigenvalues) + 1e-10))
+        # Normalize by eigenvalues (approximate scaling).
+        # DECISION plan-2026-08-31T134711-6271592d/D-009: the floor must come
+        # from the compute dtype. `float16(1e-10)` is exactly 0.0, and adapt()
+        # deliberately clamps rank-deficient eigenvalues to 0, so a bare literal
+        # divides by sqrt(0) = 0.
+        components = components / ops.sqrt(
+            ops.abs(eigenvalues) + stability_floor(self.compute_dtype, 1e-10)
+        )
 
         return components
 

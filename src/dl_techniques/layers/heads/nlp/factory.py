@@ -64,7 +64,7 @@ from ...norms import create_normalization_layer, NormalizationType
 from ...sequence_pooling import SequencePooling
 
 from .task_types import NLPTaskType, NLPTaskConfig
-from dl_techniques.utils.dtype_policy import mask_sentinel
+from dl_techniques.utils.dtype_policy import mask_sentinel, stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -1526,10 +1526,20 @@ class TextSimilarityHead(BaseNLPHead):
 
             # Compute similarity
             if self.similarity_function == 'cosine':
-                # Cosine similarity. The 1e-8 floor keeps a zero vector from
+                # Cosine similarity. The floor keeps a zero vector from
                 # producing a NaN.
-                emb1_norm = emb1 / ops.maximum(ops.norm(emb1, axis=-1, keepdims=True), 1e-8)
-                emb2_norm = emb2 / ops.maximum(ops.norm(emb2, axis=-1, keepdims=True), 1e-8)
+                # DECISION plan-2026-08-31T134711-6271592d/D-009: derive the
+                # floor from the compute dtype. A bare `1e-8` is exactly 0.0 in
+                # float16, so `ops.maximum(norm, 1e-8)` is `ops.maximum(norm,
+                # 0.0)` and an all-padding (zero) embedding divides 0/0 = NaN.
+                # MEASURED at HEAD under mixed_float16: [nan nan].
+                norm_floor = stability_floor(self.compute_dtype, 1e-8)
+                emb1_norm = emb1 / ops.maximum(
+                    ops.norm(emb1, axis=-1, keepdims=True), norm_floor
+                )
+                emb2_norm = emb2 / ops.maximum(
+                    ops.norm(emb2, axis=-1, keepdims=True), norm_floor
+                )
                 similarity = ops.sum(emb1_norm * emb2_norm, axis=-1)
 
             elif self.similarity_function == 'dot':

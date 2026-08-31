@@ -31,6 +31,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -195,7 +196,15 @@ class ExponentialMovingAverage(keras.layers.Layer):
         # The exponent is `t + 1`, matching the original Python loop.
         exponents = t_arange + 1.0
         weights_1d = 1.0 - ops.power(one_minus_alpha, exponents)
-        weights_1d = ops.maximum(weights_1d, ops.cast(1e-10, x.dtype))
+        # DECISION plan-2026-08-31T134711-6271592d/D-009: do NOT write
+        # `ops.maximum(weights_1d, ops.cast(1e-10, x.dtype))`. That cast is the
+        # DEFECT, not the protection: it casts the LITERAL, and `float16(1e-10)`
+        # is exactly 0.0, so the guard became `ops.maximum(w, 0.0)` and the
+        # `ema_current / w_t` below divided by zero. MEASURED at HEAD under
+        # mixed_float16 with period=20000: [1. inf inf inf inf].
+        weights_1d = ops.maximum(
+            weights_1d, stability_floor(self.compute_dtype, 1e-10)
+        )
 
         # ops.scan walks the LEADING axis of each xs entry, so the samples go
         # in time-major: (B, T-1, F) -> (T-1, B, F).

@@ -82,6 +82,7 @@ import keras
 import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal
+from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -673,9 +674,15 @@ class InvertibleKernelPCA(keras.layers.Layer):
         # Project to principal components
         components = ops.matmul(centered_features, self.projection_matrix)
 
-        # Whiten if requested (divide by sqrt of eigenvalues)
+        # Whiten if requested (divide by sqrt of eigenvalues).
+        # DECISION plan-2026-08-31T134711-6271592d/D-009: `float16(1e-10)` is
+        # exactly 0.0, and adapt() clamps tiny/negative eigenvalues to exactly
+        # 0.0 (see the assign in adapt), so a bare literal divides by sqrt(0).
         if self.whiten:
-            components = components / (ops.sqrt(ops.abs(self.eigenvalues) + 1e-10))
+            components = components / ops.sqrt(
+                ops.abs(self.eigenvalues)
+                + stability_floor(self.compute_dtype, 1e-10)
+            )
 
         return components
 
