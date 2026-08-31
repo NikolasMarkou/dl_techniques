@@ -387,12 +387,6 @@ class Conv2D(BaseConv):
     -   **Description**: A synonym or alternate implementation of `BatchConditionalOutputLayer`. It selects its output based on whether the `ground_truth` input tensor is all zeros.
     -   **Core Logic (`call` method)**: Same as `BatchConditionalOutputLayer`, using `tf.reduce_all` and `tf.where`.
 
--   #### `Conv2DBuilder`
-    -   **File**: `src/dl_techniques/layers/conv2d_builder.py`
-    -   **Type**: Utility Function
-    -   **Description**: A factory function, not a layer itself. It constructs a sequence of Keras layers representing a standard "convolution block." This includes a convolution layer (`Conv2D`, `DepthwiseConv2D`, etc.), optional batch/layer normalization, a custom activation, and optional dropout. It provides a consistent way to build common convolutional patterns.
-    -   **Key Parameters**: `conv_params`, `bn_params`, `ln_params`, `dropout_params`, `conv_type`.
-
 -   #### `ConvNeXtV1Block` & `ConvNeXtV2Block`
     -   **Files**: `src/dl_techniques/layers/convnext_v1_block.py`, `src/dl_techniques/layers/convnext_v2_block.py`
     -   **Type**: Keras Layer
@@ -420,13 +414,6 @@ class Conv2D(BaseConv):
         4.  The output is reshaped back to its 2D spatial format.
         5.  A residual connection is added.
         6.  This is followed by another pre-norm and an MLP block (implemented with `Conv2D` layers).
-
--   #### `Downsample` & `Upsample`
-    -   **Files**: `src/dl_techniques/layers/downsample.py`, `src/dl_techniques/layers/upsample.py`
-    -   **Type**: Utility Functions
-    -   **Description**: Factory functions that provide various strategies for downsampling and upsampling feature maps in CNNs. They are not layers themselves but construct and return Keras layers.
-        -   `downsample`: Supports methods like strided `Conv2D`, `MaxPooling2D`, and combinations.
-        -   `upsample`: Supports `Conv2DTranspose`, `UpSampling2D` (with 'bilinear' or 'nearest' interpolation), and combinations with subsequent `Conv2D` layers for feature refinement.
 
 -   #### `DyTLayer (DynamicTanh)`
     -   **File**: `src/dl_techniques/layers/dyt_layer.py`
