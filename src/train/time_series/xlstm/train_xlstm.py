@@ -322,7 +322,10 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
                 mae_of_median.__name__ = 'mae_of_median'
                 metrics.append(mae_of_median)
         else:
-            loss = keras.losses.MeanAbsoluteError()
+            # Point path only; the quantile branch above keeps QuantileLoss.
+            # None (the default) leaves the MeanAbsoluteError exactly as it was.
+            multistep = self.config.build_multistep_loss()
+            loss = multistep if multistep is not None else keras.losses.MeanAbsoluteError()
             metrics = [keras.metrics.MeanSquaredError(name='mse')]
 
         # jit_compile=True. The historical NaN was NOT a jit/XLA issue -- it was an
@@ -370,6 +373,19 @@ def build_parser() -> argparse.ArgumentParser:
     # ONNX export.
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
+    parser.add_argument(
+        "--multistep_loss", type=str, default=None,
+        choices=["mseh", "tmse", "gtmse", "msce"],
+        help="Multistep (h-steps-ahead) loss aggregation, replacing the POINT "
+             "forecast loss. Quantile mode is unaffected. WARNING: 'mseh' sends "
+             "zero gradient to every horizon step but --multistep_h, so on this "
+             "DIRECT model the other output heads never train.",
+    )
+    parser.add_argument(
+        "--multistep_h", type=int, default=None,
+        help="Horizon the multistep loss is evaluated over. Defaults to the "
+             "full prediction length.",
+    )
     parser.add_argument("--onnx_opset_version", type=int, default=17)
     return parser
 
@@ -410,6 +426,8 @@ def main() -> None:
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch,
         export_onnx=args.export_onnx,
+        multistep_loss=args.multistep_loss,
+        multistep_h=args.multistep_h,
         onnx_opset_version=args.onnx_opset_version,
     )
 

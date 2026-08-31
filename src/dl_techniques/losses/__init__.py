@@ -131,6 +131,12 @@ from .lpips_loss import LPIPSLoss
 from .masked_causal_lm_loss import MaskedCausalLMLoss, PrefixMaskedCausalLMLoss
 from .mase_loss import MASELoss, mase_metric
 
+from .multistep_loss import (
+    MULTISTEP_AGGREGATIONS,
+    MultistepLoss,
+    create_multistep_loss,
+)
+
 from .multi_task_loss import MultiTaskLoss
 
 from .quantile_loss import MQLoss, QuantileLoss
@@ -284,6 +290,10 @@ __all__ = [
     # mase_loss
     "MASELoss",
     "mase_metric",
+    # multistep_loss
+    "MultistepLoss",
+    "create_multistep_loss",
+    "MULTISTEP_AGGREGATIONS",
     # multi_task_loss
     "MultiTaskLoss",
     # Quantile loss

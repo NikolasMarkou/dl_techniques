@@ -307,12 +307,27 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
         # Learning rate schedule
         optimizer = self._build_optimizer()
 
-        # Compile with appropriate loss configuration
+        # Compile with appropriate loss configuration.
+        #
+        # `multistep_loss` overrides `primary_loss` on the FORECAST head only;
+        # the reconstruction head keeps its MeanAbsoluteError. It returns None
+        # unless the config sets it, so the default path is unchanged.
+        multistep = self.config.build_multistep_loss()
+
+        def _forecast_loss():
+            if multistep is not None:
+                logger.info(
+                    f"Using MultistepLoss ({self.config.multistep_loss}, "
+                    f"h={self.config.multistep_h}) for the forecast head"
+                )
+                return multistep
+            return (MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
+                    if self.config.primary_loss == 'mase_loss'
+                    else keras.losses.get(self.config.primary_loss))
+
         if self.config.reconstruction_loss_weight > 0.0:
             model = base_model
-            forecast_loss = (MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
-                            if self.config.primary_loss == 'mase_loss'
-                            else keras.losses.get(self.config.primary_loss))
+            forecast_loss = _forecast_loss()
             losses = [forecast_loss, keras.losses.MeanAbsoluteError(name="residual_loss", reduction="mean")]
             loss_weights = [1.0, self.config.reconstruction_loss_weight]
             metrics = [
@@ -324,9 +339,7 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
             # so self.model isinstance-passes the post_hoc gate; same forward
             # graph (inner NBeatsNet forecast head). See _NBeatsForecastOnly.
             model = _NBeatsForecastOnly(base_model)
-            losses = (MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
-                      if self.config.primary_loss == 'mase_loss'
-                      else keras.losses.get(self.config.primary_loss))
+            losses = _forecast_loss()
             loss_weights = None
             metrics = [keras.metrics.MeanAbsoluteError(name="forecast_mae")]
 
@@ -391,6 +404,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
     parser.add_argument("--hidden_layer_units", type=int, default=256)
     parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5)
+    parser.add_argument(
+        "--multistep_loss", type=str, default=None,
+        choices=["mseh", "tmse", "gtmse", "msce"],
+        help="Multistep (h-steps-ahead) loss aggregation for the FORECAST head, "
+             "overriding --primary_loss. The reconstruction head keeps its MAE. "
+             "WARNING: 'mseh' sends zero gradient to every horizon step but "
+             "--multistep_h, so on this DIRECT model the other output heads "
+             "never train.",
+    )
+    parser.add_argument(
+        "--multistep_h", type=int, default=None,
+        help="Horizon the multistep loss is evaluated over. Defaults to the "
+             "full forecast length.",
+    )
     parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
     parser.set_defaults(normalize_per_instance=True)
     return parser
@@ -420,6 +447,8 @@ def main() -> None:
         gradient_clip_norm=args.gradient_clip_norm,
         normalize_per_instance=args.normalize_per_instance,
         reconstruction_loss_weight=args.reconstruction_loss_weight,
+        multistep_loss=args.multistep_loss,
+        multistep_h=args.multistep_h,
         use_warmup=args.use_warmup,
         warmup_steps=args.warmup_steps,
         warmup_start_lr=args.warmup_start_lr,

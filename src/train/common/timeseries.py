@@ -134,6 +134,19 @@ class BaseTimeSeriesTrainingConfig:
     use_quantile_head: bool = False
     enforce_monotonicity: bool = True
 
+    # Multistep (h-steps-ahead) loss. `None` keeps each trainer's existing
+    # point-forecast loss EXACTLY as it was -- this is opt-in and the default is
+    # a no-op. When set, it names an aggregation from
+    # `dl_techniques.losses.multistep_loss` ("mseh" | "tmse" | "gtmse" | "msce")
+    # and replaces the POINT-forecast loss only; quantile branches keep
+    # QuantileLoss. `multistep_h` defaults to the full prediction length.
+    #
+    # WARNING: "mseh" on a DIRECT multi-horizon model (nbeats/prism/tirex/xlstm
+    # all are) sends zero gradient to every horizon step but `multistep_h`, so
+    # those output heads never train. See losses/multistep_loss.py.
+    multistep_loss: Optional[str] = None
+    multistep_h: Optional[int] = None
+
     # ONNX export (off by default; opset 17 matches the per-script defaults)
     export_onnx: bool = False
     onnx_opset_version: int = 17
@@ -145,6 +158,38 @@ class BaseTimeSeriesTrainingConfig:
         total = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total, 1.0, atol=1e-6):
             raise ValueError(f"Data ratios must sum to 1.0, got {total}")
+
+        if self.multistep_loss is not None:
+            # Validate at CONFIG time, not at compile time: a typo that only
+            # surfaces after the data pipeline has been built wastes the run.
+            from dl_techniques.losses.multistep_loss import MULTISTEP_AGGREGATIONS
+
+            if self.multistep_loss not in MULTISTEP_AGGREGATIONS:
+                raise ValueError(
+                    f"Unknown multistep_loss {self.multistep_loss!r}. Expected "
+                    f"one of {sorted(MULTISTEP_AGGREGATIONS)}."
+                )
+        if self.multistep_h is not None and self.multistep_h < 1:
+            raise ValueError(
+                f"multistep_h must be a positive integer, got {self.multistep_h}."
+            )
+
+    def build_multistep_loss(self):
+        """Return the configured :class:`MultistepLoss`, or ``None``.
+
+        Returns ``None`` when ``multistep_loss`` is unset, which every caller
+        treats as "keep the trainer's existing loss". Keeping the construction
+        here means the four trainers share one spelling of it rather than four.
+
+        Returns:
+            A ``MultistepLoss``, or ``None`` when multistep training is off.
+        """
+        if self.multistep_loss is None:
+            return None
+
+        from dl_techniques.losses.multistep_loss import create_multistep_loss
+
+        return create_multistep_loss(self.multistep_loss, h=self.multistep_h)
 
 
 def _fill_nans(data: np.ndarray) -> np.ndarray:

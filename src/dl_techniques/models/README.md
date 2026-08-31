@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **80 leaf packages** grouped into **11 family directories**.
+Complete model architectures — **81 leaf packages** grouped into **11 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (80 of 80 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (81 of 81 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -38,7 +38,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`vision/`](vision/) | **35** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
-| [`time_series/`](time_series/) | 7 | forecasting, probabilistic and point |
+| [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 5 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
@@ -47,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **85** | |
+| **Sum** | **86** | |
 
 ### `vision/` (35)
 
@@ -130,12 +130,13 @@ that `mamba` is only a language model.
 | `sam/sam3/` | Segment Anything v3, text-promptable |
 | `sd3_mmdit/` | SD3 MMDiT dual-stream text-to-image diffusion transformer |
 
-### `time_series/` (7)
+### `time_series/` (8)
 
 | Package | |
 |---|---|
 | `adaptive_ema/` | adaptive EMA model |
 | `deepar/` | DeepAR probabilistic forecasting |
+| `ets/` | Pure additive exponential smoothing (the one recursive forecaster) |
 | `mdn/` | Mixture Density Networks |
 | `nbeats/` | N-BEATS, plus the exogenous `nbeatsx` variant |
 | `prism/` | PRISM forecasting |

@@ -310,8 +310,20 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
                 mae_of_median.__name__ = 'mae_of_median'
                 metrics.append(mae_of_median)
         else:
-            logger.info("Compiling with MSE Loss")
-            loss = 'mse'
+            # Multistep is a POINT-path option only: the quantile branch above
+            # keeps QuantileLoss. `build_multistep_loss()` returns None unless
+            # `config.multistep_loss` is set, so the default is a byte-for-byte
+            # no-op on the pre-existing 'mse'.
+            multistep = self.config.build_multistep_loss()
+            if multistep is not None:
+                logger.info(
+                    f"Compiling with MultistepLoss "
+                    f"({self.config.multistep_loss}, h={self.config.multistep_h})"
+                )
+                loss = multistep
+            else:
+                logger.info("Compiling with MSE Loss")
+                loss = 'mse'
             metrics = ['mae', 'mse']
 
         model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
@@ -374,6 +386,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(normalize_per_instance=True)
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
+    parser.add_argument(
+        "--multistep_loss", type=str, default=None,
+        choices=["mseh", "tmse", "gtmse", "msce"],
+        help="Multistep (h-steps-ahead) loss aggregation, replacing the POINT "
+             "forecast loss. Quantile mode is unaffected. WARNING: 'mseh' sends "
+             "zero gradient to every horizon step but --multistep_h, so on this "
+             "DIRECT model the other output heads never train.",
+    )
+    parser.add_argument(
+        "--multistep_h", type=int, default=None,
+        help="Horizon the multistep loss is evaluated over. Defaults to the "
+             "full prediction length.",
+    )
     parser.add_argument("--onnx_opset_version", type=int, default=17)
     return parser
 
@@ -416,6 +441,8 @@ def main() -> None:
         use_quantile_head=args.use_quantile_head,
         enforce_monotonicity=args.enforce_monotonicity,
         export_onnx=args.export_onnx,
+        multistep_loss=args.multistep_loss,
+        multistep_h=args.multistep_h,
         onnx_opset_version=args.onnx_opset_version,
     )
 
