@@ -44,6 +44,35 @@ class StableMaxCrossEntropy(keras.losses.Loss):
 
     This is a numerically stable version of cross entropy that uses
     a modified softmax function.
+
+    **``call()`` returns PER-TOKEN values of shape ``(batch, seq_len)``, and that
+    is deliberate — it is not the premature-scalar defect and it is not a missing
+    reduction.** ``keras.losses.SparseCategoricalCrossentropy`` returns the same
+    shape for the same inputs; both are token-level losses and neither reduces
+    the sequence axis. Consequences, all MEASURED 2026-08-31 rather than assumed:
+
+    *   A ``sample_weight`` of shape ``(batch,)`` RAISES
+        ``InvalidArgumentError: Incompatible shapes: [4,5] vs. [4]``. So does
+        stock ``SparseCategoricalCrossentropy`` on the identical inputs — this is
+        the Keras convention for a token-level loss, not a bug in this class. Pass
+        ``(batch, 1)`` or ``(batch, seq_len)`` instead; both work and both select
+        rows correctly (2.00308299 under ``[1,1,1,0]`` against an unweighted
+        2.56611896, where the broken broadcast would have given 1.92458922).
+    *   Reducing the sequence axis here was evaluated and REJECTED. It would break
+        :class:`HRMLoss`, which needs per-token values in order to divide by its
+        OWN valid-token count (``sum(lm_losses) / sum(valid_counts)``), and it
+        would leave this class shaped differently from the
+        ``sparse_categorical_crossentropy`` branch it is interchangeable with.
+        The token-pool per-sample form additionally changes the value: under
+        masking the current default reduction reports 1.71106493 (the mean over
+        ALL positions, masked ones contributing zero) where a per-valid-token
+        mean is 2.44437834, 42.9% apart. See ``decisions.md`` D-002 of
+        ``plan-2026-08-31T045723-c0d5ffa9``.
+
+    Known and deliberately NOT fixed here: ``call()`` casts ``y_pred`` to float64
+    for numerical stability and then returns ``ops.cast(loss, y_pred.dtype)``,
+    where ``y_pred`` is by then the float64 copy — so a float32 caller gets a
+    float64 loss back. Recorded 2026-08-31; out of scope for the shape work.
     """
 
     def __init__(self,
@@ -102,6 +131,15 @@ class StableMaxCrossEntropy(keras.losses.Loss):
         # Apply mask and return negative log likelihood
         loss = keras.ops.where(valid_mask, -pred_log_probs, 0.0)
 
+        # DECISION plan-2026-08-31T045723-c0d5ffa9/D-002
+        # The token axis is deliberately NOT reduced here. Do NOT "finish the
+        # premature-scalar fix" by adding a `mean(axis=-1)` or the token-pool
+        # per-sample form: stock SparseCategoricalCrossentropy is token-shaped on
+        # these same inputs and raises the same error on a (batch,) sample_weight,
+        # HRMLoss below needs per-token values to divide by its own valid-token
+        # count, and the token-pool form moves the reported value by 42.9% under
+        # masking. Pass a (batch, 1) or (batch, seq_len) sample_weight instead.
+        # See the class docstring and decisions.md D-002.
         return keras.ops.cast(loss, y_pred.dtype)
 
     def get_config(self):
