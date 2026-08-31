@@ -38,6 +38,7 @@ from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
+from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -55,8 +56,10 @@ class sLSTMCell(keras.layers.Layer):
 
     The cell carries four states per timestep: ``h_t``, ``c_t``, ``n_t`` and
     ``m_t``, each of shape ``(batch, units)``. The hidden state is
-    ``h_t = o_t * (c_t / (n_t + 1e-8))``. The ``1e-8`` is what keeps a
-    near-zero normalizer from turning the output into a NaN.
+    ``h_t = o_t * (c_t / (n_t + eps))``. The ``eps`` is what keeps a near-zero
+    normalizer from turning the output into a NaN; it is
+    ``utils.dtype_policy.stability_floor(compute_dtype, 1e-8)``, not the bare
+    literal, because ``float16(1e-8)`` is exactly ``0.0``.
 
     **Gate equations** (per timestep t):
 
@@ -69,7 +72,7 @@ class sLSTMCell(keras.layers.Layer):
 
         c_t = f_t * c_{t-1} + i_t * z_t
         n_t = f_t * n_{t-1} + i_t
-        h_t = o_t * (c_t / (n_t + 1e-8))
+        h_t = o_t * (c_t / (n_t + eps))
 
     **Stabilization** (Equations 15-17 in paper):
 
@@ -79,8 +82,10 @@ class sLSTMCell(keras.layers.Layer):
 
     ``log(i_t)`` is the raw input-gate pre-activation, used as is. With
     ``forget_gate_activation='exp'`` the same is true of ``log(f_t)``. With
-    ``'sigmoid'`` the code takes ``log(sigmoid(f_proj) + 1e-8)``; the ``1e-8``
-    stops a saturated forget gate from giving ``log(0)``.
+    ``'sigmoid'`` the code takes ``log(sigmoid(f_proj) + eps)``; the ``eps``
+    stops a saturated forget gate from giving ``log(0)``. It is
+    ``stability_floor(compute_dtype, 1e-8)`` rather than the literal, so the
+    floor survives a ``float16`` compute dtype.
 
     **Architecture Overview:**
 
@@ -304,7 +309,16 @@ class sLSTMCell(keras.layers.Layer):
         if self.forget_gate_activation == 'exp':
             log_f_t = f_proj
         else:
-            log_f_t = ops.log(self.f_activation(f_proj) + 1e-8)
+            # DECISION plan-2026-08-31T134711-6271592d/D-008
+            # Do NOT write a bare `+ 1e-8`: float16(1e-8) is exactly 0.0, so
+            # the floor vanishes, a saturated sigmoid gives log(0) = -inf and
+            # the gradient is inf/NaN at every weight. `stability_floor`
+            # lifts it to the smallest NORMAL magnitude of the compute dtype
+            # (6.10e-05 in float16) and is a no-op in float32/float64.
+            log_f_t = ops.log(
+                self.f_activation(f_proj)
+                + stability_floor(self.compute_dtype, 1e-8)
+            )
 
         m_t = ops.maximum(m_tm1 + log_f_t, i_proj)
 
@@ -321,7 +335,10 @@ class sLSTMCell(keras.layers.Layer):
         n_t = f_t * n_tm1 + i_t
 
         # Output (Equation 10)
-        h_t = o_t * (c_t / (n_t + 1e-8))
+        # DECISION plan-2026-08-31T134711-6271592d/D-008: same floor, same
+        # reason -- a bare `+ 1e-8` is 0.0 under float16 and `c_t / n_t` is
+        # 0/0 = NaN as soon as the input gate underflows.
+        h_t = o_t * (c_t / (n_t + stability_floor(self.compute_dtype, 1e-8)))
 
         return h_t, [h_t, c_t, n_t, m_t]
 
@@ -618,8 +635,10 @@ class mLSTMCell(keras.layers.Layer):
         h_t   = o_t * (C_t^T @ q_t / (max(|n_t^T @ q_t|, exp(-m_t)) + 1e-8))
 
     ``i_proj`` is the raw input-gate pre-activation and the code uses it
-    directly as ``log(i_t)``. The two ``1e-8`` terms are in the code: one stops
-    ``log(0)`` on a saturated forget gate, the other stops a divide by zero.
+    directly as ``log(i_t)``. The two ``1e-8`` terms are in the code, each
+    passed through ``stability_floor(compute_dtype, 1e-8)`` so it cannot round
+    to ``0.0`` under ``float16``: one stops ``log(0)`` on a saturated forget
+    gate, the other stops a divide by zero.
     ``C_t`` is stored as ``(key_dim, value_dim)``, so reading it back with the
     query needs the transpose. Don't drop the ``^T``.
 
@@ -906,7 +925,12 @@ class mLSTMCell(keras.layers.Layer):
         # (batch_size, units).
         # DECISION plan_2026-06-11_50891da1/D-001: do NOT revert to a bare
         # `i_t = ops.exp(i_proj)`; that overflows fp32 at seq>=64. See decisions.md D-001.
-        log_f = ops.log(ops.sigmoid(f_proj) + 1e-8)
+        # DECISION plan-2026-08-31T134711-6271592d/D-008: the floor must be
+        # derived from the compute dtype; a literal 1e-8 is exactly 0.0 in
+        # float16 and log(sigmoid(-30)) is then -inf with an inf gradient.
+        log_f = ops.log(
+            ops.sigmoid(f_proj) + stability_floor(self.compute_dtype, 1e-8)
+        )
         m_t = ops.maximum(m_tm1 + log_f, i_proj)
         i_t = ops.exp(i_proj - m_t)
         f_t = ops.exp(m_tm1 + log_f - m_t)
@@ -949,13 +973,21 @@ class mLSTMCell(keras.layers.Layer):
         # The stabilized mLSTM denominator, max(|n_t^T @ q_t|, exp(-m_t)) +
         # 1e-8 (Beck et al. 2024). exp(-m_t) is a floor on the divisor, so a
         # near-zero n_t^T q_t cannot blow up the retrieval. The 1e-8 covers
-        # the case where exp(-m_t) itself underflows to zero.
+        # the case where exp(-m_t) itself underflows to zero -- which it does
+        # in float16 for m_t >~ 20, hence the dtype-derived floor below.
         # nq, m_t3 and normalization are all (batch, heads, 1).
         # DECISION plan_2026-06-11_50891da1/D-001: keep the exp(-m_t) floor; the
         # bare `+ 1e-8` form was insufficient. See decisions.md D-001.
         nq = ops.sum(n_t * q_t, axis=-1, keepdims=True)
         m_t3 = ops.reshape(m_t, (batch_size, self.num_heads, 1))
-        normalization = ops.maximum(ops.abs(nq), ops.exp(-m_t3)) + 1e-8
+        # DECISION plan-2026-08-31T134711-6271592d/D-008: `exp(-m_t)` itself
+        # underflows to 0.0 in float16 for m_t >~ 20, and a literal 1e-8 is
+        # ALSO 0.0 there, so the divisor is exactly zero. Keep the floor
+        # dtype-derived.
+        normalization = (
+            ops.maximum(ops.abs(nq), ops.exp(-m_t3))
+            + stability_floor(self.compute_dtype, 1e-8)
+        )
 
         # Divide, giving (batch, heads, value_dim).
         normalized_retrieval = memory_retrieval / normalization
