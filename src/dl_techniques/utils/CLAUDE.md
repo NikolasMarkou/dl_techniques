@@ -5,7 +5,9 @@ Shared utilities used across the library — tensor operations, geometry, maskin
 ## Structure
 
 ### Top-level Modules
-- `tensors.py` — Core tensor ops: `gram_matrix()`, `power_iteration()`, `window_partition()`/`window_reverse()`, Gaussian kernels, orthonormality validation
+- `tensors.py` — Core tensor ops: `gram_matrix()`, `power_iteration()`, `window_partition()`/`window_reverse()`, Gaussian kernels, orthonormality validation. Also the shared home for two pure dimension-contract predicates that used to be private copies in `layers/`:
+  - `is_power_of_two(n)` — `True` only for `n >= 1` with one set bit, so `0` and negatives are rejected. Used by `layers/orthogonal_butterfly.py` and `layers/norms/polar_weight_norm.py` to refuse a last dimension they cannot pair. `polar_weight_norm._next_power_of_two` is a different function and stays where it is
+  - `canonical_binary_input_shape(input_shape)` — collapses one-shape-or-list-of-shapes into the single shape a binary elementwise layer builds from, raising on more than two shapes or on a mismatched pair. Used by `layers/logic/{logic,arithmetic}_operators.py` from three sites each (`build`, `compute_output_shape`, `_assert_call_shape_contract`). Import it by its bare name: `tests/test_layers/test_logic/test_the_nine_source_fixes_stay_fixed.py` asserts the call sites resolve as `ast.Name`, so a qualified `tensors.canonical_binary_input_shape(...)` call would go unseen. It is NOT the `is_list_of_shapes` idiom inlined three times under `layers/attention/`, which is deliberately kept separate
 - `constants.py` — Shared constants for config keys
 - `convert.py` — `convert_numpy_to_python()` for JSON serialization
 - `random.py` — `rayleigh()` distribution generator with statistical validation
@@ -28,6 +30,7 @@ Shared utilities used across the library — tensor operations, geometry, maskin
   - `load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)`: layer-by-layer *partial* transfer between different architectures (a pretrain trunk into a fine-tune model). Use this instead of `model.load_weights(by_name=True)` (broken in Keras 3.8 for `.keras` files). A zero-layer result **reports rather than raises** — `src/train/beit/` and `src/train/energy_transformer/` build their own warm-start guards on that report
   - `load_weights_or_raise(model, weights_path, skip_mismatch)`: whole-file `.keras` restore into the **same** architecture, returning the number of variables whose value changed and raising when that is zero. `model.load_weights(path, skip_mismatch=True)` restores nothing and returns normally when names or shapes do not match, so never call it bare
 - `yolo_decode.py` — YOLOv12 output decoder (anchors-free decoding to boxes + scores)
+- `matplotlib_backend.py` — `import_pyplot(with_cm=False)`: the one headless-safe matplotlib importer. Calls `matplotlib.use("Agg")` BEFORE importing `pyplot` and returns `plt`, or `(plt, cm)` when `with_cm=True`. All four plotting callbacks in `dl_techniques/callbacks/` go through it; two of them previously imported `pyplot` with no backend forced, which crashed on a headless host unless the trainer happened to set `MPLBACKEND`. Never import `matplotlib.pyplot` directly in library code. Backend selection is process-global and effectively once-only, so the guard (`tests/test_callbacks/test_the_matplotlib_backend_is_headless.py`) runs each arm in a fresh subprocess with `MPLBACKEND` deleted — an in-process assertion reads the environment, not the code
 
 ### Subpackages
 - `alignment/` — Feature alignment framework:
