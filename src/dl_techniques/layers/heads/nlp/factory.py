@@ -1,8 +1,47 @@
-"""
-NLP Task Head Factory
+"""NLP task heads, and the factory that picks one.
 
-A comprehensive factory for building configurable head networks for various NLP tasks.
-Designed to be model-agnostic and work with any NLP foundation model (BERT, GPT, T5, etc.).
+This module holds eight layer classes and four module-level helpers. The
+classes turn a foundation model's hidden states into task predictions. The
+helpers pick a class and configure it.
+
+The heads take hidden states, not tokens. Nothing here knows which backbone
+produced them, so the same head works on BERT, GPT or T5 output.
+
+Classes
+-------
+* :class:`BaseNLPHead` -- shared construction and pooling. Every other head
+  except :class:`MultiTaskNLPHead` inherits from it. It has no ``call``.
+* :class:`TextClassificationHead` -- one label per sequence.
+* :class:`TokenClassificationHead` -- one label per token.
+* :class:`QuestionAnsweringHead` -- start and end logits over the sequence.
+* :class:`TextSimilarityHead` -- one embedding, or a score for a pair.
+* :class:`TextGenerationHead` -- logits over the vocabulary per position.
+* :class:`MultipleChoiceHead` -- one score per candidate answer.
+* :class:`MultiTaskNLPHead` -- several heads behind one layer.
+
+Helpers
+-------
+* :func:`get_head_class` -- task type to head class. Raises for a task type
+  that has no head.
+* :func:`create_nlp_head` -- build one head from a config.
+* :func:`create_multi_task_nlp_head` -- build a multi-task head.
+* :class:`NLPHeadConfiguration` -- default keyword arguments per task type.
+
+The task types and the config dataclass live in ``nlp/task_types.py``.
+
+Example
+-------
+>>> from dl_techniques.layers.heads.nlp import create_nlp_head
+>>> from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
+>>> cfg = NLPTaskConfig(
+...     name='sentiment',
+...     task_type=NLPTaskType.SENTIMENT_ANALYSIS,
+...     num_classes=3,
+... )
+>>> head = create_nlp_head(cfg, input_dim=768)
+>>> out = head(hidden_states)
+>>> sorted(out)
+['logits', 'probabilities']
 """
 
 import keras
@@ -29,12 +68,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# The pooling strategies BaseNLPHead delegates to the shared SequencePooling
-# facade. Declared once because two sites read it -- the construction guard in
-# `_create_common_layers` and the dispatch in `_pool_sequence` -- and a value
-# present in only one of them either creates an unused pooler or falls through
-# to `_pool_sequence`'s "Unknown pooling type" raise. The inline 'attention'
-# strategy is deliberately NOT in here (D-002, quoted below).
+# The four pooling strategies BaseNLPHead hands to the shared SequencePooling
+# layer. Two sites read this tuple: the construction guard in
+# `_create_common_layers` and the dispatch in `_pool_sequence`. It is declared
+# once so the two cannot drift. A strategy listed in only one of them either
+# builds a pooler nothing calls, or falls through to `_pool_sequence`'s
+# "Unknown pooling type" raise. 'attention' is not here on purpose: it stays
+# inline, for the reason given in the D-002 note below.
 _DELEGATED_POOLING_STRATEGIES = ('cls', 'mean', 'max', 'last')
 
 # ---------------------------------------------------------------------
@@ -44,10 +84,87 @@ _DELEGATED_POOLING_STRATEGIES = ('cls', 'mean', 'max', 'last')
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class BaseNLPHead(keras.layers.Layer):
     """
-    Base class for all NLP task heads.
+    Shared construction and pooling for every NLP task head.
 
-    Provides common functionality and structure for task-specific heads,
-    designed to work with any NLP foundation model's output.
+    This class builds the layers the task heads have in common and stores the
+    configuration they read. It has no ``call``. A subclass runs the stages it
+    needs and then applies its own output layer.
+
+    ``__init__`` calls ``_create_common_layers``, which always builds ``norm``
+    and ``dropout``, and builds ``intermediate``, ``task_attention``, ``ffn``
+    and a pooler only when the matching flag asks for them.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, S, D) or (B, D), or a dict holding
+        'hidden_states' and an optional 'attention_mask'
+                          │
+                          ▼
+        ┌───────────────────────────────────┐
+        │ _pool_sequence         (optional) │ (B,S,D)->(B,D)
+        └─────────────────┬─────────────────┘
+                          ▼
+        ┌───────────────────────────────────┐
+        │ norm  ->  dropout                 │
+        └─────────────────┬─────────────────┘
+                          ▼
+        ┌───────────────────────────────────┐
+        │ intermediate           (optional) │ -> hidden_size
+        └─────────────────┬─────────────────┘
+                          ▼
+        ┌───────────────────────────────────┐
+        │ task_attention         (optional) │
+        └─────────────────┬─────────────────┘
+                          ▼
+        ┌───────────────────────────────────┐
+        │ ffn                    (optional) │
+        └─────────────────┬─────────────────┘
+                          ▼
+                subclass output layer
+
+    Not every subclass runs every stage, whatever its flags say. Three never
+    apply ``task_attention``: :class:`TextGenerationHead`,
+    :class:`TextSimilarityHead` and :class:`MultipleChoiceHead`. Two never
+    apply ``ffn``: :class:`QuestionAnsweringHead` and
+    :class:`MultipleChoiceHead`. So a flag can build a layer the head will
+    never call. Read the subclass diagram, not this one, for what a given head
+    actually runs.
+
+    **Pooling (D-002):**
+
+    .. code-block:: text
+
+        sequence (B, S, D)  +  attention_mask (B, S)
+                            │
+                 ┌──────────┴──────────┐
+           cls/mean/max/last      'attention'
+                 ▼                     ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ SequencePooling  │ │ Dense(1, tanh)   │
+        │ (shared layer,   │ │ mask -> softmax  │
+        │  mask aware)     │ │ weighted sum     │
+        └────────┬─────────┘ └────────┬─────────┘
+                 └─────────┬──────────┘
+                           ▼
+                     pooled (B, D)
+
+              any other value -> ValueError
+
+    ``_DELEGATED_POOLING_STRATEGIES`` names the four strategies on the left.
+    They are handed to the shared ``SequencePooling`` layer. ``'attention'``
+    is not, and stays inline in ``_pool_sequence``. The two paths are not
+    interchangeable: ``SequencePooling('attention')`` is ``AttentionPooling``,
+    which scores a ``Dense(hidden, tanh)`` projection against a learnable
+    context vector, so it has both a different mechanism and a different
+    weight set than the ``Dense(1, tanh)`` scorer here.
+
+    Delegating ``cls``, ``mean`` and ``max`` was checked against the inline
+    code it replaced. Mask-aware mean and max agree with the old values within
+    atol 1e-6 for any sequence with at least one valid token. That check is
+    the reason the delegation is safe, and it is recorded here because the
+    plan that made the decision no longer exists.
 
     :param task_config: NLPTaskConfig object with task configuration.
     :type task_config: NLPTaskConfig
@@ -59,27 +176,55 @@ class BaseNLPHead(keras.layers.Layer):
     :type activation_type: ActivationType
     :param use_pooling: Whether to use pooling for sequence-level tasks.
     :type use_pooling: bool
-    :param pooling_type: Type of pooling ('mean', 'max', 'cls', 'last',
-        'attention'). ``'last'`` is mask-aware and is the correct choice for a
-        CAUSAL backbone -- see the decision note beside ``_create_common_layers``.
+    :param pooling_type: Which pooling strategy to use. ``'last'`` reads the
+        last position kept by the mask, so it is the right choice for a causal
+        backbone. The default ``'cls'`` reads position 0, which suits a
+        bidirectional encoder. See the D-023 note in ``_create_common_layers``.
     :type pooling_type: Literal['mean', 'max', 'cls', 'last', 'attention']
-    :param use_intermediate: Whether to use intermediate dense layer.
+    :param use_intermediate: Whether to build the intermediate DenseBlock.
     :type use_intermediate: bool
-    :param intermediate_size: Size of intermediate layer if used.
+    :param intermediate_size: Width of the intermediate layer. Defaults to
+        ``input_dim`` when not given.
     :type intermediate_size: Optional[int]
-    :param use_task_attention: Whether to use task-specific attention.
+    :param use_task_attention: Whether to build a task-specific attention
+        layer. Three subclasses build it but never call it; see above.
     :type use_task_attention: bool
-    :param attention_type: Type of attention mechanism if used.
+    :param attention_type: Which registered attention type to build.
     :type attention_type: AttentionType
-    :param use_ffn: Whether to include FFN block.
+    :param use_ffn: Whether to build an FFN block.
     :type use_ffn: bool
-    :param ffn_type: Type of FFN to use.
+    :param ffn_type: Which registered FFN type to build.
     :type ffn_type: FFNType
-    :param ffn_expansion_factor: Expansion factor for FFN.
+    :param ffn_expansion_factor: The FFN's inner width is
+        ``hidden_size * ffn_expansion_factor``.
     :type ffn_expansion_factor: int
-    :param initializer_range: Standard deviation for weight initialization.
+    :param initializer_range: Standard deviation of the truncated normal
+        initializer used by every Dense layer in this package.
     :type initializer_range: float
-    :param kwargs: Additional arguments for base Layer class.
+    :param kwargs: Additional arguments for the base Layer class. A default
+        ``name`` of ``"<task name>_head"`` is set when none is given.
+
+    :ivar hidden_size: Working width of the head. Taken from
+        ``task_config.hidden_size`` when set, otherwise ``intermediate_size``.
+    :vartype hidden_size: int
+    :ivar norm: Normalization layer, always built.
+    :vartype norm: keras.layers.Layer
+    :ivar dropout: Dropout layer, always built.
+    :vartype dropout: keras.layers.Dropout
+    :ivar sequence_pooler: Shared SequencePooling layer, or ``None``.
+    :vartype sequence_pooler: Optional[SequencePooling]
+    :ivar attention_pooling: Inline ``Dense(1, tanh)`` scorer used by the
+        ``'attention'`` strategy, or ``None``.
+    :vartype attention_pooling: Optional[keras.layers.Dense]
+    :ivar task_attention: Task attention layer, or ``None``.
+    :vartype task_attention: Optional[keras.layers.Layer]
+    :ivar intermediate: Intermediate DenseBlock, or ``None``.
+    :vartype intermediate: Optional[DenseBlock]
+    :ivar ffn: FFN block, or ``None``.
+    :vartype ffn: Optional[keras.layers.Layer]
+
+    :raises ValueError: From ``_pool_sequence``, when ``pooling_type`` is not
+        one of the five supported values.
     """
 
     def __init__(
@@ -100,10 +245,49 @@ class BaseNLPHead(keras.layers.Layer):
             initializer_range: float = 0.02,
             **kwargs: Any
     ) -> None:
-        """Initialize the base NLP head."""
-        # Set a default name ONLY if 'name' is not in kwargs. ---
-        # This prevents passing 'name' twice during deserialization, as the
-        # saved config will already contain it.
+        """
+        Store the configuration and build the common layers.
+
+        See the class docstring for what each parameter means. Every argument
+        is stored on the instance, then ``_create_common_layers`` builds the
+        shared layers.
+
+        :param task_config: NLPTaskConfig object with task configuration.
+        :type task_config: NLPTaskConfig
+        :param input_dim: Width of the incoming features.
+        :type input_dim: int
+        :param normalization_type: Which registered normalization to build.
+        :type normalization_type: NormalizationType
+        :param activation_type: Activation used by the intermediate block.
+        :type activation_type: ActivationType
+        :param use_pooling: Whether to build a pooler.
+        :type use_pooling: bool
+        :param pooling_type: Which pooling strategy to use.
+        :type pooling_type: Literal['mean', 'max', 'cls', 'last', 'attention']
+        :param use_intermediate: Whether to build the intermediate DenseBlock.
+        :type use_intermediate: bool
+        :param intermediate_size: Width of the intermediate layer. Defaults to
+            ``input_dim``.
+        :type intermediate_size: Optional[int]
+        :param use_task_attention: Whether to build task attention.
+        :type use_task_attention: bool
+        :param attention_type: Which registered attention type to build.
+        :type attention_type: AttentionType
+        :param use_ffn: Whether to build an FFN block.
+        :type use_ffn: bool
+        :param ffn_type: Which registered FFN type to build.
+        :type ffn_type: FFNType
+        :param ffn_expansion_factor: FFN inner-width multiplier.
+        :type ffn_expansion_factor: int
+        :param initializer_range: Truncated normal standard deviation.
+        :type initializer_range: float
+        :param kwargs: Additional arguments for the base Layer class.
+        :return: None.
+        :rtype: None
+        """
+        # Set a default name only when 'name' is absent from kwargs. This
+        # stops 'name' being passed twice during deserialization, because the
+        # saved config already carries it.
         kwargs.setdefault('name', f"{task_config.name}_head")
         super().__init__(**kwargs)
 
@@ -130,7 +314,18 @@ class BaseNLPHead(keras.layers.Layer):
         self._create_common_layers()
 
     def _create_common_layers(self) -> None:
-        """Create common layers used across different heads."""
+        """
+        Build the layers every NLP head shares.
+
+        ``norm`` and ``dropout`` are always built. The pooler,
+        ``task_attention``, ``intermediate`` and ``ffn`` are built only when
+        their flags ask for them, so a head never carries weights it will not
+        use. Called from ``__init__``, following the package rule that layers
+        are created in ``__init__``.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Dropout layer
         self.dropout = layers.Dropout(
@@ -146,33 +341,17 @@ class BaseNLPHead(keras.layers.Layer):
 
         # Optional pooling for sequence-level tasks.
         #
-        # DECISION plan_2026-06-08_8b32ca51/D-002: PARTIAL delegation to
-        # SequencePooling. The cls/mean/max strategies are delegated to the
-        # shared `sequence_pooling.SequencePooling` facade (mask-aware mean/max
-        # are value-equivalent to the old inline code within atol 1e-6 for any
-        # sequence with >=1 valid token). The 'attention' strategy is NOT
-        # delegated: SequencePooling's `attention` uses AttentionPooling
-        # (Dense(hidden,tanh) scored against a learnable context vector) — a
-        # different mechanism and a different trainable-weight set than this
-        # head's single `Dense(1, tanh)` direct-score pooling. Delegating it
-        # would change pooled values AND break serialization of existing
-        # checkpoints. DO NOT replace the inline `attention` branch below with
-        # SequencePooling('attention'). See decisions.md D-002.
-        #
-        # DECISION plan-2026-08-17T183311-79c63e38/D-023: 'last' is admitted
-        # here (the allow-list moved to `_DELEGATED_POOLING_STRATEGIES` above).
-        # The class DEFAULT stays 'cls' -- it is correct for the bidirectional
-        # encoders that dominate this head's consumers (bert, distilbert, fnet,
-        # modern_bert, tree_transformer). A CAUSAL backbone must pass
-        # `pooling_type='last'` explicitly, as `models/language/mamba/mamba_v1.py::
-        # create_mamba_with_head` now does: under 'cls' the classifier reads
-        # position 0, which in a causal model has attended to nothing but
-        # itself, so the whole classifier is a function of the first token id.
-        # Measured on the Mamba consumer, CPU, 8 tokens: perturbing token 5
-        # moved the logits by exactly 0.000e+00 under 'cls' while token 0 moved
-        # them by 6.205e-02. Do NOT "simplify" 'last' to `inputs[:, -1, :]`:
-        # SequencePooling's 'last' resolves the last position KEPT BY THE MASK,
-        # so it skips right padding, which a bare -1 index does not.
+        # DECISION plan_2026-06-08_8b32ca51/D-002: cls/mean/max/last delegate
+        # to the shared SequencePooling layer. 'attention' stays inline. Do NOT
+        # route it through SequencePooling('attention'): that is AttentionPooling,
+        # a different mechanism with a different weight set, so it changes pooled
+        # values and breaks existing checkpoints. Owning plan gone; see docstring.
+
+        # DECISION plan-2026-08-17T183311-79c63e38/D-023: 'last' is allowed here;
+        # the default stays 'cls'. A causal backbone must pass pooling_type='last':
+        # under 'cls', perturbing token 5 moved the logits by exactly 0.000e+00
+        # while token 0 moved them by 6.205e-02. Do NOT simplify 'last' to
+        # inputs[:, -1, :]; it must skip right padding. See decisions.md D-023.
         self.sequence_pooler = None
         self.attention_pooling = None
         if self.use_pooling and self.pooling_type in _DELEGATED_POOLING_STRATEGIES:
@@ -181,7 +360,7 @@ class BaseNLPHead(keras.layers.Layer):
                 name=f"{self.name}_sequence_pooler"
             )
         if self.use_pooling and self.pooling_type == 'attention':
-            # Attention-based pooling (kept inline — see D-002 above).
+            # Attention pooling, kept inline. See the D-002 note above.
             self.attention_pooling = layers.Dense(
                 1,
                 activation='tanh',
@@ -194,26 +373,17 @@ class BaseNLPHead(keras.layers.Layer):
         # Optional task-specific attention
         self.task_attention = None
         if self.use_task_attention:
-            # DECISION plan-2026-08-17T183311-79c63e38/D-023
-            # Pre-filter OUR OWN generic defaults to the ones this
-            # `attention_type` accepts, the same shape as
-            # `layers/transformers/free_transformer.py` (D-011). `dim` and
-            # `dropout_rate` used to be injected UNCONDITIONALLY for every
-            # attention type, and 14 of the 33 registered types declare neither
-            # or one of them ('fnet', 'cbam', 'channel', 'spatial', the four
-            # 'tripseN', 'capsule_routing', 'hopfield', 'non_local', 'beit',
-            # 'energy', 'mobile_mqa'). Since `create_attention_layer` RAISES on
-            # an undeclared key (D-011) that is a hard construction failure for
-            # any non-default `attention_type` -- latent only because nothing in
-            # the tree sets one today. Do NOT "fix" it by declaring `dim` on
-            # those registry entries: their classes do not accept it either.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-023: pre-filter our own
+            # generic defaults to the keys this attention_type accepts.
+            # create_attention_layer raises on an undeclared key, and 14 of the
+            # 33 registered types declare neither `dim` nor `dropout_rate`, or
+            # only one. Do NOT declare `dim` on those entries. See D-023.
             attn_defaults = {'dim': self.hidden_size}
-            # 'sliding_window' was dropped from both tuples on 2026-08-27: it is
-            # NOT an ATTENTION_REGISTRY key and never has been, so
+            # 'sliding_window' was dropped from both tuples below on 2026-08-27.
+            # It is not an ATTENTION_REGISTRY key and never has been, so
             # `create_attention_layer` raises `Unknown attention type` before
             # either branch can matter. The 1-D banded variant is 'window_band'.
-            # Adding that here would be a feature, not a fix, so the dead name is
-            # simply removed.
+            # Adding that name here would be a new feature, not a fix.
             if self.attention_type in ('multi_head', 'window'):
                 attn_defaults['num_heads'] = 8
             if self.attention_type == 'window':
@@ -254,22 +424,30 @@ class BaseNLPHead(keras.layers.Layer):
             attention_mask: Optional[keras.KerasTensor] = None
     ) -> keras.KerasTensor:
         """
-        Pool sequence representations to a single vector.
+        Reduce a sequence to one vector per batch element.
 
-        :param sequence: Sequence tensor [batch_size, seq_length, hidden_dim].
+        Four strategies are handed to the shared ``SequencePooling`` layer.
+        The fifth, ``'attention'``, is computed here. See the class docstring
+        for the diagram and for why the two paths stay separate.
+
+        :param sequence: Sequence tensor ``(batch, seq_length, hidden_dim)``.
         :type sequence: keras.KerasTensor
-        :param attention_mask: Optional attention mask [batch_size, seq_length].
+        :param attention_mask: Optional mask ``(batch, seq_length)``. Passed on
+            to ``SequencePooling``, and used to push masked scores to -1e9 in
+            the inline branch.
         :type attention_mask: Optional[keras.KerasTensor]
-        :return: Pooled representation [batch_size, hidden_dim].
+        :return: Pooled representation ``(batch, hidden_dim)``.
         :rtype: keras.KerasTensor
+        :raises ValueError: If ``pooling_type`` is none of the five supported
+            values.
         """
         # DECISION plan_2026-06-08_8b32ca51/D-002: cls/mean/max delegate to the
         # shared SequencePooling facade (created in _create_common_layers).
         # The 'attention' branch stays inline — do NOT route it through
         # SequencePooling (different mechanism + weights). See decisions.md.
         if self.pooling_type in _DELEGATED_POOLING_STRATEGIES:
-            # The `mask=` argument is LOAD-BEARING for 'last' (D-023): it is what
-            # makes the gather land on the last REAL token rather than on padding.
+            # The `mask=` argument matters for 'last' (D-023). It is what makes
+            # the gather land on the last real token rather than on padding.
             return self.sequence_pooler(sequence, mask=attention_mask)
 
         elif self.pooling_type == 'attention':
@@ -290,22 +468,36 @@ class BaseNLPHead(keras.layers.Layer):
             raise ValueError(f"Unknown pooling type: {self.pooling_type}")
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build every common sub-layer that was created.
+
+        A dict input shape is read through its ``'hidden_states'`` key. A
+        rank-3 shape is treated as a sequence and a shorter one as already
+        pooled, which decides the shape the normalization layer is built for.
+        Each optional sub-layer is built only when it exists.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # Determine input shape
         if isinstance(input_shape, dict):
             hidden_shape = input_shape.get('hidden_states', (None, None, self.input_dim))
         else:
             hidden_shape = input_shape
 
-        # Build normalization layer
-        if len(hidden_shape) == 3:  # Sequence input
+        # Build normalization layer.
+        # Rank 3 is a sequence; anything shorter is already pooled.
+        if len(hidden_shape) == 3:
             norm_input_shape = hidden_shape
-        else:  # Already pooled
+        else:
             norm_input_shape = (hidden_shape[0], self.input_dim)
 
         self.norm.build(norm_input_shape)
 
-        # Build sequence pooler (cls/mean/max delegation; D-002) if needed
+        # Build the delegated sequence pooler if there is one (D-002).
         if self.sequence_pooler is not None:
             self.sequence_pooler.build(hidden_shape)
 
@@ -335,7 +527,19 @@ class BaseNLPHead(keras.layers.Layer):
         super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Return a placeholder output shape.
+
+        The base class does not know what a head produces, so it reports one
+        ``'output'`` entry with an unknown width. Every subclass overrides this
+        with its real output keys.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: ``{'output': (batch_size, None)}``.
+        :rtype: Dict[str, Tuple]
+        """
         # Base implementation - subclasses override with specific shapes
         if isinstance(input_shape, dict):
             batch_size = input_shape.get('hidden_states', (None,))[0]
@@ -345,7 +549,15 @@ class BaseNLPHead(keras.layers.Layer):
         return {'output': (batch_size, None)}
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        ``task_config`` is a dataclass, so it is flattened to a plain dict of
+        its ten serializable fields. :meth:`from_config` rebuilds it.
+
+        :return: Config dict accepted by :meth:`from_config`.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'task_config': {
@@ -378,7 +590,17 @@ class BaseNLPHead(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BaseNLPHead":
-        """Create layer from configuration."""
+        """
+        Rebuild a head from a saved config.
+
+        The flattened ``task_config`` dict is turned back into an
+        :class:`NLPTaskConfig` before the class is constructed.
+
+        :param config: Config dict produced by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new head of this class.
+        :rtype: BaseNLPHead
+        """
         # Reconstruct task config
         task_config_dict = config.pop('task_config')
         task_config = NLPTaskConfig(
@@ -404,20 +626,87 @@ class BaseNLPHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextClassificationHead(BaseNLPHead):
     """
-    Head for text classification tasks.
+    One label for a whole sequence.
 
-    Supports various classification scenarios including sentiment analysis,
-    topic classification, intent detection, etc.
+    Use this for sentiment analysis, topic classification, intent detection
+    and the other sequence-level tasks. It also serves regression, by setting
+    ``num_classes=1``.
+
+    A rank-3 input is pooled to one vector per batch element first. A rank-2
+    input is taken as already pooled and goes straight into the common stage.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, S, D), (B, D), or a dict
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ _pool_sequence     (optional) │ rank 3 only
+        └───────────────┬───────────────┘
+                        ▼ (B, D)
+        ┌───────────────────────────────┐
+        │ norm  ->  dropout             │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ intermediate       (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ task_attention     (optional) │ rank 3 only
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ ffn                (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ classifier: Dense(num_classes)│
+        └───────────────┬───────────────┘
+                        ▼ logits (B, num_classes)
+                ┌───────┴────────┐
+                ▼                ▼
+             'logits'     'probabilities'
+                          = softmax(logits)
+
+    ``task_attention`` is built when ``use_task_attention`` is set, but it
+    only runs while the features are still rank 3. After pooling they are rank
+    2, so with the default ``use_pooling=True`` it never runs.
+
+    Input shape:
+        ``(batch, seq_length, input_dim)`` or ``(batch, input_dim)``, or a
+        dict with ``'hidden_states'`` and an optional ``'attention_mask'``.
+
+    Output shape:
+        ``{'logits': (batch, num_classes),
+        'probabilities': (batch, num_classes)}``.
+
+    :param kwargs: Passed to :class:`BaseNLPHead`. ``task_config`` and
+        ``input_dim`` are required there.
+
+    :ivar classifier: Output ``Dense(num_classes)`` layer.
+    :vartype classifier: keras.layers.Dense
+
+    :raises ValueError: If ``task_config.num_classes`` is ``None``.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize text classification head."""
+        """
+        Build the base head, then the classifier.
+
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If ``task_config.num_classes`` is ``None``.
+        """
         super().__init__(**kwargs)
 
         if self.task_config.num_classes is None:
             raise ValueError("num_classes must be specified for classification tasks")
 
-        # Classification layer (CREATE in __init__)
+        # Classification layer, created in __init__ per the package rule.
         self.classifier = layers.Dense(
             self.task_config.num_classes,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -427,7 +716,20 @@ class TextClassificationHead(BaseNLPHead):
         )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, then the classifier.
+
+        The classifier's input width is ``hidden_size`` when any of
+        ``ffn``, ``task_attention`` or ``intermediate`` is enabled, because
+        each of those rewrites the feature width. Otherwise it is
+        ``input_dim``.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # First build common layers
         super().build(input_shape)
 
@@ -444,7 +746,17 @@ class TextClassificationHead(BaseNLPHead):
         self.classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the two output shapes.
+
+        Both keys carry ``(batch, num_classes)``.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Shapes of ``'logits'`` and ``'probabilities'``.
+        :rtype: Dict[str, Tuple]
+        """
         if isinstance(input_shape, dict):
             batch_size = input_shape.get('hidden_states', (None,))[0]
         else:
@@ -461,13 +773,15 @@ class TextClassificationHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through classification head.
+        Pool if needed, run the common stage, then classify.
 
-        :param inputs: Either sequence tensor or dict with 'hidden_states' and optional 'attention_mask'.
+        :param inputs: A sequence tensor, an already-pooled tensor, or a dict
+            with ``'hidden_states'`` and an optional ``'attention_mask'``.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
-        :param training: Whether in training mode.
+        :param training: Whether the call is a training step.
         :type training: Optional[bool]
-        :return: Dictionary with 'logits' and 'probabilities'.
+        :return: ``{'logits', 'probabilities'}``. The probabilities are the
+            softmax of the logits over the last axis.
         :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
@@ -478,8 +792,9 @@ class TextClassificationHead(BaseNLPHead):
             hidden_states = inputs
             attention_mask = None
 
-        # Pool if needed (for sequence-level classification)
-        if len(ops.shape(hidden_states)) == 3:  # [batch, seq_len, hidden]
+        # Pool a sequence input down to one vector per batch element.
+        # Rank 3 is [batch, seq_len, hidden]; anything else is already pooled.
+        if len(ops.shape(hidden_states)) == 3:
             hidden_states = self._pool_sequence(hidden_states, attention_mask)
 
         # Apply common processing
@@ -512,14 +827,83 @@ class TextClassificationHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TokenClassificationHead(BaseNLPHead):
     """
-    Head for token-level classification tasks.
+    One label per token.
 
-    Supports NER, POS tagging, and other token-level tasks.
-    Optionally supports CRF layer for sequence labeling.
+    Use this for named entity recognition, part-of-speech tagging and other
+    token-level tasks. Pooling is forced off, because the sequence axis has to
+    survive to the output.
+
+    The output keys depend on ``task_config.use_crf``. With a CRF the head
+    emits logits only, and the decoding is left to the CRF. Without one it
+    also emits an argmax over the label axis.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, S, D) or a dict
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ norm  ->  dropout             │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ intermediate       (optional) │
+        │ (B,S,D) -> (B*S,D) -> (B,S,H) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ task_attention     (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ ffn                (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ token_classifier: num_classes │
+        └───────────────┬───────────────┘
+                        ▼ (B, S, num_classes)
+                ┌───────┴────────┐
+              use_crf         no crf
+                ▼                ▼
+           {'logits'}      {'logits',
+                            'predictions'}
+                            = argmax(logits)
+
+    Note:
+        ``use_crf`` records the intent. No CRF layer is built here, so a
+        CRF-flagged head currently just drops the ``'predictions'`` key.
+
+    Input shape:
+        ``(batch, seq_length, input_dim)``, or a dict with
+        ``'hidden_states'``.
+
+    Output shape:
+        ``{'logits': (batch, seq_length, num_classes)}``, plus
+        ``{'predictions': (batch, seq_length)}`` when ``use_crf`` is false.
+
+    :param kwargs: Passed to :class:`BaseNLPHead`. ``use_pooling`` is
+        overwritten with ``False`` before it gets there.
+
+    :ivar token_classifier: Per-token ``Dense(num_classes)`` layer.
+    :vartype token_classifier: keras.layers.Dense
+    :ivar use_crf: Mirror of ``task_config.use_crf``.
+    :vartype use_crf: bool
+
+    :raises ValueError: If ``task_config.num_classes`` is ``None``.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize token classification head."""
+        """
+        Force pooling off, then build the per-token classifier.
+
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If ``task_config.num_classes`` is ``None``.
+        """
         # Token classification doesn't use pooling
         kwargs['use_pooling'] = False
         super().__init__(**kwargs)
@@ -527,7 +911,7 @@ class TokenClassificationHead(BaseNLPHead):
         if self.task_config.num_classes is None:
             raise ValueError("num_classes must be specified for token classification")
 
-        # Token classifier (CREATE in __init__)
+        # Token classifier, created in __init__ per the package rule.
         self.token_classifier = layers.Dense(
             self.task_config.num_classes,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -536,16 +920,28 @@ class TokenClassificationHead(BaseNLPHead):
             name=f"{self.name}_token_classifier"
         )
 
-        # Optional CRF layer (placeholder - would need actual CRF implementation)
+        # There is no CRF layer here yet. The flag is recorded so the output
+        # keys match what a CRF consumer expects; a real CRF would be a
+        # separate layer.
         if self.task_config.use_crf:
-            # Note: CRF would need to be implemented separately
-            # This is a placeholder for the architecture
             self.use_crf = True
         else:
             self.use_crf = False
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, then the per-token classifier.
+
+        The classifier's input width is ``hidden_size`` when any of ``ffn``,
+        ``task_attention`` or ``intermediate`` is enabled, because each of
+        those rewrites the feature width. Otherwise it is ``input_dim``.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # First build common layers
         super().build(input_shape)
 
@@ -566,7 +962,18 @@ class TokenClassificationHead(BaseNLPHead):
         self.token_classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the output shapes, with or without ``'predictions'``.
+
+        ``'predictions'`` is present only when ``use_crf`` is false, which
+        matches what ``call`` returns.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: ``{'logits': ...}``, plus ``'predictions'`` when no CRF.
+        :rtype: Dict[str, Tuple]
+        """
         if isinstance(input_shape, dict):
             batch_size = input_shape.get('hidden_states', (None,))[0]
             seq_length = input_shape.get('hidden_states', (None, None))[1]
@@ -589,9 +996,15 @@ class TokenClassificationHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through token classification head.
+        Run the common stage per token, then label every position.
 
-        :return: Dictionary with 'logits' and optional 'predictions'.
+        :param inputs: A sequence tensor, or a dict with ``'hidden_states'``.
+            Any ``'attention_mask'`` in the dict is ignored by this head.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether the call is a training step.
+        :type training: Optional[bool]
+        :return: ``{'logits'}``, plus ``'predictions'`` when ``use_crf`` is
+            false.
         :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
@@ -605,7 +1018,8 @@ class TokenClassificationHead(BaseNLPHead):
         hidden_states = self.dropout(hidden_states, training=training)
 
         if self.use_intermediate:
-            # Apply to each position in the sequence
+            # Flatten the sequence axis so the dense block sees one row per
+            # token, then restore the original layout.
             batch_size, seq_len, hidden_dim = ops.shape(hidden_states)
             hidden_states_flat = ops.reshape(hidden_states, (-1, hidden_dim))
             hidden_states_flat = self.intermediate(hidden_states_flat, training=training)
@@ -637,18 +1051,83 @@ class TokenClassificationHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class QuestionAnsweringHead(BaseNLPHead):
     """
-    Head for extractive question answering.
+    Start and end scores for an extractive answer span.
 
-    Predicts start and end positions for answer spans.
+    Two independent ``Dense(1)`` layers read the same processed sequence. Each
+    produces one score per position, so the answer span is chosen by taking an
+    argmax over each of them. Pooling is forced off, because the sequence axis
+    has to survive to the output.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, S, D) or a dict (+ attention_mask)
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ norm  ->  dropout             │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ intermediate       (optional) │
+        │ (B,S,D) -> (B*S,D) -> (B,S,H) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ task_attention     (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+                ┌───────┴──────────┐
+                ▼                   ▼
+        ┌────────────────┐ ┌────────────────┐
+        │ start Dense(1) │ │ end Dense(1)   │
+        └───────┬────────┘ └───────┬────────┘
+                ▼                   ▼
+          squeeze -> (B,S)   squeeze -> (B,S)
+                │                   │
+                └───────┬──────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ mask fill  x*m + (1-m)*-1e9   │
+        │ (optional, needs the mask)    │
+        └───────────────┬───────────────┘
+                        ▼
+          {'start_logits', 'end_logits'}
+
+    There is no FFN stage. ``call`` stops applying common layers after
+    ``task_attention``, so ``use_ffn`` builds a block this head never runs.
+
+    Input shape:
+        ``(batch, seq_length, input_dim)``, or a dict with
+        ``'hidden_states'`` and an optional ``'attention_mask'``.
+
+    Output shape:
+        ``{'start_logits': (batch, seq_length),
+        'end_logits': (batch, seq_length)}``.
+
+    :param kwargs: Passed to :class:`BaseNLPHead`. ``use_pooling`` is
+        overwritten with ``False`` before it gets there.
+
+    :ivar start_classifier: ``Dense(1)`` scoring the span start.
+    :vartype start_classifier: keras.layers.Dense
+    :ivar end_classifier: ``Dense(1)`` scoring the span end.
+    :vartype end_classifier: keras.layers.Dense
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize QA head."""
+        """
+        Force pooling off, then build the two span scorers.
+
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        """
         # QA doesn't use pooling
         kwargs['use_pooling'] = False
         super().__init__(**kwargs)
 
-        # Start and end position predictors (CREATE in __init__)
+        # Span scorers, created in __init__ per the package rule.
         self.start_classifier = layers.Dense(
             1,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -666,7 +1145,19 @@ class QuestionAnsweringHead(BaseNLPHead):
         )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, then both span scorers.
+
+        Both scorers take the same shape. Its width is ``hidden_size`` when any
+        of ``ffn``, ``task_attention`` or ``intermediate`` is enabled, and
+        ``input_dim`` otherwise.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # First build common layers
         super().build(input_shape)
 
@@ -676,7 +1167,7 @@ class QuestionAnsweringHead(BaseNLPHead):
         else:
             seq_shape = input_shape
 
-        # Determine the correct input dimension for the classifiers ---
+        # Determine the correct input dimension for the classifiers.
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             classifier_input_dim = self.hidden_size
         else:
@@ -688,7 +1179,17 @@ class QuestionAnsweringHead(BaseNLPHead):
         self.end_classifier.build(classifier_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the two span-score shapes.
+
+        Both keys carry ``(batch, seq_length)``.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Shapes of ``'start_logits'`` and ``'end_logits'``.
+        :rtype: Dict[str, Tuple]
+        """
         if isinstance(input_shape, dict):
             batch_size = input_shape.get('hidden_states', (None,))[0]
             seq_length = input_shape.get('hidden_states', (None, None))[1]
@@ -707,9 +1208,18 @@ class QuestionAnsweringHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through QA head.
+        Run the common stage, then score every position twice.
 
-        :return: Dictionary with 'start_logits', 'end_logits', and optionally answer spans.
+        When an ``'attention_mask'`` is given, masked positions are pushed to
+        -1e9 in both score vectors so an argmax cannot land on padding.
+
+        :param inputs: A sequence tensor, or a dict with ``'hidden_states'``
+            and an optional ``'attention_mask'``.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether the call is a training step.
+        :type training: Optional[bool]
+        :return: ``{'start_logits', 'end_logits'}``, both ``(batch,
+            seq_length)``.
         :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
@@ -737,7 +1247,7 @@ class QuestionAnsweringHead(BaseNLPHead):
         start_logits = ops.squeeze(self.start_classifier(hidden_states), axis=-1)
         end_logits = ops.squeeze(self.end_classifier(hidden_states), axis=-1)
 
-        # Apply attention mask if provided
+        # Push masked positions to -1e9 so an argmax cannot select padding.
         if attention_mask is not None:
             # Cast attention_mask to the same dtype as logits
             mask = ops.cast(attention_mask, dtype=start_logits.dtype)
@@ -757,9 +1267,81 @@ class QuestionAnsweringHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextSimilarityHead(BaseNLPHead):
     """
-    Head for text similarity and semantic matching tasks.
+    One embedding, or a similarity score for a pair of texts.
 
-    Can output similarity scores or embeddings for comparison.
+    The head has two input forms and returns a different dict for each. Give
+    it a 2-tuple of sequences and it scores the pair. Give it a single
+    sequence and it returns that sequence's embedding, with no score.
+
+    Both forms share ``_process_sequence``, which runs ``norm``, ``dropout``,
+    the optional ``intermediate`` and ``ffn``, then a ``projection`` Dense to
+    ``hidden_size``. Neither form applies ``task_attention``, whatever
+    ``use_task_attention`` says.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (seq1, seq2) tuple, or one tensor or dict
+                            │
+                 ┌──────────┴──────────┐
+              2-tuple                single
+                 ▼                    ▼
+           pool seq1, seq2       pool if rank 3
+                 │                    │
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ _process_sequence│ │ _process_sequence│
+        │ twice: emb1,emb2 │ │ -> embeddings    │
+        └────────┬─────────┘ └────────┬─────────┘
+                 ▼                    ▼
+        ┌──────────────────┐    {'embeddings'}
+        │ similarity_fn    │
+        │ (table below)    │
+        └────────┬─────────┘
+                 ▼
+          {'similarity_score'}
+          plus 'embeddings_1' and 'embeddings_2'
+          when output_embeddings is set
+
+    **Similarity Functions:**
+
+    .. code-block:: text
+
+        similarity_function   computation             out
+        -------------------   ---------------------   ----
+        'cosine'              sum(L2(e1) * L2(e2))    (B,)
+        'dot'                 sum(e1 * e2)            (B,)
+        'learned'             concat[e1, e2, e1*e2,   (B,)
+                              abs(e1-e2)]
+                              -> Dense(hidden_size)
+                              -> Dense(1) -> squeeze
+
+    The cosine branch divides by ``max(norm, 1e-8)``, so a zero vector gives a
+    score of 0 rather than a NaN.
+
+    Input shape:
+        A 2-tuple of ``(batch, seq_length, input_dim)`` tensors or dicts, or a
+        single tensor of that shape, or a single dict.
+
+    Output shape:
+        Pair form: ``{'similarity_score': (batch,)}``, plus
+        ``'embeddings_1'`` and ``'embeddings_2'`` of ``(batch, hidden_size)``
+        when ``output_embeddings`` is set. Single form:
+        ``{'embeddings': (batch, hidden_size)}``.
+
+    :param output_embeddings: Whether the pair form also returns the two
+        embeddings. The single form always returns its embedding.
+    :type output_embeddings: bool
+    :param similarity_function: Which of the three scoring rules to use.
+    :type similarity_function: Literal['cosine', 'dot', 'learned']
+    :param kwargs: Passed to :class:`BaseNLPHead`.
+
+    :ivar projection: ``Dense(hidden_size)`` applied to every embedding.
+    :vartype projection: keras.layers.Dense
+    :ivar similarity_layers: The two Dense layers of the ``'learned'`` rule.
+        Empty for the other two rules.
+    :vartype similarity_layers: List[keras.layers.Dense]
     """
 
     def __init__(
@@ -768,13 +1350,27 @@ class TextSimilarityHead(BaseNLPHead):
             similarity_function: Literal['cosine', 'dot', 'learned'] = 'cosine',
             **kwargs: Any
     ) -> None:
-        """Initialize similarity head."""
+        """
+        Build the base head, the projection, and the learned scorer.
+
+        The two ``similarity_layers`` are built only for the ``'learned'``
+        rule. For ``'cosine'`` and ``'dot'`` the list stays empty.
+
+        :param output_embeddings: Whether the pair form also returns the two
+            embeddings.
+        :type output_embeddings: bool
+        :param similarity_function: Which of the three scoring rules to use.
+        :type similarity_function: Literal['cosine', 'dot', 'learned']
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.output_embeddings = output_embeddings
         self.similarity_function = similarity_function
 
-        # Optional projection layer (CREATE in __init__)
+        # Projection layer, created in __init__ per the package rule.
         self.projection = layers.Dense(
             self.hidden_size,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -796,7 +1392,18 @@ class TextSimilarityHead(BaseNLPHead):
             ]
 
     def build(self, input_shape: Union[Tuple, Dict, List]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, the projection, and the learned scorer.
+
+        A 2-element input shape is the pair form. Both sides go through the
+        same layers, so the first element's shape is enough to build them.
+
+        :param input_shape: One shape, a dict of shapes, or a 2-element list
+            or tuple of either for the pair form.
+        :type input_shape: Union[Tuple, Dict, List]
+        :return: None.
+        :rtype: None
+        """
         # Handle tuple input (pairwise) by using first element shape
         if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
             base_input_shape = input_shape[0]
@@ -806,8 +1413,8 @@ class TextSimilarityHead(BaseNLPHead):
         # First build common layers
         super().build(base_input_shape)
 
-        # Determine the correct input dimension for the projection layer ---
-        # Note: Similarity head doesn't typically use task_attention.
+        # Input width for the projection layer. task_attention is not part of
+        # the condition because this head never applies it.
         if self.use_ffn or self.use_intermediate:
             projection_input_dim = self.hidden_size
         else:
@@ -825,7 +1432,19 @@ class TextSimilarityHead(BaseNLPHead):
                 combined_input_shape = (None, layer.units if hasattr(layer, 'units') else 1)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict, List]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the output shapes for whichever input form was given.
+
+        A 2-element shape reports ``'similarity_score'``, plus the two
+        embeddings when ``output_embeddings`` is set. Anything else reports a
+        single ``'embeddings'`` entry.
+
+        :param input_shape: One shape, a dict of shapes, or a 2-element list
+            or tuple of either for the pair form.
+        :type input_shape: Union[Tuple, Dict, List]
+        :return: Output shapes for the matching input form.
+        :rtype: Dict[str, Tuple]
+        """
         # Handle different input formats
         if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
             # Pairwise input
@@ -854,14 +1473,17 @@ class TextSimilarityHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through similarity head.
+        Score a pair of sequences, or embed a single one.
 
-        :param inputs: Single sequence tensor, dict with 'hidden_states',
-            or tuple of two sequences for pairwise similarity.
+        :param inputs: A 2-tuple of sequences for the pair form, or a single
+            sequence tensor or dict with ``'hidden_states'``.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor], Tuple]
-        :param training: Whether in training mode.
+        :param training: Whether the call is a training step.
         :type training: Optional[bool]
-        :return: Dictionary with 'embeddings' and/or 'similarity_score'.
+        :return: ``{'similarity_score'}`` for the pair form, with
+            ``'embeddings_1'`` and ``'embeddings_2'`` when
+            ``output_embeddings`` is set. ``{'embeddings'}`` for the single
+            form.
         :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
@@ -884,7 +1506,8 @@ class TextSimilarityHead(BaseNLPHead):
 
             # Compute similarity
             if self.similarity_function == 'cosine':
-                # Cosine similarity
+                # Cosine similarity. The 1e-8 floor keeps a zero vector from
+                # producing a NaN.
                 emb1_norm = emb1 / ops.maximum(ops.norm(emb1, axis=-1, keepdims=True), 1e-8)
                 emb2_norm = emb2 / ops.maximum(ops.norm(emb2, axis=-1, keepdims=True), 1e-8)
                 similarity = ops.sum(emb1_norm * emb2_norm, axis=-1)
@@ -926,7 +1549,20 @@ class TextSimilarityHead(BaseNLPHead):
             sequence: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Process a sequence through the head layers."""
+        """
+        Run one pooled sequence through the shared layers.
+
+        Applies ``norm``, ``dropout``, the optional ``intermediate`` and
+        ``ffn``, then the ``projection`` Dense. ``task_attention`` is not
+        applied here.
+
+        :param sequence: Pooled features ``(batch, width)``.
+        :type sequence: keras.KerasTensor
+        :param training: Whether the call is a training step.
+        :type training: Optional[bool]
+        :return: Embedding ``(batch, hidden_size)``.
+        :rtype: keras.KerasTensor
+        """
         hidden_states = self.norm(sequence)
         hidden_states = self.dropout(hidden_states, training=training)
 
@@ -942,7 +1578,14 @@ class TextSimilarityHead(BaseNLPHead):
         return embeddings
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        Adds this head's two extra arguments to the base config.
+
+        :return: Config dict accepted by ``from_config``.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'output_embeddings': self.output_embeddings,
@@ -958,13 +1601,68 @@ class TextSimilarityHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class TextGenerationHead(BaseNLPHead):
     """
-    Head for text generation tasks.
+    Logits over the vocabulary, one distribution per position.
 
-    Supports autoregressive generation, masked language modeling, etc.
+    Use this for autoregressive generation, masked language modeling,
+    summarization and completion. Pooling is forced off, because the sequence
+    axis has to survive to the output.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, S, D) or a dict
+                        │
+                        ▼
+        ┌───────────────────────────────┐
+        │ norm  ->  dropout             │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ intermediate       (optional) │
+        │ (B,S,D) -> (B*S,D) -> (B,S,H) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ ffn                (optional) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ lm_head -> vocabulary_size    │
+        └───────────────┬───────────────┘
+                        ▼
+        {'logits'} (B, S, vocabulary_size)
+
+    There is no task-attention stage. ``call`` goes straight from the
+    intermediate block to the FFN, so setting ``use_task_attention=True``
+    builds an attention layer this head never runs. Do not add the stage to
+    the diagram from the base class; read ``call``.
+
+    Input shape:
+        ``(batch, seq_length, input_dim)``, or a dict with
+        ``'hidden_states'``.
+
+    Output shape:
+        ``{'logits': (batch, seq_length, vocabulary_size)}``.
+
+    :param kwargs: Passed to :class:`BaseNLPHead`. ``use_pooling`` is
+        overwritten with ``False`` before it gets there.
+
+    :ivar lm_head: Output ``Dense(vocabulary_size)`` layer.
+    :vartype lm_head: keras.layers.Dense
+
+    :raises ValueError: If ``task_config.vocabulary_size`` is ``None``.
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize generation head."""
+        """
+        Force pooling off, then build the language modeling head.
+
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If ``task_config.vocabulary_size`` is ``None``.
+        """
         # Generation doesn't use pooling
         kwargs['use_pooling'] = False
         super().__init__(**kwargs)
@@ -972,7 +1670,7 @@ class TextGenerationHead(BaseNLPHead):
         if self.task_config.vocabulary_size is None:
             raise ValueError("vocabulary_size must be specified for generation tasks")
 
-        # Language modeling head (CREATE in __init__)
+        # Language modeling head, created in __init__ per the package rule.
         self.lm_head = layers.Dense(
             self.task_config.vocabulary_size,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -982,7 +1680,19 @@ class TextGenerationHead(BaseNLPHead):
         )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, then the language modeling head.
+
+        The head's input width is ``hidden_size`` when any of ``ffn``,
+        ``task_attention`` or ``intermediate`` is enabled, and ``input_dim``
+        otherwise.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # First build common layers
         super().build(input_shape)
 
@@ -992,7 +1702,7 @@ class TextGenerationHead(BaseNLPHead):
         else:
             seq_shape = input_shape
 
-        # Determine the correct input dimension for the LM head ---
+        # Determine the correct input dimension for the LM head.
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             lm_input_dim = self.hidden_size
         else:
@@ -1003,7 +1713,15 @@ class TextGenerationHead(BaseNLPHead):
         self.lm_head.build(lm_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the vocabulary logits shape.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: ``{'logits': (batch, seq_length, vocabulary_size)}``.
+        :rtype: Dict[str, Tuple]
+        """
         if isinstance(input_shape, dict):
             batch_size = input_shape.get('hidden_states', (None,))[0]
             seq_length = input_shape.get('hidden_states', (None, None))[1]
@@ -1019,9 +1737,18 @@ class TextGenerationHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through generation head.
+        Run the common stage per token, then score the vocabulary.
 
-        :return: Dictionary with 'logits' over vocabulary.
+        ``task_attention`` is never applied here, even when
+        ``use_task_attention`` is set.
+
+        :param inputs: A sequence tensor, or a dict with ``'hidden_states'``.
+            Any ``'attention_mask'`` in the dict is ignored by this head.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Whether the call is a training step.
+        :type training: Optional[bool]
+        :return: ``{'logits'}`` of shape ``(batch, seq_length,
+            vocabulary_size)``.
         :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different input formats
@@ -1056,16 +1783,89 @@ class TextGenerationHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class MultipleChoiceHead(BaseNLPHead):
     """
-    Head for multiple choice tasks.
+    One score per candidate answer.
 
-    Handles questions with multiple answer options.
+    Every choice is scored independently by the same ``Dense(1)``, then the
+    scores are softmaxed across the choice axis. The interesting part is the
+    reshape ladder: the choice axis is folded into the batch axis so the
+    pooler sees ordinary sequences, then unfolded again.
+
+    ``B`` is the batch size, ``C`` the number of choices, ``S`` the sequence
+    length and ``D`` the input width.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs: (B, C, S, D) or (B, C, D), or a dict
+                          │
+                  ┌───────┴────────┐
+               rank 4            rank 3
+                  ▼                │
+        ┌────────────────────┐     │
+        │ reshape to         │     │
+        │ (B*C, S, D)        │     │
+        └──────────┬─────────┘     │
+                   ▼               │
+        ┌────────────────────┐     │
+        │ _pool_sequence     │     │
+        │ -> (B*C, D)        │     │
+        └──────────┬─────────┘     │
+                   ▼               │
+        ┌────────────────────┐     │
+        │ reshape to (B,C,D) │     │
+        └──────────┬─────────┘     │
+                   └────┬──────────┘
+                        ▼ pooled (B, C, D)
+        ┌───────────────────────────────┐
+        │ norm  ->  dropout             │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ intermediate       (optional) │
+        │ (B,C,D) -> (B*C,D) -> (B,C,D) │
+        └───────────────┬───────────────┘
+                        ▼
+        ┌───────────────────────────────┐
+        │ scorer: Dense(1) -> squeeze   │
+        └───────────────┬───────────────┘
+                        ▼ logits (B, C)
+                ┌───────┴────────┐
+                ▼                ▼
+             'logits'     'probabilities'
+                          = softmax(logits)
+
+    There is no task-attention stage and no FFN stage. ``call`` goes straight
+    from the intermediate block to the scorer, so ``use_task_attention`` and
+    ``use_ffn`` build layers this head never runs.
+
+    Input shape:
+        ``(batch, num_choices, seq_length, input_dim)``, or an already-pooled
+        ``(batch, num_choices, input_dim)``, or a dict with
+        ``'hidden_states'``.
+
+    Output shape:
+        ``{'logits': (batch, num_choices),
+        'probabilities': (batch, num_choices)}``.
+
+    :param kwargs: Passed to :class:`BaseNLPHead`. ``task_config`` and
+        ``input_dim`` are required there.
+
+    :ivar scorer: ``Dense(1)`` applied to every choice.
+    :vartype scorer: keras.layers.Dense
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        """Initialize multiple choice head."""
+        """
+        Build the base head, then the per-choice scorer.
+
+        :param kwargs: Passed to :class:`BaseNLPHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
-        # Scorer for each choice (CREATE in __init__)
+        # Per-choice scorer, created in __init__ per the package rule.
         self.scorer = layers.Dense(
             1,
             kernel_initializer=keras.initializers.TruncatedNormal(
@@ -1075,11 +1875,23 @@ class MultipleChoiceHead(BaseNLPHead):
         )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build the common layers, then the scorer.
+
+        The scorer sees one row per choice, so only its width matters. That
+        width is ``hidden_size`` when any of ``ffn``, ``task_attention`` or
+        ``intermediate`` is enabled, and ``input_dim`` otherwise.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # First build common layers
         super().build(input_shape)
 
-        # Determine the correct input dimension for the scorer ---
+        # Determine the correct input dimension for the scorer.
         if self.use_ffn or self.use_task_attention or self.use_intermediate:
             scorer_input_dim = self.hidden_size
         else:
@@ -1090,7 +1902,18 @@ class MultipleChoiceHead(BaseNLPHead):
         self.scorer.build(scorer_input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
-        """Compute the output shape of the layer."""
+        """
+        Report the two output shapes.
+
+        The number of choices is read from axis 1 of the input shape. Both
+        keys carry ``(batch, num_choices)``.
+
+        :param input_shape: Shape of the input, or a dict of shapes carrying a
+            ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Shapes of ``'logits'`` and ``'probabilities'``.
+        :rtype: Dict[str, Tuple]
+        """
         if isinstance(input_shape, dict):
             hidden_shape = input_shape.get('hidden_states', (None, None))
         else:
@@ -1110,14 +1933,20 @@ class MultipleChoiceHead(BaseNLPHead):
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through multiple choice head.
+        Pool every choice, then score them against each other.
 
-        :param inputs: Should have shape [batch_size, num_choices, seq_len, hidden_dim]
-            or be a dict with such 'hidden_states'.
+        A rank-4 input is folded to ``(batch * num_choices, seq_length,
+        input_dim)``, pooled, and unfolded back. A rank-3 input is taken as
+        already pooled and skips all three steps.
+
+        :param inputs: ``(batch, num_choices, seq_length, input_dim)``, an
+            already-pooled ``(batch, num_choices, input_dim)``, or a dict with
+            such a ``'hidden_states'`` entry.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
-        :param training: Whether in training mode.
+        :param training: Whether the call is a training step.
         :type training: Optional[bool]
-        :return: Dictionary with 'logits' over choices.
+        :return: ``{'logits', 'probabilities'}``, both ``(batch,
+            num_choices)``. The probabilities are a softmax across choices.
         :rtype: Dict[str, keras.KerasTensor]
         """
         if isinstance(inputs, dict):
@@ -1128,9 +1957,11 @@ class MultipleChoiceHead(BaseNLPHead):
         # Reshape to handle multiple choices
         batch_size, num_choices = ops.shape(hidden_states)[:2]
 
-        # Pool each choice if needed
-        if len(ops.shape(hidden_states)) == 4:  # [batch, choices, seq, hidden]
-            # Reshape to process all choices together
+        # Pool each choice if the sequence axis is still there.
+        # Rank 4 is [batch, choices, seq, hidden]; rank 3 is already pooled.
+        if len(ops.shape(hidden_states)) == 4:
+            # Fold the choice axis into the batch axis so the pooler sees
+            # ordinary sequences.
             hidden_states = ops.reshape(
                 hidden_states,
                 (batch_size * num_choices,) + ops.shape(hidden_states)[2:]
@@ -1145,7 +1976,7 @@ class MultipleChoiceHead(BaseNLPHead):
         hidden_states = self.dropout(hidden_states, training=training)
 
         if self.use_intermediate:
-            # Flatten for dense layer
+            # Flatten choices into rows so the dense block sees one row each.
             hidden_shape = ops.shape(hidden_states)
             hidden_flat = ops.reshape(hidden_states, (-1, hidden_shape[-1]))
             hidden_flat = self.intermediate(hidden_flat, training=training)
@@ -1168,15 +1999,72 @@ class MultipleChoiceHead(BaseNLPHead):
 @register_dl_technique("dl_techniques.layers.heads.nlp.factory")
 class MultiTaskNLPHead(keras.layers.Layer):
     """
-    Multi-task head that combines multiple task-specific NLP heads.
+    Several task heads behind one layer.
 
-    :param task_configs: Dictionary mapping task names to NLPTaskConfig objects.
+    One head is built per entry in ``task_configs``, using
+    :func:`get_head_class` to pick the class. This layer does not inherit from
+    :class:`BaseNLPHead`; it owns the sub-heads and routes to them.
+
+    ``call`` takes an optional ``task_name``. Given one, it runs that head
+    alone and returns that head's own output dict. Given ``None``, it runs
+    every head and returns a dict of those dicts, keyed by task name.
+
+    With ``use_task_specific_projections`` set, each task first goes through
+    its own ``Dense`` projection, so the heads can work at different widths.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        inputs (shared features), task_name
+                        │
+                 ┌──────┴──────────────────┐
+           task_name given            task_name None
+                 ▼                     ▼
+        ┌──────────────────┐  ┌──────────────────┐
+        │ known task?      │  │ loop every task  │
+        │ else ValueError  │  │ in task_heads    │
+        └────────┬─────────┘  └────────┬─────────┘
+                 ▼                     ▼
+        ┌──────────────────┐  ┌──────────────────┐
+        │ task_projections │  │ task_projections │
+        │ [name] (optional)│  │ [name] (optional)│
+        └────────┬─────────┘  └────────┬─────────┘
+                 ▼                     ▼
+        ┌──────────────────┐  ┌──────────────────┐
+        │ task_heads[name] │  │ task_heads[name] │
+        └────────┬─────────┘  └────────┬─────────┘
+                 ▼                     ▼
+          that head's dict     {task: head dict}
+                               one entry per task
+
+    Input shape:
+        Whatever the sub-heads accept. A tensor is passed to every head
+        unchanged. A dict is passed through with its ``'hidden_states'``
+        entry replaced when a projection applies.
+
+    Output shape:
+        The selected head's output dict, or a dict of every head's output dict
+        keyed by task name.
+
+    :param task_configs: Task name to :class:`NLPTaskConfig`. One head is
+        built per entry.
     :type task_configs: Dict[str, NLPTaskConfig]
-    :param shared_input_dim: Dimension of shared features from foundation model.
+    :param shared_input_dim: Width of the shared features coming in.
     :type shared_input_dim: int
-    :param use_task_specific_projections: Whether to use task-specific projections.
+    :param use_task_specific_projections: Whether each task gets its own
+        Dense projection before its head.
     :type use_task_specific_projections: bool
-    :param kwargs: Additional arguments.
+    :param kwargs: Additional arguments for the base Layer class.
+
+    :ivar task_heads: Task name to head layer.
+    :vartype task_heads: Dict[str, BaseNLPHead]
+    :ivar task_projections: Task name to projection layer. Empty when
+        ``use_task_specific_projections`` is false.
+    :vartype task_projections: Dict[str, keras.layers.Dense]
+
+    :raises ValueError: From :func:`get_head_class`, when a task type has no
+        head. From ``call``, when ``task_name`` is not a known task.
     """
 
     def __init__(
@@ -1186,14 +2074,28 @@ class MultiTaskNLPHead(keras.layers.Layer):
             use_task_specific_projections: bool = False,
             **kwargs: Any
     ) -> None:
-        """Initialize multi-task head."""
+        """
+        Build one head, and optionally one projection, per task.
+
+        :param task_configs: Task name to :class:`NLPTaskConfig`.
+        :type task_configs: Dict[str, NLPTaskConfig]
+        :param shared_input_dim: Width of the shared features coming in.
+        :type shared_input_dim: int
+        :param use_task_specific_projections: Whether each task gets its own
+            Dense projection before its head.
+        :type use_task_specific_projections: bool
+        :param kwargs: Additional arguments for the base Layer class.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a task type has no implemented head.
+        """
         super().__init__(**kwargs)
 
         self.task_configs = task_configs
         self.shared_input_dim = shared_input_dim
         self.use_task_specific_projections = use_task_specific_projections
 
-        # Create task heads and projections (CREATE in __init__)
+        # Heads and projections, created in __init__ per the package rule.
         self.task_heads = {}
         self.task_projections = {}
 
@@ -1219,7 +2121,18 @@ class MultiTaskNLPHead(keras.layers.Layer):
             )
 
     def build(self, input_shape: Union[Tuple, Dict]) -> None:
-        """Build the layer and its sub-layers."""
+        """
+        Build every projection, then every head.
+
+        With projections on, each head is built for the width its own
+        projection emits rather than for ``shared_input_dim``.
+
+        :param input_shape: Shape of the shared input, or a dict of shapes
+            carrying a ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: None.
+        :rtype: None
+        """
         # Build task projections if needed
         if self.use_task_specific_projections:
             for task_name, projection in self.task_projections.items():
@@ -1253,7 +2166,18 @@ class MultiTaskNLPHead(keras.layers.Layer):
         super().build(input_shape)
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Dict[str, Tuple]]:
-        """Compute the output shape of the layer."""
+        """
+        Report every head's output shapes, keyed by task name.
+
+        This is the ``task_name=None`` shape. There is no shape method for the
+        single-task call, because that returns one head's dict directly.
+
+        :param input_shape: Shape of the shared input, or a dict of shapes
+            carrying a ``'hidden_states'`` entry.
+        :type input_shape: Union[Tuple, Dict]
+        :return: Task name to that head's output shape dict.
+        :rtype: Dict[str, Dict[str, Tuple]]
+        """
         output_shapes = {}
 
         for task_name, head in self.task_heads.items():
@@ -1284,16 +2208,19 @@ class MultiTaskNLPHead(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> Union[Dict[str, Dict[str, keras.KerasTensor]], Dict[str, keras.KerasTensor]]:
         """
-        Forward pass through multi-task head.
+        Run one task head, or all of them.
 
-        :param inputs: Input features from foundation model.
+        :param inputs: Shared features from the foundation model, as a tensor
+            or as a dict with ``'hidden_states'``.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
-        :param task_name: Specific task to run (if None, runs all tasks).
+        :param task_name: Which task to run. ``None`` runs every task.
         :type task_name: Optional[str]
-        :param training: Whether in training mode.
+        :param training: Whether the call is a training step.
         :type training: Optional[bool]
-        :return: Dictionary of task outputs or single task output.
+        :return: One head's output dict when ``task_name`` is given. A dict of
+            every head's output dict, keyed by task name, when it is ``None``.
         :rtype: Union[Dict[str, Dict[str, keras.KerasTensor]], Dict[str, keras.KerasTensor]]
+        :raises ValueError: If ``task_name`` is not a known task.
         """
         # Handle single task
         if task_name is not None:
@@ -1332,7 +2259,15 @@ class MultiTaskNLPHead(keras.layers.Layer):
         return outputs
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        Each :class:`NLPTaskConfig` is flattened to a plain dict of six
+        fields. :meth:`from_config` rebuilds them.
+
+        :return: Config dict accepted by :meth:`from_config`.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'task_configs': {
@@ -1353,7 +2288,17 @@ class MultiTaskNLPHead(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MultiTaskNLPHead":
-        """Create layer from configuration."""
+        """
+        Rebuild a multi-task head from a saved config.
+
+        Each flattened task-config dict is turned back into an
+        :class:`NLPTaskConfig` before the layer is constructed.
+
+        :param config: Config dict produced by :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new multi-task head.
+        :rtype: MultiTaskNLPHead
+        """
         # Reconstruct task configs
         task_configs_dict = config.pop('task_configs')
         task_configs = {}
@@ -1378,12 +2323,47 @@ class MultiTaskNLPHead(keras.layers.Layer):
 
 def get_head_class(task_type: NLPTaskType) -> type:
     """
-    Get the appropriate head class for a task type.
+    Look up the head class for a task type.
+
+    The mapping is an explicit dict. It covers 24 of the 37
+    :class:`NLPTaskType` members. **The other 13 raise ``ValueError``.** That
+    is a guard, not a gap in the table: this function used to end with
+    ``head_mapping.get(task_type, TextClassificationHead)``, so asking for
+    ``MACHINE_TRANSLATION`` returned a text classifier that built, trained and
+    produced plausible nonsense. Nothing ever failed. A task with no head is a
+    caller error and is now reported as one.
+
+    To add support for one of the 13, implement or choose a head and add the
+    entry. Do not restore the fallback.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        task_type
+            │
+            ▼
+        ┌──────────────────────┐        ┌────────────┐
+        │ in head_mapping?     │─ no ──►│ ValueError │
+        └──────────┬───────────┘        └────────────┘
+                   │ yes
+                   ▼
+        ┌──────────────────────────────────────┐
+        │ one of the six leaf head classes:    │
+        │ TextClassificationHead  (10 tasks)   │
+        │ TokenClassificationHead  (4 tasks)   │
+        │ TextGenerationHead       (4 tasks)   │
+        │ TextSimilarityHead       (3 tasks)   │
+        │ QuestionAnsweringHead    (2 tasks)   │
+        │ MultipleChoiceHead       (1 task)    │
+        └──────────────────────────────────────┘
 
     :param task_type: The NLP task type to look up.
     :type task_type: NLPTaskType
-    :return: The head class corresponding to the given task type.
+    :return: The head class for that task type.
     :rtype: type
+    :raises ValueError: If no head is implemented for ``task_type``. The
+        message lists every supported task type.
     """
     head_mapping = {
         # Classification tasks
@@ -1427,19 +2407,16 @@ def get_head_class(task_type: NLPTaskType) -> type:
         NLPTaskType.QUALITY_SCORING: TextClassificationHead,
     }
 
-    # NO SILENT FALLBACK. This used to be
+    # No silent fallback. This used to be
     #     return head_mapping.get(task_type, TextClassificationHead)
-    # which meant that 13 of the 37 NLPTaskType members -- MACHINE_TRANSLATION,
-    # DIALOGUE_GENERATION, RELATION_EXTRACTION, DEPENDENCY_PARSING, COREFERENCE_RESOLUTION,
-    # SEMANTIC_ROLE_LABELING and friends -- silently returned a TEXT CLASSIFICATION head.
-    # It builds, it trains, and it produces plausible nonsense: a translation task quietly
-    # became a classifier. The failure was invisible.
-    #
-    # The sibling `heads/vision/factory.py` already raises on an unsupported task
-    # (`raise ValueError(f"Unsupported task type: {task_type}")`); this now matches it.
-    # A task that has no head is a caller error, not something to paper over with an
-    # arbitrary default. If one of the types below SHOULD map to an existing head, add it
-    # to `head_mapping` deliberately -- do not restore the fallback.
+    # so 13 of the 37 NLPTaskType members -- MACHINE_TRANSLATION,
+    # DIALOGUE_GENERATION, RELATION_EXTRACTION, DEPENDENCY_PARSING,
+    # COREFERENCE_RESOLUTION, SEMANTIC_ROLE_LABELING and friends -- returned a
+    # text classification head. It builds, it trains, and it produces plausible
+    # nonsense. A translation task quietly became a classifier, and nothing
+    # failed. The sibling `heads/vision/factory.py` already raises on an
+    # unsupported task, and this now matches it. To add one of the missing
+    # types, map it here on purpose. Do not restore the fallback.
     if task_type not in head_mapping:
         supported = sorted(t.name for t in head_mapping)
         raise ValueError(
@@ -1458,15 +2435,42 @@ def create_nlp_head(
         **kwargs: Any
 ) -> BaseNLPHead:
     """
-    Factory function to create NLP task heads.
+    Build one NLP head from a task config.
 
-    :param task_config: NLPTaskConfig object or dict with task configuration.
+    The task type in the config picks the class through
+    :func:`get_head_class`. A plain dict is converted to an
+    :class:`NLPTaskConfig` first. Extra keyword arguments go to the head's
+    constructor unchanged, so anything :class:`BaseNLPHead` accepts can be set
+    here.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        task_config (NLPTaskConfig or dict)
+                │
+                ▼
+        ┌──────────────────────────┐
+        │ dict -> NLPTaskConfig    │
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ get_head_class(task_type)│
+        └────────────┬─────────────┘
+                     ▼
+        ┌──────────────────────────┐
+        │ head_class(task_config,  │
+        │   input_dim, **kwargs)   │
+        └──────────────────────────┘
+
+    :param task_config: An :class:`NLPTaskConfig`, or a dict of its fields.
     :type task_config: Union[NLPTaskConfig, Dict[str, Any]]
-    :param input_dim: Dimension of input features from foundation model.
+    :param input_dim: Width of the features the foundation model emits.
     :type input_dim: int
-    :param kwargs: Additional configuration parameters.
-    :return: Configured NLP head for the specified task.
+    :param kwargs: Extra keyword arguments for the head constructor.
+    :return: A configured head for that task.
     :rtype: BaseNLPHead
+    :raises ValueError: If the task type has no implemented head.
     """
     # Convert dict to NLPTaskConfig if needed
     if isinstance(task_config, dict):
@@ -1489,15 +2493,21 @@ def create_multi_task_nlp_head(
         **kwargs: Any
 ) -> MultiTaskNLPHead:
     """
-    Create a multi-task NLP head from task configurations.
+    Build a :class:`MultiTaskNLPHead` from several task configs.
 
-    :param task_configs: List or dict of NLPTaskConfig objects.
+    A list is turned into a dict keyed by each config's ``name``. Pass a dict
+    directly to choose the keys yourself.
+
+    :param task_configs: A list of :class:`NLPTaskConfig`, or a dict of task
+        name to config.
     :type task_configs: Union[List[NLPTaskConfig], Dict[str, NLPTaskConfig]]
-    :param input_dim: Dimension of input features from foundation model.
+    :param input_dim: Width of the shared features. Becomes the head's
+        ``shared_input_dim``.
     :type input_dim: int
-    :param kwargs: Additional configuration.
-    :return: MultiTaskNLPHead instance.
+    :param kwargs: Extra keyword arguments for :class:`MultiTaskNLPHead`.
+    :return: The configured multi-task head.
     :rtype: MultiTaskNLPHead
+    :raises ValueError: If any task type has no implemented head.
     """
     # Convert list to dict if needed
     if isinstance(task_configs, list):
@@ -1515,16 +2525,47 @@ def create_multi_task_nlp_head(
 # ---------------------------------------------------------------------
 
 class NLPHeadConfiguration:
-    """Configuration helper for NLP heads."""
+    """
+    Suggested keyword arguments per task type.
+
+    This is a lookup table, not a layer. Nothing in this module calls it. Pass
+    the result to :func:`create_nlp_head` when you want sensible defaults
+    instead of writing them out.
+
+    **Task Defaults:**
+
+    .. code-block:: text
+
+        Every task gets these five:
+          dropout_rate 0.1
+          normalization_type 'layer_norm'
+          activation_type 'gelu'
+          use_intermediate True
+          initializer_range 0.02
+
+        task_type              extra keys
+        --------------------   -----------------------------
+        TEXT_CLASSIFICATION    pooling 'cls', no task attn
+        TOKEN_CLASSIFICATION   no pooling, no crf, no attn
+        QUESTION_ANSWERING     no pooling, multi_head attn
+        TEXT_SIMILARITY        pooling 'mean', cosine score
+        TEXT_GENERATION        no pooling, swiglu ffn,
+                               vocabulary_size 32000
+
+    A task type not in the table gets the five common keys only.
+    """
 
     @staticmethod
     def get_default_config(task_type: NLPTaskType) -> Dict[str, Any]:
         """
-        Get default configuration for a task type.
+        Return the suggested keyword arguments for a task type.
 
-        :param task_type: The NLP task type to get defaults for.
+        Five keys are always present. Five task types add a few more. Any
+        other task type gets the five common keys unchanged.
+
+        :param task_type: The NLP task type to look up.
         :type task_type: NLPTaskType
-        :return: Default configuration dictionary.
+        :return: A fresh dict, safe for the caller to mutate.
         :rtype: Dict[str, Any]
         """
         base_config = {
