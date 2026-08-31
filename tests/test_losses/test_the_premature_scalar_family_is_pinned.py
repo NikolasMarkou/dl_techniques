@@ -36,10 +36,14 @@ into any fixed class must turn it red.
 cleared by this file:
 
 *   ``hrm_loss.StableMaxCrossEntropy`` -- measured, and it is NOT a member: its
-    ``call()`` returns ``(batch, seq_len)``. But a ``(batch,)`` ``sample_weight``
-    then RAISES ``InvalidArgumentError: Incompatible shapes: [4,5] vs. [4]``.
-    That is a different defect class (an unreduced token axis), pinned in its own
-    test below so it cannot change unnoticed.
+    ``call()`` returns ``(batch, seq_len)``. A ``(batch,)`` ``sample_weight``
+    then RAISES ``InvalidArgumentError: Incompatible shapes: [4,5] vs. [4]`` --
+    but so does stock ``keras.losses.SparseCategoricalCrossentropy`` on the
+    identical inputs, so this is the Keras convention for a TOKEN-LEVEL loss and
+    not a defect at all. The earlier wording here called it "a different defect
+    class"; that was refuted by measurement on 2026-08-31 and the class is
+    documented rather than changed. See ``decisions.md`` D-002 of
+    ``plan-2026-08-31T045723-c0d5ffa9``.
 *   ``yolo12_multitask_loss`` (4 classes) and ``nano_vlm_loss.NanoVLMLoss`` --
     require structured multi-head ``y_pred`` dicts that cannot be built cheaply
     here.
@@ -343,18 +347,53 @@ def test_the_pinned_population_has_not_shrunk_silently():
     )
 
 
-def test_stable_max_cross_entropy_is_a_different_defect_not_this_one():
-    """NOT a premature scalar: it returns ``(batch, seq_len)`` and its token axis
-    is never reduced, so a ``(batch,)`` ``sample_weight`` RAISES instead of being
-    silently misapplied. Pinned so the distinction cannot rot.
+def test_stable_max_cross_entropy_is_token_shaped_on_purpose():
+    """NOT a premature scalar, and after measurement NOT a defect either.
+
+    ``StableMaxCrossEntropy.call()`` returns ``(batch, seq_len)`` and never
+    reduces the token axis, so a ``(batch,)`` ``sample_weight`` RAISES. This file
+    previously recorded that as "a different defect class". Measuring stock
+    ``keras.losses.SparseCategoricalCrossentropy`` on the SAME inputs refutes
+    that: it is token-shaped too and raises the same ``Incompatible shapes``
+    error. The convention is Keras', and the rank-matching weight shapes work.
+
+    The comparison arm is what makes this a ruling rather than an assertion: if
+    someone reduces this class's token axis, the arm goes red for the right
+    reason -- it now differs from the stock loss it is interchangeable with in
+    ``HRMLoss``.
     """
     from dl_techniques.losses.hrm_loss import StableMaxCrossEntropy
 
     y_true, y_pred = _token_pair()
-    out = StableMaxCrossEntropy().call(y_true, y_pred)
-    assert tuple(keras.ops.shape(out)) == (BATCH, 5)
+    stock = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
+    assert tuple(keras.ops.shape(StableMaxCrossEntropy().call(y_true, y_pred))) == (
+        BATCH,
+        5,
+    )
+    assert tuple(keras.ops.shape(stock.call(y_true, y_pred))) == (BATCH, 5), (
+        "stock SparseCategoricalCrossentropy is no longer token-shaped here, so "
+        "the comparison this ruling rests on has changed -- re-derive it"
+    )
+
+    w = keras.ops.convert_to_tensor(SAMPLE_WEIGHT)
     with pytest.raises(Exception):
-        StableMaxCrossEntropy()(
-            y_true, y_pred, sample_weight=keras.ops.convert_to_tensor(SAMPLE_WEIGHT)
+        StableMaxCrossEntropy()(y_true, y_pred, sample_weight=w)
+    with pytest.raises(Exception):
+        stock(y_true, y_pred, sample_weight=w)
+
+    # A rank-matching weight is the documented way to select rows, and it does
+    # NOT collapse to `unweighted * mean(sample_weight)`.
+    w2 = keras.ops.reshape(w, (BATCH, 1))
+    unweighted = float(
+        keras.ops.convert_to_numpy(StableMaxCrossEntropy()(y_true, y_pred))
+    )
+    weighted = float(
+        keras.ops.convert_to_numpy(
+            StableMaxCrossEntropy()(y_true, y_pred, sample_weight=w2)
         )
+    )
+    assert abs(weighted - unweighted * MEAN_W) > 1e-6, (
+        f"a (batch, 1) sample_weight was applied as a broadcast scalar "
+        f"(unweighted={unweighted!r}, weighted={weighted!r})"
+    )
