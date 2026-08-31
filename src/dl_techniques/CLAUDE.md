@@ -10,7 +10,6 @@ A comprehensive deep learning library providing a broad set of model architectur
 make test       # python -m pytest tests/ -vvv
 make clean      # remove build artifacts and __pycache__
 make structure  # display src tree
-make docs       # generate documentation
 ```
 
 ## Dependencies
@@ -110,7 +109,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 
 | Package | Convention | Measured 2026-08-28 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 265 of 300 modules carry `:param ` |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 262 of 298 modules carry `:param ` (re-measured 2026-08-31 after `downsample.py`/`upsample.py`/`conv2d_builder.py` were deleted; all three carried `:param `, hence -3 of -2) |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 87 Sphinx-only, 8 both, 112 neither, over 287 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 44 carry `Args:`, 10 carry `:param `, 1 both |
