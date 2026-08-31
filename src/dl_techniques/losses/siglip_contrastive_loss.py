@@ -101,7 +101,9 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
 
         Args:
             temperature: Fixed temperature parameter for scaling similarities
-            use_learnable_temperature: Whether to use learnable temperature from model
+            use_learnable_temperature: Whether to read ``temperature`` from ``y_pred``.
+                Defaults to ``False`` here. NOTE: :func:`create_siglip_loss` defaults it
+                to ``True`` -- a deliberate, documented divergence, not an oversight.
             reduction: Type of reduction to apply to loss
             name: Name of the loss function
         """
@@ -292,11 +294,29 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
 @register_dl_technique("dl_techniques.losses.siglip_contrastive_loss")
 class HybridContrastiveLoss(keras.losses.Loss):
     """
-    Hybrid loss combining SigLIP with score-based objectives.
+    SigLIP plus a cross-modal denoising penalty.
 
-    This implementation incorporates Miyasawa theorem principles by
-    combining contrastive learning with score matching for improved
-    cross-modal representation learning.
+    **What the second term actually is.** Gaussian noise is added to each
+    modality's embeddings, and the noisy embeddings of one modality are pulled
+    toward the CLEAN embeddings of the other::
+
+        score_term = ||image_emb + n_i - text_emb||^2 + ||text_emb + n_t - image_emb||^2
+
+    That is a squared-error regularizer with noise injection. It is **not score
+    matching**, and Miyasawa's theorem is **not** applied: nothing here estimates a
+    score ``grad log p(x)``, there is no ``sigma^2`` scaling relating the residual to
+    a score, and the regression target is the OTHER modality rather than the clean
+    signal of the same variable. Denoising score matching requires all three.
+
+    An earlier version of this docstring claimed it "incorporates Miyasawa theorem
+    principles by combining contrastive learning with score matching". That claim did
+    not describe the code and was removed (2026-08-31); the math was left exactly as
+    it is, because the term IS a useful noise-robustness regularizer under its real
+    name. If genuine denoising score matching is wanted here, it is a new feature, not
+    a docstring correction.
+
+    For an implementation that DOES rest on Miyasawa, see
+    :mod:`dl_techniques.losses.jacobian_symmetry`.
     """
 
     def __init__(
@@ -314,9 +334,9 @@ class HybridContrastiveLoss(keras.losses.Loss):
 
         Args:
             siglip_weight: Weight for SigLIP contrastive loss
-            score_weight: Weight for score matching loss
+            score_weight: Weight for the cross-modal denoising penalty
             temperature: Temperature for contrastive loss
-            noise_level: Noise level for score matching
+            noise_level: Std-dev of the Gaussian noise added to each modality
             reduction: Type of reduction to apply to loss
             name: Name of the loss function
         """
@@ -334,7 +354,7 @@ class HybridContrastiveLoss(keras.losses.Loss):
 
     def call(self, y_true, y_pred):
         """
-        Compute hybrid contrastive + score matching loss.
+        Compute the SigLIP term plus the cross-modal denoising penalty.
 
         Args:
             y_true: Not used
@@ -346,12 +366,12 @@ class HybridContrastiveLoss(keras.losses.Loss):
         # Standard SigLIP loss
         siglip_loss = self.siglip_loss(y_true, y_pred)
 
-        # Score matching component (simplified)
+        # Cross-modal denoising penalty (NOT score matching -- see class docstring)
         if 'image_embeddings' in y_pred and 'text_embeddings' in y_pred:
             image_emb = y_pred['image_embeddings']
             text_emb = y_pred['text_embeddings']
 
-            # Add noise for score matching (Miyasawa theorem application)
+            # Additive Gaussian noise. No score is estimated; see class docstring.
             noise_image = keras.random.normal(ops.shape(image_emb), stddev=self.noise_level)
             noise_text = keras.random.normal(ops.shape(text_emb), stddev=self.noise_level)
 
@@ -361,7 +381,7 @@ class HybridContrastiveLoss(keras.losses.Loss):
             # Cross-modal denoising objective: noisy embeddings from one
             # modality should remain close to clean embeddings of the other.
             # This regularizes the embedding space for noise robustness.
-            # Sum over the FEATURE axis only: one score-matching value per
+            # Sum over the FEATURE axis only: one denoising-penalty value per
             # sample, matching the per-sample SigLIP term above. The inner loss
             # is constructed with `reduction='none'`, so it already hands back
             # `(batch_size,)`.
@@ -399,7 +419,28 @@ def create_siglip_loss(
         use_learnable_temperature: bool = True,
         **kwargs
 ) -> SigLIPContrastiveLoss:
-    """Create standard SigLIP contrastive loss."""
+    """Create a standard SigLIP contrastive loss.
+
+    .. warning::
+
+        **This factory's ``use_learnable_temperature`` default is ``True``, while
+        :class:`SigLIPContrastiveLoss`'s own default is ``False``.** The divergence is
+        DELIBERATE and is documented rather than aligned (2026-08-31): the factory
+        expresses the "wired to a model that emits a ``temperature`` key" recipe, the
+        bare class expresses the standalone one. Aligning them would silently change
+        behaviour for every factory caller, and no measured defect motivates it.
+
+        The practical consequence: ``create_siglip_loss()`` reads ``temperature`` out of
+        ``y_pred`` when the key is present, and ``SigLIPContrastiveLoss()`` ignores it.
+        If you want the class default, pass ``use_learnable_temperature=False``
+        explicitly.
+
+    :param temperature: Fixed temperature, used when the learnable path is off or when
+        ``y_pred`` carries no ``temperature`` key.
+    :param use_learnable_temperature: See the warning above. Defaults to ``True`` HERE,
+        unlike the class.
+    :returns: A configured :class:`SigLIPContrastiveLoss`.
+    """
     return SigLIPContrastiveLoss(
         temperature=temperature,
         use_learnable_temperature=use_learnable_temperature,
@@ -425,7 +466,7 @@ def create_hybrid_loss(
         score_weight: float = 0.1,
         **kwargs
 ) -> HybridContrastiveLoss:
-    """Create hybrid loss combining SigLIP with score matching."""
+    """Create a hybrid loss: SigLIP plus a cross-modal denoising penalty."""
     return HybridContrastiveLoss(
         siglip_weight=siglip_weight,
         score_weight=score_weight,
