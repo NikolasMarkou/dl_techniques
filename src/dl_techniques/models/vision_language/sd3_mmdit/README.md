@@ -56,9 +56,13 @@ the integration.
 The two packages share five module names and are **not** duplicates left un-merged:
 `sd3_mmdit/config.py` imports `AutoEncoderParams` from `ideogram4.config`, and the
 VAE is the reused `ideogram4.vae.AutoEncoder` at `z_channels=16` rather than a
-second implementation. The one genuine duplication is `_validate_vae_groupnorm`
-(15 lines, no divergence). One real asymmetry: `ideogram4` implements
-classifier-free guidance and `sd3_mmdit` does not.
+second implementation. `_validate_vae_groupnorm` used to be a byte-equivalent
+second copy here; it was deleted in favour of the same one-way import in
+`plan-2026-08-31-a4e0c303/iter-1/step-3`, so `ideogram4.config` is now its single
+owner (guarded at the sd3 name by
+`tests/test_models/test_sd3_mmdit/test_config_groupnorm_validation.py`). One real
+asymmetry: `ideogram4` implements classifier-free guidance and `sd3_mmdit` does
+not.
 
 ## Loss
 

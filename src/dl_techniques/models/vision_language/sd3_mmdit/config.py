@@ -36,7 +36,14 @@ from typing import Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 
 # Reuse the VAE parameter dataclass from ideogram4 -- do NOT redefine it (D-002).
-from dl_techniques.models.vision_language.ideogram4.config import AutoEncoderParams
+# `_validate_vae_groupnorm` was a byte-equivalent local copy until
+# plan-2026-08-31-a4e0c303/iter-1/step-3; ideogram4 owns it now. Do NOT re-add a
+# local def: a shadowing copy would keep passing every test that imports from
+# ideogram4, which is why the sd3-side guard imports it from THIS module.
+from dl_techniques.models.vision_language.ideogram4.config import (
+    AutoEncoderParams,
+    _validate_vae_groupnorm,
+)
 
 # ---------------------------------------------------------------------
 # Transformer (MMDiT) config
@@ -171,39 +178,6 @@ class SD3MMDiTConfig:
                 config["dual_attention_layers"]
             )
         return cls(**config)
-
-
-# ---------------------------------------------------------------------
-# VAE channel/32 divisibility check (GroupNorm32)
-# ---------------------------------------------------------------------
-
-
-def _validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
-    """Assert every GroupNorm(32) channel count is divisible by 32.
-
-    The base ``ch`` and every stage channel ``ch * m`` for ``m in ch_mult`` feed
-    ``keras.layers.GroupNormalization(groups=32)`` in the reused VAE; each must
-    be divisible by 32 or the layer raises at build time. ``z_channels`` is the
-    latent count and is exempt (it does not feed a GroupNorm).
-
-    Args:
-        ae: The AutoEncoder parameters to validate.
-
-    Raises:
-        ValueError: If ``ch`` or any ``ch * m`` is not divisible by 32.
-    """
-    if ae.ch % 32 != 0:
-        raise ValueError(
-            f"AutoEncoder base ch ({ae.ch}) must be divisible by 32 "
-            f"(GroupNormalization groups=32)."
-        )
-    for m in ae.ch_mult:
-        stage = ae.ch * m
-        if stage % 32 != 0:
-            raise ValueError(
-                f"AutoEncoder stage channel ch * {m} = {stage} must be divisible "
-                f"by 32 (GroupNormalization groups=32)."
-            )
 
 
 # ---------------------------------------------------------------------
