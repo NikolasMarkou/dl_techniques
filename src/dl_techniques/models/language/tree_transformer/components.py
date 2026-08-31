@@ -31,6 +31,7 @@ from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
 )
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -503,11 +504,18 @@ class TreeMHA(keras.layers.Layer):
         scaled_attention_logits = matmul_qk / ops.sqrt(dk)
 
         if mask is not None:
-            # dtype-aware mask sentinel (see GroupAttention D-001).
-            neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
-            attention_mask = (1.0 - ops.cast(mask, self.compute_dtype)) * neg_inf
-            broadcast_mask = ops.expand_dims(attention_mask, axis=1)
-            scaled_attention_logits += broadcast_mask
+            # DECISION plan-2026-08-31T134711-6271592d/D-007
+            # SELECT the sentinel; do NOT add it, and do NOT restore the local
+            # `-1e4 if compute_dtype == "float16"` ternary. The additive form
+            # is `0 * -inf = NaN` at every KEPT position the moment the local
+            # value outgrows the dtype. `mask_sentinel` derives the magnitude.
+            keep = ops.expand_dims(ops.cast(mask, "bool"), axis=1)
+            sentinel = ops.cast(
+                mask_sentinel(self.compute_dtype), scaled_attention_logits.dtype
+            )
+            scaled_attention_logits = ops.where(
+                keep, scaled_attention_logits, sentinel
+            )
 
         attention_weights = ops.softmax(scaled_attention_logits, axis=-1)
 

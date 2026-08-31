@@ -45,6 +45,8 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.ffn.factory import assemble_ffn_config
 
+from dl_techniques.utils.dtype_policy import mask_sentinel
+
 from .config import NAMConfig
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -444,17 +446,19 @@ class NAMCell(keras.layers.Layer):
         # also NaN. The corruption therefore lands on the positions the mask is
         # meant to KEEP, in a row with a perfectly ordinary right-padding mask.
         #
-        # The idiom is the LOCAL one from `tree_transformer/components.py:283`
-        # (`GroupAttention`, D-001) and `:481`, not
-        # `layers/attention/common.apply_attention_mask`. That helper has zero
-        # call sites anywhere inside `models/`, and this is a reduction SCORER
-        # rather than attention — importing it would open a models/ -> attention
-        # internals dependency edge for a two-token change. `sequence_pooling`
-        # made the same call for the same reason (SYSTEM.md). This cell already
-        # composes the tree_transformer components that use this exact idiom, so
-        # the two now agree instead of differing inside one call graph.
-        neg_inf = -1e4 if self.compute_dtype == "float16" else -1e9
-        scores = scores + (1.0 - token_mask_float) * neg_inf
+        # DECISION plan-2026-08-31T134711-6271592d/D-007 (SUPERSEDES the
+        # local-idiom half of D-024 above; its hazard analysis still stands).
+        # The magnitude now comes from `utils.dtype_policy.mask_sentinel`, and
+        # the mask is SELECTED rather than ADDED. Do NOT restore either half:
+        # a local `-1e4 if compute_dtype == "float16"` ternary is one dtype
+        # nobody remembers away from `-inf`, and the additive form NaNs the
+        # KEPT positions. `utils/` imports no `layers/` and no `models/`, so
+        # this does NOT open the `models/` -> `layers/attention/` internals
+        # dependency edge D-024 objects to; `apply_attention_mask` still is
+        # not used here, and this is still a reduction scorer, not attention.
+        keep = ops.cast(token_mask, "bool")
+        sentinel = ops.cast(mask_sentinel(self.compute_dtype), scores.dtype)
+        scores = ops.where(keep, scores, sentinel)
         reduction_weights = ops.softmax(scores, axis=-1)  # (B, L)
 
         # --- 5. Deterministic number assembly from tokens ---
