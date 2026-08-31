@@ -192,10 +192,14 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
         "Selection, not multiplication, so the additive hazard cannot arise."
     ),
     ("layers/attention/common.py", "<module>"): (
-        "MASK_BIAS_VALUE = -1e9 is THE canonical constant, and it is contracted "
-        "to be used only inside a mask_dtype(...) chain (>= float32), never in "
-        "the raw compute dtype. Its own anchor forbids the (1 - keep) * "
-        "MASK_BIAS_VALUE form explicitly."
+        "MASK_BIAS_VALUE is THE canonical constant, and it is contracted to be "
+        "used only inside a mask_dtype(...) chain (>= float32), never in the raw "
+        "compute dtype. Its own anchor forbids the (1 - keep) * MASK_BIAS_VALUE "
+        "form explicitly. Since step 10 of plan-2026-08-31T134711-6271592d the "
+        "right-hand side is mask_sentinel('float32') -- still exactly -1e9, "
+        "bit-for-bit -- so no literal remains and this census no longer reports "
+        "the site. The entry is KEPT so that reintroducing a literal here lands "
+        "on a written reason rather than on a fresh decision."
     ),
     ("layers/blt_blocks.py", "PatchPooling._max_pooling"): (
         "where-form (ops.where(mask, hiddens, -1e9)) so the fp16 -inf is never "

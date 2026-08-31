@@ -141,6 +141,12 @@ sibling module came from here.
     ELEVEN. The migration list is history and does not move; the adopter count is
     mechanical and does.)
 
+    ``MASK_BIAS_VALUE`` is no longer a literal — it is
+    ``utils/dtype_policy.py``'s ``mask_sentinel("float32")``, which returns exactly
+    ``-1e9`` here and is the tree-wide home for the number, so a site computing in
+    float16 asks that function for its own dtype-safe value rather than importing
+    this float32-contracted constant.
+
     **Exactly FOUR modules still carry a LOCAL ``-1e9``-family value**, counted
     mechanically with comments and docstrings stripped:
 
@@ -200,6 +206,8 @@ from typing import Any, Optional, Sequence, Union
 
 import keras
 
+from dl_techniques.utils.dtype_policy import mask_sentinel
+
 # ---------------------------------------------------------------------
 
 # DECISION plan-2026-07-27T130643-38c5646a/D-002 — promoted from `energy_attention.py`'s
@@ -207,7 +215,7 @@ import keras
 # `np.float16(-1e9)` is `-inf`, so use this constant only inside a `mask_dtype(...)` chain
 # and cast back at the end. Do NOT bias in the compute dtype. Do NOT write
 # `(1 - keep) * MASK_BIAS_VALUE` — `0 * -inf = NaN`. See decisions.md D-002.
-MASK_BIAS_VALUE = -1e9
+MASK_BIAS_VALUE = mask_sentinel("float32")
 
 
 def mask_dtype(compute_dtype: str) -> str:
