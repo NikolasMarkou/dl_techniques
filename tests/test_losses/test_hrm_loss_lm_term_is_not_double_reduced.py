@@ -14,6 +14,15 @@ finite and the curve looks healthy. Both shipped trainers (`src/train/hrm/train_
 `src/train/tiny_recursive_model/train_trm.py:145`) default to ``stable_max``, so both were affected.
 
 Nothing else in the suite pins an `HRMLoss` value, which is why this went unseen.
+
+Note on the fixture: `_batch` emits NO ignored labels, and that is load-bearing for the
+branch-comparison test below. `HRMLoss.__init__` passes
+``ignore_class=ignore_index if ignore_index >= 0 else None`` to
+`SparseCategoricalCrossentropy`, so at the DEFAULT ``ignore_index=-100`` that branch receives the
+raw negative labels and TensorFlow raises
+``Received a label value of -100 which is outside the valid range of [0, 11)``. Measured
+2026-08-31; a pre-existing defect in the non-default branch, recorded here rather than fixed, and
+the reason this file cannot compare the two branches on a masked batch.
 """
 
 import numpy as np
@@ -92,9 +101,28 @@ def test_both_lm_loss_type_branches_agree_in_scale():
     """
     B, T, V = 8, 64, 101
     y_true, y_pred = _batch(B, T, V)
-    a = float(keras.ops.convert_to_numpy(HRMLoss(lm_loss_type="stable_max").call(y_true, y_pred)))
+
+    # `call()` returns (batch,) since plan-2026-08-31T045723-c0d5ffa9 step 9, so
+    # the comparison is on the REDUCED value -- which is the same quantity this
+    # test read before that step, when `call()` was already scalar. The shape is
+    # asserted here rather than assumed, so a regression to a scalar `call()`
+    # fails loudly instead of silently changing what is being compared.
+    for lm_type in ("stable_max", "sparse_categorical_crossentropy"):
+        shape = tuple(
+            np.shape(
+                keras.ops.convert_to_numpy(
+                    HRMLoss(lm_loss_type=lm_type).call(y_true, y_pred)
+                )
+            )
+        )
+        assert shape == (B,), (
+            f"HRMLoss(lm_loss_type={lm_type!r}).call() returned {shape}, expected {(B,)}. "
+            f"A scalar return makes sample_weight charge every row the batch aggregate."
+        )
+
+    a = float(keras.ops.convert_to_numpy(HRMLoss(lm_loss_type="stable_max")(y_true, y_pred)))
     b = float(keras.ops.convert_to_numpy(
-        HRMLoss(lm_loss_type="sparse_categorical_crossentropy").call(y_true, y_pred)))
+        HRMLoss(lm_loss_type="sparse_categorical_crossentropy")(y_true, y_pred)))
     ratio = max(a, b) / min(a, b)
     assert ratio < 3.0, (
         f"stable_max total {a!r} vs scc total {b!r} differ by {ratio:.1f}x. The two branches "

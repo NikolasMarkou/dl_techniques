@@ -158,9 +158,14 @@ def _siglip_pair():
 # ---------------------------------------------------------------------
 
 # (module, class, ctor kwargs, input builder)
-STILL_BROKEN = [
-    ("hrm_loss", "HRMLoss", {}, _hrm_pair),
-]
+# EMPTY IS THE SUCCESS STATE. All 14 measured members have been fixed and every
+# one of them is in KNOWN_GOOD below -- none was deleted. The two arms
+# parametrized on this list therefore contribute no test nodes; that is expected
+# and is NOT the file going vacuous. The KNOWN_GOOD arm is what keeps the
+# predicate honest, and `test_the_pinned_population_has_not_shrunk_silently`
+# guards the TOTAL, so a member cannot leave measurement in either direction.
+# A new member found later is APPENDED here with its measurement.
+STILL_BROKEN = []
 
 # Classes that MUST be rejected by the same predicate. Without this arm the
 # predicate could be vacuously true for everything.
@@ -232,6 +237,17 @@ KNOWN_GOOD = [
     # against 0.1281814 (20.0% off) at seasonal_periods=3, on a 4x12 batch whose
     # rows span scales 0.01/1/30/500. Value unchanged at 1.5e-08.
     ("mase_loss", "MASELoss", {}, _positive_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 9, the last member. Three
+    # terms, each decomposed so its OWN mean is the scalar it used to
+    # contribute -- proven per TERM, because three terms whose errors cancel is a
+    # passing total over a broken decomposition. LM via the token-pool form; the
+    # two BinaryCrossentropy Q-terms via a `(batch, 1)` reshape, which is
+    # load-bearing: BCE means over the LAST axis, so `(batch,)` inputs collapse
+    # the BATCH axis to a scalar even under reduction="none" (measured: shape ()
+    # for (4,) inputs, (4,) for (4, 1)). Invariant (a) is against the
+    # POST-2f3fafa09 behaviour, since that commit corrected the LM term's own
+    # double reduction and there is no earlier value worth preserving.
+    ("hrm_loss", "HRMLoss", {}, _hrm_pair),
 ]
 
 

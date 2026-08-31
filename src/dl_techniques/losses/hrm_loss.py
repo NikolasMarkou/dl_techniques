@@ -163,6 +163,14 @@ class HRMLoss(keras.losses.Loss):
     Combines language modeling loss, Q-learning losses for halt/continue
     decisions, and computes accuracy metrics.
 
+    ``call()`` returns PER-SAMPLE values of shape ``(batch,)``, not a scalar.
+    All three terms are decomposed so that each one's own mean is the scalar it
+    used to contribute, which means Keras' default reduction reproduces the
+    total this loss has always reported. The LM term's row value is proportional
+    to that row's valid-token COUNT as well as to its token losses -- faithful to
+    the batch-wide token mean it replaces, and deliberately not a per-sequence
+    mean.
+
     Args:
         lm_loss_type: Type of language modeling loss ("stable_max" or "sparse_categorical_crossentropy")
         q_loss_weight: Weight for Q-learning losses
@@ -205,8 +213,13 @@ class HRMLoss(keras.losses.Loss):
                 reduction="none",
             )
 
-        # Q-learning loss
-        self.q_loss_fn = keras.losses.BinaryCrossentropy(from_logits=True)
+        # Q-learning loss. `reduction="none"` matches the LM sub-losses above and
+        # is what makes the Q terms per-sample; see the reshape in `call()` for
+        # the trap that comes with it.
+        self.q_loss_fn = keras.losses.BinaryCrossentropy(
+            from_logits=True,
+            reduction="none",
+        )
 
     def call(self, y_true, y_pred):
         """
@@ -217,7 +230,11 @@ class HRMLoss(keras.losses.Loss):
             y_pred: Dict with "logits", "q_halt_logits", "q_continue_logits", optionally "target_q_continue"
 
         Returns:
-            Total loss scalar
+            Per-sample total loss with shape ``(batch,)``: the LM term plus
+            ``q_loss_weight`` times the two Q terms, each decomposed so that its
+            OWN mean is the scalar it used to contribute. Keras' default
+            reduction recovers the total this used to return; keeping the batch
+            axis is what lets ``sample_weight`` and ``reduction=`` select rows.
         """
         # Extract components
         labels = y_true["labels"]
@@ -243,8 +260,21 @@ class HRMLoss(keras.losses.Loss):
         valid_counts = keras.ops.sum(keras.ops.cast(valid_mask, "float32"), axis=-1)
         valid_counts = keras.ops.maximum(valid_counts, 1.0)  # Avoid division by zero
 
-        # Average LM loss per sequence
-        lm_loss = keras.ops.sum(lm_losses) / keras.ops.sum(valid_counts)
+        # LM term, PER SAMPLE. This used to be the scalar
+        # `sum(lm_losses) / sum(valid_counts)` -- the mean over every valid token
+        # in the batch. Returning each sequence's OWN mean instead is a different
+        # number whenever the valid-token counts differ, so each row's TOKEN SUM
+        # is scaled by the batch-global token count and by the batch size, which
+        # makes Keras' `sum_over_batch_size` reproduce that mean EXACTLY.
+        total_valid = keras.ops.sum(valid_counts)
+        batch_size = keras.ops.cast(
+            keras.ops.shape(valid_counts)[0], lm_losses.dtype
+        )
+        lm_loss = (
+            keras.ops.sum(lm_losses, axis=-1)
+            / keras.ops.cast(total_valid, lm_losses.dtype)
+            * batch_size
+        )
 
         # Compute sequence-level correctness for Q-learning targets
         pred_labels = keras.ops.argmax(logits, axis=-1)
@@ -254,16 +284,38 @@ class HRMLoss(keras.losses.Loss):
             valid_counts
         )
 
-        # Q-halt loss (predict sequence correctness)
+        # Q-halt loss (predict sequence correctness), PER SAMPLE.
+        #
+        # The `(batch, 1)` reshape is LOAD-BEARING and is the trap in this
+        # decomposition. `BinaryCrossentropy` means over the LAST axis, so with
+        # `(batch,)` inputs that axis IS the batch axis and the result collapses
+        # to a scalar even under `reduction="none"` -- MEASURED: `call()` returns
+        # shape `()` for `(4,)` inputs and shape `(4,)` for `(4, 1)` inputs, with
+        # identical means. Do not "simplify" the reshape away.
         q_halt_targets = keras.ops.cast(seq_correct, "float32")
-        q_halt_loss = self.q_loss_fn(q_halt_targets, q_halt_logits)
+        q_halt_loss = self.q_loss_fn(
+            keras.ops.reshape(q_halt_targets, (-1, 1)),
+            keras.ops.reshape(q_halt_logits, (-1, 1)),
+        )
 
-        # Q-continue loss (bootstrapping target)
-        q_continue_loss = 0.0
+        # Q-continue loss (bootstrapping target), PER SAMPLE. Absent, it is a
+        # ZERO VECTOR rather than the scalar 0.0 -- a scalar would still add
+        # correctly here, but only by broadcasting, and the shape of what this
+        # branch contributes should not depend on whether it is present.
+        q_continue_loss = keras.ops.zeros_like(q_halt_loss)
         if target_q_continue is not None and q_continue_logits is not None:
-            q_continue_loss = self.q_loss_fn(target_q_continue, q_continue_logits)
+            q_continue_loss = self.q_loss_fn(
+                keras.ops.reshape(target_q_continue, (-1, 1)),
+                keras.ops.reshape(q_continue_logits, (-1, 1)),
+            )
 
-        # Total loss
+        # Total loss, per sample. Each of the three terms is a `(batch,)` vector
+        # whose own mean is the scalar it used to contribute, so the mean of the
+        # sum is the sum of the old scalars -- proven per TERM, not only on the
+        # total, because three terms whose errors cancel would pass a total-only
+        # check over a broken decomposition.
+        q_halt_loss = keras.ops.cast(q_halt_loss, lm_loss.dtype)
+        q_continue_loss = keras.ops.cast(q_continue_loss, lm_loss.dtype)
         total_loss = lm_loss + self.q_loss_weight * (q_halt_loss + q_continue_loss)
 
         return total_loss
