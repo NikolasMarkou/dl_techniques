@@ -29,10 +29,9 @@ from typing import Any, Dict, List, Literal, Optional
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
-from .attention_pooling import AttentionPooling
 from .weighted_pooling import WeightedPooling
 from .sequence_pooling import SequencePooling
+from .attention_pooling import AttentionPooling
 
 # ---------------------------------------------------------------------
 # Type Definitions

@@ -14,7 +14,6 @@ pooling and full attention pooling.
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -65,8 +64,8 @@ class WeightedPooling(keras.layers.Layer):
         max_seq_len: int = 512,
         dropout_rate: float = 0.0,
         temperature: float = 1.0,
-        initializer: Union[str, initializers.Initializer] = 'ones',
-        regularizer: Optional[regularizers.Regularizer] = None,
+        initializer: Union[str, keras.initializers.Initializer] = 'ones',
+        regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Initialise the weighted pooling layer."""
@@ -76,12 +75,12 @@ class WeightedPooling(keras.layers.Layer):
         self.max_seq_len = max_seq_len
         self.dropout_rate = dropout_rate
         self.temperature = temperature
-        self.initializer = initializers.get(initializer)
-        self.regularizer = regularizers.get(regularizer) if regularizer else None
+        self.initializer = keras.initializers.get(initializer)
+        self.regularizer = keras.regularizers.get(regularizer) if regularizer else None
 
         # Create dropout layer in __init__
         if self.dropout_rate > 0:
-            self.dropout = layers.Dropout(self.dropout_rate)
+            self.dropout = keras.layers.Dropout(self.dropout_rate)
         else:
             self.dropout = None
 
@@ -129,7 +128,7 @@ class WeightedPooling(keras.layers.Layer):
         Returns:
             Pooled output ``(batch, embed_dim)``.
         """
-        seq_len = ops.shape(inputs)[1]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Get weights for current sequence length
         weights = self.position_weights[:seq_len]
@@ -154,21 +153,21 @@ class WeightedPooling(keras.layers.Layer):
             # (`# DECISION plan-2026-07-15T114613-5add9baa/D-001`).
             # The broadcast is load-bearing: `position_weights` is ONE vector
             # shared by the whole batch, while the mask is per-batch-row.
-            weights = ops.broadcast_to(weights, ops.shape(mask))
-            keep = ops.cast(mask, "bool")
-            neg = ops.cast(-1e4, weights.dtype)
-            weights = ops.where(keep, weights, neg)
+            weights = keras.ops.broadcast_to(weights, keras.ops.shape(mask))
+            keep = keras.ops.cast(mask, "bool")
+            neg = keras.ops.cast(-1e4, weights.dtype)
+            weights = keras.ops.where(keep, weights, neg)
 
         # Normalize weights
-        weights = ops.softmax(weights, axis=-1)
+        weights = keras.ops.softmax(weights, axis=-1)
 
         # Apply dropout
         if self.dropout is not None:
             weights = self.dropout(weights, training=training)
 
         # Compute weighted sum
-        weights_expanded = ops.expand_dims(weights, -1)
-        weighted_sum = ops.sum(inputs * weights_expanded, axis=1)
+        weights_expanded = keras.ops.expand_dims(weights, -1)
+        weighted_sum = keras.ops.sum(inputs * weights_expanded, axis=1)
 
         return weighted_sum
 
@@ -194,8 +193,8 @@ class WeightedPooling(keras.layers.Layer):
             'max_seq_len': self.max_seq_len,
             'dropout_rate': self.dropout_rate,
             'temperature': self.temperature,
-            'initializer': initializers.serialize(self.initializer),
-            'regularizer': regularizers.serialize(self.regularizer),
+            'initializer': keras.initializers.serialize(self.initializer),
+            'regularizer': keras.regularizers.serialize(self.regularizer),
         })
         return config
 
