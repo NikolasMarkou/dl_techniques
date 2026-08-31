@@ -1,9 +1,50 @@
-"""
-Vision Task Head Network Factory
+"""Vision task heads, and the factory that picks one.
 
-A comprehensive factory for building configurable head networks for various computer vision_heads tasks.
-Uses the dl_techniques framework components including Standard Blocks, FFN factory, 
-Norm factory, and Attention factory.
+This module holds eight layer classes and six module-level helpers. The
+classes turn a backbone feature map into task predictions. The helpers pick a
+class and configure it.
+
+The heads take a feature map, not an image. Nothing here knows which backbone
+produced it, so the same head works on a ResNet, a ViT or a ConvNeXt stage.
+
+Classes
+-------
+* :class:`BaseVisionHead` -- shared construction. Six heads inherit from it.
+  It has no ``call``.
+* :class:`DetectionHead` -- class scores and box offsets, per anchor.
+* :class:`SegmentationHead` -- one class map, upsampled towards input size.
+  The only head here that returns a bare tensor.
+* :class:`DepthEstimationHead` -- one depth map, plus the tensor it was
+  scaled from.
+* :class:`ClassificationHead` -- one label for the whole image.
+* :class:`InstanceSegmentationHead` -- detection outputs plus instance masks.
+* :class:`EnhancementHead` -- a restored or upscaled image.
+* :class:`MultiTaskHead` -- several heads behind one layer. It does not
+  inherit from :class:`BaseVisionHead`.
+
+Helpers
+-------
+* :func:`create_vision_head` -- task type to head. It handles 10 of the 37
+  ``VisionTaskType`` members and raises ``ValueError`` for the other 27.
+* :func:`create_enhancement_head` -- build an :class:`EnhancementHead`, with
+  a default scale factor for super-resolution.
+* :func:`create_multi_task_head` -- build a :class:`MultiTaskHead` from any
+  of three configuration formats.
+* :class:`HeadConfiguration` -- three keyword-argument presets per task type:
+  default, efficient and high-performance.
+
+The task types and the configuration objects live in
+``vision/task_types.py``. The ``VisionTaskType`` docstring there lists the 10
+dispatched members and names all 27 that raise. Read it rather than deriving
+a second split here.
+
+Example
+-------
+>>> from dl_techniques.layers.heads.vision import create_vision_head
+>>> head = create_vision_head('classification', num_classes=10)
+>>> out = head(features)
+>>> sorted(out)
+['logits', 'probabilities']
 """
 
 import keras
@@ -33,59 +74,93 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class BaseVisionHead(keras.layers.Layer):
     """
-    Base class for all vision task heads.
+    Shared construction for the vision task heads.
 
-    Provides common functionality and structure for task-specific heads,
-    including optional attention mechanisms, feed-forward networks, normalization,
-    and dropout regularization.
+    This class builds the layers the heads have in common and stores the
+    configuration they read. It has no ``call``. Each subclass applies the
+    stages it wants, then runs its own task layers.
+
+    ``__init__`` calls ``_create_common_layers``, which always builds
+    ``norm`` and builds ``attention``, ``ffn`` and ``dropout`` only when the
+    matching flag or rate asks for them.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │   Normalization     │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Attention (opt.)   │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │    FFN (opt.)       │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │   Dropout (opt.)    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Task-Specific Head │
-        └─────────────────────┘
+        _create_common_layers builds these four:
 
-    :param hidden_dim: Hidden dimension for intermediate layers.
+        ┌─────────────────────────────────┐
+        │ norm                     always │
+        │ attention      if use_attention │
+        │ ffn                  if use_ffn │
+        │ dropout     if dropout_rate > 0 │
+        └─────────────────────────────────┘
+
+        _common_processed_shape predicts this much of a
+        subclass forward pass, and no more:
+
+        input_shape (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ ffn                  (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        the subclass task layers
+
+    Two warnings about that picture.
+
+    ``norm`` and ``dropout`` are built, and ``norm`` carries weights, but no
+    ``call`` in this module applies either one. Each head normalizes and
+    drops inside its own ``ConvBlock`` or ``DenseBlock``, and those read
+    ``normalization_type`` and ``dropout_rate`` from this class. So the two
+    common layers are weight the forward pass never reaches, not a stage.
+
+    The other two stages are not uniform either. :class:`ClassificationHead`
+    applies ``attention`` and never ``ffn``, even though ``use_ffn`` defaults
+    to ``True``. :class:`EnhancementHead` applies none of the four.
+    :class:`MultiTaskHead` does not inherit from this class at all. Read the
+    subclass diagram, not this one, for what a given head runs.
+
+    :param hidden_dim: Working width of the head. The sub-blocks and the FFN
+        use it as their channel count.
     :type hidden_dim: int
-    :param normalization_type: Type of normalization to use.
-    :type normalization_type: str
-    :param activation_type: Type of activation function.
-    :type activation_type: str
-    :param dropout_rate: Dropout rate for regularization.
+    :param normalization_type: Which registered normalization to build, and
+        the value handed to each sub-block.
+    :type normalization_type: NormalizationType
+    :param activation_type: Activation each sub-block uses.
+    :type activation_type: ActivationType
+    :param dropout_rate: Dropout rate handed to the sub-blocks. Any value
+        above 0 also builds the unused common ``dropout`` layer.
     :type dropout_rate: float
-    :param use_attention: Whether to include attention mechanisms.
+    :param use_attention: Whether to build an attention layer.
     :type use_attention: bool
-    :param attention_type: Type of attention to use if enabled.
-    :type attention_type: str
-    :param use_ffn: Whether to include FFN blocks.
+    :param attention_type: Which registered attention type to build.
+    :type attention_type: AttentionType
+    :param use_ffn: Whether to build an FFN block. It defaults to ``True``,
+        and :class:`ClassificationHead` never applies the result.
     :type use_ffn: bool
-    :param ffn_type: Type of FFN to use if enabled.
-    :type ffn_type: str
-    :param ffn_expansion_factor: Expansion factor for FFN.
+    :param ffn_type: Which registered FFN type to build.
+    :type ffn_type: FFNType
+    :param ffn_expansion_factor: The FFN inner width is
+        ``hidden_dim * ffn_expansion_factor``.
     :type ffn_expansion_factor: int
-    :param kwargs: Additional arguments for base Layer class.
+    :param kwargs: Additional arguments for the base Layer class.
+
+    :ivar norm: Normalization layer. Always built, never applied.
+    :vartype norm: keras.layers.Layer
+    :ivar attention: Attention layer, built when ``use_attention`` is set.
+    :vartype attention: keras.layers.Layer
+    :ivar ffn: FFN block, built when ``use_ffn`` is set.
+    :vartype ffn: keras.layers.Layer
+    :ivar dropout: Dropout layer, built when ``dropout_rate > 0``. Never
+        applied.
+    :vartype dropout: keras.layers.Dropout
     """
 
     def __init__(
@@ -101,6 +176,34 @@ class BaseVisionHead(keras.layers.Layer):
             ffn_expansion_factor: int = 4,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and build the common layers.
+
+        See the class docstring for what each argument means and which heads
+        ignore it.
+
+        :param hidden_dim: Working width of the head.
+        :type hidden_dim: int
+        :param normalization_type: Which registered normalization to build.
+        :type normalization_type: NormalizationType
+        :param activation_type: Activation the sub-blocks use.
+        :type activation_type: ActivationType
+        :param dropout_rate: Dropout rate handed to the sub-blocks.
+        :type dropout_rate: float
+        :param use_attention: Whether to build an attention layer.
+        :type use_attention: bool
+        :param attention_type: Which registered attention type to build.
+        :type attention_type: AttentionType
+        :param use_ffn: Whether to build an FFN block.
+        :type use_ffn: bool
+        :param ffn_type: Which registered FFN type to build.
+        :type ffn_type: FFNType
+        :param ffn_expansion_factor: FFN inner-width multiplier.
+        :type ffn_expansion_factor: int
+        :param kwargs: Additional arguments for the base Layer class.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         # Store configuration
@@ -118,7 +221,25 @@ class BaseVisionHead(keras.layers.Layer):
         self._create_common_layers()
 
     def _create_common_layers(self) -> None:
-        """Create common layers used across different heads."""
+        """
+        Build the four layers every vision head shares.
+
+        ``norm`` is always built. ``attention``, ``ffn`` and ``dropout`` are
+        built only when their flag or rate asks for them.
+
+        The attention branch has three cases. ``'multi_head'`` and ``'cbam'``
+        get their own argument sets. Every other type goes through
+        ``assemble_attention_config``, which drops any keyword the type does
+        not declare. ``create_attention_layer`` raises ``ValueError`` on a
+        keyword the type does not declare, so passing ``dim`` to a type that
+        has no such parameter would fail construction outright.
+
+        Called from ``__init__``, following the package rule that layers are
+        created in ``__init__``.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Normalization layer
         self.norm = create_normalization_layer(
@@ -145,16 +266,10 @@ class BaseVisionHead(keras.layers.Layer):
                 )
             else:
                 # DECISION plan-2026-08-17T183311-79c63e38/D-023
-                # `dim` is THIS head's own convenience, not the caller's
-                # expressed intent, and 11 of the 33 registered attention types
-                # do not declare it ('cbam' is handled above; 'channel',
-                # 'spatial', the four 'tripseN', 'capsule_routing', 'fnet',
-                # 'hopfield', 'non_local' are not). Re-derived 2026-08-27; this
-                # sentence previously said "8 of the 32" and omitted 'fnet'.
-                # Since `create_attention_layer` RAISES on
-                # an undeclared key (D-011), passing it unconditionally is a hard
-                # construction failure for those types. Pre-filter, exactly as
-                # `layers/transformers/free_transformer.py` does.
+                # 11 of the 33 registered attention types do not declare `dim`:
+                # 'cbam' (handled above), 'channel', 'spatial', the four
+                # 'tripseN', 'capsule_routing', 'fnet', 'hopfield', 'non_local'.
+                # Do NOT pass `dim` unconditionally. See decisions.md D-023.
                 self.attention = create_attention_layer(
                     self.attention_type,
                     name=f'{self.name}_attention',
@@ -190,14 +305,21 @@ class BaseVisionHead(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Shape after the attention + FFN common processing.
+        """
+        Report the shape after the attention and FFN stages.
 
-        Mirrors the ``if self.use_attention: ... if self.use_ffn: ...`` block
-        that subclass ``call()`` methods apply before their task-specific
-        layers. Used by subclass ``build()`` to propagate intermediate shapes.
+        This mirrors the ``if self.use_attention: ... if self.use_ffn: ...``
+        block that most subclass ``call`` methods run before their task
+        layers. Subclass ``build`` methods use it to size what comes next.
+
+        ``norm`` and ``dropout`` are not in this chain, because no ``call``
+        applies them. :class:`ClassificationHead` and
+        :class:`EnhancementHead` do not use this method at all.
 
         :param input_shape: Input feature-map shape.
-        :return: Shape after the (optional) attention and FFN stages.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Shape after the optional attention and FFN stages.
+        :rtype: Tuple[Optional[int], ...]
         """
         shape = tuple(input_shape)
         if self.use_attention:
@@ -207,9 +329,17 @@ class BaseVisionHead(keras.layers.Layer):
         return shape
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the common sub-layers shared across heads.
+        """
+        Build the four common layers.
+
+        Each is built on the raw input shape, because each stage is
+        shape-preserving in the width the head runs at. ``norm`` and
+        ``dropout`` are built even though no ``call`` applies them.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         # The common layers each consume the raw input feature map.
         self.norm.build(input_shape)
@@ -226,19 +356,27 @@ class BaseVisionHead(keras.layers.Layer):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """
+        Report the output shape.
 
-        The base head performs no task-specific transformation and is a
-        passthrough; concrete subclasses override this with their task-specific
-        output shape.
+        The base head transforms nothing, so this returns the input shape
+        unchanged. Every concrete subclass overrides it.
 
-        :param input_shape: Shape of the input feature map.
-        :return: Output shape (identical to the input for the base head).
+        :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape.
+        :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying the nine constructor arguments, on top
+            of the base Layer configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'hidden_dim': self.hidden_dim,
@@ -261,39 +399,75 @@ class BaseVisionHead(keras.layers.Layer):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DetectionHead(BaseVisionHead):
     """
-    Detection head for object detection tasks.
+    Class scores and box offsets, one set per anchor per location.
 
-    Outputs bounding box regression and classification scores through
-    separate convolutional branches sharing common feature processing.
+    Two branches run on the same common-processed features. Each is a
+    ``ConvBlock`` followed by a 1x1 conv. Neither branch changes the spatial
+    dimensions, because every conv here is stride 1 with ``'same'`` padding.
+
+    Neither output conv applies an activation. The scores are raw logits and
+    the offsets are raw values, so a loss that expects logits is the right
+    one here.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Common Processing  │
-        │ (Attention + FFN)   │
-        └────┬────────┬───────┘
-             ▼        ▼
-        ┌────────┐ ┌────────┐
-        │Cls Conv│ │Reg Conv│
-        └───┬────┘ └───┬────┘
-            ▼          ▼
-        ┌────────┐ ┌────────┐
-        │Cls Head│ │Reg Head│
-        └────────┘ └────────┘
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ ffn                  (optional) │
+        └────────────────┬────────────────┘
+                         ▼ x, common-processed
+                 ┌───────┴────────────┐
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ cls_conv         │ │ reg_conv         │
+        │ ConvBlock 3x3    │ │ ConvBlock 3x3    │
+        └────────┬─────────┘ └────────┬─────────┘
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ cls_head         │ │ reg_head         │
+        │ Conv2D 1x1       │ │ Conv2D 1x1       │
+        └──────────────────┘ └──────────────────┘
+         'classifications'      'regressions'
+
+        classifications: (B, H, W, num_anchors * num_classes)
+        regressions:     (B, H, W, num_anchors * bbox_dims)
+
+    :class:`InstanceSegmentationHead` holds one of these as a sub-layer.
+    :func:`create_vision_head` also returns this class for keypoint
+    detection, unchanged.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'classifications': (batch, height, width, num_anchors *
+        num_classes), 'regressions': (batch, height, width, num_anchors *
+        bbox_dims)}``.
 
     :param num_classes: Number of object classes.
     :type num_classes: int
     :param num_anchors: Number of anchor boxes per location.
     :type num_anchors: int
-    :param bbox_dims: Dimensions for bounding box (typically 4).
+    :param bbox_dims: Values per box. 4 for the usual corner or centre form.
     :type bbox_dims: int
-    :param kwargs: Arguments for BaseVisionHead.
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar cls_conv: Classification-branch ``ConvBlock``.
+    :vartype cls_conv: ConvBlock
+    :ivar cls_head: Classification output conv.
+    :vartype cls_head: keras.layers.Conv2D
+    :ivar reg_conv: Regression-branch ``ConvBlock``.
+    :vartype reg_conv: ConvBlock
+    :ivar reg_head: Regression output conv.
+    :vartype reg_head: keras.layers.Conv2D
     """
 
     def __init__(
@@ -303,6 +477,19 @@ class DetectionHead(BaseVisionHead):
             bbox_dims: int = 4,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration, then build the two branches.
+
+        :param num_classes: Number of object classes.
+        :type num_classes: int
+        :param num_anchors: Number of anchor boxes per location.
+        :type num_anchors: int
+        :param bbox_dims: Values per box.
+        :type bbox_dims: int
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -313,7 +500,15 @@ class DetectionHead(BaseVisionHead):
         self._create_detection_layers()
 
     def _create_detection_layers(self) -> None:
-        """Create detection-specific layers."""
+        """
+        Build the classification and regression branches.
+
+        Each branch is a 3x3 ``ConvBlock`` at ``hidden_dim`` channels, then a
+        1x1 conv with no activation.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Classification branch
         self.cls_conv = ConvBlock(
@@ -348,9 +543,15 @@ class DetectionHead(BaseVisionHead):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build detection-specific sub-layers, then the common layers.
+        """
+        Build both branches on the common-processed shape.
+
+        The common layers are built last, by the base class.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         feature_shape = self._common_processed_shape(input_shape)
 
@@ -367,7 +568,17 @@ class DetectionHead(BaseVisionHead):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass through detection head."""
+        """
+        Run the common stages, then both branches.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Dict with ``'classifications'`` and ``'regressions'``.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
 
         # Apply common processing if enabled
         x = inputs
@@ -393,13 +604,16 @@ class DetectionHead(BaseVisionHead):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shapes for the detection head.
+        """
+        Report the two output shapes.
 
-        Spatial dimensions are preserved (all convolutions use stride 1 with
-        ``'same'`` padding); only the channel dimension changes.
+        Spatial dimensions are preserved. Only the channel count changes.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
-        :return: Dict with ``'classifications'`` and ``'regressions'`` shapes.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Dict with ``'classifications'`` and ``'regressions'``
+            shapes.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
         return {
@@ -408,7 +622,13 @@ class DetectionHead(BaseVisionHead):
         }
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying ``num_classes``, ``num_anchors`` and
+            ``bbox_dims``, on top of the base configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
@@ -425,44 +645,89 @@ class DetectionHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class SegmentationHead(BaseVisionHead):
     """
-    Segmentation head for semantic segmentation tasks.
+    One class map, upsampled towards the input resolution.
 
-    Produces pixel-level class predictions through progressive refinement
-    blocks with optional skip connections and upsampling to match input resolution.
+    Three ``ConvBlock`` stages refine the features, then transposed convs
+    double the resolution once per stage, then a 1x1 softmax conv emits one
+    channel per class.
+
+    This head accepts a single feature map or a list of them. With a list and
+    ``use_skip_connections``, the last map is the one refined and the rest
+    become skips in reverse order. One skip is concatenated after each
+    refine block, while skips remain.
+
+    This is the only head in the module that returns a bare tensor. Every
+    other one returns a dict.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        │  (multi-scale opt.) │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Common Processing  │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Refinement Blocks  │◄── Skip Connections
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Upsampling Layers  │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Segmentation Head  │
-        │    (softmax)        │
-        └─────────────────────┘
+        inputs: (B, H, W, C), or a list of feature maps
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ list input: x = the last map,   │
+        │ skips = the rest, reversed      │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ ffn                  (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ refine_blocks: 3 x ConvBlock    │
+        │ concat skips[i] after block i   │
+        └────────────────┬────────────────┘
+                         ▼ channels: hidden_dim, then halved
+        ┌─────────────────────────────────┐
+        │ upsample_layers                 │
+        │ Conv2DTranspose stride 2        │
+        └────────────────┬────────────────┘
+                         ▼ int(sqrt(upsampling_factor)) of them
+        ┌─────────────────────────────────┐
+        │ seg_head: Conv2D 1x1    softmax │
+        └────────────────┬────────────────┘
+                         ▼
+        (B, H*s, W*s, num_classes), s = 2 ** the count above
+
+    The refine blocks halve their channel count as they go: ``hidden_dim``,
+    then ``hidden_dim // 2``, then ``hidden_dim // 4``. Every upsample layer
+    uses ``hidden_dim // 8``, one halving further still. Concatenating a skip
+    widens the tensor again, so the built shapes follow ``call`` rather than
+    the block widths alone.
+
+    The output resolution is ``2 ** int(upsampling_factor ** 0.5)`` times the
+    input. With the default ``upsampling_factor=4`` that is 2 layers, so 4x.
+    The value is a count of doublings once square-rooted, not the factor
+    itself.
+
+    Input shape:
+        ``(batch, height, width, channels)``, or a list of such shapes.
+
+    Output shape:
+        ``(batch, out_height, out_width, num_classes)``.
 
     :param num_classes: Number of segmentation classes.
     :type num_classes: int
-    :param upsampling_factor: Factor for upsampling to match input resolution.
+    :param upsampling_factor: Its integer square root is the number of
+        stride-2 transposed convs to build.
     :type upsampling_factor: int
-    :param use_skip_connections: Whether to use skip connections.
+    :param use_skip_connections: Concatenate list inputs as skips. Ignored
+        when the input is a single tensor.
     :type use_skip_connections: bool
-    :param kwargs: Arguments for BaseVisionHead.
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar refine_blocks: The three refinement ``ConvBlock`` layers.
+    :vartype refine_blocks: List[ConvBlock]
+    :ivar upsample_layers: The stride-2 ``Conv2DTranspose`` layers.
+    :vartype upsample_layers: List[keras.layers.Conv2DTranspose]
+    :ivar seg_head: Output ``Conv2D(num_classes)`` with softmax.
+    :vartype seg_head: keras.layers.Conv2D
     """
 
     def __init__(
@@ -472,6 +737,20 @@ class SegmentationHead(BaseVisionHead):
             use_skip_connections: bool = True,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration, then build the segmentation layers.
+
+        :param num_classes: Number of segmentation classes.
+        :type num_classes: int
+        :param upsampling_factor: Its integer square root is the number of
+            stride-2 transposed convs to build.
+        :type upsampling_factor: int
+        :param use_skip_connections: Concatenate list inputs as skips.
+        :type use_skip_connections: bool
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -481,7 +760,15 @@ class SegmentationHead(BaseVisionHead):
         self._create_segmentation_layers()
 
     def _create_segmentation_layers(self) -> None:
-        """Create segmentation-specific layers."""
+        """
+        Build the refine stack, the upsample stack and the output conv.
+
+        Refine channel counts halve each step. The upsample layers all take
+        the count left after the third halving.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Feature refinement blocks
         self.refine_blocks = []
@@ -527,13 +814,18 @@ class SegmentationHead(BaseVisionHead):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> None:
-        """Build refinement, upsampling and head sub-layers, then common layers.
+        """
+        Build every sub-layer on the shape ``call`` will hand it.
 
-        Mirrors the shape flow of ``call()`` including skip-connection
-        concatenation for multi-scale (list) inputs.
+        This repeats the skip-concatenation arithmetic of ``call``, so a
+        multi-scale input builds the same widths it will run with. The common
+        layers are built on the single highest-level map.
 
-        :param input_shape: Single feature-map shape, or a list of shapes for
-            multi-scale inputs.
+        :param input_shape: One feature-map shape, or a list of shapes for a
+            multi-scale input.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :return: None.
+        :rtype: None
         """
         if isinstance(input_shape, list) and self.use_skip_connections:
             base_shape = input_shape[-1]
@@ -570,12 +862,24 @@ class SegmentationHead(BaseVisionHead):
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through segmentation head."""
+        """
+        Refine, concatenate skips, upsample, then classify each pixel.
+
+        :param inputs: One feature map, or a list of them with the
+            highest-level map last.
+        :type inputs: Union[keras.KerasTensor, List[keras.KerasTensor]]
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Class map tensor. This head returns no dict.
+        :rtype: keras.KerasTensor
+        """
 
         # Handle multi-scale inputs if skip connections are used
         if isinstance(inputs, list) and self.use_skip_connections:
-            x = inputs[-1]  # Highest level features
-            skip_features = inputs[:-1][::-1]  # Reverse order for bottom-up
+            # The last entry is the highest-level map. The rest are skips,
+            # reversed so the deepest one is consumed first.
+            x = inputs[-1]
+            skip_features = inputs[:-1][::-1]
         else:
             x = inputs if not isinstance(inputs, list) else inputs[-1]
             skip_features = []
@@ -607,15 +911,17 @@ class SegmentationHead(BaseVisionHead):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape for the segmentation head.
+        """
+        Report the output shape.
 
-        Each of the ``int(upsampling_factor ** 0.5)`` transposed-conv layers
-        doubles the spatial resolution; the final conv emits ``num_classes``
-        channels. Multi-scale (list) inputs use the highest-level feature map.
+        Each of the ``int(upsampling_factor ** 0.5)`` transposed convs
+        doubles height and width. The output conv emits ``num_classes``
+        channels. A list input is measured by its last entry.
 
-        :param input_shape: Single feature-map shape, or a list of shapes for
-            multi-scale inputs.
-        :return: Output shape ``(batch, out_height, out_width, num_classes)``.
+        :param input_shape: One feature-map shape, or a list of shapes.
+        :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+        :return: Shape ``(batch, out_height, out_width, num_classes)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
         batch, height, width = base_shape[0], base_shape[1], base_shape[2]
@@ -625,7 +931,13 @@ class SegmentationHead(BaseVisionHead):
         return (batch, out_height, out_width, self.num_classes)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying ``num_classes``, ``upsampling_factor``
+            and ``use_skip_connections``, on top of the base configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
@@ -642,46 +954,84 @@ class SegmentationHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class DepthEstimationHead(BaseVisionHead):
     """
-    Depth estimation head for predicting depth maps.
+    A depth map, at eight times the input resolution.
 
-    Produces per-pixel depth predictions through progressive refinement and
-    upsampling, with support for both linear and logarithmic depth scaling.
+    Three stages each refine the features and then double height and width,
+    so the output is ``8H`` by ``8W``. A sigmoid conv produces a normalized
+    map, which is then scaled into ``[min_depth, max_depth]``.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Common Processing  │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Depth Conv Blocks  │
-        │  + Upsampling       │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Depth Head (sig.)  │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Depth Scaling      │
-        │  (log or linear)    │
-        └─────────────────────┘
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ ffn                  (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ depth_blocks: 3 x (ConvBlock    │
+        │ then Conv2DTranspose stride 2)  │
+        └────────────────┬────────────────┘
+                         ▼ 8x spatial, channels halved 3x
+        ┌─────────────────────────────────┐
+        │ depth_head: Conv2D 3x3  sigmoid │
+        └────────────────┬────────────────┘
+                         ▼ depth_normalized, in [0, 1]
+                 ┌───────┴────────────┐
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ use_log_depth:   │ │ passed through   │
+        │ exp(...) or a    │ │ with no change   │
+        │ linear rescale   │ │                  │
+        └────────┬─────────┘ └────────┬─────────┘
+                 ▼                    ▼
+              'depth'            'confidence'
 
-    :param output_channels: Number of output channels (1 for single depth).
+        depth, confidence: (B, 8H, 8W, output_channels)
+
+    ``'confidence'`` is ``depth_normalized`` itself, returned unchanged. It
+    is the sigmoid output the depth was scaled from, not a second estimate
+    and not an uncertainty. Treat it as a confidence only if you have checked
+    that reading against your data.
+
+    The scaling has two forms. With ``use_log_depth`` the map is read as a
+    position in log space: ``exp(x * (log(max_depth) - log(min_depth)) +
+    log(min_depth))``. Otherwise it is read linearly: ``x * (max_depth -
+    min_depth) + min_depth``.
+
+    :func:`create_vision_head` reuses this class for two other tasks. Surface
+    normals get ``output_channels=3`` and optical flow gets
+    ``output_channels=2``. Neither changes the scaling, so a flow vector
+    comes out squeezed into the depth range.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'depth': (batch, 8 * height, 8 * width, output_channels),
+        'confidence': the same shape}``.
+
+    :param output_channels: Channel count of the output map. 1 for depth.
     :type output_channels: int
-    :param min_depth: Minimum depth value.
+    :param min_depth: Lower end of the output range.
     :type min_depth: float
-    :param max_depth: Maximum depth value.
+    :param max_depth: Upper end of the output range.
     :type max_depth: float
-    :param use_log_depth: Whether to predict log depth.
+    :param use_log_depth: Scale in log space instead of linearly.
     :type use_log_depth: bool
-    :param kwargs: Arguments for BaseVisionHead.
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar depth_blocks: Three ``[ConvBlock, Conv2DTranspose]`` pairs.
+    :vartype depth_blocks: List[List[keras.layers.Layer]]
+    :ivar depth_head: Output ``Conv2D(output_channels)`` with sigmoid.
+    :vartype depth_head: keras.layers.Conv2D
     """
 
     def __init__(
@@ -692,6 +1042,21 @@ class DepthEstimationHead(BaseVisionHead):
             use_log_depth: bool = True,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration, then build the depth layers.
+
+        :param output_channels: Channel count of the output map.
+        :type output_channels: int
+        :param min_depth: Lower end of the output range.
+        :type min_depth: float
+        :param max_depth: Upper end of the output range.
+        :type max_depth: float
+        :param use_log_depth: Scale in log space instead of linearly.
+        :type use_log_depth: bool
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.output_channels = output_channels
@@ -702,7 +1067,15 @@ class DepthEstimationHead(BaseVisionHead):
         self._create_depth_layers()
 
     def _create_depth_layers(self) -> None:
-        """Create depth-specific layers."""
+        """
+        Build the refinement stack and the depth conv.
+
+        Three ``[ConvBlock, Conv2DTranspose]`` pairs. Each transposed conv
+        has stride 2 and halves the channel count.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Progressive upsampling with refinement
         self.depth_blocks = []
@@ -732,14 +1105,20 @@ class DepthEstimationHead(BaseVisionHead):
             filters=self.output_channels,
             kernel_size=3,
             padding='same',
-            activation='sigmoid',  # Will be scaled to depth range
+            # Sigmoid keeps the output in [0, 1]. call() then scales it into
+            # the [min_depth, max_depth] range.
+            activation='sigmoid',
             name='depth_head'
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build depth-specific sub-layers, then the common layers.
+        """
+        Build the depth stack on the common-processed shape.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         shape = self._common_processed_shape(input_shape)
 
@@ -758,7 +1137,18 @@ class DepthEstimationHead(BaseVisionHead):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass through depth head."""
+        """
+        Refine, upsample, predict, then scale into the depth range.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Dict with ``'depth'`` and ``'confidence'``, where
+            ``'confidence'`` is the unscaled sigmoid output.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
 
         x = inputs
 
@@ -788,31 +1178,43 @@ class DepthEstimationHead(BaseVisionHead):
 
         return {
             'depth': depth,
-            'confidence': depth_normalized  # Can be used as confidence
+            # This is the sigmoid output the depth was scaled from, not a
+            # separate estimate. Read the class docstring before using it.
+            'confidence': depth_normalized
         }
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shapes for the depth-estimation head.
+        """
+        Report the two output shapes.
 
-        Three transposed-conv blocks each double the spatial resolution (×8
-        total); the final conv emits ``output_channels``. ``'depth'`` and
-        ``'confidence'`` share the same shape.
+        Three transposed convs of stride 2 give eight times the input height
+        and width. ``'depth'`` and ``'confidence'`` share one shape.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with ``'depth'`` and ``'confidence'`` shapes.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
-        scale = 8  # three transposed-conv upsamples, stride 2 each
+        # Three transposed-conv upsamples, stride 2 each.
+        scale = 8
         out_height = height * scale if height is not None else None
         out_width = width * scale if width is not None else None
         shape = (batch, out_height, out_width, self.output_channels)
         return {'depth': shape, 'confidence': shape}
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying ``output_channels``, ``min_depth``,
+            ``max_depth`` and ``use_log_depth``, on top of the base
+            configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'output_channels': self.output_channels,
@@ -830,43 +1232,85 @@ class DepthEstimationHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class ClassificationHead(BaseVisionHead):
     """
-    Classification head for image-level classification.
+    One label for a whole image.
 
-    Aggregates spatial features via global pooling, then applies dense layers
-    and a softmax classifier to produce class probabilities.
+    Spatial features are collapsed to one vector per image, pushed through
+    two dense blocks, and scored by a softmax ``Dense``. Use this for image
+    classification.
+
+    This head applies ``attention`` and never applies ``ffn``, even though
+    ``BaseVisionHead.use_ffn`` defaults to ``True``. Setting ``use_ffn``
+    builds an FFN block that carries weights and never runs. ``build``
+    matches ``call`` here: it propagates the attention shape only.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Attention (opt.)   │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Global Pooling     │
-        │  (avg or max)       │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │   Dense Blocks      │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Classifier (soft.) │
-        └─────────────────────┘
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+                 ┌───────┴────────────┐
+                 ▼                    ▼
+         use_global_pooling       otherwise
+        ┌──────────────────┐ ┌──────────────────┐
+        │ pooling          │ │ Flatten          │
+        │ avg or max       │ │ made in call()   │
+        └────────┬─────────┘ └────────┬─────────┘
+                 └───────┬────────────┘
+                         ▼ (B, C) or (B, H*W*C)
+        ┌─────────────────────────────────┐
+        │ dense_blocks: 2 x DenseBlock    │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ classifier: Dense(num_classes)  │
+        └────────────────┬────────────────┘
+                         ▼ softmax applied here
+                 ┌───────┴────────────┐
+                 ▼                    ▼
+              'logits'         'probabilities'
+
+        One tensor reaches both keys. Nothing is computed twice.
+
+    The two returned keys hold the identical tensor. ``classifier`` already
+    applies softmax, so ``'logits'`` are probabilities too, despite the name.
+    A loss expecting raw logits will be wrong here.
+
+    With ``use_global_pooling=False`` the flatten is a ``layers.Flatten()``
+    created inside ``call`` on every invocation. It is not a stored
+    sub-layer, so it appears in no weight list. ``Flatten`` holds no weights,
+    so this costs correctness nothing.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'logits': (batch, num_classes),
+        'probabilities': (batch, num_classes)}``.
 
     :param num_classes: Number of classes.
     :type num_classes: int
-    :param use_global_pooling: Whether to use global pooling.
+    :param use_global_pooling: Collapse the spatial dimensions by pooling.
+        When ``False``, ``call`` flattens them instead.
     :type use_global_pooling: bool
-    :param pooling_type: Type of pooling ('avg' or 'max').
-    :type pooling_type: str
-    :param kwargs: Arguments for BaseVisionHead.
+    :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
+        Read only when ``use_global_pooling`` is set.
+    :type pooling_type: Literal['avg', 'max']
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar pooling: Global pooling layer, built only when
+        ``use_global_pooling`` is set.
+    :vartype pooling: keras.layers.Layer
+    :ivar dense_blocks: Two ``DenseBlock`` layers, ``hidden_dim`` wide then
+        ``hidden_dim // 2`` wide.
+    :vartype dense_blocks: List[DenseBlock]
+    :ivar classifier: Output ``Dense(num_classes)`` with softmax.
+    :vartype classifier: keras.layers.Dense
     """
 
     def __init__(
@@ -876,6 +1320,19 @@ class ClassificationHead(BaseVisionHead):
             pooling_type: Literal['avg', 'max'] = 'avg',
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration, then build the classification layers.
+
+        :param num_classes: Number of classes.
+        :type num_classes: int
+        :param use_global_pooling: Collapse spatial dimensions by pooling.
+        :type use_global_pooling: bool
+        :param pooling_type: Which pooling to build, ``'avg'`` or ``'max'``.
+        :type pooling_type: Literal['avg', 'max']
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -885,7 +1342,15 @@ class ClassificationHead(BaseVisionHead):
         self._create_classification_layers()
 
     def _create_classification_layers(self) -> None:
-        """Create classification-specific layers."""
+        """
+        Build the pooling layer, the dense blocks and the classifier.
+
+        Pooling is built only when ``use_global_pooling`` is set. The two
+        dense blocks are ``hidden_dim`` and ``hidden_dim // 2`` wide.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Global pooling
         if self.use_global_pooling:
@@ -918,9 +1383,18 @@ class ClassificationHead(BaseVisionHead):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build classification-specific sub-layers, then the common layers.
+        """
+        Build the classification layers on the shapes ``call`` produces.
+
+        This does not use ``_common_processed_shape``, because ``call``
+        applies attention and skips the FFN. The flatten branch computes the
+        flat width here rather than building a layer, since ``call`` makes
+        its own ``Flatten``.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         shape = tuple(input_shape)
         # Classification call() applies attention only (no FFN) before pooling.
@@ -950,7 +1424,21 @@ class ClassificationHead(BaseVisionHead):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass through classification head."""
+        """
+        Pool or flatten, run the dense blocks, then classify.
+
+        The FFN never runs here, whatever ``use_ffn`` says.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to the dense blocks
+            and to attention.
+        :type training: Optional[bool]
+        :return: Dict whose ``'logits'`` and ``'probabilities'`` keys hold the
+            same softmax output.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
 
         x = inputs
 
@@ -973,28 +1461,37 @@ class ClassificationHead(BaseVisionHead):
 
         return {
             'logits': logits,
-            'probabilities': logits  # Softmax already applied
+            # The classifier already applied softmax, so this is the same
+            # tensor under a second name, not a second computation.
+            'probabilities': logits
         }
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shapes for the classification head.
+        """
+        Report the two output shapes.
 
-        Spatial dimensions are collapsed (global pooling or flatten) and the
-        final dense layer emits ``num_classes`` logits. ``'logits'`` and
-        ``'probabilities'`` share the same shape.
+        Both keys carry ``(batch, num_classes)``.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with ``'logits'`` and ``'probabilities'`` shapes.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch = input_shape[0]
         shape = (batch, self.num_classes)
         return {'logits': shape, 'probabilities': shape}
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying ``num_classes``, ``use_global_pooling``
+            and ``pooling_type``, on top of the base configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
@@ -1011,43 +1508,82 @@ class ClassificationHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class InstanceSegmentationHead(BaseVisionHead):
     """
-    Instance segmentation head combining detection and segmentation.
+    Boxes, class scores and per-instance masks from one feature map.
 
-    Produces per-instance bounding boxes, class predictions, and binary masks
-    through parallel detection and mask prediction branches.
+    Two branches run on the same common-processed features. One is a full
+    :class:`DetectionHead` instance held as a sub-layer, which supplies
+    ``'classifications'`` and ``'regressions'``. The other is three
+    ``ConvBlock`` stages and a 1x1 conv, which supplies ``'instance_masks'``.
+
+    The inner detection head is built with ``use_attention=False`` and
+    ``use_ffn=False``, because this head has already applied both. Without
+    that the same two stages would run twice.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │   Input Features    │
-        └─────────┬───────────┘
-                  ▼
-        ┌─────────────────────┐
-        │  Common Processing  │
-        └────┬────────┬───────┘
-             ▼        ▼
-        ┌─────────┐ ┌──────────┐
-        │Detection│ │Mask Conv │
-        │  Head   │ │ Blocks   │
-        └────┬────┘ └────┬─────┘
-             │           ▼
-             │      ┌──────────┐
-             │      │Mask Head │
-             │      └────┬─────┘
-             ▼           ▼
-        ┌─────────────────────┐
-        │  Combined Outputs   │
-        └─────────────────────┘
+        inputs (B, H, W, C)
+                         │
+                         ▼
+        ┌─────────────────────────────────┐
+        │ attention            (optional) │
+        └────────────────┬────────────────┘
+                         ▼
+        ┌─────────────────────────────────┐
+        │ ffn                  (optional) │
+        └────────────────┬────────────────┘
+                         ▼ x, common-processed
+                 ┌───────┴────────────┐
+                 ▼                    ▼
+        ┌──────────────────┐ ┌──────────────────┐
+        │ detection_head   │ │ mask_conv_blocks │
+        │ a DetectionHead  │ │ 3 x ConvBlock    │
+        └────────┬─────────┘ └────────┬─────────┘
+                 │                    ▼
+                 │           ┌──────────────────┐
+                 │           │ mask_head 1x1    │
+                 │           │ sigmoid          │
+                 │           └────────┬─────────┘
+                 ▼                    ▼
+         'classifications'     'instance_masks'
+           'regressions'
 
-    :param num_classes: Number of object classes.
+        classifications: (B, H, W, num_anchors * num_classes)
+        regressions:     (B, H, W, num_anchors * bbox_dims)
+        instance_masks:  (B, H, W, num_instances)
+
+    Spatial dimensions are preserved throughout. Every conv here is stride 1
+    with ``'same'`` padding.
+
+    ``mask_size`` is stored and serialized but no layer reads it. The masks
+    come out at the input feature-map resolution.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'classifications': (batch, height, width, num_anchors *
+        num_classes), 'regressions': (batch, height, width, num_anchors *
+        bbox_dims), 'instance_masks': (batch, height, width,
+        num_instances)}``.
+
+    :param num_classes: Number of object classes, forwarded to the inner
+        detection head.
     :type num_classes: int
-    :param num_instances: Maximum number of instances.
+    :param num_instances: Channel count of the mask output. One channel per
+        instance slot.
     :type num_instances: int
-    :param mask_size: Size of instance masks.
+    :param mask_size: Stored for serialization. No layer reads it.
     :type mask_size: Tuple[int, int]
-    :param kwargs: Arguments for BaseVisionHead.
+    :param kwargs: Arguments for :class:`BaseVisionHead`.
+
+    :ivar detection_head: The inner :class:`DetectionHead` instance.
+    :vartype detection_head: DetectionHead
+    :ivar mask_conv_blocks: The three mask ``ConvBlock`` layers.
+    :vartype mask_conv_blocks: List[ConvBlock]
+    :ivar mask_head: Output ``Conv2D(num_instances)`` with sigmoid.
+    :vartype mask_head: keras.layers.Conv2D
     """
 
     def __init__(
@@ -1057,6 +1593,19 @@ class InstanceSegmentationHead(BaseVisionHead):
             mask_size: Tuple[int, int] = (28, 28),
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration, then build the two branches.
+
+        :param num_classes: Number of object classes.
+        :type num_classes: int
+        :param num_instances: Channel count of the mask output.
+        :type num_instances: int
+        :param mask_size: Stored for serialization only.
+        :type mask_size: Tuple[int, int]
+        :param kwargs: Arguments for :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
 
         self.num_classes = num_classes
@@ -1070,14 +1619,24 @@ class InstanceSegmentationHead(BaseVisionHead):
             normalization_type=self.normalization_type,
             activation_type=self.activation_type,
             dropout_rate=self.dropout_rate,
-            use_attention=False,  # Already applied in main head
+            # Attention and the FFN have already run in this head, so the
+            # inner detection head must not repeat them.
+            use_attention=False,
             use_ffn=False
         )
 
         self._create_mask_layers()
 
     def _create_mask_layers(self) -> None:
-        """Create mask prediction layers."""
+        """
+        Build the mask branch.
+
+        Three ``ConvBlock`` stages at ``hidden_dim`` channels, then a 1x1
+        conv with sigmoid emitting ``num_instances`` channels.
+
+        :return: None.
+        :rtype: None
+        """
 
         # Mask feature extraction
         self.mask_conv_blocks = [
@@ -1099,9 +1658,16 @@ class InstanceSegmentationHead(BaseVisionHead):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the detection sub-head and mask branch, then common layers.
+        """
+        Build the detection sub-head and the mask branch.
+
+        Both consume the shape ``_common_processed_shape`` predicts, not the
+        raw input shape. The common layers are built last, by the base class.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         feature_shape = self._common_processed_shape(input_shape)
 
@@ -1121,7 +1687,18 @@ class InstanceSegmentationHead(BaseVisionHead):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass through instance segmentation head."""
+        """
+        Run the common stages, then both branches.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to every sub-layer.
+        :type training: Optional[bool]
+        :return: Dict with ``'classifications'``, ``'regressions'`` and
+            ``'instance_masks'``.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
 
         x = inputs
 
@@ -1151,15 +1728,18 @@ class InstanceSegmentationHead(BaseVisionHead):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shapes for the instance-segmentation head.
+        """
+        Report the three output shapes.
 
-        Detection branch shapes are delegated to the internal
-        :class:`DetectionHead`; the mask branch preserves spatial dimensions
-        and emits ``num_instances`` channels.
+        The two detection shapes come from the inner
+        :class:`DetectionHead`. The mask shape keeps the input spatial
+        dimensions and carries ``num_instances`` channels.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with ``'classifications'``, ``'regressions'`` and
             ``'instance_masks'`` shapes.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
         detection_shapes = self.detection_head.compute_output_shape(input_shape)
@@ -1170,7 +1750,13 @@ class InstanceSegmentationHead(BaseVisionHead):
         }
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        :return: Config dict carrying ``num_classes``, ``num_instances`` and
+            ``mask_size``, on top of the base configuration.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
@@ -1187,40 +1773,93 @@ class InstanceSegmentationHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class EnhancementHead(BaseVisionHead):
     """
-    Enhancement head for image-restoration tasks (denoising, super-resolution).
+    A restored or upscaled image, built from a feature map.
 
-    Applies a small stack of ``ConvBlock`` refinement blocks, then either an
-    upsampling transposed-conv (super-resolution, ``scale_factor > 1``) or a
-    same-resolution output conv (denoising and similar). Returns
-    ``{'enhanced': <tensor>}``.
+    Use this for denoising, super-resolution and the other image-to-image
+    tasks. Three ``ConvBlock`` stages refine the features. Then one conv
+    produces the image: a transposed conv when ``scale_factor > 1``, and a
+    same-resolution conv otherwise.
 
-    NOTE (module-scope, not a closure): this class was previously defined INSIDE
-    ``create_enhancement_head()`` and decorated there. A closure-local
-    registered class registers fine at import time but
-    is fragile and conceptually wrong (the registry holds a class redefined on
-    every factory call). It has been lifted to module scope; the class NAME is
-    kept EXACTLY ``EnhancementHead`` so the ``Custom>EnhancementHead``
-    registration string is unchanged and existing checkpoints still load.
-    Do NOT re-nest this inside the factory.
+    This head applies none of the common stages. ``norm``, ``dropout``,
+    ``attention`` and ``ffn`` are all built by :class:`BaseVisionHead`, and
+    ``call`` reaches none of them. ``build`` does not call
+    ``_common_processed_shape`` either. The head does read ``hidden_dim``,
+    ``normalization_type`` and ``activation_type``, which it hands to its own
+    ``ConvBlock`` stages.
 
-    Updated 2026-08-29 (repo-root ``MIGRATIONS.md``): the decorator is now
-    ``@register_dl_technique("dl_techniques.layers.heads.vision.factory")``, so
-    ``get_registered_name`` resolves
-    ``dl_techniques.layers.heads.vision.factory>EnhancementHead``. The name ban
-    above is UNCHANGED and now binds for a second reason: the helper's legacy
-    ``Custom>EnhancementHead`` alias -- which is what a pre-migration checkpoint
-    reads, and which was verified 2026-08-29 to resolve to this identical class
-    -- is keyed on the bare class NAME, so a rename would drop it too.
+    **Architecture Overview:**
 
-    :param output_channels: Number of output channels of the enhanced image.
+    .. code-block:: text
+
+        inputs (B, H, W, C)
+                          │
+                          ▼
+        ┌─────────────────────────────────┐
+        │ enhance_blocks: 3 x ConvBlock   │ -> hidden_dim
+        └────────────────┬────────────────┘
+                          ▼
+                 ┌────────┴────────┐
+                 ▼                 ▼
+          scale_factor > 1     otherwise
+        ┌─────────────────┐ ┌─────────────────┐
+        │ upsample        │ │ output_conv     │
+        │ Conv2DTranspose │ │ Conv2D 3x3      │
+        └────────┬────────┘ └────────┬────────┘
+                 └─────────┬─────────┘
+                           ▼
+                       'enhanced'
+
+        enhanced: (B, H*s, W*s, output_channels) when s > 1,
+                  else (B, H, W, output_channels). s = scale_factor.
+
+    The class name is frozen. This class once lived inside
+    ``create_enhancement_head`` as a closure-local registered class, and was
+    lifted to module scope. Do NOT re-nest it there. Its decorator is now
+    ``@register_dl_technique("dl_techniques.layers.heads.vision.factory")``,
+    so ``get_registered_name`` resolves
+    ``dl_techniques.layers.heads.vision.factory>EnhancementHead``. The helper
+    also mints a legacy ``Custom>EnhancementHead`` alias, which is what a
+    checkpoint written before 2026-08-29 reads, and which was verified on
+    2026-08-29 to resolve to this same class. That alias is keyed on the bare
+    class name, so a rename would drop it and break those archives.
+
+    Input shape:
+        ``(batch, height, width, channels)``.
+
+    Output shape:
+        ``{'enhanced': (batch, out_height, out_width, output_channels)}``.
+
+    :param output_channels: Channel count of the output image.
     :type output_channels: int
-    :param scale_factor: Upsampling factor; ``> 1`` selects the transposed-conv
-        super-resolution path, otherwise a same-resolution output conv is used.
+    :param scale_factor: Spatial upscaling factor. Above 1 selects the
+        transposed-conv path; 1 selects the same-resolution conv.
     :type scale_factor: int
     :param kwargs: Forwarded to :class:`BaseVisionHead`.
+
+    :ivar enhance_blocks: The three refinement ``ConvBlock`` layers.
+    :vartype enhance_blocks: List[ConvBlock]
+    :ivar upsample: Transposed conv, built only when ``scale_factor > 1``.
+    :vartype upsample: keras.layers.Conv2DTranspose
+    :ivar output_conv: Output conv, built only when ``scale_factor <= 1``.
+    :vartype output_conv: keras.layers.Conv2D
     """
 
     def __init__(self, output_channels: int = 3, scale_factor: int = 1, **kwargs):
+        """
+        Store the configuration and build the enhancement layers.
+
+        The base class builds the four common layers, which this head never
+        applies. Only one of ``upsample`` and ``output_conv`` is built, chosen
+        by ``scale_factor``.
+
+        :param output_channels: Channel count of the output image.
+        :type output_channels: int
+        :param scale_factor: Spatial upscaling factor.
+        :type scale_factor: int
+        :param kwargs: Forwarded to :class:`BaseVisionHead`.
+        :return: None.
+        :rtype: None
+        """
         super().__init__(**kwargs)
         self.output_channels = output_channels
         self.scale_factor = scale_factor
@@ -1253,9 +1892,17 @@ class EnhancementHead(BaseVisionHead):
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build enhancement-specific sub-layers, then the common layers.
+        """
+        Build the refinement stack and the output conv.
+
+        Each ``ConvBlock`` is built on the shape the previous one returns.
+        The common layers are built afterwards by the base class, even though
+        this head never applies them.
 
         :param input_shape: Input feature-map shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
         """
         shape = tuple(input_shape)
         for block in self.enhance_blocks:
@@ -1270,6 +1917,19 @@ class EnhancementHead(BaseVisionHead):
         super().build(input_shape)
 
     def call(self, inputs, training=None):
+        """
+        Refine the features, then produce the output image.
+
+        None of the four common stages runs here. See the class docstring.
+
+        :param inputs: Feature map of shape ``(batch, height, width,
+            channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Keras training flag, forwarded to each ``ConvBlock``.
+        :type training: Optional[bool]
+        :return: Dict with a single ``'enhanced'`` key.
+        :rtype: Dict[str, keras.KerasTensor]
+        """
         x = inputs
 
         for block in self.enhance_blocks:
@@ -1286,14 +1946,17 @@ class EnhancementHead(BaseVisionHead):
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Compute output shape for the enhancement head.
+        """
+        Report the output shape.
 
-        Super-resolution (``scale_factor > 1``) scales spatial dimensions by
-        ``scale_factor`` via transposed conv; otherwise the same-resolution
-        output conv preserves them. Channels become ``output_channels``.
+        With ``scale_factor > 1`` the transposed conv scales height and width
+        by ``scale_factor``. Otherwise the output conv keeps them. Channels
+        become ``output_channels`` either way.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
         :return: Dict with the ``'enhanced'`` output shape.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch, height, width = input_shape[0], input_shape[1], input_shape[2]
         scale = self.scale_factor if self.scale_factor > 1 else 1
@@ -1302,6 +1965,15 @@ class EnhancementHead(BaseVisionHead):
         return {'enhanced': (batch, out_height, out_width, self.output_channels)}
 
     def get_config(self):
+        """
+        Return the constructor arguments for serialization.
+
+        Adds this head's two arguments to the base configuration.
+
+        :return: Config dict carrying ``output_channels`` and
+            ``scale_factor``.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'output_channels': self.output_channels,
@@ -1317,36 +1989,66 @@ class EnhancementHead(BaseVisionHead):
 @register_dl_technique("dl_techniques.layers.heads.vision.factory")
 class MultiTaskHead(keras.layers.Layer):
     """
-    Multi-task head that combines multiple task-specific heads.
+    Several vision heads behind one layer.
 
-    Routes shared or task-specific inputs to independently configured task heads,
-    enabling joint multi-task learning from a common backbone.
+    Each entry in ``task_configs`` becomes one head. The heads are
+    independent: they share the input, not any weights. This class does not
+    inherit from :class:`BaseVisionHead`, so it builds no common layers of
+    its own.
+
+    A dict input is read per task name. A task name missing from the dict
+    falls back to the ``'shared'`` entry. A single tensor is sent to every
+    head unchanged.
 
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌─────────────────────┐
-        │  Shared / Per-Task  │
-        │   Input Features    │
-        └────┬───┬───┬────────┘
-             ▼   ▼   ▼
-        ┌────┐ ┌──┐ ┌────┐
-        │Det │ │Seg│ │Dep │ ...
-        │Head│ │Hd │ │Head│
-        └──┬─┘ └─┬┘ └──┬─┘
-           ▼     ▼     ▼
-        ┌─────────────────────┐
-        │  Task Output Dict   │
-        └─────────────────────┘
+        inputs: (B, H, W, C), or a dict keyed by task name
+        with a 'shared' fallback for any name it omits
+                                   │
+                      ┌────────────┴────────────┐
+                      ▼            ▼            ▼
+                 ┌───────────┐┌───────────┐┌───────────┐
+                 │ head[t1]  ││ head[t2]  ││ head[tN]  │
+                 └─────┬─────┘└─────┬─────┘└─────┬─────┘
+                       ▼            ▼            ▼
+                  outputs[t1]  outputs[t2]  outputs[tN]
 
-    :param task_configs: Dict mapping task names to their configurations.
+        Each head is one of five classes:
+
+        DetectionHead        SegmentationHead
+        DepthEstimationHead  ClassificationHead
+        InstanceSegmentationHead
+
+        Any other task type raises ValueError.
+
+    Every head returns a dict, so ``call`` returns a dict of dicts: task name
+    to that head's own output keys.
+
+    Input shape:
+        ``(batch, height, width, channels)``, or a dict of such shapes keyed
+        by task name.
+
+    Output shape:
+        Dict mapping each task name to that head's output shapes.
+
+    :param task_configs: Dict mapping a task name to that head's config. Each
+        config carries a ``'task_type'`` key naming one of the five classes.
     :type task_configs: Dict[str, Dict[str, Any]]
-    :param shared_backbone_dim: Dimension of shared backbone features.
+    :param shared_backbone_dim: Default ``hidden_dim`` for any task config
+        that does not set one.
     :type shared_backbone_dim: int
-    :param use_task_specific_attention: Whether each task gets its own attention.
+    :param use_task_specific_attention: Value forced onto every task head's
+        ``use_attention``. A per-task ``use_attention`` is overwritten.
     :type use_task_specific_attention: bool
-    :param kwargs: Additional arguments.
+    :param kwargs: Additional arguments for the base Layer class.
+
+    :ivar task_heads: Dict mapping each task name to its head instance.
+    :vartype task_heads: Dict[str, keras.layers.Layer]
+
+    :raises ValueError: From ``_create_task_heads``, when a config names a
+        task type with no head.
     """
 
     def __init__(
@@ -1356,6 +2058,23 @@ class MultiTaskHead(keras.layers.Layer):
             use_task_specific_attention: bool = True,
             **kwargs: Any
     ) -> None:
+        """
+        Store the configuration and build one head per task.
+
+        :param task_configs: Dict mapping a task name to that head's config.
+            Each config carries a ``'task_type'`` key.
+        :type task_configs: Dict[str, Dict[str, Any]]
+        :param shared_backbone_dim: Default ``hidden_dim`` for any task
+            config that does not set one.
+        :type shared_backbone_dim: int
+        :param use_task_specific_attention: Value forced onto every task
+            head's ``use_attention``.
+        :type use_task_specific_attention: bool
+        :param kwargs: Additional arguments for the base Layer class.
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a config names a task type with no head.
+        """
         super().__init__(**kwargs)
 
         self.task_configs = task_configs
@@ -1365,7 +2084,20 @@ class MultiTaskHead(keras.layers.Layer):
         self._create_task_heads()
 
     def _create_task_heads(self) -> None:
-        """Create task-specific heads based on configuration."""
+        """
+        Build one head per entry in ``task_configs``.
+
+        Each entry names a task type and carries that head's keyword
+        arguments. ``hidden_dim`` defaults to ``shared_backbone_dim`` and
+        ``use_attention`` is forced to ``use_task_specific_attention``, so a
+        per-task ``use_attention`` in the caller dict is overwritten.
+
+        Five task types are accepted. Any other raises.
+
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a config names a task type with no head.
+        """
 
         self.task_heads = {}
 
@@ -1399,10 +2131,17 @@ class MultiTaskHead(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
     ) -> None:
-        """Build every task head on its (shared or per-task) input shape.
+        """
+        Build every task head on its own input shape.
 
-        :param input_shape: Single shared feature-map shape, or a dict mapping
-            task names to per-task feature-map shapes.
+        A dict ``input_shape`` gives per-task shapes, falling back to its
+        ``'shared'`` entry. A single shape is used for every task.
+
+        :param input_shape: One shared feature-map shape, or a dict of
+            per-task shapes.
+        :type input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
+        :return: None.
+        :rtype: None
         """
         for task_name, task_head in self.task_heads.items():
             if isinstance(input_shape, dict):
@@ -1418,7 +2157,19 @@ class MultiTaskHead(keras.layers.Layer):
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
             training: Optional[bool] = None
     ) -> Dict[str, Dict[str, keras.KerasTensor]]:
-        """Forward pass through all task heads."""
+        """
+        Run every task head and collect the outputs.
+
+        A dict input is read per task name, falling back to its ``'shared'``
+        entry. A single tensor is sent to every head unchanged.
+
+        :param inputs: One feature map, or a dict of per-task feature maps.
+        :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
+        :param training: Keras training flag, forwarded to each head.
+        :type training: Optional[bool]
+        :return: Dict mapping each task name to that head's output dict.
+        :rtype: Dict[str, Dict[str, keras.KerasTensor]]
+        """
 
         outputs = {}
 
@@ -1439,15 +2190,18 @@ class MultiTaskHead(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
     ) -> Dict[str, Any]:
-        """Compute output shapes for every task head.
+        """
+        Report each task head's output shape.
 
-        Delegates to each task head's ``compute_output_shape``. A dict
-        ``input_shape`` provides per-task feature shapes (falling back to the
-        ``'shared'`` entry); a single shape is broadcast to all tasks.
+        Delegates to every head's own ``compute_output_shape``. A dict
+        ``input_shape`` gives per-task shapes, falling back to its
+        ``'shared'`` entry. A single shape is used for every task.
 
-        :param input_shape: Single shared feature-map shape, or a dict mapping
-            task names to per-task feature-map shapes.
+        :param input_shape: One shared feature-map shape, or a dict of
+            per-task shapes.
+        :type input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
         :return: Dict mapping each task name to that head's output shape.
+        :rtype: Dict[str, Any]
         """
         output_shapes = {}
         for task_name, task_head in self.task_heads.items():
@@ -1459,7 +2213,16 @@ class MultiTaskHead(keras.layers.Layer):
         return output_shapes
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
+        """
+        Return the constructor arguments for serialization.
+
+        ``task_configs`` is stored as the caller passed it. Nothing here
+        mutates it, so a round trip rebuilds the same heads.
+
+        :return: Config dict carrying ``task_configs``,
+            ``shared_backbone_dim`` and ``use_task_specific_attention``.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             'task_configs': self.task_configs,
@@ -1478,14 +2241,51 @@ def create_vision_head(
         **kwargs: Any
 ) -> BaseVisionHead:
     """
-    Factory function to create vision task heads.
+    Build the vision head that serves a task type.
 
-    :param task_type: VisionTaskType enum or string specifying the task.
+    Ten of the 37 ``VisionTaskType`` members reach a head. The other 27 raise
+    ``ValueError``. There is no fallback head and never has been: a task with
+    no implementation fails loudly rather than returning a plausible wrong
+    one.
+
+    Five members get a class of their own. Three reuse another task's class,
+    two of them with a different output channel count. Denoising and
+    super-resolution route through :func:`create_enhancement_head`.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        task_type: VisionTaskType, or a str that from_string parses
+                          │
+                 ┌────────┴────────┐
+                 ▼                 ▼
+          one of these 10     the other 27
+                 │                 │
+                 ▼                 ▼
+           head instance     ValueError raised
+
+        DETECTION              DetectionHead
+        SEGMENTATION           SegmentationHead
+        INSTANCE_SEGMENTATION  InstanceSegmentationHead
+        CLASSIFICATION         ClassificationHead
+        DEPTH_ESTIMATION       DepthEstimationHead
+        SURFACE_NORMALS        DepthEstimationHead, 3 channels
+        OPTICAL_FLOW           DepthEstimationHead, 2 channels
+        KEYPOINT_DETECTION     DetectionHead
+        DENOISING              EnhancementHead
+        SUPER_RESOLUTION       EnhancementHead, scale_factor 2
+
+    The ``VisionTaskType`` docstring in ``vision/task_types.py`` names all 27
+    members that raise. This function is the arbiter if the two disagree.
+
+    :param task_type: Task the head is for, as an enum member or its string
+        value.
     :type task_type: Union[VisionTaskType, str]
-    :param kwargs: Configuration parameters for the specific head.
-    :return: Configured vision head for the specified task.
+    :param kwargs: Forwarded to the chosen head class.
+    :return: Configured vision head.
     :rtype: BaseVisionHead
-    :raises ValueError: If task_type is not supported.
+    :raises ValueError: If the task type is one of the other 27.
     """
 
     # Convert string to VisionTaskType if needed
@@ -1533,11 +2333,21 @@ def create_enhancement_head(
         **kwargs: Any
 ) -> BaseVisionHead:
     """
-    Create enhancement-specific heads (denoising, super-resolution, etc.).
+    Build an :class:`EnhancementHead` for a restoration task.
 
-    This is a placeholder for enhancement-specific architectures. The
-    ``EnhancementHead`` class itself lives at module scope (see above); this
-    factory only selects defaults and instantiates it.
+    The only thing this function decides is the default scale factor.
+    Super-resolution gets ``scale_factor=2`` unless the caller passed one.
+    Every other task type is left alone, so the head keeps its own default of
+    1 and takes the same-resolution path.
+
+    The class itself lives at module scope. This function does not define it.
+
+    :param task_type: Task the head is for. Only
+        ``VisionTaskType.SUPER_RESOLUTION`` changes the outcome.
+    :type task_type: VisionTaskType
+    :param kwargs: Forwarded to :class:`EnhancementHead`.
+    :return: Configured enhancement head.
+    :rtype: BaseVisionHead
     """
 
     if task_type == VisionTaskType.SUPER_RESOLUTION:
@@ -1551,17 +2361,26 @@ def create_multi_task_head(
         **kwargs: Any
 ) -> MultiTaskHead:
     """
-    Create a multi-task head from task configuration.
+    Build a :class:`MultiTaskHead` from any of three configuration formats.
 
-    Accepts a TaskConfiguration object, a list of VisionTaskType enums, or a dict
-    mapping task names to configuration dicts.
+    A :class:`TaskConfiguration` contributes its enabled tasks. A list
+    contributes its entries, parsing any string through
+    ``VisionTaskType.from_string``. A dict is used as the task-config mapping
+    unchanged. In the first two cases each task name is looked up in
+    ``kwargs`` for its own extra options.
 
-    :param task_configuration: Task configuration in one of several formats.
+    ``kwargs`` is also forwarded whole to :class:`MultiTaskHead`.
+
+    :param task_configuration: A :class:`TaskConfiguration`, a list of
+        :class:`VisionTaskType` members or strings, or a dict mapping task
+        names to config dicts.
     :type task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]]
-    :param kwargs: Additional configuration.
-    :return: Configured multi-task head instance.
+    :param kwargs: Per-task option dicts, keyed by task name, plus any
+        argument for :class:`MultiTaskHead`.
+    :return: Configured multi-task head.
     :rtype: MultiTaskHead
-    :raises ValueError: If task_configuration type is invalid.
+    :raises ValueError: If ``task_configuration`` is none of the three
+        accepted types.
     """
 
     if isinstance(task_configuration, TaskConfiguration):
@@ -1600,15 +2419,54 @@ def create_multi_task_head(
 
 class HeadConfiguration:
     """
-    Configuration helper for vision heads.
+    Three keyword-argument presets for the vision heads.
 
-    Provides default, efficient, and high-performance configurations for
-    different vision tasks and deployment scenarios.
+    This class builds no layer. Each static method returns a dict you pass to
+    a head constructor or to :func:`create_vision_head`. The presets differ in
+    width, dropout, attention and FFN choice.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        get_default_config(task_type)
+                  │
+                  ▼
+        base_config, 7 keys shared by every task
+                  │
+                  ▼
+        + the task_specific entry, for 5 of the task types
+                  │
+        ┌─────────┴─────────┐
+        ▼                   ▼
+        get_efficient_config          get_high_performance_config
+        overrides 6 keys              overrides 8 keys
+
+    Both of the lower two call ``get_default_config`` first, so they inherit
+    the task-specific keys and then override the shared ones.
+
+    Example:
+        >>> cfg = HeadConfiguration.get_default_config(
+        ...     VisionTaskType.CLASSIFICATION)
+        >>> cfg['num_classes']
+        1000
     """
 
     @staticmethod
     def get_default_config(task_type: VisionTaskType) -> Dict[str, Any]:
-        """Get default configuration for a task type."""
+        """
+        Get the default preset for a task type.
+
+        Seven shared keys are always returned. Five task types add their own
+        keys on top: detection, segmentation, depth estimation,
+        classification and instance segmentation. Any other task type gets
+        the seven shared keys and nothing more.
+
+        :param task_type: Task the preset is for.
+        :type task_type: VisionTaskType
+        :return: Keyword arguments for the matching head class.
+        :rtype: Dict[str, Any]
+        """
 
         base_config = {
             'hidden_dim': 256,
@@ -1622,13 +2480,15 @@ class HeadConfiguration:
 
         task_specific = {
             VisionTaskType.DETECTION: {
-                'num_classes': 80,  # COCO default
+                # 80 classes is the COCO default.
+                'num_classes': 80,
                 'num_anchors': 9,
                 'bbox_dims': 4,
                 'use_attention': False
             },
             VisionTaskType.SEGMENTATION: {
-                'num_classes': 21,  # VOC default
+                # 21 classes is the VOC default.
+                'num_classes': 21,
                 'upsampling_factor': 4,
                 'use_skip_connections': True,
                 'use_attention': True,
@@ -1642,7 +2502,8 @@ class HeadConfiguration:
                 'use_attention': False
             },
             VisionTaskType.CLASSIFICATION: {
-                'num_classes': 1000,  # ImageNet default
+                # 1000 classes is the ImageNet default.
+                'num_classes': 1000,
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': True,
@@ -1665,7 +2526,18 @@ class HeadConfiguration:
 
     @staticmethod
     def get_efficient_config(task_type: VisionTaskType) -> Dict[str, Any]:
-        """Get efficient (lightweight) configuration."""
+        """
+        Get the lightweight preset for a task type.
+
+        Starts from :meth:`get_default_config` and overrides six keys: a
+        narrower ``hidden_dim``, no dropout, no attention, and a GLU FFN with
+        a smaller expansion.
+
+        :param task_type: Task the preset is for.
+        :type task_type: VisionTaskType
+        :return: Keyword arguments for the matching head class.
+        :rtype: Dict[str, Any]
+        """
 
         config = HeadConfiguration.get_default_config(task_type)
         config.update({
@@ -1673,25 +2545,41 @@ class HeadConfiguration:
             'dropout_rate': 0.0,
             'use_attention': False,
             'use_ffn': True,
-            'ffn_type': 'glu',  # More efficient
+            # 'glu' is the more efficient registered FFN type.
+            'ffn_type': 'glu',
             'ffn_expansion_factor': 2
         })
         return config
 
+
     @staticmethod
     def get_high_performance_config(task_type: VisionTaskType) -> Dict[str, Any]:
-        """Get high-performance configuration."""
+        """
+        Get the high-performance preset for a task type.
+
+        Starts from :meth:`get_default_config` and overrides eight keys: a
+        wider ``hidden_dim``, more dropout, differential attention, a SwiGLU
+        FFN with a larger expansion, and a zero-centred RMS norm.
+
+        :param task_type: Task the preset is for.
+        :type task_type: VisionTaskType
+        :return: Keyword arguments for the matching head class.
+        :rtype: Dict[str, Any]
+        """
 
         config = HeadConfiguration.get_default_config(task_type)
         config.update({
             'hidden_dim': 512,
             'dropout_rate': 0.2,
             'use_attention': True,
-            'attention_type': 'differential',  # Advanced attention
+            # 'differential' is the most capable registered attention type.
+            'attention_type': 'differential',
             'use_ffn': True,
-            'ffn_type': 'swiglu',  # Best performing FFN
+            # 'swiglu' is the best performing registered FFN type.
+            'ffn_type': 'swiglu',
             'ffn_expansion_factor': 8,
-            'normalization_type': 'zero_centered_rms_norm'  # More stable
+            # A zero-centred RMS norm is the more stable choice here.
+            'normalization_type': 'zero_centered_rms_norm'
         })
         return config
 
