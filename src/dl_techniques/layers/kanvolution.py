@@ -56,7 +56,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.convolutional_kan")
+@register_dl_technique("dl_techniques.layers.kanvolution")
 class KANvolution(keras.layers.Layer):
     """
     Kolmogorov-Arnold Network convolution layer with learnable B-spline activations.
