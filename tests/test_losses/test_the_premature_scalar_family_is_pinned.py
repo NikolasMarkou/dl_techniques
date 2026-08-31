@@ -156,7 +156,6 @@ def _siglip_pair():
 # (module, class, ctor kwargs, input builder)
 STILL_BROKEN = [
     ("mase_loss", "MASELoss", {}, _positive_pair),
-    ("focal_causal_lm_loss", "FocalCausalLMLoss", {}, _token_pair),
     ("hrm_loss", "HRMLoss", {}, _hrm_pair),
 ]
 
@@ -214,6 +213,14 @@ KNOWN_GOOD = [
     # the ragged proof lives in the commit message, not here.
     ("masked_causal_lm_loss", "MaskedCausalLMLoss", {}, _token_pair),
     ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 6, same T-2 token-pool form.
+    # Its ragged divergence was MEASURED under focal weighting rather than
+    # inherited from the two above, and it is WORSE than theirs: at counts
+    # [20, 3, 1, 1] the per-sequence-mean candidate reads 5.4263663 against this
+    # loss's 3.3156378 (63.7% off) at the default gamma=2.0, and 67.0% off at
+    # gamma=3.0/alpha=0.25 -- the focal modulator re-weights within a sequence
+    # too. Value unchanged at 2.4e-07, and exactly 0.0 at both of those configs.
+    ("focal_causal_lm_loss", "FocalCausalLMLoss", {}, _token_pair),
 ]
 
 
