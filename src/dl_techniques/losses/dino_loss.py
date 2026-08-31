@@ -578,12 +578,28 @@ class DINOLoss(keras.losses.Loss):
                 `"student_logits"` and `"teacher_logits"`.
 
         Returns:
-            Scalar tensor representing the computed DINO loss.
+            Per-sample cross-entropy of shape `(batch_size,)` -- one value per
+            student/teacher pair. Keras' reduction recovers the scalar this
+            used to return; keeping the batch axis is what lets
+            `sample_weight` and `reduction=` select rows.
 
         Note:
             This method ALSO advances the centering EMA -- see the class
             docstring. The returned loss uses the center as it stood BEFORE
-            this call's update, matching the reference DINO ordering.
+            this call's update, matching the reference DINO ordering. MEASURED:
+            row `i`'s returned value is bit-identical (max |d| 0.0e+00) to the
+            value a fresh instance returns for row `i` ALONE, so no row's loss
+            depends on the other rows in its batch.
+
+        Note:
+            **`sample_weight` is not clean masking -- this objective is
+            batch-coupled.** Setting `sample_weight[i] = 0` removes row `i`'s
+            LOSS CONTRIBUTION, but NOT its INFLUENCE on the other rows: row `i`
+            is still in the batch mean that advances the centering EMA inside
+            this same call, and that center shapes every subsequent call's
+            teacher distribution. A caller who reads `sample_weight = 0` as
+            "pretend this sample is absent" would be wrong. To actually exclude
+            a sample, keep it out of the batch.
         """
         teacher_logits, student_logits = _resolve_student_teacher(
             'DINOLoss', y_true, y_pred, self.out_dim)
@@ -626,7 +642,13 @@ class DINOLoss(keras.losses.Loss):
             + ops.cast(batch_center, center.dtype) * (1.0 - self.center_momentum)
         )
 
-        return ops.mean(loss)
+        # Per-sample: `loss` is already `(batch_size,)`. An `ops.mean` here would
+        # collapse the batch axis BEFORE Keras applies `sample_weight`, so the
+        # weights would multiply a scalar and every row would be charged the batch
+        # aggregate. Do not reintroduce it. Note this does NOT make the weighting
+        # clean masking -- the EMA update above still sees every row; see the
+        # `sample_weight` note in this method's docstring.
+        return loss
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -1099,7 +1121,22 @@ class KoLeoLoss(keras.losses.Loss):
             y_pred: Embeddings to regularize with shape (batch_size, dim).
 
         Returns:
-            Scalar regularization loss encouraging uniform distribution.
+            Per-sample regularization loss of shape `(batch_size,)`: row `i` is
+            `-log(distance to row i's nearest neighbour IN THE BATCH)`. Keras'
+            reduction recovers the scalar this used to return; keeping the batch
+            axis is what lets `sample_weight` and `reduction=` select rows.
+
+        Note:
+            **`sample_weight` is not clean masking -- this objective is
+            batch-coupled.** Every row's value is computed against the other rows
+            through the pairwise similarity matrix. Setting `sample_weight[i] = 0`
+            removes row `i`'s LOSS CONTRIBUTION, but NOT its INFLUENCE as a
+            NEIGHBOUR: row `i` stays in the similarity matrix and can still be the
+            nearest neighbour that sets some other row's value. A caller who reads
+            `sample_weight = 0` as "pretend this sample is absent" would be wrong.
+            To actually exclude a sample, keep it out of the batch. The per-row
+            attribution is still honest -- row `i` owns its own nearest-neighbour
+            distance -- which is what makes returning a vector correct here.
         """
         # L2 normalize embeddings to unit sphere.
         #
@@ -1158,7 +1195,15 @@ class KoLeoLoss(keras.losses.Loss):
 
         # Return in the caller's dtype: only the INTERMEDIATE normalization was
         # promoted (D-023 above), so the method's dtype contract is unchanged.
-        return ops.cast(ops.mean(loss), input_dtype)
+        #
+        # `loss` is ALREADY `(batch_size,)` -- `ops.max(..., axis=1)` above
+        # reduced the neighbour axis and nothing since has touched the batch axis.
+        # An `ops.mean` here would collapse it BEFORE Keras applies
+        # `sample_weight`, so the weights would multiply a scalar and every row
+        # would be charged the batch aggregate. Do not reintroduce it; see the
+        # `sample_weight` note in this method's docstring for why the vector is
+        # still not clean masking.
+        return ops.cast(loss, input_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization."""

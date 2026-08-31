@@ -160,9 +160,6 @@ STILL_BROKEN = [
     ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
     ("focal_causal_lm_loss", "FocalCausalLMLoss", {}, _token_pair),
     ("hrm_loss", "HRMLoss", {}, _hrm_pair),
-    # --- found by execution, absent from the findings' list ---
-    ("dino_loss", "DINOLoss", {"out_dim": 5}, _embedding_pair),
-    ("dino_loss", "KoLeoLoss", {}, _embedding_pair),
 ]
 
 # Classes that MUST be rejected by the same predicate. Without this arm the
@@ -197,6 +194,15 @@ KNOWN_GOOD = [
     # 200654.34474678 -- the new order is the closer of the two).
     ("scaled_mse_loss", "ScaledMseLoss", {}, _image_pair),
     ("sam_mask_loss", "SAMIoULoss", {}, _iou_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 4 (Tranche A batch 3). These
+    # two are BATCH-COUPLED: a row's value is computed against the other rows, so
+    # `sample_weight=0` removes a row's loss CONTRIBUTION but not its INFLUENCE
+    # (as a neighbour for KoLeo, as a participant in the centering EMA for DINO).
+    # The per-row attribution is still honest and both docstrings now say so.
+    # `_charges_every_row_the_batch_aggregate` builds a FRESH instance per call,
+    # which is what keeps DINOLoss's stateful centering out of this measurement.
+    ("dino_loss", "DINOLoss", {"out_dim": 5}, _embedding_pair),
+    ("dino_loss", "KoLeoLoss", {}, _embedding_pair),
 ]
 
 
