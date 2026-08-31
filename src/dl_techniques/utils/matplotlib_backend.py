@@ -97,6 +97,12 @@ def import_pyplot(with_cm: bool = False) -> Union[Any, Tuple[Any, Any]]:
     """
     import matplotlib
 
+    # DECISION plan-2026-08-31T175140-a4e0c303/D-011: SETDEFAULT, never an
+    # override. Do NOT restore an unconditional matplotlib.use("Agg") here:
+    # it discards a caller's explicit MPLBACKEND (e.g. svg for vector output)
+    # to fix a headless crash that DOES NOT REPRODUCE on matplotlib 3.10 (see
+    # the module docstring's measurements). Do NOT key off get_backend()
+    # instead: it cannot tell a prior use() from the default. See D-011.
     if not os.environ.get("MPLBACKEND"):
         os.environ["MPLBACKEND"] = DEFAULT_BACKEND
         matplotlib.use(DEFAULT_BACKEND)
