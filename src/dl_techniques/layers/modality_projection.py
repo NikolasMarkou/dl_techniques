@@ -64,9 +64,10 @@ from typing import Optional, Tuple, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .pixel_shuffle import PixelShuffle
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+from .pixel_shuffle import PixelShuffle
 
 # ---------------------------------------------------------------------
 

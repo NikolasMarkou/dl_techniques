@@ -1,4 +1,5 @@
-"""One encoder junction: produce ``(skip, downsampled)`` from a single input.
+"""
+One encoder junction: produce ``(skip, downsampled)`` from a single input.
 
 This module holds :class:`DownsampleAndSkip`, the single home for the "skip
 connection + downsample" decision made at every encoder level of the U-Net-shaped
