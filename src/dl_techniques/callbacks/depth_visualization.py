@@ -22,7 +22,8 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 # Lazy-import matplotlib to avoid import-time side effects; the shared importer
-# FORCES the headless Agg backend, so no MPLBACKEND=Agg prefix is required.
+# defaults the backend to Agg when MPLBACKEND is unset, and respects MPLBACKEND
+# when the caller set one.
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 

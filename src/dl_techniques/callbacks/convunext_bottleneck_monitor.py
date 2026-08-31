@@ -27,10 +27,12 @@ and writes three PNGs for the first sample / fixed batch:
    statistics versus epoch, overwritten each monitored epoch and at train end.
 
 The callback imports nothing from ``src/train/`` (HARD library-layering rule):
-the trainer builds the fixed validation batch and passes it in. matplotlib is
-lazy-imported inside the plotting method; callers should set ``MPLBACKEND=Agg``
-for headless environments. The entire emit path is wrapped in a try/except so a
-plotting or forward-pass failure can never raise into the training loop.
+the trainer builds the fixed validation batch and passes it in. ``pyplot`` is
+lazy-acquired through
+:func:`dl_techniques.utils.matplotlib_backend.import_pyplot`, which defaults the
+backend to ``Agg`` when the caller set no ``MPLBACKEND`` and respects it when
+they did. The entire emit path is wrapped in a try/except so a plotting or
+forward-pass failure can never raise into the training loop.
 """
 
 from pathlib import Path
@@ -40,6 +42,7 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 
 # DECISION plan-2026-08-10T130454-3649c19e/D-011
@@ -189,7 +192,7 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
             suffix: Filename suffix (``"first"`` or ``"energy"``).
             title: Figure super-title.
         """
-        import matplotlib.pyplot as plt  # noqa: PLC0415
+        plt = import_pyplot()
 
         k = len(indices)
         cols = int(np.ceil(np.sqrt(k)))
@@ -226,7 +229,7 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
     # -----------------------------------------------------------------
     def _save_health_curves(self) -> None:
         """Plot each cumulative health metric versus epoch (overwrites)."""
-        import matplotlib.pyplot as plt  # noqa: PLC0415
+        plt = import_pyplot()
 
         metrics = list(self.history.keys())
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))

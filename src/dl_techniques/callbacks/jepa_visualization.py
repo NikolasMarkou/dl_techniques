@@ -16,8 +16,9 @@ and a ``config`` with ``patches_per_side`` / ``mask_prediction_enabled``
 Both callbacks:
 
 * lazy-import matplotlib through
-  :func:`dl_techniques.utils.matplotlib_backend.import_pyplot`, which FORCES
-  the headless ``Agg`` backend (callers no longer need ``MPLBACKEND=Agg``);
+  :func:`dl_techniques.utils.matplotlib_backend.import_pyplot`, which defaults
+  the backend to ``Agg`` when ``MPLBACKEND`` is unset and respects it when the
+  caller set one;
 * swallow all exceptions and log a warning via ``dl_techniques.utils.logger``
   so visualization failures never take down training;
 * cache a fixed ``eval_pixels`` batch at construction time for cross-epoch
