@@ -9,8 +9,12 @@ back-compat alias, ``TaskConfiguration``, ``CommonTaskConfigurations`` and
 ``parse_task_list``.
 
 ``BaseVisionHead`` is exported but is not a usable head. It defines no
-``call``, only the shared normalization, dropout, attention and feed-forward
-stages its subclasses build on. Use one of the seven task heads instead.
+``call``. It builds four sub-layers -- ``norm``, ``dropout``, ``attention``
+and ``ffn`` -- but only ``attention`` and ``ffn`` are ever applied by a
+subclass ``call``; ``norm`` and ``dropout`` are built (``norm`` carries
+weights) and never reached, because each head normalizes and drops inside
+its own ``ConvBlock`` / ``DenseBlock``. Use one of the seven task heads
+instead.
 ``get_task_suggestions`` and ``validate_task_combination`` are NOT exported;
 import them from ``.task_types`` when you need them.
 

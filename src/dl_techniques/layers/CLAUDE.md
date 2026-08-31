@@ -20,7 +20,7 @@ in § Naming traps below.
 | `logic/` | ✅ | Arithmetic operators, logic operators, neural circuit |
 | `memory/` | ✅ | NTM family, SOM family, NeuroGrid (see below) |
 | `mixtures/` | ✅ | `RBFLayer` (`radial_basis_function.py`), `KMeansLayer` (`kmeans.py`, differentiable K-means), `GMMLayer` (`gmm.py`, differentiable GMM with isometric-kernel regularization). `factory.py` exposes `MixtureType` + `create_mixture_layer` / `create_mixture_from_config`. Import via `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer` |
-| `sequence_pooling/` | ✅ | Pool a `(B, T, D)` sequence to `(B, D)`: `SequencePooling` (`sequence_pooling.py` — `cls`/`mean`/`max`/positional, reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
+| `sequence_pooling/` | ✅ | Pool a `(B, T, D)` sequence to `(B, D)`: `SequencePooling` (`sequence_pooling.py` — 18 strategies: positional `cls`/`first`/`last`/`middle`, statistical `mean`/`max`/`min`/`sum`, composite `mean_max`/`mean_std`/`mean_max_min`, learnable `attention`/`multi_head_attention`/`weighted`, `top_k_mean`/`top_k_max`, and `none`/`flatten`; four of them reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
 | `transformers/` | — | Standard transformer, Swin block, Swin conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork` (`energy_transformer.py`), `GatedLinearAttentionBlock` (`gated_linear_attention_block.py`) |
 | `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/` (which assembles them into the MCi tower): `FastVitConvMlp`, `RepConditionalPosEnc`, `FastVitRepMixer`, `FastVitRepMixerBlock`, `ReparamLargeKernelConv`, `FastVitPatchEmbed`, `FastVitAttentionBlock`, `FastVitStage`. Curated `__init__` re-export, no factory. Train-time multi-branch form only — no reparameterization / fusion path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
@@ -72,7 +72,7 @@ Consolidates the formerly-separate `nlp_heads/`, `vision_heads/` and `vlm_heads/
 
 | Sub-package | Heads |
 |---|---|
-| `heads/nlp/` | text/token classification, QA, similarity, generation, multiple-choice, multi-task. Pooling reuses the shared `SequencePooling` for `cls`/`mean`/`max`; the learnable `attention` strategy stays inline (different mechanism + weights) |
+| `heads/nlp/` | text/token classification, QA, similarity, generation, multiple-choice, multi-task. Pooling reuses the shared `SequencePooling` for the four delegated strategies `cls`/`mean`/`max`/`last`; the learnable `attention` strategy stays inline (different mechanism + weights) |
 | `heads/vision/` | detection, segmentation, depth, classification, instance segmentation, enhancement, multi-task, plus `VisionTaskType` (with a `TaskType` back-compat alias) |
 | `heads/vlm/` | captioning, VQA, visual grounding, image-text matching, multi-task |
 

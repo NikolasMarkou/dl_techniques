@@ -81,7 +81,7 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
 
 ## Notes
 
-- **Serialization-stable.** All 21 layer-class names are preserved verbatim; the
+- **Serialization-stable.** All 22 layer-class names are preserved verbatim; the
   package was relocated via `git mv`, so existing `.keras` checkpoints stay loadable. The
   classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`
   (from `dl_techniques.utils.keras_registration`), so
