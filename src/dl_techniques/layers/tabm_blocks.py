@@ -62,6 +62,11 @@ diversity comes from elsewhere, and a silent degeneracy if it is not.
 import keras
 from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -72,6 +77,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class RandomSigns(keras.initializers.Initializer):

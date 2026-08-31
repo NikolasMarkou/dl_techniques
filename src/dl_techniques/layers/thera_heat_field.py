@@ -1,4 +1,5 @@
-"""THERA neural heat field as Keras layers: ``ThermalActivation`` + ``HeatField``.
+"""
+THERA neural heat field as Keras layers: ``ThermalActivation`` + ``HeatField``.
 
 THERA (Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields)
 represents the high-resolution signal as a **spatially-varying** SIREN-style

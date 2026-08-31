@@ -47,13 +47,19 @@ The operational flow is as follows:
 import keras
 from keras import ops
 from typing import Dict, List, Optional, Tuple, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.one_hot_encoding")
 class OneHotEncoding(keras.layers.Layer):
-    """One-hot encoding layer for multiple categorical features.
+    """
+    One-hot encoding layer for multiple categorical features.
 
     This layer converts integer-encoded categorical features into binary
     one-hot vectors and concatenates them into a single wide tensor. It

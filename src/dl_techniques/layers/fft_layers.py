@@ -20,6 +20,11 @@ channels-first for the transform and permuted back afterwards.
 
 import keras
 from typing import Optional, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

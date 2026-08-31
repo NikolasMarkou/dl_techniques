@@ -154,7 +154,6 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 make test       # full pytest suite (~1.5 hours; also the pre-push hook)
 make clean      # remove build artifacts and __pycache__
 make structure  # print the src/ tree
-make docs       # generate per-module docs (output is NOT committed)
 ```
 
 Scope pytest to what you changed rather than running the whole suite as a regression check:
@@ -360,7 +359,7 @@ Our `research/` directory contains over 120 articles providing the theoretical f
 Five LaTeX manuscripts written against this codebase live under [`research/papers/`](./research/papers), several with built PDFs: `band_rms` (band-constrained RMS normalization), `bfunet` (bias-free denoisers as image priors), `cliffordnet_extensions`, `correlations`, and `logical_net`.
 
 ### API Reference (per-module docs)
-There is **no committed documentation directory** — `make docs` generates one on demand and the output is not checked in. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. Every one of the 80 leaf model packages carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
+There is **no committed documentation directory and no doc generator** — `generate_docs.py` and the `make docs` target were deleted as deprecated. For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. Every one of the 84 leaf model packages carries its own `README.md`. The `research/` guides above complement these with the underlying theory.
 
 ---
 

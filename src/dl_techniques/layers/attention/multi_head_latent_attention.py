@@ -47,9 +47,9 @@ from typing import Optional, Dict, Any, Tuple, Union
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput
-from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+from .common import apply_attention_mask, compute_attention_scale
 # ---------------------------------------------------------------------
 
 

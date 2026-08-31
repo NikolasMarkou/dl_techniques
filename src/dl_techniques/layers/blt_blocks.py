@@ -222,11 +222,12 @@ from typing import Optional, Dict, Any, List, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+from dl_techniques.utils.masking import create_mask
+from dl_techniques.utils.keras_registration import register_dl_technique
+
 from .transformers.transformer import TransformerLayer
 from .embedding.positional_embedding import PositionalEmbedding
-from ..utils.masking import create_mask
-from ..utils.logger import logger
-from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 

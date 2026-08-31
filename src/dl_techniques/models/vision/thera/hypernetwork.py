@@ -1,25 +1,5 @@
-# DECISION plan_2026-06-11_f662207d/D-008
-# This layer ports THERA's hypernetwork + apply_decoder (reference `model/hyper.py`
-# + `model/thera.py`). Several choices are deliberate and must NOT be "simplified":
-#
-#  1. phi SPLIT CONVENTION (phase first, kernel reshaped second) is OUR choice. THERA
-#     trains the hypernetwork from a JAX param-tree whose flat layout we are NOT
-#     porting (INV-6: no param-tree, no .pkl weight port). Under train-from-scratch
-#     the only requirement is that the split is INTERNALLY CONSISTENT between
-#     `out_conv` output ordering and the `HeatField` inputs. Do not "match the JAX
-#     layout" -- there is no weight port to match.
-#  2. PER-PIXEL field via the step-3 HeatField BATCHED EINSUM, NOT JAX vmap over query
-#     pixels / a nested param tree (INV-5). Do not reintroduce vmap.
-#  3. SOURCE GRID is built pixel-CENTER to match step-2 `make_grid` EXACTLY (channel
-#     order [h, w], `linspace(-0.5+1/(2n), 0.5-1/(2n), n)`, indexing='ij'). A naive
-#     `linspace(-0.5, 0.5, n)` endpoint grid would silently mis-register rel_coords.
-#  4. SAMPLING is order=0 (NEAREST), matching THERA. Do NOT "upgrade" to bilinear:
-#     the step-9 TV-loss coordinate Jacobian flows through the DIRECT `coords` term of
-#     `rel = coords - nearest(coords)` (the nearest term is piecewise-constant,
-#     zero-grad a.e.), into the heat field -- NOT through the sampler.
-#
-# See decisions.md D-008.
-"""THERA hypernetwork + implicit-field decoder as a Keras layer.
+"""
+THERA hypernetwork + implicit-field decoder as a Keras layer.
 
 This module ports THERA's per-pixel implicit-field decoder. A frozen encoding
 (the backbone feature map) is turned, at each *query* coordinate, into a

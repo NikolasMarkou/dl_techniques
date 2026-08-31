@@ -55,8 +55,9 @@ from keras import ops
 from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 # ---------------------------------------------------------------------
-# Local imports - assumed to exist as per instructions
+# local imports
 # ---------------------------------------------------------------------
+
 from ..utils.logger import logger
 from ..initializers import clone_initializer
 from .yolo12_blocks import ConvBlock
@@ -392,23 +393,23 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │  Inputs: [P3, P4, P5]               │
+        │  Inputs: [P3, P4, P5]                │
         └──────────────┬───────────────────────┘
                        ▼
         ┌──────────────────────────────────────┐
-        │  P5 → UpConv0 (2x) → fuse with P4  │
+        │  P5 → UpConv0 (2x) → fuse with P4    │
         │       (skip conv + opt. SE attn)     │
         └──────────────┬───────────────────────┘
                        ▼
         ┌──────────────────────────────────────┐
-        │  → UpConv1 (2x) → fuse with P3     │
+        │  → UpConv1 (2x) → fuse with P3       │
         │       (skip conv + opt. SE attn)     │
         └──────────────┬───────────────────────┘
                        ▼
         ┌──────────────────────────────────────┐
-        │  → UpConv2..N (2x each)             │
+        │  → UpConv2..N (2x each)              │
         │  → Resize to target_size             │
-        │  → Dropout → Conv1x1(num_classes)   │
+        │  → Dropout → Conv1x1(num_classes)    │
         └──────────────────────────────────────┘
 
     :param num_classes: Number of segmentation classes. Defaults to 1.
@@ -697,7 +698,8 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through segmentation head.
 
-            :param inputs: List of feature maps [P3, P4, P5] from backbone. Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :param inputs: List of feature maps [P3, P4, P5] from backbone.
+                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
             :type inputs: keras.KerasTensor
             :param training: Boolean, whether in training mode.
             :type training: bool or None
@@ -760,7 +762,10 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
 
         return segmentation_output
 
-    def compute_output_shape(self, input_shape: List[Tuple[Optional[int], ...]]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: List[Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
         """Compute output shape of the layer.
 
             :param input_shape: List of input shape tuples.
@@ -822,7 +827,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     .. code-block:: text
 
         ┌───────────────────────────────────────┐
-        │  Inputs: [P3, P4, P5]                │
+        │  Inputs: [P3, P4, P5]                 │
         └──────┬────────┬────────┬──────────────┘
                ▼        ▼        ▼
         ┌──────────────────────────────────────┐
@@ -832,7 +837,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
                        ▼
         ┌──────────────────────────────────────┐
         │  Optional Attention Weighting        │
-        │  Dense(D/4, relu) → Dense(D, sig)   │
+        │  Dense(D/4, relu) → Dense(D, sig)    │
         │  x = x * attention_weights           │
         └──────────────┬───────────────────────┘
                        ▼
@@ -1042,7 +1047,8 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through classification head.
 
-            :param inputs: List of feature maps [P3, P4, P5] from backbone. Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
+            :param inputs: List of feature maps [P3, P4, P5] from backbone.
+                Expected shapes: [(B, H/8, W/8, C1), (B, H/16, W/16, C2), (B, H/32, W/32, C3)]
             :type inputs: keras.KerasTensor
             :param training: Boolean, whether in training mode.
             :type training: bool or None
@@ -1114,3 +1120,5 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

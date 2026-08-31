@@ -1,12 +1,16 @@
 """
 Pool features globally by summing over spatial dimensions.
 
-Performs global sum pooling on 2D spatial feature maps, reducing a 4D tensor
-(batch, H, W, C) to (batch, C) by summing over spatial dimensions per channel:
-y_c = sum_{h,w} x_{h,w,c}. Unlike average pooling (which normalizes by area)
+Performs global sum pooling on spatial feature maps of arbitrary rank, reducing
+an input tensor to a per-channel descriptor by summing over the selected spatial
+axes: y_c = sum_{s} x_{s,c}. Unlike average pooling (which normalizes by area)
 or max pooling (which identifies peak response), sum pooling measures the total
 magnitude of feature activation, making it suited for tasks where total feature
 quantity matters such as object counting and density estimation.
+
+Assumes the Keras default "channels_last" data format, i.e. inputs of shape
+(batch, *spatial, channels). The spatial rank is inferred from the input shape
+at build time.
 
 References:
     - Lempitsky, V. and Zisserman, A. "Learning To Count Objects in Images".
@@ -15,18 +19,24 @@ References:
 
 import keras
 from keras import ops
-from typing import Optional, Any, Dict, Tuple
+from typing import Optional, Any, Dict, Tuple, Union, Sequence
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.global_sum_pool_2d")
-class GlobalSumPooling2D(keras.layers.Layer):
+@register_dl_technique("dl_techniques.layers.global_sum_pool")
+class GlobalSumPooling(keras.layers.Layer):
     """
-    Global sum pooling operation for 2D spatial data.
+    Global sum pooling operation over configurable spatial axes.
 
-    Sums over spatial dimensions (height and width) to reduce 4D tensors to 2D
-    channel descriptors: y_c = sum_{h=1..H, w=1..W} x_{h,w,c}. Preserves the
+    Sums over the selected spatial axes of a (batch, *spatial, channels) tensor.
+    By default every spatial axis is summed, reducing the input to a
+    (batch, channels) channel descriptor: y_c = sum_s x_{s,c}. Preserves the
     total activation magnitude rather than averaging or taking the maximum,
     making it useful for object counting and density estimation where the
     integral of a learned density map corresponds to a count.
@@ -36,51 +46,106 @@ class GlobalSumPooling2D(keras.layers.Layer):
     .. code-block:: text
 
         ┌──────────────────────────────────────────┐
-        │  Input [batch, H, W, C]                  │
+        │  Input [batch, *spatial, C]              │
+        │  rank 3: [batch, W, C]                   │
+        │  rank 4: [batch, H, W, C]                │
+        │  rank 5: [batch, D, H, W, C]             │
         └──────────────────┬───────────────────────┘
                            ▼
         ┌──────────────────────────────────────────┐
-        │  Sum over spatial dims (H, W)            │
-        │  y_c = Σ_{h,w} x_{h,w,c}                 │
+        │  Sum over selected spatial axes          │
+        │  y_c = Σ_s x_{s,c}                       │
         └──────────────────┬───────────────────────┘
                            ▼
         ┌──────────────────────────────────────────┐
-        │  Output [batch, C]                       │
-        │  (or [batch, 1, 1, C] if keepdims)       │
+        │  Output [batch, *kept_spatial, C]        │
+        │  (summed axes dropped, or 1 if keepdims) │
         └──────────────────────────────────────────┘
 
-    :param keepdims: Whether to keep the spatial dimensions as size 1.
+    :param axes: Spatial axis or axes to sum over. Negative values are counted
+        from the end, so -2 is the last spatial axis. The batch axis (0) and the
+        channel axis (-1) cannot be summed. If None, all spatial axes are
+        summed. Defaults to None.
+    :type axes: Optional[Union[int, Sequence[int]]]
+    :param keepdims: Whether to keep the summed dimensions as size 1.
         Defaults to False.
     :type keepdims: bool
-    :param data_format: Either "channels_last" or "channels_first". If None,
-        uses Keras default. Defaults to None.
-    :type data_format: Optional[str]
     :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
     def __init__(
             self,
+            axes: Optional[Union[int, Sequence[int]]] = None,
             keepdims: bool = False,
-            data_format: Optional[str] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
 
-        # Store configuration parameters
+        if isinstance(axes, int):
+            axes = (axes,)
+        elif axes is not None:
+            axes = tuple(int(axis) for axis in axes)
+            if not axes:
+                raise ValueError("axes must not be empty")
+            if len(set(axes)) != len(axes):
+                raise ValueError(f"axes must not contain duplicates, got {axes}")
+
+        # Configuration as provided by the user, kept verbatim for serialization
+        self.axes = axes
         self.keepdims = keepdims
 
-        # Set data format - use provided value or default from Keras config
-        if data_format is None:
-            data_format = keras.backend.image_data_format()
+        # Positive, sorted axes resolved against the input rank at build time
+        self._sum_axes: Optional[Tuple[int, ...]] = None
 
-        # Validate data format
-        if data_format not in ("channels_last", "channels_first"):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Infer the spatial rank and resolve the axes to sum over.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
+        self._sum_axes = self._resolve_axes(len(input_shape))
+        super().build(input_shape)
+
+    def _resolve_axes(self, input_rank: int) -> Tuple[int, ...]:
+        """Normalize the configured axes against a concrete input rank.
+
+        :param input_rank: Rank of the input tensor, including batch and channels.
+        :type input_rank: int
+        :return: Sorted tuple of positive spatial axis indices.
+        :rtype: Tuple[int, ...]
+        """
+        spatial_rank = input_rank - 2
+
+        if spatial_rank < 1:
             raise ValueError(
-                f"data_format must be 'channels_last' or 'channels_first', "
-                f"got {data_format}"
+                f"Expected an input of rank >= 3 with shape "
+                f"(batch, *spatial, channels), got rank {input_rank}"
             )
 
-        self.data_format = data_format
+        # Default: every spatial axis
+        if self.axes is None:
+            return tuple(range(1, spatial_rank + 1))
+
+        resolved = []
+        for axis in self.axes:
+            positive_axis = axis + input_rank if axis < 0 else axis
+
+            if not 1 <= positive_axis <= spatial_rank:
+                raise ValueError(
+                    f"axis {axis} is not a spatial axis of a rank-{input_rank} "
+                    f"input; valid spatial axes are 1..{spatial_rank} "
+                    f"(or -2..{-input_rank + 1})"
+                )
+
+            resolved.append(positive_axis)
+
+        if len(set(resolved)) != len(resolved):
+            raise ValueError(
+                f"axes {self.axes} resolve to duplicate axes {tuple(resolved)} "
+                f"for a rank-{input_rank} input"
+            )
+
+        return tuple(sorted(resolved))
 
     def call(
             self,
@@ -89,24 +154,14 @@ class GlobalSumPooling2D(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass computation.
 
-        :param inputs: Input tensor of rank 4.
+        :param inputs: Input tensor of shape (batch, *spatial, channels).
         :type inputs: keras.KerasTensor
         :param training: Boolean indicating training mode (unused).
         :type training: Optional[bool]
-        :return: Tensor with spatial dimensions summed out.
+        :return: Tensor with the selected spatial dimensions summed out.
         :rtype: keras.KerasTensor
         """
-        # Determine which axes to sum over based on data format
-        if self.data_format == "channels_last":
-            # For channels_last: (batch, height, width, channels)
-            # Sum over height (axis 1) and width (axis 2)
-            sum_axes = [1, 2]
-        else:
-            # For channels_first: (batch, channels, height, width)
-            # Sum over height (axis 2) and width (axis 3)
-            sum_axes = [2, 3]
-
-        return ops.sum(inputs, axis=sum_axes, keepdims=self.keepdims)
+        return ops.sum(inputs, axis=self._sum_axes, keepdims=self.keepdims)
 
     def compute_output_shape(
             self,
@@ -119,27 +174,18 @@ class GlobalSumPooling2D(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        # Convert to list for manipulation
-        input_shape_list = list(input_shape)
+        sum_axes = self._sum_axes or self._resolve_axes(len(input_shape))
 
-        if self.data_format == "channels_last":
-            # Input: (batch, height, width, channels)
-            if self.keepdims:
-                # Output: (batch, 1, 1, channels)
-                output_shape_list = [input_shape_list[0], 1, 1, input_shape_list[3]]
-            else:
-                # Output: (batch, channels)
-                output_shape_list = [input_shape_list[0], input_shape_list[3]]
-        else:
-            # Input: (batch, channels, height, width)
-            if self.keepdims:
-                # Output: (batch, channels, 1, 1)
-                output_shape_list = [input_shape_list[0], input_shape_list[1], 1, 1]
-            else:
-                # Output: (batch, channels)
-                output_shape_list = [input_shape_list[0], input_shape_list[1]]
+        if self.keepdims:
+            return tuple(
+                1 if index in sum_axes else dim
+                for index, dim in enumerate(input_shape)
+            )
 
-        return tuple(output_shape_list)
+        return tuple(
+            dim for index, dim in enumerate(input_shape)
+            if index not in sum_axes
+        )
 
     def get_config(self) -> Dict[str, Any]:
         """Get the layer configuration for serialization.
@@ -149,8 +195,8 @@ class GlobalSumPooling2D(keras.layers.Layer):
         """
         config = super().get_config()
         config.update({
+            "axes": list(self.axes) if self.axes is not None else None,
             "keepdims": self.keepdims,
-            "data_format": self.data_format,
         })
         return config
 

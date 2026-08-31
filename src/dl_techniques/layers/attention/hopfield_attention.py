@@ -179,7 +179,7 @@ class HopfieldAttention(keras.layers.Layer):
         │  out = A · V                                        │
         │  if step < update_steps_max:                        │
         │      Q = A · K   ◄── the Hopfield loop-back         │
-        └────────────────────────────────────────────────────┘
+        └─────────────────────────────────────────────────────┘
                ▼
         transpose ► reshape to [B, N_q, H*value_dim]
                ▼

@@ -77,6 +77,11 @@ References:
 import keras
 from keras import ops
 from typing import Dict, Tuple, Any, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

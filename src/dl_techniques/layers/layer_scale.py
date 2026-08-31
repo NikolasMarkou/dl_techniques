@@ -67,6 +67,11 @@ import keras
 from keras import ops
 from enum import Enum
 from typing import Dict, Any, Optional, Union, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -243,7 +248,10 @@ class LearnableMultiplier(keras.layers.Layer):
         # ("mixed precision disallowed"). No-op when dtypes already match (fp32 path).
         return ops.multiply(inputs, ops.cast(self.gamma, inputs.dtype))
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
         :param input_shape: Shape tuple of the input tensor.
