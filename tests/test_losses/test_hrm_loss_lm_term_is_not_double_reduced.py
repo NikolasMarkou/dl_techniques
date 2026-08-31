@@ -128,3 +128,66 @@ def test_both_lm_loss_type_branches_agree_in_scale():
         f"stable_max total {a!r} vs scc total {b!r} differ by {ratio:.1f}x. The two branches "
         f"should differ only by the choice of cross-entropy, not by a reduction convention."
     )
+
+
+# ---------------------------------------------------------------------
+# The OTHER branch's defect: it crashed at its own default ignore_index
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lm_loss_type", ["stable_max", "sparse_categorical_crossentropy"])
+def test_both_branches_survive_masked_labels_at_the_default_ignore_index(lm_loss_type):
+    """Neither branch may crash on a masked batch at the DEFAULT ``ignore_index=-100``.
+
+    The ``sparse_categorical_crossentropy`` branch used to. ``__init__`` passes
+    ``ignore_class=ignore_index if ignore_index >= 0 else None``, so at the default the sub-loss
+    was told to ignore NOTHING and TF raised
+    ``Received a label value of -100 which is outside the valid range of [0, V)``.
+
+    Padding a batch is the normal case, not an edge case, so this branch was unusable exactly when
+    it mattered. A failure here means the ignored labels are reaching the cross-entropy kernel raw
+    again.
+    """
+    B, T, V = 4, 6, 11
+    y_true, y_pred = _batch(B, T, V)
+    labels = y_true["labels"]
+    labels[1, 3:] = -100          # ragged padding, the ordinary case
+    labels[2, 4:] = -100
+
+    out = HRMLoss(lm_loss_type=lm_loss_type).call(y_true, y_pred)
+    arr = keras.ops.convert_to_numpy(out)
+    assert arr.shape == (B,), f"{lm_loss_type}: expected per-sample {(B,)}, got {arr.shape}"
+    assert np.all(np.isfinite(arr)), f"{lm_loss_type}: non-finite loss {arr!r}"
+
+
+def test_masked_positions_contribute_nothing_to_the_scc_branch():
+    """Clamping the ignored labels must not let them into the loss.
+
+    The fix replaces ignored labels with class 0 so the kernel's range check passes. That is only
+    sound because those positions are zeroed afterwards. If the zeroing is dropped, class 0's
+    cross-entropy silently enters the token sum, and this test is what notices.
+    """
+    B, T, V = 4, 6, 11
+    y_true, y_pred = _batch(B, T, V)
+    labels = y_true["labels"]
+    labels[1, 3:] = -100
+
+    loss = HRMLoss(lm_loss_type="sparse_categorical_crossentropy")
+    base = keras.ops.convert_to_numpy(loss.call(y_true, y_pred))
+
+    # Change the LOGITS only at masked positions. A correct implementation cannot see it.
+    #
+    # Perturb ONE class, not all of them. Adding a constant to every logit at a position
+    # is invisible to cross-entropy because softmax is SHIFT-INVARIANT -- a uniform bump
+    # makes this test pass whether or not the masking works, i.e. a guard that cannot
+    # fail. Measured: the uniform version stayed green under an injection that deleted
+    # the zeroing outright.
+    y_pred2 = {k: (v.copy() if hasattr(v, "copy") else v) for k, v in y_pred.items()}
+    y_pred2["logits"][1, 3:, 0] += 25.0
+    after = keras.ops.convert_to_numpy(loss.call(y_true, y_pred2))
+
+    np.testing.assert_allclose(
+        base, after, rtol=0, atol=1e-6,
+        err_msg=("perturbing the logits at IGNORED positions changed the loss, so those positions "
+                 "are contributing to the token sum. The clamp-to-class-0 is leaking."),
+    )

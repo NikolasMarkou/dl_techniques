@@ -249,11 +249,31 @@ class HRMLoss(keras.losses.Loss):
         if self.lm_loss_type == "stable_max":
             lm_losses = self.lm_loss_fn(labels, logits)
         else:
-            # Flatten for standard sparse categorical crossentropy
-            labels_flat = keras.ops.reshape(labels, [-1])
+            # DECISION plan-2026-08-31T045723-c0d5ffa9/D-003
+            # CLAMP the ignored labels to a VALID class id before the sub-loss sees
+            # them, then zero those positions afterwards. Passing them through raw
+            # CRASHES: `__init__` sets `ignore_class=ignore_index if ignore_index >= 0
+            # else None`, so at the DEFAULT `ignore_index=-100` the sub-loss is told to
+            # ignore nothing and TF raises
+            # `Received a label value of -100 which is outside the valid range`.
+            # The masking below is what actually removes those positions, so the clamp
+            # only has to make the kernel's range check pass -- class 0 is arbitrary and
+            # never reaches the returned value. See decisions.md D-003.
+            safe_labels = keras.ops.where(
+                keras.ops.not_equal(labels, self.ignore_index),
+                labels,
+                keras.ops.zeros_like(labels),
+            )
+            labels_flat = keras.ops.reshape(safe_labels, [-1])
             logits_flat = keras.ops.reshape(logits, [-1, keras.ops.shape(logits)[-1]])
             lm_losses = self.lm_loss_fn(labels_flat, logits_flat)
             lm_losses = keras.ops.reshape(lm_losses, keras.ops.shape(labels))
+            # Zero the clamped positions so they contribute nothing to the token sum.
+            lm_losses = keras.ops.where(
+                keras.ops.not_equal(labels, self.ignore_index),
+                lm_losses,
+                keras.ops.zeros_like(lm_losses),
+            )
 
         # Compute valid token mask
         valid_mask = keras.ops.not_equal(labels, self.ignore_index)
