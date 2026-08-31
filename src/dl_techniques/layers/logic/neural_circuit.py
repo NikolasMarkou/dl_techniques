@@ -66,9 +66,10 @@ from typing import List, Optional, Union, Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.utils.keras_registration import register_dl_technique
+
 from .logic_operators import LearnableLogicOperator
 from .arithmetic_operators import LearnableArithmeticOperator
-from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 

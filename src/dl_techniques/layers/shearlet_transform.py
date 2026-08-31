@@ -51,6 +51,11 @@ import keras
 import numpy as np
 from keras import ops, initializers
 from typing import List, Tuple, Optional, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -282,7 +287,11 @@ class ShearletTransform(keras.layers.Layer):
 
         return self._normalize_filter_bank_numpy(filters)
 
-    def _meyer_window_numpy(self, x: np.ndarray, a: float = 1.0, eps: float = 1e-6) -> np.ndarray:
+    def _meyer_window_numpy(
+            self,
+            x: np.ndarray, a: float = 1.0,
+            eps: float = 1e-6
+    ) -> np.ndarray:
         """NumPy implementation of Meyer window function."""
         def smooth_transition(t):
             t = np.clip(t, 0.0, 1.0)
@@ -302,7 +311,10 @@ class ShearletTransform(keras.layers.Layer):
         )
         return value + eps
 
-    def _normalize_filter_bank_numpy(self, filters: List[np.ndarray]) -> List[np.ndarray]:
+    def _normalize_filter_bank_numpy(
+            self,
+            filters: List[np.ndarray]
+    ) -> List[np.ndarray]:
         """Normalize filter bank for tight frame property (NumPy version)."""
         # Initial normalization
         normalized = []
@@ -426,7 +438,10 @@ class ShearletTransform(keras.layers.Layer):
         # promoted. Under the default float32 policy this cast is a no-op.
         return ops.cast(ops.reshape(coeffs, final_shape), self.compute_dtype)
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer."""
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D")

@@ -372,7 +372,10 @@ class FNetEncoderBlock(keras.layers.Layer):
         """
         return mask
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Encoder block preserves input shape.
 
         :param input_shape: Input shape tuple.
