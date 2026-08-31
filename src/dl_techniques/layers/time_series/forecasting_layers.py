@@ -22,6 +22,11 @@ import keras
 import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
