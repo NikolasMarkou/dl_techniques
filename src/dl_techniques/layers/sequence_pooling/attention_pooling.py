@@ -15,7 +15,6 @@ sequence for a given task.
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -75,8 +74,8 @@ class AttentionPooling(keras.layers.Layer):
         dropout_rate: float = 0.0,
         use_bias: bool = True,
         temperature: float = 1.0,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Initialise the attention pooling layer."""
@@ -88,11 +87,11 @@ class AttentionPooling(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.temperature = temperature
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer) if kernel_regularizer else None
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
 
         # Create sub-layers in __init__ (Golden Rule)
-        self.attention_dense = layers.Dense(
+        self.attention_dense = keras.layers.Dense(
             self.hidden_dim * self.num_heads,
             activation='tanh',
             use_bias=self.use_bias,
@@ -102,7 +101,7 @@ class AttentionPooling(keras.layers.Layer):
         )
 
         if self.dropout_rate > 0:
-            self.dropout = layers.Dropout(self.dropout_rate)
+            self.dropout = keras.layers.Dropout(self.dropout_rate)
         else:
             self.dropout = None
 
@@ -148,49 +147,54 @@ class AttentionPooling(keras.layers.Layer):
         Returns:
             Pooled output ``(batch, embed_dim)``.
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # Compute attention scores
         attention_hidden = self.attention_dense(inputs)
 
         # Reshape for multi-head attention
-        attention_hidden = ops.reshape(
+        attention_hidden = keras.ops.reshape(
             attention_hidden,
             (batch_size, seq_len, self.num_heads, self.hidden_dim)
         )
 
         # Compute attention scores with context vector
-        scores = ops.einsum('bsnh,nh->bsn', attention_hidden, self.context_vector)
+        scores = keras.ops.einsum('bsnh,nh->bsn', attention_hidden, self.context_vector)
         scores = scores / self.temperature
 
         # Apply mask if provided
         if mask is not None:
-            # DECISION plan-2026-07-15T114613-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
-            mask_bool = ops.expand_dims(ops.cast(mask, "bool"), -1)
-            neg = ops.cast(-1e4, scores.dtype)
-            scores = ops.where(mask_bool, scores, neg)
+            # dtype-safe mask sentinel (ops.where, finite -1e4) —
+            # a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens;
+            # do NOT revert to an additive -1e9/-inf mask.
+            mask_bool = keras.ops.expand_dims(keras.ops.cast(mask, "bool"), -1)
+            neg = keras.ops.cast(-1e4, scores.dtype)
+            scores = keras.ops.where(mask_bool, scores, neg)
 
         # Compute attention weights
-        attention_weights = ops.softmax(scores, axis=1)
+        attention_weights = keras.ops.softmax(scores, axis=1)
 
         # Apply dropout to attention weights
         if self.dropout is not None:
             attention_weights = self.dropout(attention_weights, training=training)
 
         # Apply attention weights to input
-        weighted_sum = ops.einsum('bsn,bsd->bnd', attention_weights, inputs)
+        weighted_sum = keras.ops.einsum('bsn,bsd->bnd', attention_weights, inputs)
 
         # Average or concatenate heads
         if self.num_heads == 1:
             output = weighted_sum[:, 0, :]
         else:
             # Average across heads
-            output = ops.mean(weighted_sum, axis=1)
+            output = keras.ops.mean(weighted_sum, axis=1)
 
         return output
 
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Compute output shape.
 
         Args:
@@ -214,8 +218,8 @@ class AttentionPooling(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
             'temperature': self.temperature,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 

@@ -75,7 +75,6 @@ References:
 """
 
 import keras
-from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any, Literal, List
 
 # ---------------------------------------------------------------------
@@ -214,10 +213,10 @@ class SequencePooling(keras.layers.Layer):
         top_k: int = 10,
         temperature: float = 1.0,
         use_bias: bool = True,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-        kernel_regularizer: Optional[regularizers.Regularizer] = None,
-        bias_regularizer: Optional[regularizers.Regularizer] = None,
+        kernel_initializer: Union[str,keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str,keras.initializers.Initializer] = 'zeros',
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
         **kwargs: Any
     ) -> None:
         """Initialise the sequence pooling layer."""
@@ -234,10 +233,10 @@ class SequencePooling(keras.layers.Layer):
         self.top_k = top_k
         self.temperature = temperature
         self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer) if kernel_regularizer else None
-        self.bias_regularizer = regularizers.get(bias_regularizer) if bias_regularizer else None
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer) if kernel_regularizer else None
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer) if bias_regularizer else None
 
         # Create learnable components in __init__ (Golden Rule)
         self.learnable_components: Dict[str, keras.layers.Layer] = {}
@@ -307,9 +306,9 @@ class SequencePooling(keras.layers.Layer):
             empty — the condition every caller's no-mask fast path keys on.
         """
         if self.exclude_positions:
-            seq_len = ops.shape(inputs)[1]
+            seq_len = keras.ops.shape(inputs)[1]
             if mask is None:
-                mask = ops.ones((ops.shape(inputs)[0], seq_len))
+                mask = keras.ops.ones((keras.ops.shape(inputs)[0], seq_len))
 
             # DECISION plan-2026-07-31T210633-b63a35aa/D-005: no `pos < seq_len`
             # Python guard. `indices != pos` is already a no-op for an
@@ -318,9 +317,9 @@ class SequencePooling(keras.layers.Layer):
             # which AutoGraph rewrites into a `tf.cond` (or raises). Positional
             # modes now reach this method, and they are required to be
             # symbolic-length-safe. Do NOT reinstate the guard.
-            indices = ops.arange(seq_len)
+            indices = keras.ops.arange(seq_len)
             for pos in self.exclude_positions:
-                exclusion = ops.cast(indices != pos, mask.dtype)
+                exclusion = keras.ops.cast(indices != pos, mask.dtype)
                 mask = mask * exclusion
 
         return inputs, mask
@@ -367,30 +366,32 @@ class SequencePooling(keras.layers.Layer):
         # Do NOT drop (i) and keep only (ii) either: without the sentinel a
         # masked position can outrank a kept one whose embedding is near zero.
         if mask is not None:
-            mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+            mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
             masked_inputs = inputs * mask_expanded
         else:
             masked_inputs = inputs
 
-        norms = ops.sum(masked_inputs ** 2, axis=-1)
+        norms = keras.ops.sum(masked_inputs ** 2, axis=-1)
         if mask is not None:
-            norms = ops.where(
-                ops.cast(mask, "bool"), norms, ops.cast(-1e4, norms.dtype)
+            norms = keras.ops.where(
+                keras.ops.cast(mask, "bool"), norms, keras.ops.cast(-1e4, norms.dtype)
             )
 
-        k = ops.minimum(self.top_k, seq_len)
-        _, top_k_indices = ops.top_k(norms, k=k)
+        k = keras.ops.minimum(self.top_k, seq_len)
+        _, top_k_indices = keras.ops.top_k(norms, k=k)
 
-        top_k_embeds = ops.take_along_axis(
+        top_k_embeds = keras.ops.take_along_axis(
             inputs,
-            ops.expand_dims(top_k_indices, -1),
+            keras.ops.expand_dims(top_k_indices, -1),
             axis=1
         )
 
         validity = None
         if mask is not None:
-            validity = ops.take_along_axis(
-                ops.cast(mask, inputs.dtype), top_k_indices, axis=1
+            validity = keras.ops.take_along_axis(
+                keras.ops.cast(mask, inputs.dtype),
+                top_k_indices,
+                axis=1
             )
 
         return top_k_embeds, validity
@@ -469,31 +470,33 @@ class SequencePooling(keras.layers.Layer):
                 f"got {mode!r}."
             )
 
-        keep = ops.cast(mask, 'bool')
-        keep_int = ops.cast(keep, 'int32')
+        keep = keras.ops.cast(mask, 'bool')
+        keep_int = keras.ops.cast(keep, 'int32')
         # `(batch, seq_len)` position grid, broadcast from `(1, seq_len)`.
-        positions = ops.zeros_like(keep_int) + ops.expand_dims(
-            ops.arange(seq_len, dtype='int32'), 0
+        positions = keras.ops.zeros_like(keep_int) + keras.ops.expand_dims(
+            keras.ops.arange(seq_len, dtype='int32'), 0
         )
 
         if mode == 'first':
-            sentinel = ops.cast(seq_len, 'int32')
-            candidates = ops.where(keep, positions, sentinel)
-            index = ops.min(candidates, axis=1)
-            return ops.where(
-                ops.equal(index, sentinel), ops.zeros_like(index), index
+            sentinel = keras.ops.cast(seq_len, 'int32')
+            candidates = keras.ops.where(keep, positions, sentinel)
+            index = keras.ops.min(candidates, axis=1)
+            return keras.ops.where(
+                keras.ops.equal(index, sentinel),
+                keras.ops.zeros_like(index),
+                index
             )
 
         if mode == 'middle':
-            cum = ops.cumsum(keep_int, axis=1)
-            target = ops.expand_dims(cum[:, -1] // 2 + 1, -1)
-            candidates = ops.where(
-                ops.logical_and(keep, cum <= target), positions, -1
+            cum = keras.ops.cumsum(keep_int, axis=1)
+            target = keras.ops.expand_dims(cum[:, -1] // 2 + 1, -1)
+            candidates = keras.ops.where(
+                keras.ops.logical_and(keep, cum <= target), positions, -1
             )
         else:
-            candidates = ops.where(keep, positions, -1)
+            candidates = keras.ops.where(keep, positions, -1)
 
-        return ops.maximum(ops.max(candidates, axis=1), 0)
+        return keras.ops.maximum(keras.ops.max(candidates, axis=1), 0)
 
     def _apply_single_strategy(
         self,
@@ -513,8 +516,8 @@ class SequencePooling(keras.layers.Layer):
         Returns:
             Pooled tensor.
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
+        batch_size = keras.ops.shape(inputs)[0]
+        seq_len = keras.ops.shape(inputs)[1]
 
         # DECISION plan-2026-07-31T210633-b63a35aa/D-005: `exclude_positions` is
         # HONOURED by the four positional modes. The old gate listed all four
@@ -542,9 +545,9 @@ class SequencePooling(keras.layers.Layer):
                 # No exclusions: bit-identical to the pre-H-02 code.
                 return inputs[:, 0, :]
             selected = self._positional_index(keep, seq_len, mode='first')
-            return ops.take_along_axis(
+            return keras.ops.take_along_axis(
                 inputs,
-                ops.expand_dims(ops.expand_dims(selected, -1), -1),
+                keras.ops.expand_dims(keras.ops.expand_dims(selected, -1), -1),
                 axis=1
             )[:, 0, :]
 
@@ -561,75 +564,75 @@ class SequencePooling(keras.layers.Layer):
                 return inputs[:, seq_len // 2, :]
 
             selected = self._positional_index(mask, seq_len, mode=strategy)
-            return ops.take_along_axis(
+            return keras.ops.take_along_axis(
                 inputs,
-                ops.expand_dims(ops.expand_dims(selected, -1), -1),
+                keras.ops.expand_dims(keras.ops.expand_dims(selected, -1), -1),
                 axis=1
             )[:, 0, :]
 
         # Statistical strategies
         elif strategy == 'mean':
             if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
                 masked_inputs = inputs * mask_expanded
-                sum_pooled = ops.sum(masked_inputs, axis=1)
-                lengths = ops.sum(mask_expanded, axis=1)
-                lengths = ops.maximum(lengths, 1.0)
+                sum_pooled = keras.ops.sum(masked_inputs, axis=1)
+                lengths = keras.ops.sum(mask_expanded, axis=1)
+                lengths = keras.ops.maximum(lengths, 1.0)
                 return sum_pooled / lengths
             else:
-                return ops.mean(inputs, axis=1)
+                return keras.ops.mean(inputs, axis=1)
 
         elif strategy == 'max':
             if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
                 masked_inputs = inputs + (1.0 - mask_expanded) * (-1e9)
-                return ops.max(masked_inputs, axis=1)
+                return keras.ops.max(masked_inputs, axis=1)
             else:
-                return ops.max(inputs, axis=1)
+                return keras.ops.max(inputs, axis=1)
 
         elif strategy == 'min':
             if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
                 masked_inputs = inputs + (1.0 - mask_expanded) * 1e9
-                return ops.min(masked_inputs, axis=1)
+                return keras.ops.min(masked_inputs, axis=1)
             else:
-                return ops.min(inputs, axis=1)
+                return keras.ops.min(inputs, axis=1)
 
         elif strategy == 'sum':
             if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
                 masked_inputs = inputs * mask_expanded
-                return ops.sum(masked_inputs, axis=1)
+                return keras.ops.sum(masked_inputs, axis=1)
             else:
-                return ops.sum(inputs, axis=1)
+                return keras.ops.sum(inputs, axis=1)
 
         # Combined statistical strategies
         elif strategy == 'mean_max':
             mean_pool = self._apply_single_strategy('mean', inputs, mask, training)
             max_pool = self._apply_single_strategy('max', inputs, mask, training)
-            return ops.concatenate([mean_pool, max_pool], axis=-1)
+            return keras.ops.concatenate([mean_pool, max_pool], axis=-1)
 
         elif strategy == 'mean_std':
             mean_pool = self._apply_single_strategy('mean', inputs, mask, training)
             if mask is not None:
-                mask_expanded = ops.expand_dims(ops.cast(mask, inputs.dtype), -1)
+                mask_expanded = keras.ops.expand_dims(keras.ops.cast(mask, inputs.dtype), -1)
                 masked_inputs = inputs * mask_expanded
-                variance = ops.sum(
-                    (masked_inputs - ops.expand_dims(mean_pool, 1)) ** 2 * mask_expanded,
+                variance = keras.ops.sum(
+                    (masked_inputs - keras.ops.expand_dims(mean_pool, 1)) ** 2 * mask_expanded,
                     axis=1
                 )
-                lengths = ops.sum(mask_expanded, axis=1)
-                lengths = ops.maximum(lengths, 1.0)
-                std_pool = ops.sqrt(variance / lengths + 1e-6)
+                lengths = keras.ops.sum(mask_expanded, axis=1)
+                lengths = keras.ops.maximum(lengths, 1.0)
+                std_pool = keras.ops.sqrt(variance / lengths + 1e-6)
             else:
-                std_pool = ops.std(inputs, axis=1)
-            return ops.concatenate([mean_pool, std_pool], axis=-1)
+                std_pool = keras.ops.std(inputs, axis=1)
+            return keras.ops.concatenate([mean_pool, std_pool], axis=-1)
 
         elif strategy == 'mean_max_min':
             mean_pool = self._apply_single_strategy('mean', inputs, mask, training)
             max_pool = self._apply_single_strategy('max', inputs, mask, training)
             min_pool = self._apply_single_strategy('min', inputs, mask, training)
-            return ops.concatenate([mean_pool, max_pool, min_pool], axis=-1)
+            return keras.ops.concatenate([mean_pool, max_pool, min_pool], axis=-1)
 
         # Learnable strategies
         elif strategy in ['attention', 'multi_head_attention']:
@@ -646,22 +649,22 @@ class SequencePooling(keras.layers.Layer):
         elif strategy == 'top_k_mean':
             top_k_embeds, validity = self._select_top_k(inputs, mask, seq_len)
             if validity is None:
-                return ops.mean(top_k_embeds, axis=1)
+                return keras.ops.mean(top_k_embeds, axis=1)
             # Divide by the number of VALID selected positions, never by `k`.
             # A fully-masked row floors the denominator at 1 and returns zeros
             # rather than dividing by zero; it is deliberately NOT rescued.
-            validity_expanded = ops.expand_dims(validity, -1)
-            valid_sum = ops.sum(top_k_embeds * validity_expanded, axis=1)
-            valid_count = ops.maximum(
-                ops.sum(validity_expanded, axis=1),
-                ops.cast(1.0, top_k_embeds.dtype)
+            validity_expanded = keras.ops.expand_dims(validity, -1)
+            valid_sum = keras.ops.sum(top_k_embeds * validity_expanded, axis=1)
+            valid_count = keras.ops.maximum(
+                keras.ops.sum(validity_expanded, axis=1),
+                keras.ops.cast(1.0, top_k_embeds.dtype)
             )
             return valid_sum / valid_count
 
         elif strategy == 'top_k_max':
             top_k_embeds, validity = self._select_top_k(inputs, mask, seq_len)
             if validity is None:
-                return ops.max(top_k_embeds, axis=1)
+                return keras.ops.max(top_k_embeds, axis=1)
             # Bias the INVALID SELECTED embeddings below every real value before
             # the max. This mirrors the `max` strategy above, but uses the
             # `ops.where` form with the finite `-1e4` sentinel rather than
@@ -670,20 +673,20 @@ class SequencePooling(keras.layers.Layer):
             # A fully-masked row therefore returns the sentinel itself; it is
             # deliberately NOT rescued (the `max` strategy already returns
             # `-1e9` in the same situation).
-            validity_expanded = ops.expand_dims(validity, -1)
-            biased = ops.where(
-                ops.cast(validity_expanded, "bool"),
+            validity_expanded = keras.ops.expand_dims(validity, -1)
+            biased = keras.ops.where(
+                keras.ops.cast(validity_expanded, "bool"),
                 top_k_embeds,
-                ops.cast(-1e4, top_k_embeds.dtype)
+                keras.ops.cast(-1e4, top_k_embeds.dtype)
             )
-            return ops.max(biased, axis=1)
+            return keras.ops.max(biased, axis=1)
 
         # Special strategies
         elif strategy == 'none':
             return inputs
 
         elif strategy == 'flatten':
-            return ops.reshape(inputs, (batch_size, -1))
+            return keras.ops.reshape(inputs, (batch_size, -1))
 
         else:
             raise ValueError(f"Unknown pooling strategy: {strategy}")
@@ -718,7 +721,7 @@ class SequencePooling(keras.layers.Layer):
         if self.aggregation_method == 'concat':
             if any(s == 'none' for s in self.strategy):
                 raise ValueError("Cannot concatenate 'none' strategy with others")
-            return ops.concatenate(outputs, axis=-1)
+            return keras.ops.concatenate(outputs, axis=-1)
 
         elif self.aggregation_method == 'add':
             result = outputs[0]
@@ -733,7 +736,7 @@ class SequencePooling(keras.layers.Layer):
             return result
 
         elif self.aggregation_method == 'weighted_sum':
-            weights = ops.softmax(self.aggregation_weights)
+            weights = keras.ops.softmax(self.aggregation_weights)
             result = outputs[0] * weights[0]
             for i, output in enumerate(outputs[1:], 1):
                 result = result + output * weights[i]
@@ -805,10 +808,10 @@ class SequencePooling(keras.layers.Layer):
             'top_k': self.top_k,
             'temperature': self.temperature,
             'use_bias': self.use_bias,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer':keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer':keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer':keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer':keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
