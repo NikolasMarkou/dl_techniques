@@ -64,6 +64,7 @@ from ...norms import create_normalization_layer, NormalizationType
 from ...sequence_pooling import SequencePooling
 
 from .task_types import NLPTaskType, NLPTaskConfig
+from dl_techniques.utils.dtype_policy import mask_sentinel
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -433,8 +434,8 @@ class BaseNLPHead(keras.layers.Layer):
         :param sequence: Sequence tensor ``(batch, seq_length, hidden_dim)``.
         :type sequence: keras.KerasTensor
         :param attention_mask: Optional mask ``(batch, seq_length)``. Passed on
-            to ``SequencePooling``, and used to push masked scores to -1e9 in
-            the inline branch.
+            to ``SequencePooling``, and used to select the dtype's mask
+            sentinel over masked scores in the inline branch.
         :type attention_mask: Optional[keras.KerasTensor]
         :return: Pooled representation ``(batch, hidden_dim)``.
         :rtype: keras.KerasTensor
@@ -457,8 +458,16 @@ class BaseNLPHead(keras.layers.Layer):
             attention_weights = ops.squeeze(attention_weights, axis=-1)
 
             if attention_mask is not None:
-                mask = ops.cast(attention_mask, dtype=attention_weights.dtype)
-                attention_weights = attention_weights * mask + (1 - mask) * -1e9
+                # DECISION plan-2026-08-31T134711-6271592d/D-007
+                # SELECT the sentinel, never add it. `w * m + (1 - m) * -1e9`
+                # is `0 * -inf = NaN` at every KEPT position once `-1e9`
+                # overflows float16. Do NOT reintroduce that form, and do NOT
+                # hardcode the magnitude; `mask_sentinel` derives it per dtype.
+                keep = ops.cast(attention_mask, dtype="bool")
+                sentinel = ops.cast(
+                    mask_sentinel(self.compute_dtype), attention_weights.dtype
+                )
+                attention_weights = ops.where(keep, attention_weights, sentinel)
 
             attention_weights = ops.softmax(attention_weights, axis=-1)
             attention_weights = ops.expand_dims(attention_weights, axis=-1)
@@ -1090,7 +1099,7 @@ class QuestionAnsweringHead(BaseNLPHead):
                 └───────┬──────────┘
                         ▼
         ┌───────────────────────────────┐
-        │ mask fill  x*m + (1-m)*-1e9   │
+        │ where(keep, x, mask_sentinel) │
         │ (optional, needs the mask)    │
         └───────────────┬───────────────┘
                         ▼
@@ -1211,8 +1220,10 @@ class QuestionAnsweringHead(BaseNLPHead):
         """
         Run the common stage, then score every position twice.
 
-        When an ``'attention_mask'`` is given, masked positions are pushed to
-        -1e9 in both score vectors so an argmax cannot land on padding.
+        When an ``'attention_mask'`` is given, masked positions are replaced
+        by ``utils.dtype_policy.mask_sentinel`` in both score vectors so an
+        argmax cannot land on padding. Selection, not an additive bias: the
+        additive form NaNs every KEPT position under ``mixed_float16``.
 
         :param inputs: A sequence tensor, or a dict with ``'hidden_states'``
             and an optional ``'attention_mask'``.
@@ -1248,12 +1259,20 @@ class QuestionAnsweringHead(BaseNLPHead):
         start_logits = ops.squeeze(self.start_classifier(hidden_states), axis=-1)
         end_logits = ops.squeeze(self.end_classifier(hidden_states), axis=-1)
 
-        # Push masked positions to -1e9 so an argmax cannot select padding.
+        # Push masked positions to the dtype's mask sentinel so an argmax
+        # cannot select padding.
         if attention_mask is not None:
-            # Cast attention_mask to the same dtype as logits
-            mask = ops.cast(attention_mask, dtype=start_logits.dtype)
-            start_logits = start_logits * mask + (1 - mask) * -1e9
-            end_logits = end_logits * mask + (1 - mask) * -1e9
+            # DECISION plan-2026-08-31T134711-6271592d/D-007
+            # These are span logits read by an ARGMAX, not a softmax: the
+            # sentinel only has to lose, so there is no rescue semantics and
+            # `apply_attention_mask` is deliberately NOT used here. Select the
+            # sentinel; the additive form NaNs every KEPT position under fp16.
+            keep = ops.cast(attention_mask, dtype="bool")
+            sentinel = ops.cast(
+                mask_sentinel(self.compute_dtype), start_logits.dtype
+            )
+            start_logits = ops.where(keep, start_logits, sentinel)
+            end_logits = ops.where(keep, end_logits, sentinel)
 
         return {
             'start_logits': start_logits,
