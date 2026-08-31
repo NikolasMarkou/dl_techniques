@@ -453,8 +453,8 @@ class VLMTaskConfig:
         ``hidden_size`` becomes the larger of ``vision_hidden_size`` and
         ``text_hidden_size``. ``fusion_hidden_size`` becomes their sum when
         ``fusion_type`` is ``"concat"``, because concatenation stacks the two
-        streams instead of mixing them; for every other fusion type it
-        becomes ``hidden_size``. ``num_classes`` is filled for three task
+        streams instead of mixing them. For every other fusion type it becomes
+        ``hidden_size``. ``num_classes`` is filled for three task
         types only: 3 for ``MULTIMODAL_SENTIMENT_ANALYSIS``, 7 for
         ``MULTIMODAL_EMOTION_RECOGNITION``, 3 for ``VISUAL_ENTAILMENT``.
         Every other task keeps ``num_classes`` as it was.
@@ -501,8 +501,8 @@ class VLMTaskConfiguration:
     ask whether the set needs a text decoder.
 
     This class holds task types only. It carries no per-task hyperparameters
-    and never touches a head class, so it neither knows nor checks which of
-    the 47 task types have a head.
+    and never touches a head class. So it neither knows nor checks which of the
+    47 task types have a head.
 
     **Generation tasks:**
 

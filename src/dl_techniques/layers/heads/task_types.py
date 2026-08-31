@@ -1,7 +1,8 @@
 """One import surface for every ``heads`` task-type name.
 
 This module re-exports the task-type enums, their config classes and their
-helpers from the three domain sub-packages (``nlp``, ``vision``, ``vlm``)::
+helpers. They come from the three domain sub-packages: ``nlp``, ``vision`` and
+``vlm``. Import them from one place::
 
     from dl_techniques.layers.heads.task_types import (
         NLPTaskType, VisionTaskType, VLMTaskType,

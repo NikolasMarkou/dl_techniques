@@ -155,10 +155,10 @@ class BaseNLPHead(keras.layers.Layer):
     ``_DELEGATED_POOLING_STRATEGIES`` names the four strategies on the left.
     They are handed to the shared ``SequencePooling`` layer. ``'attention'``
     is not, and stays inline in ``_pool_sequence``. The two paths are not
-    interchangeable: ``SequencePooling('attention')`` is ``AttentionPooling``,
+    interchangeable. ``SequencePooling('attention')`` is ``AttentionPooling``,
     which scores a ``Dense(hidden, tanh)`` projection against a learnable
-    context vector, so it has both a different mechanism and a different
-    weight set than the ``Dense(1, tanh)`` scorer here.
+    context vector. That is a different mechanism and a different weight set
+    from the ``Dense(1, tanh)`` scorer here.
 
     Delegating ``cls``, ``mean`` and ``max`` was checked against the inline
     code it replaced. Mask-aware mean and max agree with the old values within
@@ -441,10 +441,11 @@ class BaseNLPHead(keras.layers.Layer):
         :raises ValueError: If ``pooling_type`` is none of the five supported
             values.
         """
-        # DECISION plan_2026-06-08_8b32ca51/D-002: cls/mean/max delegate to the
-        # shared SequencePooling facade (created in _create_common_layers).
-        # The 'attention' branch stays inline — do NOT route it through
-        # SequencePooling (different mechanism + weights). See decisions.md.
+        # DECISION plan_2026-06-08_8b32ca51/D-002: the four strategies in
+        # _DELEGATED_POOLING_STRATEGIES (cls/mean/max/last) delegate to the
+        # shared SequencePooling facade, created in _create_common_layers.
+        # 'attention' stays inline. Do NOT route it through SequencePooling:
+        # different mechanism, different weights. Owning plan gone.
         if self.pooling_type in _DELEGATED_POOLING_STRATEGIES:
             # The `mask=` argument matters for 'last' (D-023). It is what makes
             # the gather land on the last real token rather than on padding.
@@ -2325,13 +2326,13 @@ def get_head_class(task_type: NLPTaskType) -> type:
     """
     Look up the head class for a task type.
 
-    The mapping is an explicit dict. It covers 24 of the 37
-    :class:`NLPTaskType` members. **The other 13 raise ``ValueError``.** That
-    is a guard, not a gap in the table: this function used to end with
-    ``head_mapping.get(task_type, TextClassificationHead)``, so asking for
-    ``MACHINE_TRANSLATION`` returned a text classifier that built, trained and
-    produced plausible nonsense. Nothing ever failed. A task with no head is a
-    caller error and is now reported as one.
+    The mapping is an explicit dict. It covers 24 of the 37 members of
+    :class:`NLPTaskType`. **The other 13 raise ``ValueError``.** That is a
+    guard, not a gap in the table. This function used to end with
+    ``head_mapping.get(task_type, TextClassificationHead)``. Asking for
+    ``MACHINE_TRANSLATION`` then returned a text classifier that built, trained
+    and produced plausible nonsense. Nothing ever failed. A task with no head
+    is a caller error and is now reported as one.
 
     To add support for one of the 13, implement or choose a head and add the
     entry. Do not restore the fallback.
