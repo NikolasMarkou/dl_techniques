@@ -155,7 +155,6 @@ def _siglip_pair():
 
 # (module, class, ctor kwargs, input builder)
 STILL_BROKEN = [
-    ("mase_loss", "MASELoss", {}, _positive_pair),
     ("hrm_loss", "HRMLoss", {}, _hrm_pair),
 ]
 
@@ -221,6 +220,14 @@ KNOWN_GOOD = [
     # gamma=3.0/alpha=0.25 -- the focal modulator re-weights within a sequence
     # too. Value unchanged at 2.4e-07, and exactly 0.0 at both of those configs.
     ("focal_causal_lm_loss", "FocalCausalLMLoss", {}, _token_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 7. Only the NUMERATOR is
+    # decomposed: `mae_naive` stays a BATCH-GLOBAL scalar, because the batch-wise
+    # scaling factor is this implementation's documented approximation of
+    # canonical MASE and a per-row denominator is a different metric -- measured
+    # 0.3003199 against 0.1984148 (51.4% off) at seasonal_periods=1 and 0.1537864
+    # against 0.1281814 (20.0% off) at seasonal_periods=3, on a 4x12 batch whose
+    # rows span scales 0.01/1/30/500. Value unchanged at 1.5e-08.
+    ("mase_loss", "MASELoss", {}, _positive_pair),
 ]
 
 
