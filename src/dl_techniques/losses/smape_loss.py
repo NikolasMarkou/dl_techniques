@@ -85,10 +85,13 @@ class SMAPELoss(keras.losses.Loss):
 
         Args:
             y_true: Ground truth values.
-            y_pred: The predicted values.
+            y_pred: The predicted values. Shape: (batch_size, ...).
 
         Returns:
-            SMAPE loss value.
+            Per-sample SMAPE with shape (batch_size,), averaged over every
+            non-batch axis and scaled by 100. Keras' reduction recovers the scalar
+            this used to return; keeping the batch axis is what lets
+            ``sample_weight`` and ``reduction=`` select rows.
         """
         y_true = ops.cast(y_true, y_pred.dtype)
 
@@ -101,8 +104,15 @@ class SMAPELoss(keras.losses.Loss):
         # Add epsilon to avoid division by zero
         denominator = ops.maximum(denominator, self.epsilon)
 
-        # Calculate SMAPE
-        smape = ops.mean(abs_diff / denominator) * 100.0
+        # Calculate SMAPE per sample: average every axis EXCEPT the batch axis.
+        # Reducing to a scalar here would make `sample_weight` multiply a scalar,
+        # charging every row the batch aggregate. Every row holds the same element
+        # count, so the mean of this vector equals the old all-axes mean exactly.
+        ratio = abs_diff / denominator
+        non_batch_axes = tuple(range(1, len(ratio.shape)))
+        if non_batch_axes:
+            ratio = ops.mean(ratio, axis=non_batch_axes)
+        smape = ratio * 100.0
 
         return smape
 

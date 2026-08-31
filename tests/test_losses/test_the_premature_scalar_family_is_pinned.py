@@ -24,6 +24,14 @@ the plan listed 8 modules; measuring found 14 classes across 12 modules. Four of
 them -- ``DINOLoss``, ``KoLeoLoss``, ``ScaledMseLoss``, ``SAMIoULoss`` -- were
 NOT on that list and were found only by running the predicate.
 
+**An empty ``STILL_BROKEN`` is the SUCCESS state of this file, not a dead file.**
+Plan ``plan-2026-08-31T045723-c0d5ffa9`` is fixing the members one at a time; each
+fix MOVES its row from ``STILL_BROKEN`` to ``KNOWN_GOOD`` in the same commit,
+where the same predicate is then run in the negative direction. Deleting a row is
+never the right response to a red test here. The ``KNOWN_GOOD`` arm is what keeps
+the file non-vacuous once ``STILL_BROKEN`` is empty: injecting a scalar return
+into any fixed class must turn it red.
+
 **NOT MEASURED (named, never silently dropped).** These are neither pinned nor
 cleared by this file:
 
@@ -147,11 +155,6 @@ def _siglip_pair():
 
 # (module, class, ctor kwargs, input builder)
 STILL_BROKEN = [
-    ("feature_alignment_loss", "FeatureAlignmentLoss", {}, _regression_pair),
-    ("quantile_loss", "MQLoss", {"quantile": 0.7}, _regression_pair),
-    ("quantile_loss", "QuantileLoss", {"quantiles": [0.1, 0.5, 0.9]}, _quantile_pair),
-    ("affine_invariant_loss", "AffineInvariantLoss", {}, _image_pair),
-    ("smape_loss", "SMAPELoss", {}, _positive_pair),
     ("mase_loss", "MASELoss", {}, _positive_pair),
     ("masked_causal_lm_loss", "MaskedCausalLMLoss", {}, _token_pair),
     ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
@@ -175,11 +178,31 @@ KNOWN_GOOD = [
     # correct all along -- the siblings whose shape discipline was copied
     ("goodhart_loss", "GoodhartAwareLoss", {}, _logit_pair),
     ("focal_uncertainty_loss", "FocalUncertaintyLoss", {}, _logit_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 2 (Tranche A batch 1). Each was
+    # proven value-unchanged against its pre-edit module on a RAGGED fixture at
+    # atol=1e-6 before being moved here.
+    ("feature_alignment_loss", "FeatureAlignmentLoss", {}, _regression_pair),
+    ("quantile_loss", "MQLoss", {"quantile": 0.7}, _regression_pair),
+    ("quantile_loss", "QuantileLoss", {"quantiles": [0.1, 0.5, 0.9]}, _quantile_pair),
+    (
+        "quantile_loss",
+        "QuantileLoss",
+        {"quantiles": [0.1, 0.5, 0.9], "normalize": True},
+        _quantile_pair,
+    ),
+    ("affine_invariant_loss", "AffineInvariantLoss", {}, _image_pair),
+    ("smape_loss", "SMAPELoss", {}, _positive_pair),
 ]
 
 
 def _ids(cases):
-    return [f"{m}.{c}" for m, c, _, _ in cases]
+    seen = {}
+    out = []
+    for m, c, _, _ in cases:
+        key = f"{m}.{c}"
+        seen[key] = seen.get(key, 0) + 1
+        out.append(key if seen[key] == 1 else f"{key}[{seen[key]}]")
+    return out
 
 
 def _make(module, cls, kwargs):
@@ -260,12 +283,28 @@ def test_the_predicate_rejects_a_correctly_shaped_class(module, cls, kwargs, bui
 
 
 def test_the_pinned_population_has_not_shrunk_silently():
-    """A census that quietly loses members is the failure mode this file exists for."""
-    assert len(STILL_BROKEN) >= 14, (
-        f"{PLAN} measured 14 members on 2026-08-31; STILL_BROKEN now has "
-        f"{len(STILL_BROKEN)}. Members are removed only by FIXING them."
+    """A census that quietly loses members is the failure mode this file exists for.
+
+    The floor is on the TOTAL measured population, not on ``STILL_BROKEN`` alone.
+    A floor on the broken list becomes unsatisfiable the moment a fix lands, which
+    would force whoever fixed it to lower the number -- turning the guard into a
+    tally of the work instead of a constraint on it. Expressed this way, the only
+    thing that can breach it is a member DISAPPEARING from measurement in either
+    direction.
+    """
+    total = len(STILL_BROKEN) + len(KNOWN_GOOD)
+    assert total >= 20, (
+        f"{PLAN} measured 14 members on 2026-08-31 and 6 known-good controls; "
+        f"the total measured population is now {total} "
+        f"(STILL_BROKEN={len(STILL_BROKEN)}, KNOWN_GOOD={len(KNOWN_GOOD)}). A "
+        f"member is removed from STILL_BROKEN only by being FIXED, and a fixed "
+        f"member MOVES to KNOWN_GOOD in the same commit -- it is never deleted."
     )
-    assert len(KNOWN_GOOD) >= 6
+    assert len(KNOWN_GOOD) >= 6, (
+        "The anti-vacuity arm is what proves the defect predicate still "
+        "discriminates. It must never be emptied, least of all as STILL_BROKEN "
+        "empties."
+    )
 
 
 def test_stable_max_cross_entropy_is_a_different_defect_not_this_one():

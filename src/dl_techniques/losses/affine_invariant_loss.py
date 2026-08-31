@@ -102,7 +102,10 @@ class AffineInvariantLoss(keras.losses.Loss):
             y_pred: Predicted depth maps. Shape: (batch_size, height, width, channels)
 
         Returns:
-            Computed loss value as a scalar tensor.
+            Per-sample loss with shape (batch_size,) -- the normalized L1 error of
+            each depth map. Keras' reduction recovers the scalar this used to
+            return; keeping the batch axis is what lets ``sample_weight`` and
+            ``reduction=`` select rows.
         """
         # Flatten spatial dimensions for statistics computation
         batch_size = ops.shape(y_true)[0]
@@ -113,8 +116,12 @@ class AffineInvariantLoss(keras.losses.Loss):
         y_true_scaled = self._scale_and_shift(y_true_flat)
         y_pred_scaled = self._scale_and_shift(y_pred_flat)
 
-        # Compute L1 loss between normalized depth maps
-        loss = ops.mean(ops.abs(ops.subtract(y_true_scaled, y_pred_scaled)))
+        # Compute L1 loss between normalized depth maps, per sample. Reducing over
+        # the batch axis here would make `sample_weight` multiply a scalar,
+        # charging every row the batch aggregate. The scale/shift normalization is
+        # already per-sample, and every row holds the same pixel count, so the mean
+        # of this vector equals the old all-axes mean exactly.
+        loss = ops.mean(ops.abs(ops.subtract(y_true_scaled, y_pred_scaled)), axis=-1)
 
         return loss
 
