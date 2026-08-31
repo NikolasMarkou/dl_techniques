@@ -163,8 +163,6 @@ STILL_BROKEN = [
     # --- found by execution, absent from the findings' list ---
     ("dino_loss", "DINOLoss", {"out_dim": 5}, _embedding_pair),
     ("dino_loss", "KoLeoLoss", {}, _embedding_pair),
-    ("scaled_mse_loss", "ScaledMseLoss", {}, _image_pair),
-    ("sam_mask_loss", "SAMIoULoss", {}, _iou_pair),
 ]
 
 # Classes that MUST be rejected by the same predicate. Without this arm the
@@ -192,6 +190,13 @@ KNOWN_GOOD = [
     ),
     ("affine_invariant_loss", "AffineInvariantLoss", {}, _image_pair),
     ("smape_loss", "SMAPELoss", {}, _positive_pair),
+    # fixed by plan-2026-08-31T045723-c0d5ffa9 step 3 (Tranche A batch 2), same
+    # two-part proof. `ScaledMseLoss`'s invariant (a) is exact in float64; in
+    # float32 at the ragged fixture's 500x row scale the two summation orders
+    # differ by exactly ONE ulp (200654.328125 vs 200654.34375, and float64 says
+    # 200654.34474678 -- the new order is the closer of the two).
+    ("scaled_mse_loss", "ScaledMseLoss", {}, _image_pair),
+    ("sam_mask_loss", "SAMIoULoss", {}, _iou_pair),
 ]
 
 

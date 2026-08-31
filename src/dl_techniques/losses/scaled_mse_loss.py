@@ -68,7 +68,9 @@ class ScaledMseLoss(keras.losses.Loss):
             y_pred: Prediction tensor of shape ``(B, H', W', C)``.
 
         Returns:
-            Scalar MSE loss value.
+            Per-sample MSE of shape ``(B,)``. Keras' reduction recovers the scalar
+            this used to return; keeping the batch axis is what lets
+            ``sample_weight`` and the ``reduction`` argument select rows.
         """
         y_true = ops.cast(y_true, y_pred.dtype)
         pred_shape = ops.shape(y_pred)
@@ -77,7 +79,12 @@ class ScaledMseLoss(keras.losses.Loss):
             size=(pred_shape[1], pred_shape[2]),
             interpolation=self.interpolation,
         )
-        return ops.mean(ops.square(y_pred - y_true_resized))
+        # Mean over the spatial and channel axes ONLY, keeping the batch axis.
+        # A scalar here would be multiplied by `sample_weight` before Keras
+        # reduces, charging every row the batch aggregate. Each row holds the same
+        # H'*W'*C element count, so the mean of this vector equals the old
+        # all-axes mean exactly.
+        return ops.mean(ops.square(y_pred - y_true_resized), axis=(1, 2, 3))
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
