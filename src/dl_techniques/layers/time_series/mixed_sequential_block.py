@@ -48,12 +48,11 @@ from typing import Optional, Union, Tuple, Callable, Any, Literal, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..ffn import create_ffn_layer, FFNType
-from ..ffn.factory import assemble_ffn_config
-from ..attention import create_attention_layer, AttentionType
-from ..attention.factory import ATTENTION_REGISTRY, assemble_attention_config
-from ..norms import create_normalization_layer, NormalizationType
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.attention import create_attention_layer, AttentionType
+from dl_techniques.layers.ffn import create_ffn_layer, FFNType, assemble_ffn_config
+from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
+from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY, assemble_attention_config
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -66,12 +65,11 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # The full rule lives on the drop loop in __init__ (search this name). See D-011.
 _CONDITIONAL_ATTENTION_ARG_KEYS: Tuple[str, ...] = ('window_size',)
 
-# ---------------------------------------------------------------------
-
 # The three modes of MixedSequentialBlock. 'lstm' runs LSTM + FFN,
 # 'transformer' runs attention + FFN, 'mixed' runs LSTM + attention + FFN.
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.time_series.mixed_sequential_block")
 class MixedSequentialBlock(keras.layers.Layer):

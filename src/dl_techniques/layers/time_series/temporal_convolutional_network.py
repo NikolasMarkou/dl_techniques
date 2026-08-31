@@ -248,6 +248,7 @@ class TemporalBlock(layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.time_series.temporal_convolutional_network")
 class TemporalConvNet(layers.Layer):
@@ -447,3 +448,5 @@ class TemporalConvNet(layers.Layer):
             'activation': serialize_activation(self.activation)
         })
         return config
+
+# ---------------------------------------------------------------------
