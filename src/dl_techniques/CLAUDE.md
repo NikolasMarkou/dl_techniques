@@ -109,7 +109,7 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 
 | Package | Convention | Measured 2026-08-28 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 262 of 298 modules carry `:param ` (re-measured 2026-08-31; commit `95ec63218` deleted three top-level modules that all carried `:param `, hence -3 of the numerator and -2 of the denominator) |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 262 of 297 modules carry `:param ` (re-measured 2026-08-31; commit `95ec63218` deleted three top-level modules that all carried `:param `, hence -3 of the numerator and -2 of the denominator; then `layers/grid_sample.py` was merged into `layers/spatial_layer.py` and deleted, and because it carried **0** `:param ` lines only the DENOMINATOR moved, 298 -> 297. Check both terms, never the ratio.) |
 | `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 87 Sphinx-only, 8 both, 112 neither, over 287 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 44 carry `Args:`, 10 carry `:param `, 1 both |
@@ -282,7 +282,7 @@ hence scoping pytest to the modules you changed rather than running `make test` 
 
 Mirrors `src/` — `tests/test_models/test_mobilenet/`, `tests/test_layers/test_attention/`. Under
 `tests/test_models/` a directory is the norm; under `tests/test_layers/` a loose `test_<name>.py` is
-(84 loose modules against 20 subdirectories, 2026-08-25), so a missing directory there means nothing.
+(83 loose modules against 20 subdirectories, re-measured 2026-08-31), so a missing directory there means nothing.
 `REPO_MAP.md` § Tests lists the named exceptions.
 
 > **`tests/test_models/` is FLAT and deliberately does not mirror the `models/` family nesting**

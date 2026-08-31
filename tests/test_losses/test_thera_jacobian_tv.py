@@ -19,7 +19,7 @@ import numpy as np
 import tensorflow as tf
 import pytest
 
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 from dl_techniques.models.vision.thera import (
     Thera,
     EDSRBackbone,
@@ -41,7 +41,7 @@ def _finite(t) -> bool:
 
 
 def _coords(batch: int, hq: int, wq: int):
-    grid = make_grid((hq, wq))  # (hq, wq, 2) numpy, pixel-center [h, w]
+    grid = coordinate_grid((hq, wq))  # (hq, wq, 2) numpy, pixel-center [h, w]
     g = tf.convert_to_tensor(grid, dtype=tf.float32)
     return tf.broadcast_to(g[None, ...], (batch, hq, wq, 2))
 

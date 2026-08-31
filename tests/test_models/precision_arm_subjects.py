@@ -1214,9 +1214,9 @@ def _b_thera():
 
 def _thera_inputs():
     import keras
-    from dl_techniques.layers.grid_sample import make_grid
+    from dl_techniques.layers.spatial_layer import coordinate_grid
     grid = np.asarray(keras.ops.convert_to_numpy(
-        keras.ops.convert_to_tensor(make_grid((12, 12)))))
+        keras.ops.convert_to_tensor(coordinate_grid((12, 12)))))
     coords = np.broadcast_to(grid[None, ...], (1, 12, 12, 2)).astype("float32")
     return (_f32(1, 8, 8, 3), coords, np.ones((1, 1), dtype="float32"))
 

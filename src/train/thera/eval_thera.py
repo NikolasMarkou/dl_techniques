@@ -33,7 +33,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 
 # Reuse the recursive image-discovery helper instead of re-implementing rglob
 # (thera/data.py already imports the same one).
@@ -95,7 +95,7 @@ def super_resolve(
     encoding = thera_model.apply_encoder(source_std, training=False)
 
     # Target-shaped query grid (pixel-center; numpy -> tensor + batch dim).
-    coords = make_grid((target_h, target_w))  # (target_h, target_w, 2) numpy
+    coords = coordinate_grid((target_h, target_w))  # (target_h, target_w, 2) numpy
     coords = tf.convert_to_tensor(coords, dtype=tf.float32)[tf.newaxis, ...]
 
     # Heat-kernel time t = (target_h / source_h) ** -2, shape (1, 1).

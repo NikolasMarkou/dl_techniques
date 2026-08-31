@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.spatial_layer import coordinate_grid
 from dl_techniques.layers.thera_heat_field import DEFAULT_K_INIT
 from dl_techniques.models.vision.thera import (
     Thera,
@@ -73,7 +73,7 @@ def _small_thera(kind: str, size: str, out_dim: int = 3) -> Thera:
 
 def _coords(batch: int, hq: int, wq: int) -> tf.Tensor:
     """Broadcast a pixel-center query grid to ``(batch, hq, wq, 2)``."""
-    grid = keras.ops.convert_to_tensor(make_grid((hq, wq)))  # (hq, wq, 2)
+    grid = keras.ops.convert_to_tensor(coordinate_grid((hq, wq)))  # (hq, wq, 2)
     return keras.ops.broadcast_to(grid[None, ...], (batch, hq, wq, 2))
 
 
