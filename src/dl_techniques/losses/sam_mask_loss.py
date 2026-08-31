@@ -326,7 +326,9 @@ class SAMIoULoss(keras.losses.Loss):
             by the model.
 
     Returns:
-        Scalar MSE.
+        Per-sample MSE of shape ``(B,)``, averaged over the ``M`` mask slots.
+        Keras' reduction recovers the scalar this used to return; keeping the
+        batch axis is what lets ``sample_weight`` and ``reduction`` select rows.
 
     Raises:
         ValueError: if ``y_pred``'s trailing axis is not exactly 2 -- the one
@@ -352,7 +354,7 @@ class SAMIoULoss(keras.losses.Loss):
         super().__init__(name=name, reduction=reduction, **kwargs)
 
     def call(self, y_true: Any, y_pred: Any) -> Any:
-        """Compute ``mean((predicted_iou - achieved_iou) ** 2)``."""
+        """Per sample: ``mean_over_masks((predicted_iou - achieved_iou) ** 2)``."""
         shape = tuple(y_pred.shape)
         if len(shape) != 3 or shape[-1] != 2:
             raise ValueError(
@@ -364,7 +366,13 @@ class SAMIoULoss(keras.losses.Loss):
             )
         predicted = y_pred[..., 0]
         achieved = ops.stop_gradient(y_pred[..., 1])
-        return ops.mean(ops.square(predicted - achieved))
+        # Mean over the mask axis ONLY, keeping the batch axis. A scalar here
+        # would be multiplied by `sample_weight` before Keras reduces, charging
+        # every row the batch aggregate. Every row holds the same M mask slots, so
+        # the mean of this vector equals the old all-axes mean exactly -- including
+        # over the GT-absent rows SAM 2's training model zeroes in BOTH channels,
+        # which contribute an exact 0 either way.
+        return ops.mean(ops.square(predicted - achieved), axis=-1)
 
     def get_config(self) -> Dict[str, Any]:
         """Full serialization config."""
