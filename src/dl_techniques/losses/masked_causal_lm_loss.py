@@ -61,7 +61,11 @@ class MaskedCausalLMLoss(keras.losses.Loss):
 
         Output
         ──────
-        scalar : mean CE over non-masked positions
+        (batch,) : per-sample values whose MEAN is the batch-wide mean CE
+                   over non-masked positions. Row i is
+                   ``row_token_sum_i / total_valid_tokens_in_batch * batch``,
+                   so it is proportional to the row's token COUNT -- not a
+                   per-sequence mean (see ``call()``).
 
     :param ignore_index: Label value to ignore in loss computation.
         Positions with this label are masked out. Default ``-1``.
@@ -103,7 +107,10 @@ class MaskedCausalLMLoss(keras.losses.Loss):
             are excluded from the loss.
         :param y_pred: Predicted logits with shape
             ``(batch, seq_len, vocab_size)``.
-        :return: Scalar loss averaged over non-masked positions.
+        :return: Per-sample loss with shape ``(batch,)``, scaled so that Keras'
+            default ``sum_over_batch_size`` reduction reproduces the batch-wide
+            mean over non-masked positions EXACTLY. Keeping the batch axis is
+            what lets ``sample_weight`` and ``reduction=`` select rows.
         """
         # Build mask: 1.0 for real tokens, 0.0 for ignored positions
         mask = ops.cast(y_true != self.ignore_index, "float32")
@@ -130,10 +137,31 @@ class MaskedCausalLMLoss(keras.losses.Loss):
                 + self.label_smoothing * smooth_loss
             )
 
-        # Masked mean: average only over real token positions
-        numerator = ops.sum(per_token_loss * mask)
-        denominator = ops.sum(mask) + 1e-8
-        return numerator / denominator
+        # Per-sample values that PRESERVE the batch-wide token mean.
+        #
+        # This used to return `sum(all valid token losses) / count(all valid
+        # tokens)` -- a scalar. `keras.losses.Loss.__call__` multiplies call()'s
+        # output by `sample_weight` BEFORE reducing, so that scalar broadcast and
+        # the result was exactly `unweighted * mean(sample_weight)`: every row
+        # charged the batch aggregate, with WHICH rows were weighted discarded.
+        #
+        # The obvious repair -- return each sequence's OWN mean -- is a different
+        # number whenever the sequences have unequal valid-token counts, because a
+        # mean of means is not the mean of the pool. Measured at valid counts
+        # [20, 3, 1, 1]: 5.5544796 against this loss's 3.5734539, 55.4% off. That
+        # would silently re-weight short sequences UP -- a different objective,
+        # arriving as a side effect of a shape fix. Do NOT use it.
+        #
+        # Instead scale each row's TOKEN SUM by the batch-global token count and
+        # by the batch size, so that Keras' `sum_over_batch_size` (which divides
+        # by the batch size) reproduces the original batch-wide token mean
+        # exactly. A row's value is then proportional to its token COUNT as well
+        # as to its token losses, which is faithful to the original objective:
+        # every token weighted equally regardless of which sequence it came from.
+        row_token_sum = ops.sum(per_token_loss * mask, axis=-1)
+        total_valid_tokens = ops.sum(mask) + 1e-8
+        batch_size = ops.cast(ops.shape(mask)[0], row_token_sum.dtype)
+        return row_token_sum / ops.cast(total_valid_tokens, row_token_sum.dtype) * batch_size
 
     def get_config(self) -> dict:
         """Get loss configuration for serialization."""
@@ -157,6 +185,13 @@ class PrefixMaskedCausalLMLoss(MaskedCausalLMLoss):
     set prompt token positions to ``ignore_index`` in the labels during
     preprocessing. This class adds no extra logic over the base — it
     exists as a semantic alias with documentation for the prefix use case.
+    It therefore inherits :meth:`MaskedCausalLMLoss.call` unchanged, and
+    returns PER-SAMPLE values of shape ``(batch,)``, not a scalar: row ``i``
+    is ``row_token_sum_i / total_valid_tokens_in_batch * batch``, whose mean
+    under the default reduction is the batch-wide token mean. Under instruction
+    tuning the prefix masking makes the per-row valid-token counts UNEQUAL by
+    construction, which is exactly the case where a per-sequence mean would
+    have differed from the value this loss has always reported.
 
     .. code-block:: text
 
