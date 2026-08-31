@@ -145,7 +145,21 @@ class HRMLoss(keras.losses.Loss):
 
         # Language modeling loss
         if lm_loss_type == "stable_max":
-            self.lm_loss_fn = StableMaxCrossEntropy(ignore_index=ignore_index)
+            # DECISION plan-2026-08-31T045723-c0d5ffa9/D-001
+            # `reduction="none"` is LOAD-BEARING, not cosmetic. `call()` below does
+            # `sum(lm_losses) / sum(valid_counts)`, which is only correct if this
+            # sub-loss hands back PER-TOKEN values. Without it, `Loss.__call__`
+            # returns an already-averaged scalar and that line divides it by the
+            # token count a SECOND time, under-weighting the LM term by exactly
+            # `sum(valid_counts)` (MEASURED: 24x at 4x6, 512x at 8x64, 4096x at
+            # 8x512). The LM objective then all but vanishes next to the Q-learning
+            # terms it is summed with, while the loss curve still looks healthy.
+            # The `else` branch below has always passed `reduction="none"`; this
+            # branch -- the DEFAULT -- did not. See decisions.md D-001.
+            self.lm_loss_fn = StableMaxCrossEntropy(
+                ignore_index=ignore_index,
+                reduction="none",
+            )
         else:
             self.lm_loss_fn = keras.losses.SparseCategoricalCrossentropy(
                 from_logits=True,
