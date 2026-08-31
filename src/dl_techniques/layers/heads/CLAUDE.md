@@ -93,8 +93,8 @@ still load. `MIGRATIONS.md` at the repo root is the record.
   have a real head today (captioning, VQA, visual grounding, image-text matching). To add
   one: implement the head and map it — do not restore the fallback.
   Pinned by `tests/test_layers/test_heads/test_head_dispatch_no_silent_fallback.py`.
-- **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for `cls`/`mean`/`max`
-  delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
+- **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for the four strategies
+  in `_DELEGATED_POOLING_STRATEGIES` -- `cls`/`mean`/`max`/`last` -- delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
   layer (built in `__init__`/`build`, Golden Rule). The `attention` strategy
   stays inline (`Dense(1, tanh)` direct-score) — `SequencePooling('attention')`
   uses a different `AttentionPooling` mechanism + weight set, so delegating it
@@ -118,11 +118,12 @@ still load. `MIGRATIONS.md` at the repo root is the record.
 - **No caller-dict mutation.** `MultiTaskHead._create_task_heads()` copies each
   per-task config dict before `pop('task_type')` (it used to mutate the caller's
   dict and break round-trips).
-- **Serialization-stable class names.** All 21 names are verbatim; no `package=`
-  added to any decorator. Sub-layers created in `__init__`/`build`, `keras.ops`
-  only, `dl_techniques.utils.logger` only.
-  *Superseded 2026-08-29: the "no `package=`" half no longer holds — every decorator here is
-  now `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")` and each class
+- **Serialization-stable class names.** All 22 names are verbatim. Sub-layers
+  created in `__init__`/`build`, `keras.ops` only, `dl_techniques.utils.logger`
+  only.
+  *This bullet once also required "no `package=` on any decorator"; that half was
+  superseded 2026-08-29 and has been dropped. Every decorator here is now
+  `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")` and each class
   carries a package-qualified key. It cost no archive because the helper also mints the legacy
   `Custom>ClassName` alias (`MIGRATIONS.md`). The **class names** are still verbatim and must
   stay so: the alias is keyed on the bare name.*
