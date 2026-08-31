@@ -85,9 +85,9 @@ See `heads/CLAUDE.md` and `heads/README.md`.
 ### Standalone layers (top-level files)
 
 Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE,
-complex-valued layers, conditional output, ConvNeXt v1/v2 blocks, convolutional KAN,
+complex-valued layers, conditional output, ConvNeXt v1/v2 blocks, KANvolution (convolutional KAN),
 depthwise separable, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal
-block, FFT layers, Gaussian filter/pyramid, global sum pool, HANC block/layer, hierarchical MLP stem,
+block, FFT layers, Gaussian filter/pyramid, global sum pool (any spatial rank), HANC block/layer, hierarchical MLP stem,
 inverted residual block, IO preparation, KAN linear, Laplacian filter, layer scale, mobile-one block,
 modality projection, MothNet blocks, MPS layer, multi-level feature compilation, one-hot encoding,
 orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible — see its module
