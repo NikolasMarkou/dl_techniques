@@ -67,6 +67,11 @@ from dl_techniques.layers.transformers.sd3_adaln import (
     AdaLayerNormZero,
     AdaLayerNormZeroX,
     AdaLayerNormContinuous,
+    # `_modulate` was defined identically here until
+    # plan-2026-08-31-a4e0c303/iter-1/step-2; `sd3_adaln` owns it now. It
+    # expands `(B, dim)` shift/scale to `(B, 1, dim)` itself -- do NOT swap it
+    # for `AdaLNZeroConditionalBlock._modulate`, which does not.
+    _modulate,
 )
 from dl_techniques.layers.ffn.gelu_mlp_ffn import GELUMLPFFN
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -120,17 +125,6 @@ def _gate(
 ) -> keras.KerasTensor:
     """Apply a ``(B, dim)`` gate to a ``(B, N, dim)`` tensor (broadcast)."""
     return keras.ops.expand_dims(gate, axis=1) * x
-
-
-def _modulate(
-    x: keras.KerasTensor,
-    shift: keras.KerasTensor,
-    scale: keras.KerasTensor,
-) -> keras.KerasTensor:
-    """AdaLN MLP-branch modulation ``x*(1+scale[:,None,:]) + shift[:,None,:]``."""
-    scale = keras.ops.expand_dims(scale, axis=1)
-    shift = keras.ops.expand_dims(shift, axis=1)
-    return x * (1.0 + scale) + shift
 
 
 # =====================================================================

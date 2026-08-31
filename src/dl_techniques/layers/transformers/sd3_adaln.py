@@ -118,7 +118,19 @@ def _modulate(
 
     ``h`` is ``(B, N, dim)`` and ``shift`` / ``scale`` are ``(B, dim)``; they
     are broadcast to ``(B, 1, dim)`` via ``expand_dims`` so the modulation is
-    graph-safe (no python-int shape access).
+    graph-safe (no python-int shape access). THIS HELPER OWNS THE BROADCAST.
+
+    .. note::
+       A same-named ``@staticmethod`` exists on
+       :class:`~dl_techniques.layers.transformers.adaln_zero.AdaLNZeroConditionalBlock`
+       with a DIFFERENT contract: it has no ``expand_dims``, so its caller owns
+       the broadcast and passes already-aligned operands. The two are
+       deliberately NOT unified -- merging them would silently move a
+       ``(B, dim)`` operand from the sample axis to the sequence axis. Owner of
+       this contract: this function, used here and by
+       ``models/vision_language/sd3_mmdit/blocks.py`` (which imports it rather
+       than re-defining it). Pinned by
+       ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
     """
     scale = keras.ops.expand_dims(scale, axis=1)
     shift = keras.ops.expand_dims(shift, axis=1)

@@ -318,7 +318,19 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
     @staticmethod
     def _modulate(h: keras.KerasTensor, shift: keras.KerasTensor,
                   scale: keras.KerasTensor) -> keras.KerasTensor:
-        """AdaLN-zero modulation: h * (1 + scale) + shift."""
+        """AdaLN-zero modulation: h * (1 + scale) + shift.
+
+        NO ``expand_dims`` here: the CALLER owns the broadcast. Both call sites
+        below pass ``(B, T, D)``-shaped ``shift``/``scale`` chunks that are
+        already aligned with ``h``.
+
+        This is NOT the same function as the module-level ``_modulate`` in
+        ``layers/transformers/sd3_adaln.py``, despite the shared name: that one
+        takes ``(B, dim)`` chunks and expands them to ``(B, 1, dim)`` itself.
+        The two are deliberately kept separate -- unifying them would silently
+        change which axis the conditioning lands on. Pinned by
+        ``tests/test_layers/test_transformers/test_the_modulate_broadcast_contract.py``.
+        """
         return h * (1.0 + scale) + shift
 
     def call(
