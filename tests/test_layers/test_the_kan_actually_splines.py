@@ -2,10 +2,12 @@
 
 Plan ``plan-2026-08-22T035419-a11304c8``, ruling **D-052**.
 
-The inventory recorded one dead weight -- ``control_points`` ``add_weight``-ed at
-``layers/convolutional_kan.py:257`` and read nowhere in ``src/``. Measurement
-found the defect is larger than that: the whole learnable-univariate-function
-apparatus was decorative. The forward path was
+The inventory recorded one dead weight -- ``control_points``, ``add_weight``-ed
+in ``KANvolution.build`` (``layers/kanvolution.py``) and read nowhere in ``src/``.
+Cited by symbol, not by line number: the address it originally carried has
+already rotted, the symbol has not. Measurement found the defect is larger than
+that -- the whole learnable-univariate-function apparatus was decorative. The
+forward path was
 
     effective_kernel = self.w_spline + self.w_silu
     outputs = ops.conv(inputs, transpose(effective_kernel), ...)
@@ -25,7 +27,7 @@ reading                                                      value
 Zero homogeneity error means the layer carried **no non-linearity at all** -- not
 the B-spline and not even the advertised SiLU -- and the identical movement of
 ``w_spline`` and ``w_silu`` shows they were a redundant reparameterization of a
-single conv kernel. All 83 tests in ``test_convolutional_kan.py`` passed against
+single conv kernel. All 83 tests in ``test_kanvolution.py`` passed against
 that implementation, which is why this file exists: those tests pin shapes,
 finiteness and weight *existence*, and none of them pins what the layer computes.
 
@@ -37,7 +39,7 @@ import pytest
 import keras
 from keras import ops
 
-from dl_techniques.layers.convolutional_kan import KANvolution
+from dl_techniques.layers.kanvolution import KANvolution
 
 
 def _reference_kanvolution(x, layer):
