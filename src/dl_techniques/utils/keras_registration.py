@@ -14,8 +14,10 @@ stable package-qualified one (which new saves write) and, where the bare class n
 shared with another registered class, the pre-migration ``Custom>ClassName`` one (which
 existing archives read). See :sec:`6.3` of the same guide for the migration-path rule.
 **No class under ``src/`` gets no alias today** -- re-derived 2026-09-01 by AST census over
-``src/dl_techniques``, ``src/train``, ``src/applications`` and ``tests``: **0** of the 746
-``register_dl_technique`` sites pass ``legacy_alias=False``, and **0** bare ``__name__``s are
+``src/dl_techniques``, ``src/train``, ``src/applications`` and ``tests``: **0** of the 745
+``register_dl_technique`` sites (730 under ``src/dl_techniques``, 15 under ``src/train``; counted
+in a clean checkout, so an untracked local module cannot inflate it) pass ``legacy_alias=False``,
+and **0** bare ``__name__``s are
 shared by two registered objects (the last three, ``Downsample``/``Upsample``/``MLPBlock``,
 were resolved by package-prefix renames, not by refusals). ``yolov12_losses`` remains a
 further exception, and nine archives were already broken before this change by the
@@ -29,9 +31,11 @@ Measured behaviour of the mechanism (2026-08-29, keras 3.x, this repository):
   archive loads with ``max|delta| = 0.0`` against the pre-migration output.
 - **Control**: with ``legacy_alias=False`` the same legacy archive is REFUSED with
   ``TypeError: ... could not be deserialized properly``. The alias is load-bearing, not
-  decorative. The flag is still supported and still the correct remedy for a genuine
-  bare-name collision (see :class:`AliasCollisionError`), but as of 2026-09-01 it has **no
-  users**: it is a mechanism held in reserve, not a live exception list.
+  decorative. The flag is still supported, but as of 2026-09-01 it has **no users** and is no
+  longer the prescribed remedy for a bare-name collision: rename the narrower class with its
+  package prefix instead (``PWFNetDownsample``, not a second ``Downsample``), which removes the
+  duplicate at its source and costs neither class its alias. See :class:`AliasCollisionError`.
+  The flag is a last resort held in reserve, not a live exception list.
 - Plain functions (not only classes) register and alias identically.
 
 Example:
@@ -65,9 +69,18 @@ class AliasCollisionError(RuntimeError):
     the second write and silently overwrite the first, making the winner a function of
     import order; refusing at definition time makes the collision impossible to miss.
 
-    The fix is never to let one side win by accident: pass ``legacy_alias=False`` on *both*
-    sides of the duplicate-name pair, so neither claims the legacy key and each is reachable
-    only through its own package-qualified key.
+    The fix is never to let one side win by accident. Rename the narrower of the two classes
+    with its package prefix -- ``PWFNetDownsample``, not a second ``Downsample`` -- so the
+    duplicate disappears at its source and both classes keep a legacy alias. That is the house
+    rule (``research/2026_keras_custom_models_instructions_v2.md`` :sec:`6.3`) and, as of
+    2026-09-01, what every collision in this tree was resolved by.
+
+    ``legacy_alias=False`` on *both* sides is the LAST RESORT, for when neither class can be
+    renamed (a third-party name, or a published key you must keep). It costs both of them their
+    ``Custom>`` alias forever, leaves the duplicate name in place so the next same-named class
+    re-opens the hazard, and is pinned at population zero by
+    ``tests/test_the_legacy_alias_namespace_has_no_collisions.py`` -- so adding one reddens the
+    suite and needs a recorded decision, not a quiet flag.
     """
 
 # ---------------------------------------------------------------------
@@ -117,9 +130,13 @@ def register_dl_technique(
     :type package: str
     :param legacy_alias: When ``True`` (default), also bind ``Custom>{obj.__name__}`` in
         :func:`keras.saving.get_custom_objects` to the same object, so pre-migration
-        ``.keras`` archives keep loading. Pass ``False`` for any name shared by two
-        registered objects -- aliasing both sides of such a pair would recreate, in the
-        legacy namespace, the exact import-order collision this migration removes.
+        ``.keras`` archives keep loading. When two registered objects would share a bare
+        ``__name__``, RENAME one of them with its package prefix rather than passing ``False``
+        here: aliasing both sides of such a pair would recreate, in the legacy namespace, the
+        exact import-order collision this migration removes, and suppressing both sides costs
+        each its alias while leaving the duplicate name in place. ``False`` is the last resort
+        for a pair that genuinely cannot be renamed; it has no users in this tree and a guard
+        pins that at zero.
     :type legacy_alias: bool
     :param legacy_packages: Additional *package strings* this object was registered under
         before the migration. Each contributes one more alias, ``f"{pkg}>{obj.__name__}"``,
@@ -183,8 +200,14 @@ def register_dl_technique(
                     f"legacy alias {key!r} is already claimed by "
                     f"{getattr(existing, '__module__', '?')}.{getattr(existing, '__qualname__', existing)}; "
                     f"{getattr(obj, '__module__', '?')}.{getattr(obj, '__qualname__', obj)} cannot also claim it. "
-                    f"Two registered objects share the bare name {obj.__name__!r}: pass "
-                    f"legacy_alias=False on BOTH of them so neither owns the legacy key."
+                    f"Two registered objects share the bare name {obj.__name__!r}. FIX: rename "
+                    f"the narrower of the two with its package prefix (e.g. "
+                    f"'PWFNetDownsample', not a second 'Downsample') so the duplicate goes away "
+                    f"at its source and BOTH classes keep their legacy alias. Last resort only, "
+                    f"if neither can be renamed: legacy_alias=False on BOTH of them -- that "
+                    f"costs both their legacy key and is pinned at zero users by "
+                    f"tests/test_the_legacy_alias_namespace_has_no_collisions.py, so it will "
+                    f"redden the suite."
                 )
             custom_objects[key] = obj
         return obj

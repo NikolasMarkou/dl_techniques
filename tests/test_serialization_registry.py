@@ -5,8 +5,9 @@ the module-INDEPENDENT key ``Custom>{ClassName}``. Two classes with the SAME cla
 therefore claim the SAME key, and the one imported LAST silently overwrites the other.
 Nothing warns.
 
-SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 746 of them
-(731 in `src/dl_techniques`, 15 in `src/train`; AST census re-derived 2026-09-01) go
+SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 745 of them
+(730 in `src/dl_techniques`, 15 in `src/train`; AST census re-derived 2026-09-01 in a clean
+`git worktree` at ca79c2378, and identical at the plan's base commit 755f06a38) go
 through `dl_techniques.utils.keras_registration.register_dl_technique`, which mints a
 package-qualified key and binds the old ``Custom>{ClassName}`` as an ALIAS to the same
 object so pre-migration `.keras` archives keep loading. This guard is
@@ -19,8 +20,10 @@ three duplicate-name pairs -- ``Downsample``, ``Upsample``, ``MLPBlock`` -- were
 their source by package-prefix renames (``PWFNetDownsample``, ``PWFNetUpsample``,
 ``TabMMLPBlock``) rather than by suppressing aliases on both sides. The flag still exists and
 is still the right remedy for a genuine bare-name collision; it simply has no users.
-`tests/test_the_legacy_alias_namespace_has_no_collisions.py` re-derives both counts from the
-tree, so this paragraph reddens rather than rots.
+`tests/test_the_legacy_alias_namespace_has_no_collisions.py` pins exactly those two ZEROS, so a
+re-added refusal or a re-created duplicate name reddens it. It does NOT pin the site count, which
+sits behind an 80%-of-population anti-vacuity floor -- so `745` above is a dated measurement, not
+a guarded invariant.
 
 The consequence is a real serialization-correctness bug, not merely a test annoyance:
 saving a model containing the shadowed class and loading it back resolves the key to the
@@ -131,18 +134,21 @@ def test_no_duplicate_keras_serialization_keys():
     #
     # The floor was ``> 100`` against a measured population of 728, i.e. ~7x headroom --
     # so seven of every eight registrations could have vanished without this noticing.
-    # Re-measured 2026-09-01 by re-running THIS walk and printing ``len(registry)``:
-    # **1466 keys** (each aliased object holds two, the qualified key and its legacy
-    # ``Custom>`` alias). The 1452 recorded here on 2026-08-29 was stale by -14: the
+    # Re-measured 2026-09-01 by re-running THIS walk and printing ``len(registry)`` in a
+    # CLEAN ``git worktree`` at ca79c2378 (and again in the main tree, same answer):
+    # **1464 keys** (each aliased object holds two, the qualified key and its legacy
+    # ``Custom>`` alias). The 1452 recorded here on 2026-08-29 was stale by -12: the
     # 2026-09-01 alias cleanup minted 8 of those (the last 8 ``legacy_alias=False`` sites
-    # took the house default, so each gained a second key) and the other 6 predate it.
+    # took the house default, so each gained a second key) and the other 4 predate it.
+    # (A 1466 written earlier the same day was measured against a worktree holding an
+    # untracked foreign module that no longer exists; it was true of no committed state.)
     # The floor is re-derived on the same 80%-of-population rule the sibling guard in
-    # `test_models/test_package_api_contract.py` uses: ``int(0.8 * 1466) == 1172``. A
+    # `test_models/test_package_api_contract.py` uses: ``int(0.8 * 1464) == 1171``. A
     # fifth of the tree's registrations may disappear before this guard is allowed to call
     # itself alive; anything tighter would trip on an ordinary refactor and say nothing
     # more about whether the walk still reaches the tree.
-    assert len(registry) > 1172, (
-        f"only {len(registry)} objects registered (measured 1466 on 2026-09-01) -- the "
+    assert len(registry) > 1171, (
+        f"only {len(registry)} objects registered (measured 1464 on 2026-09-01) -- the "
         f"module walk likely failed, so this guard would pass vacuously"
     )
 

@@ -317,11 +317,15 @@ from dl_techniques.layers.sequence_pooling import create_sequence_pooling_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-# `legacy_alias=False` because `ClassificationHead` is already a registered name in this
-# repo (`dl_techniques.layers.heads.vision.factory>ClassificationHead`), and its legacy
-# `Custom>ClassificationHead` alias is taken; claiming it again raises AliasCollisionError.
-@register_dl_technique("my_project.classification_head", legacy_alias=False)
-class ClassificationHead(keras.layers.Layer):
+# The class is PREFIXED because the bare name `ClassificationHead` is already registered in
+# this repo (`dl_techniques.layers.heads.vision.factory>ClassificationHead`), so its legacy
+# `Custom>ClassificationHead` alias is taken and claiming it again raises AliasCollisionError.
+# Prefixing removes the duplicate at its source and lets BOTH classes keep a legacy alias.
+# (`legacy_alias=False` on both sides also silences the error, but it costs each of them its
+# alias and leaves the duplicate name in place; it is a last resort for a class that cannot be
+# renamed, and this tree has zero users of it.)
+@register_dl_technique("my_project.classification_head")
+class MyProjectClassificationHead(keras.layers.Layer):
     def __init__(self, num_classes, pooling_type='attention', **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes

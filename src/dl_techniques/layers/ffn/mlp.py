@@ -46,6 +46,14 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose. When
+# the 2026-09-01 ``MLPBlock`` collision was resolved, the tabm copy was the one renamed
+# (``TabMMLPBlock``) because THIS name is API: it is the FFN factory's ``'mlp'`` key
+# (``layers/ffn/factory.py``), so renaming the class here would change a public construction path
+# as well as a live ``Custom>MLPBlock`` alias that pre-migration archives read. Do NOT rename this
+# to ``FFNMLPBlock`` for symmetry with ``TabMMLPBlock``: the bare name is unique again, so every
+# arm of ``tests/test_the_legacy_alias_namespace_has_no_collisions.py`` would stay green while the
+# rename broke both contracts. See decisions.md D-001.
 @register_dl_technique("dl_techniques.layers.ffn.mlp")
 class MLPBlock(keras.layers.Layer):
     """

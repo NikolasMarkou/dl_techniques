@@ -309,6 +309,14 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose.
+# The legacy alias namespace is keyed by the bare class name alone, and the 2026-09-01 collision
+# with pw_fnet was resolved by prefixing the NARROWER consumer (``PWFNetDownsample``), leaving
+# ideogram4's VAE as the canonical owner of ``Custom>Downsample``. Do NOT "make it consistent" by
+# renaming this to ``Ideogram4Downsample``: uniqueness is already satisfied, so every arm of
+# ``tests/test_the_legacy_alias_namespace_has_no_collisions.py`` would stay green while the rename
+# silently moved a live key -- ``keras.saving.get_registered_object("Custom>Downsample")`` resolves
+# to THIS class today, and pre-migration archives read it. See decisions.md D-001.
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
@@ -379,6 +387,13 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose, for
+# the same reason as ``Downsample`` above -- ideogram4's VAE is the canonical owner of
+# ``Custom>Upsample`` and pw_fnet's copy was the one renamed (``PWFNetUpsample``). Do NOT rename
+# this to ``Ideogram4Upsample`` for consistency: the guard cannot see such a rename (uniqueness
+# is preserved either way) and it would move a legacy key that archives still read. The separate
+# D-005 anchor in this class's docstring is about its INTERNALS and is unrelated to its name.
+# See decisions.md D-001.
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).

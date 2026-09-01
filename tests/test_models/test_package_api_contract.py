@@ -2027,7 +2027,7 @@ def _memo_default_roots(fn):
 #: Root set of the registry-key sweep: **every registering path in the repo**.
 #:
 #: NOT ``models/`` (217 registering sites) and NOT ``src/dl_techniques/`` alone
-#: (731). A bare ``@register_keras_serializable()`` registers under the literal
+#: (730). A bare ``@register_keras_serializable()`` registers under the literal
 #: key ``Custom><ClassName>``, which is MODULE-INDEPENDENT -- measured on Keras
 #: 3.8.0, see decisions.md D-002 -- so the namespace those classes compete in is
 #: flat and repo-global. Both narrower scopings are structurally blind to the
@@ -2270,7 +2270,7 @@ class TestRegistryKeysDoNotCollide:
         # existing checkpoint that stored the old registered_name (D-002)." The
         # premise is still true and the conclusion is now wrong. Adding
         # `package=` does move the key -- which is exactly why every `src/`
-        # site (746 today; 744 when this was written) moved onto
+        # site (745 today; 744 when this was written) moved onto
         # `register_dl_technique`, whose legacy `Custom>{name}`
         # alias keeps the OLD key resolving to the SAME object (verified against
         # all 14 class names this repository's `.keras` archives actually

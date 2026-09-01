@@ -94,12 +94,17 @@ deserialization of both.
 
 **Legacy archives still load.** The helper also binds `Custom>ClassName` as an alias to the same
 object, which is what a pre-2026-08-29 `.keras` file reads. **No name under `src/` opts out**:
-re-derived 2026-09-01 by AST census, **0** of the 746 `register_dl_technique` sites pass
-`legacy_alias=False` and **0** bare `__name__`s are claimed by two registered objects. The flag
-remains the correct remedy for a genuine bare-name collision, and it currently has no users --
-the last three collisions (`Downsample`, `Upsample`, `MLPBlock`) were resolved by package-prefix
-renames instead. `tests/test_the_legacy_alias_namespace_has_no_collisions.py` re-derives both
-counts from the tree, so this paragraph cannot drift silently. The
+re-derived 2026-09-01 by AST census over `src/dl_techniques`, `src/train`, `src/applications` and
+`tests`, **0** of the 745 `register_dl_technique` sites pass `legacy_alias=False` and **0** bare
+`__name__`s are claimed by two registered objects. The preferred remedy for a genuine bare-name
+collision is a package-prefix rename of the narrower consumer (`PWFNetDownsample`, not a second
+`Downsample`); the flag remains supported as a last resort and currently has no users -- the last
+three collisions (`Downsample`, `Upsample`, `MLPBlock`) were resolved by renames instead.
+`tests/test_the_legacy_alias_namespace_has_no_collisions.py` pins **exactly the two zeros above**:
+a site that re-adds `legacy_alias=False`, or a second registered object taking a bare name already
+claimed, reddens it. It does **not** pin the site count — that sits behind an anti-vacuity floor at
+80% of the measured population, so `745` may drift by well over a hundred sites with every arm
+green. Read the zeros as guarded and the count as a dated measurement. The
 `dl_techniques.utils.keras_registration` module docstring records the mechanism and the measured
 control.
 
