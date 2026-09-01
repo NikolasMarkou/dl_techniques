@@ -94,7 +94,45 @@ from typing import Optional, Union, Tuple, Any, List, Dict
 from dl_techniques.layers.res_path import ResPath
 from dl_techniques.layers.hanc_block import HANCBlock
 from dl_techniques.layers.multi_level_feature_compilation import MLFCLayer
+from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
+
+def _force_no_xla(kwargs: Dict[str, Any], owner: str) -> None:
+    """Force ``jit_compile=False`` into a ``compile()`` keyword dictionary.
+
+    :class:`~dl_techniques.layers.hanc_layer.HANCLayer` resizes its pooled
+    summaries back to full resolution with nearest-neighbour interpolation. The
+    backward pass of that op, ``ResizeNearestNeighborGrad``, has no registered
+    XLA-GPU kernel in TF 2.18, so Keras' default ``jit_compile="auto"`` -- which
+    resolves to XLA on a GPU -- makes ``fit()`` raise ``InvalidArgumentError:
+    Detected unsupported operations ... on XLA_GPU_JIT``. Inference is
+    unaffected; only the gradient needs the missing kernel.
+
+    The opt-out deliberately wins even over an explicitly-passed
+    ``jit_compile=True``: on a GPU that request is a guaranteed crash, so there
+    is no configuration in which honouring it would be useful.
+
+    This is the single home of the forcing rule. Both :class:`AccUNet` and
+    :class:`AccUNetFunctional` call it; do not inline a copy in either.
+
+    :param kwargs: Keyword dictionary about to be handed to ``super().compile``;
+        mutated in place.
+    :type kwargs: Dict[str, Any]
+    :param owner: Class name of the caller, used only in the log line.
+    :type owner: str
+    :return: Nothing; ``kwargs`` is modified in place.
+    :rtype: None
+    """
+    if kwargs.get("jit_compile") is not False:
+        logger.warning(
+            f"{owner}.compile(): forcing jit_compile=False (requested: "
+            f"{kwargs.get('jit_compile', 'auto')!r}). ResizeNearestNeighborGrad, "
+            "the backward pass of HANCLayer's nearest-neighbour resize, has no "
+            "XLA-GPU kernel in TF 2.18, so an XLA training step cannot compile."
+        )
+    kwargs["jit_compile"] = False
 
 # ---------------------------------------------------------------------
 
@@ -619,6 +657,93 @@ class AccUNet(keras.Model):
         """
         return cls(**config)
 
+    def compile(self, *args: Any, **kwargs: Any) -> None:
+        """Compile the model with XLA unconditionally disabled.
+
+        See :func:`_force_no_xla` for why. The forced value wins over an
+        explicitly-passed ``jit_compile``.
+        """
+        _force_no_xla(kwargs, type(self).__name__)
+        return super().compile(*args, **kwargs)
+
+    def compile_from_config(self, config: Dict[str, Any]) -> 'AccUNet':
+        """Recompile on ``load_model()``, routed through :meth:`compile`.
+
+        Overriding ``compile()`` makes Keras route a reload's recompile through
+        this method; without it the reloaded model comes back with a stale
+        ``jit_compile="auto"`` and XLA-crashes on the next GPU ``fit()``.
+
+        :param config: Serialized compile configuration from the archive.
+        :type config: Dict[str, Any]
+        :return: ``self``, recompiled.
+        :rtype: AccUNet
+        """
+        config = keras.saving.deserialize_keras_object(config)
+        self.compile(**config)
+        # The next two lines are the tail of Keras' own
+        # `Trainer.compile_from_config` (keras/src/trainers/trainer.py:973-975).
+        # Overriding the method without them silently DROPS the whole saved
+        # optimizer state on every reload -- measured on the VAE, which carries
+        # the same override pair: the archive held 122 optimizer variables and
+        # the reloaded model's optimizer held 2, so `load_own_variables` warned
+        # and restored nothing, and a resumed checkpoint restarted Adam from
+        # zeroed moments. Do NOT simplify this to `self.compile(**config);
+        # return self`.
+        if hasattr(self, "optimizer") and self.built:
+            self.optimizer.build(self.trainable_variables)
+        return self
+
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-09-01T163450-1f49c11f/D-002: the `create_acc_unet*`
+# factories do NOT return the `AccUNet` instance -- they wrap it in a second,
+# separate model object, and that wrapper is the path the measured GPU
+# reproduction (`create_acc_unet_binary`) used. A class-level override on
+# `AccUNet` alone is therefore green in tests and dead on the reported path, so
+# the wrapper needs its own class carrying the same opt-out. Do NOT instead
+# force `jit_compile=False` inside the factory bodies: that is the shape VAE's
+# D-005 shipped and its D-009 had to supersede, because it misses the
+# `load_model()` recompile path. See `decisions.md` D-002.
+@register_dl_technique("dl_techniques.models.accunet.model")
+class AccUNetFunctional(keras.Model):
+    """Functional wrapper returned by the ``create_acc_unet*`` factories.
+
+    Behaviourally a plain functional :class:`keras.Model`; it exists only to
+    carry the :meth:`compile` / :meth:`compile_from_config` XLA opt-out, which a
+    plain ``keras.Model`` structurally cannot. Construct it exactly as the base
+    class is constructed, ``AccUNetFunctional(inputs=..., outputs=...)``.
+
+    Registering it also fixes the archive's deserialization key, so a factory
+    model saved with :meth:`keras.Model.save` reloads as this type and keeps the
+    opt-out through the reload's recompile.
+    """
+
+    def compile(self, *args: Any, **kwargs: Any) -> None:
+        """Compile the model with XLA unconditionally disabled.
+
+        See :func:`_force_no_xla` for why. The forced value wins over an
+        explicitly-passed ``jit_compile``.
+        """
+        _force_no_xla(kwargs, type(self).__name__)
+        return super().compile(*args, **kwargs)
+
+    def compile_from_config(self, config: Dict[str, Any]) -> 'AccUNetFunctional':
+        """Recompile on ``load_model()``, routed through :meth:`compile`.
+
+        :param config: Serialized compile configuration from the archive.
+        :type config: Dict[str, Any]
+        :return: ``self``, recompiled.
+        :rtype: AccUNetFunctional
+        """
+        config = keras.saving.deserialize_keras_object(config)
+        self.compile(**config)
+        # Tail of Keras' own `Trainer.compile_from_config`; see the identical
+        # comment on `AccUNet.compile_from_config` for the measured regression
+        # that omitting it causes.
+        if hasattr(self, "optimizer") and self.built:
+            self.optimizer.build(self.trainable_variables)
+        return self
+
 # ---------------------------------------------------------------------
 # Factory Functions
 # ---------------------------------------------------------------------
@@ -630,7 +755,7 @@ def create_acc_unet(
     mlfc_iterations: int = 3,
     input_shape: Optional[Tuple[int, int]] = None,
     **kwargs: Any
-) -> keras.Model:
+) -> AccUNetFunctional:
     """Create an ACC-UNet wrapped in the Keras Functional API.
 
     :param input_channels: Number of input channels.
@@ -647,8 +772,10 @@ def create_acc_unet(
         cannot be checked at trace time.
     :type input_shape: Optional[Tuple[int, int]]
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
-    :return: Functional ``keras.Model`` named ``ACC_UNet``.
-    :rtype: keras.Model
+    :return: Functional model named ``ACC_UNet``. Its type is
+        :class:`AccUNetFunctional`, a ``keras.Model`` subclass that additionally
+        forces ``jit_compile=False`` on every compile path.
+    :rtype: AccUNetFunctional
 
     Example:
         .. code-block:: python
@@ -684,8 +811,9 @@ def create_acc_unet(
     # Build the model by calling it
     outputs = acc_unet(input_spec)
 
-    # Create functional model
-    model = keras.Model(inputs=input_spec, outputs=outputs, name='ACC_UNet')
+    # Create functional model. AccUNetFunctional is a keras.Model that forces
+    # jit_compile=False on every compile path (D-002, above).
+    model = AccUNetFunctional(inputs=input_spec, outputs=outputs, name='ACC_UNet')
 
     return model
 
@@ -696,7 +824,7 @@ def create_acc_unet_binary(
     base_filters: int = 32,
     mlfc_iterations: int = 3,
     **kwargs: Any
-) -> keras.Model:
+) -> AccUNetFunctional:
     """Create an ACC-UNet for binary segmentation.
 
     :param input_channels: Number of input channels.
@@ -710,7 +838,9 @@ def create_acc_unet_binary(
     :type mlfc_iterations: int
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
     :return: Functional model with a single sigmoid-activated output channel.
-    :rtype: keras.Model
+        Its type is :class:`AccUNetFunctional`, a ``keras.Model`` subclass that
+        additionally forces ``jit_compile=False`` on every compile path.
+    :rtype: AccUNetFunctional
 
     Example:
         .. code-block:: python
@@ -745,7 +875,7 @@ def create_acc_unet_multiclass(
     base_filters: int = 32,
     mlfc_iterations: int = 3,
     **kwargs: Any
-) -> keras.Model:
+) -> AccUNetFunctional:
     """Create an ACC-UNet for multi-class segmentation.
 
     :param input_channels: Number of input channels.
@@ -760,8 +890,10 @@ def create_acc_unet_multiclass(
     :param mlfc_iterations: Number of stacked MLFC layers. Defaults to 3.
     :type mlfc_iterations: int
     :param kwargs: Additional arguments forwarded to :class:`AccUNet`.
-    :return: Functional model with a softmax-activated output.
-    :rtype: keras.Model
+    :return: Functional model with a softmax-activated output. Its type is
+        :class:`AccUNetFunctional`, a ``keras.Model`` subclass that additionally
+        forces ``jit_compile=False`` on every compile path.
+    :rtype: AccUNetFunctional
     :raises ValueError: If ``num_classes`` is not greater than 1.
 
     Example:
