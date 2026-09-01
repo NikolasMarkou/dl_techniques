@@ -6,11 +6,16 @@ including its mathematical properties, integration with Keras, and edge cases.
 The regularizer should encourage weights to converge to -1, 0, or 1.
 """
 
+import math
+
 import pytest
 import tensorflow as tf
 from keras.api.layers import Dense, Input
 from keras.api.models import Sequential
-from dl_techniques.regularizers.tri_state_preference import TriStatePreferenceRegularizer
+from dl_techniques.regularizers.tri_state_preference import (
+    BARRIER_NORMALIZATION,
+    TriStatePreferenceRegularizer,
+)
 
 
 @pytest.fixture
@@ -20,15 +25,36 @@ def regularizer():
 
 
 def test_regularizer_initialization():
-    """Test proper initialization of the regularizer."""
-    # Test default initialization
-    reg = TriStatePreferenceRegularizer()
-    assert reg.scale == 1.0
-    assert abs(reg.base_coefficient - 32.0 / 4.5) < 1e-6
+    """Pin the constructor defaults of the current (target-based) API.
 
-    # Test custom scale
-    reg = TriStatePreferenceRegularizer(scale=2.0)
-    assert reg.scale == 2.0
+    `scale` and `base_coefficient` no longer exist. The old assertion
+    `base_coefficient == 32/4.5` literally pinned the superseded barrier
+    constant, which was 5.35% too large.
+    """
+    reg = TriStatePreferenceRegularizer()
+
+    assert reg.target == 1.0
+    # `reg.multiplier` is a keras.Variable when annealable=True, and comparing a
+    # Variable with `==` yields a truthy tensor rather than a bool -- such an
+    # assertion cannot fail. Read the float property instead.
+    assert reg.multiplier_value == 1.0
+    assert isinstance(reg.multiplier_value, float)
+    assert reg.reduction == "sum"
+    assert reg.quadratic_tails is False
+    assert reg.annealable is True
+
+
+def test_barrier_normalization_constant():
+    """The leading constant is 27/4, derived, not measured.
+
+    L(w) = m * C * w^2 (w-t)^2 (w+t)^2 / t^6.  Substituting u = (w/t)^2 turns
+    the shape factor into f(u) = u (u-1)^2, whose derivative is
+    f'(u) = (3u - 1)(u - 1); the interior stationary point is u = 1/3, i.e.
+    w = +/- t/sqrt(3), where f(1/3) = (1/3)(2/3)^2 = 4/27.
+    Normalizing the barrier height to exactly 1 therefore requires
+    C = 1 / (4/27) = 27/4 = 6.75.
+    """
+    assert BARRIER_NORMALIZATION == 27.0 / 4.0
 
 
 def test_stable_points_zero_cost(regularizer):
@@ -41,14 +67,129 @@ def test_stable_points_zero_cost(regularizer):
     assert tf.abs(cost) < 1e-6
 
 
-def test_local_maxima(regularizer):
-    """Test that weights at ±0.5 produce local maxima of 1.0."""
-    # Create tensor with values at local maxima
-    max_weights = tf.constant([[-0.5, 0.5]], dtype=tf.float32)
-    cost = regularizer(max_weights)
+@pytest.mark.parametrize(
+    "reduction, n_elements, expected",
+    [
+        # Per-element barrier height is EXACTLY `multiplier` (= 1.0 here):
+        #   (27/4) * f(1/3) = (27/4) * (4/27) = 1 exactly.
+        # "sum" adds one barrier per element; 4 elements -> 4 * 1.0 = 4.0.
+        ("sum", 4, 4.0),
+        # "mean" averages them -> 1.0, independent of element count.
+        ("mean", 4, 1.0),
+    ],
+)
+def test_barrier_height_at_true_maximum(reduction, n_elements, expected):
+    """Pin the TRUE barrier height, at w = +/- target/sqrt(3).
 
-    # Cost should be close to scale value (1.0 in this case)
-    assert abs(float(cost) - 1.0) < 1e-6
+    With u = (w/t)^2 the shape factor is f(u) = u (u-1)^2 and
+    f'(u) = (3u - 1)(u - 1), so the interior maxima are at u = 1/3, i.e.
+    |w| = t / sqrt(3) ~ 0.57735 t -- NOT at 0.5 t, which is what the previous
+    (32/4.5) constant encoded. There f(1/3) = 4/27, and the leading 27/4
+    cancels it: (27/4) * (4/27) = 1 EXACTLY. So the per-element penalty at the
+    maximum is exactly `multiplier`, for every target.
+    """
+    t = 1.0
+    w = t / math.sqrt(3.0)
+    reg = TriStatePreferenceRegularizer(
+        multiplier=1.0, target=t, reduction=reduction
+    )
+    weights = tf.constant([[-w, w], [w, -w]], dtype=tf.float32)
+    assert int(tf.size(weights)) == n_elements
+
+    cost = float(reg(weights))
+    assert abs(cost - expected) < 1e-6
+
+
+def test_barrier_height_is_target_independent():
+    """The barrier height is `multiplier` for ANY target, since t cancels.
+
+    L(t/sqrt(3)) = m * (27/4) * f(1/3) = m, with no residual dependence on t
+    (the t^6 in the denominator is exactly consumed by the three squared
+    factors in the numerator). Checked at a non-default target so a stray
+    t-dependence in the normalization could not hide behind t = 1.
+    """
+    t = 2.0
+    w = t / math.sqrt(3.0)
+    reg = TriStatePreferenceRegularizer(
+        multiplier=1.0, target=t, reduction="mean"
+    )
+    weights = tf.constant([[-w, w]], dtype=tf.float32)
+    assert abs(float(reg(weights)) - 1.0) < 1e-6
+
+
+@pytest.mark.parametrize(
+    "reduction, expected",
+    [
+        # Per element at w = 0.5, t = 1:
+        #   w^2 = 0.25, (w^2 - t^2)^2 = (0.25 - 1)^2 = 0.5625,
+        #   L = 6.75 * 0.25 * 0.5625 = 0.94921875.
+        # Two elements under "sum": 2 * 0.94921875 = 1.8984375.
+        ("sum", 2.0 * 0.94921875),
+        # Under "mean" the average of two identical values is the value itself.
+        ("mean", 0.94921875),
+    ],
+)
+def test_value_at_half_target_is_below_the_barrier(reduction, expected):
+    """w = +/- 0.5 t is NOT the maximum any more; pin its exact value.
+
+    The superseded 32/4.5 constant placed the maxima at +/- 0.5 t and made the
+    height there equal 1.0. Under the corrected 27/4 the maxima moved to
+    +/- t/sqrt(3), so w = 0.5 t sits strictly inside the zero well:
+    0.94921875 < 1.0 per element.
+    """
+    reg = TriStatePreferenceRegularizer(
+        multiplier=1.0, target=1.0, reduction=reduction
+    )
+    max_weights = tf.constant([[-0.5, 0.5]], dtype=tf.float32)
+    cost = float(reg(max_weights))
+
+    assert abs(cost - expected) < 1e-6
+    # And it is strictly under the barrier, unlike under the old constant.
+    per_element = cost / (2.0 if reduction == "sum" else 1.0)
+    assert per_element < 1.0
+
+
+def test_watershed_discriminates_the_old_constant():
+    """WATERSHED test: a weight at 0.55 t belongs to the ZERO well.
+
+    This is the assertion that actually separates 27/4 from the old 32/4.5.
+    The old constant put the watershed (barrier maximum) at 0.5 t, so anything
+    at 0.55 t would have been PAST the crest and on its way to +t. The correct
+    watershed is at 1/sqrt(3) = 0.57735 t, so 0.55 t is still below the crest.
+
+    Arithmetic at w = 0.55, t = 1, m = 1:
+        u = w^2                  = 0.3025
+        (u - 1)^2                = (-0.6975)^2 = 0.48650625
+        u * (u - 1)^2            = 0.3025 * 0.48650625 = 0.147168140625
+        L = 6.75 * that          = 0.99338494921875
+    which is strictly BELOW the barrier height of 1.0. The gap is only
+    ~0.0066, so this is deliberately a strict inequality against the exact
+    derived value, not an approximate comparison.
+    """
+    reg = TriStatePreferenceRegularizer(
+        multiplier=1.0, target=1.0, reduction="mean"
+    )
+    cost = float(reg(tf.constant([[0.55]], dtype=tf.float32)))
+
+    assert abs(cost - 0.99338494921875) < 1e-6
+    # Strictly below the barrier -> 0.55 t is on the zero side of the crest.
+    assert cost < 1.0
+
+
+def test_three_wells_have_zero_cost():
+    """L(0) = L(+t) = L(-t) = 0, exactly.
+
+    The penalty is written in the factored form w^2 (w-t)^2 (w+t)^2, so each
+    well is a literal root of a factor: at w = 0 the w^2 factor is 0, and at
+    w = +/- t the (w -/+ t) factor is 0. With t = 1 every intermediate value is
+    exactly representable in float32, so the expected value is exactly 0.0 --
+    no tolerance needed.
+    """
+    reg = TriStatePreferenceRegularizer(
+        multiplier=1.0, target=1.0, reduction="sum"
+    )
+    for w in (-1.0, 0.0, 1.0):
+        assert float(reg(tf.constant([[w]], dtype=tf.float32))) == 0.0
 
 
 def test_multiplier():
