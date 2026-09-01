@@ -50,7 +50,9 @@ cleared by this file:
 *   The remaining ~60 ``keras.losses.Loss`` subclasses in
     ``src/dl_techniques/losses/`` were NOT swept. A static scan of their
     ``call()`` return expressions shows further candidates (for example
-    ``multi_labels_loss``, ``utilization_loss``, ``brier_spiegelhalters_ztest_loss``).
+    ``multi_labels_loss`` and ``utilization_loss``).
+    ``brier_spiegelhalters_ztest_loss`` was on that list and its three loss
+    classes were fixed on 2026-09-02; they are in ``KNOWN_GOOD`` below.
     **This file is a floor, not a census of the package.**
 """
 
@@ -138,6 +140,21 @@ def _iou_pair():
 def _logit_pair():
     r = _rng()
     return _t(np.eye(BATCH, 5)), _t(r.normal(size=(BATCH, 5)))
+
+
+def _calibration_pair():
+    """Binary outcomes with an OVER-CONFIDENT, WRONG half.
+
+    The generic pairs above do not work for the calibration losses: their
+    default penalty is ``relu(Z**2 - 1) / N``, which is exactly ZERO whenever
+    the batch is within chance of calibrated, and ``0 == 0 * 0.75`` would make
+    the predicate report every one of them a member. Measured on this fixture:
+    ``Z_sh = 2.67``, ``Z_sh**2 = 7.11``, so the chance gate is open.
+    """
+    return (
+        _t([[1.0], [0.0], [1.0], [0.0]]),
+        _t([[0.9], [0.1], [0.1], [0.9]]),
+    )
 
 
 def _siglip_pair():
@@ -248,6 +265,24 @@ KNOWN_GOOD = [
     # POST-2f3fafa09 behaviour, since that commit corrected the LM term's own
     # double reduction and there is no earlier value worth preserving.
     ("hrm_loss", "HRMLoss", {}, _hrm_pair),
+    # fixed by plan-2026-09-02 (the brier/spiegelhalter review). All three were
+    # named as unswept candidates in this file's own docstring and MEASURED to
+    # be members before the fix. The Z statistic is batch-global, but it
+    # decomposes exactly the same way MASELoss and HRMLoss above do: with
+    # `c_i = (o_i - p_i)(1 - 2p_i)`, `num = sum(c_i)` and `den = sum(v_i w_i^2)`,
+    # `mean_i(N * c_i * num/den) == num^2/den == Z^2` is an algebraic identity,
+    # so value AND gradient are unchanged while a zero-weighted row drops out.
+    # `_calibration_pair` is required: at the generic fixtures the default
+    # chance-corrected penalty is exactly 0.0 and the predicate would report a
+    # false membership off `0 == 0 * 0.75`.
+    ("brier_spiegelhalters_ztest_loss", "BrierScoreLoss", {}, _calibration_pair),
+    ("brier_spiegelhalters_ztest_loss", "SpiegelhalterZLoss", {}, _calibration_pair),
+    (
+        "brier_spiegelhalters_ztest_loss",
+        "CombinedCalibrationLoss",
+        {},
+        _calibration_pair,
+    ),
 ]
 
 
