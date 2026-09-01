@@ -22,7 +22,7 @@ make structure  # display src tree
 
 ## Repository Structure
 
-> **Start here for orientation**: `REPO_MAP.md` at the repo root — a path-verified map of where code lives, how the registry/factory dispatch works, which trainer trains which model, and a ledger of claims the repo's own docs get wrong.
+> **Start here for orientation**: `REPO_MAP.md` at the repo root — a path-verified map of where code lives, how the registry/factory dispatch works, and which trainer trains which model.
 
 ```
 ├── src/
@@ -57,7 +57,7 @@ Production-grade training pipelines — one directory per runnable pipeline. Mos
 
 ### tests/
 
-Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a vestigial shadow directory, a loose test module) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/CLAUDE.md` for testing conventions.
+Pytest test suite mirroring the `src/dl_techniques/` structure — with named exceptions (an untested package, a loose test module, and a few directories named for the leaf rather than its path) catalogued in `REPO_MAP.md` § Tests. See `src/dl_techniques/CLAUDE.md` for testing conventions.
 
 **`tests/test_models/` deliberately does NOT mirror the model family nesting.** It stays flat: leaf package `x` is tested by `tests/test_models/test_<x>/`, with no `test_vision/` or `test_language/` level in between. This is a recorded decision, not an unfinished migration — 218 relative imports (`grep -rn "from \.\." tests/test_models --include=*.py | wc -l`, 2026-08-25; 202 of them name one of the five shared oracles) reach modules that live at `tests/test_models/*.py`, and adding a family level would change what `..` resolves to across all of them for zero behavioural gain. Do not "finish the job" by nesting them.
 

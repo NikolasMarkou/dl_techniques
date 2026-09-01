@@ -94,7 +94,7 @@ def _variant_table_for(fn):
     Resolution order, and why:
 
     1. ``fn.__self__`` -- a bound ``from_variant`` classmethod carries its owning
-       class, which is where the house rule (``models/CLAUDE.md`` Axis 2) puts the
+       class, which is where the house rule (``models/CLAUDE.md`` § House Model Module Shape) puts the
        table. This is the exact channel step 6 was told to read, in place of a
        hand-maintained variant table that would rot the moment a package renames
        a size.
@@ -585,7 +585,7 @@ class TestPretrainedNeverSilentlyRandom:
         assert not offenders, (
             "a `pretrained` branch that only logs returns a randomly initialized "
             "model to a caller who asked for a trained one. Raise "
-            "NotImplementedError instead (see models/CLAUDE.md Axis 3 and "
+            "NotImplementedError instead (see models/CLAUDE.md House Model Module Shape and "
             f"vision/resnet/model.py). Found: {offenders}"
         )
 
@@ -1545,7 +1545,7 @@ class TestNormalizationKnobsAreForwarded:
 # MODEL_VARIANTS: the house rule's variant registry, previously unguarded.
 # ---------------------------------------------------------------------------
 
-#: Legacy spellings of the variant registry, per ``models/CLAUDE.md`` Axis 2:
+#: Legacy spellings of the variant registry, per ``models/CLAUDE.md`` § House Model Module Shape:
 #: "Packages that predate this spec also use ``VARIANT_CONFIGS``, ``NAM_VARIANTS``,
 #: ``NTM_VARIANTS`` or ``MCI_VARIANTS`` for that same role; where one of those is
 #: the package's *only* variant table, add ``MODEL_VARIANTS`` as a class-level
@@ -1638,7 +1638,7 @@ def _sweep_model_variants(roots=None, src_root=None):
 
     * ``hits`` -- ``(relpath, lineno, symbol, kind, detail)`` where ``kind`` is one
       of three predicates, each transcribed from a different sentence of
-      ``models/CLAUDE.md`` § Axis 2:
+      ``models/CLAUDE.md`` § House Model Module Shape:
 
       - ``"from_variant-without-table"``: *"``from_variant(cls, variant, ...)``
         looks the name up in ``MODEL_VARIANTS``"*. A class defining
@@ -1799,7 +1799,7 @@ def create_injected(variant="small", **kwargs):
 class TestModelVariantsArePresent:
     """Named variants must be reachable as ``MODEL_VARIANTS``, not just callable.
 
-    ``models/CLAUDE.md`` § Axis 2 makes ``MODEL_VARIANTS`` the canonical name for
+    ``models/CLAUDE.md`` § House Model Module Shape makes ``MODEL_VARIANTS`` the canonical name for
     the registry of publicly named variants, tells packages carrying a legacy
     spelling to add it as a class-level alias, and defines ``from_variant`` as the
     method that "looks the name up in ``MODEL_VARIANTS``". Until this class
@@ -1842,7 +1842,7 @@ class TestModelVariantsArePresent:
         assert not offenders, (
             "a from_variant classmethod resolves no MODEL_VARIANTS table, so its "
             "variants exist only inside its own body. Hoist them to a class-level "
-            "MODEL_VARIANTS dict (models/CLAUDE.md Axis 2). Found:\n  "
+            "MODEL_VARIANTS dict (models/CLAUDE.md House Model Module Shape). Found:\n  "
             + "\n  ".join(offenders)
         )
 
@@ -2194,7 +2194,7 @@ class Downsample(keras.layers.Layer):  # noqa: F811 -- a second FILE in reality
     pass
 '''
 
-#: The same two classes, one of them prefixed per R-011. A predicate that flags
+#: The same two classes, one of them prefixed per the naming-trap rule. A predicate that flags
 #: this too is matching on the class name, not on the registry key.
 _INJECTED_REGISTRY_FIXED_SRC = '''
 @keras.saving.register_keras_serializable()
@@ -2235,7 +2235,8 @@ class TestRegistryKeysDoNotCollide:
     Adding ``package=`` to a bare decorator is NOT a safe repair: it moves the key
     (measured on Keras 3.8.0 -- ``Custom>ProbeBare`` vs ``dl_techniques>ProbePkg``)
     and every ``.keras`` config storing the old ``registered_name`` stops
-    resolving. The repair for a collision is to PREFIX the class name (R-011).
+    resolving. The repair for a collision is to PREFIX the class name
+    (``layers/CLAUDE.md`` Naming traps).
 
     Three blind spots, each measured EMPTY today and each therefore a shape this
     guard would silently skip if it ever appeared. They are reported non-fatally
@@ -2286,7 +2287,7 @@ class TestRegistryKeysDoNotCollide:
         assert not offenders, (
             "two @register_keras_serializable classes claim one registry key; "
             "whichever module imports last wins every deserialization of both. "
-            "PREFIX the class name (models/CLAUDE.md R-011) -- do NOT add "
+            "PREFIX the class name (layers/CLAUDE.md Naming traps) -- do NOT add "
             "`package=`, which moves the key and invalidates existing "
             ".keras checkpoints. Found:\n  " + "\n  ".join(offenders)
         )
@@ -3682,7 +3683,7 @@ def _variant_keys_for(cls, module) -> Tuple[Any, str]:
     Contract: returns ``(sorted_keys, source)``, or ``(None, "unresolved")``.
     A three-step cascade, first hit wins:
 
-    1. ``cls.MODEL_VARIANTS`` -- the house shape (models/CLAUDE.md Axis 2);
+    1. ``cls.MODEL_VARIANTS`` -- the house shape (models/CLAUDE.md House Model Module Shape);
     2. a class DEFINED IN THE SAME MODULE carrying one. This is what clears
        ``DINOv2``, whose ``from_variant`` deliberately reads
        ``DINOv2VisionTransformer.MODEL_VARIANTS`` -- one table, one home;

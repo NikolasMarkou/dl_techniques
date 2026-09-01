@@ -166,7 +166,7 @@ class TestMambaModelVariants:
 
         It used to log a warning and hand back randomly initialized weights,
         which is exactly the silent-untrained-model failure the house contract
-        (models/CLAUDE.md, Axis 3) forbids.
+        (models/CLAUDE.md, House Model Module Shape) forbids.
         """
         with pytest.raises(NotImplementedError, match="No pretrained weights"):
             Mamba.from_variant("base", vocab_size=1000, pretrained=True)
