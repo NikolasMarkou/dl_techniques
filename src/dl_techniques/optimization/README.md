@@ -1,1342 +1,324 @@
-# Deep Learning Techniques - Optimization Module Guide
+# `dl_techniques.optimization`
 
-A comprehensive guide to using the optimization module for configuring optimizers, learning rate schedules, deep supervision, and advanced inference techniques in your deep learning projects.
+Config-driven builders for Keras 3 optimizers, learning-rate schedules and deep-supervision
+weights, plus four custom optimizers (`Muon`, `SGLD`, `VSGD`, `Gefen`), a warmup schedule
+wrapper, a SLED logits processor and a WeightWatcher-style spectral projection callback.
 
-## Table of Contents
+Everything is built from plain `dict` config, so a whole training recipe can live in JSON.
 
-1. [Overview](#overview)
-2. [Quick Start](#quick-start)
-3. [Optimizer Builder](#optimizer-builder)
-4. [Muon Optimizer](#muon-optimizer)
-5. [SGLD Optimizer](#sgld-optimizer)
-6. [Learning Rate Schedule Builder](#learning-rate-schedule-builder)
-6. [Deep Supervision Schedule Builder](#deep-supervision-schedule-builder)
-7. [SLED Logits Processor](#sled-logits-processor)
-8. [Complete Integration Examples](#complete-integration-examples)
-9. [Configuration Reference](#configuration-reference)
-10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
-12. [Advanced Usage](#advanced-usage)
-
-## Overview
-
-The optimization module provides comprehensive components for configuring training optimization and inference:
-
-- **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta, SGLD, Gefen) with gradient clipping support
-- **Muon Optimizer**: MomentUm Orthogonalized by Newton-schulz optimizer for faster convergence on Transformers and ConvNets
-- **SGLD Optimizer**: Stochastic Gradient Langevin Dynamics — SGD with Gaussian noise for Bayesian posterior sampling and escape from shallow minima
-- **Gefen Optimizer**: Memory-lean AdamW variant (Gefen-lite, shared-v) that shares one second-moment estimate per block of parameters, reducing second-moment optimizer state
-- **Learning Rate Schedule Builder**: Creates learning rate schedules with automatic warmup periods
-- **Deep Supervision Schedule Builder**: Creates weight schedules for multi-scale deep supervision training
-- **SLED Logits Processor**: Self Logits Evolution Decoding for improving factuality in LLMs
-
-### Key Features
-
-- **Configuration-driven**: All components use dictionary-based configuration
-- **Sensible defaults**: Fallback to proven default values from research
-- **Flattened structure**: Simple, intuitive configuration format
-- **Gradient clipping**: Built-in support for gradient clipping methods
-- **Warmup periods**: Automatic learning rate warmup for training stability
-- **Deep supervision**: Multiple scheduling strategies for multi-scale training
-- **Backend-agnostic**: SLED and core components work across TensorFlow, PyTorch, and JAX backends
-
-## Quick Start
-
-### Basic Setup
+## Quick start
 
 ```python
 from dl_techniques.optimization import (
-    optimizer_builder,
     learning_rate_schedule_builder,
-    deep_supervision_schedule_builder
+    optimizer_builder,
 )
 
-# 1. Configure learning rate schedule with warmup
-lr_config = {
-    "type": "cosine_decay",
-    "warmup_steps": 1000,
-    "warmup_start_lr": 1e-8,
-    "learning_rate": 0.001,
-    "decay_steps": 10000,
-    "alpha": 0.0001
-}
-
-# 2. Configure optimizer
-optimizer_config = {
-    "type": "adam",
-    "beta_1": 0.9,
-    "beta_2": 0.999,
-    "gradient_clipping_by_norm": 1.0
-}
-
-# 3. Build components
-lr_schedule = learning_rate_schedule_builder(lr_config)
-optimizer = optimizer_builder(optimizer_config, lr_schedule)
-
-# 4. Use with your model
-model.compile(optimizer=optimizer, loss='categorical_crossentropy')
-```
-
-### Training with Deep Supervision
-
-```python
-# Configure deep supervision weights
-ds_config = {
-    "type": "linear_low_to_high",
-    "config": {}
-}
-
-# Build scheduler for 5 output scales
-ds_scheduler = deep_supervision_schedule_builder(ds_config, 5)
-
-# Use during training
-def train_step(batch_data, epoch_progress):
-    # Get current weights for this training progress
-    supervision_weights = ds_scheduler(epoch_progress)  # [0.0, 1.0]
-    
-    # Apply weights to multiple outputs
-    total_loss = 0
-    for i, (output, weight) in enumerate(zip(model_outputs, supervision_weights)):
-        scale_loss = loss_function(targets[i], output)
-        total_loss += weight * scale_loss
-    
-    return total_loss
-```
-
-## Optimizer Builder
-
-The optimizer builder creates configured Keras optimizers with gradient clipping support.
-
-### Supported Optimizers
-
-- **Adam**: Adaptive moment estimation with bias correction
-- **AdamW**: Adam with decoupled weight decay (better for transformers)
-- **RMSprop**: Root mean square propagation (good for RNNs)
-- **Adadelta**: Adaptive learning rate method
-- **SGLD**: Stochastic Gradient Langevin Dynamics (SGD + calibrated Gaussian noise for Bayesian sampling)
-- **Gefen**: Memory-lean AdamW variant (Gefen-lite, shared-v) with a block-shared second moment; graph/`jit_compile`/`model.fit`-compatible drop-in for AdamW
-
-### Basic Configuration
-
-```python
-# Minimal configuration (uses defaults)
-config = {
-    "type": "adam"
-}
-optimizer = optimizer_builder(config, learning_rate=0.001)
-
-# Full configuration
-config = {
-    "type": "adam",
-    "beta_1": 0.9,
-    "beta_2": 0.999,
-    "epsilon": 1e-7,
-    "amsgrad": False,
-    "gradient_clipping_by_value": 0.5,
-    "gradient_clipping_by_norm_local": 1.0,
-    "gradient_clipping_by_norm": 1.0
-}
-optimizer = optimizer_builder(config, lr_schedule)
-```
-
-### Optimizer-Specific Parameters
-
-#### Adam/AdamW
-```python
-adam_config = {
-    "type": "adam",  # or "adamw"
-    "beta_1": 0.9,          # First moment decay rate
-    "beta_2": 0.999,        # Second moment decay rate
-    "epsilon": 1e-7,        # Numerical stability constant
-    "amsgrad": False        # Use AMSGrad variant
-}
-```
-
-#### RMSprop
-```python
-rmsprop_config = {
-    "type": "rmsprop",
-    "rho": 0.9,             # Decay factor for moving average
-    "momentum": 0.0,        # Momentum factor
-    "epsilon": 1e-7,        # Numerical stability constant
-    "centered": False       # Use centered RMSprop
-}
-```
-
-#### Adadelta
-```python
-adadelta_config = {
-    "type": "adadelta",
-    "rho": 0.9,             # Decay rate for gradient accumulation
-    "epsilon": 1e-7         # Numerical stability constant
-}
-```
-
-#### SGLD
-```python
-sgld_config = {
-    "type": "sgld",
-    "noise_scale": 1.0,     # Multiplier on canonical sqrt(2*lr) noise (1.0 = canonical)
-    "seed": 42,             # Optional int for reproducible noise (default: None)
-    "weight_decay": 1e-4    # Optional decoupled weight decay
-}
-```
-
-#### Gefen
-```python
-gefen_config = {
-    "type": "gefen",
-    "beta_1": 0.9,          # First moment (momentum) decay rate
-    "beta_2": 0.999,        # Block-shared second moment decay rate
-    "epsilon": 1e-8,        # Numerical stability constant
-    "weight_decay": 0.0,    # Decoupled (AdamW) weight decay
-    "max_block_size": 1024, # Upper bound on the per-variable block size (period)
-    "min_block_size": 8     # Below this divisor, fall back to per-element AdamW
-}
-optimizer = optimizer_builder(gefen_config, lr_schedule)  # learning_rate via the lr/schedule
-```
-
-### Gradient Clipping Options
-
-```python
-config = {
-    "type": "adam",
-    # Clip gradients by absolute value (clips to [-0.5, 0.5])
-    "gradient_clipping_by_value": 0.5,
-    
-    # Clip gradients by L2 norm per variable
-    "gradient_clipping_by_norm_local": 1.0,
-    
-    # Clip gradients by global L2 norm
-    "gradient_clipping_by_norm": 1.0
-}
-```
-
-## Muon Optimizer
-
-The Muon (MomentUm Orthogonalized by Newton-schulz) optimizer is a novel optimization algorithm designed for faster convergence on Transformers and ConvNets.
-
-### Key Characteristics
-
-1. **Hybrid Optimization**: Muon optimizes hidden linear transformation weights (rank >= 2) while an integrated auxiliary AdamW handles embeddings, normalization, biases, and classification heads.
-
-2. **Newton-Schulz Orthogonalization**: Projects momentum updates onto the manifold of orthogonal matrices, enabling significantly larger learning rates (e.g., 0.02 vs 0.0003 for AdamW).
-
-3. **Hardware Efficient**: Uses standard matrix multiplications, making it efficient on GPUs/TPUs and stable in lower precision (bfloat16).
-
-### Performance Achievements
-
-- ~1.35x training speedup for GPT-2 scale models compared to AdamW
-- State-of-the-art training speed records for CIFAR-10
-- Proven effectiveness at large batch sizes
-- Adopted by frontier labs for large-scale LLM pre-training
-
-### Basic Usage
-
-```python
-from dl_techniques.optimization.muon_optimizer import Muon
-
-# Create Muon optimizer
-optimizer = Muon(
-    learning_rate=0.02,           # Muon LR (higher than typical AdamW)
-    momentum=0.95,                # Momentum factor
-    nesterov=True,                # Use Nesterov momentum
-    ns_steps=5,                   # Newton-Schulz iterations
-    adam_learning_rate=1e-3,      # AdamW LR for auxiliary params
-    adam_beta_1=0.9,
-    adam_beta_2=0.999,
-    weight_decay=0.0
-)
-
-# Use with your model
-model.compile(optimizer=optimizer, loss='categorical_crossentropy')
-```
-
-### Configuration Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `learning_rate` | 0.02 | Learning rate for Muon-optimized parameters |
-| `momentum` | 0.95 | Momentum factor for Muon |
-| `nesterov` | True | Whether to use Nesterov momentum |
-| `ns_steps` | 5 | Number of Newton-Schulz iterations |
-| `adam_learning_rate` | 1e-3 | Learning rate for AdamW auxiliary optimizer |
-| `adam_beta_1` | 0.9 | First moment decay rate (Adam) |
-| `adam_beta_2` | 0.999 | Second moment decay rate (Adam) |
-| `adam_epsilon` | 1e-7 | Numerical stability constant (Adam) |
-| `weight_decay` | 0.0 | Weight decay coefficient (decoupled) |
-| `exclude_embedding_names` | ["embedding", "token_emb", "embed"] | Substrings to identify embedding layers |
-
-### Automatic Parameter Routing
-
-Muon automatically routes parameters to the appropriate optimizer:
-
-- **Muon**: Weight matrices with rank >= 2 (excluding embeddings)
-- **AdamW**: Biases, normalization parameters, embeddings, and 1D parameters
-
-```python
-# Parameters routed to Muon:
-# - Dense layer kernels
-# - Conv2D kernels
-# - Attention projection weights
-
-# Parameters routed to AdamW:
-# - All biases
-# - LayerNorm/BatchNorm parameters
-# - Embedding tables
-# - Final classification head
-```
-
-### Advanced Configuration
-
-```python
-# Transformer-optimized Muon configuration
-optimizer = Muon(
-    learning_rate=0.02,
-    momentum=0.95,
-    nesterov=True,
-    ns_steps=5,
-    adam_learning_rate=3e-4,      # Lower for embeddings
-    adam_beta_2=0.95,             # Lower for transformers
-    weight_decay=0.01,            # Apply weight decay
-    exclude_embedding_names=[     # Custom embedding patterns
-        "embedding", 
-        "token_emb", 
-        "embed",
-        "position"
-    ]
-)
-```
-
-## SGLD Optimizer
-
-The SGLD (Stochastic Gradient Langevin Dynamics) optimizer augments the standard SGD update with calibrated Gaussian noise, bridging optimization and Bayesian sampling (Welling & Teh, 2011).
-
-### Update Rule
-
-```
-w_{t+1} = w_t  -  lr * grad(L)  +  noise_scale * sqrt(2 * lr) * eps,   eps ~ N(0, I)
-```
-
-The deterministic drift `-lr * grad` is identical to vanilla SGD; the diffusion term `noise_scale * sqrt(2*lr) * eps` turns the iterate sequence into an (approximate) sample from the Bayesian posterior `p(w | data) ∝ exp(-L(w))` as `lr → 0`.
-
-### Key Characteristics
-
-1. **Escapes shallow minima**: injected noise gives the optimizer enough energy to climb out of narrow attractors that trap pure SGD. Robust on highly non-convex landscapes (Ackley-like, rugged deep-net loss surfaces).
-2. **Bayesian posterior sampling**: as `lr → 0` and step count → ∞, the iterates approximate samples from the (mini-batch-approximated) posterior over weights — enabling uncertainty quantification, MCMC-style ensembling without re-training.
-3. **Exploration/exploitation control**: a larger `lr` or `noise_scale` favours exploration; annealing the LR "locks in" a stable mode (simulated-annealing-style exploitation).
-4. **Stateless per-variable**: no momentum, no second-moment buffers — minimal memory overhead vs. SGD.
-
-### Basic Usage
-
-```python
-from dl_techniques.optimization.sgld_optimizer import SGLD
-
-# Canonical SGLD (temperature 1, reproducible noise)
-optimizer = SGLD(
-    learning_rate=1e-3,
-    noise_scale=1.0,        # 1.0 = canonical; 0.0 collapses to pure SGD
-    weight_decay=1e-4,      # Optional decoupled weight decay
-    seed=42                 # Optional int for reproducible noise stream
-)
-
-model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
-model.fit(x_train, y_train, epochs=10)
-```
-
-### Configuration Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `learning_rate` | 1e-2 | Controls both drift and (via `sqrt(2*lr)`) noise magnitude. Accepts float or `LearningRateSchedule`. |
-| `noise_scale` | 1.0 | Non-negative multiplier on Langevin noise. `1.0` = canonical SGLD; `0.0` = pure SGD; `>1.0` = more exploration. |
-| `weight_decay` | None | Optional decoupled weight decay (handled by base class). |
-| `seed` | None | Optional integer seed for reproducible noise via `keras.random.SeedGenerator`. |
-| `name` | `"SGLD"` | Optimizer name. |
-
-Standard `clipnorm`, `global_clipnorm`, and `clipvalue` are supported via the base `keras.optimizers.Optimizer` class.
-
-### Posterior Sampling Recipe
-
-For Bayesian posterior sampling, anneal the learning rate so the chain converges:
-
-```python
-from dl_techniques.optimization import learning_rate_schedule_builder
-from dl_techniques.optimization.sgld_optimizer import SGLD
-
-# Polynomial/cosine decay drives lr -> 0 so iterates approximate posterior samples
 lr_schedule = learning_rate_schedule_builder({
     "type": "cosine_decay",
-    "learning_rate": 1e-2,
-    "decay_steps": 50000,
+    "learning_rate": 1e-3,
+    "decay_steps": 10_000,
+    "warmup_steps": 1_000,
+    "warmup_start_lr": 1e-8,
     "alpha": 1e-4,
-    "warmup_steps": 500,
 })
 
-optimizer = SGLD(learning_rate=lr_schedule, noise_scale=1.0, seed=2026)
-
-# After a burn-in period, snapshot weights periodically to build a posterior ensemble
-weight_samples = []
-for epoch in range(num_epochs):
-    model.fit(x_train, y_train, epochs=1, verbose=0)
-    if epoch >= burn_in:
-        weight_samples.append([keras.ops.convert_to_numpy(w) for w in model.weights])
-```
-
-### Config-Driven Usage via `optimizer_builder`
-
-```python
-from dl_techniques.optimization import optimizer_builder
-
-config = {
-    "type": "sgld",
-    "noise_scale": 1.0,
-    "seed": 42,
-    "weight_decay": 1e-4,
-    "gradient_clipping_by_norm": 1.0,   # Standard clipping still applies
-}
-optimizer = optimizer_builder(config, lr_schedule=1e-3)
-```
-
-### When to Use SGLD
-
-- Rugged, multi-modal loss landscapes where pure SGD/Adam get trapped.
-- Bayesian deep learning / uncertainty quantification (deep ensembles without re-training).
-- MCMC-style sampling from the parameter posterior.
-- Diagnostic ablations: set `noise_scale=0.0` to recover pure SGD as a baseline.
-
-### Notes
-
-- The noise coefficient `sqrt(2 * lr)` is the canonical Langevin scaling. Some reference implementations use `sqrt(lr)` (without the factor of two) — this implementation follows the standard derivation.
-- For preconditioned variants (pSGLD), implement as a subclass; SGLD itself is intentionally stateless.
-
-## Gefen Optimizer
-
-The Gefen optimizer is a **memory-lean AdamW variant** (this implementation is "Gefen-lite, shared-v") that shares a single second-moment estimate across each *block* of `period` contiguous (flattened) parameters, while keeping full-precision, full-shape first-moment momentum. Inspired by the Gefen paper (arxiv 2606.13894).
-
-The block `period` is chosen deterministically from each variable's shape in `build()` — the largest divisor of its element count that is `<= max_block_size`, falling back to `1` (per-element AdamW) when no valid divisor is `>= min_block_size`. Because `period` and the block count `K = numel / period` are static Python ints per variable, the block reshape is graph-static, making Gefen a `jit_compile`-compatible, `model.fit`-friendly drop-in for `keras.optimizers.AdamW`.
-
-### Honest Scope (vs. the full paper)
-
-This is a **shared-second-moment adaptation only**, NOT the full Gefen algorithm:
-
-- **No uint8 momentum quantization** and **no learned codebook**. Momentum is stored full-shape and full-precision (standard Adam first moment).
-- **Shape-based period selection** (not gradient-statistic period selection from step 1).
-
-As a consequence, the memory saving is on the **second-moment state only** — Gefen-lite does NOT reproduce the paper's full ~8x optimizer-state reduction (which depends on the omitted momentum quantization). The momentum buffer is the same size as AdamW's; only the second-moment buffer is compressed (from `numel` to `K = numel / period` floats per variable).
-
-### Update Rule
-
-```
-m       = beta_1 * m + (1 - beta_1) * g                  # full-shape momentum
-g_block = reshape(g, [K, period])
-bmsq    = mean(g_block^2, axis=1)                         # [K] block mean-square
-vmean   = beta_2 * vmean + (1 - beta_2) * bmsq            # [K] shared 2nd moment
-h_block = sqrt(vmean / (1 - beta_2^t)) + epsilon          # [K]
-denom   = broadcast(h_block) reshaped to var.shape        # one h per block
-p      *= (1 - lr * weight_decay)                         # decoupled (AdamW) WD
-p      -= lr * (m / (1 - beta_1^t)) / denom
-```
-
-### Basic Usage
-
-```python
-from dl_techniques.optimization.gefen_optimizer import Gefen
-
-optimizer = Gefen(
-    learning_rate=1e-3,
-    beta_1=0.9,
-    beta_2=0.999,
-    epsilon=1e-8,
-    weight_decay=0.0,
-    max_block_size=1024,
-    min_block_size=8,
+optimizer = optimizer_builder(
+    {
+        "type": "adamw",
+        "weight_decay": 1e-4,
+        "gradient_clipping_by_norm": 1.0,          # -> Keras global_clipnorm
+        "exclude_from_weight_decay": ["bias", "gamma", "beta"],
+    },
+    lr_schedule,                                    # 2nd POSITIONAL arg
 )
 
-model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
-model.fit(x_train, y_train, epochs=10)  # graph / jit_compile compatible
+model.compile(optimizer=optimizer, loss="sparse_categorical_crossentropy")
 ```
 
-### Configuration Parameters
+`lr_schedule(0) == 1e-8`, `lr_schedule(1000) == 1e-3`, then cosine decay from there.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `learning_rate` | 1e-3 | Base learning rate. Accepts a float or a `LearningRateSchedule` (supplied via the lr/schedule like other optimizers). |
-| `beta_1` | 0.9 | Exponential decay rate for the first moment (momentum), in `[0, 1)`. |
-| `beta_2` | 0.999 | Exponential decay rate for the block-shared second moment, in `[0, 1)`. |
-| `epsilon` | 1e-8 | Small constant added to the denominator for numerical stability (`>= 0`). |
-| `weight_decay` | 0.0 | Decoupled (AdamW) weight decay coefficient, applied before the gradient step (`>= 0`). |
-| `max_block_size` | 1024 | Upper bound on the block size (`period`); the chosen period is the largest divisor of `numel` not exceeding this. |
-| `min_block_size` | 8 | If the largest valid divisor is `< min_block_size`, `period` falls back to `1` (per-element AdamW). |
+## Entry points
 
-Standard `clipnorm`, `global_clipnorm`, and `clipvalue` are supported via the base `keras.optimizers.Optimizer` class.
+| Import from `dl_techniques.optimization` | Signature | Returns |
+|---|---|---|
+| `optimizer_builder` | `(config: dict, lr_schedule: float \| LearningRateSchedule)` | `keras.optimizers.Optimizer` |
+| `learning_rate_schedule_builder` | `(config: dict)` | `WarmupSchedule` (always wrapped) |
+| `create_learning_rate_schedule` | `(initial_lr, schedule_type='cosine', total_epochs=100, warmup_epochs=5, steps_per_epoch=None, warmup_steps=0, warmup_start_lr=1e-8)` | schedule, or a bare `float` for `'constant'` |
+| `create_warmup_lr_schedule` | `(learning_rate, num_epochs, steps_per_epoch, warmup_ratio=0.1)` | `WarmupSchedule` over `CosineDecay(alpha=0.0)` |
+| `deep_supervision_schedule_builder` | `(config: dict, no_outputs: int, invert_order: bool = False)` | `Callable[[float], np.ndarray]` |
+| `WarmupSchedule` | `(warmup_steps, warmup_start_lr=1e-8, primary_schedule=None)` | linear ramp then `primary_schedule(step - warmup_steps)` |
+| `Muon`, `SGLD`, `VSGD`, `Gefen` | Keras optimizer classes | see below |
+| `WWTailConfig`, `ww_pgd_project`, `WWPGDProjectionCallback` | spectral tail projection | see below |
 
-### Config-Driven Usage via `optimizer_builder`
+`sled_builder` / `SledLogitsProcessor` are **not** re-exported; import them from
+`dl_techniques.optimization.sled_supervision`.
+
+## `optimizer_builder`
+
+`config["type"]` (lower-cased, stripped) selects the optimizer. Unknown types raise `ValueError`.
+
+| `type` | Class | Type-specific config keys (default) |
+|---|---|---|
+| `"adam"` | `keras.optimizers.Adam` | `beta_1` (0.9), `beta_2` (0.999), `epsilon` (1e-7), `amsgrad` (False) |
+| `"adamw"` | `keras.optimizers.AdamW` | same as Adam, plus `weight_decay` (**0.004**) |
+| `"sgd"` | `keras.optimizers.SGD` | `momentum` (0.0), `nesterov` (False) |
+| `"rmsprop"` | `keras.optimizers.RMSprop` | `rho` (0.9), `momentum` (0.0), `epsilon` (1e-7), `centered` (False) |
+| `"adadelta"` | `keras.optimizers.Adadelta` | `rho` (0.9), `epsilon` (1e-7) |
+| `"sgld"` | `SGLD` | `noise_scale` (1.0), `seed` (None) |
+| `"vsgd"` | `VSGD` | `ghattg` (30.0), `ps` (1e-8), `tau1` (0.81), `tau2` (0.90), `eps` (1e-8), `weight_decay` (0.0) |
+| `"gefen"` | `Gefen` | `beta_1` (0.9), `beta_2` (0.999), `epsilon` (1e-8), `weight_decay` (0.0), `max_block_size` (1024), `min_block_size` (8) |
+
+`Muon` is **not** reachable through `optimizer_builder` — construct it directly.
+
+Keys accepted for every type:
+
+| Key | Effect |
+|---|---|
+| `gradient_clipping_by_value` | → Keras `clipvalue` |
+| `gradient_clipping_by_norm_local` | → Keras `clipnorm` (per-variable L2) |
+| `gradient_clipping_by_norm` | → Keras `global_clipnorm` (global L2) |
+| `weight_decay` | forwarded when set; otherwise the Keras default applies (`None` everywhere except AdamW's 0.004) |
+| `exclude_from_weight_decay` | list of name patterns matched with `re.search`; applied after construction, ignored with a warning on optimizers that lack the method |
+
+Defaults live in `constants.py` (`DEFAULT_*`) — the single source of truth.
+
+### Two traps in `optimizer_builder`
+
+**1. The clipping keys are renamed.** A literal `"clipnorm"` / `"clipvalue"` /
+`"global_clipnorm"` key in your config is *silently ignored* — the builder only reads
+`gradient_clipping_by_*`. Measured:
 
 ```python
-from dl_techniques.optimization import optimizer_builder
-
-config = {
-    "type": "gefen",
-    "beta_1": 0.9,
-    "beta_2": 0.999,
-    "epsilon": 1e-8,
-    "weight_decay": 0.0,
-    "max_block_size": 1024,
-    "min_block_size": 8,
-    "gradient_clipping_by_norm": 1.0,   # Standard clipping still applies
-}
-optimizer = optimizer_builder(config, lr_schedule=1e-3)
+optimizer_builder({"type": "adamw", "clipnorm": 1.0}, 1e-3).clipnorm      # -> None
+optimizer_builder({"type": "adamw", "gradient_clipping_by_norm_local": 1.0}, 1e-3).clipnorm  # -> 1.0
 ```
 
-### When to Use Gefen
+A naive migration from `keras.optimizers.AdamW(clipnorm=1.0)` therefore ships with clipping
+disabled and no error. Keras also rejects setting more than one of the three at once, so pick
+exactly one `gradient_clipping_by_*` key.
 
-- AdamW-style training where the second-moment optimizer state is a meaningful fraction of the memory budget.
-- A drop-in replacement for AdamW under `jit_compile=True` / `model.fit` without changing the training loop.
-
-### Notes
-
-- `period` is derived from each variable's shape at `build()` time and is therefore **not serialized**; it is recomputed identically on load from the restored shapes (only `max_block_size` / `min_block_size` are serialized).
-- Scalar / tiny variables (or those whose largest valid divisor is `< min_block_size`) degenerate to standard per-element AdamW (`period = 1`). Acceptable and documented.
-- Block math and `vmean` are kept in float32 for mixed-precision safety; the denominator is cast back to the variable dtype before the assign.
-
-## Learning Rate Schedule Builder
-
-Creates learning rate schedules with automatic warmup periods for training stability.
-
-### Supported Schedules
-
-- **Cosine Decay**: Smooth cosine-based decay
-- **Exponential Decay**: Exponential learning rate reduction
-- **Cosine Decay with Restarts**: Cosine decay with periodic restarts
-
-### Flattened Configuration Format
-
-All parameters are specified at the top level - no nested dictionaries needed!
+**2. It hard-codes `"name": "AdamW"`** where Keras' own default is `"adamw"`. The name is the
+optimizer's variable scope, so slot variables are created under a different path:
 
 ```python
-# Simple cosine decay with warmup
-config = {
-    "type": "cosine_decay",
-    "warmup_steps": 1000,
-    "warmup_start_lr": 1e-8,
-    "learning_rate": 0.001,
-    "decay_steps": 10000,
-    "alpha": 0.0001
-}
-lr_schedule = learning_rate_schedule_builder(config)
+optimizer_builder({"type": "adamw"}, 1e-3).name        # -> 'AdamW'
+keras.optimizers.AdamW(learning_rate=1e-3).name        # -> 'adamw'
+# slot variable path becomes 'AdamW/w_momentum', not 'adamw/w_momentum'
 ```
 
-### Schedule Types
+That matters for anything keyed on variable paths — optimizer-state checkpoints written by one
+construction path will not line up with the other. (Same pattern for `"Adam"`, `"SGD"`,
+`"RMSprop"`, `"Adadelta"`, `"SGLD"`, `"VSGD"`; `"gefen"` is already lower-case.)
 
-#### 1. Cosine Decay
-Smoothly decreases learning rate following a cosine curve.
+## Learning-rate schedules
 
-```python
-config = {
-    "type": "cosine_decay",
-    "learning_rate": 0.001,      # Initial learning rate
-    "decay_steps": 10000,        # Steps to decay over
-    "alpha": 0.0001,             # Minimum LR as fraction of initial (optional)
-    "warmup_steps": 1000,        # Warmup period (optional)
-    "warmup_start_lr": 1e-8      # Starting warmup LR (optional)
-}
+`learning_rate_schedule_builder(config)` takes a **flat** dict and always returns a
+`WarmupSchedule`, even at `warmup_steps=0` (a numerical no-op).
+
+| `type` | Required keys | Optional keys (default) |
+|---|---|---|
+| `"cosine_decay"` | `learning_rate`, `decay_steps` | `alpha` (1e-4) |
+| `"exponential_decay"` | `learning_rate`, `decay_steps`, `decay_rate` | — |
+| `"cosine_decay_restarts"` | `learning_rate`, `decay_steps` (= first period) | `t_mul` (2.0), `m_mul` (0.9), `alpha` (1e-3) |
+
+Warmup keys, valid for all three: `warmup_steps` (0), `warmup_start_lr` (1e-8). Missing required
+keys raise `KeyError`; an unknown `type` raises `ValueError`.
+
+Warmup behaviour:
+
+```
+step <  warmup_steps: lr = warmup_start_lr + (target - warmup_start_lr) * step / warmup_steps
+step >= warmup_steps: lr = primary_schedule(step - warmup_steps)
 ```
 
-#### 2. Exponential Decay
-Multiplicatively decreases learning rate at regular intervals.
+### The two epoch-facing adapters
+
+`create_learning_rate_schedule` and `create_warmup_lr_schedule` are **deliberately different**
+from `schedule_builder` and must not be "unified" with it — dozens of trainers depend on the
+current behaviour:
+
+- `create_learning_rate_schedule` returns a **bare** `CosineDecay` when `warmup_steps == 0`,
+  hard-codes `alpha=0.01` / `decay_rate=0.9`, and returns a plain `float` for `'constant'`.
+- `warmup_epochs` is a **no-op** kept for positional compatibility. Warmup engages only via
+  `warmup_steps > 0`, which additionally requires `steps_per_epoch` (else `ValueError`).
+- `create_warmup_lr_schedule` sizes warmup as a fraction of the total step budget, always warms
+  up, and uses `alpha=0.0`, `warmup_start_lr=1e-7`.
+
+## Deep supervision
+
+`deep_supervision_schedule_builder(config, no_outputs, invert_order=False)` returns a function
+of training progress in `[0, 1]` giving one normalised weight per output (weights sum to 1.0).
+Config shape is `{"type": ..., "config": {...}}`.
+
+Default ordering: output 0 is the final, highest-resolution head; output `n-1` is the deepest,
+lowest-resolution one. `invert_order=True` reverses the returned array.
+
+| `type` | Behaviour | `config` params (default) |
+|---|---|---|
+| `constant_equal` | uniform weights, constant | — |
+| `constant_low_to_high` | fixed tilt toward shallow | — |
+| `constant_high_to_low` | fixed tilt toward deep | — |
+| `linear_low_to_high` | linear shift deep → shallow | — |
+| `non_linear_low_to_high` | same, non-linear ramp | — |
+| `custom_sigmoid_low_to_high` | sigmoid transition | `k` (10.0), `x0` (0.5), `transition_point` (0.25) |
+| `scale_by_scale_low_to_high` | one scale at a time | — |
+| `cosine_annealing` | oscillating emphasis | `frequency` (3.0), `final_ratio` (0.5) |
+| `curriculum` | progressively activates outputs | `max_active_outputs` (`no_outputs`), `activation_strategy` (`'linear'` \| `'exp'`) |
+| `step_wise` | hard switch at a threshold | `threshold` (0.5) |
 
 ```python
-config = {
-    "type": "exponential_decay",
-    "learning_rate": 0.001,      # Initial learning rate
-    "decay_steps": 1000,         # Steps between decay applications
-    "decay_rate": 0.9,           # Multiplicative decay factor
-    "warmup_steps": 500,         # Warmup period (optional)
-    "warmup_start_lr": 1e-8      # Starting warmup LR (optional)
-}
+from dl_techniques.optimization import deep_supervision_schedule_builder
+
+sched = deep_supervision_schedule_builder({"type": "linear_low_to_high", "config": {}}, 5)
+sched(0.0)   # [0.067 0.133 0.2 0.267 0.333]  -> weight on the deep heads
+sched(1.0)   # [0.333 0.267 0.2 0.133 0.067]  -> weight on the final head
 ```
 
-#### 3. Cosine Decay with Restarts
-Cosine decay with periodic restarts to escape local minima.
+## Custom optimizers
+
+### `Muon`
+
+MomentUm Orthogonalized by Newton-Schulz. Hybrid: rank ≥ 2 non-embedding kernels get the
+orthogonalized momentum update, everything else (biases, norm gains, embeddings) is handled by an
+integrated auxiliary AdamW. Orthogonalization allows a much larger LR than AdamW.
+
+Use it for Transformers / ConvNets where you want fewer steps to a target loss. Not wired into
+`optimizer_builder`.
 
 ```python
-config = {
-    "type": "cosine_decay_restarts",
-    "learning_rate": 0.001,      # Initial learning rate
-    "decay_steps": 5000,         # Steps in first decay period
-    "t_mul": 2.0,                # Factor to multiply period after restart (optional)
-    "m_mul": 0.9,                # Factor to multiply LR after restart (optional)
-    "alpha": 0.001,              # Minimum LR as fraction (optional)
-    "warmup_steps": 1000,        # Warmup period (optional)
-    "warmup_start_lr": 1e-8      # Starting warmup LR (optional)
-}
-```
+from dl_techniques.optimization import Muon
 
-### Warmup Behavior
-
-All schedules automatically include a linear warmup period:
-
-- **Purpose**: Prevents training instability in early epochs
-- **Behavior**: Linear increase from `warmup_start_lr` to target learning rate
-- **Duration**: Specified by `warmup_steps` parameter
-- **Default**: No warmup (`warmup_steps=0`) if not specified
-- **Post-warmup**: Primary schedule starts from step 0 after warmup completes
-
-```python
-# During warmup (step < warmup_steps):
-#   lr = warmup_start_lr + (target_lr - warmup_start_lr) * (step / warmup_steps)
-# After warmup (step >= warmup_steps):
-#   lr = primary_schedule(step - warmup_steps)
-```
-
-## Deep Supervision Schedule Builder
-
-Creates weight schedules for training models with multiple output scales (e.g., U-Net architectures).
-
-### Available Schedule Types
-
-- **constant_equal**: Equal weights for all outputs
-- **constant_low_to_high**: Fixed weights favoring higher resolution
-- **constant_high_to_low**: Fixed weights favoring deeper layers
-- **linear_low_to_high**: Gradual linear transition from deep to shallow focus
-- **non_linear_low_to_high**: Quadratic transition for smoother focus shift
-- **custom_sigmoid_low_to_high**: Sigmoid-based transition with custom parameters
-- **scale_by_scale_low_to_high**: Progressive activation of outputs
-- **cosine_annealing**: Oscillating weights with overall trend
-- **curriculum**: Progressive activation based on training progress
-- **step_wise**: Two-phase training with hard cutoff
-
-### Basic Usage
-
-```python
-# Configure schedule
-config = {
-    "type": "linear_low_to_high",
-    "config": {}  # Schedule-specific parameters (if any)
-}
-
-# Build scheduler for 5 output scales
-num_outputs = 5
-scheduler = deep_supervision_schedule_builder(config, num_outputs)
-
-# Use during training
-training_progress = 0.3  # 30% through training
-weights = scheduler(training_progress)  # Returns array of 5 weights summing to 1.0
-```
-
-### Schedule Examples
-
-#### 1. Linear Transition
-Gradually shifts focus from deep (low-res) to shallow (high-res) outputs.
-
-```python
-config = {
-    "type": "linear_low_to_high",
-    "config": {}
-}
-```
-
-#### 2. Custom Sigmoid Transition
-Sigmoid-based transition with configurable parameters.
-
-```python
-config = {
-    "type": "custom_sigmoid_low_to_high",
-    "config": {
-        "k": 10.0,                    # Sigmoid steepness
-        "x0": 0.5,                    # Sigmoid midpoint
-        "transition_point": 0.25      # When transition begins
-    }
-}
-```
-
-#### 3. Cosine Annealing
-Oscillating weights with overall trend toward shallow outputs.
-
-```python
-config = {
-    "type": "cosine_annealing",
-    "config": {
-        "frequency": 3.0,             # Number of cycles during training
-        "final_ratio": 0.5            # Ratio between final and initial weights
-    }
-}
-```
-
-#### 4. Curriculum Learning
-Progressive activation of outputs during training.
-
-```python
-config = {
-    "type": "curriculum",
-    "config": {
-        "max_active_outputs": 3,      # Maximum simultaneously active outputs
-        "activation_strategy": "linear"  # or "exp" for exponential
-    }
-}
-```
-
-#### 5. Step-Wise Transition
-Two-phase training with linear transition then hard cutoff to final output.
-
-```python
-config = {
-    "type": "step_wise",
-    "config": {
-        "threshold": 0.5              # Progress point for hard cutoff
-    }
-}
-```
-
-### Weight Order Inversion
-
-By default, output 0 is the final inference output (highest resolution). Use `invert_order=True` if your architecture uses the opposite convention:
-
-```python
-scheduler = deep_supervision_schedule_builder(config, num_outputs, invert_order=True)
-```
-
-## SLED Logits Processor
-
-Self Logits Evolution Decoding (SLED) is an inference-time framework that enhances factual accuracy of LLMs by leveraging "latent knowledge" from earlier layers.
-
-### Key Features
-
-- **No Fine-tuning Required**: Works at inference time only
-- **Backend-Agnostic**: Fully portable across TensorFlow, PyTorch, and JAX
-- **Top-k Optimization**: Efficient computation focused on top-k tokens
-
-### Basic Usage
-
-```python
-from dl_techniques.optimization.sled_supervision import sled_builder
-
-# Configure SLED processor
-config = {
-    "type": "sled_v1",
-    "config": {
-        "evolution_rate": 0.5,        # Alpha: magnitude of logit update
-        "evolution_scale": 10,        # k: number of top tokens to consider
-        "temperature": 1.0,           # Tau: softmax temperature
-        "use_tau_in_update": True,    # Divide update by temperature
-        "inactive_logit_value": -1e9  # Value for non-top-k tokens
-    }
-}
-
-# Build processor
-sled_processor = sled_builder(config)
-
-# Use during generation
-# all_logits_for_step: List of logits from each layer [batch_size, vocab_size]
-evolved_logits = sled_processor(all_logits_for_step)
-next_token = keras.ops.argmax(evolved_logits, axis=-1)
-```
-
-### Configuration Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `evolution_rate` | 0.5 | Alpha parameter controlling update magnitude |
-| `evolution_scale` | 10 | Number of top-k tokens for evolution |
-| `temperature` | 1.0 | Softmax temperature (must be > 0) |
-| `use_tau_in_update` | True | Divide update term by temperature |
-| `inactive_logit_value` | -1e9 | Logit value for non-top-k tokens |
-
-### Algorithm Overview
-
-SLED operates in three phases:
-
-1. **Phase 1 - Estimate**: Compute gradient-based alignment scores between early and final layer logits
-2. **Phase 2 - Ensemble**: Aggregate scores across all early layers to form latent knowledge estimate
-3. **Phase 3 - Evolve**: Apply correction to final layer logits based on latent knowledge
-
-## Complete Integration Examples
-
-### Example 1: Basic Training Setup
-
-```python
-import keras
-from dl_techniques.optimization import (
-    optimizer_builder,
-    learning_rate_schedule_builder
-)
-
-# Configure learning rate schedule
-lr_config = {
-    "type": "cosine_decay",
-    "warmup_steps": 1000,
-    "warmup_start_lr": 1e-8,
-    "learning_rate": 0.001,
-    "decay_steps": 10000,
-    "alpha": 0.0001
-}
-
-# Configure optimizer
-opt_config = {
-    "type": "adamw",
-    "beta_1": 0.9,
-    "beta_2": 0.999,
-    "gradient_clipping_by_norm": 1.0
-}
-
-# Build components
-lr_schedule = learning_rate_schedule_builder(lr_config)
-optimizer = optimizer_builder(opt_config, lr_schedule)
-
-# Create and compile model
-model = keras.Sequential([
-    keras.layers.Dense(128, activation='relu'),
-    keras.layers.Dense(64, activation='relu'),
-    keras.layers.Dense(10, activation='softmax')
-])
-
-model.compile(
-    optimizer=optimizer,
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# Train model
-model.fit(x_train, y_train, epochs=50, batch_size=32)
-```
-
-### Example 2: Transformer Training with Muon
-
-```python
-import keras
-from dl_techniques.optimization.muon_optimizer import Muon
-
-# Create Muon optimizer for transformers
 optimizer = Muon(
-    learning_rate=0.02,
+    learning_rate=0.02,      # Muon branch
     momentum=0.95,
     nesterov=True,
-    ns_steps=5,
-    adam_learning_rate=3e-4,
-    adam_beta_2=0.95,
-    weight_decay=0.01,
-    exclude_embedding_names=["embedding", "token_emb", "position"]
+    ns_steps=5,              # Newton-Schulz iterations
+    adam_learning_rate=1e-3, # auxiliary AdamW branch
+    weight_decay=0.0,
+    exclude_embedding_names=["embedding", "token_emb", "embed"],
 )
-
-# Create transformer model
-transformer_model = create_transformer_model()
-
-# Compile with Muon
-transformer_model.compile(
-    optimizer=optimizer,
-    loss='sparse_categorical_crossentropy'
-)
-
-# Train - Muon automatically routes parameters
-transformer_model.fit(train_dataset, epochs=100)
 ```
 
-### Example 3: U-Net with Deep Supervision
+Routing rule: `rank >= 2` **and** no `exclude_embedding_names` substring in the variable name →
+Muon; otherwise AdamW. If Muon is not beating AdamW, check that routing first.
+
+Keller Jordan et al., 2024 — <https://kellerjordan.github.io/posts/muon/>,
+<https://github.com/KellerJordan/Muon>
+
+### `SGLD`
+
+SGD plus isotropic Gaussian noise of stddev `sqrt(2 * lr) * noise_scale`. With an LR annealed to
+0, the iterates approximate samples from the Bayesian posterior. Use it for posterior sampling /
+weight ensembles, or to escape shallow minima. `noise_scale=0.0` is plain SGD.
 
 ```python
-import keras
-import tensorflow as tf
-import numpy as np
-from dl_techniques.optimization import (
-    optimizer_builder,
-    learning_rate_schedule_builder,
-    deep_supervision_schedule_builder
-)
+from dl_techniques.optimization import SGLD
 
-def create_unet_with_deep_supervision():
-    """Create U-Net model with multiple output scales."""
-    # ... model creation code ...
-    # Returns model with 5 outputs at different scales
-    pass
-
-# Configure all components
-lr_config = {
-    "type": "cosine_decay_restarts",
-    "warmup_steps": 2000,
-    "learning_rate": 0.001,
-    "decay_steps": 8000,
-    "t_mul": 2.0,
-    "m_mul": 0.8
-}
-
-opt_config = {
-    "type": "adam",
-    "gradient_clipping_by_norm": 0.5
-}
-
-ds_config = {
-    "type": "linear_low_to_high",
-    "config": {}
-}
-
-# Build components
-lr_schedule = learning_rate_schedule_builder(lr_config)
-optimizer = optimizer_builder(opt_config, lr_schedule)
-ds_scheduler = deep_supervision_schedule_builder(ds_config, 5)
-
-# Create model
-model = create_unet_with_deep_supervision()
-
-# Custom training loop with deep supervision
-@tf.function
-def train_step(x_batch, y_batch, epoch_progress):
-    # Get current supervision weights
-    supervision_weights = ds_scheduler(epoch_progress)
-    
-    with tf.GradientTape() as tape:
-        # Forward pass - model returns 5 outputs
-        outputs = model(x_batch, training=True)
-        
-        # Compute weighted loss
-        total_loss = 0
-        for i, (output, weight) in enumerate(zip(outputs, supervision_weights)):
-            target = tf.image.resize(y_batch, output.shape[1:3])
-            scale_loss = keras.losses.binary_crossentropy(target, output)
-            total_loss += weight * tf.reduce_mean(scale_loss)
-    
-    # Backward pass
-    gradients = tape.gradient(total_loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    
-    return total_loss
-
-# Training loop
-epochs = 100
-for epoch in range(epochs):
-    epoch_progress = epoch / epochs
-    for step, (x_batch, y_batch) in enumerate(train_dataset):
-        loss = train_step(x_batch, y_batch, epoch_progress)
+optimizer = SGLD(learning_rate=1e-2, noise_scale=1.0, seed=42, weight_decay=None)
+# or: optimizer_builder({"type": "sgld", "noise_scale": 1.0, "seed": 42}, lr_schedule)
 ```
 
-### Example 4: LLM Generation with SLED
+Snapshot weights periodically after a burn-in to build the posterior ensemble; a single final
+checkpoint is a posterior *sample*, not a MAP estimate.
+
+Welling & Teh, ICML 2011, *Bayesian Learning via Stochastic Gradient Langevin Dynamics*.
+
+### `VSGD`
+
+Variational Stochastic Gradient Descent: models the gradient with a probabilistic model and
+derives a closed-form adaptive update by stochastic variational inference, keeping per-variable
+running statistics. A drop-in adaptive optimizer; the default LR (0.1) is much larger than Adam's.
 
 ```python
-import keras
+from dl_techniques.optimization import VSGD
+
+optimizer = VSGD(learning_rate=0.1, ghattg=30.0, tau1=0.81, tau2=0.90)
+```
+
+Chen et al., 2024, *VSGD: Variational Stochastic Gradient Descent via Bayesian Online Natural
+Gradient*.
+
+### `Gefen`
+
+"Gefen-lite (shared-v)": AdamW with **one second-moment scalar per block** of `period`
+contiguous flattened parameters, full-precision momentum unchanged. `period` is the largest
+divisor of the variable's element count `<= max_block_size`, falling back to 1 (per-element
+AdamW) when no divisor is `>= min_block_size`. Because `period` is a static Python int per
+variable, the update is graph-static and `jit_compile` / `model.fit` safe.
+
+Use it when optimizer state is the memory bottleneck and you want an AdamW drop-in.
+
+```python
+from dl_techniques.optimization import Gefen
+
+optimizer = Gefen(learning_rate=1e-3, weight_decay=1e-2, max_block_size=1024, min_block_size=8)
+```
+
+**Scope caveat:** this is the shared-second-moment part only. There is no uint8 momentum
+quantization and no learned codebook, and `period` is chosen from shape rather than gradient
+statistics. The momentum buffer is the same size as AdamW's, so this does **not** reproduce the
+paper's full optimizer-state reduction — only the second-moment buffer shrinks, from `numel` to
+`numel / period` floats per variable.
+
+Inspired by arXiv:2606.13894.
+
+## WW-PGD spectral projection
+
+`ww_pgd_project(model, config, *, epoch, num_epochs, logs=None)` walks the model's rank ≥ 2
+non-embedding kernels and, for layers with a large enough power-law tail, reshapes the tail
+toward an `r^(-q)` template in place. `WWPGDProjectionCallback(config=..., num_epochs=...,
+model=..., csv_path=...)` runs it on the `apply_every_epochs` cadence.
+
+`WWTailConfig` is **off by default** (`enable=False` is a strict no-op). Knobs: `min_tail` (5),
+`q` (1.0), `blend_eta` (0.5), `cayley_eta` (0.25), `max_ks_distance` (None), `use_detx` (True),
+`warmup_epochs` (0), `ramp_epochs` (5), `apply_every_epochs` (1), `verbose` (False),
+`log_layer_stats` (False — turning it on costs one extra SVD per projected layer).
+
+## SLED logits processor
+
+Self Logits Evolution Decoding: contrasts every layer's next-token logits against the final
+layer's to improve factuality at generation time.
+
+```python
 from dl_techniques.optimization.sled_supervision import sled_builder
 
-# Configure SLED
-sled_config = {
+processor = sled_builder({
     "type": "sled_v1",
     "config": {
-        "evolution_rate": 0.5,
-        "evolution_scale": 10,
-        "temperature": 1.0
-    }
-}
+        "evolution_rate": 0.5,      # alpha
+        "evolution_scale": 10,      # k, top-k tokens considered
+        "temperature": 1.0,         # tau
+        "use_tau_in_update": True,
+        "inactive_logit_value": -1e9,
+    },
+})
 
-sled_processor = sled_builder(sled_config)
-
-def generate_with_sled(model, input_ids, max_length=100):
-    """Generate text using SLED-enhanced decoding."""
-    generated = input_ids
-    
-    for _ in range(max_length):
-        # Get logits from all layers (model must expose intermediate logits)
-        all_layer_logits = model.get_all_layer_logits(generated)
-        
-        # Apply SLED evolution
-        evolved_logits = sled_processor(all_layer_logits)
-        
-        # Sample next token
-        next_token = keras.ops.argmax(evolved_logits[:, -1, :], axis=-1)
-        generated = keras.ops.concatenate([generated, next_token[:, None]], axis=1)
-        
-        if next_token == eos_token_id:
-            break
-    
-    return generated
+# all_logits: list of [batch, vocab] tensors, ordered layer 0 -> final layer
+final_logits = processor(all_logits)
 ```
 
-## Configuration Reference
-
-### Default Values
-
-The module uses research-backed default values from the constants module:
-
-#### Warmup Defaults
-- `DEFAULT_WARMUP_STEPS = 0`
-- `DEFAULT_WARMUP_START_LR = 1e-8`
-
-#### Optimizer Defaults
-- **Adam**: `beta_1=0.9, beta_2=0.999, epsilon=1e-7, amsgrad=False`
-- **AdamW**: Same as Adam
-- **RMSprop**: `rho=0.9, momentum=0.0, epsilon=1e-7, centered=False`
-- **Adadelta**: `rho=0.9, epsilon=1e-7`
-
-#### SGLD Defaults
-- `learning_rate=1e-2`
-- `noise_scale=1.0` (canonical Langevin temperature)
-- `seed=None` (non-deterministic noise unless set)
-- `weight_decay=None`
-
-#### Gefen Defaults
-- `learning_rate=1e-3`
-- `beta_1=0.9, beta_2=0.999, epsilon=1e-8`
-- `weight_decay=0.0`
-- `max_block_size=1024, min_block_size=8`
-
-#### Muon Defaults
-- `learning_rate=0.02`
-- `momentum=0.95`
-- `nesterov=True`
-- `ns_steps=5`
-- `adam_learning_rate=1e-3`
-- `adam_beta_1=0.9, adam_beta_2=0.999, adam_epsilon=1e-7`
-- `weight_decay=0.0`
-
-#### Schedule Defaults
-- **Cosine Decay**: `alpha=0.0001`
-- **Cosine Restarts**: `t_mul=2.0, m_mul=0.9, alpha=0.001`
-
-#### SLED Defaults
-- `evolution_rate=0.5`
-- `evolution_scale=10`
-- `temperature=1.0`
-- `use_tau_in_update=True`
-- `inactive_logit_value=-1e9`
-
-### Required vs Optional Parameters
-
-#### Learning Rate Schedules
-
-**All Schedules Require:**
-- `type`: Schedule type string
-- `learning_rate`: Initial learning rate
-
-**Schedule-Specific Required:**
-- `decay_steps`: All schedules
-- `decay_rate`: Exponential decay only
-
-**Always Optional:**
-- `warmup_steps`: Defaults to 0 (no warmup)
-- `warmup_start_lr`: Defaults to 1e-8
-- `alpha`: Schedule-specific minimum LR ratio
-- `t_mul`, `m_mul`: Cosine restarts only
-
-#### Optimizers
-
-**Required:**
-- `type`: Optimizer type string
-
-**Optional (all have defaults):**
-- Optimizer-specific hyperparameters
-- Gradient clipping parameters
-
-## Best Practices
-
-### Learning Rate Schedules
-
-1. **Use Warmup**: Always include warmup for training stability
-   ```python
-   "warmup_steps": max(1000, total_steps // 20)  # 5% of training
-   ```
-
-2. **Choose Appropriate Schedules**:
-   - **Cosine Decay**: General purpose, smooth decay
-   - **Cosine Restarts**: When training plateaus, helps escape local minima
-   - **Exponential**: When you need precise control over decay timing
-
-3. **Scale Warmup with Model Size**:
-   ```python
-   # Larger models need longer warmup
-   warmup_steps = min(10000, max(1000, model_params // 1000))
-   ```
-
-### Optimizers
-
-1. **Choose Based on Architecture**:
-   - **Muon**: Transformers, large ConvNets (fastest convergence)
-   - **AdamW**: Transformers, large models (most stable)
-   - **Adam**: General purpose, CNNs
-   - **RMSprop**: RNNs, unstable gradients
-   - **Adadelta**: When learning rate is hard to tune
-   - **SGLD**: Bayesian posterior sampling, escaping shallow minima on rugged landscapes
-   - **Gefen**: AdamW-style training when second-moment optimizer state memory matters (block-shared second moment)
-
-2. **Muon Learning Rates**:
-   ```python
-   # Muon uses much higher LR than AdamW
-   muon_lr = 0.02       # Good starting point
-   adamw_lr = 0.0003    # Typical AdamW LR
-   ```
-
-3. **Gradient Clipping Guidelines**:
-   ```python
-   # Conservative clipping for stability
-   "gradient_clipping_by_norm": 1.0  # Good default
-   
-   # Aggressive clipping for RNNs
-   "gradient_clipping_by_norm": 0.5  # Prevent exploding gradients
-   ```
-
-### Deep Supervision
-
-1. **Choose Schedule Based on Architecture**:
-   - **linear_low_to_high**: Standard U-Net, gradual transition
-   - **curriculum**: Complex models, progressive learning
-   - **step_wise**: Two-phase training (features then refinement)
-   - **constant_equal**: When all scales are equally important
-
-2. **Monitor Weight Distribution**:
-   ```python
-   # Log weights during training
-   if step % 100 == 0:
-       weights = ds_scheduler(epoch_progress)
-       logger.info(f"DS weights: {weights}")
-   ```
-
-### SLED
-
-1. **Tune Evolution Rate**:
-   ```python
-   # Higher alpha = stronger correction
-   "evolution_rate": 0.3  # Conservative
-   "evolution_rate": 0.7  # Aggressive
-   ```
-
-2. **Adjust Top-k for Vocabulary Size**:
-   ```python
-   # Larger k for larger vocabularies
-   "evolution_scale": 10   # Small vocab
-   "evolution_scale": 50   # Large vocab (50k+)
-   ```
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Training Instability
-```python
-# Symptoms: Loss spikes, NaN values
-# Solutions:
-config = {
-    "type": "adam",
-    "gradient_clipping_by_norm": 0.5,  # Reduce clipping threshold
-    "warmup_steps": 2000,              # Increase warmup
-    "warmup_start_lr": 1e-9,           # Lower starting LR
-    "learning_rate": 0.0001            # Reduce peak LR
-}
-```
-
-#### 2. Slow Convergence
-```python
-# Symptoms: Very slow loss decrease
-# Solutions:
-config = {
-    "type": "cosine_decay_restarts",
-    "learning_rate": 0.003,            # Increase peak LR
-    "warmup_steps": 500,               # Reduce warmup
-    "t_mul": 2.0,                      # Add restarts
-    "decay_steps": 5000
-}
-
-# Or try Muon for faster convergence
-optimizer = Muon(learning_rate=0.02)
-```
-
-#### 3. Muon Not Improving Over AdamW
-```python
-# Check parameter routing
-for var in model.trainable_variables:
-    uses_muon = optimizer._should_use_muon(var)
-    print(f"{var.name}: {'Muon' if uses_muon else 'AdamW'}")
-
-# Ensure weight matrices are rank >= 2
-# Add custom embedding patterns if needed
-optimizer = Muon(
-    exclude_embedding_names=["embedding", "your_custom_pattern"]
-)
-```
-
-#### 4. Deep Supervision Not Working
-```python
-# Check weight distribution
-weights = ds_scheduler(0.5)  # Mid-training
-print(f"Weights sum: {np.sum(weights)}")  # Should be 1.0
-print(f"Weights: {weights}")
-
-# If weights are too extreme, try:
-config = {
-    "type": "custom_sigmoid_low_to_high",
-    "config": {
-        "k": 5.0,                      # Reduce steepness
-        "transition_point": 0.1        # Start transition earlier
-    }
-}
-```
-
-#### 5. SLED Returning Original Logits
-```python
-# Check for zero denominator warning in logs
-# This means all layer contrasts were misaligned
-
-# Try adjusting parameters:
-config = {
-    "type": "sled_v1",
-    "config": {
-        "evolution_scale": 20,         # Increase top-k
-        "temperature": 0.8             # Lower temperature
-    }
-}
-```
-
-### Error Messages
-
-#### "Missing required parameters"
-```python
-# Ensure all required parameters are provided
-config = {
-    "type": "cosine_decay",
-    "learning_rate": 0.001,  # Required
-    "decay_steps": 10000,    # Required
-}
-```
-
-#### "Unknown optimizer/schedule type"
-```python
-# Check spelling and supported types
-supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta", "sgld", "gefen"]
-supported_schedules = ["cosine_decay", "exponential_decay", "cosine_decay_restarts"]
-supported_ds_schedules = [
-    "constant_equal", "constant_low_to_high", "constant_high_to_low",
-    "linear_low_to_high", "non_linear_low_to_high", "custom_sigmoid_low_to_high",
-    "scale_by_scale_low_to_high", "cosine_annealing", "curriculum", "step_wise"
-]
-```
-
-## Advanced Usage
-
-### Custom Learning Rate Curves
-
-Combine multiple schedules for complex learning rate curves:
-
-```python
-# Create custom multi-phase training
-phase1_config = {
-    "type": "exponential_decay",
-    "warmup_steps": 1000,
-    "learning_rate": 0.001,
-    "decay_steps": 5000,
-    "decay_rate": 0.8
-}
-
-phase2_config = {
-    "type": "cosine_decay",
-    "warmup_steps": 0,  # No warmup for second phase
-    "learning_rate": 0.0005,
-    "decay_steps": 10000,
-    "alpha": 0.0001
-}
-```
-
-### Muon with Learning Rate Schedules
-
-```python
-from dl_techniques.optimization import learning_rate_schedule_builder
-from dl_techniques.optimization.muon_optimizer import Muon
-
-# Create schedule for Muon's main learning rate
-lr_config = {
-    "type": "cosine_decay",
-    "warmup_steps": 1000,
-    "learning_rate": 0.02,  # Higher LR for Muon
-    "decay_steps": 50000,
-    "alpha": 0.001
-}
-lr_schedule = learning_rate_schedule_builder(lr_config)
-
-# Use schedule with Muon
-optimizer = Muon(
-    learning_rate=lr_schedule,
-    adam_learning_rate=1e-3  # AdamW uses fixed rate
-)
-```
-
-### Dynamic Deep Supervision
-
-Adapt supervision weights based on validation performance:
-
-```python
-class AdaptiveSupervisionCallback(keras.callbacks.Callback):
-    def __init__(self, ds_scheduler, base_config, num_outputs):
-        self.ds_scheduler = ds_scheduler
-        self.base_config = base_config
-        self.num_outputs = num_outputs
-        self.best_val_loss = float('inf')
-        
-    def on_epoch_end(self, epoch, logs=None):
-        val_loss = logs.get('val_loss', 0)
-        
-        if val_loss >= self.best_val_loss:
-            # Switch to more aggressive schedule if plateauing
-            new_config = {"type": "step_wise", "config": {"threshold": 0.3}}
-            self.ds_scheduler = deep_supervision_schedule_builder(
-                new_config, self.num_outputs
-            )
-        else:
-            self.best_val_loss = val_loss
-```
-
-### Multi-GPU Training Considerations
-
-```python
-import tensorflow as tf
-
-# Adjust learning rate for multi-GPU training
-strategy = tf.distribute.MirroredStrategy()
-num_gpus = strategy.num_replicas_in_sync
-
-config = {
-    "type": "cosine_decay",
-    "learning_rate": 0.001 * num_gpus,  # Scale LR with batch size
-    "warmup_steps": 1000 * num_gpus,    # Scale warmup proportionally
-    "decay_steps": 10000
-}
-
-# For Muon, scale both learning rates
-with strategy.scope():
-    optimizer = Muon(
-        learning_rate=0.02 * num_gpus,
-        adam_learning_rate=1e-3 * num_gpus
-    )
-```
-
-### Hyperparameter Sweeps
-
-```python
-def create_sweep_configs():
-    """Generate configurations for hyperparameter sweeps."""
-    sweep_configs = []
-    
-    # Standard optimizer sweep
-    for lr in [0.0001, 0.0003, 0.001]:
-        for opt_type in ["adam", "adamw"]:
-            for clip_norm in [0.5, 1.0, 2.0]:
-                sweep_configs.append({
-                    "optimizer": {
-                        "type": opt_type,
-                        "gradient_clipping_by_norm": clip_norm
-                    },
-                    "lr_schedule": {
-                        "type": "cosine_decay",
-                        "learning_rate": lr,
-                        "warmup_steps": 1000,
-                        "decay_steps": 10000
-                    }
-                })
-    
-    # Muon sweep
-    for muon_lr in [0.01, 0.02, 0.05]:
-        for adam_lr in [1e-4, 3e-4, 1e-3]:
-            sweep_configs.append({
-                "optimizer": "muon",
-                "muon_config": {
-                    "learning_rate": muon_lr,
-                    "adam_learning_rate": adam_lr,
-                    "momentum": 0.95
-                }
-            })
-    
-    return sweep_configs
-```
+If every layer contrast is misaligned the denominator is zero and the processor logs a warning
+and returns the original final-layer logits unchanged.
+
+arXiv:2411.02433.
+
+## Gotchas
+
+- `optimizer_builder`'s second argument is **positional** (`lr_schedule`). There is no
+  `learning_rate=` keyword — passing one raises `TypeError`.
+- Set at most one of the three `gradient_clipping_by_*` keys; Keras raises if more than one of
+  `clipnorm` / `clipvalue` / `global_clipnorm` is set.
+- `"adamw"` defaults to `weight_decay=0.004` when the key is absent. Every other type defaults to
+  no decay. Do not also add an L2 kernel regularizer — that decays the parameter twice.
+- `learning_rate_schedule_builder` requires `decay_steps` in *optimizer steps*, not epochs.
+  `create_learning_rate_schedule` takes epochs.
+- There is no `"constant"` schedule type in `learning_rate_schedule_builder` — pass a plain float
+  as the `lr_schedule` argument instead.
+- `Muon` and the WW-PGD tools are not reachable from `optimizer_builder`.
+
+## See also
+
+- `CLAUDE.md` in this directory — module map and authoring rules.
+- `train_vision/README.md` — the vision training pipeline built on these builders.
+- Tests: `tests/test_optimization/`.
