@@ -603,3 +603,64 @@ class TestMpSoftrank:
         for k in range(0, 5):
             val = compute_mp_softrank(evals, num_spikes=k)
             assert 0.0 < val <= 1.0
+
+
+# =====================================================================
+# C6 — the rank-1 pathology must score ABOVE a healthy full-rank control
+# =====================================================================
+
+class TestDominanceRatioOnTheRankOnePathology:
+    """`calculate_dominance_ratio` returned 0.0 for a (near-)rank-1 spectrum.
+
+    That zeroed ``concentration_score`` through ``gini * dominance``, so the most
+    concentrated spectrum possible scored strictly BELOW a healthy full-rank control —
+    the metric was inverted exactly where it matters.
+    """
+
+    @staticmethod
+    def _rank_one_matrix() -> np.ndarray:
+        rng = np.random.default_rng(20260902)
+        u = rng.normal(size=(50, 1))
+        v = rng.normal(size=(1, 30))
+        return (u @ v).astype("float64")
+
+    @staticmethod
+    def _healthy_matrix() -> np.ndarray:
+        rng = np.random.default_rng(1234)
+        return rng.normal(size=(50, 30))
+
+    def test_a_rank_one_spectrum_is_not_reported_as_zero_dominance(self):
+        evals = np.linalg.svd(self._rank_one_matrix(), compute_uv=False) ** 2
+        sum_others = float(np.sum(evals) - np.max(evals))
+
+        # Anti-vacuity: the probe must really be in the guarded branch.
+        assert sum_others < 1e-10, f"probe is not rank-1 enough: sum_others={sum_others}"
+
+        dominance = calculate_dominance_ratio(evals)
+        assert dominance > 0.0, (
+            "the most dominant spectrum possible reported zero dominance: "
+            f"dominance={dominance}"
+        )
+        assert np.isfinite(dominance)
+
+    def test_the_pathology_scores_above_the_healthy_control(self):
+        pathological = calculate_concentration_metrics(self._rank_one_matrix())
+        healthy = calculate_concentration_metrics(self._healthy_matrix())
+
+        # Anti-vacuity: Gini already sees the pathology, so only `dominance` can be
+        # responsible for an inverted ordering.
+        assert pathological['gini_coefficient'] > healthy['gini_coefficient']
+
+        assert pathological['concentration_score'] > healthy['concentration_score'], (
+            "a rank-1 matrix scores no higher than a healthy full-rank control: "
+            f"pathological={pathological['concentration_score']} "
+            f"healthy={healthy['concentration_score']} "
+            f"(gini {pathological['gini_coefficient']} vs {healthy['gini_coefficient']}, "
+            f"dominance {pathological['dominance_ratio']} vs {healthy['dominance_ratio']})"
+        )
+        assert np.isfinite(pathological['concentration_score'])
+
+    def test_a_healthy_spectrum_is_unchanged(self):
+        """Anti-vacuity arm: the guard is inert away from the degenerate branch."""
+        evals = np.array([10.0, 1.0, 1.0, 1.0])
+        assert calculate_dominance_ratio(evals) == pytest.approx(10.0 / 3.0)

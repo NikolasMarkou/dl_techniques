@@ -775,11 +775,16 @@ def calculate_dominance_ratio(evals: np.ndarray) -> float:
     """
     Calculate the ratio of the largest eigenvalue to the sum of all other eigenvalues.
 
+    A (near-)rank-1 spectrum is the MOST dominant spectrum there is, so the ratio must
+    stay monotone there rather than collapsing to zero.
+
     Args:
         evals: Array of eigenvalues.
 
     Returns:
-        Dominance ratio.
+        Dominance ratio, a non-negative finite value. The denominator is floored at
+        ``SPECTRAL_EPSILON``, so a rank-1 spectrum yields a large value rather than
+        ``inf`` or ``0.0``.
     """
     if len(evals) < 2:
         return 0.0
@@ -787,10 +792,14 @@ def calculate_dominance_ratio(evals: np.ndarray) -> float:
     lambda_max = np.max(evals)
     sum_others = np.sum(evals) - lambda_max
 
-    if sum_others < SPECTRAL_EPSILON:
-        return 0.0  # Return 0 instead of inf for stability
-
-    return lambda_max / sum_others
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-009
+    # FLOOR the denominator; do NOT restore the old `if sum_others < SPECTRAL_EPSILON:
+    # return 0.0` guard. Returning 0.0 there inverted the metric exactly where it
+    # matters: it zeroed `concentration_score = (gini * dominance) / ...`, so a rank-1
+    # matrix (gini 0.9333) scored 0.0 against a healthy full-rank control's 0.00244.
+    # The downstream `np.log1p` in `calculate_concentration_metrics` keeps the result
+    # bounded, so a large ratio is safe. See decisions.md D-009.
+    return lambda_max / max(sum_others, SPECTRAL_EPSILON)
 
 
 # ---------------------------------------------------------------------
