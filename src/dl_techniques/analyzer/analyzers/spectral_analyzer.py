@@ -89,7 +89,7 @@ from typing import Dict, Any, Optional, List, Tuple
 from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from ..constants import (
-    LayerType, MetricNames, SPECTRAL_DEFAULT_SUMMARY_METRICS,
+    LayerType, MetricNames, StatusCode, SPECTRAL_DEFAULT_SUMMARY_METRICS,
     SPECTRAL_HIGH_CONCENTRATION_PERCENTILE, SPECTRAL_WEAK_RANK_LOSS_TOLERANCE
 )
 from .. import spectral_metrics
@@ -319,22 +319,49 @@ class SpectralAnalyzer(BaseAnalyzer):
 
     def _get_summary(self, details_df: pd.DataFrame) -> Dict[str, float]:
         """
-        Get summary metrics averaged across all analyzed layers for all models.
+        Get summary metrics averaged across the SUCCESSFULLY analyzed layers.
+
+        Layers whose power-law fit failed carry sentinel values (``alpha = -1.0``, and a
+        derived ``alpha_weighted`` of ``+10.0``) rather than missing values, so they are
+        numerically indistinguishable from a real fit once averaged. They are therefore
+        excluded here, and their count is reported alongside the means.
+
+        Args:
+            details_df: The per-layer spectral details frame. When it carries a
+                ``status`` column, only ``StatusCode.SUCCESS`` rows are aggregated.
+
+        Returns:
+            Dictionary of summary metrics. ``total_layers_analyzed`` keeps its published
+            meaning (every described layer); ``successful_layers_analyzed`` and
+            ``failed_layers`` partition it.
         """
         summary = {}
         if details_df is None or details_df.empty:
             return summary
 
-        metrics_to_summarize = [m for m in SPECTRAL_DEFAULT_SUMMARY_METRICS if m in details_df.columns]
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-008
+        # Exclude failed fits by STATUS, not by dropping the -1.0 sentinel value. Do NOT
+        # "simplify" this to a `!= -1.0` value filter: -1.0 is a legitimate value for some
+        # summary metrics (e.g. Q, log-norms), and alpha_weighted's failure sentinel is
+        # +10.0, not -1.0, so a value filter would silently keep the worst offender. See
+        # decisions.md D-008.
+        if MetricNames.STATUS in details_df.columns:
+            success_df = details_df[details_df[MetricNames.STATUS] == StatusCode.SUCCESS.value]
+        else:
+            success_df = details_df
+
+        metrics_to_summarize = [m for m in SPECTRAL_DEFAULT_SUMMARY_METRICS if m in success_df.columns]
 
         for metric in metrics_to_summarize:
-            valid_values = details_df[metric][pd.to_numeric(details_df[metric], errors='coerce').notna()]
+            valid_values = success_df[metric][pd.to_numeric(success_df[metric], errors='coerce').notna()]
             if not valid_values.empty:
                 summary[metric] = float(valid_values.mean())
 
         summary['total_layers_analyzed'] = len(details_df)
-        if 'concentration_score' in details_df.columns:
-            score = pd.to_numeric(details_df['concentration_score'], errors='coerce').dropna()
+        summary['successful_layers_analyzed'] = len(success_df)
+        summary['failed_layers'] = len(details_df) - len(success_df)
+        if 'concentration_score' in success_df.columns:
+            score = pd.to_numeric(success_df['concentration_score'], errors='coerce').dropna()
             if not score.empty:
                 high_conc_threshold = score.quantile(SPECTRAL_HIGH_CONCENTRATION_PERCENTILE)
                 summary['high_concentration_layers'] = int(sum(score > high_conc_threshold))
