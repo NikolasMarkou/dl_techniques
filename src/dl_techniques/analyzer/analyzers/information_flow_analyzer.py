@@ -8,14 +8,25 @@ information bottlenecks, which can impede a model's ability to learn.
 
 Architecture
 ------------
-The analysis is performed by constructing a temporary Keras "feature
-extractor" model. This new model shares the same input as the original model
-but is reconfigured to output a list of activation tensors from each
-intermediate layer. By performing a single forward pass on a batch of data,
-this architecture efficiently captures a snapshot of the entire network's
-internal state. The analyzer then processes this sequence of activation
-tensors to quantify how information is transformed at each stage of the
-network.
+The analysis is performed by temporarily wrapping the ``call`` method of each
+selected layer on the layer INSTANCE, so that every wrapped layer records its
+own output, and then running one eager forward pass (``model(x, training=
+False)``) over a batch of data. A single pass therefore captures a snapshot of
+the entire network's internal state, and every wrapper is removed again in a
+``finally`` block, leaving the model bit-identical to how it was handed in.
+The analyzer then processes this sequence of activation tensors to quantify
+how information is transformed at each stage of the network.
+
+Two properties of this mechanism are deliberate and load-bearing:
+
+-   The capture pass must be EAGER. Under ``model.predict(...)`` Keras traces
+    the forward function, so a wrapped ``call`` is handed a
+    ``SymbolicTensor`` and nothing concrete is captured.
+-   A temporary functional "feature extractor" sub-model is NOT used. Slicing
+    one requires ``model.input`` and ``layer.output``, and neither exists for
+    a subclassed model — a model kind this analyzer explicitly supports, since
+    ``recursively_get_layers`` attribute-walks subclassed models to find their
+    sublayers.
 
 Foundational Mathematics
 ------------------------
@@ -41,6 +52,7 @@ batch and columns correspond to features (neurons):
 """
 
 import keras
+import functools
 import numpy as np
 from typing import Dict, Any, Optional, List
 
@@ -60,9 +72,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
     """Analyzes information flow through network layers."""
 
     def __init__(self, models: Dict[str, keras.Model], config: AnalysisConfig):
-        """Initialize analyzer and setup extraction models."""
+        """Initialize the analyzer."""
         super().__init__(models, config)
-        self.layer_extraction_models = {}
 
     def requires_data(self) -> bool:
         """Information flow analysis requires input data."""
@@ -70,7 +81,7 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
     def analyze(self, results: AnalysisResults, data: Optional[DataInput] = None,
                 cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
-        """Analyze information flow using forward hooks for subclassed model compatibility."""
+        """Analyze information flow by recording each selected layer's own output."""
         logger.info("Analyzing information flow and activations...")
 
         if data is None:
@@ -101,8 +112,9 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                         f"Failed to build model '{model_name}'. Skipping information flow analysis. Error: {e}")
                     continue
 
-            captured_outputs = {}
-            hook_handles = []
+            captured_outputs: Dict[str, np.ndarray] = {}
+            # (layer, had_own_call, original_call_attribute) for every layer we wrap.
+            wrapped: List[tuple] = []
 
             try:
                 all_layers = recursively_get_layers(model)
@@ -112,17 +124,25 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     logger.warning(f"No suitable layers for information flow analysis in '{model_name}'.")
                     continue
 
-                def forward_hook(layer, inputs, outputs):
-                    captured_outputs[layer.name] = keras.ops.convert_to_numpy(outputs)
-
                 for layer in extraction_layers:
-                    handle = layer.register_forward_hook(forward_hook)
-                    hook_handles.append(handle)
+                    if any(existing is layer for existing, _, _ in wrapped):
+                        # The same layer object can be reached twice by the walk; wrap it once.
+                        continue
+                    had_own_call = 'call' in layer.__dict__
+                    original_call = layer.__dict__.get('call')
+                    wrapped.append((layer, had_own_call, original_call))
+                    layer.call = self._make_recording_call(layer, captured_outputs)
 
-                model.predict(x_sample, verbose=0)
+                # The pass MUST be eager. Under `model.predict(...)` Keras traces the
+                # forward function and the wrapper is handed a SymbolicTensor, so
+                # nothing concrete is captured.
+                model(x_sample, training=False)
 
                 layer_analysis = {}
-                for i, layer in enumerate(extraction_layers):
+                # Iterate `extraction_layers` in order so that insertion order equals
+                # network depth: `_get_ordered_layer_analysis` in the visualizer reads
+                # the dict order as the forward-pass order.
+                for layer in extraction_layers:
                     if layer.name in captured_outputs:
                         output_tensor = captured_outputs[layer.name]
                         layer_info = {'name': layer.name, 'type': layer.__class__.__name__}
@@ -137,12 +157,53 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 layer_info_list = [{'name': l.name, 'type': l.__class__.__name__} for l in extraction_layers]
                 self._analyze_key_layer_activations(model_name, layer_outputs_list, layer_info_list, results)
 
+            # A programming / API-shape error is never swallowed again: this analyzer
+            # shipped a call to the PyTorch-only `register_forward_hook`, and the bare
+            # `except Exception` that used to stand here turned that hard AttributeError
+            # into a per-model log line, so `information_flow` was silently empty on
+            # every run. A genuine per-model runtime failure still only skips that model,
+            # so one bad model cannot abort a multi-model analysis.
+            except (AttributeError, TypeError, NameError, ImportError):
+                raise
             except Exception as e:
                 logger.error(f"Failed to analyze information flow for {model_name}: {e}", exc_info=True)
+                continue
             finally:
-                for handle in hook_handles:
-                    handle.remove()
-                logger.debug(f"Removed {len(hook_handles)} hooks from model '{model_name}'.")
+                # Runs on every exit path, including the re-raise and the `continue`.
+                for layer, had_own_call, original_call in wrapped:
+                    if had_own_call:
+                        layer.call = original_call
+                    else:
+                        # Delete the per-instance attribute so the class method is
+                        # reachable again; the model must be bit-identical afterwards.
+                        layer.__dict__.pop('call', None)
+                logger.debug(f"Restored `call` on {len(wrapped)} layers of model '{model_name}'.")
+
+    @staticmethod
+    def _make_recording_call(layer: keras.layers.Layer, store: Dict[str, np.ndarray]):
+        """Build a `call` wrapper that records the layer's output into `store`.
+
+        Args:
+            layer: The layer whose bound `call` is being wrapped.
+            store: Dict to record into, keyed by layer name. A layer invoked more
+                than once in a forward pass (weight sharing) therefore keeps only
+                its LAST output; this is deliberate — the per-layer analysis and
+                the visualizer are both keyed by layer name.
+
+        Returns:
+            A callable delegating `*args, **kwargs` to the original bound `call`,
+            so Keras' `__call__` machinery (training/mask argument routing) is
+            unaffected.
+        """
+        original_call = layer.call
+
+        @functools.wraps(original_call)
+        def recording_call(*args, **kwargs):
+            outputs = original_call(*args, **kwargs)
+            store[layer.name] = keras.ops.convert_to_numpy(outputs)
+            return outputs
+
+        return recording_call
 
     def _get_extraction_layers(self, layers: List[keras.layers.Layer]) -> List[keras.layers.Layer]:
         """Get a list of layer objects suitable for information flow analysis from a flat list."""
