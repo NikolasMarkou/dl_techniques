@@ -1,705 +1,312 @@
-# CliffordNet Training & Inference
+# train/cliffordnet — CliffordNet family
 
-Training pipelines and inference tools for the CliffordNet model family -- geometric-algebra neural networks that replace both attention and FFN with Clifford geometric products.
+Training and inference for CliffordNet: attention-free, FFN-free networks whose
+blocks fuse a detail stream and a depthwise-conv context stream through
+`SparseRollingGeometricProduct` + `GatedGeometricResidual`
+(`src/dl_techniques/layers/geometric/clifford_block.py`). Three domains are
+trainable here: CIFAR classification, causal language modeling, and CLIP-style
+image-text contrastive learning.
 
-All models share the same algebraic core (`SparseRollingGeometricProduct` + `GatedGeometricResidual`) from `src/dl_techniques/layers/geometric/clifford_block.py`. The surviving family spans three domains: vision classification, causal language modeling, and vision-language contrastive learning.
+| Script | Model | What it does |
+|---|---|---|
+| `train_cliffordnet.py` | `CliffordNet` (`models/vision/cliffordnet/model.py`) | CIFAR-10/100 classification. |
+| `train_downsampling_techniques.py` | hand-composed `CliffordNetBlock` stacks | CIFAR-100 ablation of 6 downsampling compositions. |
+| `train_cliffordnet_nlp.py` | `CliffordNetLM` (`models/vision/cliffordnet/lm.py`) | Causal LM pretraining on Wikipedia or TFDS text. |
+| `train_clip.py` | `CliffordCLIP` (`models/vision_language/clip/clifford_clip.py`) | Dual-encoder CLIP, both towers Clifford. |
+| `infer_cliffordnet_nlp.py` | `CliffordNetLM` | Generation: nucleus, MCMC power sampling, max-swap. |
+| `eval_clip_retrieval.py` | `CliffordCLIP` | COCO 2017 zero-shot retrieval, R@1/5/10 both directions. |
+| `filter_cc3m_clipscore.py` | `CliffordCLIP` | CLIP-score caption filter; writes a drop-in CC3M manifest. |
+| `prepare_cc3m.py` | — | Resumable CC3M extractor from HF Hub tar shards. |
+| `resize_cc3m_to_ssd.py` | — | One-time resumable downscaled CC3M copy onto SSD. |
 
-> **Removed 2026-08-10.** The three denoising pipelines (`train_denoiser.py`,
-> `train_conditional_denoiser.py`, `train_confidence_denoiser.py`), the routing-LM
-> trainer, the COCO multi-task trainer, the depth-estimation trainer, the embedding
-> and LM U-Net trainers and the Wikipedia pre-training helper were all deleted along
-> with the `models/vision/cliffordnet/` modules and the strided `*BlockDSv2` blocks they
-> depended on. Their sections have been removed from this document rather than left
-> as instructions that cannot be run. Recover them from git history if needed.
+Companion note: `VARIATIONS_COMPARISON.md` (architecture-variation results).
 
-**Reference**: Brandstetter, J. et al. (2025). *CliffordNet: All You Need is Geometric Algebra*. arXiv:2601.06793v2.
-
----
-
-## Table of Contents
-
-1. [Overview](#1-overview)
-2. [Vision Classification](#2-vision-classification)
-3. [NLP Pre-training](#3-nlp-pre-training)
-4. [Power Sampling Inference](#4-power-sampling-inference)
-5. [CLIP Contrastive Pretraining](#5-clip-contrastive-pretraining)
-
----
-
-## 1. Overview
-
-Every runnable entry point in this directory:
-
-| Script | Model | Domain | Description |
-|:-------|:------|:-------|:------------|
-| `train_cliffordnet.py` | `CliffordNet` | Vision | CIFAR-10/100 classification with AutoAugment |
-| `train_downsampling_techniques.py` | `CliffordNetBlock` (composed) | Vision | Ablation of 5 hierarchical downsampling variants on CIFAR-100 vs the isotropic baseline |
-| `train_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Causal language model pre-training on Wikipedia |
-| `infer_cliffordnet_nlp.py` | `CliffordNetLM` | NLP | Inference with standard and power sampling |
-| `train_clip.py` | `CliffordCLIP` | Vision-Language | CLIP-style dual encoder (both towers Clifford) |
-| `eval_clip_retrieval.py` | `CliffordCLIP` | Vision-Language | COCO 2017 zero-shot image-text retrieval eval (R@1/5/10, both directions) |
-| `filter_cc3m_clipscore.py` | `CliffordCLIP` | Data prep | Per-pair CLIP-score caption filter; writes a drop-in filtered CC3M JSONL manifest |
-| `prepare_cc3m.py` | -- | Data prep | Resumable CC3M extractor from HF Hub tar shards |
-| `resize_cc3m_to_ssd.py` | -- | Data prep | One-time resumable downscaled CC3M copy onto SSD (HDD IOPS wall) |
-
-Companion documents in this directory: `VARIATIONS_COMPARISON.md` (architecture-variation
-comparison notes).
-
-### Shared design
-
-All three architectures are **attention-free and FFN-free**. Each block follows the same pattern:
-
-```
-Input
-  +--> Detail stream (1x1 Dense)
-  +--> Context stream (depthwise conv, optionally causal)
-  |
-  v
-SparseRollingGeometricProduct(detail, context)   -- replaces attention + FFN
-  |
-  v
-GatedGeometricResidual(input, product)           -- LayerScale + DropPath
-  |
-  v
-Output = Input + residual
-```
-
-The context stream extracts local spatial/temporal patterns; the geometric product fuses them with the detail stream across multiple channel shifts, approximating the Clifford algebra product `AB = A . B + A ^ B`.
+Reference: Brandstetter, J. et al. (2025). *CliffordNet: All You Need is
+Geometric Algebra*. arXiv:2601.06793v2.
 
 ---
 
-## 2. Vision Classification
-
-**Script**: `train_cliffordnet.py`
-**Model**: `CliffordNet` (`dl_techniques/models/vision/cliffordnet/model.py`)
-
-Trains the CliffordNet vision backbone on CIFAR-10 or CIFAR-100 following the protocol from the original paper: AdamW with cosine decay + linear warmup, AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalization, and random erasing.
-
-### Architecture
-
-```
-Input (B, H, W, 3)
-  --> GeometricStem (Conv2D + BN)
-  --> L x CliffordNetBlock (DWConv context, geometric product, GGR)
-  --> GlobalAvgPool --> LayerNorm --> Dense
-  --> Logits (B, num_classes)
-```
-
-### Variants
-
-| Variant | Channels | Depth | Shifts | Global Context |
-|:--------|:--------:|:-----:|:-------|:--------------:|
-| `nano` | 128 | 12 | [1, 2] | No |
-| `lite` | 128 | 12 | [1, 2, 4, 8, 16] | No |
-| `lite_g` | 128 | 12 | [1, 2, 4, 8, 16] | Yes |
-
-### Usage
+## 1. Vision classification
 
 ```bash
-# CIFAR-10, nano variant
-python -m train.cliffordnet.train_cliffordnet \
-    --dataset cifar10 --variant nano --epochs 200 --gpu 0
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
+    --dataset cifar10 --variant nano --epochs 200 --batch-size 128 --gpu 0
 
-# CIFAR-100, lite_g (with global context)
-python -m train.cliffordnet.train_cliffordnet \
-    --dataset cifar100 --variant lite_g --epochs 300
-
-# Custom architecture
-python -m train.cliffordnet.train_cliffordnet \
-    --dataset cifar10 --variant custom \
-    --channels 192 --depth 16 --shifts 1,2,4,8 \
-    --cli-mode full --ctx-mode diff
+# custom architecture
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet \
+    --dataset cifar100 --variant custom \
+    --channels 192 --depth 16 --shifts 1,2,4,8 --cli-mode full --ctx-mode diff
 ```
 
-### Training protocol
+| Variant | Channels | Depth | Shifts | Global context |
+|---|---|---|---|---|
+| `nano` | 128 | 12 | 1,2 | no |
+| `lite` | 128 | 12 | 1,2,4,8,16 | no |
+| `lite_g` | 128 | 12 | 1,2,4,8,16 | yes |
 
-| Setting | Value |
-|:--------|:------|
-| Optimizer | AdamW (beta1=0.9, beta2=0.999) |
-| LR schedule | Cosine decay with linear warmup |
-| Default LR | 1e-3 |
-| Warmup | 10 epochs |
-| Weight decay | 0.05 (decoupled, no L2 regularizer) |
-| Augmentation | AutoAugment (CIFAR-10 policy) + random flip + pad-4/crop-32 + random erasing |
-| Normalization | Per-channel (dataset mean/std) |
+| Flag | Default | Notes |
+|---|---|---|
+| `--dataset` | `cifar100` | `cifar10` or `cifar100`. |
+| `--variant` | `nano` | `nano`, `lite`, `lite_g`, `custom`. |
+| `--epochs` | `200` | |
+| `--batch-size` | `128` | |
+| `--learning-rate` | `1e-3` | Peak LR; cosine decay + linear warmup. |
+| `--weight-decay` | `0.1` | AdamW decoupled; no L2 regularizer is added. |
+| `--warmup-epochs` | `5` | |
+| `--patience` | `30` | EarlyStopping on `val_accuracy`. |
+| `--channels` / `--depth` / `--shifts` | `128` / `12` / none | `custom` variant only. `--shifts` is comma-separated. |
+| `--cli-mode` | `full` | `inner`, `wedge`, `full`. |
+| `--ctx-mode` | `diff` | `diff` (discrete Laplacian) or `abs`. |
+| `--use-global-context` | off | |
+| `--layer-scale-init` | `1e-5` | |
+| `--stochastic-depth-rate` | `0.3` | |
+| `--dropout-rate` | `0.0` | |
+| `--random-erasing-prob` | `0.25` | |
+| `--gpu` | none | |
 
-### Key parameters
+`--image-size`, `--lr-schedule` and `--show-plots` come from the base parser
+and **are not read by this script**.
 
-| Parameter | Default | Description |
-|:----------|:--------|:------------|
-| `--dataset` | `cifar10` | Dataset (`cifar10`, `cifar100`) |
-| `--variant` | `nano` | Model variant (`nano`, `lite`, `lite_g`, `custom`) |
-| `--epochs` | 200 | Training epochs |
-| `--batch-size` | 128 | Batch size |
-| `--learning-rate` | 1e-3 | Peak learning rate |
-| `--weight-decay` | 0.05 | AdamW weight decay |
-| `--warmup-epochs` | 10 | Linear warmup epochs |
-| `--dropout-rate` | 0.0 | Dropout rate |
-| `--stochastic-depth-rate` | 0.1 | Max stochastic depth rate |
-| `--cli-mode` | `full` | Clifford components (`inner`, `wedge`, `full`) |
-| `--ctx-mode` | `diff` | Context mode (`diff` = discrete Laplacian, `abs`) |
+Augmentation is AutoAugment (CIFAR-10 policy) + random flip + pad-4/crop-32 +
+random erasing, with per-channel normalization. After training the script saves
+the final and best models, validates the serialization round trip, runs
+`ModelAnalyzer`, and writes curves.
 
-### Post-training
+Output: `results/cliffordnet_<variant>_<dataset>_<timestamp>/` with `best_model.keras`,
+`cliffordnet_<variant>_<dataset>_final.keras`, `training_summary.txt`, the
+config/history JSON, and the CSV log.
 
-After training, the script automatically:
-- Saves the final model and best checkpoint
-- Validates serialization round-trip
-- Runs `ModelAnalyzer` (weight/spectral analysis)
-- Generates training curves and evaluation metrics
+### Downsampling ablation
 
-### Downsampling-variant ablation (`train_downsampling_techniques.py`)
-
-`CliffordNetBlock` is dim-preserving, so hierarchical (multi-stage) CliffordNets have
-to be composed by hand from a custom stem, several stages of identical blocks, and an
-inter-stage downsampler. This script trains six such compositions on CIFAR-100 and
-writes a comparison CSV/JSON per run:
+`CliffordNetBlock` is dim-preserving, so a hierarchical CliffordNet must be
+composed by hand from a stem, several stages, and an inter-stage downsampler.
 
 | Variant key | Shape |
-|:------------|:------|
-| `V0_baseline_isotropic` | `CliffordNet.nano` reference: patch-2 stem, 12 isotropic blocks @ C=128, no downsampling |
-| `V1_3stage_strided_conv` | 64-128-256, strided 3x3 Conv2D downsampler |
+|---|---|
+| `V0_baseline_isotropic` | patch-2 stem, 12 isotropic blocks @ C=128, no downsampling |
+| `V1_3stage_strided_conv` | 64-128-256, strided 3x3 Conv2D |
 | `V2_3stage_avgpool` | 64-128-256, AvgPool2D(2) + 1x1 projection |
 | `V3_3stage_patch_merging` | 64-128-256, Swin-style `PatchMerging` |
-| `V4_4stage_aggressive` | 4-stage hierarchy |
-| `V5_2stage_aggressive_stem` | 2-stage, aggressive stem |
+| `V4_4stage_aggressive` | 64-128-256-512, `PatchMerging` at each transition |
+| `V5_2stage_aggressive_stem` | patch-4 stem, 128-256, depthwise-separable strided |
 
 ```bash
-# Train every variant serially
-MPLBACKEND=Agg python -m train.cliffordnet.train_downsampling_techniques \
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_downsampling_techniques \
     --variant all --epochs 100 --gpu 0
 
-# One variant, short smoke run
-MPLBACKEND=Agg python -m train.cliffordnet.train_downsampling_techniques \
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_downsampling_techniques \
     --variant V3_3stage_patch_merging --smoke-test --gpu 0
 ```
 
-The downsamplers themselves are library layers (`layers/patch_merging.py`,
-`layers/stochastic_depth.py`) — this script only composes them; it does **not**
-depend on any in-block strided Clifford variant.
+Flags: `--variant` (`all` by default), `--epochs` 100, `--batch-size` 128,
+`--learning-rate` 1e-3, `--weight-decay` 0.1, `--patience` 30,
+`--warmup-epochs` 5, `--stochastic-depth-rate` 0.1, `--layer-scale-init` 1e-5,
+`--dropout-rate` 0.0, `--smoke-test` (3 epochs, batch 32, no augmentation),
+`--skip-save`, `--gpu`.
 
 ---
 
-## 3. NLP Pre-training
+## 2. NLP pretraining
 
-**Script**: `train_cliffordnet_nlp.py`
-**Model**: `CliffordNetLM` (`dl_techniques/models/vision/cliffordnet/lm.py`)
+Causal LM on English Wikipedia (HuggingFace) or a TFDS text dataset.
+`CausalCliffordNetBlock` consumes `(B, seq_len, D)` directly; left-padded
+depthwise convolutions enforce causality, so there is no attention mask.
+Tokenizer is tiktoken GPT-2 BPE (50,257) plus CLS/SEP/PAD/MASK at 50257-50260,
+total vocabulary 50,261.
 
-Pre-trains a causal language model on English Wikipedia (HuggingFace) or TFDS text datasets. The `CausalCliffordNetBlock` layers consume the `(B, seq_len, D)` sequence directly -- the caller does no reshaping; the block resolves its own layout (see `dl_techniques/layers/geometric/clifford_block.py`). Left-only padded depthwise convolutions enforce strict autoregressive causality -- no attention mask needed.
-
-### Architecture
-
-```
-Token IDs (B, seq_len)
-  --> Token Embedding + Learned Positional Embedding
-  --> LayerNorm --> Dropout
-  --> L x CausalCliffordNetBlock    (B, seq_len, D) throughout;
-                                    left-padded DWConv, causal cumulative mean
-  --> LayerNorm --> Dropout --> Dense(vocab_size)
-  --> {"logits": (B, seq_len, vocab_size)}
-```
-
-### Variants
-
-| Variant | Channels | Depth | Shifts | Stoch. Depth |
-|:--------|:--------:|:-----:|:-------|:------------:|
-| `nano` | 128 | 12 | [1, 2] | 0.05 |
-| `mini` | 192 | 12 | [1, 2, 4] | 0.10 |
-| `base` | 384 | 18 | [1, 2, 4, 8, 16] | 0.15 |
-| `large` | 512 | 20 | [1, 2, 4, 8, 16] | 0.20 |
-| `xl` | 768 | 28 | [1, 2, 4, 8, 16] | 0.25 |
-
-### Tokenizer
-
-Uses `tiktoken` with the GPT-2 BPE encoding (50,257 base tokens) plus 4 special tokens:
-
-| Token | ID | Purpose |
-|:------|:---|:--------|
-| CLS | 50257 | Sequence start marker |
-| SEP | 50258 | Separator |
-| PAD | 50259 | Padding |
-| MASK | 50260 | Masking (for future MLM) |
-
-Total vocabulary size: 50,261.
-
-### Usage
+| Variant | Channels | Depth | Shifts | Stoch. depth |
+|---|---|---|---|---|
+| `nano` | 128 | 12 | 1,2 | 0.05 |
+| `mini` | 192 | 12 | 1,2,4 | 0.10 |
+| `base` | 384 | 18 | 1,2,4,8,16 | 0.15 |
+| `large` | 512 | 20 | 1,2,4,8,16 | 0.20 |
+| `xl` | 768 | 28 | 1,2,4,8,16 | 0.25 |
 
 ```bash
-# Wikipedia (default), nano variant
-python -m train.cliffordnet.train_cliffordnet_nlp \
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet_nlp \
     --gpu 0 --variant nano --epochs 3
 
-# TFDS dataset with focal loss
-python -m train.cliffordnet.train_cliffordnet_nlp \
-    --dataset-source tfds --dataset-name imdb_reviews --loss-type focal
-
-# Custom architecture
-python -m train.cliffordnet.train_cliffordnet_nlp \
-    --variant custom --channels 256 --depth 12 --shifts 1,2,4,8
-
-# Resume from checkpoint
-python -m train.cliffordnet.train_cliffordnet_nlp \
-    --resume results/.../checkpoints/step_0050000.keras
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet_nlp \
+    --resume results/cliffordnet_nlp/.../checkpoints/step_0050000.keras
 ```
 
-### Training protocol
+| Flag | Default | Notes |
+|---|---|---|
+| `--variant` | `nano` | plus `custom` with `--channels`/`--depth`/`--shifts`. |
+| `--epochs` | `3` | |
+| `--batch-size` | `8` | |
+| `--max-seq-length` | `512` | |
+| `--learning-rate` | `3e-4` | Warmup (10% of steps) + cosine decay, AdamW clipnorm 1.0. |
+| `--dropout-rate` | `0.0` | |
+| `--stochastic-depth-rate` | `0.1` | |
+| `--tie-word-embeddings` / `--no-tie-word-embeddings` | tied | |
+| `--cli-mode` / `--ctx-mode` | `full` / `diff` | |
+| `--use-global-context` | off | |
+| `--loss-type` | `ce` | `ce` = `MaskedCausalLMLoss`, `focal` = `FocalCausalLMLoss`. |
+| `--focal-gamma` | `1.0` | |
+| `--label-smoothing` | `0.0` | |
+| `--dataset-source` | `huggingface` | or `tfds`. |
+| `--dataset-name` | `imdb_reviews` | TFDS only. |
+| `--max-samples` | none | TFDS cap. |
+| `--max-train-samples` | none | HF cap. |
+| `--val-fraction` | `0.02` | |
+| `--min-article-length` | `0` | 0 = no filter, correct for packed CLM. |
+| `--shuffle-shards` | `4` | 1 = deterministic single-thread. |
+| `--hf-cache-dir` | none | |
+| `--seed` | `42` | On `--resume` the data seed is shifted by the initial step. |
+| `--steps-per-epoch` | none | Overrides the chunk-aware estimate. |
+| `--checkpoint-every-steps` | `25000` | Wikipedia epochs are long; checkpointing is step-based. |
+| `--analyze-every-steps` | `50000` | 0 disables. |
+| `--max-checkpoints` | `3` | Rolling window. |
+| `--resume` | none | Path to a `.keras` checkpoint. |
+| `--save-dir` | `results/cliffordnet_nlp` | **Dead flag.** It reaches `TrainingConfig.save_dir` and nothing reads it. The run directory is always `results/cliffordnet_nlp_CliffordNetLM-<variant>_<timestamp>` from `create_nlp_callbacks`. |
+| `--gpu` | none | |
 
-| Setting | Value |
-|:--------|:------|
-| Optimizer | AdamW (clipnorm=1.0) |
-| LR schedule | Warmup (10% of steps) + cosine decay |
-| Default LR | 3e-4 |
-| Weight decay | 0.01 |
-| Loss | `MaskedCausalLMLoss` or `FocalCausalLMLoss` |
-| Data | Wikipedia (streaming, no cache to avoid OOM) |
+Each checkpoint also runs a generation probe (nucleus sampling with repetition
+penalty), and step-level loss/accuracy goes to CSV.
 
-### Features
+### Inference
 
-- **Step-based checkpointing**: saves every N steps (default 25,000) instead of per-epoch, since Wikipedia epochs are very long
-- **Generation probes**: autoregressive text generation at each checkpoint to track quality over training (nucleus sampling with repetition penalty)
-- **Step-level CSV logging**: loss/accuracy logged every 100 steps
-- **Configurable loss**: standard cross-entropy (`MaskedCausalLMLoss`) or focal loss (`FocalCausalLMLoss`) for handling token frequency imbalance
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.infer_cliffordnet_nlp \
+    --checkpoint results/.../step_0050000.keras \
+    --prompt "The history of" --method power --compare
+```
 
-### Key parameters
+Power sampling optimizes the whole trajectory rather than each token greedily:
+it samples a block, then runs MCMC refinement steps that propose token swaps and
+accept them by the sequence-level score at `alpha = 1/temperature`. `max_swap`
+is the deterministic variant.
 
-| Parameter | Default | Description |
-|:----------|:--------|:------------|
-| `--variant` | `nano` | Model variant |
-| `--epochs` | 3 | Training epochs |
-| `--batch-size` | 8 | Batch size |
-| `--max-seq-length` | 512 | Maximum sequence length |
-| `--learning-rate` | 3e-4 | Peak learning rate |
-| `--loss-type` | `ce` | Loss function (`ce` or `focal`) |
-| `--dataset-source` | `huggingface` | Data source (`huggingface` or `tfds`) |
-| `--checkpoint-every-steps` | 25000 | Checkpoint interval |
-| `--analyze-every-steps` | 50000 | Weight/spectral analysis interval |
+| Flag | Default | Notes |
+|---|---|---|
+| `--checkpoint` | required | |
+| `--prompt` / `--prompts-file` | none | Mutually exclusive. |
+| `--method` | `power` | `standard`, `power`, `max_swap`. |
+| `--compare` | off | Run all three side by side. |
+| `--temperature` | `0.25` | `alpha = 1/temperature`. |
+| `--mcmc-steps` | `10` | Refinement steps per block. |
+| `--max-tokens` | `100` | |
+| `--block-num` | `8` | |
+| `--top-p` | `0.92` | |
+| `--repetition-penalty` | `1.3` | |
+| `--output-json` | none | |
+| `--gpu` | none | |
 
 ---
 
-## 4. Power Sampling Inference
-
-**Script**: `infer_cliffordnet_nlp.py`
-**Module**: `dl_techniques/models/common/power_sampling/` (was `cliffordnet/power_sampling.py`)
-
-After training `CliffordNetLM`, generate text using **power sampling** -- an inference-time method that improves reasoning and coherence without any additional training or reward models.
-
-### The problem with standard sampling
-
-Standard autoregressive decoding samples one token at a time from the model's distribution *p*. Low-temperature sampling sharpens the distribution but only at the *local* (per-token) level. This amplifies shortcuts:
-
-- Guessing instead of planning
-- Premature answers
-- Locally plausible but globally poor trajectories
-
-Low temperature asks *"How likely is this token?"* -- but reasoning is fundamentally about *"If I pick this token, how good are the futures it leads to?"*
-
-### Power sampling: trajectory-level optimization
-
-Power sampling targets the *power distribution* **p^alpha** (where alpha = 1/temperature > 1). Instead of sharpening individual token probabilities, it reweights entire trajectories to favor globally more coherent sequences.
-
-The key insight from the literature: **reasoning capabilities attributed to RL post-training (GRPO, RLHF) may already exist in the base model's distribution**. RL doesn't inject new ideas into the model -- it reshapes probability mass, making certain trajectories more likely. Power sampling achieves the same effect at inference time by amplifying high-probability trajectories through MCMC refinement.
-
-### Algorithm
-
-Three generation methods are available:
-
-| Method | Sampling from | Speed | Use case |
-|:-------|:-------------|:------|:---------|
-| `standard` | *p* (nucleus sampling) | Fast (1x) | Baseline generation |
-| `power` | *p^alpha* (MCMC) | ~160x forward passes | Best trajectory coherence |
-| `max_swap` | *p^infinity* (deterministic) | ~160x forward passes | Highest probability trajectories |
-
-**MCMC power sampling** (`power` method):
-
-1. Split generation into `block_num` blocks (default 16)
-2. For each block, generate `jump_size` tokens using low-temperature proposal sampling
-3. Run `mcmc_steps` (default 10) Metropolis-Hastings refinement steps:
-   - Pick a random position *idx* in the generated sequence
-   - Re-generate from *idx* to the end as a proposal
-   - Compute the MH acceptance ratio:
-     ```
-     log r = sum(target_log_prob_proposal) + sum(proposal_log_prob_current)
-           - sum(target_log_prob_current) - sum(proposal_log_prob_proposal)
-     ```
-     where `target_log_prob = (1/temp) * log p(token)` is the power distribution
-   - Accept with probability `min(1, exp(log r))`
-4. The `max_swap` variant accepts deterministically whenever `log r > 0` (greedy trajectory optimization, approximating *p^infinity*)
-
-### Usage
+## 3. CLIP contrastive pretraining
 
 ```bash
-# Standard nucleus sampling (baseline)
-python -m train.cliffordnet.infer_cliffordnet_nlp \
-    --checkpoint results/.../checkpoints/final.keras \
-    --prompt "The capital of France is" \
-    --method standard --gpu 0
+# CC3M smoke: ~12.5k steps. --skip-pretrain goes straight to the CLIP stage.
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip \
+    --variant mini --dataset cc3m --cc3m-root /path/to/cc3m \
+    --skip-pretrain --max-train-samples 100000 \
+    --batch-size 32 --image-size 112 --epochs 4 --gpu 0
 
-# MCMC power sampling (alpha=4)
-python -m train.cliffordnet.infer_cliffordnet_nlp \
-    --checkpoint results/.../checkpoints/final.keras \
-    --prompt "In mathematics, a prime number is" \
-    --method power --temperature 0.25 --mcmc-steps 10
-
-# Max-swap (deterministic trajectory optimization)
-python -m train.cliffordnet.infer_cliffordnet_nlp \
-    --checkpoint results/.../checkpoints/final.keras \
-    --prompt "Albert Einstein was born in" \
-    --method max_swap
-
-# Compare all three methods side-by-side
-python -m train.cliffordnet.infer_cliffordnet_nlp \
-    --checkpoint results/.../checkpoints/final.keras \
-    --prompt "The theory of relativity states that" \
-    --compare
-
-# Batch prompts from file, save results as JSON
-python -m train.cliffordnet.infer_cliffordnet_nlp \
-    --checkpoint results/.../checkpoints/final.keras \
-    --prompts-file prompts.txt --method power \
-    --output-json results.json
+# smoke with no data at all
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_clip --synthetic --gpu 0
 ```
 
-### Parameters
-
-| Parameter | Default | Description |
-|:----------|:--------|:------------|
-| `--temperature` | 0.25 | Sampling temperature; alpha = 1/temp (0.25 -> alpha=4) |
-| `--mcmc-steps` | 10 | MH refinement steps per block |
-| `--block-num` | 8 | Number of generation blocks |
-| `--max-tokens` | 100 | Maximum tokens to generate |
-| `--top-p` | 0.92 | Nucleus sampling threshold |
-| `--repetition-penalty` | 1.3 | Sign-aware repetition penalty |
-
-### Programmatic API
-
-```python
-import tiktoken
-from dl_techniques.models.common.power_sampling import (
-    PowerSampler,
-    PowerSamplingConfig,
-)
-
-# Load trained model
-model = load_model("checkpoints/final.keras")
-enc = tiktoken.get_encoding("gpt2")
-
-# Configure sampler
-config = PowerSamplingConfig(
-    temperature=0.25,     # alpha = 4
-    mcmc_steps=10,
-    block_num=8,
-    max_tokens=200,
-    # CliffordNetLM identity (was the old PowerSamplingConfig GPT-2 defaults)
-    cls_token_id=50257,
-    pad_token_id=50260,
-    special_token_ids={50257, 50258, 50259, 50260},
-    ctx_len=511,
-)
-sampler = PowerSampler(model, enc, config=config)
-
-# Generate with power sampling
-text, info = sampler.generate_text(
-    "The theory of relativity states that",
-    method="power",
-)
-print(text)
-print(f"Acceptance ratio: {info['acceptance_ratio']:.1%}")
-print(f"Time: {info['elapsed_s']:.1f}s")
-
-# Compare methods
-for method in ["standard", "power", "max_swap"]:
-    text, info = sampler.generate_text("Once upon a time", method=method)
-    print(f"\n--- {method} ---")
-    print(text[:200])
-```
-
-### Implementation notes
-
-- All sampling logic uses NumPy (not TF ops) to avoid Keras graph retraces
-- Fixed-shape input padding (511 tokens) ensures a single compiled graph for all forward passes
-- No KV-cache: each forward pass recomputes all positions. Power sampling is designed for offline/batch inference, not real-time generation
-- The MCMC acceptance criterion is the standard Metropolis-Hastings ratio adapted for autoregressive models
-
-### References
-
-1. Karan, A. & Du, Y. (2025). **Reasoning with Sampling: Your Base Model is Smarter Than You Think**. arXiv:2510.14901. [Paper](https://arxiv.org/abs/2510.14901) | [Code](https://github.com/aakaran/reasoning-with-sampling)
-2. Bou Ammar, H. et al. (2026). **Scalable Power Sampling for LLM Reasoning**. arXiv:2601.21590. [Paper](https://arxiv.org/abs/2601.21590)
-3. Brandstetter, J. et al. (2025). **CliffordNet: All You Need is Geometric Algebra**. arXiv:2601.06793v2.
-
----
-
-## 5. CLIP Contrastive Pretraining
-
-**Script**: `train_clip.py`
-**Model**: `CliffordCLIP` (`dl_techniques/models/vision_language/clip/clifford_clip.py`)
-**Data prep**: `prepare_cc3m.py`
-**Reference**: Radford, A. et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). arXiv:2103.00020.
-
-A CLIP-style dual encoder where **both towers are built from Clifford blocks** -- no attention anywhere in either the vision or the text path. The vision tower uses bidirectional `CliffordNetBlock`s over 2-D feature maps; the text tower uses `CausalCliffordNetBlock`s over `(B, seq_len, D)` so left-only depthwise context enforces autoregressive compatibility at the feature-extraction stage.
-
-### Architecture
-
-```
-Image (B, H, W, 3)                           Tokens (B, L)
-     |                                            |
-  Conv2D patch stem + BN                    Token emb + positional emb + LN
-     |                                            |
-  L x CliffordNetBlock                            |
-  (bidirectional 2-D DWConv context)              |
-     |                                      L x CausalCliffordNetBlock
-  GlobalAvgPool                             (left-padded DWConv context)
-     |                                            |
-  LayerNorm                                 (B, L, D) throughout
-     |                                            |
-  Dense(embed_dim)                          gather last token --> Dense(embed_dim)
-     |                                            |
-  L2-normalize                              L2-normalize
-            \                            /
-             cosine similarity @ exp(logit_scale)
-                        |
-             Symmetric InfoNCE loss
-             (label-smoothed, both directions)
-```
-
-### Variants
-
-Source of truth: `CliffordCLIP.MODEL_VARIANTS`. Params are counted at `image_size=160`, `context_length=64`, `vision_patch_size=4`, `vocab_size=50257`.
-
-| Variant  | Vision ch / depth / shifts | Text ch / depth / shifts | Embed dim | Params  |
-|:---------|:---------------------------|:-------------------------|:---------:|:-------:|
-| `nano`   | 128 / 12 / [1,2]           | 128 / 12 / [1,2]         | 256       | ~9.5M   |
-| `nano_g` | 128 / 12 / [1,2] +gFFN-G   | 128 / 12 / [1,2]         | 256       | ~10.3M  |
-| `mini`   | 192 / 12 / [1,2,4]         | 192 / 12 / [1,2,4]       | 384       | ~18M    |
-| `small`  | 192 / 15 / [1,2,4]         | 192 / 15 / [1,2,4]       | 384       | ~20M    |
-| `base`   | 256 / 16 / [1,2,4,8]       | 256 / 12 / [1,2,4]       | 512       | ~33M    |
-| `large`  | 384 / 20 / [1,2,4,8,16]    | 384 / 16 / [1,2,4,8]     | 768       | ~120M   |
-
-`nano` and `nano_g` are depth/shift-matched to `CliffordNet.nano` and `CliffordNetLM.from_variant("nano", ...)` so the CLIP backbone can be ablated against the vanilla classifier / LM at matched capacity. `nano_g` adds a global-context branch on the vision tower only -- the text tower stays `use_global_context=False` because `CliffordNetLM` has no global-context variant.
-
-Both towers also expose an optional pre-projection `head_dropout` gated on `dropout_rate > 0`, placed after `*_head_norm` and before the projection Dense. This mirrors the `head_dropout` hook in `CliffordNet.model` and `CliffordNetLM.lm`; at `dropout_rate=0.0` the sublayer is not materialised.
-
-### Tokenizer
-
-Uses `tiktoken` with the GPT-2 BPE encoding (50,257 tokens, English-trained). The encoder's native `eot_token` (ID 50256) doubles as both end-of-sequence and the pad sentinel. This avoids collisions with real caption tokens and matches the CLIP convention -- no extra special tokens are added.
-
-### Datasets
-
-| Dataset | Pairs | Loader | Layout |
-|:--------|:------|:-------|:-------|
-| Synthetic | any | `build_synthetic_image_text_dataset` | in-memory random tensors (smoke tests) |
-| MS-COCO 2017 | ~118 k | `load_coco2017_local_split` | `train2017/*.jpg`, `annotations/captions_*.json` |
-| CC3M | ~2.9 M | `load_cc3m_local_split` | extracted by `prepare_cc3m.py` (see below) |
-
-All loaders return a `(list[str], np.ndarray int32[N, L])` tuple -- image paths plus right-padded token IDs -- so the training script dispatches between datasets via a single `--dataset` flag. See `train.common.image_text` for the shared surface.
-
-### CC3M extractor: `prepare_cc3m.py`
-
-Streams `pixparse/cc3m-wds` tar shards from the Hugging Face Hub directly via `huggingface_hub` + stdlib `tarfile`. The `datasets.load_dataset` path is deliberately avoided because `pixparse/cc3m-wds`'s JSON sidecar column fails HF's feature-schema cast.
-
-Usage:
-
-```bash
-PYTHONPATH=src python -m train.cliffordnet.prepare_cc3m \
-    --dst /path/to/cc3m \
-    --splits validation train \
-    --progress-every 10000
-```
-
-Output layout (matching `load_cc3m_local_split`):
-
-```
-<dst>/
-  train/XX/cc3m_train_NNNNNNNN.jpg          # 256-way hash-shard
-  validation/XX/cc3m_validation_NNNNNNNN.jpg
-  train_captions.jsonl                       # one {id, caption, split} per line
-  validation_captions.jsonl
-  _prepare_cc3m_state.json                   # completed tar shard list
-```
-
-**Resumable**: two layers of safety. The state file records completed tar shards so re-running skips them. Individual JPEGs are additionally skipped if the target path already exists, so even a re-processed tar produces no duplicates. Network errors are caught per-shard and reported in the log (`errors=N`) without aborting the run -- re-run the same command to pick up any partially-failed shards.
-
-**Observed throughput**: ~120 pairs/sec on a typical home uplink. Full 2.9M extraction takes ~7 hours end-to-end, yielding ~230 GiB on disk.
-
-### Training script: `train_clip.py`
-
-Usage:
-
-```bash
-# Smoke run: 100k CC3M subset, ~12.5k steps, ~1h on RTX 4070.
-# --skip-pretrain bypasses the optional CIFAR-100 vision + Wikipedia LM
-# pretraining helpers and goes straight to single-stage CLIP training.
-PYTHONPATH=src python -m train.cliffordnet.train_clip \
-    --variant mini --dataset cc3m \
-    --batch-size 32 --context-length 64 \
-    --image-size 112 --epochs 4 --peak-lr 5e-4 \
-    --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
-    --label-smoothing 0.1 \
-    --skip-pretrain \
-    --max-train-samples 100000 --max-val-samples 5000 \
-    --save-every-steps 500 --log-every-steps 50 \
-    --probe-every-steps 500 --probe-num-pairs 512 \
-    --max-checkpoints 3 --gpu 1
-
-# Full run: 950k CC3M, ~30k steps, ~5h on RTX 4090.
-PYTHONPATH=src python -m train.cliffordnet.train_clip \
-    --variant mini --dataset cc3m \
-    --batch-size 32 --context-length 64 \
-    --image-size 112 --epochs 1 --peak-lr 5e-4 \
-    --warmup-ratio 0.03 --weight-decay 0.1 --dropout-rate 0.1 \
-    --label-smoothing 0.1 \
-    --skip-pretrain \
-    --max-train-samples 950000 --max-val-samples 5000 \
-    --save-every-steps 2000 --log-every-steps 100 \
-    --probe-every-steps 2000 --probe-num-pairs 512 \
-    --max-checkpoints 3 --gpu 0
-```
-
-CLIP training is a single contrastive pass at one configurable resolution. Two optional pretraining helpers run before CLIP training unless `--skip-pretrain` is passed: a CIFAR-100 vision pretrain (controlled by `--pretrain-vision-*` flags, including `--pretrain-vision-steps`) and a Wikipedia LM pretrain (controlled by `--pretrain-lm-*` flags, including `--pretrain-lm-steps` and `--pretrain-lm-hf-cache`). Both pretrains warm up the respective backbones; the projection heads, `logit_scale`, and the opposite tower stay frozen during each helper.
-
-### Training protocol
-
-| Setting | Value |
-|:--------|:------|
-| Optimizer | AdamW, `logit_scale` **excluded** from weight decay |
-| LR schedule | Cosine decay with linear warmup (3% of steps) |
-| Default LR | 5e-4 |
-| Weight decay | 0.1 |
-| Label smoothing | 0.1 |
-| Loss | `CLIPContrastiveLoss` (symmetric InfoNCE), `apply_temperature=False` |
-| Temperature | Learnable `logit_scale`, init 2.6592 (=> `exp(...) = 14.3`), capped at 100 |
-| Augmentation | Random crop + horizontal flip + OpenAI/CLIP normalization |
-| Image normalization | `[0.4814, 0.4578, 0.4082]` mean / `[0.2686, 0.2613, 0.2758]` std |
-
-### Key parameters
-
-| Parameter | Default | Description |
-|:----------|:--------|:------------|
-| `--variant` | `nano` | Model variant (`nano`, `nano_g`, `mini`, `small`, `base`, `large`) |
-| `--dataset` | `coco2017` | `coco2017` or `cc3m`; `--synthetic` flag overrides with in-memory random pairs |
-| `--batch-size` | 32 | Proven to fit mini on 12 GB VRAM at 112² |
-| `--context-length` | 64 | Text sequence length |
-| `--image-size` | 112 | CLIP training resolution (single-stage) |
-| `--epochs` | 10 | CLIP training epochs |
-| `--peak-lr` | 5e-4 | Peak learning rate (cosine decay + warmup) |
-| `--skip-pretrain` | flag | Skip optional CIFAR-100 vision + Wikipedia LM pretraining |
-| `--pretrain-vision-steps` | 50000 | CIFAR-100 vision pretrain steps (set 0 to skip just vision) |
-| `--pretrain-lm-steps` | 50000 | Wikipedia LM pretrain steps (set 0 to skip just LM) |
-| `--pretrain-lm-hf-cache` | `None` | Pre-downloaded HF cache dir for Wikipedia (offline runs) |
-| `--warmup-ratio` | 0.03 | Linear warmup fraction |
-| `--label-smoothing` | 0.1 | Contrastive loss label smoothing |
-| `--save-every-steps` | 2000 | Checkpoint cadence |
-| `--probe-every-steps` | 2000 | Retrieval probe cadence |
-| `--probe-num-pairs` | 512 | Probe-set size (quick signal, not full val) |
-| `--max-checkpoints` | 3 | Rolling checkpoint window |
-| `--max-train-samples` | `None` | Optional cap for budget-constrained runs |
-
-### Features
-
-- **Step-based checkpointing** (not per-epoch) -- CC3M epochs are long, a rolling `step_NNNNNNN.keras` window + `final.keras` gives fine-grained recovery
-- **Retrieval probes every N steps**: R@1/R@5/R@10 on a small held-out slice (512 pairs by default), appended to `retrieval_probes/probes.jsonl` -- curve diagnostics without burning minutes on full 5k-pair eval
-- **Early GPU binding**: parses `--gpu` from `sys.argv` **before** `import tensorflow` so `CUDA_VISIBLE_DEVICES` is set before TF claims all visible devices -- the "GPU setup error" logged late is benign and does not indicate a real failure
-- **`logit_scale` excluded from weight decay** via `optimizer.exclude_from_weight_decay(var_names=["logit_scale"])` -- without this AdamW decays the learnable temperature toward zero and kills the contrastive signal. Verify the startup log line `Excluded 'logit_scale' from AdamW weight decay.` on every run
-
-### Reference results
-
-All runs share the same mini config (18M params, batch 32, 112², label smoothing 0.1, single-stage). Retrieval R@K is computed on the respective val split at the end of training.
-
-| Run | Steps | Data | i2t R@1 | t2i R@1 | i2t R@5 | t2i R@5 | i2t R@10 |
-|:----|------:|:-----|--------:|--------:|--------:|--------:|--------:|
-| COCO-mini-v4 (baseline) | 10,000 | 32 k COCO | 0.40% | 0.48% | 1.92% | 2.40% | 3.86% |
-| CC3M smoke (plain head, old code) | 12,500 | 100 k CC3M (4 ep) | 0.46% | 0.38% | 1.58% | 1.38% | 2.64% |
-| **CC3M full (plain head)** | 29,687 | 950 k CC3M (1 ep) | **1.08%** | **1.22%** | **3.82%** | **5.14%** | **6.70%** |
-
-On a 5 k-pair val pool, random R@1 is 0.02% and random R@5 is 0.10%. The CC3M-full run's i2t R@1 is **~54× random** and R@5 is **~38× random**. Comparable per-step behavior to the COCO baseline, with CC3M's larger and more diverse pool pushing absolute numbers up meaningfully once the full budget is spent.
-
-### Projection-head A/B sweep (CC3M-smoke, 12,500 steps, 5 k val pairs)
-
-Same config as CC3M-smoke above; only ``--head-kind`` and ``--head-cli-mode`` vary. Runs performed on RTX 4090 (current hardware) for same-day apples-to-apples comparison.
-
-| Head | cli_mode | Params | i2t R@1 | t2i R@1 | i2t R@5 | t2i R@5 | i2t R@10 | t2i R@10 |
-|:----|:--------|-------:|--------:|--------:|--------:|--------:|---------:|---------:|
-| `plain` (fresh baseline) | —    | 18.04 M | 0.32%  | 0.38%  | 1.46%  | 1.94%  | 3.02% | 3.32% |
-| `mean_max` | full | 18.34 M | 0.30%  | 0.16%  | 1.42%  | 1.20%  | 2.50% | 2.42% |
-| `learned_query` | full | 18.34 M | 0.24%  | 0.44%  | 1.62%  | 1.88%  | 2.86% | 3.08% |
-| **`learned_query_residual`** *(default)* | full | 18.34 M | **0.46%** | **0.40%** | 1.50%  | 1.90%  | 2.94% | **3.38%** |
-| `learned_query_residual` | wedge | 18.19 M | 0.36%  | 0.38%  | 1.50%  | 1.40%  | 2.34% | 2.92% |
-
-**Takeaways:**
-
-- `plain` and `learned_query_residual full` are the top two heads. The residual variant matches or beats plain on 5/6 metrics, with the largest win (+0.14 pp, +44% relative) on the hardest metric (i2t R@1). It also matches the old-hardware README baseline on i2t R@1 and beats it on t2i R@5, i2t R@10.
-- `mean_max` (mean + max-pool via geometric product) loses on every metric — max-pool is the wrong second view for Clifford mixing.
-- `learned_query` (non-residual) ties plain on average but is noisy per-metric. Using the geometric product as the *sole* embedding signal underperforms using it as a residual additive term.
-- `wedge`-only cli_mode underperforms `full`; the symmetric inner-product component still contributes.
-
-The default `head_kind` is set to `learned_query_residual` with `cli_mode=full`. The LayerScale gamma (init 1e-5) means the head starts behaving like plain CLIP and lets gradients pull in Clifford content only where it measurably helps.
-
-**Healthy training diagnostics** (from the CC3M-full run):
-
-- Loss crossed `log(batch_size) = log(32) ≈ 3.47` by step 1,000 (3.4% of budget)
-- Loss descended monotonically from 3.48 to ~2.0 by step 12,000, then plateaued
-- `logit_scale` (= `exp(variable)`) bottomed at ~9.62 around step 18-20 k, then climbed back to ~9.77 by the end -- the canonical CLIP **bottom-and-climb-back** signal indicating the model has crossed from "random discrimination" to "better-than-random discrimination" (see note below)
-- Probe R@5 monotonically increased from 1.0% to 17% over the run
-
-**Note on `logit_scale` dynamics**: the gradient of the symmetric InfoNCE loss w.r.t. `logit_scale` is proportional to `(positive-pair similarity) - (mean similarity over all pairs)`. Early in training, random embeddings put this near zero or negative -- the optimizer softens the temperature to minimize loss without learning discriminative features. Once embeddings actually separate positives from negatives, the gradient flips sign and the optimizer sharpens the temperature to exploit the newfound discrimination. A `logit_scale` that falls monotonically forever is a smoking gun that the model is not learning useful structure -- it's just going maximally uncertain. The bottom-and-climb-back pattern is therefore a training-time diagnostic, not an outcome.
-
-### Operational lessons
-
-Paid for these in real training incidents -- documented here so future runs avoid them:
-
-1. **No multi-resolution curriculum (historical)**. An earlier version of this script had a low-res-to-high-res CLIP curriculum. When the curriculum bumped resolution (e.g. 112² -> 128²), the lower-res compiled kernels stayed resident while the higher-res ones compiled their own, spiking VRAM during the transition and OOM'ing three times on a 12 GB card between 160² / 128² / 112². The curriculum was nice-to-have, not load-bearing — it has been removed in favor of single-stage CLIP training at one configurable `--image-size`. If a real multi-resolution curriculum is wanted in the future, a save-model -> `clear_session()` -> load-model trick at each transition would prevent the kernel-resident OOM, but that's a non-trivial refactor.
-
-2. **`logit_scale` in weight decay is a silent killer**. AdamW's decoupled weight decay will quietly drive the learnable temperature to zero, flattening the softmax and killing the contrastive signal regardless of how good the embeddings are. Verify the startup log line on every run.
-
-3. **`.cache()` on the dataset is a RAM bomb at scale**. The default `cache_decoded=False` streams from disk. Enable `--cache-decoded` only for subsets under ~200 k samples (roughly 10-40 GB post-decode cache).
-
-4. **I/O, not compute, bounds CC3M training**. At 32 random JPEG reads per step from a SATA-class disk with a dataset that doesn't fit in page cache, both RTX 4070 (12 GB) and RTX 4090 (24 GB) bottom out at ~540 ms/step with 30-40% GPU utilization. The 4090's extra FLOPs are unreachable through this pipeline. For repeat training runs on the same dataset, the high-throughput path is to convert JPEGs to TFRecord shards (see `train.common.tfrecord`) -- sequential reads from ~256 MiB shards typically recover 3-5× speedup. One-shot runs can live with the I/O cost.
-
-### Serialization
-
-`CliffordCLIP` has full `get_config` / `from_config` / `from_variant` round-trip serialization. It is **not** exported from `dl_techniques.models.vision.cliffordnet` (that package exports only `CliffordNet` and `create_cliffordnet`) — import it from `dl_techniques.models.vision_language.clip.clifford_clip`. The training script additionally writes:
+| Flag | Default | Notes |
+|---|---|---|
+| `--variant` | `nano` | `nano`, `mini`, `small`, `base`, `large`. |
+| `--dataset` | `coco2017` | or `cc3m`; `--synthetic` overrides both with random tensors. |
+| `--coco-root` | `/media/arxwn/data0_4tb/datasets/coco_2017` | needs `train2017/`, `val2017/`, `annotations/`. |
+| `--cc3m-root` | `/media/arxwn/data0_4tb/datasets/cc3m` | output of `prepare_cc3m.py`; needs `train/`, `validation/`, `*_captions.jsonl`. |
+| `--batch-size` | `128` | 32 is the size proven to fit `mini` on 12 GB at 112^2. |
+| `--image-size` | `112` | Single stage; there is no resolution curriculum. |
+| `--context-length` | `64` | |
+| `--epochs` | `10` | |
+| `--peak-lr` | `5e-4` | Cosine decay + linear warmup. |
+| `--warmup-ratio` | `0.03` | |
+| `--weight-decay` | `0.1` | `logit_scale` is excluded from it. |
+| `--loss` | `clip` | `clip` (symmetric InfoNCE) or `siglip`. |
+| `--label-smoothing` | `0.1` | Set 0.0 to match the CLIP paper exactly. |
+| `--head-kind` | `learned_query_residual` | `plain`, `mean_max`, `learned_query`, `learned_query_residual`. |
+| `--head-cli-mode` | `full` | Clifford components in the projection head. |
+| `--vision-patch-size` | `4` | |
+| `--dropout-rate` | `0.1` | |
+| `--tokenizer-encoding` | `gpt2` | English-trained, 50257 tokens. |
+| `--text-use-global-context` | off | Global-context pooling in the text tower only. |
+| `--skip-pretrain` | off | Zeros both pretrain step counts. |
+| `--pretrain-vision-steps` | `50000` | CIFAR-100 vision pretraining; 0 disables. |
+| `--pretrain-lm-steps` | `50000` | Wikipedia LM pretraining; 0 disables. |
+| `--pretrain-vision-lr` / `-wd` / `-batch-size` | `1e-3` / `0.1` / `128` | |
+| `--pretrain-lm-lr` / `-wd` / `-batch-size` | `3e-4` / `0.01` / `8` | |
+| `--pretrain-lm-hf-cache` | none | For offline runs. |
+| `--pretrain-lm-min-article-length` | `0` | |
+| `--pretrain-lm-shuffle-shards` | `4` | |
+| `--save-every-steps` | `500` | |
+| `--log-every-steps` | `50` | |
+| `--max-checkpoints` | `3` | Rolling `step_NNNNNNN.keras` window. |
+| `--probe-every-steps` | `750` | Retrieval probe cadence; 0 disables. |
+| `--probe-num-pairs` | `512` | |
+| `--gamma-probe-every-steps` | `500` | Logs projection-head LayerScale gamma. No effect for `--head-kind plain`. |
+| `--max-train-samples` / `--max-val-samples` | none | |
+| `--cache-decoded` | off | See gotchas. |
+| `--mixed-bfloat16` | off | No LossScaleOptimizer needed; `logit_scale` stays fp32. |
+| `--seed` | `42` | |
+| `--gpu` | none | Parsed from `sys.argv` before `import tensorflow`, so the late "GPU setup error" log line is benign. |
+
+Output:
 
 ```
 results/cliffordclip_<variant>_<timestamp>/
-  checkpoints/step_NNNNNNN.keras      # rolling window + final.keras
-  retrieval_probes/probes.jsonl        # one line per probe
+  checkpoints/step_NNNNNNN.keras + final.keras
+  retrieval_probes/probes.jsonl
   tensorboard/{train,validation}/
-  training_log.csv                     # step-level loss, lr, logit_scale
-  cliffordclip_<variant>.keras         # final model at run root
-  training_summary.txt                 # final val R@K + hyperparameters
+  training_log.csv
+  cliffordclip_<variant>.keras
+  training_summary.txt
 ```
 
-### Companion CLIP tools
+`CliffordCLIP` is **not** exported from
+`dl_techniques.models.vision.cliffordnet` (that package exports `CliffordNet`
+and `create_cliffordnet` only). Import it from
+`dl_techniques.models.vision_language.clip.clifford_clip`.
 
-Three standalone scripts sit alongside `train_clip.py`. All three load a saved
-`CliffordCLIP` `.keras` checkpoint (or, for the resizer, no model at all) and match
-the trainer's preprocessing exactly.
+### Companion tools
 
 ```bash
-# COCO 2017 zero-shot retrieval eval (R@1/5/10, image->text and text->image).
-# Reuses train_clip._compute_retrieval_metrics, so eval and in-run probe numbers
-# are computed by the same function.
-CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
-    -m train.cliffordnet.eval_clip_retrieval \
-    --checkpoint results/.../checkpoints/final.keras \
-    --max-samples 1000 --gpu 1
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.eval_clip_retrieval \
+    --checkpoint results/.../checkpoints/final.keras --max-samples 1000 --gpu 1
 
-# Per-pair CLIP-score caption filter. Writes a JSONL manifest in the SAME schema
-# as <split>_captions.jsonl, so it is a drop-in --cc3m-root manifest.
-# Omit --max-samples for the full (multi-hour, user-launched) pass.
-CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
-    -m train.cliffordnet.filter_cc3m_clipscore \
+MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.filter_cc3m_clipscore \
     --checkpoint results/.../checkpoints/final.keras \
-    --out-manifest /tmp/cc3m_filtered.jsonl \
-    --threshold 0.20 --max-samples 1000 --gpu 1
+    --out-manifest /tmp/cc3m_filtered.jsonl --threshold 0.20 --gpu 1
 
-# One-time resumable downscaled CC3M copy onto SSD (see lesson 4 above).
 MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.resize_cc3m_to_ssd \
     --src-root /media/arxwn/data0_4tb/datasets/cc3m \
     --dst-root /media/arxwn/data_fast/datasets/cc3m_144 \
     --splits train validation --workers 12
 ```
 
-### Related utility: `train.common.tfrecord`
+`eval_clip_retrieval.py`'s `--image-size` (112) and `--context-length` (64)
+**must match what the checkpoint was trained with**.
 
-Generic TFRecord I/O for converting path-addressable datasets (per-sample JPEGs + metadata) to sharded TFRecord files. Not specific to CLIP -- any image-text or image-label dataset can use it. Pre-baked schemas (`IMAGE_TEXT_SCHEMA`, `IMAGE_LABEL_SCHEMA`), example builders, auto-sharded writer with sidecar manifest, and a companion `make_image_text_tf_dataset_from_tfrecord` that returns the same `{"image", "text"}` batches as the path-streaming loader so training code does not need to change to consume the faster format.
+### Gotchas
 
-Use case: once a dataset exceeds page-cache size (roughly, raw bytes > available RAM), the random-access JPEG streaming pipeline becomes I/O bound and GPU utilization collapses. TFRecord shards convert that scatter-read into a small number of sequential reads per step.
+1. **`logit_scale` in weight decay is a silent killer.** AdamW's decoupled decay
+   drives the learnable temperature to zero and flattens the softmax regardless
+   of embedding quality. Confirm the startup line
+   `Excluded 'logit_scale' from AdamW weight decay.` on every run.
+2. **`--cache-decoded` is a RAM bomb at scale.** It caches decoded uint8 tensors
+   in RAM; roughly 10-40 GB for 200k samples. Default off streams from disk and
+   scales to any dataset size.
+3. **I/O, not compute, bounds CC3M training.** At 32 random JPEG reads per step
+   from a SATA-class disk with a dataset larger than page cache, both a 12 GB
+   4070 and a 24 GB 4090 bottom out around 540 ms/step at 30-40% GPU
+   utilization. For repeat runs on the same data, convert to TFRecord shards
+   with `train.common.tfrecord` — sequential reads from ~256 MiB shards recover
+   several times the throughput. `resize_cc3m_to_ssd.py` is the cheaper fix.
+4. **There is no multi-resolution curriculum, on purpose.** An earlier version
+   raised resolution mid-run; the lower-res compiled kernels stayed resident
+   while the higher-res ones compiled, spiking VRAM and OOMing repeatedly on a
+   12 GB card. Use one fixed `--image-size`.
+
+> **Removed 2026-08-10.** The three denoising pipelines, the routing-LM trainer,
+> the COCO multi-task trainer, the depth-estimation trainer, the embedding and
+> LM U-Net trainers and the Wikipedia pretraining helper were deleted along with
+> the model modules and strided `*BlockDSv2` blocks they depended on. Recover
+> them from git history if needed.

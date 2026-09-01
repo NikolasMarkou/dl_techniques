@@ -1,1143 +1,180 @@
-# NAM Training — Implementation Log
-
-## Overview
-
-This document records the implementation of the NAM multi-task training plan (see `NAM.md` in repo root) and every fix discovered through iterative training experiments.
-
-The NAM (Neural Arithmetic Module) evaluates arithmetic expressions by parsing them into tree structures and reducing sub-expressions using fixed arithmetic operations. The model must learn 5 sub-skills: number extraction, operator classification, reduction targeting, arithmetic execution (fixed), and final result prediction.
-
-The original approach trained end-to-end on the final result only. This failed because the gradient signal from the result is too weak to teach number extraction and operator classification through 10+ layers of indirection.
-
-## Architecture
-
-### NAM Forward Pass (Single ACT Step)
-
-```
-  Expression tokens: "15 + 3"
-          |
-          v
-  +-----------------+
-  | Token Embedding  |  + numeric injection [digit_val, is_digit, op_type]
-  | + Positional Enc |
-  +-----------------+
-          |
-          v
-  +-----------------+
-  | Tree Encoder     |  (4-6 TreeTransformerBlocks)
-  | GroupAttention    |  parse expression structure
-  +-----------------+
-          |
-          v  hidden (B, L, D)
-  +-------+-------+-------------------+--------------------+
-  |               |                   |                    |
-  v               v                   v                    v
-+----------+  +----------+   +--------------+   +----------------+
-| Reduction |  | left_proj|   | NTM Memory   |   | Halt Head      |
-| Scorer    |  | right_proj|  | Read/Write   |   | (q_halt/cont)  |
-| Dense(1)  |  | Dense(D) |  | Heads        |   +----------------+
-+----------+  +----------+   +--------------+
-  |               |                   |
-  v               v                   v
-reduction_wts   left_focused       controller_out
-  (B, L)       right_focused        (B, D)
-  |               |                   |
-  |               v                   v
-  |         +----------+       +------------+
-  |         | number_   |       | op_        |
-  |         | head      |       | classifier |
-  |         | Dense(1)  |       | Dense(4)   |
-  |         | + clip    |       +------------+
-  |         +----------+             |
-  |           |     |                v
-  |           v     v           op_probs (B, 4)
-  |       left_val right_val        |
-  |        (B,1)   (B,1)            |
-  |           |     |                |
-  |           v     v                v
-  |     +-----------------------------------+
-  |     | Fixed Arithmetic (NOT learned)    |
-  |     | add, sub, mul, div                |
-  |     | soft-select by op_probs (train)   |
-  |     | hard-select argmax    (inference) |
-  |     +-----------------------------------+
-  |                    |
-  |                    v
-  |              step_result (B, 1)  <-- direct arithmetic output
-  |                    |
-  +--------------------+
-                       |
-                       v
-              +------------------+
-              | result_head      |  <-- stop_gradient on input!
-              | Dense(D+2 -> 1)  |
-              +------------------+
-                       |
-                       v
-                final_result (B, 1)
-```
-
-### Multi-Task Loss Flow
-
-```
-                        L_total
-                          |
-          +-------+-------+-------+-------+-------+
-          |       |       |       |       |       |
-          v       v       v       v       v       v
-      w=0.5   w=3.0   w=5.0   w=1.0   w=0.5  w=0.01
-          |       |       |       |       |       |
-     L_number  L_op   L_red  L_result L_valid L_ponder
-          |       |       |       |       |       |
-   log-MSE on  CE on   CE on   Huber   BCE    step
-   left_val   clamped  clamped  log-    clamped count
-   right_val  op_logits red_wts space   valid
-     vs        vs       vs      vs       vs
-   true_left  true_op  true_pos true_res true_valid
-   true_right
-
-  Gradients flow:
-  L_number ----> number_head, left/right_proj, reduction_scorer, tree_encoder
-  L_op     ----> op_classifier, controller, NTM heads, tree_encoder
-  L_red    ----> reduction_scorer, tree_encoder
-  L_result ----> result_head ONLY (stop_gradient blocks upstream)
-  L_valid  ----> validity_head ONLY (stop_gradient blocks upstream)
-```
-
-### Gradient Isolation (Critical)
-
-```
-  WITHOUT stop_gradient:                  WITH stop_gradient:
-
-  L_result                                L_result
-     |                                       |
-     v                                       v
-  result_head                             result_head
-     |                                       |
-     v                                       X  <-- gradient blocked
-  pooled + cell_result                    pooled + cell_result
-     |         |                          (frozen for result_head,
-     v         v                           but trained by L_number,
-  tree_enc  number_head                    L_op, L_red separately)
-     |         |
-  EVERYTHING gets noisy                   Sub-skills train cleanly
-  result gradients that                   without interference
-  DEGRADE sub-skill learning
-```
-
-### Smooth Curriculum Distribution
-
-```
-  Probability
-  mass
-   |
-  50%|*
-     | *        progress = 0.0 (start)
-     |  *       81% on 1-digit
-     |   *
-  25%|    *
-     |     *  .
-     |      *.  .                        progress = 0.5 (mid)
-     |   .  . *  .                       roughly uniform
-  12%| .       .  *  .
-     |.    .    .   *  .   .
-     +--+--+--+--+--+--+--+--
-      1d 1d 1- 2- 3- 4- 6- 8-
-      a/ al 2d 3d 4d 6d 8d 10d     Difficulty level
-      s  l
-
-  At progress = 1.0 (end):
-  - 67% on 6-10 digit numbers
-  - Still 10% on 1-2 digit (anti-forgetting)
-  - Every level >= 2% probability
-```
-
-### Convergence Order (Empirical)
-
-```
-  Accuracy
-  100% |          xxxxxxxxxxxxxxxxxxxxxxxxxx  reduction
-       |         x
-       |        x     ooooooooooooooooooooo  operator
-   75% |       x    oo
-       |      x   o
-       |     x  o
-   50% |    x o
-       |   xo        ......................  step_10%
-   25% |  xo       ..
-       | xo     ...        ,,,,,,,,,,,,,,,,  step_5%
-       |xo   ..        ,,,,
-    0% +--+--+--+--+--+--+--+--+--+--+-->
-       0  2K 4K 6K 8K 10K 12K 14K 16K 18K 20K  steps
-```
-
-## What Was Implemented
-
-### 1. Cell Intermediates Exposed (`cell.py`)
-
-Added `left_val`, `right_val`, and `reduction_weights` to `NAMCell` output dict. These already existed as local variables — just included them in the return.
-
-```python
-outputs = {
-    ...
-    "left_val": left_val,              # (B, 1) extracted left operand
-    "right_val": right_val,            # (B, 1) extracted right operand
-    "reduction_weights": reduction_weights,  # (B, L) sub-expression focus
-}
-```
-
-### 2. Model Forwards Cell Intermediates (`model.py`)
-
-NAM model now passes cell intermediates through as `step_left_val`, `step_right_val`, `reduction_weights`.
-
-**Critical change — `stop_gradient` on result_head inputs:**
-
-```python
-result_input = ops.stop_gradient(
-    ops.concatenate([pooled, cell_outputs["result"], cell_outputs["valid"]], axis=-1)
-)
-final_result = self.result_head(result_input)
-final_valid = self.validity_head(ops.stop_gradient(pooled))
-```
-
-Without `stop_gradient`, the result loss gradients propagate backward through the entire model and **degrade sub-skill learning**. This was the single most important architectural fix. See Run 5 and Run 6 in the experiments section below.
-
-### 3. Number Head — Removed `tanh`, Added Clamp (`cell.py`)
-
-Original: `left_val = ops.tanh(self.number_head(left_focused)) * 100.0`
-
-Problems:
-- `tanh * 100` caps at [-100, 100] — can't handle 10-digit numbers
-- For values 1-100, uses only the 1-100% range of tanh — gradient vanishing
-- Unnecessary constraint
-
-Changed to hard clamp:
-```python
-left_val = ops.clip(self.number_head(left_focused), -1e10, 1e10)
-right_val = ops.clip(self.number_head(right_focused), -1e10, 1e10)
-```
-
-The clamp allows 10-digit numbers (up to 10^10) while preventing float32 overflow when two operands are multiplied (10^10 * 10^10 = 10^20, within float32 range of ~3.4e38). Unlike tanh, the clamp has unit gradient inside the range.
-
-### 3b. Log-Compressed Result Encoding (`cell.py`)
-
-The raw arithmetic result (up to 10^20 for multiplications) fed directly into `result_encoder` → NTM memory → `state_update` blows up the internal Dense pipeline. Even with clamped operands, the multiplication result is too large to flow through the model safely.
-
-Fix — log-compress before encoding:
-
-```python
-result_compressed = ops.sign(result) * ops.log1p(ops.abs(result))
-result_embedding = self.result_encoder(
-    ops.concatenate([result_compressed, valid], axis=-1)
-)
-```
-
-The raw `result` is still returned as output for loss computation. Only the internal pipeline sees the log-compressed version, which maps any scale to a bounded range (~0-46 for 10^20).
-
-**Without this fix**, training NaN'd at step 15K when the curriculum introduced 2-3 digit numbers. With it, 100K steps complete cleanly.
-
-### 4. Enriched Data Generator (`data_generator.py`)
-
-Added `_parse_single_op()` that extracts structured labels from single-operator expressions:
-
-```python
-def _parse_single_op(expression, token_ids) -> dict:
-    # Returns: left_operand, right_operand, operator_index, operator_position
-```
-
-`generate_batch()` now returns a 5-tuple: `(input_ids, targets, validity, expressions, labels)`.
-
-**Smooth curriculum system** added via `generate_curriculum_batch()`:
-
-- 8 difficulty levels spanning 1-digit add/sub to 10-digit all-ops
-- `_curriculum_probs(progress)` computes a shifted Gaussian over levels
-- At progress=0: 81% on 1-digit expressions
-- At progress=1: concentrated on 6-10 digits but still 10% on 1-2 digits (anti-forgetting)
-- Every level always retains >= 2% probability
-
-### 5. Multi-Task Training Function (`train_nam.py`)
-
-Rewrote `_make_compiled_train_fn` with 6 loss terms, all with numerical stability clamps discovered through iterative debugging:
-
-| Loss | Description | Stability fix |
-|------|-------------|---------------|
-| `L_number` | Log-compressed MSE on `left_val`/`right_val` | `sign(x) * log1p(|x|)` for scale invariance across 1-10 digit numbers |
-| `L_operator` | CE on `op_logits` vs true operator | Logits clamped to [-30, 30] to prevent CE explosion on confident-but-wrong predictions |
-| `L_reduction` | CE on `reduction_weights` vs true operator position | Softmax probabilities clamped to [1e-7, 1.0] to prevent log(0) |
-| `L_result` | Huber in log-space on result_head output | Only trains result_head (stop_gradient on inputs). Log-space Huber with delta=2 |
-| `L_valid` | BCE on validity prediction | Sigmoid output clamped to [1e-7, 1-1e-7] to prevent log(0) |
-| `L_ponder` | Step count penalty | Regularizer |
-
-**Warmup + cosine decay LR** via `WarmupSchedule` from `dl_techniques.optimization`.
-
-**Step-result metrics**: `step_exact_acc`, `step_acc_5pct`, `step_acc_10pct` — accuracy of the cell's direct arithmetic output (not the result_head), which is the true end-to-end pipeline metric.
-
-**Digit accuracy matrix**: `_eval_digit_matrix()` evaluates a [1..10] x [1..10] x 4-ops grid at configurable intervals, showing exactly where the model succeeds and fails.
-
-### 6. Tests (`test_nam.py`)
-
-Added 10 new tests (49 total):
-- Cell forward pass: `left_val`, `right_val`, `reduction_weights` shapes
-- Model single step: `step_left_val`, `step_right_val`, `reduction_weights` shapes
-- `_parse_single_op` for all 4 operators
-- Enriched labels: correct shapes, operator indices, arithmetic consistency
-
-## Training Experiments
-
-### Run 1: NAM.md Original Weights (5K steps)
-**Settings**: `w_number=5.0, w_operator=3.0, w_reduction=1.0, result=1.0, clip=1.0`
-**Result**: All sub-skills stuck at random. L_result dominated 64% of gradient budget. Global clip_norm=1.0 with gradient norms of 30K+ reduced effective LR to ~2e-8.
-
-### Run 2: Lower Result Weight (5K steps)
-**Settings**: `w_number=5.0, w_operator=3.0, w_reduction=5.0, result=0.05, clip=1.0`
-**Result**: Same failure. w_number=5.0 still created huge gradient norms.
-
-### Run 3: Low w_number + Higher Clip (5K steps)
-**Settings**: `w_number=0.5, w_operator=3.0, w_reduction=5.0, result=0.05, clip=10.0`
-**Result**: **Breakthrough.** Reduction solved (100%), operator reached 72%, number MSE 5.6.
-
-**Key insight**: w_number must be LOW (0.5 not 5.0). High values create gradient norms that suppress all other learning via global clip.
-
-### Run 4: Result Weight Back to 1.0 (10K steps)
-**Settings**: Same as run 3 but `result=1.0`
-**Result**: L_result gradients **regressed** sub-skills. Op_acc only 50% vs run 3's 72%.
-
-### Run 5: Resume from Run 3 + Result Weight (5K steps)
-**Settings**: Resume checkpoint, `result=0.3, lr=3e-5`
-**Result**: Number MSE regressed from 5.6 to 16+. Reduction dropped from 100% to 75%. Result loss gradients destroy sub-skill learning even at moderate weight.
-
-### Run 6: stop_gradient on Result Head (10K steps)
-**Settings**: Added `ops.stop_gradient` on result_head inputs. `w_number=0.5, w_operator=3.0, w_reduction=5.0, result=1.0, clip=10.0`
-**Result**: **All sub-skills solved.** op=98%, red=100%, num_mse=1.7, op_entropy=3%. But exact_acc=0% because result_head can't learn (frozen inputs shift over training).
-
-**Key insight**: `stop_gradient` on result_head is essential. Without it, any L_result weight > 0 degrades sub-skills.
-
-### Run 9: 20K Steps — Full Pipeline (best single-op run)
-**Settings**: Same as run 6, 20K steps
-**Result**:
-- op=100%, red=100%, num_mse=0.17 (RMSE 0.41)
-- step_1%=12-19%, step_5%=52-61%, step_10%=67-80%
-- Gradient norms stable at 130-250
-
-**Convergence order**: reduction (2K) → operator (5K) → numbers (10K) → step accuracy climbs after
-
-### Run 10: Values 1-100 (20K steps, curriculum not yet implemented)
-**Settings**: `--min-val 1 --max-val 100`
-**Result**: Same convergence pattern, just slower. op=100%, red=100% by step 9K. step_10%=50% by step 12K.
-
-### Curriculum Runs: 1-digit to 10-digit
-
-After implementing the smooth curriculum, several stability issues surfaced:
-
-1. **L_valid BCE explosion** (run with curriculum, step ~6K): validity_head sigmoid output drifted to exactly 0.0 → BCE = -log(0) = inf → loss = 12.8 billion. **Fix**: clamp validity predictions to [1e-7, 1-1e-7].
-
-2. **L_operator CE explosion** (100K run, step ~15K): op_logits diverged to extreme values when curriculum introduced unfamiliar number sizes. Confident-but-wrong prediction → CE of 10,884. **Fix**: clamp op_logits to [-30, 30] before CE.
-
-3. **Eval NaN** (base variant): eval loop used `model.config.halt_max_steps=32` while training used `act_steps=2`. Over 32 steps, hidden states diverged. **Fix**: use `act_steps` for eval too.
-
-4. **Number head NaN** (after removing tanh): unbounded Dense output → float32 overflow in `_fixed_multiply`. **Fix**: `ops.clip(..., -1e10, 1e10)`.
-
-5. **Internal pipeline NaN** (100K curriculum run, step 15K): the raw arithmetic result (up to 10^20 for multiplications) flowed into `result_encoder` → memory → `state_update`. Dense layers amplified it until values went to inf → NaN. Clamping losses didn't help because the NaN originated in the forward pass, not the loss. **Fix**: log-compress the result before encoding into the internal pipeline (`result_compressed = sign(result) * log1p(|result|)`). The raw result is still returned for loss computation.
-
-### Final Run: 100K Steps with All Fixes
-
-**Settings**: `--variant base --curriculum --steps 100000 --batch-size 64 --lr 1e-4 --clip-norm 10.0 --act-steps 2 --w-number 0.5 --w-operator 3.0 --w-reduction 5.0 --result-loss-weight 1.0`
-
-**Zero NaN.** All 100K steps completed cleanly.
-
-**Training trajectory:**
-
-| Step | loss | num_mse | op | red | step_10% |
-|------|------|---------|-----|-----|----------|
-| 5K | 3.6 | 0.71 | 100% | 100% | 19% |
-| 20K | 1.0 | 0.22 | 97% | 100% | 22% |
-| 35K | 1.6 | 0.32 | 98% | 100% | 28% |
-| 50K | 7.4 | 0.46 | 91% | 100% | 23% |
-| 65K | 16.4 | 0.28 | 83% | 94% | 31% |
-| 80K | 17.4 | 0.84 | 83% | 95% | 23% |
-| 100K | 16.5 | 0.67 | 75% | 98% | 14% |
-
-**Final digit accuracy matrix — addition (10% tolerance):**
-
-```
-       1d    2d    3d    4d    5d    6d    7d    8d    9d   10d
- 1d   50%  100%    0%    0%    0%    0%    0%    0%    0%    0%
- 2d  100%  100%   25%    0%    0%    0%    0%    0%    0%    0%
- 3d    0%   50%  100%  100%    0%    0%    0%    0%    0%    0%
- 4d    0%    0%  100%  100%   75%   25%    0%    0%    0%    0%
- 5d    0%    0%    0%   25%   75%    0%   25%    0%    0%    0%
- 6d    0%    0%    0%   50%    0%    0%   50%    0%    0%    0%
- 7d    0%    0%    0%    0%    0%   25%    0%    0%    0%    0%
- 8d    0%    0%    0%    0%    0%    0%    0%    0%   25%    0%
- 9d    0%    0%    0%    0%    0%    0%    0%   75%   50%    0%
-10d    0%    0%    0%    0%    0%    0%    0%    0%    0%    0%
-```
-
-**Final digit accuracy matrix — multiplication (10% tolerance):**
-
-```
-       1d    2d    3d    4d    5d    6d    7d    8d    9d   10d
- 1d    0%   50%    0%    0%    0%    0%    0%    0%    0%    0%
- 2d   50%  100%  100%    0%    0%    0%    0%    0%    0%    0%
- 3d    0%   75%  100%   75%    0%    0%    0%    0%    0%    0%
- 4d    0%   25%  100%  100%   50%   25%    0%    0%    0%    0%
- 5d    0%    0%   25%    0%   25%   25%    0%    0%    0%    0%
- 6d    0%   25%    0%   50%   25%   50%   25%    0%    0%    0%
- 7d    0%    0%    0%   75%   50%    0%   25%    0%    0%    0%
- 8d    0%    0%    0%    0%    0%    0%    0%    0%    0%    0%
- 9d    0%    0%   25%    0%    0%    0%    0%    0%    0%    0%
-10d    0%    0%    0%    0%    0%    0%    0%    0%    0%    0%
-```
-
-**Observations:**
-
-1. **Strong diagonal band 2-4 digits** — the model solves same-size or adjacent-size problems reliably at 75-100%.
-2. **Mismatched sizes fail** — e.g., `1d × 3d` is 0% while `3d × 3d` is 100%. The number_head can't simultaneously read small and large numbers from the same focused representation well.
-3. **10-digit cliff** — the model never gets a 10-digit problem right in either operand position. The curriculum probability at end is only 25% on 8-10d — not enough exposure for the hardest cases.
-4. **Operator accuracy drops under hard data** — op went from 100% at step 5K down to 75% at step 100K. The harder the problem, the more the operator classifier gets confused.
-5. **Reduction stays stable** — 94-100% throughout.
-6. **step_1% vs step_10% gap** — the model is doing approximate computation, not exact. RMSE of operands is small but amplified through multiplication.
-
-**What works**: the multi-task training strategy with all the fixes does train. Sub-skills converge and the model handles 1-7 digit single-op arithmetic with meaningful accuracy.
-
-**Remaining limitations**: cross-scale operations, 9-10 digit extremes, and precise (1%) accuracy. These likely need more curriculum weight on hard examples, a larger model, or a different number representation (e.g., digit-by-digit instead of scalar).
-
-## Architecture Decisions
-
-### Why stop_gradient on result_head?
-
-The result_head takes `[pooled_hidden, cell_result, cell_valid]` and outputs a scalar prediction. Without stop_gradient, L_result gradients flow backward through:
-
-```
-result_head → pooled → hidden → tree_encoder → EVERYTHING
-result_head → cell_result → fixed_arithmetic → number_head → hidden → EVERYTHING
-```
-
-This creates a competing gradient signal that drowns out the surgical sub-skill supervision. Empirically, even `result_loss_weight=0.3` degrades sub-skills when stop_gradient is absent.
-
-With stop_gradient, L_result only trains the 130-parameter result_head Dense layer. The sub-skills train independently via their own losses.
-
-### Why log-compressed number loss?
-
-Raw MSE blows up for large numbers: a 10-digit prediction error of 10^9 produces MSE of 10^18. Log-compression (`sign(x) * log1p(|x|)`) makes the loss scale-invariant:
-
-- log1p(5) ≈ 1.8 (1-digit)
-- log1p(500) ≈ 6.2 (3-digit)
-- log1p(5e9) ≈ 22.3 (10-digit)
-
-All produce comparable loss magnitudes.
-
-### Why smooth curriculum over discrete phases?
-
-Discrete phases cause catastrophic forgetting — the model loses earlier skills when switched to harder data. The smooth curriculum:
-
-- Always mixes in easy examples (>= 2% probability per level)
-- Shifts gradually: at progress=0.5 all levels get meaningful probability
-- At progress=1.0, hard levels dominate but easy levels retain 5-10%
-
-## CLI Reference
-
-```bash
-# Smooth curriculum (recommended)
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
-    --variant base --curriculum \
-    --steps 100000 --batch-size 64 \
-    --lr 1e-4 --clip-norm 10.0 --act-steps 2 \
-    --w-number 0.5 --w-operator 3.0 --w-reduction 5.0 \
-    --result-loss-weight 1.0 \
-    --log-interval 5000 --eval-interval 25000 --save-interval 25000
-
-# Fixed phase (legacy)
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
-    --variant small --phase phase_1 \
-    --steps 20000 --batch-size 64 \
-    --lr 1e-4 --clip-norm 10.0 --act-steps 2 \
-    --w-number 0.5 --w-operator 3.0 --w-reduction 5.0 \
-    --result-loss-weight 1.0
-
-# Custom value range
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
-    --variant small --phase phase_1 --min-val 1 --max-val 1000 \
-    --steps 20000 --act-steps 2
-```
-
-### Key Arguments
-
-| Arg | Default | Description |
-|-----|---------|-------------|
-| `--curriculum` | off | Smooth curriculum: 1-digit → 10-digit over training |
-| `--variant` | small | Model size: tiny/small/base |
-| `--act-steps` | from config | ACT depth override (use 2 for single-op) |
-| `--w-number` | 0.5 | Number extraction loss weight (keep low) |
-| `--w-operator` | 3.0 | Operator classification loss weight |
-| `--w-reduction` | 5.0 | Reduction target loss weight (keep high) |
-| `--result-loss-weight` | 1.0 | Result head loss weight |
-| `--w-halt` | 0.5 | ACT halting BCE weight (S6). `q_halt` is trained to predict whether the current step is already within 1% relative error — the same threshold the eval path reports as `exact_acc`. Before 2026-08-15 there was NO halting loss in this file: `q_halt_logits` / `q_continue_logits` were collected into lists nothing consumed, so the head was untrained and (in the model) unread at inference, and `--halt-exploration-prob` / `halt_max_steps` had no measurable effect. `--w-halt 0` reproduces that. Only the `q_halt` arm exists: NAM halts on `q_halt > 0`, so `q_continue` is not on the decision path. |
-| `--clip-norm` | 10.0 | Global gradient clip norm |
-| `--eval-interval` | 1000 | Digit accuracy matrix eval frequency |
-| `--min-val` / `--max-val` | from phase | Override operand value range |
-
-## Next Steps for Better Performance
-
-The 100K run achieved stable training with strong performance on same-size 2-4 digit arithmetic but revealed clear bottlenecks. Here are concrete directions to close the gap, ordered by expected impact.
-
-### 1. Fix the scalar number representation (highest impact)
-
-**Problem observed:** Cross-scale operations fail (e.g., `1d × 3d` is 0% while `3d × 3d` is 100%). A single scalar from `number_head` is a poor fit for arithmetic — the network has to simultaneously support values from 1 to 10^10 through one Dense layer.
-
-**Direction:** Replace `number_head` with a **digit-level decoder** that predicts each digit position independently:
-
-```python
-# Instead of: number_head: Dense(D, 1) -> scalar
-# Use:        digit_heads: Dense(D, 10 * num_positions)
-#             + sign_head: Dense(D, 2)
-#             + magnitude_head: Dense(D, num_positions)
-```
-
-Each digit position gets its own 10-way softmax. Losses become cross-entropy per position. The scalar value is reconstructed as `sign * sum(digit_i * 10^i)` for metric computation. This is how LLMs handle numbers and it matches the tokenizer's structure.
-
-**Expected gain:** Exact 1% accuracy at all digit sizes if sub-skills converge.
-
-### 2. Curriculum re-tuning
-
-**Problem observed:** Operator accuracy degrades from 100% (step 5K) to 75% (step 100K) as curriculum advances. Reduction accuracy also wobbles (94-100%).
-
-**Direction:**
-- **Slower curriculum progression:** extend training to 200-300K steps, or cap progress at 0.8 so the hardest level still gets mixed with significant easier data.
-- **Level-aware pacing:** advance only when current-level step_10% accuracy exceeds a threshold (e.g., 80%), instead of linear time-based advancement.
-- **Flatten the final distribution:** at progress=1.0, the current Gaussian still puts ~67% on hard levels. A flatter distribution (e.g., 40% hard / 30% mid / 30% easy) should preserve more sub-skills.
-
-### 3. Extended training + more capacity
-
-**Problem observed:** Number MSE plateaus around 0.2-0.8 (RMSE ~0.45-0.9). For 1% exact accuracy, we need RMSE well below 0.1.
-
-**Direction:**
-- **Longer training:** 250-500K steps. The number extraction task never fully converged.
-- **Larger model:** base variant has hidden=256, 6 tree layers. A larger variant (hidden=512, 12 layers) would have more capacity for simultaneous scale ranges.
-- **More read heads:** currently 2 NTM read heads. 4 heads might let the model separate left/right/context/carry information.
-
-### 4. Multi-op expressions (phase 2+)
-
-Currently only single-op expressions are trained. The data generator and parser need extension to multi-op:
-
-```python
-# Expression: "3 + 5 * 2"
-# Step 0: reduce "5 * 2" -> left=5, right=2, op=*, result=10, pos=6
-# Step 1: reduce "3 + 10" -> left=3, right=10, op=+, result=13, pos=2
-```
-
-Use Python's `ast` module for precedence-correct parsing. Each ACT step gets per-step labels. `act_steps` must increase from 2 to 4-8 for multi-op. The cell already supports this via the ACT loop; only the data generator and label parsing need changes.
-
-### 5. Separate left/right number heads
-
-**Problem observed:** `number_head` is shared between left and right operand extraction. This forces one Dense layer to read two semantically different positions.
-
-**Direction:** Use two independent `Dense(D, 1)` heads. Minimal parameter cost, likely improves asymmetric cases (e.g., `3 + 15`).
-
-### 6. Relative-error loss for numbers
-
-Currently `L_number` uses log-compressed MSE. A relative-error loss would weight small and large errors proportionally to target magnitude:
-
-```python
-rel_err = (pred - target) / (abs(target) + 1.0)
-L_number = huber(rel_err, delta=0.1)
-```
-
-This directly optimizes the metric we care about (step_1%) instead of a scale-compressed proxy.
-
-### 7. Instrument gradient health per sub-skill
-
-The training log shows combined gradient norms. Per-loss gradient norms (`grad_num`, `grad_op`, `grad_red`, `grad_res`) would reveal which sub-skill is dominating at each step and let us adjust weights dynamically.
-
-### 8. Auxiliary digit-position supervision
-
-As an alternative to (1), add a cheap auxiliary loss: for each digit token in the expression, predict its numerical value through a per-token head. This gives a token-level signal that bootstraps the number extraction without changing the main architecture.
-
-### 9. Longer context for the tree encoder
-
-Currently 4-6 tree blocks. For 10-digit numbers, the encoder needs to aggregate information across 10+ digit tokens into a single focused representation. More tree layers (8-12) or a dedicated "number assembly" layer might help.
-
-### 10. Use `step_result` as the primary output
-
-The `result_head` (with `stop_gradient`) never learns to match the cell's direct arithmetic output. It's a redundant linear layer that hurts evaluation metrics. Either:
-- Drop it entirely and use `step_result` as `outputs["result"]`, or
-- Keep it but evaluate exact_acc on `step_result` (we already track `step_exact_acc` — consider making it the primary metric).
-
-### Quick-win combination
-
-For a practical next experiment that doesn't require architectural changes:
-
-```bash
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_nam \
-    --variant base --curriculum \
-    --steps 300000 --batch-size 64 \
-    --lr 1e-4 --clip-norm 10.0 --act-steps 2 \
-    --w-number 0.5 --w-operator 3.0 --w-reduction 5.0 \
-    --result-loss-weight 1.0 \
-    --log-interval 5000 --eval-interval 25000
-```
-
-Just 3x the training time with the existing recipe. Based on the 100K trajectory, this should push step_10% accuracy well above 50% on the diagonal band.
-
-For a bigger win, implement (1) — digit-level number decoder — first.
-
-## Iteration 2: Differentiable FSA (DFSA) — Epistemic Deconstruction
-
-### Root Cause Discovery
-
-An epistemic deconstruction analysis identified the fundamental bottleneck in the original NAM architecture: **Dense(D→1) cannot perform multi-digit number assembly.**
-
-The reduction_weights peak on the OPERATOR position (as trained), so `left_focused ≈ left_proj(hidden[op_pos])` — the operator token's embedding, NOT the number digits. A Dense(1) then tries to decode a multi-digit number from this single vector, which requires nonlinear positional multiplication (`digit × 10^position`) that a linear layer cannot express.
-
-**Key insight**: if you place the correct tokens in the correct place for the correct operator, the result MSE MUST be zero. Number extraction from tokens is a DETERMINISTIC operation, not a learning target.
-
-### Deterministic Number Assembly
-
-Replaced the learned number extraction (4 Dense layers: left_proj, right_proj, left_number_head, right_number_head) with `_assemble_number_from_tokens()` — a zero-parameter function:
-
-```python
-value = sum(digit_value_i × 10^position_in_number_i)
-```
-
-where `digit_value` comes from the tokenizer (token_id - 4 for ids 4-13) and `position_in_number` is derived from cumulative digit count.
-
-**Result on single-op**: 100% accuracy across ALL 400 cells of the digit matrix (all 4 operators × 10×10 digit sizes) within 2,500 training steps on the `small` variant. Zero MSE when reduction and operator are correct.
-
-### Differentiable FSA Architecture (`train_dfsa.py`)
-
-Built a minimal, fully-differentiable module designed to be frozen and embedded into larger transformer models:
-
-```
-token_ids → token_embedding + numeric_proj + pos_encoding
-  → TreeTransformerBlock × N (shared across ACT steps)
-  → reduction_scorer (softmax) → soft operator position
-  → cumsum(softmax) → soft left/right digit masks (differentiable)
-  → power(10, soft_position) → positional assembly (differentiable)
-  → op_classifier (softmax) → soft-select over 4 fixed arithmetic ops
-  → result → result_encoder → embedding for host transformer
-```
-
-**Gradient flows end-to-end**: from host loss back through result → arithmetic → number assembly → soft masks → reduction scorer → token features → host transformer.
-
-**Key design properties**:
-- Fully differentiable (no argmax, no integer indexing during training)
-- Converges to exact FSA behavior as softmax temperatures sharpen
-- Freezable once trained
-- ~2M parameters (vs 5.6M in original NAM)
-
-### Experiments Run
-
-#### Experiment 1: Dense(1) number heads (original approach)
-- **Architecture**: tree encoder → weighted sum → Dense(1) → scalar per operand
-- **Result**: 100K step_10% peaked at 22% on diagonal, 0% cross-scale
-- **Diagnosis**: Dense(1) is linear; multi-digit assembly requires nonlinear 10^i
-
-#### Experiment 2: Split left/right Dense(1) heads
-- **Architecture**: same but independent Dense(1) per operand
-- **Result**: 160K step_10% = 80% diagonal, 30% cross-scale on addition. Better but still approximate.
-- **Diagnosis**: two Dense(1) heads help cross-scale but can't achieve zero error
-
-#### Experiment 3: Relative-error Huber loss
-- **Result**: gradient vanishes for large numbers (O(1/target) scaling)
-- **Diagnosis**: log-MSE has O(log) gradient, rel-err has O(1/target). 500,000× weaker for 10-digit numbers.
-
-#### Experiment 4: Deterministic assembly (the fix)
-- **Architecture**: zero-parameter `_assemble_number_from_tokens()`
-- **Result**: **100% on all 400 cells** in 2,500 steps
-- **Diagnosis**: confirmed — number extraction is deterministic, not a learning target
-
-#### Experiment 5: DFSA without cross-position mechanism
-- **Architecture**: pointwise MLP + deterministic assembly, 6.5K params
-- **Result**: single-op step_1% = 88% in 600 steps. Multi-op red_acc stuck at 25%.
-- **Diagnosis**: pointwise MLP can't learn PEMDAS (can't compare operators across positions)
-
-#### Experiment 6: DFSA with generic attention encoder
-- **Architecture**: 2-layer MultiHeadAttention + deterministic assembly, 668K params
-- **Result**: step_1% = 88% but red_acc stuck at 25%, op_acc stuck at 47%
-- **Diagnosis**: generic attention helps number assembly but doesn't crack PEMDAS
-
-#### Experiment 7: DFSA with tree transformer
-- **Architecture**: 3 TreeTransformerBlock + deterministic assembly, 2M params
-- **Result at 200K steps**: single-op red_acc ~30% (stable with w_reduction=20). Multi-op red_acc collapses from 30% → 8% over training.
-- **Diagnosis**: tree transformer CAN parse structure but the reduction scorer (Dense(1) on per-token features) scores positions independently — it can't express "this * is higher precedence than that +"
-
-### Key Findings
-
-1. **Number extraction is solved**: deterministic assembly from tokenizer gives 100% accuracy, zero parameters needed.
-
-2. **PEMDAS precedence is the remaining bottleneck**: all architectures tried (MLP, generic attention, tree transformer) fail to learn operator precedence for multi-op. The reduction scorer is a pointwise function that can't compare operators across positions.
-
-3. **The scaling laws hold**: for ~2M params, the Chinchilla-optimal budget is ~40M tokens (40K steps). Our 200K steps at 96:1 ratio was adequate. The issue is architectural, not data/compute.
-
-4. **Differentiable assembly works**: `cumsum(softmax)` → soft masks → `power(10, x)` → weighted sum gives fully differentiable number assembly with gradient flow end-to-end.
-
-5. **w_reduction must be high (≥20)**: the soft assembly produces good results even with imprecise reduction, masking the credit assignment signal. High w_reduction forces position accuracy.
-
-### PEMDAS Precedence: The Hardest Problem
-
-#### What was tried and failed
-
-**8 separate approaches** to learn operator precedence via gradient descent:
-
-| # | Approach | red_acc | Why it failed |
-|---|----------|---------|---------------|
-| 1 | Dense(1) on pointwise MLP features | 25% | Can't compare operators across positions |
-| 2 | Dense(1) on generic 2-layer attention features | 25% | Attention helps assembly but not precedence |
-| 3 | Dense(1) on tree transformer features | 30% | Tree learns constituency but scorer can't read it |
-| 4 | g_attn neighbor tightness signal added to scores | 0% | CKY backprop gradient explosion (mean grad 7-14) |
-| 5 | Hard operator-only mask on reduction_weights | 0% | Breaks cumsum-based soft left/right masks |
-| 6 | Soft operator bias (+5.0) on reduction scores | 30% | Credit assignment: soft assembly works around bad reduction |
-| 7 | Skip connection (raw numeric features to scorer) | 13% | Feature dilution not the bottleneck |
-| 8 | w_reduction=20 + staged curriculum (single-op first) | 30% stable | Prevents collapse but doesn't improve |
-
-**Root cause**: the differentiable assembly (cumsum → soft masks → power(10) → weighted sum) produces good arithmetic results EVEN WHEN reduction_weights point to the wrong position. The loss goes down without the model learning correct precedence — a classic **credit assignment failure**.
-
-#### The solution: hardcoded PEMDAS
-
-PEMDAS is a DETERMINISTIC rule, not a learning target. The reduction scores are computed directly from token IDs:
-
-```python
-# * (tid=16) and / (tid=17) → score 10.0 (high precedence)
-# + (tid=14) and - (tid=15) → score 5.0 (low precedence)
-# All other tokens → score 0.0
-# Leftmost tie-breaking: -0.01 × position
-scores = high_prec * 10.0 + low_prec * 5.0 - 0.01 * position
-```
-
-**Result**: 100% reduction accuracy from step 0. No training needed. The softmax with scores 10.0 vs 5.0 vs 0.0 correctly peaks at the highest-precedence leftmost operator with 99%+ probability mass.
-
-**Verified** on complex multi-op expressions including "2906 + 6 / 82 * 75 - 3" (4 operators, correctly selects / at position 10).
-
-#### Key metric bug found and fixed
-
-The training metric compared the LAST ACT step's reduction_weights against the FIRST step's target. The last step sees a fully-reduced expression (e.g., "13") with NO operators → reduction_weights is garbage → metric shows 0% even when step 0 is 100% correct. Fixed by returning step 0 outputs for metrics.
-
-## Iteration 3: DFSA with Teacher-Forced Multi-Step
-
-### Architecture
-
-```
-token_ids (B, L)
-    │
-    ├── token_embedding × √D + numeric_proj([digit_val, is_digit, op_type, is_op])
-    │       + positional_encoding
-    │
-    ├── TreeTransformerBlock × 3 (CKY constituency parsing)
-    │       → tree-encoded features (B, L, D) + g_attn constituency matrix
-    │
-    ├── PEMDAS reduction (DETERMINISTIC from token IDs)
-    │       → reduction_weights peaked on correct operator (99%+ mass)
-    │
-    ├── Soft left/right masks (cumsum of reduction_weights, DIFFERENTIABLE)
-    │       → left_mask, right_mask for digit grouping
-    │
-    ├── Differentiable number assembly (power(10, soft_position), DIFFERENTIABLE)
-    │       → left_val, right_val — exact when reduction is correct
-    │
-    ├── Operator classification (softmax, LEARNED via tree features)
-    │       → op_probs → soft-select over 4 fixed arithmetic ops
-    │
-    ├── Fixed arithmetic (add, sub, mul, div — NOT learned)
-    │       → result (B, 1)
-    │
-    └── Result encoder (Dense(D) — LEARNED interface to host transformer)
-            → result_embedding (B, D)
-```
-
-### Multi-op support (teacher-forced)
-
-- **ACT loop**: `reduce_step()` called `act_steps` times (default 4)
-- **Per-step teacher forcing**: each step receives updated token_ids (expression after prior reductions, from `prepare_per_step_labels()`)
-- **Per-step loss**: L_reduction and L_operator supervised per step with validity mask
-- **PEMDAS data generator**: `_parse_multi_op()` produces correct reduction order via AST walk
-
-### Limitations discovered
-
-This architecture had two critical flaws that made multi-op arithmetic fail:
-
-1. **Cumsum masking grabs wrong operands**: for `"3 + 5 * 2"` with `*` selected, `left_mask = (1 - cumsum(reduction_weights)) * is_digit` grabbed ALL digits left of `*` → `left_val = 35` (should be 5). Teacher forcing masked this during training by providing pre-simplified tokens, but the forward pass was fundamentally wrong for multi-op.
-
-2. **Softmax sharpness asymmetry**: PEMDAS scores `10.0` for `*/` and `5.0` for `+-` created operator probability 0.9997 vs 0.955. The 4.5% leakage for `+-` corrupted the power-of-10 number assembly, causing 33% error on 5-digit addition.
-
-3. **No cross-step gradient flow**: teacher forcing meant each step was independent. The final result loss couldn't propagate back to improve earlier steps' operator classification.
-
-4. **Inference required oracle**: at inference, there were no pre-computed intermediate tokens, so multi-op didn't work without teacher forcing.
-
-## Iteration 4: Recursive Re-tokenization (Current)
-
-### Methodology: Epistemic Deconstruction
-
-The root cause analysis used a Bayesian hypothesis tracking protocol. Four hypotheses were seeded with priors, then updated with evidence from numerical simulations, code tracing, and controlled experiments.
-
-#### Hypothesis tracking
-
-| ID | Hypothesis | Prior | Final Posterior | Status |
-|----|-----------|-------|----------------|--------|
-| H1 | Softmax sharpness asymmetry in PEMDAS scores | 0.55 | **0.93** | CONFIRMED |
-| H2 | Power-of-10 gradient instability | 0.20 | 0.13 | WEAKENED (downstream of H1) |
-| H3 | Int32 overflow in label generation | 0.10 | 0.18 | CONFIRMED (secondary, 10-digit only) |
-| H4 | Insufficient training (needs more steps) | 0.15 | **0.03** | REFUTED |
-
-#### Key evidence that confirmed H1
-
-Numerical simulation traced the exact error chain for `"15 + 3"`:
-
-```
-Score 5.0 (addition):
-  operator probability = 0.955 (not 1.0)
-  left_mask leakage to right-side digits = 4.5%
-  cumsum gives total_digits = 1.973 (not 2.0)
-  power_of_10 at tens digit = 0.973 (not 1.0)
-  10^0.973 = 9.33 (not 10.0)
-  assembled "15" = 14.27 (4.9% error)
-  
-Score 10.0 (multiplication):
-  operator probability = 0.9997
-  assembled "15" = 14.995 (0.04% error)
-```
-
-This explained the eval pattern exactly: `*/` at 100%, `+-` at 0% for 3+ digits.
-
-Parametric sweep across digit sizes and scores:
-
-| Digits | Score=5 error | Score=10 error | Score=15 error | Score=20 error |
-|--------|--------------|----------------|----------------|----------------|
-| 1 | 0.3% | 0.002% | 0.000% | 0.000% |
-| 3 | 14.2% | 0.11% | 0.001% | 0.000% |
-| 5 | 33.2% | 0.31% | 0.002% | 0.000% |
-| 10 | 70.8% | 1.15% | 0.008% | 0.000% |
-
-H4 (insufficient training) was refuted because the error is deterministic from hardcoded constants — no amount of training can fix a score of 5.0.
-
-#### Discovery of the cumsum multi-op bug
-
-Separate from the sharpness issue, tracing `reduce_step` on `"3 + 5 * 2"` revealed:
-
-```python
-cum_op_prob = cumsum(reduction_weights)  # ramps 0→1 across sequence
-left_mask = (1 - cum_op_prob) * is_digit  # everything LEFT of selected op
-```
-
-For `*` at position 7: `left_mask` includes digit `3` at position 1 AND digit `5` at position 5. The assembled left operand is `35`, not `5`. This is architecturally unfixable with cumsum-based masking — it's the wrong primitive for multi-op.
-
-### Solution: Recursive Single-Op Reduction
-
-Each reduction step now operates on a single `<number> <op> <number>` sub-expression extracted via segment-based adjacent masking, computes the result, then re-tokenizes the sequence by replacing the consumed sub-expression with a placeholder that carries the result value (with gradients) into the next step.
-
-#### Architecture
-
-```
-multi_reduce(token_ids, max_steps=3):
-
-  Step 1: "3 + 5 * 2"
-    ├── PEMDAS scoring → selects * (score 20 > + score 15)
-    ├── op_cumsum = [0,0,0,1,1,1,1,2,2,2,2]
-    │   selected_cum = 2
-    ├── Adjacent masking:
-    │   left_mask  = (op_cumsum == 1) & is_digit → digit 5 ONLY
-    │   right_mask = (op_cumsum == 2) & (pos > op) & is_digit → digit 2 ONLY
-    ├── _soft_assemble → left=5, right=2 (EXACT, zero error)
-    ├── op_classifier → softmax → soft-select → result=10
-    └── _retokenize:
-        ├── Clear "5 * 2" + adjacent spaces → PAD
-        ├── Place RESULT_PLACEHOLDER (token 21) at operator position
-        └── value_buffer[op_pos] = 10.0 (carries gradient from result)
-
-  Step 2: "3 + [PAD] [PAD] [PAD] [RES] [PAD] [PAD] [PAD]"
-    ├── PEMDAS scoring → selects + (only operator remaining)
-    ├── Adjacent masking:
-    │   left  = digit 3 (from tokens)
-    │   right = RESULT_PLACEHOLDER (buffer_active=1)
-    ├── _assemble_with_bypass:
-    │   left  = _soft_assemble(digits) = 3
-    │   right = value_buffer[op_pos] = 10.0 (WITH gradients from step 1)
-    ├── op_classifier → + → 3+10 = 13
-    └── _retokenize: replace remaining sub-expression
-
-  Step 3: No operators remain → pass-through result (13)
-  
-  Final result: 13 ✓
-  Gradient chain: Loss → result_step2 → right_val_step2 (=result_step1)
-                  → op_probs_step1 → tree_encoder ✓
-```
-
-#### Component details
-
-**1. Adjacent masking via `op_cumsum`**
-
-Replaces cumsum-of-softmax. The cumulative count of operators in the token sequence defines segments:
-
-```python
-op_cumsum = cumsum(cast(is_operator, int32))  # [0,0,0,1,1,1,1,2,2,2,2]
-selected_cum = op_cumsum[op_pos]               # e.g. 2 for *
-
-left_mask  = (op_cumsum == selected_cum - 1) & is_value  # segment before op
-right_mask = (op_cumsum == selected_cum) & (pos > op_pos) & is_value  # segment after op
-```
-
-Verified on 6 test cases: single-op, 2-op, 3-op, multi-digit, cross-scale. All give exact adjacent operands.
-
-**2. Value buffer gradient bypass**
-
-```python
-value_buffer: (B, L) float  — stores computed results at RESULT_PLACEHOLDER positions
-buffer_active: (B, L) float — marks which positions have buffer values
-```
-
-When `_assemble_with_bypass` encounters a masked position with `buffer_active=1`, it reads `value_buffer` directly instead of assembling from digit tokens:
-
-```python
-has_buffer = sum(mask * buffer_active)  # >0.5 if buffer value present
-val = where(has_buffer > 0.5, buffer_val, digit_assembled_val)
-```
-
-Gradient flows: `d(val)/d(value_buffer) = mask * buffer_active`, and `value_buffer` was written as `result * one_hot(op_pos)`, so `d(value_buffer)/d(result) = one_hot(op_pos)`. End-to-end chain is intact.
-
-Verified with TF GradientTape: step 1 op_logits receive gradient magnitude 12.4 from step 2's result loss. 29/29 trainable variables get nonzero gradients.
-
-**3. Re-tokenization (`_retokenize`)**
-
-After each reduction:
-- Clears consumed positions (left operand digits + operator + right operand digits + adjacent spaces) to PAD (token 0)
-- Places `RESULT_PLACEHOLDER` (token 21) at the operator position
-- Stores result float in `value_buffer` at that position
-- Updates `buffer_active` mask
-
-Token modifications are non-differentiable (integer ops on token_ids). Value buffer update IS differentiable (float assignment via `result * one_hot`).
-
-**4. Pass-through for fully-reduced expressions**
-
-When no operators remain in the token sequence, the step's result is replaced with the prior step's result:
-
-```python
-has_ops = cast(sum(is_operator) > 0.5, float32)  # (B, 1)
-out["result"] = has_ops * out["result"] + (1 - has_ops) * last_valid_result
-```
-
-Without this, `reduce_step` on a fully-reduced expression produces garbage (no operator to select, softmax over empty set). The pass-through ensures the final output is always the last meaningful reduction.
-
-A NaN safety fallback also adds uniform scores when no operators exist, preventing `softmax(all -inf)`.
-
-#### Additional fixes
-
-- **PEMDAS scores 20/15** (was 10/5): both operator types get >0.9999 softmax probability, <0.003% assembly error at any digit size, 99.3% correct PEMDAS ordering for multi-op
-- **Int32 overflow**: `int(d) * 10 ** p` in `data_generator.py` prevents numpy int32 overflow for 10-digit operands in label preparation
-- **num_mse diagnostic**: now compares step-0 values to step-0 labels (was comparing last step to first step)
-
-### Training
-
-```bash
-CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src python -m train.nam.train_dfsa \
-    --hidden-size 256 --num-tree-layers 3 --num-heads 8 \
-    --max-len 128 --act-steps 3 \
-    --steps 20000 --batch-size 64 --lr 1e-4 \
-    --clip-norm 10.0 --warmup-steps 1000 \
-    --w-operator 3.0 --w-reduction 5.0 --result-loss-weight 1.0 \
-    --curriculum-cap 0.8 --multiop-start-step 0 \
-    --gpu 1 --save-dir results/nam/dfsa_recursive
-```
-
-**Training trajectory:**
-
-| Step | loss | num_mse | op | red | step_1% | step_10% |
-|------|------|---------|-----|-----|---------|----------|
-| 2K | 3.09 | 0.0000 | 1.000 | 1.000 | 0.906 | 0.922 |
-| 4K | 0.87 | 0.0000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| 10K | 2.23 | 0.0000 | 1.000 | 1.000 | 0.969 | 1.000 |
-| 20K | 14.48 | 0.0000 | 1.000 | 1.000 | 0.969 | 0.969 |
-
-Note: `num_mse=0.0000` throughout — adjacent masking gives exact operand extraction with zero assembly error. Loss increases at later steps due to curriculum progression introducing larger numbers where even correct results have larger Huber residuals in log-space.
-
-### Evaluation Results
-
-**Single-op digit accuracy matrix (20K) — all four operations, 1-10 digits:**
-
-400/400 cells at 100% (10% tolerance). Every operator × digit-size combination evaluates correctly.
-
-**Multi-op comprehensive eval (post-training, 1% tolerance):**
-
-| Test | Samples | Accuracy |
-|------|---------|----------|
-| 2-op, all 16 operator combos (×25 each) | 400 | **400/400 (100%)** |
-| 3-op, random (1-50 operands) | 200 | **200/200 (100%)** |
-| PEMDAS ordering (handpicked where order matters) | 14 | **14/14 (exact)** |
-| Edge cases (0, fractions, result=0, large) | 12 | **12/12** |
-| Large multi-op (results up to 100K) | 6 | **6/6 (exact)** |
-| Single-op, all ops × 8 digit sizes (×20 each) | 640 | **640/640 (100%)** |
-| **Total** | **1272** | **1272/1272 (100%)** |
-
-**PEMDAS correctness (selected cases):**
-
-```
-3 + 5 * 2          = 13.00    pred=13.00    OK
-10 - 2 * 3         = 4.00     pred=4.00     OK
-2 + 3 * 4 - 1      = 13.00    pred=13.00    OK
-10 * 2 + 3 * 4     = 32.00    pred=32.00    OK
-99 - 11 * 9         = 0.00     pred=0.00     OK
-1 + 0 * 99          = 1.00     pred=1.00     OK
-100 / 10 / 2        = 5.00     pred=5.00     OK
-```
-
-### Properties
-
-| Property | Value |
+# train/nam — Neural Arithmetic Module
+
+Trains models that evaluate arithmetic expression strings (`"(3 + 5) * 2"`) by
+repeatedly reducing one sub-expression at a time. Model code lives in
+`src/dl_techniques/models/neural_computer/nam/` (`NAM`, `NAMConfig`,
+`ArithmeticTokenizer`); the DFSA variants are defined in this directory, in
+`train_dfsa.py`.
+
+## Read this before spending GPU hours
+
+**The DFSA arithmetic path has zero learned parameters.** In `train_dfsa.py`,
+operator identity (`token_id - 14`), PEMDAS + parenthesis precedence, adjacent
+operand masking, digit-to-number assembly (`digit x 10^pos`), the four
+arithmetic ops, and re-tokenization between steps are all hardcoded. A
+randomly-initialised `DifferentiableFSA` already evaluates expressions exactly.
+Training it changes the tree encoder, whose output the arithmetic path does not
+consume. If you want a correct calculator, run `eval_dfsa.py` against an
+untrained model and stop.
+
+Training `train_dfsa.py` / `train_dfsa_ste.py` is only useful if you are working
+on the *learned* pieces: the tree encoder, the STE gradient path, or the
+learned residual scorer (`train_dfsa_ste.py`, gated by `--alpha-max`).
+
+`train_nam.py` trains the older, fully-learned `NAM` model. It does learn, but
+scalar number regression through a `Dense(D, 1)` head is the known bottleneck —
+accuracy degrades sharply as operand digit count grows.
+
+## Scripts
+
+| Script | What it does |
 |---|---|
-| Parameters | ~2M (vs 5.6M original NAM) |
-| Reduction accuracy | 100% (hardcoded PEMDAS) |
-| Number assembly | Exact (op_cumsum adjacent masking, zero error) |
-| Operator classification | 100% (learned, from tree encoder features) |
-| Gradient flow | End-to-end across all reduction steps via value buffer |
-| Inference | Self-contained (no teacher forcing / oracle needed) |
-| Max digits per operand | 10 (float32 precision limit) |
-| Max operators | `act_steps` (default 3, configurable) |
-| Operators | +, -, *, / with standard PEMDAS precedence |
-| Speed | 6.3 steps/sec on RTX 4070 (batch=64, act_steps=3) |
+| `train_nam.py` | Multi-task training of the learned `NAM` model (number, operator, reduction, halting, result heads). |
+| `train_dfsa.py` | Trains `DifferentiableFSA` — deterministic arithmetic, learned tree encoder. |
+| `train_dfsa_ste.py` | `DifferentiableFSA` with `use_ste=True` + learned residual scorer, ramped in after a phase-1 warmup. |
+| `eval_dfsa.py` | Evaluation suite: single-op, 2-op and 3-op flat, parenthesised, PEMDAS-vs-paren, edge cases. Prints per-group pass rates. No training. |
+| `test_extreme.py` | Stress cases: big operands, deep nesting. No training. |
+| `create_dataset.py` | Writes expression dataset files to disk. Nothing else reads them — the trainers generate batches on the fly via `data_generator.py`. |
+| `data_generator.py` | 13 curriculum difficulty levels (8 single-op, 3 multi-op, 2 parenthesised). Library module, not runnable. |
 
-### What is learned vs what is hardcoded
+## Run
 
-| Component | Learned/Hardcoded | Parameters |
+```bash
+# Evaluate the deterministic DFSA (no checkpoint needed)
+MPLBACKEND=Agg .venv/bin/python -m train.nam.eval_dfsa --gpu 0
+
+# Train the DFSA tree encoder
+MPLBACKEND=Agg .venv/bin/python -m train.nam.train_dfsa \
+    --steps 20000 --batch-size 64 --act-steps 4 --gpu 0
+
+# Train the STE variant
+MPLBACKEND=Agg .venv/bin/python -m train.nam.train_dfsa_ste \
+    --steps 20000 --phase1-steps 2000 --alpha-max 0.1 --gpu 0
+
+# Train the learned NAM with the smooth curriculum
+MPLBACKEND=Agg .venv/bin/python -m train.nam.train_nam \
+    --variant small --curriculum --steps 100000 --gpu 0
+```
+
+## CLI — `train_nam.py`
+
+| Flag | Default | Notes |
 |---|---|---|
-| Token embedding | Learned | vocab_size × D |
-| Numeric projection | Learned | 4 × D |
-| Positional encoding | Fixed (sinusoidal) | 0 |
-| Tree transformer (3 blocks) | Learned | ~1.5M |
-| PEMDAS reduction | **Hardcoded** (scores 20/15) | 0 |
-| Adjacent operand masking | **Hardcoded** (op_cumsum segments) | 0 |
-| Number assembly | **Hardcoded** (deterministic power-of-10) | 0 |
-| Value buffer bypass | **Hardcoded** (read/write at placeholder positions) | 0 |
-| Re-tokenization | **Hardcoded** (clear + placeholder insertion) | 0 |
-| Fixed arithmetic | **Hardcoded** | 0 |
-| Operator classifier | Learned | D × 4 |
-| Result encoder | Learned | 2 × D |
+| `--variant` | `tiny` | `tiny`, `small`, `base`. |
+| `--phase` | `phase_1` | `phase_1`..`phase_5`. Ignored when `--curriculum` is set. |
+| `--curriculum` | off | Smooth curriculum; difficulty rises over training while easier levels stay mixed in. Overrides `--phase`, `--min-val`, `--max-val`. |
+| `--curriculum-cap` | `0.8` | Caps curriculum progress. At 1.0 the sampler puts ~67% of mass on the three hardest levels and operator accuracy regresses late in training. |
+| `--steps` | `10000` | |
+| `--batch-size` | `64` | |
+| `--min-val` / `--max-val` | phase config | Operand range override. |
+| `--lr` | `1e-4` | |
+| `--weight-decay` | `1e-5` | |
+| `--clip-norm` | `10.0` | Global norm clip — this is why loss weights interact. |
+| `--warmup-steps` | `1000` | |
+| `--act-steps` | model config | ACT depth override. Use 2-4 for early phases. |
+| `--ponder-cost` | `0.01` | |
+| `--result-loss-weight` | `1.0` | |
+| `--valid-loss-weight` | `0.5` | |
+| `--w-number` | `0.5` | Number-extraction loss weight. Keep low; large values dominate the global clip and starve the operator and reduction heads. |
+| `--number-loss-type` | `log_mse` | `log_mse`, `rel_err`, `combined`. `rel_err` alone has weak gradient at large magnitudes. |
+| `--number-loss-delta` | `0.1` | Huber delta; used only for `rel_err` / `combined`. |
+| `--w-operator` | `3.0` | Operator CE weight. |
+| `--w-reduction` | `5.0` | Reduction-target CE weight. Reduction must converge first — everything downstream depends on it. |
+| `--w-halt` | `0.5` | ACT halting BCE weight. `0.0` gives the head no gradient at all. |
+| `--log-interval` | `100` | |
+| `--save-interval` | `2000` | |
+| `--eval-interval` | `1000` | Digit-accuracy matrix eval cadence. |
+| `--log-grad-norms` | off | Per-sub-skill gradient norms. ~5x backward cost. Debug only. |
+| `--checkpoint` | none | Resume path. Step and best-loss are restored from a JSON sidecar next to the weights. |
+| `--save-dir` | `results` | Run root. |
+| `--gpu` | none | GPU index. |
 
-### What changed vs iteration 3
+## CLI — `train_dfsa.py`
 
-| Aspect | Iteration 3 (teacher-forced) | Iteration 4 (recursive) |
-|--------|------------------------------|-------------------------|
-| Multi-op approach | Teacher-forced per-step tokens | Recursive re-tokenization with value buffer |
-| Operand masking | cumsum-of-softmax (broken for multi-op) | op_cumsum segments (exact) |
-| Gradient flow | Per-step only (no cross-step) | End-to-end via value buffer |
-| num_mse | 6-18 (wrong operands for multi-op) | 0.0000 (exact assembly) |
-| Multi-op eval | Not tested | **1272/1272 (100% at 1% tol)** |
-| Inference | Requires oracle tokens | Self-contained |
-| PEMDAS scores | 10/5 (add/sub broken at 3+ digits) | 20/15 (all exact) |
+| Flag | Default | Notes |
+|---|---|---|
+| `--hidden-size` | `64` | |
+| `--num-tree-layers` | `2` | Tree transformer blocks. |
+| `--num-heads` | `4` | |
+| `--max-len` | `64` | Token budget per expression. |
+| `--act-steps` | `1` | Reduction steps. 1 = single-op only, 4 = multi-op. |
+| `--steps` | `5000` | |
+| `--batch-size` | `64` | |
+| `--lr` | `1e-4` | |
+| `--weight-decay` | `1e-5` | |
+| `--clip-norm` | `10.0` | |
+| `--warmup-steps` | `500` | |
+| `--w-operator` | `3.0` | |
+| `--w-reduction` | `20.0` | |
+| `--result-loss-weight` | `1.0` | |
+| `--curriculum-cap` | `0.8` | |
+| `--multiop-start-step` | `0` | Staged training: only single-op levels before this step. |
+| `--log-interval` | `100` | |
+| `--eval-interval` | `1000` | |
+| `--save-interval` | `2000` | |
+| `--save-dir` | `results` | |
+| `--gpu` | none | |
 
-### Open directions
+## CLI — `train_dfsa_ste.py`
 
-1. **Embedding integration**: the `result_encoder` produces (B, D) embeddings. To embed in a host transformer, add input/output projections.
+Same as `train_dfsa.py` except: no `--w-reduction`, no `--multiop-start-step`,
+defaults `--act-steps 4`, `--steps 20000`, `--log-interval 200`,
+`--eval-interval 2000`, `--save-interval 5000`, plus:
 
-2. **Longer expressions**: increase `act_steps` beyond 4 for expressions with 5+ operators. The architecture supports it; only needs training data and evaluation.
+| Flag | Default | Notes |
+|---|---|---|
+| `--phase1-steps` | `5000` | Steps training `op_classifier` only. 0 to skip. |
+| `--alpha-max` | `0.1` | Hard cap on the residual-scorer mixing weight. `alpha=0` makes the forward pass bit-identical to `train_dfsa.py`. |
+| `--alpha-warmup-steps` | `5000` | Linear ramp of alpha, 0 -> `alpha-max`, after phase 1. |
+| `--w-consistency` | `0.5` | Weight of the residual/PEMDAS KL consistency loss. |
 
-3. **Negative intermediate results**: expressions like `3 - 10 * 2 = -17` produce negative intermediates. The sign handling in `_soft_assemble` and value buffer should be verified for these cases.
+## CLI — `eval_dfsa.py` and `test_extreme.py`
 
-4. **Straight-through estimator**: to restore gradient flow to the tree encoder (for host transformer fine-tuning), use hard op selection in the forward pass but soft approximation in the backward pass. Not needed for arithmetic correctness, only for learned embedding quality.
+Both take `--checkpoint`, `--hidden-size`, `--num-tree-layers`, `--num-heads`,
+`--max-len`, `--act-steps`, `--gpu`. `eval_dfsa.py` also takes `--save-dir`
+(default `results/nam/dfsa_paren_iter1`) and, when `--checkpoint` is omitted,
+globs the newest `**/checkpoints/*.h5` under it. `test_extreme.py` also takes
+`--use-ste` and `--use-learned-residual`. Note both default to `--gpu 1`.
 
-5. **Remove dead parameters**: the tree encoder (~1.5M params) now has zero effect on arithmetic results. Could be removed to save compute, or kept for future embedding integration.
+Model geometry flags must match the checkpoint you are loading. `eval_dfsa.py`
+defaults (`hidden 256 / 3 layers / 8 heads / max-len 128`) do **not** match
+`train_dfsa.py` defaults (`64 / 2 / 4 / 64`).
 
-## Iteration 5: Parenthesis Support — Fully Deterministic Pipeline
+## CLI — `create_dataset.py`
 
-### Root Cause (from Epistemic Deconstruction)
+`--output-dir`, `--samples-per-phase`, `--div-zero-samples`, `--seed`.
 
-Three prior attempts to add parenthesis support failed at 57-62% accuracy (see `PARENTHESIS.md`). A Bayesian hypothesis tracking analysis (H1 posterior 0.91) confirmed the **single root cause**: the `op_classifier` (Dense(D, 4)) was the only learned component in the arithmetic path. It failed when processing post-reduction sequences where `RESULT_PLACEHOLDER` tokens sat in PAD-heavy context — features the tree encoder had never seen during training.
+## What lands on disk
 
-The operator identity is **deterministic** — token 14 is always `+`, 15 is always `-`, etc. Teaching a neural network to rediscover this mapping was both unnecessary and fragile.
+```
+<save-dir>/nam_<variant>-<phase>_<timestamp>/     # train_nam.py
+  checkpoints/            step_NNNNNN.weights.h5, best.weights.h5, final + JSON sidecars
+  digit_matrix/           digit_matrix_step_NNNNNN.csv
+  metrics.json
+  config.json
 
-### Solution: Hardcode the Op Classifier
+<save-dir>/dfsa_<timestamp>/                      # train_dfsa.py
+  checkpoints/            step_NNNNNN.weights.h5, final.weights.h5
+  metrics.json
+  config.json
 
-Replaced the learned `op_classifier` with a direct token-id lookup:
-
-```python
-# Before (learned, failed on paren step 2+):
-pooled = ops.sum(x * expand_dims(reduction_weights, -1), axis=1)
-op_logits = self.op_classifier(pooled)  # Dense(D, 4)
-op_probs = softmax(op_logits)
-
-# After (deterministic, always correct):
-op_token_id = take_along_axis(token_ids, expand_dims(op_pos_hard, -1), axis=1)
-op_idx = clip(cast(op_token_id, "int32") - 14, 0, 3)
-op_one_hot = one_hot(op_idx, 4)
+<save-dir>/dfsa_ste_<timestamp>/                  # train_dfsa_ste.py
+  checkpoints/            *.weights.h5
+  dfsa_ste_final.weights.h5
 ```
 
-This completes the pattern from iterations 2-4:
+`--save-dir` is `results` by default and the path is used as given, so launch
+from the repo root or pass an absolute path — otherwise you get a second
+`results/` tree next to wherever you started.
 
-| Iteration | Component hardcoded | What it replaced |
-|-----------|-------------------|------------------|
-| 2 | Number assembly (`digit × 10^pos`) | Learned Dense(D, 1) |
-| 2-3 | PEMDAS scoring (scores 20/15) | Learned Dense(1) reduction scorer |
-| 4 | Adjacent masking (op_cumsum) | Learned cumsum(softmax) |
-| 4 | Value buffer (float read/write) | Teacher-forced tokens |
-| **5** | **Op classifier (`token_id - 14`)** | **Learned Dense(D, 4)** |
+## Gotchas
 
-### Additional Changes
-
-**Paren-aware PEMDAS** (`train_dfsa.py`):
-```python
-paren_depth = cumsum(is_open_paren) - cumsum(is_close_paren)
-pemdas_scores = paren_depth * 100.0 + high_prec * 20.0 + low_prec * 15.0
-```
-Operators inside parens at depth 1 score 115+ vs 20 for operators outside.
-
-**Paren clearing in retokenize** (`train_dfsa.py`):
-After reducing an inner sub-expression, the clear mask expands to absorb adjacent `(` and `)` tokens (2 rounds for up to 2 nesting levels).
-
-**Data generator** (`data_generator.py`):
-- Added difficulty levels 11-12 for parenthesized 2-op and 3-op expressions
-- `_generate_paren_expr()`: wraps one random adjacent operand pair in parens
-- `_parse_multi_op()` rewritten to respect paren depth when determining reduction order
-- `prepare_per_step_labels()` strips redundant parens after sub-expression replacement
-
-### Evaluation Results
-
-**308/308 (100%) — zero training, random model weights:**
-
-| Test | Samples | Accuracy |
-|------|---------|----------|
-| single-op (4 ops × 3 digit sizes × 5) | 60 | **60/60 (100%)** |
-| 2-op flat (16 combos × 3) | 48 | **48/48 (100%)** |
-| 3-op flat (random) | 50 | **50/50 (100%)** |
-| 2-op paren (16 combos × 5) | 80 | **80/80 (100%)** |
-| 3-op paren (random) | 50 | **50/50 (100%)** |
-| PEMDAS vs paren (handpicked) | 12 | **12/12 (100%)** |
-| Edge cases (double parens, both-sides, etc.) | 8 | **8/8 (100%)** |
-| **Total** | **308** | **308/308 (100%)** |
-
-Previously failing cases now exact:
-```
-(3 + 5) * 2          = 16.00    pred=16.00    err=0.00%  (was pred=30.00)
-(10 - 2) * 3         = 24.00    pred=24.00    err=0.00%  (was pred=2.00)
-8 / (4 + 1)          = 1.60     pred=1.60     err=0.00%  (was pred=4.00)
-((3 + 5)) * 2        = 16.00    pred=16.00    err=0.00%  (was pred=0.43)
-(7 - 3) * (8 - 6)    = 8.00     pred=8.00     err=0.00%  (was pred=6.64)
-```
-
-### Architecture: Fully Deterministic
-
-With the op_classifier hardcoded, the entire arithmetic pipeline is deterministic:
-
-| Component | Status | Parameters |
-|-----------|--------|-----------|
-| Token embedding | Learned (not in arithmetic path) | vocab × D |
-| Numeric projection | Learned (not in arithmetic path) | 4 × D |
-| Tree transformer | Learned (not in arithmetic path) | ~1.5M |
-| **PEMDAS + paren_depth** | **Hardcoded** | 0 |
-| **Adjacent masking (op_cumsum)** | **Hardcoded** | 0 |
-| **Number assembly (power-of-10)** | **Hardcoded** | 0 |
-| **Value buffer bypass** | **Hardcoded** | 0 |
-| **Op classifier (token_id - 14)** | **Hardcoded** | 0 |
-| **Fixed arithmetic** | **Hardcoded** | 0 |
-| **Re-tokenization + paren clearing** | **Hardcoded** | 0 |
-| Result encoder | Learned (host interface) | 2 × D |
-
-**No training needed.** The model achieves 100% accuracy with random weights because zero learned parameters are in the arithmetic computation path. The tree encoder still runs but its output is unused — it can be removed to save ~1.5M parameters or kept for future embedding integration.
-
-**No gradient flows** through the arithmetic path. All losses (L_operator, L_reduction, L_result) either have hardcoded outputs or are stop-gradiented. For future host transformer integration, a straight-through estimator could restore gradient flow without affecting arithmetic correctness.
-
-## File Changes Summary
-
-| File | Changes |
-|------|---------|
-| `src/dl_techniques/models/neural_computer/nam/cell.py` | Deterministic `_assemble_number_from_tokens()`; removed learned number heads; cell accepts `token_ids` for assembly |
-| `src/dl_techniques/models/neural_computer/nam/model.py` | Passes `token_ids` through to cell for deterministic assembly |
-| `src/train/nam/data_generator.py` | `_parse_multi_op()` paren-aware PEMDAS parser; `_generate_multi_op_expr()`; `_generate_paren_expr()`; `prepare_per_step_labels()` with paren support; 13 difficulty levels (8 single-op + 3 multi-op + 2 paren); int32 overflow fix for 10-digit operands |
-| `src/train/nam/train_dfsa.py` | `DifferentiableFSA` with hardcoded op_classifier (`token_id - 14`), paren-aware PEMDAS (`paren_depth * 100`), paren clearing in `_retokenize`, recursive `multi_reduce()`, adjacent `_adjacent_masks()` via op_cumsum, `_assemble_with_bypass()` for value buffer reads; pass-through for fully-reduced expressions |
-| `src/train/nam/train_nam.py` | Updated with `--number-loss-type` toggle, per-step labels, validity mask; legacy training script for original NAM |
-| `tests/test_models/test_nam/test_nam.py` | Tests for deterministic assembly (exact values), split heads, round-trip serialization, resume |
+- `--clip-norm` is a **global** norm clip, so the loss weights compete. Raising
+  one weight suppresses learning in every other head.
+- Reduction targeting has to converge before number extraction and operator
+  classification can learn anything; that is why `--w-reduction` is an order of
+  magnitude above the others in `train_dfsa.py`.
+- `data_generator.py` levels 11-12 are the parenthesised ones. They only appear
+  once the curriculum progresses far enough, so a short run never sees them.
+- Companion note: `PARENTHESIS.md` in this directory records the three failed
+  attempts at learned parenthesis handling.
