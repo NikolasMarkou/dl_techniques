@@ -54,7 +54,8 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from .norms import create_normalization_layer
-from .activations import create_activation_layer
+from .activations import create_activation_layer, resolve_activation_layer
+from .activations.factory import ACTIVATION_REGISTRY
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
@@ -111,7 +112,9 @@ class ConvBlock(keras.layers.Layer):
     :type padding: str
     :param normalization_type: Type of normalization.
     :type normalization_type: str
-    :param activation_type: Type of activation.
+    :param activation_type: Type of activation. Either an ``ACTIVATION_REGISTRY``
+        key or any plain Keras activation name; ``'linear'`` builds a weightless
+        exact identity, i.e. no activation.
     :type activation_type: str
     :param dropout_rate: Dropout rate (0.0 to disable).
     :type dropout_rate: float
@@ -127,8 +130,16 @@ class ConvBlock(keras.layers.Layer):
     :type kernel_initializer: str or keras.initializers.Initializer
     :param normalization_kwargs: Additional arguments for normalization layer.
     :type normalization_kwargs: dict or None
-    :param activation_kwargs: Additional arguments for activation layer.
+    :param activation_kwargs: Additional arguments for activation layer. Only a
+        registry activation accepts them; supplying them for a plain Keras
+        activation name raises ``ValueError`` rather than dropping them.
     :type activation_kwargs: dict or None
+    :param groups: Number of convolution groups. ``groups=1`` is a dense
+        convolution; ``groups`` equal to the input channel count is depthwise.
+        Must divide both the input channel count and ``filters``.
+    :type groups: int
+    :param use_bias: Whether the convolution carries a bias term.
+    :type use_bias: bool
     :param kwargs: Additional arguments for Layer base class.
     :type kwargs: Any
     """
@@ -149,6 +160,8 @@ class ConvBlock(keras.layers.Layer):
             kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_kwargs: Optional[Dict[str, Any]] = None,
+            groups: int = 1,
+            use_bias: bool = True,
             **kwargs: Any
     ) -> None:
         """Initialize ConvBlock with specified parameters."""
@@ -163,6 +176,24 @@ class ConvBlock(keras.layers.Layer):
             raise ValueError(f"padding must be 'same' or 'valid', got {padding}")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be in [0,1], got {dropout_rate}")
+        if groups <= 0:
+            raise ValueError(f"groups must be positive, got {groups}")
+
+        # DECISION plan-2026-09-01T055648-e6d380a5/D-001
+        # `activation_type` is resolved by `resolve_activation_layer`, whose Keras
+        # fallback path SILENTLY DROPS kwargs. Do NOT relax this raise into a
+        # warning or delete it: an `activation_kwargs` typo aimed at a plain Keras
+        # name would then become a no-op with no signal at all. See decisions.md
+        # D-001/D-004 (I6, "no silent factory drops").
+        if activation_kwargs and activation_type not in ACTIVATION_REGISTRY:
+            raise ValueError(
+                f"activation_kwargs={activation_kwargs} was given for "
+                f"activation_type='{activation_type}', which is not an "
+                f"ACTIVATION_REGISTRY key. Keras activation names take no "
+                f"keyword arguments and the kwargs would be silently dropped. "
+                f"Use one of {sorted(ACTIVATION_REGISTRY)} or pass no "
+                f"activation_kwargs."
+            )
 
         # Store configuration
         self.filters = filters
@@ -179,6 +210,8 @@ class ConvBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.normalization_kwargs = normalization_kwargs or {}
         self.activation_kwargs = activation_kwargs or {}
+        self.groups = groups
+        self.use_bias = use_bias
 
         # Create sub-layers in __init__
         self.conv = keras.layers.Conv2D(
@@ -186,6 +219,8 @@ class ConvBlock(keras.layers.Layer):
             kernel_size=kernel_size,
             strides=strides,
             padding=padding,
+            groups=groups,
+            use_bias=use_bias,
             kernel_regularizer=kernel_regularizer,
             kernel_initializer=kernel_initializer,
             name=f"{self.name}_conv"
@@ -198,8 +233,11 @@ class ConvBlock(keras.layers.Layer):
             **self.normalization_kwargs
         )
 
-        # Create activation layer using factory
-        self.activation = create_activation_layer(
+        # Create activation layer using factory. `resolve_activation_layer` keeps
+        # every registry key on its existing path and additionally accepts plain
+        # Keras names, so `activation_type='linear'` expresses "no activation" as
+        # a weightless exact identity.
+        self.activation = resolve_activation_layer(
             activation_type,
             name=f"{self.name}_activation",
             **self.activation_kwargs
@@ -295,6 +333,8 @@ class ConvBlock(keras.layers.Layer):
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'normalization_kwargs': self.normalization_kwargs,
             'activation_kwargs': self.activation_kwargs,
+            'groups': self.groups,
+            'use_bias': self.use_bias,
         })
         return config
 
