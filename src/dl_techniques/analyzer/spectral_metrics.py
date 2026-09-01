@@ -777,7 +777,9 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
         evals: Array of eigenvalues.
 
     Returns:
-        Gini coefficient between 0 and 1.
+        Gini coefficient between 0 and ``(n - 1) / n``. Exactly ``0.0`` for a
+        perfectly uniform spectrum; approaches ``1.0`` as the spectrum
+        concentrates on a single eigenvalue.
     """
     if len(evals) < 2:
         return 0.0
@@ -794,7 +796,16 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
     if denominator < SPECTRAL_EPSILON:
         return 0.0
 
-    return 1.0 - (2 * np.sum(cum_evals)) / denominator
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-011
+    # The `+ 1.0 / n` term is NOT a fudge factor — without it this expression is
+    # the standard (population) Gini coefficient MINUS EXACTLY 1/n, because
+    # sum(cumsum(x)) = sum_i (n - i + 1) * x_i carries an (n+2)/n offset where the
+    # definition carries (n+1)/n. Do NOT "simplify" it away, and do NOT replace it
+    # with the sample-Gini rescaling `* n / (n - 1)`: that rescaling leaves a
+    # uniform spectrum at -1/(n-1) instead of 0.0 and was REFUTED by measurement
+    # (n=50: code 0.53155992, correct 0.55155992, `* n/(n-1)` gives 0.54240808).
+    # See decisions.md D-011.
+    return (1.0 - (2 * np.sum(cum_evals)) / denominator) + 1.0 / n
 
 
 # ---------------------------------------------------------------------

@@ -276,10 +276,18 @@ class TestConcentrationMetrics:
     """Tests for concentration metric functions."""
 
     def test_gini_uniform_distribution(self):
-        """Uniform eigenvalues should have low Gini."""
+        """A perfectly uniform spectrum has Gini EXACTLY zero, not merely 'low'.
+
+        REPAIRED (plan-2026-09-01T225724-e79ad4bd step 12): the previous assertion
+        was ``gini < 0.1``, which the shipped value of ``-0.01`` satisfied — it
+        passed under the ``-1/n`` bias AND under the fix, so it guarded nothing.
+        """
         evals = np.ones(100) * 5.0
         gini = calculate_gini_coefficient(evals)
-        assert gini < 0.1
+        assert gini == pytest.approx(0.0, abs=1e-12), (
+            f"a perfectly uniform spectrum must have Gini 0.0, got {gini!r} "
+            f"(a -1/n bias reads as {-1.0 / len(evals)!r})"
+        )
 
     def test_gini_extreme_inequality(self):
         """One large, rest tiny should have high Gini."""
@@ -734,3 +742,66 @@ class TestShortTailGoodnessOfFit:
 
         assert p_large_d == pytest.approx(0.0)
         assert p_zero_d == pytest.approx(1.0)
+
+
+# =====================================================================
+# Gini Coefficient — the -1/n bias (plan step 12, S10)
+# =====================================================================
+
+def _gini_by_pairwise_definition(x: np.ndarray) -> float:
+    """Reference Gini from its DEFINITION, not from the code under test.
+
+    ``G = mean |x_i - x_j| / (2 * mean x)`` over all ordered pairs. This is the
+    textbook (population) Gini coefficient and is derived here independently of
+    ``calculate_gini_coefficient``'s Lorenz-cumsum implementation, so the guard
+    cannot be satisfied by re-running the implementation's own algebra.
+    """
+    v = np.abs(np.asarray(x, dtype=float))
+    n = len(v)
+    return float(np.abs(v[:, None] - v[None, :]).sum() / (2.0 * n * n * v.mean()))
+
+
+class TestGiniIsNotBiasedByMinusOneOverN:
+    """`spectral_metrics.calculate_gini_coefficient` shipped `G_standard - 1/n`."""
+
+    @pytest.mark.parametrize("n", [4, 10, 50, 200])
+    def test_gini_matches_the_standard_definition(self, n):
+        """The implementation must equal the pairwise definition at every n."""
+        rng = np.random.default_rng(1234 + n)
+        evals = rng.pareto(2.0, n) + 1.0
+
+        expected = _gini_by_pairwise_definition(evals)
+        got = calculate_gini_coefficient(evals)
+
+        # Anti-vacuity: the reference must be a discriminating, non-degenerate
+        # value — a spectrum with ~zero inequality would make any bias invisible.
+        assert expected > 0.1, f"degenerate probe: reference gini {expected}"
+        assert got == pytest.approx(expected, abs=1e-10), (
+            f"gini is off by {expected - got!r} at n={n}; "
+            f"a -1/n bias would read exactly {1.0 / n!r}"
+        )
+
+    def test_gini_is_never_negative(self):
+        """The docstring promises [0, 1]; the biased form went below zero.
+
+        The tolerance is float round-off only (measured |g| <= 8.4e-17). A -1/n
+        bias is at least 0.01 over this range of n, i.e. four orders of magnitude
+        above the tolerance, so the guard still discriminates.
+        """
+        for n in (2, 3, 4, 10, 100):
+            gini = calculate_gini_coefficient(np.ones(n) * 5.0)
+            assert gini >= -1e-12, (
+                f"gini went negative on a uniform spectrum of {n} values: {gini!r} "
+                f"(a -1/n bias reads as {-1.0 / n!r})"
+            )
+            assert gini <= 1.0
+
+    def test_maximal_inequality_is_the_population_maximum(self):
+        """`[0, 0, 0, 1]` is `(n-1)/n = 0.75`, not the biased `0.50`."""
+        evals = np.array([0.0, 0.0, 0.0, 1.0])
+        assert calculate_gini_coefficient(evals) == pytest.approx(0.75, abs=1e-12)
+
+    def test_short_spectra_still_return_the_zero_sentinel(self):
+        """Anti-vacuity: the `len < 2` early exit is untouched by the fix."""
+        assert calculate_gini_coefficient(np.array([5.0])) == 0.0
+        assert calculate_gini_coefficient(np.array([])) == 0.0
