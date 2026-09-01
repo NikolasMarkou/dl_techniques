@@ -166,10 +166,8 @@ x_train, y_train = make_data(32)
 x_val, y_val = make_data(8)
 
 # 2. Build. The head already applies sigmoid, so from_logits stays False.
-#    jit_compile=False is required on GPU -- see section 10.
 model = create_acc_unet_binary(input_channels=1, input_shape=(128, 128), base_filters=16)
-model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"],
-              jit_compile=False)
+model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
 
 # 3. Train and predict
 model.fit(x_train, y_train, validation_data=(x_val, y_val),
@@ -186,7 +184,8 @@ print(predicted_mask.shape)  # (128, 128, 1)
 
 **Location**: `dl_techniques.models.vision.accunet.AccUNet`
 
-The subclassed model. Usually you want a factory instead, which wraps it in the Functional API.
+The subclassed model. Usually you want a factory instead, which wraps it in the Functional API
+(§6.2).
 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
@@ -204,7 +203,9 @@ three layers recalibrates channels three times, not once.
 
 ### 6.2 Factory Functions
 
-All three live in `dl_techniques.models.vision.accunet` and return a Functional `keras.Model`.
+All three live in `dl_techniques.models.vision.accunet` and return an `AccUNetFunctional` — a
+`keras.Model` subclass built with the Functional API, which adds nothing but the automatic XLA
+opt-out of §10.
 
 | Factory | Signature |
 | :--- | :--- |
@@ -309,7 +310,7 @@ def bce_dice_loss(y_true, y_pred):
 
 model = create_acc_unet_binary(input_channels=1, input_shape=(256, 256), base_filters=32)
 model.compile(optimizer=keras.optimizers.Adam(1e-4), loss=bce_dice_loss,
-              metrics=["binary_accuracy"], jit_compile=False)
+              metrics=["binary_accuracy"])
 ```
 
 ### Example 2: Multi-class segmentation with a dynamic input size
@@ -320,7 +321,7 @@ from dl_techniques.models.vision.accunet import create_acc_unet_multiclass
 
 model = create_acc_unet_multiclass(input_channels=3, num_classes=5, input_shape=None)
 model.compile(optimizer="adam", loss="sparse_categorical_crossentropy",
-              metrics=["sparse_categorical_accuracy"], jit_compile=False)
+              metrics=["sparse_categorical_accuracy"])
 
 # Any spatial size works as long as both dimensions are multiples of 16.
 print(model.predict(np.random.rand(1, 224, 224, 3), verbose=0).shape)  # (1, 224, 224, 5)
@@ -367,17 +368,16 @@ squeeze-excitation once at the end, whereas `mlfc_iterations` stacks separate la
 
 ## 10. Performance Optimization
 
-### XLA does not work here — pass `jit_compile=False` on GPU
+### XLA is disabled automatically
 
 `HANCLayer` resizes its pooled summaries back to full resolution with nearest-neighbour
-interpolation. The backward pass of that op, `ResizeNearestNeighborGrad`, has no registered
-XLA-GPU kernel in TF 2.18, so any attempt to compile a training step fails with
-`InvalidArgumentError: Detected unsupported operations ... on XLA_GPU_JIT`.
+interpolation, and the backward pass of that op, `ResizeNearestNeighborGrad`, has no registered
+XLA-GPU kernel in TF 2.18, so an XLA training step cannot compile.
 
-This bites at the default setting. `compile()` leaves `jit_compile="auto"`, which Keras
-resolves to XLA on a GPU, so **`model.fit()` on a GPU raises unless you pass
-`jit_compile=False` explicitly.** Inference (`predict`) is unaffected — only the gradient needs
-the missing kernel. On CPU, `"auto"` already resolves to no XLA, so nothing is required there.
+`AccUNet` and the `AccUNetFunctional` the factories return therefore force `jit_compile=False`
+on every compile path, including the recompile behind `load_model()`. The forced value wins over
+an explicit `jit_compile=True`, and a warning is logged when it overrides one. Nothing is
+required of you; inference (`predict`) and CPU training were never affected.
 
 ### Mixed precision
 
@@ -388,7 +388,7 @@ from dl_techniques.models.vision.accunet import create_acc_unet_binary
 keras.mixed_precision.set_global_policy("mixed_float16")
 
 model = create_acc_unet_binary(input_channels=1, input_shape=(256, 256))
-model.compile(optimizer="adam", loss="binary_crossentropy", jit_compile=False)
+model.compile(optimizer="adam", loss="binary_crossentropy")
 ```
 
 Mixed precision cuts activation memory roughly in half and speeds up the convolutions on Tensor
@@ -406,7 +406,6 @@ Core hardware. Set the policy before building the model.
 - **Augment.** Geometric (flips, rotations, scaling, cropping), photometric (brightness and
   contrast), and elastic deformation for medical images.
 - **Resize to a multiple of 16** in the data pipeline, not in the model.
-- **Pass `jit_compile=False`** to every `compile()` call that will be trained on a GPU (§10).
 
 ---
 
@@ -457,7 +456,9 @@ MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_accunet -q
 - **Out of memory at `base_filters=64`.** The five levels reach `16 * base_filters` channels at
   full bottleneck depth. Drop to 32, or reduce the tile size.
 - **`InvalidArgumentError: ... ResizeNearestNeighborGrad ... on XLA_GPU_JIT` during `fit()`.**
-  XLA cannot compile the backward pass of this model. Pass `jit_compile=False` (§10).
+  Cannot come from this package's models — they disable XLA themselves (§10). The remaining way
+  to see it is a network of your own that embeds `HANCBlock` or `HANCLayer` (§9) and inherits no
+  such override; that model has to train with XLA off.
 
 ---
 
