@@ -9,7 +9,7 @@ from dl_techniques.layers.tabm_blocks import (
     ScaleEnsemble,
     LinearEfficientEnsemble,
     NLinear,
-    MLPBlock,
+    TabMMLPBlock,
     TabMBackbone,
 )
 
@@ -70,20 +70,20 @@ class TestNLinear:
                    "nl", tmp_path, NLinear)
 
 
-class TestMLPBlock:
+class TestTabMMLPBlock:
     def test_forward_no_ensemble(self):
-        layer = MLPBlock(units=8)
+        layer = TabMMLPBlock(units=8)
         out = layer(_f32(B, 10))
         assert tuple(out.shape) == (B, 8)
         assert layer.compute_output_shape((B, 10)) == (B, 8)
 
     def test_forward_ensemble(self):
-        layer = MLPBlock(units=8, k=K)
+        layer = TabMMLPBlock(units=8, k=K)
         out = layer(_f32(B, K, 10))
         assert tuple(out.shape) == (B, K, 8)
 
     def test_serialization(self, tmp_path):
-        _roundtrip(MLPBlock(units=8, name="mlp"), (10,), _f32(B, 10), "mlp", tmp_path, MLPBlock)
+        _roundtrip(TabMMLPBlock(units=8, name="mlp"), (10,), _f32(B, 10), "mlp", tmp_path, TabMMLPBlock)
 
 
 class TestTabMBackbone:

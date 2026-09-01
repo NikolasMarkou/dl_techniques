@@ -46,7 +46,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.ffn.mlp", legacy_alias=False)
+@register_dl_technique("dl_techniques.layers.ffn.mlp")
 class MLPBlock(keras.layers.Layer):
     """
     The standard Transformer MLP block.

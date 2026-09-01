@@ -39,7 +39,7 @@ The module contains the following key components:
     -   This is useful for the final output heads of an ensemble, where each member needs
         its own independent classifier.
 
-4.  **`MLPBlock` and `TabMBackbone` (High-Level Abstractions):**
+4.  **`TabMMLPBlock` and `TabMBackbone` (High-Level Abstractions):**
     -   These are convenience layers that assemble the lower-level components into
         standard MLP blocks and a full MLP backbone.
     -   They can operate in either a "plain" mode (a single model) or an "ensemble"
@@ -501,7 +501,7 @@ class NLinear(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the parallel linear layer weights."""
         # ``input_dim=None`` defers the fan-in to build time, which is what lets
-        # a packed MLPBlock construct its NLinear in __init__ (where the input
+        # a packed TabMMLPBlock construct its NLinear in __init__ (where the input
         # width is not yet known) instead of lazily inside build().
         if self.input_dim is None:
             self.input_dim = input_shape[-1]
@@ -563,11 +563,15 @@ class NLinear(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
-# Registered under an explicit package: the bare class name collides with
-# `layers/ffn/mlp.py::MLPBlock`, and whichever module imported last used to win
-# the global registry key, so a saved TabM deserialized into the FFN block.
-@register_dl_technique("dl_techniques.layers.tabm_blocks", legacy_alias=False)
-class MLPBlock(keras.layers.Layer):
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the ``TabM`` prefix is load-bearing. The
+# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
+# already claimed by another registered class must be prefixed with its package rather than
+# registered twice. Do NOT simplify this back to ``MLPBlock``: that name belongs to
+# ``layers/ffn/mlp.py``, which is also the FFN factory's ``'mlp'`` key, and re-taking it
+# re-creates the collision this rename removed (before the rename a saved TabM could
+# deserialize into the FFN block, whichever module imported last).
+@register_dl_technique("dl_techniques.layers.tabm_blocks")
+class TabMMLPBlock(keras.layers.Layer):
     """
     MLP block with optional efficient ensemble support.
 
@@ -785,7 +789,7 @@ class TabMBackbone(keras.layers.Layer):
     """
     TabM backbone MLP with optional ensemble support.
 
-    This layer stacks multiple ``MLPBlock`` layers to form a complete backbone.
+    This layer stacks multiple ``TabMMLPBlock`` layers to form a complete backbone.
     It can operate in plain mode (single model) or ensemble mode by setting the
     ``k`` parameter.
 
@@ -798,13 +802,13 @@ class TabMBackbone(keras.layers.Layer):
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐
-        │  MLPBlock(hidden_dims[0])       │
+        │  TabMMLPBlock(hidden_dims[0])   │
         ├─────────────────────────────────┤
-        │  MLPBlock(hidden_dims[1])       │
+        │  TabMMLPBlock(hidden_dims[1])   │
         ├─────────────────────────────────┤
         │  ...                            │
         ├─────────────────────────────────┤
-        │  MLPBlock(hidden_dims[-1])      │
+        │  TabMMLPBlock(hidden_dims[-1])  │
         └──────────────┬──────────────────┘
                        ▼
         ┌─────────────────────────────────┐
@@ -815,7 +819,7 @@ class TabMBackbone(keras.layers.Layer):
     :type hidden_dims: list[int]
     :param k: Number of ensemble members (None for plain MLP).
     :type k: int or None
-    :param ensemble_type: ``'efficient'`` or ``'packed'`` (see :class:`MLPBlock`).
+    :param ensemble_type: ``'efficient'`` or ``'packed'`` (see :class:`TabMMLPBlock`).
     :type ensemble_type: str
     :param ensemble_scaling_in: Per-member input scaling in the efficient ensemble.
     :type ensemble_scaling_in: bool
@@ -876,7 +880,7 @@ class TabMBackbone(keras.layers.Layer):
         # CREATE all MLP blocks in __init__ (hidden_dims are config-known) so
         # weights are reliably created/restored across serialization.
         self.blocks = [
-            MLPBlock(
+            TabMMLPBlock(
                 units=units,
                 k=self.k,
                 ensemble_type=self.ensemble_type,
