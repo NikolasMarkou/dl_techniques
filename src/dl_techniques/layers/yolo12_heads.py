@@ -60,7 +60,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 from ..utils.logger import logger
 from ..initializers import clone_initializer
-from .yolo12_blocks import ConvBlock
+from .yolo12_blocks import yolo12_conv_block
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -220,14 +220,14 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             # the first" would still tie scale 0's first layer to scale 1's.
             # See decisions.md D-071.
             # Populate bbox branch layers
-            self.bbox_branches[i].add(ConvBlock(
+            self.bbox_branches[i].add(yolo12_conv_block(
                 filters=bbox_c,
                 kernel_size=3,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bbox_{i}_conv1"
             ))
-            self.bbox_branches[i].add(ConvBlock(
+            self.bbox_branches[i].add(yolo12_conv_block(
                 filters=bbox_c,
                 kernel_size=3,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -243,7 +243,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
             ))
 
             # Populate classification branch layers with depthwise separable convolutions
-            self.cls_branches[i].add(ConvBlock(
+            self.cls_branches[i].add(yolo12_conv_block(
                 filters=in_channels,
                 kernel_size=3,
                 groups=in_channels,  # Depthwise
@@ -251,14 +251,14 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw1"
             ))
-            self.cls_branches[i].add(ConvBlock(
+            self.cls_branches[i].add(yolo12_conv_block(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_pw1"
             ))
-            self.cls_branches[i].add(ConvBlock(
+            self.cls_branches[i].add(yolo12_conv_block(
                 filters=cls_c,
                 kernel_size=3,
                 groups=cls_c,  # Depthwise
@@ -266,7 +266,7 @@ class YOLOv12DetectionHead(keras.layers.Layer):
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"cls_{i}_dw2"
             ))
-            self.cls_branches[i].add(ConvBlock(
+            self.cls_branches[i].add(yolo12_conv_block(
                 filters=cls_c,
                 kernel_size=1,  # Pointwise
                 kernel_initializer=clone_initializer(self.kernel_initializer),

@@ -54,6 +54,103 @@ from typing import Optional, Tuple, Union, Dict, Any
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+from . import standard_blocks
+
+# ---------------------------------------------------------------------
+# The one home for the D-067 BatchNorm pair
+# ---------------------------------------------------------------------
+
+# DECISION plan-2026-09-01T055648-e6d380a5/D-005
+# This dict is the ONLY home for the epsilon/momentum pair, and it exists so
+# that the pair is threaded to every consumer as DATA. Do NOT "simplify" it
+# back into per-site `epsilon=1e-3, momentum=0.97` literals: the swap onto
+# `standard_blocks.ConvBlock` puts 26 construction sites across four modules
+# behind these two numbers, two of those modules sit in packages that must not
+# import `yolo12_blocks` (the dependency direction I5 exists to fix), and
+# `create_normalization_layer` SILENTLY falls back to Keras' 1e-6/0.99 when the
+# kwargs are omitted -- no raise, no shape change, only different inference.
+# See decisions.md D-005, and the D-067 rationale for the values themselves:
+#
+# DECISION plan-2026-08-19T163559-499b6f0e/D-067
+# These two values are the Ultralytics YOLO port, not Keras defaults
+# that nobody looked at, and they are load-bearing TOGETHER. PyTorch
+# `nn.BatchNorm2d` and Keras `BatchNormalization` define `momentum`
+# with OPPOSITE senses, so Ultralytics' `momentum=0.03` is Keras'
+# `momentum=0.97`; `eps=1e-3` is Ultralytics' own value and is NOT the
+# 1e-5 that most transformer-family references use. Do NOT "correct"
+# the epsilon to 1e-5 in the belief that it is an unreviewed Keras
+# default -- it agrees with Keras' default by coincidence. MEASURED:
+# all 134 norm sites of `create_yolov12_multitask(scale="n")` are at
+# 1e-03, pinned in
+# `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py`.
+# See decisions.md D-067.
+YOLO12_NORM_KWARGS: Dict[str, Any] = {"epsilon": 1e-3, "momentum": 0.97}
+
+
+def yolo12_conv_block(
+    filters: int,
+    kernel_size: int = 3,
+    strides: int = 1,
+    padding: str = "same",
+    groups: int = 1,
+    activation: bool = True,
+    use_bias: bool = False,
+    kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
+    kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+    **kwargs: Any
+) -> standard_blocks.ConvBlock:
+    """Build the YOLOv12 Conv-BN-SiLU unit on top of the shared ``ConvBlock``.
+
+    Every convolution in the YOLOv12 tree is bias-free, He-initialised, batch
+    normalised with the D-067 pair, and either SiLU-activated or not activated
+    at all. This helper is the single place that spells that out, so the
+    normalization pair keeps exactly one home (``YOLO12_NORM_KWARGS``).
+
+    :param filters: Number of output channels. Must be positive.
+    :type filters: int
+    :param kernel_size: Convolution kernel size. Defaults to 3.
+    :type kernel_size: int
+    :param strides: Convolution stride. Defaults to 1.
+    :type strides: int
+    :param padding: One of ``'same'`` or ``'valid'``. Defaults to ``'same'``.
+    :type padding: str
+    :param groups: Number of convolution groups; ``groups`` equal to the input
+        channel count gives a depthwise convolution. Defaults to 1.
+    :type groups: int
+    :param activation: ``True`` for SiLU, ``False`` for no activation at all.
+        ``False`` maps to ``activation_type='linear'``, which is a weightless
+        exact identity, not an approximation of one.
+    :type activation: bool
+    :param use_bias: Whether the convolution carries a bias term. Defaults to
+        ``False``, because the BatchNorm that follows has its own beta.
+    :type use_bias: bool
+    :param kernel_initializer: Weight initializer. Defaults to ``'he_normal'``.
+    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Optional weight regularizer.
+    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
+    :param kwargs: Additional keyword arguments for the Layer base class, e.g.
+        ``name``.
+    :type kwargs: Any
+
+    :return: An unbuilt ``standard_blocks.ConvBlock``.
+    :rtype: standard_blocks.ConvBlock
+    """
+    return standard_blocks.ConvBlock(
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=strides,
+        padding=padding,
+        groups=groups,
+        use_bias=use_bias,
+        activation_type="silu" if activation else "linear",
+        normalization_type="batch_norm",
+        normalization_kwargs=dict(YOLO12_NORM_KWARGS),
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        **kwargs
+    )
+
+
 # ---------------------------------------------------------------------
 
 
@@ -156,23 +253,10 @@ class ConvBlock(keras.layers.Layer):
             name="conv"
         )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-067
-        # These two values are the Ultralytics YOLO port, not Keras defaults
-        # that nobody looked at, and they are load-bearing TOGETHER. PyTorch
-        # `nn.BatchNorm2d` and Keras `BatchNormalization` define `momentum`
-        # with OPPOSITE senses, so Ultralytics' `momentum=0.03` is Keras'
-        # `momentum=0.97`; `eps=1e-3` is Ultralytics' own value and is NOT the
-        # 1e-5 that most transformer-family references use. Do NOT "correct"
-        # the epsilon to 1e-5 in the belief that it is an unreviewed Keras
-        # default -- it agrees with Keras' default by coincidence. MEASURED:
-        # all 134 norm sites of `create_yolov12_multitask(scale="n")` are at
-        # 1e-03, pinned in
-        # `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py`.
-        # See decisions.md D-067.
+        # The D-067 pair is threaded from its one home; see YOLO12_NORM_KWARGS.
         self.bn = keras.layers.BatchNormalization(
-            epsilon=1e-3,
-            momentum=0.97,
-            name="bn"
+            name="bn",
+            **YOLO12_NORM_KWARGS
         )
 
         self.act = None
@@ -761,14 +845,14 @@ class Bottleneck(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
-        self.cv1 = ConvBlock(
+        self.cv1 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=3,
             kernel_initializer=self.kernel_initializer,
             name="cv1"
         )
 
-        self.cv2 = ConvBlock(
+        self.cv2 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=3,
             activation=False,
@@ -915,14 +999,14 @@ class C3k2Block(keras.layers.Layer):
         self.hidden_filters = filters // 2
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
-        self.cv1 = ConvBlock(
+        self.cv1 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
             kernel_initializer=self.kernel_initializer,
             name="cv1"
         )
 
-        self.cv2 = ConvBlock(
+        self.cv2 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
             kernel_initializer=self.kernel_initializer,
@@ -940,7 +1024,7 @@ class C3k2Block(keras.layers.Layer):
             )
             self.bottlenecks.append(bottleneck)
 
-        self.cv3 = ConvBlock(
+        self.cv3 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=1,
             kernel_initializer=self.kernel_initializer,
@@ -1104,7 +1188,7 @@ class A2C2fBlock(keras.layers.Layer):
         self.hidden_filters = filters // 2
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
-        self.cv1 = ConvBlock(
+        self.cv1 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
             kernel_initializer=self.kernel_initializer,
@@ -1134,7 +1218,7 @@ class A2C2fBlock(keras.layers.Layer):
             self.attention_first_blocks.append(attn_block_1)
             self.attention_second_blocks.append(attn_block_2)
 
-        self.cv2 = ConvBlock(
+        self.cv2 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=1,
             kernel_initializer=self.kernel_initializer,

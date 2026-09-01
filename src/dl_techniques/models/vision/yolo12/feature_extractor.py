@@ -31,7 +31,11 @@ from typing import Optional, Tuple, Dict, Any, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.yolo12_blocks import ConvBlock, A2C2fBlock, C3k2Block
+from dl_techniques.layers.yolo12_blocks import (
+    yolo12_conv_block,
+    A2C2fBlock,
+    C3k2Block,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -188,7 +192,7 @@ class YOLOv12FeatureExtractor(keras.Model):
     def _build_layers(self) -> None:
         """Initialize all backbone and neck layers."""
         # Backbone stem
-        self.stem1 = ConvBlock(
+        self.stem1 = yolo12_conv_block(
             filters=self.filters['c1'],
             kernel_size=3,
             strides=2,
@@ -196,7 +200,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_stem_1"
         )
 
-        self.stem2 = ConvBlock(
+        self.stem2 = yolo12_conv_block(
             filters=self.filters['c2'],
             kernel_size=3,
             strides=2,
@@ -214,7 +218,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_b1"
         )
 
-        self.down1 = ConvBlock(
+        self.down1 = yolo12_conv_block(
             filters=self.filters['c3'],
             kernel_size=3,
             strides=2,
@@ -231,7 +235,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_b2"
         )
 
-        self.down2 = ConvBlock(
+        self.down2 = yolo12_conv_block(
             filters=self.filters['c5'],
             kernel_size=3,
             strides=2,
@@ -247,7 +251,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="backbone_b3"
         )
 
-        self.down3 = ConvBlock(
+        self.down3 = yolo12_conv_block(
             filters=self.filters['c6'],
             kernel_size=3,
             strides=2,
@@ -292,7 +296,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="neck_h2"
         )
 
-        self.neck_down1 = ConvBlock(
+        self.neck_down1 = yolo12_conv_block(
             filters=self.filters['c3'],
             kernel_size=3,
             strides=2,
@@ -308,7 +312,7 @@ class YOLOv12FeatureExtractor(keras.Model):
             name="neck_h3"
         )
 
-        self.neck_down2 = ConvBlock(
+        self.neck_down2 = yolo12_conv_block(
             filters=self.filters['c5'],
             kernel_size=3,
             strides=2,
