@@ -218,3 +218,86 @@ class TestModelIsNotMutated:
         np.testing.assert_array_equal(
             before, after, err_msg=f"{kind}: forward pass changed after analysis"
         )
+
+
+# ---------------------------------------------------------------------
+# C2 -- _batch_size captured before the subsample slice
+# ---------------------------------------------------------------------
+
+CONV_SPATIAL = 8
+CONV_CHANNELS = 3
+CONV_FILTERS = 6
+
+
+def build_conv_model() -> keras.Model:
+    """A conv probe whose captured activations are rank-4, not rank-2.
+
+    The defect this model exists to expose is reachable only for rank>=3
+    activations: ``_safely_flatten_activations`` compares ``original_shape[0]``
+    against ``_batch_size`` and falls back to ``reshape(1, -1)`` on a mismatch,
+    which collapses a conv feature map to a single row.
+    """
+    inputs = keras.Input(
+        shape=(CONV_SPATIAL, CONV_SPATIAL, CONV_CHANNELS), name="conv_in"
+    )
+    x = keras.layers.Conv2D(CONV_FILTERS, 3, activation="relu", name="conv_c1")(inputs)
+    x = keras.layers.GlobalAveragePooling2D(name="conv_gap")(x)
+    outputs = keras.layers.Dense(2, name="conv_d1")(x)
+    return keras.Model(inputs=inputs, outputs=outputs, name="conv_probe")
+
+
+def run_conv_analysis(n_samples: int):
+    """Drive the analyzer over the conv probe with ``n_samples`` rows.
+
+    Args:
+        n_samples: Number of rows handed to the analyzer. Values above the
+            analyzer's internal ``min(n_samples, 200)`` cap exercise the
+            subsampling path.
+
+    Returns:
+        Tuple of the model and the populated ``AnalysisResults``.
+    """
+    rng = np.random.default_rng(4321)
+    x = rng.standard_normal(
+        (n_samples, CONV_SPATIAL, CONV_SPATIAL, CONV_CHANNELS)
+    ).astype("float32")
+    y = np.zeros((n_samples, 2), dtype="float32")
+
+    model = build_conv_model()
+    config = AnalysisConfig(n_samples=n_samples)
+    analyzer = InformationFlowAnalyzer({model.name: model}, config)
+    results = AnalysisResults()
+    analyzer.analyze(results, DataInput(x_data=x, y_data=y))
+    return model, results
+
+
+class TestSubsamplingPreservesConvRank:
+    """The internal 200-sample cap must not destroy the conv effective rank.
+
+    Defect guarded (C2): ``information_flow_analyzer.py`` assigned
+    ``self._batch_size = len(x_sample)`` BEFORE slicing ``x_sample`` down to
+    ``min(n_samples, 200)``, so the recorded batch size (300) disagreed with the
+    activations actually captured (200). ``_safely_flatten_activations`` then took
+    its ``reshape(1, -1)`` fallback and ``effective_rank`` came back as exactly
+    0.0. The dict input path was already correct, which is why only the ndarray
+    path is affected.
+    """
+
+    def test_conv_effective_rank_is_positive_below_the_cap(self):
+        """Anti-vacuity arm: the same probe is healthy when no slicing happens."""
+        model, results = run_conv_analysis(n_samples=32)
+        flow = results.information_flow[model.name]
+        assert flow["conv_c1"]["effective_rank"] > 0.0, (
+            "the conv probe reports rank 0 even without subsampling, so the "
+            "N>200 arm below would not be measuring the subsampling defect"
+        )
+
+    def test_conv_effective_rank_survives_subsampling(self):
+        model, results = run_conv_analysis(n_samples=300)
+        flow = results.information_flow[model.name]
+        effective_rank = flow["conv_c1"]["effective_rank"]
+
+        assert effective_rank > 0.0, (
+            "conv effective_rank collapsed to 0 once the sample count exceeded "
+            f"the analyzer's internal 200-row cap: effective_rank={effective_rank}"
+        )

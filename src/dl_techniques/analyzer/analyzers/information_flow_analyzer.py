@@ -98,8 +98,11 @@ class InformationFlowAnalyzer(BaseAnalyzer):
             x_sample = {k: v[:min(max_info_flow_samples, self._batch_size)] for k, v in x_sample.items()}
             self._batch_size = len(x_sample[first_key])
         else:
+            # Slice FIRST, then record the batch size, mirroring the dict path above.
+            # Recording it before the slice makes `_safely_flatten_activations` reject
+            # every rank>=3 activation and report `effective_rank = 0.0`.
+            x_sample = x_sample[:min(max_info_flow_samples, len(x_sample))]
             self._batch_size = len(x_sample)
-            x_sample = x_sample[:min(max_info_flow_samples, self._batch_size)]
 
 
         for model_name, model in self.models.items():
