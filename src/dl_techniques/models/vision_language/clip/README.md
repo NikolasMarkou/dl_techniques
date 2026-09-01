@@ -4,586 +4,304 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of the **CLIP (Contrastive Language-Image Pre-training)** model. CLIP learns rich visual representations from natural language supervision by training a vision and text encoder in parallel to predict which images were paired with which texts in a large dataset. This enables powerful zero-shot transfer capabilities for a wide range of vision tasks.
+A Keras 3 implementation of **CLIP (Contrastive Language-Image Pre-training)**: two towers map images and captions into one embedding space, trained so that a matched pair scores higher than every mismatched pair in the batch.
 
-The implementation is based on a highly configurable and modern `TransformerLayer` that uses state-of-the-art components like RMS Normalization, SwiGLU activations, and Grouped-Query Attention.
+This is a **modernized** CLIP, not a weight-compatible port. Both towers are built from this repo's `TransformerLayer` with grouped-query attention, RMSNorm, SwiGLU and rotary position embeddings, and neither tower carries a learned positional table. No pretrained weights are distributed.
 
----
-
-## Table of Contents
-
-1. [Overview: What is CLIP and Why It Matters](#1-overview-what-is-clip-and-why-it-matters)
-2. [The Problem CLIP Solves](#2-the-problem-clip-solves)
-3. [How CLIP Works: Core Concepts](#3-how-clip-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+The package also ships `CliffordCLIP` (`clifford_clip.py`), a Clifford-algebra variant that shares the contrastive objective but not the tower internals. It is not documented here.
 
 ---
 
 ## 1. Overview: What is CLIP and Why It Matters
 
-### What is CLIP?
+CLIP addresses a supervision problem, not an architectural one. Labelled image datasets are small and their label sets are closed, so a classifier can only ever name categories somebody enumerated in advance. Image-caption pairs are abundant and open-ended, but a caption is not a label: predicting it token by token is expensive, and two captions of the same picture rarely agree word for word.
 
-**CLIP (Contrastive Language-Image Pre-training)** is a multi-modal neural network that learns the connection between images and text. Instead of training on a fixed set of object labels (like "cat" or "dog"), CLIP is trained on a massive dataset of (image, text) pairs collected from the internet. Its goal is to learn a shared embedding space where the vector for an image of a dog is close to the vector for the text "a photo of a dog."
+The contrastive formulation extracts a usable signal anyway by asking a much weaker question — *which caption in this batch belongs to which image*. Both modalities are mapped into one space, each feature is L2-normalized so an inner product is a cosine, and a batch of `N` pairs yields an `N x N` similarity matrix whose diagonal must dominate both its row and its column:
 
-### Key Innovations
-
-1.  **Learning from Natural Language**: CLIP moves beyond fixed classification labels and learns from the rich, noisy, and diverse text captions found online. This gives it a much broader and more flexible understanding of the visual world.
-2.  **Contrastive Learning at Scale**: CLIP is trained on a simple yet highly effective contrastive objective: given a batch of N (image, text) pairs, the model must predict which N images correspond to which N texts. This scalable pre-training task is what enables its powerful representations.
-3.  **Zero-Shot Transfer**: Because CLIP learns a general-purpose association between vision and language, it can be adapted to new visual classification tasks *without any additional training*. You can simply provide it with text descriptions of your target classes (e.g., "a photo of a car," "a drawing of a bird") and it will classify new images based on which description is most similar.
-
-### Why CLIP Matters
-
-**Traditional Supervised Learning Problem**:
 ```
-Problem: Build a model to classify 1000 different types of objects.
-Traditional Approach:
-  1. Collect hundreds of thousands of images.
-  2. Manually label each image with one of the 1000 object classes.
-  3. Train a model to predict the correct class label.
-  4. Limitation: The model is "stuck" with only these 1000 classes. To add a
-     new class, you must collect new data and retrain.
+S = tau * f_I(I) @ f_T(T)^T
 ```
 
-**CLIP's Solution**:
-```
-CLIP Approach:
-  1. Scrape millions of images and their associated alt-text from the web.
-  2. Train a dual-encoder model to match images to their text descriptions.
-  3. For a new task, simply write text prompts for your classes. No retraining needed.
-  4. Benefit: A single, pre-trained CLIP model can be used for a virtually
-     unlimited number of visual classification tasks on the fly.
-```
+Two things follow. It scales, because the batch supplies its own negatives — the `N^2 - N` mismatched pairs cost nothing to construct. And it yields zero-shot classification for free: any set of class names can be encoded as text and used directly as a classifier weight matrix.
 
-### Real-World Impact
-
-CLIP is a foundational model that has powered a revolution in multi-modal AI:
-
--   **Zero-Shot Image Classification**: Its primary use case, enabling flexible and powerful classification without fine-tuning.
--   **Text-to-Image Generation**: The shared embedding space is a core component in models like DALL-E 2 and Stable Diffusion, which use it to guide image generation from text prompts.
--   **Image Search & Retrieval**: Find images based on complex natural language descriptions, not just simple tags.
--   **Foundation for Vision-Language Models (VLMs)**: Serves as a powerful vision backbone for more complex reasoning and question-answering models.
+**The loss is not implemented here.** This module produces the two logits matrices and the temperature; the contrastive loss lives in `dl_techniques.losses`.
 
 ---
 
 ## 2. The Problem CLIP Solves
 
-### The Brittleness of Supervised Learning
+| | Supervised ImageNet-style training | CLIP |
+|---|---|---|
+| Supervision | Manual labels from a fixed set | Web alt-text, open-ended |
+| Cost per example | Human annotation | Free, already on the page |
+| New class | Collect data, retrain | Write a prompt |
+| What is learned | Which of `K` bins | Which caption describes this image |
 
-For years, the gold standard in computer vision was supervised learning on large, manually labeled datasets like ImageNet. While powerful, this paradigm had major limitations:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Supervised Vision Models                    │
-│                                                             │
-│  The Old Way (e.g., ResNet on ImageNet):                    │
-│    - High cost: Manual labeling is expensive and slow.      │
-│    - Narrow scope: Models learn a predefined, fixed set of  │
-│      concepts. They struggle with anything outside this set.│
-│    - Poor generalization: Performance on benchmarks often   │
-│      doesn't translate to real-world messy data.            │
-│                                                             │
-│  The Need:                                                  │
-│    - A model that learns a more general and robust          │
-│      understanding of visual concepts, much like humans do, │
-│      from broad, uncurated data sources.                    │
-└─────────────────────────────────────────────────────────────┘
-```
-
-CLIP addresses this by tapping into the largest source of labeled data available: the internet. By learning from raw (image, text) pairs, it sidesteps the need for costly manual annotation and develops a much more flexible and comprehensive visual understanding.
-
-### How CLIP Changes the Game
-
-CLIP's pre-training task forces it to learn not just what objects are, but also their context, attributes, actions, and relationships, as described in natural language.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The CLIP Learning Strategy                                 │
-│                                                             │
-│  1. The Data:                                               │
-│     - Use 400 million (image, text) pairs from the internet.│
-│     - No expensive manual labeling needed.                  │
-│                                                             │
-│  2. The Task (Contrastive Learning):                        │
-│     - Given a batch of images and texts, learn to "contrast"│
-│       the correct pairs from the incorrect ones. This forces│
-│       the model to create a shared space where semantically │
-│       similar images and texts are close together.          │
-│                                                             │
-│  3. The Result:                                             │
-│     - A robust, general-purpose vision model that can be    │
-│       instructed in natural language to perform new tasks.  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-This approach results in a highly versatile and powerful model that serves as a flexible foundation for a multitude of vision and multi-modal applications.
+The consequence is that a single pre-trained CLIP serves an unbounded number of classification tasks: describe the classes in words, encode them once, and compare. That property is why CLIP became a component of text-to-image models, retrieval indexes and larger VLMs rather than just a classifier.
 
 ---
 
 ## 3. How CLIP Works: Core Concepts
 
-### The Dual-Encoder Contrastive Architecture
-
-CLIP consists of two main components that are trained jointly: an image encoder and a text encoder.
-
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                           CLIP Architecture                      │
-│                                                                  │
-│  Image Input (Batch) ───►┌─────────────────┐                     │
-│                          │  Image Encoder  │                     │
-│                          │     (ViT)       │──► Image Embeddings │
-│                          └─────────────────┘      (Batch, D)     │
-│                                                       │          │
-│  Text Input (Batch) ───►┌─────────────────┐          ▼           │
-│                          │  Text Encoder   │                     ┌────────────┐
-│                          │ (Transformer)   │───► Text Embeddings │ Compute NxN│
-│                          └─────────────────┘      (Batch, D)     │ Similarity │
-│                                                       ▲          └────────────┘
-│                                                       │                │
-│                                                       └────────────────▼
-│                                                    Contrastive Loss
-│                (Maximize similarity of correct pairs, minimize for others)
-│
-└──────────────────────────────────────────────────────────────────┘
+Image batch (B, 224, 224, 3) ──► Vision tower ──► project ──► L2 norm ──► (B, D)
+                                                                            │
+Text batch  (B, 77) ────────────► Text tower ───► project ──► L2 norm ──► (B, D)
+                                                                            │
+                     logits = clip_scale * image_features @ text_features^T
+                     ──► logits_per_image (B, B), logits_per_text (B, B)
 ```
 
-### The Complete Data Flow (During Training)
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          CLIP Complete Data Flow                        │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: BATCH PREPARATION
-─────────────────────────
-- A batch of N (image, text) pairs is sampled.
-- We now have N images and N texts.
-
-STEP 2: ENCODING
-────────────────
-- All N images are passed through the Image Encoder to get N image embeddings.
-- All N texts are passed through the Text Encoder to get N text embeddings.
-
-STEP 3: SIMILARITY CALCULATION
-──────────────────────────────
-- The cosine similarity is computed between every image embedding and every text embedding.
-- This creates an N x N similarity matrix.
-- The values on the diagonal (i, i) of this matrix represent the similarity between
-  the i-th image and its correct corresponding text.
-- The off-diagonal values (i, j) where i ≠ j represent the similarity between
-  an image and an incorrect text.
-
-STEP 4: LOSS CALCULATION
-────────────────────────
-- The goal is to maximize the similarity scores on the diagonal while minimizing the
-  scores on the off-diagonal.
-- This is formulated as a cross-entropy loss, applied symmetrically for both
-  images-to-texts and texts-to-images.
-- A learnable temperature parameter (logit_scale) is used to scale the similarities,
-  controlling the sharpness of the probability distribution.
-```
+Training maximizes the diagonal of that matrix under a symmetric cross-entropy over its rows and its columns. Both towers end in a **bias-free** `Dense(embed_dim)` out of their native width (768 vision / 512 text at base scale), followed by L2 normalization. Keeping the projection last and the normalization after it is what makes the dot product a cosine and the temperature the only scale in the logits.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `Image Encoder`
+### 4.1 Vision tower
 
--   **Purpose**: To convert an image into a fixed-size vector representation.
--   **Implementation**: A Vision Transformer (ViT).
-    1.  **Patchify Stem**: A `Conv2D` with a kernel size and stride equal to `patch_size` (e.g., 16x16 or 32x32). This splits the image into a sequence of flattened patches.
-    2.  **Add `[CLS]` Token**: A special, learnable `[CLS]` (classification) token is prepended to the sequence of patch embeddings.
-    3.  **Transformer Blocks**: The entire sequence is processed by a stack of standard Transformer layers.
-    4.  **Feature Extraction**: The output embedding corresponding to the `[CLS]` token is taken as the final representation of the image.
-    5.  **Projection**: A final `Dense` layer projects this representation into the shared `embed_dim`.
+Strided-convolution patch embedding, a learnable CLS token prepended to the patch sequence, `vision_layers` transformer blocks, and a read of position 0.
 
-### 4.2 `Text Encoder`
+The CLS token is a single `(1, 1, vision_width)` weight broadcast across the batch — every image starts from the same query vector, and the attention blocks are what make its final state image-specific. It is created in `build()` alongside the temperature, not in `__init__`.
 
--   **Purpose**: To convert a sequence of text tokens into a fixed-size vector representation.
--   **Implementation**: A standard causal Transformer.
-    1.  **Token Embedding**: An `Embedding` layer maps input token IDs to dense vectors. Positional embeddings are added.
-    2.  **Transformer Blocks**: The sequence of token embeddings is processed by a stack of Transformer layers with a causal attention mask.
-    3.  **Feature Extraction**: The output embedding of the final token (often an `[EOT]` or End-of-Text token) is taken as the representation for the entire text sequence.
-    4.  **Projection**: A final `Dense` layer projects this representation into the shared `embed_dim`.
+The tower is **bidirectional** and stays so: there is no ordering over image patches to respect.
 
-### 4.3 Contrastive Head and `logit_scale`
+### 4.2 Text tower — and its causal mask
 
--   **Purpose**: To compute the final similarity scores and scale them for the loss function.
--   **Functionality**:
-    1.  **Normalization**: Both the final image and text features are L2-normalized to lie on a hypersphere. This makes cosine similarity equivalent to a simple dot product.
-    2.  **Similarity**: An N x N similarity matrix is computed via matrix multiplication: `logits = image_features @ text_features.T`.
-    3.  **Temperature Scaling**: The logits are multiplied by a learnable scalar parameter, `logit_scale` (which is stored as `log(t)` and exponentiated). This temperature `t` controls the sharpness of the distribution over similarities, helping the model learn more effectively during training.
+Token embedding, `text_layers` transformer blocks, and a read of the last non-padding position.
+
+**The tower is causal.** `encode_text` builds a lower-triangular mask and passes it to every text block, so the pooled last real token is the only position that has read the whole sentence — which is what makes last-token pooling meaningful. Two details matter if you touch this code:
+
+- The mask is built in the masking factory's **block** semantics (`True` = mask out) and inverted once to the **attend** semantics the attention layers want.
+- It is broadcast to **rank 3** `(B, L, L)` on purpose. A rank-2 mask is read by `GroupedQueryAttention` as a `(batch, seq)` *padding* mask, not as a `(seq, seq)` *score* mask.
+
+Pooling uses `last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`. That **assumes right padding and pad id `0`** — the id is hard-coded at the call site. A left-padded batch, or a tokenizer whose pad id is not zero, pools the wrong position silently rather than raising. This also differs from OpenAI CLIP, which locates the EOT token as the argmax of the token ids.
+
+### 4.3 Position encoding
+
+Neither tower has a learned positional embedding. Position enters only as **RoPE** inside the grouped-query attention, rotating queries and keys by an angle proportional to index. On the image side that means patches are positioned along the flattened raster order with CLS at index 0 — a real departure from CLIP's learned positional embedding, and worth knowing before comparing numbers.
+
+### 4.4 Temperature
+
+`logit_scale` is an unconstrained scalar weight holding the **logarithm** of the temperature; `exp` is applied on every use, which keeps the multiplier positive under ordinary gradient descent without a constraint object. The default init `2.6592` is `ln(1 / 0.07)`, the paper's starting temperature of roughly 14.3.
+
+**This class applies no upper clamp.** Unlike the MobileCLIP models in this repo, a diverging temperature here produces `inf` logits and a `nan` loss with no other symptom. A trainer that expects OpenCLIP's clamp must supply it.
+
+### 4.5 `call` is partial by design
+
+Passing only `image` or only `text` returns just that tower's features and **omits the logits keys entirely**, so encoding a caption bank for retrieval does not require fabricating a dummy image batch. The output dict's shape is therefore input-dependent, and any consumer indexing it must account for that.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First CLIP Model (30 seconds)
-
-Let's build a small CLIP model and perform a single forward pass.
-
 ```python
 import keras
 import numpy as np
-
-# Local imports from your project structure
 from dl_techniques.models.vision_language.clip.model import CLIP
 
-# 1. Create a ViT-B/32 model from a predefined variant
 model = CLIP.from_variant("ViT-B/32")
+model.build({'image': (None, 224, 224, 3), 'text': (None, 77)})
+print(f"{model.count_params():,} parameters")   # 147,929,857
 
-# Build the model with expected input shapes
-model.build({
-    'image': (None, 224, 224, 3),
-    'text': (None, 77)
-})
+images = np.random.rand(4, 224, 224, 3).astype("float32")
+tokens = np.random.randint(1, 49408, (4, 77)).astype("int32")
 
-# 2. Compile the model (e.g., for training)
-model.compile(optimizer="adam") # Optimizer is needed but loss is custom
-print("✅ CLIP model created and compiled successfully!")
-model.summary()
+outputs = model({'image': images, 'text': tokens}, training=False)
+print(sorted(outputs))
+# ['image_features', 'logit_scale', 'logits_per_image',
+#  'logits_per_text', 'text_features']
+print(outputs['image_features'].shape)    # (4, 512)
+print(outputs['logits_per_image'].shape)  # (4, 4)
 
-# 3. Create dummy data for a forward pass
-batch_size = 8
-dummy_images = np.random.rand(batch_size, 224, 224, 3).astype("float32")
-dummy_text_tokens = np.random.randint(0, 49408, (batch_size, 77))
-
-# 4. Perform a full forward pass (as in training)
-outputs = model({
-    'image': dummy_images,
-    'text': dummy_text_tokens
-})
-
-# 5. Inspect the outputs
-print(f"\nImage features shape: {outputs['image_features'].shape}") # (B, 512)
-print(f"Text features shape: {outputs['text_features'].shape}")   # (B, 512)
-print(f"Logits per image shape: {outputs['logits_per_image'].shape}") # (B, B)
+# Single modality: only that tower's features come back.
+print(sorted(model({'text': tokens}, training=False)))   # ['text_features']
 ```
+
+**No tokenizer ships here.** The model expects CLIP's byte-pair encoding with a 49,408-token vocabulary, right-padded with id `0`. Pretrained tokenizers are available in libraries such as Hugging Face `transformers` (`openai/clip-vit-base-patch32`).
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Class and Creation Functions
-
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`CLIP`** | `...clip.model.CLIP` | The main Keras `Model` for the complete dual-encoder architecture. |
-| **`from_variant`** | `...clip.model.CLIP.from_variant` | Recommended class method to create CLIP models from predefined configurations. |
-| **`create_clip_model`** | `...clip.model.create_clip_model` | Convenience function to create a custom CLIP model from scratch. |
-| **`create_clip_variant`** | `...clip.model.create_clip_variant` | Convenience function to create a CLIP model from a predefined variant. |
+| **`CLIP`** | `...clip.model.CLIP` | The dual-encoder `keras.Model`. |
+| **`CLIP.from_variant`** | `...clip.model.CLIP.from_variant` | Build from a `MODEL_VARIANTS` key; kwargs override the row. |
+| **`create_clip_variant`** | `...clip.model.create_clip_variant` | Thin wrapper around `from_variant`. |
+| **`create_clip_model`** | `...clip.model.create_clip_model` | Thin wrapper around the constructor, for custom configs. |
+| **`CliffordCLIP`** | `...clip.clifford_clip.CliffordCLIP` | Clifford-algebra variant; separate architecture. |
+| **`TransformerLayer`** | `...layers.transformers.TransformerLayer` | The block both towers are built from. |
 
-### 6.2 Core Building Block
-
-| Layer | Location | Purpose |
-| :--- | :--- | :--- |
-| **`TransformerLayer`** | `...layers.transformers.TransformerLayer` | The highly configurable, modern Transformer block that powers both the vision and text encoders. |
+Model methods beyond the Keras surface: `encode_image(image, training=None)` and `encode_text(text, training=None)`, both returning L2-normalized features.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured variants from the original paper.
+`CLIP.MODEL_VARIANTS`:
 
-| Variant | Embed Dim | Vision Layers | Vision Width | Patch Size | Text Layers | Text Width |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **`ViT-B/32`** | 512 | 12 | 768 | 32 | 12 | 512 |
-| **`ViT-B/16`**| 512 | 12 | 768 | 16 | 12 | 512 |
-| **`ViT-L/14`** | 768 | 24 | 1024 | 14 | 12 | 768 |
-| **`ViT-H/14`**| 1024 | 32 | 1280 | 14 | 12 | 1024 |
+| Variant | `embed_dim` | Patch | Vision layers / width / heads / kv | Text layers / width / heads / kv |
+|:---|:---:|:---:|:---:|:---:|
+| **`ViT-B/32`** | 512 | 32 | 12 / 768 / 12 / 4 | 12 / 512 / 8 / 8 |
+| **`ViT-B/16`** | 512 | 16 | 12 / 768 / 12 / 4 | 12 / 512 / 8 / 8 |
+| **`ViT-L/14`** | 768 | 14 | 24 / 1024 / 16 / 4 | 12 / 768 / 12 / 12 |
+| **`ViT-H/14`** | 1024 | 14 | 32 / 1280 / 16 / 4 | **24** / 1024 / 16 / 16 |
+
+**`ViT-H/14` has 24 text layers, not 12.** It is the one scale where the text tower deepens; B/32, B/16 and L/14 all legitimately have 12. Copying the previous row is exactly how that gets missed — do not "restore consistency".
+
+The `*_kv_heads` columns are **not** from any released CLIP: no CLIP checkpoint uses grouped-query attention. They are this implementation's declared modernization.
+
+Other constructor arguments (with defaults): `image_size=224`, `vocab_size=49408`, `context_length=77`, `ffn_expansion_factor=4`, `ffn_multiple_of=256`, `dropout_rate=0.0`, `attention_dropout_rate=0.0`, `logit_scale_init=2.6592`. The constructor validates divisibility eagerly: `image_size % patch_size`, each width by its head count, each head count by its kv-head count.
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Zero-Shot Image Classification
-
-The most powerful application of CLIP is classifying images without any fine-tuning.
+### Example 1: Zero-shot classification
 
 ```python
 import keras
 import numpy as np
 from dl_techniques.models.vision_language.clip.model import create_clip_variant
 
-# Assume you have a text tokenizer
-def tokenize(texts, context_length=77):
-    # This is a placeholder for a real tokenizer (e.g., from huggingface/transformers)
-    return np.random.randint(0, 49408, (len(texts), context_length))
-
-# 1. Create the CLIP model
 model = create_clip_variant("ViT-B/32")
-model.build({
-    'image': (None, 224, 224, 3),
-    'text': (None, 77)
-})
+model.build({'image': (None, 224, 224, 3), 'text': (None, 77)})
 
-# 2. Prepare the image and text prompts
-# A dummy image that we want to classify
-dummy_image = np.random.rand(1, 224, 224, 3).astype("float32")
+image = np.random.rand(1, 224, 224, 3).astype("float32")
+classes = ["a photo of a dog", "a photo of a cat", "a drawing of a car"]
+tokens = tokenize(classes)          # your CLIP BPE tokenizer, right-padded with 0
 
-# The candidate classes described in natural language
-class_descriptions = [
-    "a photo of a dog",
-    "a photo of a cat",
-    "a drawing of a car",
-    "a picture of a bird"
-]
-text_tokens = tokenize(class_descriptions)
+image_features = model.encode_image(image)     # (1, 512), already L2-normalized
+text_features = model.encode_text(tokens)      # (3, 512)
 
-# 3. Get image and text features using the dedicated encoding methods
-image_features = model.encode_image(dummy_image)
-text_features = model.encode_text(text_tokens)
-
-# 4. Compute similarity and find the best match
-# Both features are already L2-normalized
 similarities = keras.ops.matmul(image_features, keras.ops.transpose(text_features))
-probabilities = keras.ops.softmax(similarities, axis=-1)
-
-best_match_index = keras.ops.argmax(probabilities, axis=-1)
-print(f"Input image is most similar to: '{class_descriptions[best_match_index[0]]}'")
-print(f"Probabilities: {probabilities.numpy().flatten()}")
+probs = keras.ops.softmax(similarities, axis=-1)
+print(classes[int(keras.ops.argmax(probs, axis=-1)[0])])
 ```
 
-### Example 2: Getting Separate Embeddings for Downstream Tasks
+Both `encode_*` methods normalize, so the matmul is already a cosine. For a calibrated score, multiply by `keras.ops.exp(model.logit_scale)` first.
 
-You can use CLIP as a powerful feature extractor for other models.
+### Example 2: Caching a prompt bank
+
+Text embeddings for a fixed prompt set are constant. Compute them once and keep only `encode_image` in the loop — the partial `call` contract exists precisely so this needs no dummy image batch.
 
 ```python
-# (Model creation from Example 1)
-batch_size = 4
-dummy_images = np.random.rand(batch_size, 224, 224, 3).astype("float32")
-dummy_texts = ["a red car", "blue sky", "a running dog", "a sleeping cat"]
-text_tokens = tokenize(dummy_texts)
-
-# Get L2-normalized embeddings
-image_embeddings = model.encode_image(dummy_images)
-text_embeddings = model.encode_text(text_tokens)
-
-print(f"Image embeddings shape: {image_embeddings.shape}") # (4, 512)
-print(f"Text embeddings shape: {text_embeddings.shape}")   # (4, 512)
-
-# These embeddings can now be used for image retrieval, clustering, etc.
+text_features = model.encode_text(tokens)          # once
+for batch in stream:
+    image_features = model.encode_image(batch)     # per frame
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning on a Specific Dataset
-
-While designed for zero-shot use, CLIP can be fine-tuned. For example, you can train it on a dataset with higher-quality captions or for a specific domain.
-
-```python
-# Create a CLIP model
-model = create_clip_variant("ViT-B/16")
-
-# You would typically load pre-trained weights here
-# model.load_weights('path/to/pretrained_clip_weights.weights.h5')
-
-# Define a custom training step
-def contrastive_loss(logits_per_image):
-    # Logits are (batch_size, batch_size)
-    batch_size = keras.ops.shape(logits_per_image)[0]
-    # The correct labels are on the diagonal: [0, 1, 2, ..., batch_size-1]
-    labels = keras.ops.arange(batch_size)
-    
-    # Symmetrical loss
-    loss_img = keras.losses.sparse_categorical_crossentropy(
-        labels, logits_per_image, from_logits=True
-    )
-    loss_txt = keras.losses.sparse_categorical_crossentropy(
-        labels, keras.ops.transpose(logits_per_image), from_logits=True
-    )
-    
-    return (loss_img + loss_txt) / 2.0
-
-# Compile the model with a dummy loss (or use a custom training loop)
-model.compile(optimizer=keras.optimizers.AdamW(learning_rate=1e-5))
-
-# Training loop
-# for images, texts in dataset:
-#     with tf.GradientTape() as tape:
-#         outputs = model({'image': images, 'text': texts}, training=True)
-#         loss = contrastive_loss(outputs['logits_per_image'])
-#     grads = tape.gradient(loss, model.trainable_variables)
-#     optimizer.apply_gradients(zip(grads, model.trainable_variables))
-```
-
----
-
-## 10. Performance Optimization
-
-### Mixed Precision Training
-
-CLIP models, being based on Transformers, are excellent candidates for mixed precision training. This uses 16-bit floating-point numbers for many computations, which can significantly speed up training (up to 2-3x) on modern GPUs with Tensor Cores.
-
-```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = create_clip_variant("ViT-B/16")
-model.compile(...)
-
-# When training, use a LossScaleOptimizer to prevent numeric underflow
-# Keras's model.fit() handles this automatically.
-```
-
----
-
-## 11. Training and Best Practices
-
-### Optimizer and Schedule
-
--   **Optimizer**: **AdamW** is highly recommended. The weight decay is a crucial regularizer for Transformer-based models.
--   **Learning Rate Schedule**: A **cosine decay** learning rate schedule, often with a few epochs of linear warmup at the start of training, is standard practice and yields the best results.
-
-### The Importance of Batch Size
-
--   Contrastive learning benefits immensely from **large batch sizes**. A larger batch provides more "negative" examples for each positive pair, making the learning task more challenging and resulting in better representations. The original CLIP was trained with a batch size of 32,768. For typical hardware, techniques like **gradient accumulation** are necessary to simulate such large batches.
-
----
-
-## 12. Serialization & Deployment
-
-The `CLIP` model and all its custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
-
-```python
-# Create and train model
-model = create_clip_variant("ViT-B/32")
-# model.compile(...) and model.fit(...)
-
-# Save the entire model to a single file
-model.save('my_clip_model.keras')
-
-# Load the model in a new session, including its architecture and weights.
-loaded_model = keras.models.load_model('my_clip_model.keras')
-print("✅ CLIP model loaded successfully!")
-```
-
----
-
-## 13. Testing & Validation
-
-### Unit Tests
-
-You can validate the implementation with simple tests to ensure all variants can be created and produce the correct output shapes.
+### Fine-tuning with a contrastive loss
 
 ```python
 import keras
+
+def contrastive_loss(logits_per_image):
+    batch_size = keras.ops.shape(logits_per_image)[0]
+    labels = keras.ops.arange(batch_size)
+    loss_img = keras.losses.sparse_categorical_crossentropy(
+        labels, logits_per_image, from_logits=True)
+    loss_txt = keras.losses.sparse_categorical_crossentropy(
+        labels, keras.ops.transpose(logits_per_image), from_logits=True)
+    return (loss_img + loss_txt) / 2.0
+```
+
+`dl_techniques.losses` carries a ready-made CLIP contrastive loss; prefer it over a hand-rolled training loop.
+
+### Clamping the temperature
+
+This class does not clamp, so a trainer that wants OpenCLIP's behaviour must add it after each step:
+
+```python
+model.logit_scale.assign(keras.ops.minimum(model.logit_scale, keras.ops.log(100.0)))
+```
+
+### Mixed precision
+
+```python
+keras.mixed_precision.set_global_policy('mixed_float16')
+model = create_clip_variant("ViT-B/16")
+```
+
+`model.fit()` inserts the loss-scale optimizer automatically.
+
+---
+
+## 10. Training and Best Practices
+
+- **Optimizer**: AdamW. The weight decay matters for both towers.
+- **Schedule**: cosine decay with a short linear warmup.
+- **Batch size is the main lever.** Contrastive learning scales with negatives per positive; the original CLIP trained above 32,000. On one GPU, gradient accumulation is how you approximate it.
+- **Padding**: right-pad with id `0`. Pooling silently reads the wrong position otherwise (§4.2).
+- **Temperature**: watch `exp(logit_scale)`. There is no clamp here.
+
+---
+
+## 11. Serialization & Deployment
+
+`CLIP` and its layers register through `@register_dl_technique` and carry a complete `get_config`, so the standard round trip works:
+
+```python
+model.save('clip_vit_b32.keras')
+restored = keras.models.load_model('clip_vit_b32.keras')
+```
+
+`compute_output_shape` mirrors `call`'s partial contract: it returns only the keys `call` would emit for the given input spec.
+
+---
+
+## 12. Testing & Validation
+
+```python
 import numpy as np
 from dl_techniques.models.vision_language.clip.model import CLIP
 
 def test_creation_all_variants():
-    """Test model creation for all variants."""
-    for variant in CLIP.MODEL_VARIANTS.keys():
-        model = CLIP.from_variant(variant)
-        assert model is not None
-        print(f"✓ CLIP-{variant} created successfully")
+    for variant in CLIP.MODEL_VARIANTS:
+        assert CLIP.from_variant(variant) is not None
 
 def test_forward_pass_shapes():
-    """Test the output shapes of a full forward pass and individual encoders."""
     model = CLIP.from_variant("ViT-B/32")
-    batch_size = 4
-    embed_dim = 512
-    
-    images = np.random.rand(batch_size, 224, 224, 3)
-    texts = np.random.randint(0, 49408, (batch_size, 77))
-
-    # Test full pass
-    outputs = model({'image': images, 'text': texts})
-    assert outputs['image_features'].shape == (batch_size, embed_dim)
-    assert outputs['text_features'].shape == (batch_size, embed_dim)
-    assert outputs['logits_per_image'].shape == (batch_size, batch_size)
-
-    # Test individual encoders
-    img_feat = model.encode_image(images)
-    txt_feat = model.encode_text(texts)
-    assert img_feat.shape == (batch_size, embed_dim)
-    assert txt_feat.shape == (batch_size, embed_dim)
-    print("✓ Forward pass and encoder shapes are correct")
-
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shapes()
-    print("\n✅ All tests passed!")
+    images = np.random.rand(4, 224, 224, 3).astype("float32")
+    texts = np.random.randint(1, 49408, (4, 77)).astype("int32")
+    out = model({'image': images, 'text': texts}, training=False)
+    assert out['image_features'].shape == (4, 512)
+    assert out['logits_per_image'].shape == (4, 4)
+    assert model.encode_text(texts).shape == (4, 512)
 ```
 
----
-
-## 14. Troubleshooting & FAQs
-
-**Issue 1: Training is unstable or the loss becomes `NaN`.**
-
--   **Cause 1**: The learning rate may be too high.
--   **Solution 1**: Use a smaller peak learning rate (e.g., `1e-5` to `1e-4`) and implement a linear warmup schedule.
--   **Cause 2**: The learnable temperature `logit_scale` is diverging. The original paper clips its value to prevent it from growing too large.
--   **Solution 2**: In your custom training loop, add `model.logit_scale.assign(ops.clip(model.logit_scale, -np.inf, np.log(100)))`.
-
-### Frequently Asked Questions
-
-**Q: What is the `logit_scale` (temperature) parameter?**
-
-A: It's a learnable scalar that scales the cosine similarities before the cross-entropy loss is calculated. A higher temperature makes the softmax distribution sharper, meaning the model becomes more confident about which pairs match. It effectively controls the dynamic range of the logits and is crucial for stable and effective training.
-
-**Q: Why does CLIP use a Vision Transformer (ViT) instead of a CNN?**
-
-A: The authors found that a ViT was more computationally efficient and scalable for the massive pre-training task than a comparable ResNet-based model. However, the core CLIP concept is architecture-agnostic, and versions using CNNs also exist.
-
-**Q: How do I get a tokenizer for the text encoder?**
-
-A: This implementation defines the model architecture. For practical use, you need a compatible tokenizer. The original CLIP model uses a specific byte-pair encoding (BPE) tokenizer with a vocab size of 49,408. You can typically find compatible tokenizers in libraries like `transformers` from Hugging Face or `ftfy`.
+The package suite lives at `tests/test_models/test_clip/`.
 
 ---
 
-## 15. Technical Details
+## 13. Troubleshooting
 
-### Modern `TransformerLayer`
+**Text features look wrong / retrieval is poor.** Check padding. Pooling assumes right padding and pad id `0`; a left-padded batch pools a pad position and never raises.
 
-This CLIP implementation is built upon a generic, high-quality `TransformerLayer`. This is not a simple textbook implementation; it incorporates several modern improvements for better stability and performance, making it a robust foundation for both encoders:
+**Loss becomes `nan`.** Either the learning rate (use warmup, peak around `1e-5`–`1e-4` for fine-tuning) or a diverging `logit_scale`. There is no clamp in this class — add one (§9).
 
--   **Normalization**: Uses **RMSNorm** (`normalization_type='rms_norm'`) instead of standard LayerNorm, which can be faster and more stable. Normalization is applied *before* the sub-layer (`normalization_position='pre'`), a key design choice for training very deep Transformers.
--   **FFN Network**: Uses **SwiGLU** (`ffn_type='swiglu'`), a modern activation function in the feed-forward block that often outperforms standard ReLU or GELU.
--   **Attention**: Uses **Grouped-Query Attention** (`attention_type='group_query'`) in the vision encoder. This is an optimization over standard Multi-Head Attention that reduces the memory bandwidth required for the Key and Value projections, leading to faster inference.
+**`KeyError: 'logits_per_image'`.** You passed one modality. `call` omits the logits keys unless both are present (§4.5).
 
-### Feature Extraction Strategies
-
--   **Vision Encoder**: Following the standard ViT practice, a learnable `[CLS]` token is added to the sequence of image patches. The final hidden state corresponding to this token is used as the aggregate representation of the entire image.
--   **Text Encoder**: The model uses the hidden state of the *last token* in the sequence as the representation for the text. This is typically an `[EOT]` (end-of-text) token, which is trained to summarize the meaning of the entire sentence.
+**Comparing against published CLIP numbers.** Do not. This is a modernized architecture (GQA, RMSNorm, SwiGLU, RoPE instead of learned positions) with no ported weights.
 
 ---
 
-## 16. Citation
-
-This implementation is based on the official CLIP paper. If you use this model in your research, please consider citing the original work:
+## 14. Citation
 
 ```bibtex
 @inproceedings{radford2021learning,
   title={Learning Transferable Visual Models From Natural Language Supervision},
-  author={Alec Radford and Jong Wook Kim and Chris Hallacy and Aditya Ramesh and Gabriel Goh and Sandhini Agarwal and Girish Sastry and Amanda Askell and Pamela Mishkin and Jack Clark and Gretchen Krueger and Ilya Sutskever},
+  author={Radford, Alec and Kim, Jong Wook and Hallacy, Chris and Ramesh, Aditya
+          and Goh, Gabriel and Agarwal, Sandhini and Sastry, Girish and Askell, Amanda
+          and Mishkin, Pamela and Clark, Jack and Krueger, Gretchen and Sutskever, Ilya},
   booktitle={Proceedings of the 38th International Conference on Machine Learning (ICML)},
   year={2021}
 }
 ```
+
+The modernizations this implementation adds: Grouped-Query Attention (Ainslie et al., 2023, [arXiv:2305.13245](https://arxiv.org/abs/2305.13245)), RoPE (Su et al., 2021, [arXiv:2104.09864](https://arxiv.org/abs/2104.09864)), RMSNorm (Zhang and Sennrich, 2019, [arXiv:1910.07467](https://arxiv.org/abs/1910.07467)) and SwiGLU (Shazeer, 2020, [arXiv:2002.05202](https://arxiv.org/abs/2002.05202)).

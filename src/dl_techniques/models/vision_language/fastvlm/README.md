@@ -4,230 +4,61 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of **FastVLM**, a hybrid vision architecture that combines the strengths of efficient convolutions and Transformers. This implementation is inspired by recent research on models like FastViT and RepMixer, whose authors report a strong balance between accuracy, latency, and model size. This port has not been trained or benchmarked, and no accuracy or latency claim is made for it.
+A hybrid convolution/transformer **image model**: a `ConvolutionalStem` of MobileOne blocks, two `RepMixer` stages for cheap token mixing, and one attention stage for global context, ending in a classification head.
 
-The architecture features a `ConvolutionalStem` using MobileOne blocks, `RepMixer` stages for efficient feature mixing, and `Attention` stages for capturing global context.
-
----
-
-## Table of Contents
-
-1. [Overview: What is FastVLM and Why It Matters](#1-overview-what-is-fastvlm-and-why-it-matters)
-2. [The Problem FastVLM Solves](#2-the-problem-fastvlm-solves)
-3. [How FastVLM Works: Core Concepts](#3-how-fastvlm-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+> **Two things the name invites you to assume, and shouldn't.**
+>
+> 1. **This is not a vision-language model.** It takes images and returns class logits or feature maps. There is no text tower and no cross-modal head.
+> 2. **This is not a weight-compatible port of any published FastViT or FastVLM checkpoint.** It is assembled from this repo's own blocks. In particular `dl_techniques.layers.repmixer_block.RepMixerBlock` shares a *name* with FastViT's RepMixer and is a different construction; the faithful FastViT port lives in `dl_techniques.layers.fastvit` and `models/vision/fastvit/`.
+>
+> No pretrained weights are distributed, and the model has not been trained or benchmarked in this repository. No accuracy or latency claim is made for it.
 
 ---
 
 ## 1. Overview: What is FastVLM and Why It Matters
 
-### What is FastVLM?
+The model combines layer types hierarchically instead of using one everywhere. Cheap convolutional and mixer-style blocks handle the early stages, where feature maps are large; expensive attention is reserved for the last stage, where the grid has already shrunk.
 
-**FastVLM** is a hybrid vision model designed for high efficiency and performance. It strategically combines different types of layers to create a hierarchical architecture that is both fast and accurate. Instead of relying purely on self-attention like a standard Vision Transformer (ViT), it uses computationally cheaper convolutional and mixer-style blocks in the early stages and reserves powerful (but expensive) attention blocks for the later stages.
+### Key ideas
 
-### Key Innovations
-
-1.  **Hybrid Architecture**: The model starts with a convolutional stem, transitions to efficient `RepMixer` blocks for spatial and channel mixing, and finishes with standard Transformer `Attention` blocks. This leverages the strengths of each component at the most appropriate stage of feature extraction.
-2.  **RepMixer Blocks**: In the early and middle stages, the model uses `RepMixer` blocks as a lightweight alternative to self-attention. `RepMixer` decouples spatial mixing (using depthwise convolutions) and channel mixing (using 1x1 convolutions), achieving effective feature interaction with linear complexity.
-3.  **Efficient Convolutional Stem**: The initial feature extraction is handled by a `ConvolutionalStem` built from `MobileOne` blocks, which use structural reparameterization to be efficient at inference time.
-4.  **Hierarchical Structure**: Like a classic CNN, the model processes images in stages, progressively downsampling the spatial resolution while increasing the number of feature channels. This allows it to learn features at multiple scales.
-
-### Why FastVLM Matters
-
-**Standard Vision Transformer (ViT) Problem**:
-```
-Problem: Classify a high-resolution image efficiently.
-ViT Approach:
-  1. Split the image into patches and process them with a deep stack of
-     self-attention layers.
-  2. Limitation: Self-attention has O(N²) complexity, where N is the number of
-     patches. For high-resolution images, N becomes very large, making the
-     model slow and memory-hungry.
-  3. Result: Standard ViTs struggle with high resolutions and are often too
-     slow for real-time or on-device applications.
-```
-
-**FastVLM's Solution**:
-```
-FastVLM Approach:
-  1. Use an efficient convolutional stem to quickly downsample the image.
-  2. Use RepMixer blocks in the early stages. These have linear complexity
-     (O(N)) and are very fast at processing the larger feature maps. [8]
-  3. Reserve the expensive self-attention blocks for the final stage, where the
-     number of patches is much smaller (N/16).
-  4. Benefit: Achieves a superior speed-accuracy trade-off by applying the
-     right tool for the right job at each stage of the network. [10]
-```
-
-### Real-World Impact
-
-FastVLM is designed for applications where both high accuracy and low latency are critical:
-
--   📱 **On-Device AI**: Efficient enough to run on mobile phones, enabling real-time image recognition, augmented reality, and visual search.
--   🚗 **Autonomous Systems**: Provides fast and accurate perception for robotics and self-driving cars.
--   💨 **Real-Time Video Analysis**: Can process frames from a video stream at a high rate.
--   ☁️ **Efficient Cloud Deployment**: Reduces computational cost and energy consumption for large-scale image processing services.
+1. **Hybrid architecture.** Convolutional stem, then `RepMixer` blocks, then Transformer attention — each component where it is worth its cost.
+2. **RepMixer blocks.** A convolutional alternative to self-attention in the early stages: depthwise convolutions mix spatially, `1x1` convolutions mix channels, and the whole thing is linear in the number of spatial locations.
+3. **Efficient stem.** Three `MobileOneBlock` layers do the initial `/4` downsample.
+4. **Hierarchical structure.** Three stages, progressively downsampling while widening — features at multiple scales, and `extract_features` exposes all of them.
 
 ---
 
 ## 2. The Problem FastVLM Solves
 
-### The Efficiency-Accuracy Trade-off
+| | Pure CNN | Pure ViT | This hybrid |
+|---|---|---|---|
+| Early-stage cost | Cheap, linear | Quadratic in a large token count | Cheap, linear (RepMixer) |
+| Global context | Weak; grows with depth | Strong from layer 1 | Strong, from stage 3 |
+| Cost driver | Convolution FLOPs | `O(N^2)` attention at every layer | Convolutions dominate |
 
-In computer vision, there has long been a trade-off between model accuracy and computational efficiency.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Vision Architectures                        │
-│                                                             │
-│  Convolutional Neural Networks (CNNs):                      │
-│    - Highly efficient due to local operations and shared weights.
-│    - Struggle to model long-range, global dependencies.     │
-│                                                             │
-│  Vision Transformers (ViTs):                                │
-│    - Excellent at modeling global context via self-attention.
-│    - Suffer from quadratic complexity, making them slow and │
-│      inefficient, especially with high-resolution inputs.   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-Designing a model that captures the global context of a Transformer while retaining the speed of a CNN is a major challenge.
-
-### How FastVLM Changes the Game
-
-FastVLM provides a principled hybrid architecture that explicitly optimizes this trade-off.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The FastVLM Hybrid Strategy                                │
-│                                                             │
-│  1. Early Stages (Large Feature Maps):                      │
-│     - Use efficient, convolution-based layers (Stem and     │
-│       RepMixer) that have linear complexity.                │
-│     - Focus on learning local patterns and textures quickly.│
-│                                                             │
-│  2. Later Stages (Small Feature Maps):                      │
-│     - Introduce powerful self-attention blocks.             │
-│     - The quadratic cost is now manageable because the      │
-│       sequence length (number of patches) is small.         │
-│     - Focus on integrating local features into a global,    │
-│       context-aware representation.                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-This staged approach ensures that the most computationally expensive operations are only applied when absolutely necessary, on smaller feature maps where they provide the most value.
+Self-attention is `O(N^2)` in the number of spatial locations, so it is at its most expensive exactly where the feature map is largest and its content is most local anyway. Deferring it to the `H/16 x W/16` grid makes the quadratic term affordable while still giving every location a view of every other one before the head.
 
 ---
 
 ## 3. How FastVLM Works: Core Concepts
 
-### The Hierarchical Multi-Stage Architecture
-
-FastVLM processes an image in four main phases, progressively refining the feature representation.
-
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     FastVLM Architecture Stages                  │
-│                                                                  │
-│  Input Image ───►┌──────────────────┐  (Downsamples 4x)          │
-│   (H, W)         │ ConvolutionalStem│                            │
-│                  └────────┬─────────┘                            │
-│                           │ (H/4, W/4)                           │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 1     │                            │
-│                  │ (RepMixer Blocks)│                            │
-│                  └────────┬─────────┘                            │
-│                           │ Downsample 2x                        │
-│                           ▼ (H/8, W/8)                           │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 2     │                            │
-│                  │ (RepMixer Blocks)│                            │
-│                  └────────┬─────────┘                            │
-│                           │ Downsample 2x                        │
-│                           ▼ (H/16, W/16)                         │
-│                  ┌────────▼──────────┐ (Maintains resolution)    │
-│                  │      Stage 3      │                           │
-│                  │ (Attention Blocks)│                           │
-│                  └────────┬──────────┘                           │
-│                           │                                      │
-│                  ┌────────▼───────────┐                          │
-│                  │ Classification Head│                          │
-│                  └────────────────────┘                          │
-└──────────────────────────────────────────────────────────────────┘
+Input (B, H, W, 3)
+    │
+    ├─► ConvolutionalStem (3 x MobileOneBlock)   -> (B, H/4,  W/4,  D0)
+    │
+    ├─► Stage 1: depths[0] x RepMixerBlock       -> (B, H/4,  W/4,  D0)
+    ├─► Downsample Conv2D                        -> (B, H/8,  W/8,  D1)
+    │
+    ├─► Stage 2: depths[1] x RepMixerBlock       -> (B, H/8,  W/8,  D1)
+    ├─► Downsample Conv2D                        -> (B, H/16, W/16, D2)
+    │
+    ├─► Stage 3: depths[2] x AttentionBlockVLM   -> (B, H/16, W/16, D2)
+    │
+    └─► [include_top] GAP -> [Dropout] -> Dense  -> (B, num_classes)
 ```
 
-### The Complete Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     FastVLM Complete Data Flow                          │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: CONVOLUTIONAL STEM
-──────────────────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► ConvolutionalStem (using MobileOne blocks)
-    │
-    └─► Feature Map 0: (B, H/4, W/4, D₀)
-
-
-STEP 2: STAGE 1 (RepMixer)
-──────────────────────────
-Feature Map 0
-    │
-    ├─► Stack of RepMixer Blocks
-    │
-    └─► Feature Map 1: (B, H/4, W/4, D₀)
-
-
-STEP 3: STAGE 2 (RepMixer)
-──────────────────────────
-Feature Map 1
-    │
-    ├─► Downsampling Conv2D -> (B, H/8, W/8, D₁)
-    │
-    ├─► Stack of RepMixer Blocks
-    │
-    └─► Feature Map 2: (B, H/8, W/8, D₁)
-
-
-STEP 4: STAGE 3 (Attention)
-───────────────────────────
-Feature Map 2
-    │
-    ├─► Downsampling Conv2D -> (B, H/16, W/16, D₂)
-    │
-    ├─► Stack of Attention Blocks
-    │   (Flatten -> TransformerLayer -> Reshape)
-    │
-    └─► Feature Map 3: (B, H/16, W/16, D₂)
-
-
-STEP 5: CLASSIFICATION
-──────────────────────
-Feature Map 3
-    │
-    ├─► Global Average Pooling -> (B, D₂)
-    │
-    ├─► [Optional] Dropout
-    │
-    ├─► Dense Layer (Classifier)
-    │
-    └─► Logits (B, num_classes)
-```
+`embed_dims` is `[D0, D1, D2]` and `depths` is per stage; both must have exactly 3 entries. With `include_top=False` the model stops at the stage-3 feature map, downsampled `16x` from the input.
 
 ---
 
@@ -235,351 +66,263 @@ Feature Map 3
 
 ### 4.1 `ConvolutionalStem`
 
--   **Purpose**: To perform initial, aggressive downsampling and low-level feature extraction.
--   **Implementation**: A sequence of three `MobileOneBlock` layers.
--   **Functionality**: Reduces spatial resolution by 4x (e.g., 224x224 -> 56x56) while increasing the channel dimension. `MobileOne` blocks are used for their efficiency at inference time due to structural reparameterization.
+Three `MobileOneBlock` layers performing the initial `/4` downsample and low-level feature extraction, e.g. `224x224 -> 56x56`.
+
+`MobileOneBlock` is a *reparameterizable* block family in principle. **In this stack the fusion pass is not implemented** — see §9.
 
 ### 4.2 `RepMixerBlock`
 
--   **Purpose**: To efficiently mix features in the early stages where feature maps are large. It's a convolution-based alternative to self-attention.
--   **Architecture**: Comprises two main parts:
-    1.  **Token Mixing**: Uses depthwise convolutions (3x3 and 1x1) to mix information spatially within each channel.
-    2.  **Channel Mixing**: Uses 1x1 convolutions (an MLP) to mix information across different feature channels.
--   **Benefit**: Achieves effective feature mixing with a computational complexity that is linear with respect to the number of spatial locations, unlike the quadratic complexity of self-attention.
+A residual block that decouples spatial from channel mixing:
 
-### 4.3 `AttentionBlock`
+```
+Y = X + TokenMixer(Norm1(X))       DWConv3x3 -> BN -> Act -> DWConv1x1 -> BN
+Z = Y + ChannelMixer(Norm2(Y))     Conv1x1(expand) -> Act -> Conv1x1(project)
+```
 
--   **Purpose**: To capture global, long-range dependencies in the final, low-resolution stage.
--   **Implementation**: This block wraps a standard `TransformerLayer`. It first flattens the spatial dimensions of the feature map into a sequence, processes it with the Transformer, and then reshapes it back to a spatial format.
--   **Functionality**: Performs full multi-head self-attention, allowing every location in the feature map to interact with every other location, enabling the model to learn global context.
+Both halves are convolutional, so the cost is linear in `H * W` rather than quadratic. The channel mixer is an inverted-bottleneck MLP whose expansion is `mlp_ratio`.
+
+Again: this is **this repo's** `RepMixerBlock`, not FastViT's. Use `dl_techniques.layers.fastvit.FastVitRepMixerBlock` for anything that must match timm block-for-block.
+
+### 4.3 `AttentionBlockVLM`
+
+```
+Input (B, H, W, C) ─► flatten to (B, H*W, C) ─► TransformerLayer ─► reshape ─► [LayerScale] ─► (B, H, W, C)
+```
+
+**The default `attention_type` is `'group_query'`, not plain multi-head.** It is configured with `num_kv_heads == num_heads`, so the arithmetic is that of ordinary MHA — but it is the only wired attention type that carries **positional information** into stage 3. `'multi_head'` and `'window'` are accepted and carry none. This is a weight-path change relative to models built before 2026-08-19.
+
+Because attention is positional here, `attention_max_seq_len` (default `2048`) is the RoPE table length and is a real limit: the stage-3 grid is `(H/16) * (W/16)` tokens, so the default covers inputs up to roughly 720 px. A larger encoder input needs a larger value or RoPE raises. It is consumed only when `attention_type='group_query'`.
+
+`num_heads` defaults to `[max(1, dim // 32) for dim in embed_dims]` and each entry must divide its `embed_dims` entry.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First FastVLM Model (30 seconds)
-
-Let's build a tiny FastVLM for a simple classification task.
-
 ```python
 import keras
 import numpy as np
+from dl_techniques.models.vision_language.fastvlm import FastVLM
 
-# Local imports from your project structure
-from dl_techniques.models.vision_language.fastvlm.model import FastVLM
-
-# 1. Create a tiny FastVLM model for CIFAR-10 (32x32 images, 10 classes)
-# We use the "nano" variant for a very small and fast model
-model = FastVLM.from_variant(
-    "nano",
-    num_classes=10,
-    input_shape=(32, 32, 3)
-)
-
-# 2. Compile the model
+model = FastVLM.from_variant("nano", num_classes=10, input_shape=(32, 32, 3))
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
-print("✅ FastVLM model created and compiled successfully!")
+
+images = np.random.rand(16, 32, 32, 3).astype("float32")
+labels = np.random.randint(0, 10, 16)
+
+loss, acc = model.train_on_batch(images, labels)
+print(model.predict(images).shape)   # (16, 10)
+print(f"{model.count_params():,}")   # 505,978
 model.summary()
-
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3)
-dummy_labels = np.random.randint(0, 10, batch_size)
-
-# 4. Train for one step
-loss, acc = model.train_on_batch(dummy_images, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
-
-# 5. Run inference
-predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
 ```
+
+The head emits **logits**: keep `from_logits=True`, or pass your own activation through the classification `Dense`.
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `FastVLM` (Model Class)
+| Component | Location | Purpose |
+| :--- | :--- | :--- |
+| **`FastVLM`** | `...fastvlm.model.FastVLM` | The `keras.Model`. |
+| **`FastVLM.from_variant`** | — | Build a preset; kwargs override the row. |
+| **`create_fastvlm`** | `...fastvlm.model.create_fastvlm` | Module-level factory; forwards to `from_variant`. |
+| **`FastVLM.extract_features`** | — | All four intermediate feature maps (§8). |
+| **`AttentionBlockVLM`** | `...fastvlm.components.AttentionBlockVLM` | This package's own attention block. |
+| **`RepMixerBlock`** | `...layers.repmixer_block.RepMixerBlock` | Convolutional token + channel mixing. |
+| **`ConvolutionalStem`** | `...layers.repmixer_block.ConvolutionalStem` | Stem; `/4` downsample. |
+| **`MobileOneBlock`** | `...layers.mobile_one_block.MobileOneBlock` | The stem's conv block. |
 
-**Purpose**: The main Keras `Model` subclass that assembles the complete FastVLM architecture.
-
-**Location**: `dl_techniques.models.vision_language.fastvlm.model.FastVLM`
+`FastVLM`, `create_fastvlm` and `AttentionBlockVLM` are exported from the package:
 
 ```python
-from dl_techniques.models.vision_language.fastvlm.model import FastVLM
-
-# Create from a standard variant
-model = FastVLM.from_variant(
-    "base",
-    num_classes=1000,
-    input_shape=(224, 224, 3)
-)
-
-# Create a custom model
-custom_model = FastVLM(
-    num_classes=100,
-    embed_dims=[96, 192, 384],
-    depths=[4, 6, 8],
-    num_heads=[3, 6, 12]
-)
+from dl_techniques.models.vision_language.fastvlm import FastVLM, create_fastvlm, AttentionBlockVLM
 ```
 
-### 6.2 Core Building Blocks
+### Constructor
 
-| Layer | Location | Purpose |
-| :--- | :--- | :--- |
-| **`ConvolutionalStem`** | `...layers.repmixer_block.ConvolutionalStem` | Initial feature extraction and 4x downsampling. |
-| **`RepMixerBlock`** | `...layers.repmixer_block.RepMixerBlock` | Efficient, convolution-based token and channel mixing. |
-| **`AttentionBlock`** | `...models.vision.fast_vlm.components.AttentionBlock` | Wraps a `TransformerLayer` for global attention on spatial feature maps. |
-| **`MobileOneBlock`** | `...layers.mobile_one_block.MobileOneBlock` | The efficient, reparameterizable conv block used in the stem. |
+`num_classes=1000`, `embed_dims=[64, 128, 256]`, `depths=[3, 4, 6]`, `num_heads=None`, `mlp_ratio=4.0`, `dropout_rate=0.0`, `drop_path_rate=0.1`, `use_se=False`, `attention_type='group_query'`, `use_layer_scale=True`, `attention_max_seq_len=2048`, `activation='gelu'`, `kernel_initializer='he_normal'`, `include_top=True`, `input_shape=None` (defaults to `(224, 224, 3)`).
+
+`num_classes=0` builds a feature extractor, as does `include_top=False`.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured variants.
+`FastVLM.MODEL_VARIANTS`:
 
-| Variant | Embed Dims | Depths | Heads | MLP Ratio | Use SE |
-|:---:|:---|:---|:---|:---:|:---:|
-| **`nano`** | | | | 2.0 | No |
-| **`tiny`** | | | | 3.0 | No |
-| **`small`**| | | | 4.0 | No |
-| **`base`** | | | | 4.0 | No |
-| **`large`**| | || 4.0 | Yes |
-| **`huge`** |||| 4.0 | Yes |
+| Variant | `embed_dims` | `depths` | `num_heads` | `mlp_ratio` | `dropout_rate` | `drop_path_rate` | `use_se` |
+|:---|:---|:---|:---|:---:|:---:|:---:|:---:|
+| **`nano`** | `[24, 48, 96]` | `[1, 2, 3]` | `[1, 2, 3]` | 2.0 | 0.0 | 0.0 | No |
+| **`tiny`** | `[32, 64, 128]` | `[2, 3, 4]` | `[1, 2, 4]` | 3.0 | 0.0 | 0.05 | No |
+| **`small`** | `[48, 96, 192]` | `[3, 4, 6]` | `[2, 3, 6]` | 4.0 | 0.1 | 0.1 | No |
+| **`base`** | `[64, 128, 256]` | `[3, 4, 6]` | `[2, 4, 8]` | 4.0 | 0.1 | 0.1 | No |
+| **`large`** | `[96, 192, 384]` | `[4, 6, 8]` | `[3, 6, 12]` | 4.0 | 0.1 | 0.2 | Yes |
+| **`huge`** | `[128, 256, 512]` | `[6, 8, 12]` | `[4, 8, 16]` | 4.0 | 0.1 | 0.3 | Yes |
+
+`use_se` toggles squeeze-and-excitation inside the stem's MobileOne blocks. `from_variant(variant, num_classes=1000, input_shape=None, **kwargs)` applies the row and then any kwargs on top:
+
+```python
+model = FastVLM.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3),
+                             drop_path_rate=0.2, attention_type="multi_head")
+```
+
+**No pretrained weights ship with this package.** There is no `pretrained` argument; build the architecture and warm-start from a local checkpoint with `model.load_weights(path)` — or better, `dl_techniques.utils.weight_transfer.load_weights_or_raise(model, path)`, which raises when a load changes zero variables.
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Using FastVLM as a Feature Extraction Backbone
-
-You can use a headless FastVLM as a powerful backbone for downstream tasks like object detection or semantic segmentation.
+### Example 1: As a feature-extraction backbone
 
 ```python
-# 1. Create the feature extractor
-backbone = FastVLM.from_variant("base", include_top=False, input_shape=(512, 512, 3))
+import numpy as np
+from dl_techniques.models.vision_language.fastvlm import create_fastvlm
 
-# 2. Extract features
-dummy_images = np.random.rand(2, 512, 512, 3)
-features = backbone.predict(dummy_images)
-
-# The output is the feature map from the final stage
-# Spatial resolution is downsampled by 16x
-print(f"Output shape: {features.shape}") # (2, 32, 32, 256)
+backbone = create_fastvlm("base", include_top=False, input_shape=(256, 256, 3))
+features = backbone.predict(np.random.rand(2, 256, 256, 3).astype("float32"))
+print(features.shape)   # (2, 16, 16, 256)  -- 16x downsampled, embed_dims[2] channels
 ```
 
-### Example 2: Accessing Multi-Scale Features
-
-The `extract_features` method provides access to feature maps from all stages, which is ideal for building feature pyramid networks (FPNs).
+### Example 2: Multi-scale features for an FPN
 
 ```python
-# 1. Create the model
-model = FastVLM.from_variant("base", include_top=False, input_shape=(224, 224, 3))
-
-# 2. Get the multi-scale features
-dummy_images = np.random.rand(1, 224, 224, 3)
-multi_scale_features = model.extract_features(dummy_images)
-
-print("Multi-scale feature map shapes:")
-# features[0]: Stem output (4x downsampled)
-print(f"  - Stem: {multi_scale_features[0].shape}")
-# features[1]: Stage 1 output (4x downsampled)
-print(f"  - Stage 1: {multi_scale_features[1].shape}")
-# features[2]: Stage 2 output (8x downsampled)
-print(f"  - Stage 2: {multi_scale_features[2].shape}")
-# features[3]: Stage 3 output (16x downsampled)
-print(f"  - Stage 3: {multi_scale_features[3].shape}")
+feats = backbone.extract_features(np.random.rand(1, 256, 256, 3).astype("float32"))
+for name, f in zip(["stem", "stage 1", "stage 2", "stage 3"], feats):
+    print(f"{name}: {tuple(f.shape)}")
+# stem:    (1, 64, 64, 64)     /4
+# stage 1: (1, 64, 64, 64)     /4   (stage 1 does not downsample)
+# stage 2: (1, 32, 32, 128)    /8
+# stage 3: (1, 16, 16, 256)    /16
 ```
+
+`extract_features` takes a tensor and runs eagerly; it is not part of `call`, so it does not appear in a functional graph. Wrap it yourself if you need a traced multi-output model.
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Structural Reparameterization for Inference
+### Structural reparameterization is NOT available
 
-The `ConvolutionalStem` (and its underlying `MobileOneBlock`s) supports structural reparameterization. This fuses multiple parallel convolutional branches into a single, faster convolution for inference.
+`ConvolutionalStem` exposes `reparameterize()` and `reset_reparameterization()`, but `MobileOneBlock` implements neither:
 
-```python
-# 1. Create and train your model as usual
-model = FastVLM.from_variant("small", num_classes=10)
-# ... model.compile() and model.fit() ...
+- `stem.reparameterize()` is a **silent no-op**. It catches the `AttributeError` per block and logs `Failed to reparameterize stem block N` at WARNING level, then returns normally. Nothing is fused and inference speed is unchanged.
+- `stem.reset_reparameterization()` does **not** catch, and raises `AttributeError: 'MobileOneBlock' object has no attribute 'reset_reparameterization'`.
 
-# 2. Switch the stem to inference mode
-model.stem.reparameterize()
-print("✅ Stem has been reparameterized for fast inference!")
+Do not build a deployment path on either. If you need the fusion, implement it as an explicit, separately tested conversion pass over a trained model.
 
-# 3. Now, inference calls will be faster
-# predictions = model.predict(images)
-
-# 4. If you need to continue training, switch back
-# model.stem.reset_reparameterization()
-```
-
----
-
-## 10. Performance Optimization
-
-### Mixed Precision Training
-
-FastVLM is well-suited for mixed precision training, which can provide significant speedups on modern GPUs.
+### Mixed precision
 
 ```python
-# Enable mixed precision globally
 keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
 model = FastVLM.from_variant("base", num_classes=1000)
-model.compile(...)
+```
+
+### Larger inputs
+
+Raise `attention_max_seq_len` past `(H/16) * (W/16)` before going beyond ~720 px (§4.3).
+
+---
+
+## 10. Training and Best Practices
+
+- **Optimizer**: AdamW. Weight decay matters for the attention stage.
+- **Schedule**: cosine decay with a few epochs of linear warmup.
+- **Stochastic depth**: `drop_path_rate` is the endpoint of a linearly increasing schedule — the drop probability is lowest at the first block and highest at the last. Raise it with model size, as the variant table does.
+- **Regularization**: hybrid models with attention inherit the weak inductive biases of Transformers, so RandAugment, Mixup and CutMix are effective and often necessary.
+- **Learning rate**: attention stages are LR-sensitive; if training diverges, drop the peak to `1e-4` or `5e-5` and lengthen the warmup before touching anything else.
+
+---
+
+## 11. Serialization & Deployment
+
+`FastVLM` and its layers register through `@register_dl_technique` (key `dl_techniques.models.fastvlm.model>FastVLM` — the `vision_language/` family directory is stripped) and carry a complete `get_config`, so the standard round trip works with no `custom_objects`:
+
+```python
+model.save('my_fastvlm.keras')
+loaded = keras.models.load_model('my_fastvlm.keras')
 ```
 
 ---
 
-## 11. Training and Best Practices
-
-### Optimizer and Regularization
-
--   **Optimizer**: **AdamW** is highly recommended, as weight decay is a crucial regularizer for Transformer-like models.
--   **Learning Rate Schedule**: A cosine decay schedule with a few epochs of linear warmup generally works best.
--   **Stochastic Depth**: The `drop_path_rate` enables stochastic depth, a powerful regularization technique that randomly drops entire residual blocks during training. The rate is typically increased linearly from 0 for the first layer to the specified `drop_path_rate` for the last layer.
-
-### Data Augmentation
-
--   Like other Transformer-based models, FastVLM benefits from strong data augmentations, as it has weaker inductive biases than traditional CNNs. Techniques like **RandAugment**, **Mixup**, and **CutMix** are effective.
-
----
-
-## 12. Serialization & Deployment
-
-The `FastVLM` model and all its custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+## 12. Testing & Validation
 
 ```python
-# Create and train model
-model = FastVLM.from_variant("tiny", num_classes=10)
-# model.compile(...) and model.fit(...)
-
-# Save the entire model
-model.save('my_fastvlm_model.keras')
-
-# Load the model in a new session
-loaded_model = keras.models.load_model('my_fastvlm_model.keras')
-print("✅ Model loaded successfully!")
-```
-
----
-
-## 13. Testing & Validation
-
-### Unit Tests
-
-```python
-import keras
 import numpy as np
-from dl_techniques.models.vision_language.fastvlm.model import FastVLM
+from dl_techniques.models.vision_language.fastvlm import FastVLM
 
 def test_creation_all_variants():
-    """Test model creation for all variants."""
-    for variant in FastVLM.MODEL_VARIANTS.keys():
-        model = FastVLM.from_variant(variant, num_classes=10, input_shape=(64, 64, 3))
-        assert model is not None
-        print(f"✓ FastVLM-{variant} created successfully")
+    for variant in FastVLM.MODEL_VARIANTS:
+        assert FastVLM.from_variant(variant, num_classes=10,
+                                    input_shape=(64, 64, 3)) is not None
 
 def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
     model = FastVLM.from_variant("tiny", num_classes=10, input_shape=(128, 128, 3))
-    dummy_input = np.random.rand(4, 128, 128, 3)
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
+    assert model.predict(np.random.rand(4, 128, 128, 3).astype("float32")).shape == (4, 10)
 
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
+def test_feature_pyramid_strides():
+    backbone = FastVLM.from_variant("nano", include_top=False, input_shape=(64, 64, 3))
+    feats = backbone.extract_features(np.random.rand(1, 64, 64, 3).astype("float32"))
+    assert [tuple(f.shape)[1] for f in feats] == [16, 16, 8, 4]
 ```
 
----
-
-## 14. Troubleshooting & FAQs
-
-**Issue 1: Training is unstable or diverges.**
-
--   **Cause 1**: The learning rate may be too high. Hybrid models, especially those with attention, can be sensitive to the learning rate.
--   **Solution 1**: Use a smaller peak learning rate (e.g., `1e-4` or `5e-5`) and a proper warmup schedule.
--   **Cause 2**: Insufficient regularization for the model size and dataset.
--   **Solution 2**: Increase `dropout_rate` or `drop_path_rate`. Ensure you are using AdamW with appropriate `weight_decay`.
-
-### Frequently Asked Questions
-
-**Q: What is the main advantage of FastVLM over a standard Vision Transformer?**
-
-A: **Speed**. By using efficient convolutional and RepMixer blocks in the early stages where feature maps are large, FastVLM avoids the quadratic complexity of self-attention until the final, low-resolution stage. This results in a significantly faster model with a better latency-accuracy trade-off.
-
-**Q: How does `RepMixer` differ from `ConvMixer` or `MLP-Mixer`?**
-
-A: They all belong to a family of "mixer" architectures that separate spatial and channel mixing.
--   `MLP-Mixer` uses MLPs (Dense layers) for both token and channel mixing, requiring patches to be flattened.
--   `ConvMixer` uses standard and depthwise convolutions throughout.
--   `RepMixer` is a highly optimized convolutional mixer that uses a specific sequence of depthwise and pointwise convolutions and is designed with structural reparameterization in mind for inference speed.
+The package suite is at `tests/test_models/test_fastvlm/`.
 
 ---
 
-## 15. Technical Details
+## 13. Troubleshooting & FAQs
 
-### Stochastic Depth
+**Training diverges.** Lower the peak learning rate and lengthen warmup first; then raise `dropout_rate` / `drop_path_rate` and check that AdamW's `weight_decay` is set.
 
-This model implements a linearly increasing stochastic depth rate. The probability of dropping a block is lowest at the start of the network and highest at the end. This is controlled by the `drop_path_rate` parameter. This regularization technique encourages the network to learn more robust features by forcing it to rely on different combinations of layers during training.
+**RoPE raises on a large input.** The stage-3 token count exceeded `attention_max_seq_len`. Raise it (§4.3).
 
-### Attention vs. RepMixer
+**`stem.reparameterize()` logged three warnings and changed nothing.** Working as documented — the fusion pass is not implemented (§9).
 
--   **RepMixer (Early Stages)**:
-    -   **Receptive Field**: Local. The depthwise convolutions have a fixed, small kernel size (e.g., 3x3).
-    -   **Complexity**: `O(N)`, linear in the number of spatial locations.
-    -   **Content-Agnostic**: The mixing operation is the same regardless of the input features.
--   **Self-Attention (Final Stage)**:
-    -   **Receptive Field**: Global. Every location can attend to every other location.
-    -   **Complexity**: `O(N²)`, quadratic in the number of spatial locations.
-    -   **Content-Aware**: The mixing weights (attention scores) are dynamically computed based on the similarity between input features.
+**`ValueError` about `num_heads` and `embed_dims`.** Each `num_heads` entry must divide its corresponding `embed_dims` entry, and both lists must have exactly 3 entries.
 
-The hybrid design leverages the efficiency of the former and the power of the latter at the most appropriate architectural stages.
+**How does `RepMixer` differ from `ConvMixer` or `MLP-Mixer`?** All three separate spatial from channel mixing. `MLP-Mixer` uses `Dense` layers for both and needs flattened patches; `ConvMixer` uses standard and depthwise convolutions throughout; `RepMixer` is a convolutional mixer designed around structural reparameterization at inference — a design this port does not exploit (§9).
+
+**Which stage sees global context?** Only stage 3. Stages 1 and 2 have the local receptive field of their depthwise kernels.
 
 ---
 
-## 16. Citation
+## 14. Technical Details
 
-This implementation is inspired by several recent papers in efficient vision model design. If using these concepts in research, please consider citing the relevant works:
+| | RepMixer (stages 1–2) | Self-attention (stage 3) |
+|---|---|---|
+| Receptive field | Local, fixed `3x3` depthwise kernel | Global |
+| Complexity | `O(N)` in spatial locations | `O(N^2)` |
+| Mixing weights | Content-agnostic, learned once | Content-aware, recomputed per input |
+| Positional information | Implicit, from the convolution | Explicit, RoPE — **only** under `attention_type='group_query'` |
 
--   On FastViT and RepMixer:
-    ```bibtex
-    @article{vasu2023fastvit,
-      title={FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization},
-      author={Vasu, Pavan Kumar Anasosalu and Gabriel, James and Ravichandran, Anurag and Mehta, Saurabh and Hong, Zhaowen and Gholami, Ali and Adl, Morteza and Shazeer, Noam and Tuzel, Oncel and Faghri, Fartash},
-      journal={arXiv preprint arXiv:2303.14189},
-      year={2023}
-    }
-    ```
--   On MobileOne:
-    ```bibtex
-    @inproceedings{vasu2022mobileone,
-      title={Mobileone: An improved one millisecond mobile backbone},
-      author={Vasu, Pavan Kumar Anasosalu and Gabriel, James and Zhu, Jeff and Tuzel, Oncel and Faghri, Fartash},
-      booktitle={European Conference on Computer Vision},
-      pages={56--72},
-      year={2022},
-      organization={Springer}
-    }
-    ```
+The hybrid design uses the former where `N` is large and the latter where `N` is small enough to afford it.
+
+---
+
+## 15. Citation
+
+This implementation follows ideas from the papers below; it is not a port of any of them (see the header note).
+
+```bibtex
+@inproceedings{vasu2023fastvit,
+  title={FastViT: A Fast Hybrid Vision Transformer using Structural Reparameterization},
+  author={Vasu, Pavan Kumar Anasosalu and Gabriel, James and Zhu, Jeff
+          and Tuzel, Oncel and Ranjan, Anurag},
+  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+  year={2023}
+}
+
+@inproceedings{vasu2023mobileone,
+  title={MobileOne: An Improved One Millisecond Mobile Backbone},
+  author={Vasu, Pavan Kumar Anasosalu and Gabriel, James and Zhu, Jeff
+          and Tuzel, Oncel and Ranjan, Anurag},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year={2023}
+}
+```
+
+The transformer stage follows ViT (Dosovitskiy et al., 2021, [arXiv:2010.11929](https://arxiv.org/abs/2010.11929)).
