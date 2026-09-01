@@ -7,8 +7,8 @@ interface that builds them from a config dict. Import a class directly, or call
 
 Factory coverage of the names exported here
 -------------------------------------------
-`factory.py` registers **33** keys. This package re-exports 36 layer classes.
-30 of them are reachable through `create_attention_layer(type=...)`. The other 6
+`factory.py` registers **34** keys. This package re-exports 37 layer classes.
+31 of them are reachable through `create_attention_layer(type=...)`. The other 6
 are direct-import only:
 
     ProgressiveFocusedAttention, Ideogram4Attention, MMDiTJointAttention,
@@ -73,6 +73,8 @@ from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from .non_local_attention import NonLocalAttention
 from .mobile_mqa import MobileMQA
+# key 'area'
+from .area_attention import AreaAttention
 # key 'beit'
 from .beit_attention import BeitAttention
 from .window_attention import WindowAttention
@@ -139,6 +141,8 @@ __all__ = [
     "SpatialAttention",
     "NonLocalAttention",
     "MobileMQA",
+    # factory key 'area'
+    "AreaAttention",
     # factory key 'beit'
     "BeitAttention",
     # no factory key; the 'window'/'window_zigzag'/'window_band' wrappers

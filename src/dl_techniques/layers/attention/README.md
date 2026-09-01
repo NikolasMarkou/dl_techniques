@@ -13,6 +13,7 @@ The following layers are supported by the factory system with automated paramete
 | Type | Class | Description | Use Case | Input Shape |
 |------|-------|-------------|----------|-------------|
 | `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. | `(batch, seq_len, dim)` |
+| `area` | `AreaAttention` | Area attention over a 4D feature map: the flattened `H*W` token sequence is split into `area` contiguous groups and attention runs inside each group, so one `(H*W, H*W)` score matrix becomes `area` independent `(H*W/area, H*W/area)` blocks. `area=1` is plain global attention. Carries a depthwise `5x5` positional-encoding branch added to the attention result and its own `1x1` output projection. Falls back to global attention when `H*W % area != 0` — deliberate, yolo12 feeds it non-divisible extents. | YOLOv12-style detection/dense-prediction backbones needing feature-map self-attention at sub-quadratic pixel cost. | `(batch, H, W, dim)` |
 | `beit` | `BeitAttention` | BEiT self-attention: learnable relative-position bias over a `(Wh, Ww)` **patch grid** with three extra cls-interaction slots, added pre-softmax, plus asymmetric QKV bias (K has **no** bias parameter). | BEiT / BEiT-style ViTs; any ViT wanting a T5-style 2D relative-position bias instead of absolute position embeddings. | `(batch, Wh*Ww + 1, dim)` |
 | `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. | `(batch, seq_len, dim)` |
 | `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. | `(batch, H, W, channels)` |
@@ -97,7 +98,7 @@ bit-identical to it). Read that section before adopting any of them at a new cal
 
 ## Call-signature caveats
 
-The factory (`create_attention_layer`) is **construction-only** — it standardizes how layers are *built*, not how they are *called*. Most layers follow the standard self-attention call signature `call(inputs, attention_mask=None, training=None)`, but seven layers deviate for intentional, architectural reasons. These are documented (not "fixed"): renaming them would break serialized configs and existing call sites. When invoking these layers directly, use their native signatures:
+The factory (`create_attention_layer`) is **construction-only** — it standardizes how layers are *built*, not how they are *called*. Most layers follow the standard self-attention call signature `call(inputs, attention_mask=None, training=None)`, but 12 layers deviate for intentional, architectural reasons. These are documented (not "fixed"): renaming them would break serialized configs and existing call sites. When invoking these layers directly, use their native signatures:
 
 | Layer | Non-standard call signature | Reason |
 |-------|-----------------------------|--------|
@@ -111,6 +112,7 @@ The factory (`create_attention_layer`) is **construction-only** — it standardi
 | `mobile_mqa` | `call(inputs, training=None, attention_mask=None, return_attention_weights=False)` (order swapped + extra flag) | `training` precedes `attention_mask` positionally; an extra `return_attention_weights` flag follows. |
 | `differential_attention` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` (extra positional `layer_idx`) | An extra `layer_idx` positional argument sits between `attention_mask` and `training`. |
 | `spatial` | 4D input `(batch, H, W, channels)`; **no** mask argument | Spatial CBAM attention operates over the full feature map; there is no token mask to apply. |
+| `area` | 4D input `(batch, H, W, channels)`; `attention_mask` is a **spatial keep mask** shaped `(batch, H, W)` or `(batch, H*W)`, not a token mask | The layer attends over flattened spatial positions; `1 = keep`, and the predicate is forwarded verbatim to `apply_attention_mask`, which never infers polarity. The call signature itself is the standard `call(inputs, attention_mask=None, training=None)`. |
 | `non_local` | 4D input `(batch, H, W, channels)`; mask argument **ignored** | Non-local attention computes dense global affinities over spatial positions; a token/sequence mask does not apply. |
 
 For `group_query`/`ring`/`mobile_mqa`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall. For `differential_attention`, pass `training` as a keyword argument: because `layer_idx` is the 3rd positional parameter (`call(inputs, attention_mask=None, layer_idx=0, training=None)`), a positionally-passed `training` would otherwise bind to `layer_idx`.

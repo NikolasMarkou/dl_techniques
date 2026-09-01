@@ -25,8 +25,8 @@ Five small things live here that sibling modules used to re-derive:
 Adoption is partial, and uneven. Read this before assuming a number you see in a
 sibling module came from here.
 
--   ``validate_head_divisibility`` (12 importers) and ``compute_attention_scale``
-    (15 importers) ARE genuinely consolidated. Where a module declines one, it
+-   ``validate_head_divisibility`` (13 importers) and ``compute_attention_scale``
+    (16 importers) ARE genuinely consolidated. Where a module declines one, it
     says so in a comment naming the measurement. ``progressive_focused_attention.py``
     and ``mmdit_joint_attention.py`` both keep ``head_dim ** -0.5``, which is NOT
     bit-identical to ``compute_attention_scale`` — it mismatches in the last ULP
@@ -48,18 +48,18 @@ sibling module came from here.
         print(c["validate_head_divisibility"], c["compute_attention_scale"])
         PY
 
-    It prints ``12 15``. The last dotted component is what is matched, so a
+    It prints ``13 16``. The last dotted component is what is matched, so a
     relative ``from .common import ...`` is counted. The walk is scoped to
-    ``layers/`` on purpose. Measured 2026-08-28: every importer of this module
+    ``layers/`` on purpose. Re-measured 2026-09-01: every importer of this module
     lives inside ``layers/attention/``, and ``src``, ``layers`` and
-    ``layers/attention`` all print ``12 15``. The loose module match would
+    ``layers/attention`` all print ``13 16``. The loose module match would
     otherwise count an unrelated ``some_package/common.py`` elsewhere in
     ``src/``. Nothing GUARDS that scoping. An importer appearing outside
     ``layers/`` would leave both counts and the test unchanged, and this
     sentence quietly wrong. ``test_common.py`` runs the SAME scope; widen or
     narrow the two together or the number gets a second home again. Both numbers
     were one short of the truth until 2026-08-28, because nothing re-derived
-    them. The 11 / 8 pair below has a test that re-derives it on every run.
+    them. The 12 / 9 pair below has a test that re-derives it on every run.
 
 -   ``apply_attention_mask`` (added by ``plan-2026-07-27T183600-b4ef45f0``) is the
     *behavioral* counterpart to the pair below. It performs the ``ops.where`` bias
@@ -84,7 +84,7 @@ sibling module came from here.
     measured at 24.14. It rescues once over the full key axis before its block loop
     instead. A site whose softmax reduces over some other axis must name that axis
     explicitly. The axis is never inferred, for the same reason polarity is never
-    inferred. **EIGHT of the ELEVEN adopters** therefore DERIVE the axis from their
+    inferred. **NINE of the TWELVE adopters** therefore DERIVE the axis from their
     own ``probability_config`` (whose ``axis`` key ``ProbabilityOutput`` honors)
     rather than inheriting the ``-1`` default. Of the remaining three,
     ``capsule_routing`` PINS the axis in ``__init__`` (its ``_site_config`` overrides
@@ -105,12 +105,12 @@ sibling module came from here.
     **Both counts above are MECHANICAL — re-derive them in one command each, from
     the repository root, and never hand-edit one without the other**::
 
-        # 11 adopters (files calling the module-level helper; excludes this file's
+        # 12 adopters (files calling the module-level helper; excludes this file's
         # own definition and the private `self._apply_attention_mask` wrappers):
         grep -rlE '(^|[^._[:alnum:]])apply_attention_mask\(' \
             src/dl_techniques/layers/attention/*.py | grep -v '/common.py$' | wc -l
 
-        # 8 of them derive the axis from their own probability_config.
+        # 9 of them derive the axis from their own probability_config.
         # The `grep -v '/common.py$'` is REQUIRED and was missing until
         # 2026-08-27: the search string appears in this very docstring as the
         # example being discussed, so without the exclusion the command
@@ -138,7 +138,7 @@ sibling module came from here.
     ``multi_head_cross``, ``multi_head_latent``, ``ring``, ``rpc``,
     ``single_window``. (``beit`` ADOPTED the helper at birth rather than migrating
     to it, which is why that migration list is ten while the adopter count above is
-    ELEVEN. The migration list is history and does not move; the adopter count is
+    TWELVE. The migration list is history and does not move; the adopter count is
     mechanical and does.)
 
     ``MASK_BIAS_VALUE`` is no longer a literal — it is

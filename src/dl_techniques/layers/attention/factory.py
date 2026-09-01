@@ -71,6 +71,7 @@ seven keys: ``class``, ``complexity``, ``description``, ``optional_params``,
 .. code-block:: text
 
     anchor                AnchorAttention
+    area                  AreaAttention
     beit                  BeitAttention
     capsule_routing       CapsuleRoutingSelfAttention
     cbam                  CBAM
@@ -106,7 +107,7 @@ seven keys: ``class``, ``complexity``, ``description``, ``optional_params``,
 
 **Required parameters, grouped:**
 
-The same 33 keys, grouped by the ``required_params`` list they share. Every
+The same 34 keys, grouped by the ``required_params`` list they share. Every
 other parameter is optional and has a default in the entry.
 
 .. code-block:: text
@@ -118,7 +119,7 @@ other parameter is optional and has a default in the entry.
     channels
         cbam, channel
     dim
-        energy, linear, mobile_mqa, multi_head,
+        area, energy, linear, mobile_mqa, multi_head,
         multi_head_cross, perceiver, performer, ring, rpc,
         shared_weights_cross, wave_field
     num_heads
@@ -137,7 +138,7 @@ other parameter is optional and has a default in the entry.
         beit, single_window, window, window_band, window_zigzag
 
 Both tables are rendered from the registry, not transcribed. ``README.md``
-carries its own 33-row table and agrees on all 33 keys; its Class column
+carries its own 34-row table and agrees on all 34 keys; its Class column
 names the INSTANCE type, so the three window keys read ``WindowAttention``
 there and name the builder function here. The registry is the source of
 truth.
@@ -209,6 +210,7 @@ from typing import Dict, Any, Literal, Mapping, Optional, List, Sequence
 from dl_techniques.utils.logger import logger
 
 from .anchor_attention import AnchorAttention
+from .area_attention import AreaAttention
 from .beit_attention import BeitAttention
 from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
@@ -247,6 +249,7 @@ from .window_attention import (
 
 AttentionType = Literal[
     'anchor',
+    'area',
     'beit',
     'capsule_routing',
     'cbam',
@@ -319,6 +322,44 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(n√n) vs O(n²) for standard attention',
         'paper': 'Anchored Attention: Efficient Self-Attention for Long Sequences'
+    },
+
+    'area': {
+        'class': AreaAttention,
+        'description': (
+            'Area attention over a 4D (batch, height, width, channels) feature map, as used '
+            'by the YOLOv12 detector. Partitions the flattened token sequence into `area` '
+            'contiguous groups and attends only within each group, turning one '
+            '(H*W, H*W) score matrix into `area` independent (H*W/area, H*W/area) blocks. '
+            'area=1 recovers plain global attention. Carries its own depthwise 5x5 '
+            'positional-encoding branch (added to the attention result, not to the input) '
+            'and its own 1x1 output projection. When H*W is not divisible by `area` the '
+            'layer falls back to global attention; that fallback is deliberate, because '
+            'yolo12 feeds it non-divisible spatial extents.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'area': 1,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'normalization_type': 'batch_norm',
+            'normalization_kwargs': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
+            'kernel_initializer': 'he_normal'
+        },
+        'use_case': (
+            'Detection and dense-prediction backbones that need self-attention over a '
+            'feature map without paying full quadratic cost in the pixel count — YOLOv12 '
+            "A2C2f stages in particular. Pass normalization_kwargs when the caller owns "
+            'the normalization constants (yolo12 threads its D-067 epsilon/momentum pair '
+            'in this way rather than hardcoding it here).'
+        ),
+        'complexity': 'O(area * (H*W/area)^2 * D) = O((H*W)^2 * D / area)',
+        'paper': 'YOLOv12: Attention-Centric Real-Time Object Detectors (arXiv:2502.12524)'
     },
 
     'beit': {
@@ -1578,7 +1619,7 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
         )
 
     # NOTE (documented shape, not fixed here): everything below is a FLAT
-    # ALLOWLIST OF PARAMETER NAMES applied uniformly to all 33 attention types.
+    # ALLOWLIST OF PARAMETER NAMES applied uniformly to all 34 attention types.
     # There are no per-type schemas. A parameter is range-checked because of its
     # NAME, wherever it appears, and a type-specific bound cannot be expressed.
     # Per-type schemas would be the right shape; converting is out of scope for a
@@ -1586,8 +1627,8 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
     # match on.
     # Validate positive integer parameters
     positive_int_params = [
-        'dim', 'channels', 'attention_channels', 'num_heads', 'num_kv_heads',
-        'window_size', 'head_dim', 'kv_latent_dim'
+        'area', 'dim', 'channels', 'attention_channels', 'num_heads',
+        'num_kv_heads', 'window_size', 'head_dim', 'kv_latent_dim'
     ]
     # DECISION plan-2026-08-11T012340-f63796dc/D-006 — the COMPONENTS are compared,
     # not the value, because `window_size` is a scalar edge length for

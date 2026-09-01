@@ -1023,10 +1023,10 @@ class TestTheAdopterCountsAreMechanical:
                 derivers.append(path.name)
         return adopters, derivers
 
-    def test_there_are_exactly_eleven_adopters_and_eight_derive_the_axis(self):
+    def test_there_are_exactly_twelve_adopters_and_nine_derive_the_axis(self):
         adopters, derivers = self._counts()
-        assert len(adopters) == 11, f"adopters drifted: {adopters}"
-        assert len(derivers) == 8, f"derivers drifted: {derivers}"
+        assert len(adopters) == 12, f"adopters drifted: {adopters}"
+        assert len(derivers) == 9, f"derivers drifted: {derivers}"
         assert set(derivers) <= set(adopters)
 
     def test_the_three_non_deriving_adopters_are_the_documented_ones(self):
@@ -1159,6 +1159,11 @@ class TestTheAdopterCountsAreMechanical:
             9: "NINE",
             10: "TEN",
             11: "ELEVEN",
+            12: "TWELVE",
+            13: "THIRTEEN",
+            14: "FOURTEEN",
+            15: "FIFTEEN",
+            16: "SIXTEEN",
         }
         assert f"**{words[len(derivers)]} of the {words[len(adopters)]} adopters**" in doc, (
             "common.py's module docstring no longer states the mechanically-derived "
