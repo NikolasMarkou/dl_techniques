@@ -4,30 +4,9 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of the **Swin Transformer** in **Keras 3**, based on the foundational paper ["Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"](https://arxiv.org/abs/2103.14030) by Liu et al. (2021).
+A Keras 3 implementation of the **Swin Transformer**, from ["Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"](https://arxiv.org/abs/2103.14030) (Liu et al., 2021).
 
-The architecture introduces a hierarchical structure and shifted window attention, making it a highly efficient and effective backbone for a wide range of computer vision tasks.
-
----
-
-## Table of Contents
-
-1. [Overview: What is Swin Transformer and Why It Matters](#1-overview-what-is-swin-transformer-and-why-it-matters)
-2. [The Problem Swin Transformer Solves](#2-the-problem-swin-transformer-solves)
-3. [How Swin Transformer Works: Core Concepts](#3-how-swin-transformer-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+The architecture combines a CNN-like feature pyramid with attention computed inside local windows, which makes attention cost linear in the number of patches rather than quadratic.
 
 ---
 
@@ -35,499 +14,282 @@ The architecture introduces a hierarchical structure and shifted window attentio
 
 ### What is a Swin Transformer?
 
-The **Swin (Shifted Window) Transformer** is a vision-focused Transformer architecture that introduces a hierarchical structure and a novel attention mechanism. Unlike the original Vision Transformer (ViT), which applies global self-attention across all image patches, the Swin Transformer computes self-attention within local, non-overlapping windows. This makes it significantly more efficient and allows it to process high-resolution images with linear complexity.
+Swin (Shifted Window) Transformer is a vision Transformer that computes self-attention inside small, non-overlapping windows rather than globally, and builds a hierarchy of feature maps by merging patches between stages. The result behaves like a convolutional backbone -- multi-scale features, linear cost -- while the operator inside each stage is attention.
 
 ### Key Innovations
 
-1.  **Hierarchical Feature Maps**: The model creates a pyramid of feature maps, similar to a Convolutional Neural Network (CNN). It starts with small patches and merges them in deeper layers, allowing it to capture features at different scales.
-2.  **Windowed Self-Attention**: Self-attention is computed only within small, non-overlapping windows of the image, drastically reducing computational cost compared to the global attention used in ViT.
-3.  **Shifted Window Self-Attention**: To enable communication between different windows, the windows are "shifted" in consecutive layers. This clever trick allows for cross-window connections, effectively creating a global receptive field while maintaining local computation.
-4.  **Linear Complexity**: Due to the windowed attention mechanism, the computational complexity is linear with respect to the number of image patches, not quadratic like in ViT. This makes Swin Transformers highly scalable to large images.
+1. **Hierarchical feature maps.** Four stages, each halving spatial resolution and doubling channels, so the backbone emits features at several scales instead of one.
+2. **Windowed self-attention (W-MSA).** Attention is restricted to a `window_size x window_size` group of patches. Cost grows linearly with the patch count.
+3. **Shifted windows (SW-MSA).** Alternate blocks shift the window grid by half a window, so information crosses the previous window boundaries. Over a pair of blocks the receptive field grows without any global attention.
+4. **Patch merging.** A `2x2` neighbourhood is concatenated (4x channels) and linearly projected back down to 2x, halving resolution and doubling width.
 
 ![image](swin_transformer.jpeg)
-
-### Why Swin Transformers Matter
-
-**Standard Vision Transformer (ViT) Problem**:
-```
-Problem: Classify a high-resolution (e.g., 1024x1024) image.
-Standard ViT Approach:
-  1. Divide the image into patches (e.g., 16x16).
-  2. Compute self-attention between every single patch and all other patches.
-  3. Limitation: The number of patches is large, and the quadratic complexity of
-     global self-attention (O(n²)) becomes computationally prohibitive. ViTs also
-     produce a single-resolution feature map, which is not ideal for dense
-     prediction tasks like segmentation. [4]
-```
-
-**Swin Transformer's Solution**:
-```
-Swin Transformer Approach:
-  1. Divide the image into patches and group them into local windows.
-  2. Compute self-attention only within these windows (much cheaper).
-  3. In the next layer, shift the windows and compute attention again. This allows
-     information to flow between the original windows.
-  4. Merge patches to create a hierarchical feature map.
-  5. Benefit: Achieves state-of-the-art performance with linear computational
-     complexity, making it a versatile backbone for many vision tasks. [11]
-```
-
-### Real-World Impact
-
-Swin Transformer has become a dominant architecture in computer vision, serving as a general-purpose backbone for:
-
--   **Image Classification**: Achieving top performance on benchmarks like ImageNet.
--   **Object Detection**: Its hierarchical features are excellent for identifying objects of various sizes.
--   **Semantic Segmentation**: The multi-scale feature maps are ideal for pixel-level classification tasks.
--   **Medical Image Analysis**: Used in models like Swin-UNET for high-resolution medical image segmentation.
 
 ---
 
 ## 2. The Problem Swin Transformer Solves
 
-### The Limitations of Standard Vision Transformers
+A plain ViT has two properties that hurt on dense-prediction tasks:
 
-The original Vision Transformer (ViT) demonstrated the power of Transformers for vision but had key limitations:
+| ViT limitation | Consequence |
+| :--- | :--- |
+| Global attention over all patches | Cost is quadratic in patch count, so high resolution is expensive. |
+| One fixed patch resolution end to end | A single-scale feature map, awkward for detection and segmentation, which need several scales. |
 
-1.  **Quadratic Complexity**: Global self-attention is computationally expensive, scaling quadratically with the number of patches (i.e., image resolution). This makes it impractical for very high-resolution images.
-2.  **Lack of Hierarchy**: ViT produces a single, low-resolution feature map. This is suboptimal for tasks that require multi-scale information, such as detecting both small and large objects in the same image.
-3.  **Scale Invariance**: ViT treats all patches at a single scale, struggling with the vast variation in the size of objects in the visual world.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Standard Vision Transformer (ViT)                          │
-│                                                             │
-│  Objective: Apply Transformer architecture to images.       │
-│                                                             │
-│  The Scaling Problem:                                       │
-│  - Its attention mechanism is global, making it very slow   │
-│    and memory-intensive for high-resolution images.         │
-│  - It doesn't naturally produce multi-scale features, which │
-│    are critical for many vision tasks like detection and    │
-│    segmentation.                                            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### How Swin Transformer Changes the Game
-
-Swin Transformer addresses these issues with its innovative architecture.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Swin Transformer Solution                              │
-│                                                             │
-│  1. Windowed Attention: Replaces global attention with      │
-│     local attention within non-overlapping windows. This    │
-│     reduces complexity from quadratic to linear. [4]        │
-│                                                             │
-│  2. Shifted Windows: Allows for cross-window connections in │
-│     subsequent layers, building a global receptive field    │
-│     without the cost of global attention. [1]               │
-│                                                             │
-│  3. Patch Merging: A downsampling technique that merges     │
-│     groups of patches, creating a hierarchical feature map  │
-│     similar to the pyramid structure of CNNs. [2]           │
-└─────────────────────────────────────────────────────────────┘
-```
-
-This combination of features makes the Swin Transformer as versatile and powerful as leading CNNs like ResNet, but with the added benefits of the Transformer architecture.
+Swin addresses both directly. Windowed attention makes the cost linear; patch merging produces the pyramid. The shifted-window alternation supplies the cross-window mixing that pure windowing would otherwise lose.
 
 ---
 
 ## 3. How Swin Transformer Works: Core Concepts
 
-### The Hierarchical Encoder Architecture
+### Windowed and shifted-window attention
 
-A Swin Transformer processes an image through a series of stages, each reducing the spatial resolution and increasing the channel depth.
+Swin blocks come in pairs:
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      Swin Transformer Architecture               │
-│                                                                  │
-│  ┌─────────────────┐      ┌───────────────────────────────────┐  │
-│  │ Patch Embedding │─────►│             Stage 1               │  │
-│  │ (Patchify Image)│      │ (Linear Embedding + Swin Blocks)  │  │
-│  └─────────────────┘      └───────────────────┬───────────────┘  │
-│                                               │ (Patch Merging)  │
-│  ┌────────────────┐     ┌─────────────────────▼──────────────┐   │
-│  │   Classifier   │◄────┤             Stage 2..4             │   │
-│  │ (Optional Head)│     │(Downsample + More Swin Blocks)     │   │
-│  └────────────────┘     └────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────┘
-```
+1. **W-MSA block.** The patch grid is divided into non-overlapping `window_size x window_size` windows and attention runs inside each one independently. Nothing crosses a window boundary.
+2. **SW-MSA block.** The window grid is displaced by half a window. New windows straddle the previous boundaries, so tokens that could not see each other in the previous block now can. A cyclic shift plus an attention mask implements this without recomputing the partition, and the mask prevents attention between patches that are not actually adjacent.
 
-### Windowed and Shifted-Window Attention
-
-The core innovation is the replacement of standard multi-head self-attention (MSA) with a window-based version.
-
-1.  **Windowed MSA (W-MSA)**: In the first block of a pair, the image grid is divided into non-overlapping windows (e.g., 7x7 patches), and self-attention is computed independently within each window.
-    -   *Problem*: Information is not shared between windows.
-
-2.  **Shifted Window MSA (SW-MSA)**: In the second block, the window configuration is shifted by half a window size.
-    -   *Solution*: This shift creates new windows that overlap with the boundaries of the previous windows, allowing information to be exchanged across them. A clever masking mechanism is used to handle the new window configurations efficiently.
-
-This two-step process allows the model to learn both local and global relationships effectively and efficiently.
-
-### The Complete Data Flow
+### Data flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     Swin Transformer Complete Data Flow                 │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: PATCH EMBEDDING
-──────────────────────
-Input Image (B, H, W, C)
-    │
-    ├─► Patch Partition (Conv2D with strides=patch_size)
-    │
-    └─► Flattened & Embedded Patches (B, H/4 * W/4, D)
-
-
-STEP 2: STAGE 1
-───────────────
-Embedded Patches
-    │
-    ├─► Swin Block 1 (W-MSA: Regular windows)
-    │
-    ├─► Swin Block 2 (SW-MSA: Shifted windows)
-    │
-    └─► ... (repeated for `depths[0]` times)
-
-
-STEP 3: PATCH MERGING + STAGE 2
-──────────────────────────────
-Feature Map from Stage 1
-    │
-    ├─► Patch Merging (Downsample HxW by 2, Double C)
-    │
-    ├─► Swin Block 1 (W-MSA)
-    │
-    ├─► Swin Block 2 (SW-MSA)
-    │
-    └─► ... (repeated for `depths[1]` times)
-
-
-STEP 4: REPEAT FOR STAGES 3 & 4
-───────────────────────────────
-Repeat the Patch Merging and Swin Block stages to create a deep,
-hierarchical feature representation.
-
-
-STEP 5: CLASSIFICATION HEAD (Optional)
-─────────────────────────────────────
-Final Feature Map
-    │
-    ├─► Global Average Pooling
-    │
-    └─► Dense Layer → Logits (B, num_classes)
+Input image (B, H, W, 3)
+    |
+    +-> PatchEmbedding (patch_size x patch_size, stride patch_size) -> (B, H/p * W/p, C)
+    +-> LayerNorm, reshape back to a grid                           -> (B, H/p, W/p, C)
+    |
+    +-> Stage 1: depths[0] Swin blocks (W-MSA / SW-MSA alternating)  C
+    +-> PatchMerging  -> Stage 2: depths[1] blocks                   2C, half resolution
+    +-> PatchMerging  -> Stage 3: depths[2] blocks                   4C, quarter resolution
+    +-> PatchMerging  -> Stage 4: depths[3] blocks                   8C, eighth resolution
+    |
+    +-- include_top=False -> (B, H/(8p), W/(8p), 8C)   e.g. (B, 7, 7, 8C) at H=W=224, p=4
+    +-- include_top=True  -> LayerNorm -> GlobalAveragePooling2D -> Dense -> logits (B, num_classes)
 ```
+
+The classifier `Dense` has no activation, so it emits **logits**; compile with `from_logits=True`.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 Patch Embedding and Merging
+### 4.1 Patch embedding and merging
 
--   **`PatchEmbedding`**: A convolutional layer is used to split the input image into non-overlapping patches and project them into an embedding dimension `C`.
--   **`PatchMerging`**: This layer is responsible for downsampling. It takes a `2x2` group of patches, concatenates them (increasing the channel dimension by 4x), and then applies a linear layer to reduce the channel dimension by 2x, effectively halving the spatial resolution and doubling the feature dimension.
+- **Patch embedding** comes from the shared embedding factory (`embedding_type="patch_2d"`). It emits a 3D `(B, H*W, C)` tensor, which the model reshapes back to a `(B, H', W', C)` grid because the Swin blocks require 4D input. A LayerNorm sits between the two.
+- **Patch merging** concatenates each `2x2` patch group into `4 * dim` channels and projects to `2 * dim`. An odd grid dimension is ceil-padded, so odd sizes are correct; they just carry padded tokens.
 
-### 4.2 Swin Transformer Block
+### 4.2 Swin Transformer block
 
-This is the core building block of the model. Each Swin Transformer block contains:
-1.  A Layer Normalization layer.
-2.  A Windowed or Shifted Window Multi-Head Self-Attention module.
-3.  A residual connection.
-4.  Another Layer Normalization layer.
-5.  A 2-layer MLP with a GELU activation in between.
-6.  A final residual connection.
+Each block is LayerNorm -> (shifted) window attention -> residual add, then LayerNorm -> MLP with GELU -> residual add. Blocks alternate between zero shift and a half-window shift within a stage. Stochastic depth (`drop_path_rate`) is applied on the residual branches.
 
-This structure is similar to a standard Transformer block but replaces the MSA module with the efficient window-based attention.
+### 4.3 Input size
+
+The only hard requirement is that height and width divide by `patch_size`; `PatchEmbedding2D` raises otherwise. Sizes that are not multiples of `patch_size * 8` still build and still report the correct output shape -- the model logs a warning because at least one merge stage will carry zero-padded tokens, which is a compute cost, not a correctness problem.
+
+Window size is unconstrained. Note that a window larger than the deepest stage grid is padded up to the full window, which can waste a great deal of attention compute: at `input_shape=(32, 32, 3)` with `patch_size=4` the stage-4 grid is `1x1`, so `window_size=8` pads it to `8x8`.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy matplotlib
-```
-
-### Your First Swin Transformer Model (30 seconds)
-
-Let's train a small Swin Transformer on the CIFAR-10 dataset.
-
 ```python
 import keras
 from keras.datasets import cifar10
-import numpy as np
-import matplotlib.pyplot as plt
 
-# Local imports from your project structure
-# from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
+from dl_techniques.models.vision.swin_transformer import create_swin_transformer
 
-# 1. Load and preprocess data
-(X_train, y_train), (X_test, y_test) = cifar10.load_data()
-X_train = X_train.astype("float32") / 255.0
-X_test = X_test.astype("float32") / 255.0
-y_train = keras.utils.to_categorical(y_train, 10)
-y_test = keras.utils.to_categorical(y_test, 10)
+# 1. Data (a subset keeps this example fast).
+(x_train, y_train), (x_test, y_test) = cifar10.load_data()
+x_train = x_train[:2000].astype("float32") / 255.0
+y_train = y_train[:2000]
+x_test = x_test[:1000].astype("float32") / 255.0
+y_test = y_test[:1000]
 
-# 2. Create a Swin Transformer model suitable for CIFAR-10 (32x32 images)
-# We use the "tiny" variant, which is the smallest.
-model = SwinTransformer.from_variant(
+# 2. Model. window_size=2 keeps the deepest 1x1 grid from being padded to 7x7.
+model = create_swin_transformer(
     "tiny",
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
+    window_size=2,
 )
 
-# 3. Compile the model
+# 3. Compile. The classifier is unactivated, so the loss reads logits.
 model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-    loss="categorical_crossentropy",
-    metrics=["accuracy"]
+    optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
 )
-print("✅ Swin Transformer model created and compiled successfully!")
 model.summary()
 
-# 4. Train the model
-history = model.fit(
-    X_train, y_train,
-    epochs=10, # Train longer for better results
-    batch_size=128,
-    validation_data=(X_test, y_test)
-)
-print("✅ Training Complete!")
-
-# 5. Evaluate the model
-loss, acc = model.evaluate(X_test, y_test)
-print(f"Test Accuracy: {acc*100:.2f}%")
+# 4. Train and evaluate.
+model.fit(x_train, y_train, epochs=1, batch_size=64, validation_data=(x_test, y_test))
+loss, acc = model.evaluate(x_test, y_test)
+print(f"Test accuracy: {acc * 100:.2f}%")
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `SwinTransformer` (Model Class)
+### 6.1 `SwinTransformer` (model class)
 
-**Purpose**: The main Keras `Model` subclass that assembles the patch embedding, stages of Swin blocks, and the classification head.
+`dl_techniques.models.vision.swin_transformer.SwinTransformer` -- a functional `keras.Model` subclass; the graph is built in `__init__`, so the model is usable immediately after construction.
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `num_classes` | `1000` | Output units in the classifier head. |
+| `embed_dim` | `96` | Stage-1 channel width `C`. |
+| `depths` | `(2, 2, 6, 2)` | Blocks per stage; must have exactly 4 entries. |
+| `num_heads` | `(3, 6, 12, 24)` | Attention heads per stage; must have exactly 4 entries. |
+| `window_size` | `7` | Side of the square attention window, in patches. |
+| `mlp_ratio` | `4.0` | MLP hidden expansion inside a block. |
+| `qkv_bias` | `True` | Bias on the qkv projection. |
+| `dropout_rate` | `0.0` | General dropout. |
+| `attn_dropout_rate` | `0.0` | Dropout on attention weights. |
+| `drop_path_rate` | `0.1` | Stochastic depth rate. |
+| `patch_size` | `4` | Patch side; `H` and `W` must divide by it. |
+| `use_bias` | `True` | Bias (and LayerNorm centering) throughout. |
+| `include_top` | `True` | `False` returns the stage-4 feature grid. |
+| `input_shape` | `None` (resolves to `(224, 224, 3)`) | Input shape `(H, W, C)`. |
+
+Also available: `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`.
+
+`SwinTransformer.from_variant(variant, num_classes=..., input_shape=..., **overrides)` builds from `MODEL_VARIANTS`; any keyword overrides the preset value.
+
+### 6.2 `create_swin_transformer`
+
+The package factory. Same arguments as `from_variant`, plus `pretrained`.
 
 ```python
-from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
+from dl_techniques.models.vision.swin_transformer import create_swin_transformer
 
-# Create a base model for ImageNet
-model = SwinTransformer.from_variant(
-    "base",
-    num_classes=1000,
-    input_shape=(224, 224, 3),
-    drop_path_rate=0.2 # Add stochastic depth for regularization
-)
+model = create_swin_transformer("base", num_classes=1000, input_shape=(224, 224, 3),
+                                drop_path_rate=0.2)
 ```
 
-**Key Parameters**:
+### 6.3 Pretrained weights
 
-| Parameter | Description |
-| :--- | :--- |
-| `num_classes` | The number of output classes for the classifier head. |
-| `embed_dim` | The initial embedding dimension (C). |
-| `depths` | A list of 4 integers specifying the number of blocks in each stage. |
-| `num_heads` | A list of 4 integers specifying the number of attention heads in each stage. |
-| `window_size` | The size of the attention window (e.g., 7 for a 7x7 patch window). |
-| `drop_path_rate` | The stochastic depth rate for regularization. |
-| `include_top` | Whether to include the final classification head. Set to `False` to use as a backbone. |
+None are distributed. The factory accepts a `pretrained` flag, but any truthy value raises `NotImplementedError` rather than handing back a randomly initialized model. Leave it at its default (`False`).
 
-**Key Methods**:
--   `from_variant()`: A factory method to easily create standard Swin Transformer sizes ("tiny", "small", "base", "large").
+To warm-start from a local checkpoint, build with `pretrained=False` and load explicitly. Prefer `dl_techniques.utils.weight_transfer.load_weights_or_raise(model, path)`, which raises when a load changes zero variables; bare `load_weights` is silent about a checkpoint that matches nothing.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides four standard pre-configured variants from the original paper.
+The four presets from the paper. Parameter counts were measured by building each model at `input_shape=(224, 224, 3)`, `num_classes=1000`, `patch_size=4`, `window_size=7`.
 
-| Variant | Depths | Embed Dim (C) | Heads | Parameters | Use Case |
-| :---: | :---: | :---: | :---: | :---: | :--- |
-| **`tiny`** | | 96 | | ~28M | Small to medium datasets (CIFAR, etc.) |
-| **`small`**|| 96 | | ~50M | Medium datasets, good trade-off |
-| **`base`** || 128 | | ~88M | Standard for ImageNet-1k |
-| **`large`**|| 192 | | ~197M | Large-scale datasets (ImageNet-22k) |
+| Variant | Embed dim | Depths | Heads | Params |
+| :--- | ---: | :--- | :--- | ---: |
+| `tiny` | 96 | `[2, 2, 6, 2]` | `[3, 6, 12, 24]` | 28,289,698 |
+| `small` | 96 | `[2, 2, 18, 2]` | `[3, 6, 12, 24]` | 49,607,602 |
+| `base` | 128 | `[2, 2, 18, 2]` | `[4, 8, 16, 32]` | 87,770,016 |
+| `large` | 192 | `[2, 2, 18, 2]` | `[6, 12, 24, 48]` | 196,535,164 |
+
+Only `embed_dim`, `depths` and `num_heads` vary between variants; everything else comes from the constructor defaults or your overrides.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Using Swin Transformer as a Feature Extractor
-
-To use the Swin Transformer as a backbone for downstream tasks like object detection or segmentation, set `include_top=False`.
+### Example 1: backbone plus a custom head
 
 ```python
-# Create the backbone
+import keras
+from dl_techniques.models.vision.swin_transformer import SwinTransformer
+
 backbone = SwinTransformer.from_variant(
     "base",
     include_top=False,
-    input_shape=(224, 224, 3)
+    input_shape=(224, 224, 3),
 )
+print(backbone.output_shape)  # (None, 7, 7, 1024)
 
-# You can now build a new model on top of the Swin features
 inputs = keras.Input(shape=(224, 224, 3))
 features = backbone(inputs)
-# features will have shape (B, 7, 7, 1024) for a 224x224 input
-
-# Add your custom head
-# For example, a simple classifier
 x = keras.layers.GlobalAveragePooling2D()(features)
-outputs = keras.layers.Dense(100, activation="softmax")(x)
-
+outputs = keras.layers.Dense(100, name="head")(x)
 custom_model = keras.Model(inputs, outputs)
-custom_model.summary()
+```
+
+The stage-4 grid is `(H / (patch_size * 8), W / (patch_size * 8), embed_dim * 8)`, so `tiny`/`small` give `(7, 7, 768)` at 224 and `large` gives `(7, 7, 1536)`.
+
+### Example 2: overriding a preset
+
+```python
+from dl_techniques.models.vision.swin_transformer import SwinTransformer
+
+# Keep the tiny depth/width schedule, change everything else.
+model = SwinTransformer.from_variant(
+    "tiny",
+    num_classes=100,
+    input_shape=(128, 128, 3),
+    window_size=4,
+    drop_path_rate=0.2,
+    dropout_rate=0.1,
+)
+print(model.output_shape)  # (None, 100)
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning on Higher Resolution
+### Changing input resolution
 
-Swin Transformers can be fine-tuned on images of a higher resolution than they were pre-trained on. The architecture is flexible enough to handle different input sizes, though performance is optimal when the input dimensions are a multiple of `patch_size * 32`.
+The model is built for one fixed `input_shape` at construction time; there is no dynamic-resolution path. To fine-tune at a higher resolution, construct a second model at the new shape and transfer weights. Layers whose shapes do not depend on resolution transfer directly; the relative-position tables inside window attention depend on `window_size`, not on image size, so keeping `window_size` fixed keeps them compatible.
 
----
-
-## 10. Performance Optimization
-
-### Mixed Precision Training
-
-Swin Transformers can be accelerated significantly using mixed precision, which performs computations in `float16` where possible and `float32` for stability.
+### Mixed precision
 
 ```python
-# Enable mixed precision globally
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = SwinTransformer.from_variant("base", num_classes=1000)
-model.compile(...)
+keras.mixed_precision.set_global_policy("mixed_float16")
 ```
 
----
-
-## 11. Training and Best Practices
-
-### Optimizer and Learning Rate Schedule
-
-The original paper uses the AdamW optimizer with a cosine learning rate decay schedule and a linear warmup for the first few epochs. This is crucial for stable training and achieving the best performance.
-
-### Regularization
-
--   **Stochastic Depth (`drop_path_rate`)**: This is a key regularization technique for Swin Transformers. It randomly drops entire residual blocks during training, preventing co-adaptation of layers. A rate of `0.1` to `0.3` is common.
--   **Weight Decay**: Applying weight decay via an optimizer like AdamW helps prevent overfitting.
--   **Label Smoothing**: For classification tasks, label smoothing can improve generalization.
+Set the policy before constructing the model.
 
 ---
 
-## 12. Serialization & Deployment
+## 10. Training Notes
 
-The `SwinTransformer` model is fully serializable using Keras 3's modern `.keras` format.
+- **Optimizer**: the paper uses AdamW with cosine decay and a linear warmup. Warmup matters.
+- **Stochastic depth**: `drop_path_rate` is the main regularizer here. `0.1` (the default) to `0.3` for the larger variants.
+- **Weight decay and label smoothing**: both help on classification.
+- **Window size vs. input size**: pick `window_size` so the deepest stage grid is not much smaller than the window; otherwise attention compute is spent on padding.
 
-### Saving and Loading
+---
+
+## 11. Serialization
 
 ```python
-# Create and train model
-model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
-model.compile(optimizer="adam", loss="categorical_crossentropy")
-# model.fit(...)
-
-# Save the entire model
-model.save('my_swin_model.keras')
-print("Model saved to my_swin_model.keras")
-
-# Load the model in a new session
-loaded_model = keras.models.load_model(
-    'my_swin_model.keras',
-    custom_objects={"SwinTransformer": SwinTransformer}
-)
-print("Model loaded successfully")
-
-# Verify that the loaded model works
-# prediction = loaded_model.predict(X_test[:1])
+model.save("my_swin.keras")
+loaded = keras.models.load_model("my_swin.keras")
 ```
 
----
-
-## 13. Testing & Validation
-
-### Unit Tests
-
-```python
-import keras
-import numpy as np
-# from dl_techniques.models.vision.swin_transformer.model import SwinTransformer
-
-def test_model_creation_from_variant():
-    """Test model creation from all variants."""
-    for variant in ["tiny", "small", "base", "large"]:
-        model = SwinTransformer.from_variant(variant, num_classes=10, input_shape=(224, 224, 3))
-        assert model is not None
-        print(f"✓ Swin-{variant} created successfully")
-
-def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
-    model = SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(224, 224, 3))
-    dummy_input = np.random.rand(4, 224, 224, 3)
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
-
-def test_feature_extractor_shape():
-    """Test the output shape when include_top=False."""
-    model = SwinTransformer.from_variant("tiny", include_top=False, input_shape=(224, 224, 3))
-    dummy_input = np.random.rand(4, 224, 224, 3)
-    output = model.predict(dummy_input)
-    # H/32, W/32, C*8 -> 224/32=7, 96*8=768
-    assert output.shape == (4, 7, 7, 768)
-    print("✓ Feature extractor has correct shape")
-
-# Run tests
-if __name__ == '__main__':
-    test_model_creation_from_variant()
-    test_forward_pass_shape()
-    test_feature_extractor_shape()
-```
+The class is registered for the `.keras` format, so no `custom_objects` argument is needed.
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 12. Troubleshooting
 
-**Issue 1: Training is unstable or performance is poor.**
-
--   **Cause 1**: The optimizer and learning rate schedule are critical. A simple Adam optimizer with a fixed learning rate may not be sufficient.
--   **Solution 1**: Implement a cosine decay learning rate schedule with a warmup period. Use the AdamW optimizer.
--   **Cause 2**: Insufficient regularization for the model size.
--   **Solution 2**: Increase the `drop_path_rate` and `weight_decay`.
-
-### Frequently Asked Questions
-
-**Q: How does Swin Transformer compare to a CNN like ResNet?**
-
-A: Swin Transformers have demonstrated superior performance to ResNets and other leading CNNs on many benchmarks. They combine the hierarchical structure of CNNs with the powerful self-attention mechanism of Transformers, capturing both local and global dependencies more effectively.
-
-**Q: Can I use this for small datasets?**
-
-A: Yes, the "tiny" and "small" variants can work well on smaller datasets like CIFAR-10/100, especially when using data augmentation and proper regularization. However, like most Transformers, they benefit greatly from large-scale pre-training.
+- `ValueError: depths must have 4 elements` / `num_heads must have 4 elements` -- the stage count is fixed at 4.
+- A `ValueError` from `PatchEmbedding2D` -- `H` or `W` is not divisible by `patch_size`. This is the only hard size constraint.
+- "Input height ... is not divisible by ..." in the log -- a warning, not an error. The model is correct; a merge stage carries padded tokens.
+- Very slow or memory-hungry training on small images -- check `window_size` against the deepest stage grid (see 4.3).
+- Accuracy stuck near chance -- the head emits logits; the loss must use `from_logits=True`.
+- `NotImplementedError` from a truthy `pretrained` -- expected; no checkpoints ship with this package.
 
 ---
 
-## 15. Technical Details
+## 13. Technical Details
 
-### Shifted Window Attention Mechanism
+**Shifted-window implementation.** Rather than re-partitioning after the shift, the feature map is cyclically shifted and a mask is applied so that tokens brought together only by the wrap-around do not attend to each other. This keeps every window the same size and the batched attention regular.
 
-The efficiency of the Swin Transformer comes from its clever implementation of shifted window attention. To avoid re-computing windows after shifting, a cyclic shift is performed, and a mask is applied to the attention mechanism. This mask prevents attention between patches that were not adjacent in the original feature map, ensuring the computation remains valid while being highly efficient.
+**Initialization.** `kernel_initializer=None` resolves to the module's reference initializer, and each consumer receives its own `clone_initializer(...)` copy. A single seedless initializer instance replays its draw, which would otherwise make every same-shape kernel in a stage bit-identical.
+
+**Fixed constants.** `NUM_STAGES = 4`, LayerNorm epsilon `1e-5`, and a LayerNorm after patch embedding are class-level constants rather than constructor arguments.
 
 ---
 
-## 16. Citation
-
-If you use the Swin Transformer in your research, please cite the original paper:
+## 14. Citation
 
 ```bibtex
 @inproceedings{liu2021swin,

@@ -6,30 +6,10 @@
 
 An implementation of a **Variational Autoencoder (VAE)** in **Keras 3**, based on the foundational paper ["Auto-Encoding Variational Bayes"](https://arxiv.org/abs/1312.6114) by Kingma & Welling (2013).
 
-The architecture uses robust **ResNet-based** encoder and decoder networks and incorporates a custom training loop to correctly handle the two-part VAE loss (reconstruction and KL divergence).
-
----
-
-## Table of Contents
-
-1. [Overview: What is VAE and Why It Matters](#1-overview-what-is-vae-and-why-it-matters)
-2. [The Problem VAE Solves](#2-the-problem-vae-solves)
-3. [How VAE Works: Core Concepts](#3-how-vae-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Hypersphere Latent Sampling: Does It Work?](#16-hypersphere-latent-sampling-does-it-work)
-17. [vMF Spherical VAE: Winning on Generation](#17-vmf-spherical-vae-winning-on-generation)
-18. [Citation](#18-citation)
+The encoder and decoder are residual convolutional stacks, and a custom `train_step`
+computes and tracks the two-part VAE objective (reconstruction and KL). Three latent
+geometries are selectable through one argument, `sampling_type`: the standard diagonal
+Gaussian, a thin-shell **hypersphere**, and a true **von Mises-Fisher** spherical VAE.
 
 ---
 
@@ -37,341 +17,187 @@ The architecture uses robust **ResNet-based** encoder and decoder networks and i
 
 ### What is a VAE?
 
-A **Variational Autoencoder (VAE)** is a deep generative model that learns to compress data into a structured, low-dimensional **latent space** and then generate new, similar data by sampling from this space.
+A **Variational Autoencoder** learns to compress data into a structured, low-dimensional
+**latent space** and to generate new data by sampling from that space.
 
-Unlike a standard autoencoder, a VAE's encoder doesn't map an input to a single point in the latent space. Instead, it outputs the parameters of a **probability distribution** (typically a Gaussian) for that input. The VAE then samples from this distribution to generate a latent vector, which is fed to the decoder.
+Unlike a plain autoencoder, the encoder does not map an input to a single point. It emits
+the parameters of a **probability distribution** over latents. A latent vector is sampled
+from that distribution and handed to the decoder.
 
 ### Key Innovations
 
-1.  **Generative Modeling**: VAEs are not just for compression; their primary purpose is to learn the underlying probability distribution of the training data, allowing them to generate novel samples.
-2.  **Probabilistic Latent Space**: The latent space is continuous and structured, meaning nearby points correspond to visually similar outputs. This allows for smooth interpolation between generated samples.
-3.  **The Reparameterization Trick**: A clever mathematical trick that allows gradients to be backpropagated through the stochastic sampling process, enabling end-to-end training with standard optimizers.
-4.  **Principled Probabilistic Framework**: VAEs are derived from the principles of variational inference, providing a solid mathematical foundation for learning latent variable models.
-
-### Why VAEs Matter
-
-**Standard Autoencoder Problem**:
-```
-Problem: Generate a new image of a face.
-Standard AE Approach:
-  1. Train an autoencoder on a dataset of faces.
-  2. Take a random point from the latent space and feed it to the decoder.
-  3. Limitation: The latent space is unstructured. Random points often produce
-     meaningless, non-face-like garbage because the model hasn't learned to
-     organize the space in a probabilistic way. There are "holes" everywhere.
-```
-
-**VAE's Solution**:
-```
-VAE Approach:
-  1. Train a VAE on the same dataset.
-  2. The VAE's loss function forces the latent space to be continuous and centered
-     around a prior distribution (like a standard Gaussian).
-  3. Now, if you take a random point from this distribution, it's highly likely to
-     decode into a realistic, novel face.
-  4. Benefit: The VAE learns a smooth, continuous map of the data, perfect for generation.
-```
-
-### Real-World Impact
-
-VAEs are a cornerstone of modern generative modeling and representation learning:
-
--   🎨 **Image Generation**: Creating novel, realistic images, such as faces, artworks, or product designs.
--   🎶 **Music & Audio Synthesis**: Generating new musical sequences or sound textures.
--   💊 **Drug Discovery**: Generating new molecular structures by exploring the latent space of chemical compounds.
--   🧩 **Data Augmentation**: Creating realistic new training samples to improve the performance of other machine learning models.
--   🤖 **Reinforcement Learning**: Learning models of an environment for planning and control.
+1. **Probabilistic latent space.** The space is continuous and organised, so nearby points
+   decode to similar outputs and interpolation is meaningful.
+2. **The reparameterization trick.** Sampling is rewritten so gradients flow through it,
+   making the whole model trainable end to end with a standard optimizer.
+3. **A principled objective.** The loss is the negative Evidence Lower Bound (ELBO) on the
+   data log-likelihood, not a heuristic.
+4. **Selectable latent geometry.** `sampling_type` swaps the sampler, the prior used by
+   `sample()`, and the KL term together, so a Gaussian ball, a spherical shell, or a vMF
+   sphere are all one argument apart.
 
 ---
 
 ## 2. The Problem VAE Solves
 
-### The Limitations of Standard Autoencoders
+A plain autoencoder minimises reconstruction error alone. Nothing in that objective asks it
+to organise the latent space, so the space ends up disjointed and sparse: encoded points sit
+in isolated islands with large dead zones between them. Draw a random latent and the decoder
+almost always produces noise, because the point you drew lies in a region no training
+example ever occupied.
 
-Standard autoencoders are great for dimensionality reduction and feature learning, but they fail as generative models.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Standard Autoencoder (AE)                                  │
-│                                                             │
-│  Objective: Minimize Reconstruction Error (e.g., MSE).      │
-│                                                             │
-│  The Latent Space Problem:                                  │
-│  - The model only learns to encode/decode training examples │
-│    perfectly.                                               │
-│  - It doesn't learn how to organize the latent space.       │
-│  - The space becomes disjointed and sparse, with large      │
-│    "dead zones" between encoded points.                     │
-└─────────────────────────────────────────────────────────────┘
-```
-
-If you try to sample a point from the latent space of a standard AE, you are likely to pick a point from one of these dead zones, resulting in an unrealistic output.
-
-
-*A standard AE's latent space (left) is irregular, making generation difficult. A VAE's latent space (right) is smooth and structured, ideal for sampling.*
-
-### How VAE Changes the Game
-
-VAEs fix this by introducing a probabilistic framework and a carefully designed loss function.
+The VAE adds a second term that fixes exactly this:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  The VAE Solution                                           │
-│                                                             │
-│  1. Probabilistic Encoder: Instead of a single vector `z`,  │
-│     the encoder outputs a mean `μ` and a log-variance       │
-│     `log(σ²)` that define a Gaussian distribution.          │
-│                                                             │
-│  2. The VAE Loss Function (The ELBO):                       │
-│     Loss = Reconstruction Loss + KL Divergence              │
-│     - Reconstruction Loss: Pushes the model to accurately   │
-│       reconstruct the input (like a standard AE).           │
-│     - KL Divergence: Acts as a regularizer, forcing the     │
-│       encoded distributions to stay close to a standard     │
-│       normal distribution (N(0,1)). This organizes the      │
-│       latent space.                                         │
-└─────────────────────────────────────────────────────────────┘
+Loss = Reconstruction Loss + beta * KL Divergence
+       |                            +-- pulls every encoded distribution toward the
+       |                                prior, filling the dead zones
+       +-- keeps the decoder faithful to the input
 ```
 
-The KL divergence term is the magic ingredient. It ensures that the latent space is continuous and densely packed around the origin, eliminating the "dead zones" and making it a fertile ground for generating new samples.
+The KL term is what makes the space samplable: it forces the per-input posteriors to overlap
+and to cover the prior, so a draw from the prior lands somewhere the decoder understands.
 
 ---
 
 ## 3. How VAE Works: Core Concepts
 
-### The Probabilistic Encoder-Decoder Architecture
+### The Objective: Evidence Lower Bound
 
-A VAE consists of two main components connected by a stochastic sampling step.
+The loss is derived by lower-bounding the intractable log-likelihood `log p(x)`:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                          VAE Architecture                        │
-│                                                                  │
-│  ┌──────────────┐      ┌───────────────────────────────────┐     │
-│  │    Encoder   │───►  │           Latent Space            │     │
-│  │ (e.g., ResNet)│      │                                  │     │
-│  │              │      │ 1. Predicts μ and log(σ²)         │     │
-│  │ Maps input X │      │    for the distribution q(z|X)    │     │
-│  │ to a distribution │  │ 2. Sample z ~ N(μ, σ²) via       │     │
-│  │              │      │    Reparameterization Trick       │     │
-│  └──────────────┘      └───────────────────┬───────────────┘     │
-│                                            │                     │
-│  ┌──────────────┐                          │                     │
-│  │    Decoder   │◄─────────────────────────┘                     │
-│  │ (e.g.,ResNet)│                                                │
-│  │              │                                                │
-│  │ Maps latent  │                                                │
-│  │ vector z back│                                                │
-│  │ to X'        │                                                │
-│  └──────────────┘                                                │
-└──────────────────────────────────────────────────────────────────┘
+log p(x)  >=  E_q(z|x)[ log p(x|z) ]  -  KL( q(z|x) || p(z) )
+              \_______________________/    \___________________/
+                   reconstruction term          regularizer
 ```
+
+Minimising the negative of that bound gives the training loss:
+
+- **`-E_q(z|x)[log p(x|z)]`** — the expected negative log-likelihood of `x` given `z`. For
+  pixels scaled to `[0, 1]` this is **binary cross-entropy**, which is what
+  `_compute_reconstruction_loss` computes (in float32, with the inputs clipped away from
+  `0` and `1` so `log` never sees zero).
+- **`KL(q(z|x) || p(z))`** — how far the encoder's posterior sits from the prior. Scaled by
+  `kl_loss_weight`, the `beta` of beta-VAE.
 
 ### The Reparameterization Trick
 
-The key challenge in training a VAE is that the sampling step (`z ~ N(μ, σ²)`) is random and therefore non-differentiable. We can't backpropagate through it. The reparameterization trick solves this by reframing the sampling process:
+Sampling `z ~ N(mu, sigma^2)` is random and therefore not differentiable. The trick moves
+the randomness outside the gradient path:
 
-**`z = μ + σ * ε`**, where **`ε ~ N(0, 1)`**
+**`z = mu + sigma * eps`**, where **`eps ~ N(0, 1)`**
 
--   `μ` and `σ` are the (deterministic) outputs from the encoder.
--   `ε` is a random noise vector sampled from a fixed, standard normal distribution.
+`mu` and `sigma` are deterministic encoder outputs; `eps` is fixed noise. The map from
+`mu, sigma` to `z` is now differentiable and gradients reach the encoder.
 
-Now, the randomness is external. The path from `μ` and `σ` to `z` is fully deterministic, allowing gradients to flow back to the encoder.
+### The Three KL Terms
+
+Each latent geometry has its own closed-form KL. All three run in float32 regardless of the
+compute policy, because every branch exponentiates a clipped log-variance and `exp(20)`
+overflows float16.
+
+| `sampling_type` | Posterior | `z_log_var` slot holds | KL against |
+| :--- | :--- | :--- | :--- |
+| `gaussian` | `N(mu, sigma^2)`, diagonal | log-variance, shape `[B, D]` | `-0.5 * sum(1 + logv - mu^2 - exp(logv))` vs `N(0, I)` |
+| `hypersphere` | direction from `z_mean`, radius on a thin shell | radius log-variance, shape `[B, 1]` | `0.5 * (exp(rlv) - rlv - 1)`, a 1-D radius KL |
+| `vmf` | `vMF(mu_hat, kappa)` on the unit sphere | concentration `kappa > 0`, shape `[B, 1]` | closed-form vMF-to-uniform-sphere KL |
+
+The `z_log_var` output slot is reused by all three modes — its shape and meaning change with
+the mode, so never interpret it without checking `sampling_type` first.
 
 ### The Complete Data Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     VAE Complete Data Flow                              │
-└─────────────────────────────────────────────────────────────────────────┘
+STEP 1: ENCODING          Input (B, H, W, C)
+    |-> residual encoder, one downsampling stage per depth
+    |-> global average pooling -> (B, F)
+    |-> Dense -> z_mean    (B, D_latent)
+    +-> Dense -> z_log_var (B, D_latent), or (B, 1) for hypersphere / vmf
 
-STEP 1: ENCODING
-────────────────
-Input Image (B, H, W, C)
-    │
-    ├─► ResNet Encoder
-    │
-    ├─► Global Average Pooling -> Feature Vector (B, F)
-    │
-    ├──► Dense Layer → z_mean (B, D_latent)
-    └──► Dense Layer → z_log_var (B, D_latent)
+STEP 2: SAMPLING          layer "vae_sampling", one per mode
+    |-> gaussian:    z = z_mean + exp(0.5 * z_log_var) * eps,  eps ~ N(0, 1)
+    |-> hypersphere: unit direction from z_mean, radius on a thin shell
+    +-> vmf:         Ulrich/Wood rejection sampler + Householder reflection
 
+STEP 3: DECODING          Dense + reshape -> residual upsampling stack
+    +-> final conv + sigmoid -> reconstruction (B, H, W, C)
 
-STEP 2: SAMPLING (within Sampling Layer)
-────────────────────────────────────────
-z_mean, z_log_var
-    │
-    ├─► Calculate std: σ = exp(0.5 * z_log_var)
-    │
-    ├─► Sample noise: ε ~ N(0, 1) with shape (B, D_latent)
-    │
-    ├─► Compute latent vector: z = z_mean + σ * ε
-    │
-    └─► Latent Vector z (B, D_latent)
-
-
-STEP 3: DECODING
-────────────────
-Latent Vector z (B, D_latent)
-    │
-    ├─► Dense Layer to project to initial feature map size
-    │
-    ├─► Reshape to (B, H', W', C')
-    │
-    ├─► ResNet Decoder (with upsampling)
-    │
-    └─► Reconstructed Image (B, H, W, C)
-
-
-STEP 4: LOSS CALCULATION (During Training)
-──────────────────────────────────────────
-Input Image, Reconstructed Image, z_mean, z_log_var
-    │
-    ├──► Reconstruction Loss:
-    │    └─► e.g., BinaryCrossentropy(Input, Reconstructed)
-    │
-    ├──► KL Divergence Loss:
-    │    └─► KL( N(z_mean, z_log_var) || N(0, 1) )
-    │
-    └─► Total Loss = Reconstruction Loss + β * KL Loss
+STEP 4: LOSS              total = reconstruction_loss + kl_weight * kl_loss
 ```
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 ResNet-based Encoder
+### 4.1 Residual Encoder
 
-This implementation uses a deep residual network for the encoder to learn powerful feature representations.
-
-```
-┌───────────────────────────────────────────────────┐
-│              ResNet Encoder                       │
-└───────────────────────────────────────────────────┘
-Input: (B, H, W, C)
-  │
-  ▼
-┌──────────────────────────────────┐   ┐
-│   Downsampling Conv              │   │
-│   + Residual Blocks              │   │  Repeated for each
-└──────────────────────────────────┘   │  depth level
-  │                                    │
-  ▼                                    │
-┌──────────────────────────────────┐   │
-│   ...                            │   │
-└──────────────────────────────────┘   ┘
-  │
-  ▼
-Global Average Pooling
-  │
-  ▼
-Dense layers for z_mean and z_log_var
-```
+`depths` downsampling stages, `steps_per_depth` residual blocks per stage, channel counts
+from `filters` (one entry per depth — `len(filters)` must equal `depths`). The stack ends in
+global average pooling followed by two `Dense` heads, `z_mean` and `z_log_var`. Blocks use
+`leaky_relu`, `he_normal` initialization, and optional batch norm and dropout.
 
 ### 4.2 Sampling Layer
 
-A simple, non-trainable layer that performs the reparameterization trick.
+A non-trainable layer, always named `vae_sampling` whatever the mode — `decode()` and
+`sample()` locate the decoder by that exact name, so the name is part of the contract.
 
-> This model also supports an alternative **hypersphere** latent sampler
-> (`sampling_type="hypersphere"`) that places latents on a thin spherical shell
-> instead of a diagonal-Gaussian ball. It avoids posterior collapse and uses every
-> latent dimension. See [Section 16](#16-hypersphere-latent-sampling-does-it-work)
-> for the design and a fair cross-dimension empirical verdict.
+- **`gaussian`** — `Sampling`, the reparameterization trick above.
+- **`hypersphere`** — `HypersphereSampling`. The encoder predicts a unit direction plus one
+  scalar radius log-variance, and the latent lands on a thin, strictly positive shell:
+  `r = radius * (1 + 0.1 * exp(0.5 * clip(rlv)) * eta)`, floored at `0.05 * radius`. There
+  is no explicit directional KL, so this is a deliberate simplification, **not** a full
+  spherical VAE.
+- **`vmf`** — `VMFSampling`, a fixed-K Ulrich/Wood rejection sampler with a Householder
+  reflection, paired with the exact vMF-to-uniform KL (`vmf_kl_divergence`, computed from a
+  continued-fraction modified-Bessel ratio). This is a true von Mises-Fisher spherical VAE
+  in the sense of Davidson et al. (2018).
 
-### 4.3 ResNet-based Decoder
+All three live in `dl_techniques/layers/sampling.py`.
 
-The decoder mirrors the encoder's architecture, using upsampling layers and residual blocks to progressively reconstruct the image from the latent vector.
+The legacy value `"hypersphere_faithful"` is accepted as a deprecated alias for
+`"hypersphere"` so old configs and checkpoints still load; the removed
+`"hypersphere_controlled"` raises `ValueError`.
 
-```
-┌───────────────────────────────────────────────────┐
-│              ResNet Decoder                       │
-└───────────────────────────────────────────────────┘
-Input: Latent Vector z (B, D_latent)
-  │
-  ▼
-Dense + Reshape to initial feature map size
-  │
-  ▼
-┌──────────────────────────────────┐   ┐
-│   Upsampling (e.g., UpSampling2D)│   │
-│   + Conv + Residual Blocks       │   │  Repeated for each
-└──────────────────────────────────┘   │  depth level
-  │                                    │
-  ▼                                    │
-┌──────────────────────────────────┐   │
-│   ...                            │   │
-└──────────────────────────────────┘   ┘
-  │
-  ▼
-Final Conv Layer + Sigmoid Activation
-  │
-  ▼
-Output: Reconstructed Image (B, H, W, C)
-```
+### 4.3 Residual Decoder
+
+A mirror of the encoder: `Dense` projection and reshape to the smallest feature map, one
+upsampling stage per depth with residual blocks, then a final convolution with
+`final_activation` (default `sigmoid` — which is what makes the binary cross-entropy
+reconstruction term correct for `[0, 1]` data).
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy matplotlib
-```
-
-### Your First Generative Model (30 seconds)
-
-Let's train a small VAE on the MNIST dataset to generate new handwritten digits.
-
 ```python
 import keras
-from keras.datasets import mnist
 import numpy as np
-import matplotlib.pyplot as plt
+from keras.datasets import mnist
 
-# Local imports from your project structure
 from dl_techniques.models.vision.vae.model import VAE
 
-# 1. Load and preprocess data
-(X_train, _), (X_test, _) = mnist.load_data()
-X_train = np.expand_dims(X_train.astype("float32") / 255.0, -1)
-X_test = np.expand_dims(X_test.astype("float32") / 255.0, -1)
+# 1. Load and preprocess data (pixels must land in [0, 1] for the BCE term)
+(x_train, _), (x_test, _) = mnist.load_data()
+x_train = np.expand_dims(x_train.astype("float32") / 255.0, -1)
+x_test = np.expand_dims(x_test.astype("float32") / 255.0, -1)
 
-# 2. Create a VAE model suitable for MNIST (28x28 images)
-model = VAE.from_variant(
-    "small",
-    input_shape=(28, 28, 1),
-    latent_dim=2 # Use a 2D latent space for easy visualization
-)
+# 2. Create a VAE for MNIST with a 2-D latent, so it can be plotted directly
+model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=2)
 
-# 3. Compile the model
+# 3. Compile. The loss lives in train_step, so only an optimizer is needed.
 model.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-3))
-print("✅ VAE model created and compiled successfully!")
-model.summary()
 
-# 4. Train the model
-history = model.fit(
-    X_train,
-    epochs=10, # Train longer for better results
-    batch_size=128,
-    validation_data=(X_test,)
-)
-print("✅ Training Complete!")
+# 4. Train
+model.fit(x_train, epochs=10, batch_size=128, validation_data=(x_test,))
 
-# 5. Generate new digits by sampling from the latent space
-num_samples = 15
-generated_images = model.sample(num_samples=num_samples)
-
-# 6. Visualize the results
-plt.figure(figsize=(15, 3))
-for i in range(num_samples):
-    plt.subplot(1, num_samples, i + 1)
-    plt.imshow(generated_images[i, :, :, 0], cmap='gray')
-    plt.axis('off')
-plt.suptitle('Generated Digits from VAE')
-plt.show()
+# 5. Generate new digits by decoding draws from the prior
+generated = model.sample(num_samples=15)
+print(generated.shape)  # (15, 28, 28, 1)
 ```
+
+`fit()` takes the images alone: `train_step` reads `data[0]` when handed a tuple and the
+tensor itself otherwise, so `validation_data=(x_test,)` is the right one-element form.
 
 ---
 
@@ -379,510 +205,259 @@ plt.show()
 
 ### 6.1 `VAE` (Model Class)
 
-**Purpose**: The main Keras `Model` subclass that assembles the encoder, sampler, and decoder, and includes the custom `train_step`.
-
 **Location**: `dl_techniques.models.vision.vae.model.VAE`
 
-```python
-from dl_techniques.models.vision.vae.model import VAE
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `latent_dim` | (required) | Dimensionality of the latent space `z`. |
+| `input_shape` | (required) | `(H, W, C)`; `H` and `W` must be at least 8. |
+| `depths` | `2` | Number of downsampling / upsampling stages. |
+| `steps_per_depth` | `1` | Residual blocks per stage. |
+| `filters` | `None` | One channel count per depth. `None` gives `[32, 64, ...]`. |
+| `kl_loss_weight` | `0.01` | The `beta` of beta-VAE. |
+| `sampling_type` | `"gaussian"` | `"gaussian"`, `"hypersphere"` or `"vmf"`. |
+| `kernel_initializer` | `"he_normal"` | Initializer for conv and dense kernels. |
+| `kernel_regularizer` | `None` | Optional regularizer. |
+| `use_batch_norm` | `True` | Batch normalization inside the residual blocks. |
+| `use_bias` | `True` | Bias terms in the convolutions. |
+| `dropout_rate` | `0.0` | Must be in `[0, 1)`. |
+| `activation` | `"leaky_relu"` | Hidden activation. |
+| `final_activation` | `"sigmoid"` | Decoder output activation. |
 
-model = VAE.from_variant(
-    "medium",
-    input_shape=(32, 32, 3),
-    latent_dim=128,
-    kl_loss_weight=0.005 # Adjust the beta-VAE parameter
-)
-```
+**Key methods**:
 
-**Key Parameters**:
+- `VAE.from_variant(variant, input_shape, latent_dim=None, **kwargs)` — build a named size.
+  An explicit keyword argument always overrides the variant's value.
+- `encode(images)` — returns the `(z_mean, z_log_var)` pair.
+- `decode(z)` — decodes latent vectors to images.
+- `sample(num_samples)` — draws from *this mode's* true prior (`N(0, I)` for gaussian,
+  uniform-on-sphere at the layer radius otherwise) and decodes.
+- `train_step` / `test_step` — compute and track `total_loss`, `reconstruction_loss` and
+  `kl_loss`.
 
-| Parameter | Description |
+Calling the model returns a dict with keys `"reconstruction"`, `"z_mean"`, `"z_log_var"`
+and `"z"`.
+
+### 6.2 Factory Functions
+
+| Function | Purpose |
 | :--- | :--- |
-| `latent_dim` | The dimensionality of the latent space `z`. |
-| `input_shape` | Shape of the input images `(H, W, C)`. |
-| `depths` | Number of downsampling/upsampling stages in the ResNet. |
-| `filters` | List of filter counts for each stage. |
-| `kl_loss_weight` | The β parameter in the β-VAE framework, balancing reconstruction and regularization. |
+| `create_vae(input_shape, latent_dim, variant="small", optimizer="adam", learning_rate=0.001, **kwargs)` | Build **and compile** a variant in one call. |
+| `create_vae_from_config(config)` | Build and compile from a configuration dictionary. |
 
-**Key Methods**:
--   `from_variant()`: Factory method to create standard VAE sizes.
--   `train_step()` / `test_step()`: Custom logic to compute and track both reconstruction and KL losses.
--   `encode(images)`: Returns the `z_mean` and `z_log_var` for a batch of images.
--   `decode(z)`: Decodes a batch of latent vectors `z` into images.
--   `sample(num_samples)`: Generates `num_samples` new images from the prior distribution.
+Both disable `jit_compile` automatically when `sampling_type="vmf"` (see §10).
 
-### 6.2 `Sampling` Layer
+### 6.3 Sampling Layers
 
-**Purpose**: A simple, non-trainable layer that implements the reparameterization trick.
-
-**Location**: `dl_techniques.layers.sampling.Sampling`
+| Layer | Location |
+| :--- | :--- |
+| `Sampling` | `dl_techniques.layers.sampling.Sampling` |
+| `HypersphereSampling` | `dl_techniques.layers.sampling.HypersphereSampling` |
+| `VMFSampling` | `dl_techniques.layers.sampling.VMFSampling` |
+| `vmf_kl_divergence` | `dl_techniques.layers.sampling.vmf_kl_divergence` |
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured ResNet-based variants to suit different image sizes and complexity.
+`VAE.MODEL_VARIANTS` holds five entries. `latent_dim` falls back to the variant default when
+not given explicitly; so does `kl_loss_weight`.
 
-| Variant | Depths | Filters | Default Latent Dim | Use Case |
-| :---: | :---: | :--- | :---: | :--- |
-| **`micro`** | 2 | [16, 32] | 32 | Very small images (e.g., 16x16) |
-| **`small`** | 2 | [32, 64] | 64 | Small datasets (e.g., MNIST) |
-| **`medium`**| 3 | [32, 64, 128]| 128 | Medium datasets (e.g., CIFAR-10) |
-| **`large`** | 3 | [64, 128, 256]| 256 | Higher resolution (e.g., 64x64, 128x128) |
-| **`xlarge`**| 4 | [64,..,512] | 512 | Very high resolution / complex data |
+| Variant | Depths | Steps/Depth | Filters | Default `latent_dim` | Default `kl_loss_weight` |
+| :---: | :---: | :---: | :--- | :---: | :---: |
+| **`micro`** | 2 | 1 | `[16, 32]` | 32 | 0.01 |
+| **`small`** | 2 | 1 | `[32, 64]` | 64 | 0.01 |
+| **`medium`** | 3 | 1 | `[32, 64, 128]` | 128 | 0.005 |
+| **`large`** | 3 | 2 | `[64, 128, 256]` | 256 | 0.005 |
+| **`xlarge`** | 4 | 2 | `[64, 128, 256, 512]` | 512 | 0.001 |
+
+Input spatial dimensions must be at least `8 x 8`, and should be divisible by `2^depths` so
+the encoder and decoder round-trip cleanly.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Reconstructing Images
-
-A core function of any autoencoder is reconstruction.
+### Example 1: Reconstructing images
 
 ```python
-# Assuming 'model' is trained on MNIST and X_test is available
-num_reconstructions = 10
-test_images = X_test[:num_reconstructions]
+import numpy as np
+from dl_techniques.models.vision.vae.model import create_vae
 
-# Get the model's reconstructions
-reconstructed_images = model.predict(test_images)["reconstruction"]
+model = create_vae(input_shape=(28, 28, 1), latent_dim=16, variant="small")
+batch = np.random.rand(8, 28, 28, 1).astype("float32")
 
-# Visualize
-plt.figure(figsize=(20, 4))
-for i in range(num_reconstructions):
-    # Original
-    plt.subplot(2, num_reconstructions, i + 1)
-    plt.imshow(test_images[i, :, :, 0], cmap='gray')
-    plt.title("Original")
-    plt.axis('off')
-    # Reconstruction
-    plt.subplot(2, num_reconstructions, i + 1 + num_reconstructions)
-    plt.imshow(reconstructed_images[i, :, :, 0], cmap='gray')
-    plt.title("Reconstructed")
-    plt.axis('off')
-plt.show()
+outputs = model.predict(batch, verbose=0)
+print(outputs["reconstruction"].shape)  # (8, 28, 28, 1)
+print(outputs["z_mean"].shape)          # (8, 16)
 ```
 
-### Example 2: Visualizing the 2D Latent Space
+### Example 2: Walking a 2-D latent space
 
-If you train a VAE with `latent_dim=2`, you can visualize the manifold of generated data.
+With `latent_dim=2` the whole manifold can be decoded on a grid and plotted directly.
 
 ```python
-# Assuming 'model' was trained with latent_dim=2
-n = 20  # Display a 20x20 grid of digits
-digit_size = 28
-figure = np.zeros((digit_size * n, digit_size * n))
+import numpy as np
+from dl_techniques.models.vision.vae.model import VAE
 
-# Linearly spaced coordinates in the latent space
-grid_x = np.linspace(-3, 3, n)
-grid_y = np.linspace(-3, 3, n)
+model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=2)
+n, digit = 20, 28
+canvas = np.zeros((digit * n, digit * n), dtype="float32")
+grid = np.linspace(-3.0, 3.0, n)
+for i, yi in enumerate(grid):
+    for j, xi in enumerate(grid):
+        decoded = model.decode(np.array([[xi, yi]], dtype="float32"))
+        canvas[i * digit:(i + 1) * digit, j * digit:(j + 1) * digit] = (
+            np.asarray(decoded)[0, :, :, 0])
+```
 
-for i, yi in enumerate(grid_x):
-    for j, xi in enumerate(grid_y):
-        z_sample = np.array([[xi, yi]])
-        x_decoded = model.decode(z_sample)
-        digit = x_decoded[0].reshape(digit_size, digit_size)
-        figure[i * digit_size: (i + 1) * digit_size,
-               j * digit_size: (j + 1) * digit_size] = digit
+### Example 3: Swapping the latent geometry
 
-plt.figure(figsize=(10, 10))
-plt.imshow(figure, cmap="gray")
-plt.title("2D Latent Space Manifold")
-plt.axis("off")
-plt.show()
+```python
+from dl_techniques.models.vision.vae.model import VAE
+
+gauss = VAE.from_variant("small", input_shape=(28, 28, 1),
+                         latent_dim=16, sampling_type="gaussian")
+
+hyper = VAE.from_variant("small", input_shape=(28, 28, 1),
+                         latent_dim=16, sampling_type="hypersphere")
+
+# The vMF KL is roughly 100x larger than the others', so beta must shrink to match.
+vmf = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=16,
+                       sampling_type="vmf", kl_loss_weight=1e-3)
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Conditional VAE (CVAE)
+### Pattern 1: Tuning beta
 
-You can extend the VAE to be conditional by feeding class labels (or other conditioning information) into both the encoder and decoder.
+`kl_loss_weight` trades reconstruction fidelity against latent-space regularity.
 
-```python
-# This is a conceptual example showing how one might modify the architecture
-# to build a CVAE. The provided class is not conditional.
-
-# Encoder: Concatenate image and one-hot label before processing.
-# Decoder: Concatenate latent vector 'z' and one-hot label before decoding.
-```
-
-### Pattern 2: Adjusting the β-VAE Parameter
-
-The `kl_loss_weight` (β) controls the trade-off between reconstruction quality and the "niceness" of the latent space.
--   **β < 1**: Emphasizes reconstruction, may lead to a less structured latent space.
--   **β = 1**: The standard VAE objective.
--   **β > 1**: Pushes for a more disentangled latent space where individual latent dimensions correspond to distinct factors of variation in the data. This often comes at the cost of blurrier reconstructions.
+- **beta < 1** — favours reconstruction; the latent space is less tightly organised.
+- **beta = 1** — the plain ELBO.
+- **beta > 1** — pushes toward a disentangled latent, usually at the cost of blur.
 
 ```python
-# Create a beta-VAE with a high beta value
-beta_vae = VAE.from_variant(
-    "small",
-    input_shape=(28, 28, 1),
-    latent_dim=10,
-    kl_loss_weight=4.0 # Beta = 4
-)
+beta_vae = VAE.from_variant("small", input_shape=(28, 28, 1),
+                            latent_dim=10, kl_loss_weight=4.0)
 ```
+
+### Pattern 2: KL warmup
+
+`train_step` multiplies the KL by `self.kl_weight`, which a callback can ramp from `0` to
+`kl_loss_weight` over the first epochs. Starting at `0` lets the model learn a reconstruction
+path before the regularizer bites, which is the standard cure for posterior collapse. The
+`vmf` mode in particular needs a warmup, because a freely learned `kappa` otherwise collapses
+to `~0` (a uniform latent) and reconstruction stalls.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-VAEs, especially with deep ResNet backbones, can be accelerated using mixed precision.
+### Mixed precision
 
 ```python
-# Enable mixed precision globally
-keras.mixed_precision.set_global_policy('mixed_float16')
+import keras
+from dl_techniques.models.vision.vae.model import VAE
 
-# Create model (will automatically use mixed precision)
-model = VAE.from_variant("large", ...)
-model.compile(...)
+keras.mixed_precision.set_global_policy("mixed_float16")
+model = VAE.from_variant("large", input_shape=(32, 32, 3), latent_dim=64)
+model.compile(optimizer="adam")
 ```
+
+The reconstruction term, the KL and the loss total are computed in float32 by design under
+this policy: `1e-7` is below the smallest normal float16, so the BCE clip would be a no-op
+and `log(0)` would reach the loss, and `exp(20)` in the KL would become `+inf`. `train_step`
+also calls `optimizer.scale_loss` inside the tape and clips gradients in the *scaled* domain,
+so a `LossScaleOptimizer` does not silently divide the whole weight update by the loss scale.
+
+### XLA
+
+`jit_compile=True` works for `gaussian` and `hypersphere`. It does **not** work for `vmf`:
+the rejection sampler uses `keras.random.beta`, whose `StatelessRandomGammaV3` kernel has no
+XLA-GPU implementation in TF 2.18. `VAE.compile()` forces `jit_compile=False` for that mode,
+and vMF training runs roughly 5-10x slower per epoch as a result.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Monitoring the Loss Components
+- **Watch both loss components.** `reconstruction_loss` should fall steadily.
+  `kl_loss` often rises early and then plateaus; a `kl_loss` pinned near zero is posterior
+  collapse.
+- **Scale pixels to `[0, 1]`.** The reconstruction term is binary cross-entropy and the
+  decoder ends in a sigmoid; data outside that range makes the objective meaningless.
+- **Match beta to the mode.** The three KL formulas are on different scales, so a beta tuned
+  for `gaussian` is wrong for `vmf` by about two orders of magnitude. Never compare
+  `total_loss` or `kl_loss` across modes; `reconstruction_loss` is the one comparable number.
 
-During training, it's crucial to monitor both `reconstruction_loss` and `kl_loss`.
--   **`reconstruction_loss`**: Should steadily decrease. If it stagnates, the model's capacity might be too low, or the learning rate may need adjustment.
--   **`kl_loss`**: This term regularizes the latent space. It might increase initially as the encoder learns to map inputs to the prior distribution, then it should stabilize. A `kl_loss` near zero can indicate "posterior collapse" (see below).
+### Choosing a latent geometry
 
-### The Reconstruction Loss Function
+Measured on MNIST in this repository at a single seed, so treat these as directional:
 
-This implementation uses `binary_crossentropy` for reconstruction loss, which is common for images with pixel values scaled to `[0, 1]`. For images with a different distribution, Mean Squared Error (`mse`) might be more appropriate.
+- **The spherical modes do not collapse.** `hypersphere` and `vmf` use every latent dimension,
+  where `gaussian` flatlines at 5-6 active units however much capacity it is given, and their
+  reconstruction keeps improving as `latent_dim` grows.
+- **Only `vmf` regularises direction**, and only `vmf` wins on the quality of prior-sample
+  decodes. The `hypersphere` KL is one-dimensional and says nothing about where on the sphere
+  latents land, so its aggregate posterior stays concentrated.
+- **Shrink the vMF beta as the latent grows** — roughly 10x per doubling of `latent_dim`. Its
+  raw KL grows with dimension, so a beta tuned at `d=8` over-regularises at `d=32`.
+- **At `latent_dim=2` use `gaussian`.** A 2-D sphere is a 1-D circle, and it loses to the plane.
+  The spherical advantage only appears once there is real capacity to spread out in.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `VAE` model is fully serializable using Keras 3's modern `.keras` format, including its custom `train_step`.
-
-### Saving and Loading
+The model round-trips through Keras 3's `.keras` format, custom `train_step` included.
 
 ```python
-# Create and train model
+import keras
+from dl_techniques.models.vision.vae.model import VAE
+
 model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=16)
 model.compile(optimizer="adam")
-# model.fit(...)
+model.save("my_vae_model.keras")
 
-# Save the entire model
-model.save('my_vae_model.keras')
-print("Model saved to my_vae_model.keras")
-
-# Load the model in a new session
-loaded_model = keras.models.load_model('my_vae_model.keras')
-print("Model loaded successfully")
-
-# Verify that the custom methods work
-generated_image = loaded_model.sample(1)
-print(f"Generated image shape: {generated_image.shape}")
+loaded = keras.models.load_model("my_vae_model.keras")
+print(loaded.sample(1).shape)  # (1, 28, 28, 1)
 ```
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
+The tests live in `tests/test_models/test_vae/` and cover variant construction, forward-pass
+shapes for every `sampling_type`, the generative methods, the deprecated alias, and save/load
+round-trips including optimizer state.
 
-```python
-import keras
-import numpy as np
-from dl_techniques.models.vision.vae.model import VAE
-
-def test_model_creation_from_variant():
-    """Test model creation from variants."""
-    model = VAE.from_variant("micro", input_shape=(32, 32, 1), latent_dim=8)
-    assert model is not None
-    print("✓ VAE-micro created successfully")
-
-def test_forward_pass_shape():
-    """Test the output shapes of a forward pass."""
-    model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=16)
-    dummy_input = np.random.rand(4, 28, 28, 1)
-    outputs = model.predict(dummy_input)
-
-    assert outputs["reconstruction"].shape == (4, 28, 28, 1)
-    assert outputs["z_mean"].shape == (4, 16)
-    assert outputs["z_log_var"].shape == (4, 16)
-    assert outputs["z"].shape == (4, 16)
-    print("✓ Forward pass has correct shapes")
-
-def test_generative_methods():
-    """Test the encode, decode, and sample methods."""
-    model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=16)
-    dummy_input = np.random.rand(4, 28, 28, 1)
-
-    z_mean, _ = model.encode(dummy_input)
-    reconstruction = model.decode(z_mean)
-    assert reconstruction.shape == (4, 28, 28, 1)
-
-    samples = model.sample(num_samples=5)
-    assert samples.shape == (5, 28, 28, 1)
-    print("✓ Generative methods work correctly")
-
-# Run tests
-if __name__ == '__main__':
-    test_model_creation_from_variant()
-    test_forward_pass_shape()
-    test_generative_methods()
-    print("\n✅ All tests passed!")
+```bash
+MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_vae -q
 ```
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Troubleshooting
 
-**Issue 1: Reconstructions are very blurry.**
-
--   **Cause 1**: The `kl_loss_weight` (β) is too high, prioritizing a perfect latent space over accurate reconstruction.
--   **Solution 1**: Decrease `kl_loss_weight` (e.g., from `0.01` to `0.001`).
--   **Cause 2**: The model capacity (number of filters, latent dimension) is too low to capture the data's complexity.
--   **Solution 2**: Try a larger model variant (e.g., move from "small" to "medium").
--   **Cause 3**: The VAE objective itself, which maximizes the average log-likelihood, tends to produce blurry images compared to GANs. This is an inherent property.
-
-**Issue 2: The `kl_loss` drops to nearly zero and stays there ("Posterior Collapse").**
-
--   **Cause**: The decoder becomes powerful enough to reconstruct the input without using the information from the latent vector `z`. The encoder then learns to map all inputs to the prior distribution (N(0,1)) to minimize the KL loss, effectively ignoring the input.
--   **Solution 1**: Use "KL annealing" - start with `kl_loss_weight=0` and gradually increase it over the first several thousand training steps. This gives the model a chance to learn a meaningful reconstruction path first.
--   **Solution 2**: Use a weaker decoder or a stronger encoder.
-
-### Frequently Asked Questions
-
-**Q: How does a VAE compare to a GAN (Generative Adversarial Network)?**
-
-A:
--   **VAE**: Learns an explicit probability distribution and provides a smooth, continuous latent space. Great for understanding data structure and interpolation. Tends to produce blurrier, but more diverse, samples.
--   **GAN**: Uses a minimax game between a generator and a discriminator. Does not learn an explicit distribution. Tends to produce sharper, more realistic samples but can suffer from "mode collapse" (generating only a few types of samples) and training instability.
-
-**Q: Can I use this for anomaly detection?**
-
-A: Yes. A VAE trained on normal data will have a higher reconstruction error for anomalous inputs. You can set a threshold on the reconstruction loss to identify anomalies.
+- **Blurry reconstructions.** Lower `kl_loss_weight` or move up a variant. Some blur is
+  inherent to an objective that averages over plausible reconstructions.
+- **`kl_loss` collapses to ~0 (posterior collapse).** Ramp beta from zero over the first
+  epochs, or use `sampling_type="hypersphere"` / `"vmf"`, which have no origin to collapse
+  toward.
+- **`ValueError: sampling_type must be one of ...`.** `"hypersphere_controlled"` was removed;
+  use `"gaussian"`, `"hypersphere"` or `"vmf"`.
+- **`ValueError: Filters array length N must equal depths M`.** `filters` carries one entry
+  per depth; override both together or neither.
+- **`ValueError: Input dimensions must be at least 8x8`.** The encoder cannot downsample
+  smaller inputs.
+- **vMF training is slow.** Expected: that mode cannot be XLA-compiled (§10).
 
 ---
 
-## 15. Technical Details
-
-### The VAE Objective: Evidence Lower Bound (ELBO)
-
-The VAE loss function is derived from maximizing the **Evidence Lower Bound (ELBO)** on the log-likelihood of the data. The objective is:
-
-**log p(x) ≥ E_q(z|x) [log p(x|z)] - KL(q(z|x) || p(z))**
-
-Maximizing the ELBO is equivalent to minimizing the VAE loss:
-
-**Loss = - (Reconstruction Term) + (Regularization Term)**
-
--   **Reconstruction Term (`-E_q(z|x) [log p(x|z)]`)**: This is the expected negative log-likelihood of the data `x` given the latent vector `z`. For image pixels scaled to `[0, 1]`, this is equivalent to **binary cross-entropy**. It measures how well the decoder reconstructs the input.
--   **Regularization Term (`KL(q(z|x) || p(z))`)**: This is the **Kullback-Leibler (KL) divergence** between the encoder's approximate posterior `q(z|x)` and the prior `p(z)`. It forces the encoded distributions to be similar to a standard normal distribution, thus structuring the latent space.
-
----
-
-## 16. Hypersphere Latent Sampling: Does It Work?
-
-Beyond the standard diagonal-Gaussian latent, this `VAE` supports a **hypersphere**
-sampling mode (`sampling_type="hypersphere"`) — the contribution evaluated in this
-section. Instead of `z ~ N(μ, σ²)` on an unbounded ball, the encoder places each latent
-on a thin, strictly-positive **spherical shell**: it predicts a unit direction from
-`z_mean` and a single scalar radius log-variance (a dedicated `Dense(1)` head), and the
-Gaussian KL is replaced by a **radius-variance KL**. The direction carries an implicit
-uniform-on-sphere prior.
-
-```python
-from dl_techniques.models.vision.vae.model import VAE
-
-# Baseline diagonal-Gaussian latent
-gauss = VAE.from_variant("small", input_shape=(28, 28, 1),
-                         latent_dim=16, sampling_type="gaussian")
-
-# Hypersphere (thin-shell sphere sampler + radius-variance KL)
-hyper = VAE.from_variant("small", input_shape=(28, 28, 1),
-                         latent_dim=16, sampling_type="hypersphere")
-```
-
-> The hypersphere mode is a deliberate simplification, **not** a full vMF S-VAE — there is
-> no explicit directional (von Mises–Fisher / uniform-sphere) KL on the aggregate posterior.
-> The legacy value `"hypersphere_faithful"` is accepted as a deprecated alias (old configs
-> and checkpoints still load and report as `"hypersphere"`); the dropped
-> `"hypersphere_controlled"` mode raises `ValueError`.
-
-### Verdict
-
-**YES — hypersphere sampling works, and at `latent_dim ≥ 8` it decisively beats the
-Gaussian baseline.** Its defining advantage is that it **does not suffer posterior
-collapse**: it uses *every* latent dimension, whereas the Gaussian VAE collapses to ~5–6
-active units no matter how much latent capacity it is given. This translates directly into
-much better reconstruction.
-
-*Setup: MNIST, 50 epochs, seed 42. Fair metrics only — `reconstruction_loss` (identical
-binary-crossentropy across modes) and MMD (mode-agnostic, prior-decoded samples vs real
-test, PCA-50 RBF kernel). `total_loss`/`kl_loss` are NOT comparable across modes (the two
-modes use different KL formulas) and are excluded.*
-
-| latent_dim | recon_bce (gauss) | recon_bce (hyper) | hyper vs gauss | active units gauss | active units hyper |
-|---|---|---|---|---|---|
-| 2  | **0.189** | 0.200 | +5.7% (gauss wins) | 2 | 2 |
-| 8  | 0.166 | **0.112** | **−33%** | 6 / 8 | **8 / 8** |
-| 16 | 0.168 | **0.092** | **−46%** | 5 / 16 | **16 / 16** |
-| 32 | 0.165 | **0.091** | **−45%** | 6 / 32 | **32 / 32** |
-
-- **Posterior collapse (the headline).** Gaussian active units flatline at ~5–6 regardless
-  of `latent_dim`; its reconstruction is stuck at ~0.165. The hypersphere uses **100%** of
-  dimensions (8/8, 16/16, 32/32) and reconstruction keeps improving (0.112 → 0.092 → 0.091).
-  This is exactly the theoretically-predicted benefit of a hyperspherical latent: no origin
-  to collapse toward, and the KL does not penalize latent magnitude.
-- **Reconstruction.** Hypersphere is 33–46% better at `latent_dim ≥ 8`.
-- **`latent_dim = 2`.** Hypersphere is marginally behind (+5.7%) — expected, since a 2-D
-  sphere is a 1-D circle, intrinsically more constrained than the 2-D Gaussian plane. The
-  advantage appears once there is real capacity to use.
-
-### Generative quality (MMD on prior samples) — mixed, roughly comparable
-
-| latent_dim | mmd2_median (gauss / hyper) | mmd2_half (gauss / hyper) |
-|---|---|---|
-| 8  | 0.0155 / 0.0266 (gauss) | 0.056 / 0.060 (≈) |
-| 16 | 0.0153 / 0.0187 (gauss) | 0.056 / **0.032** (hyper) |
-| 32 | 0.0155 / 0.0201 (gauss) | 0.057 / **0.032** (hyper) |
-
-On prior-sample MMD the two are close: Gaussian is slightly ahead at the median bandwidth
-(1.2–1.7×), the hypersphere is ahead at the smaller bandwidth for `dim ≥ 16`. The clear,
-robust win is on **reconstruction + dimension utilization**, not prior-sample MMD. The
-likely cause: the hypersphere has no explicit directional-KL forcing the aggregate posterior
-to match the uniform-sphere prior, leaving a small prior–posterior gap that a true S-VAE
-(vMF / uniform-sphere KL) would close.
-
-### Corrections made during the study
-
-Two real bugs and one misleading visualization were fixed before any verdict could be
-trusted:
-
-1. **`VAE.sample()` drew `N(0,I)` for all modes** → fixed to draw each mode's true prior.
-2. **The radius shell was neither thin nor strictly positive.** The original
-   `r = radius + exp(0.5·rlv)·η` had σ ≈ radius, producing ~8–13% **negative** radii and
-   ~10–18% of samples at the origin (a filled disk, not a sphere). Fixed to a thin,
-   strictly-positive shell `r = radius·(1 + 0.1·exp(0.5·clip(rlv))·η)` floored at
-   `0.05·radius`. After the fix, sampled `‖z‖` ≈ 1 with 0% off-shell.
-3. **Latent plots showed raw `z_mean` on a fixed `[-4, 4]` axis** (and produced nothing for
-   `latent_dim > 2`) → now plot the on-sphere direction and project `dim > 2` via PCA-2.
-
-An intermediate "parity" verdict, computed on the buggy off-sphere model, was **retracted**;
-the table above supersedes it.
-
-### Scope / limitations
-
-- Single dataset (MNIST), single seed, 50 epochs. The reconstruction / active-unit result is
-  large and monotonic in `latent_dim`, so it is unlikely to be noise, but multi-seed /
-  multi-dataset confirmation would strengthen it.
-- Prior-sample MMD is only comparable, not better — a directional (vMF / uniform-sphere) KL
-  is the natural next step to also win on generation. **This was done — see §17.**
-
----
-
-## 17. vMF Spherical VAE: Winning on Generation
-
-§16 left one gap open: the thin-shell `hypersphere` mode wins reconstruction but only *ties*
-gaussian on prior-sample generation (MMD), because it has **no directional regularizer** — its
-1-D radius-variance KL says nothing about where on the sphere the latents go. A true **von
-Mises–Fisher Spherical VAE** (Davidson et al. 2018) closes that gap with a directional posterior
-`q(z|x)=vMF(μ̂, κ)` and the closed-form **vMF→uniform-sphere KL**, which pushes the *aggregate*
-posterior toward the uniform prior.
-
-```python
-from dl_techniques.models.vision.vae.model import VAE
-
-# True vMF Spherical VAE: directional posterior + vMF->uniform KL
-vmf = VAE.from_variant("small", input_shape=(28, 28, 1),
-                       latent_dim=16, sampling_type="vmf")
-```
-
-> The vMF mode samples via a fixed-K Ulrich/Wood rejection sampler + Householder reflection
-> (`VMFSampling`), and computes the exact vMF→uniform KL via a continued-fraction modified-Bessel
-> ratio (`vmf_kl_divergence`), both in `layers/sampling.py`. Because its KL is ~100× larger than
-> the other modes', set a much smaller `kl_loss_weight` (β≈1e-3, vs 0.01) — the trainer exposes
-> `--kl-loss-weight`, `--kl-warmup-epochs`, `--early-stop-monitor`, and a (now-functional) cosine
-> `--lr-schedule`.
-
-### Verdict
-
-**The directional vMF KL delivers the generation win at all three latent dims — with a dim-scaled β.**
-MNIST, 50ep, seed 42, cosine LR, early-stop on `val_reconstruction_loss`. Each mode is run at
-**its** operating point (disclosed, not a single recipe): gaussian/hypersphere β=0.01 with no
-warmup; vMF an 8-epoch KL warmup + **β=1e-3 at d8/d16, β=1e-4 at d32** — the vMF KL is ~100× larger
-than the baselines' and grows with dimension, so its β must shrink as the latent grows. (β and
-warmup are vMF necessities, not advantages — neither helps the baselines.)
-
-| dim (vMF β) | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_conc † (h / **v**) |
-|---|---|---|---|---|
-| 8 (1e-3)  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.337 / **0.100** |
-| 16 (1e-3) | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.424 / **0.077** |
-| 32 (1e-4) | 0.164 / 0.0915 / **0.0901** | 0.0159 / 0.0496 / **0.0157** | 6 / 32 / 32 | 0.448 / **0.105** |
-
-- **Generation (MMD).** vMF wins at every dim: **d8** 3.2× better than gaussian / 6.2× than
-  hypersphere, **d16** 2.6× / 5.7×, **d32** (β=1e-4) it edges gaussian on the median bandwidth
-  (0.0157 vs 0.0159) and wins decisively on `mmd²_half` (0.0364 vs gaussian 0.0581, hypersphere
-  0.0781) — always far ahead of hypersphere.
-- **Mechanism — the directional KL does real work.** † `dir_concentration` (`||mean(unit z_mean)||`,
-  lower = aggregate posterior more spread) is only a sphere-coverage signal for the two **sphere**
-  modes (not meaningful for gaussian's ball latent, so gaussian is omitted). Among them, vMF's is far
-  below hypersphere's (0.10/0.077/0.105 vs 0.34/0.42/0.45): the vMF→uniform KL **spreads the
-  aggregate posterior**, so uniform-prior samples decode to realistic images — exactly the term the
-  hypersphere mode lacks. This is the plausible mechanism for vMF's MMD edge **over hypersphere**;
-  vMF's edge over gaussian is additionally helped by gaussian's posterior collapse (5–6 active units).
-- **Reconstruction + dimension use.** vMF (like hypersphere) uses **100%** of latent dims and
-  reconstructs far better than gaussian (which collapses to ~5–6 active units). vMF's recon trails
-  hypersphere slightly at d8/d16 (0.112/0.096 vs 0.108/0.094) but **edges it at d32** (0.0901 vs
-  0.0915) once β is dim-scaled; note hypersphere is nearly unregularized (its KL ≈ 5e-4), so this is
-  not an equal-β comparison.
-- **β must be dim-scaled (the d32 story).** The vMF KL grows with dimension (raw KL ≈16/26/57 at the
-  per-dim β), so the optimal β shrinks: 1e-3 at d8/d16, 1e-4 at d32. A *fixed* β=1e-3 over-regularizes
-  d32 (recon 0.105, MMD 0.0236 — loses to gaussian); the dim-scaled β=1e-4 recovers the full win
-  (recon 0.0901, MMD 0.0157 — beats both). Confirmed by a d32 β-sweep over {3e-4, 1e-4, 3e-5}, with
-  1e-4 ≈ 3e-5 optimal. So the earlier "d32 erosion" was the fixed β, not a vMF limitation.
-
-### How β was chosen
-
-The vMF KL is structurally ~100× larger than the baselines' (≈7–31 vs gaussian ≈5, hypersphere
-≈4e-4), so the shared β=0.01 over-regularizes vMF and drives reconstruction back up after a few
-epochs. A d16 β-sweep over {3e-4, 1e-3, 3e-3, 1e-2} (clean methodology — cosine LR,
-`val_reconstruction_loss` early-stop) found **β=1e-3** optimal: recon 0.096 (≈ hypersphere 0.094,
-trails slightly) + best MMD; higher β monotonically degrades both. Because the vMF KL grows with
-dimension, β must be **dim-scaled**: a separate d32 β-sweep over {3e-4, 1e-4, 3e-5} found
-**β=1e-4** optimal there (recon 0.0901, MMD 0.0157 — beats both baselines), vs the over-regularized
-fixed β=1e-3 (recon 0.105). Rule of thumb: shrink β ~10× per ~2× of latent dim. The KL is
-mode-incomparable, so judge across modes on `reconstruction_loss` + MMD only, never
-`total_loss`/`kl_loss`.
-
-### Engineering notes (all verified)
-
-1. **`VMFSampling` layer** — fixed-K Ulrich/Wood rejection sampler + Householder reflection. Verified
-   in isolation: on-sphere ‖z‖≈1; isotropic vMF cap (tangent-eigenvalue ratio ≈1.01); diverse μ̂ →
-   uniform coverage; E[z·μ̂]=A_m(κ) vs `scipy.stats.vonmises_fisher` to ~2e-4.
-2. **Closed-form vMF KL** — Bessel ratio `A_m(κ)=I_{m/2}/I_{m/2-1}` via a continued-fraction /
-   downward Miller recurrence (the upward recurrence is unstable — relerr up to 1e5 at d16/d32) plus
-   a telescoping log-normalizer. Verified vs `scipy.special.ive` to ~6e-6 (even and odd dims).
-3. **κ-gradient is unbiased** — `∇_κ E[w]` matches the analytic `A_m'(κ)` + finite differences, so
-   the Naesseth-2017 rejection-reparameterization correction is **not** needed (ruled out by test).
-4. **Posterior collapse cured** — free-learned κ initially collapses to ~0 (uniform latent, recon
-   stuck ~0.25). Fixed with higher init κ (≈12) + KL warmup, not a gradient change.
-5. **XLA / GPU** — vMF opts out of `jit_compile` (`keras.random.beta` → `StatelessRandomGammaV3` has
-   no XLA-GPU kernel in TF 2.18); `VAE.compile()` forces this for `sampling_type='vmf'`.
-
-### Scope / limitations
-
-- Single dataset (MNIST), single seed, 50 epochs. β was tuned per dim (d16 + d32 sweeps); a fuller
-  β-vs-dim curve and multi-seed / multi-dataset confirmation would strengthen the result.
-- vMF trains without XLA (rejection sampler) → ~5–10× slower per epoch than the gaussian/hypersphere
-  arms.
-
----
-
-## 18. Citation
-
-If you use VAEs in your research, please cite the original paper:
+## 15. Citation
 
 ```bibtex
 @article{kingma2013auto,
@@ -890,5 +465,14 @@ If you use VAEs in your research, please cite the original paper:
   author={Kingma, Diederik P and Welling, Max},
   journal={arXiv preprint arXiv:1312.6114},
   year={2013}
+}
+
+@inproceedings{davidson2018hyperspherical,
+  title={Hyperspherical Variational Auto-Encoders},
+  author={Davidson, Tim R and Falorsi, Luca and De Cao, Nicola and
+          Kipf, Thomas and Tomczak, Jakub M},
+  booktitle={Uncertainty in Artificial Intelligence (UAI)},
+  year={2018},
+  note={arXiv:1804.00891}
 }
 ```

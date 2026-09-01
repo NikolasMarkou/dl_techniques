@@ -4,535 +4,296 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of the **Vision Transformer (ViT)** in **Keras 3**, based on the paper ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) by Dosovitskiy et al. (2020).
+A Keras 3 implementation of the **Vision Transformer (ViT)**, from ["An Image Is Worth 16x16 Words: Transformers for Image Recognition at Scale"](https://arxiv.org/abs/2010.11929) (Dosovitskiy et al., 2020).
 
-The architecture supports multiple standard scales (`Tiny`, `Small`, `Base`, `Large`, `Huge`) and is highly configurable, allowing for easy experimentation with different normalization techniques, feed-forward networks, and attention mechanisms.
-
----
-
-## Table of Contents
-
-1. [Overview: What is ViT and Why It Matters](#1-overview-what-is-vit-and-why-it-matters)
-2. [The Problem ViT Solves](#2-the-problem-vit-solves)
-3. [How ViT Works: Core Concepts](#3-how-vit-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+Six scales are provided (`pico`, `tiny`, `small`, `base`, `large`, `huge`). Block internals -- normalization type and position, feed-forward network type, activation -- are resolved through the `dl_techniques` factories, so a variant can be swapped in without forking the file.
 
 ---
 
 ## 1. Overview: What is ViT and Why It Matters
 
-### What is a Vision Transformer (ViT)?
+### What is a Vision Transformer?
 
-A **Vision Transformer (ViT)** is a model that applies the standard Transformer architecture, originally designed for text, directly to image recognition. It challenges the long-standing dominance of Convolutional Neural Networks (CNNs) in computer vision.
-
-The core idea is to treat an image as a sequence of fixed-size patches, analogous to words in a sentence. Each patch is linearly embedded, combined with position embeddings, and then processed by a standard Transformer encoder.
+A ViT applies the standard Transformer encoder directly to images. The image is cut into non-overlapping square patches, each patch is flattened and linearly projected to `embed_dim`, and from that point the network has no notion of two dimensions at all: it sees a set of tokens, and any geometry it uses it must learn.
 
 ### Key Innovations
 
-1.  **Sequence-Based Image Processing**: ViT discards the inductive biases of CNNs (like locality and translation equivariance) and instead learns spatial relationships from scratch using self-attention.
-2.  **Global Receptive Field**: From the very first layer, the self-attention mechanism allows every patch to interact with every other patch, providing a global receptive field.
-3.  **Scalability**: ViT demonstrates exceptional scaling properties. When trained on sufficiently large datasets (e.g., ImageNet-21k, JFT-300M), it can outperform state-of-the-art CNNs.
-4.  **Transfer Learning Powerhouse**: Pre-trained ViT models serve as powerful backbones for a wide range of downstream vision tasks, such as object detection, segmentation, and fine-grained classification.
-
-### Why ViT Matters
-
-**Traditional Computer Vision (CNNs)**:
-```
-Problem: Classify an image of a cat.
-CNN Approach:
-  1. Use stacked convolutional layers with small kernels (e.g., 3x3).
-  2. Each layer processes local neighborhoods, gradually building up a
-     larger receptive field.
-  3. Limitation: It takes many layers for a neuron to "see" the entire image,
-     making it harder to model long-range dependencies between distant pixels.
-```
-
-**ViT's Solution**:
-```
-ViT Approach:
-  1. Split the image into a grid of 16x16 patches.
-  2. Treat these patches as a sequence of "image words".
-  3. Feed this sequence into a Transformer encoder.
-  4. The self-attention mechanism in the first layer immediately relates a patch
-     in the top-left corner to a patch in the bottom-right.
-  5. Benefit: Models global context from the outset, allowing it to learn
-     holistic representations of objects and scenes.
-```
-
-### Real-World Impact
-
-ViT has revolutionized the field of computer vision and has become the foundation for many state-of-the-art models:
-
--   🖼️ **Image Classification**: Achieves top performance on benchmarks like ImageNet.
--   🎯 **Object Detection & Segmentation**: ViT backbones (e.g., in DETR, Mask R-CNN) provide powerful features for locating and outlining objects.
--   🔬 **Medical Imaging**: Analyzes whole-slide pathology images by treating large tissue sections as sequences of patches.
--   🎨 **Generative Modeling**: Foundational to models like DALL-E 2 and Imagen that generate images from text.
+1. **Sequence-based image processing.** The convolutional priors -- locality, translation equivariance, a hierarchy of scales -- are dropped entirely rather than built into the weights.
+2. **Global receptive field from layer one.** Self-attention lets any patch influence any other patch in a single layer; a ConvNet needs many downsampling stages to reach the same interaction.
+3. **Explicit position.** Because the patch grid is discarded, spatial position is re-injected by a learned positional embedding. Remove it and the model is permutation-invariant over patches: an image and its shuffled version look identical.
+4. **Scaling.** The authors report that with enough pre-training data (ImageNet-21k, JFT-300M) the architecture matches or beats the best CNNs of the time.
 
 ---
 
 ## 2. The Problem ViT Solves
 
-### The Limitations of CNNs
+A CNN kernel sees only its immediate neighbourhood, so relating a dog's head to its tail requires information to propagate through many layers. Dilated convolutions, larger kernels and bolt-on attention modules all mitigate this, but each is a patch on a locality assumption that is baked into the operator.
 
-For years, CNNs were the undisputed kings of computer vision, but they have inherent limitations.
+ViT removes the assumption instead. Self-attention weights are content-based and computed over the whole sequence, so long-range structure is available immediately and is learned from data rather than hard-wired.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Convolutional Neural Networks (CNNs)                       │
-│                                                             │
-│  The Inductive Bias of Locality:                            │
-│    CNNs are hard-wired to prioritize local information. A    │
-│    3x3 kernel only sees its immediate neighbors.             │
-│                                                             │
-│  This creates challenges for:                               │
-│  1. Modeling Long-Range Dependencies: Relating a dog's head │
-│     to its tail requires information to propagate through   │
-│     many layers.                                            │
-│  2. Global Context: Understanding the overall scene context │
-│     is difficult in early layers.                           │
-│  3. Flexibility: The rigid convolutional structure is less  │
-│     adaptable than the dynamic, content-based weighting of  │
-│     self-attention.                                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-While techniques like larger kernels, dilated convolutions, and attention mechanisms were added to CNNs to mitigate this, they were often ad-hoc solutions.
-
-### How ViT Changes the Game
-
-ViT abandons the CNN paradigm in favor of a more flexible, scalable approach.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Vision Transformer Principle                           │
-│                                                             │
-│  1. Minimal Inductive Bias: ViT does not assume locality.   │
-│     It learns all spatial relationships directly from data. │
-│                                                             │
-│  2. Global Information Mixing:                              │
-│     Self-attention allows any two patches in the image, no  │
-│     matter how far apart, to directly influence each other's │
-│     representation in a single layer.                       │
-│                                                             │
-│  This allows the model to:                                  │
-│  - Learn non-local patterns that are difficult for CNNs.    │
-│  - Scale more effectively with massive datasets, as the     │
-│    model's capacity to learn is not constrained by a local  │
-│    receptive field.                                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-The key trade-off is that this flexibility requires a large amount of data to learn meaningful patterns. On small datasets, ViTs tend to underperform CNNs without strong regularization or pre-training.
+The trade-off is sample efficiency. Priors that constrain a CNN are also what make it learn from little data. On small datasets a ViT trained from scratch overfits or plateaus unless it gets heavy augmentation, strong regularization, or pre-trained weights.
 
 ---
 
 ## 3. How ViT Works: Core Concepts
 
-### From Image to Sequence
+### From image to sequence
 
-The first and most critical step is converting a 2D image into a 1D sequence of tokens.
+An `H x W` image with patch size `P` becomes `(H/P) * (W/P)` tokens. Attention cost is quadratic in that count, so patch size is the central efficiency knob: halving `P` quadruples the sequence length and multiplies attention cost by roughly sixteen.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                         Image-to-Sequence                        │
-│                                                                  │
-│ ┌───────────────┐  Slice into Grid  ┌───┬───┬───┐                │
-│ │               │  ─────────────►   │ 1 │ 2 │ 3 │                │
-│ │   Input Image │                   ├───┼───┼───┤                │
-│ │ (e.g. 224x224)│                   │ 4 │ 5 │ 6 │                │
-│ │               │                   ├───┼───┼───┤                │
-│ └───────────────┘                   │ 7 │ 8 │ 9 │                │
-│                                     └───┴───┴───┘                │
-│                                           │                      │
-│                                           ▼                      │
-│                            Flatten and Linearly Embed Each Patch │
-│                                           │                      │
-│                                           ▼                      │
-│                  Sequence of Patch Embeddings (e.g., 196 tokens) │
-└──────────────────────────────────────────────────────────────────┘
-```
+### The CLS token and positional embeddings
 
-### The [CLS] Token and Positional Embeddings
+- **CLS token**: a learnable vector prepended to the sequence. It carries no image content; its job is to accumulate a whole-image summary through attention, giving the head a single vector to read.
+- **Positional embeddings**: learned, absolute, 1D. One vector per position (including position 0, the CLS token), added to the patch embeddings.
 
-Once the image is a sequence, two more elements are added:
-
-1.  **[CLS] Token**: A special, learnable token is prepended to the sequence. The final representation of this token from the Transformer is used as the aggregate image representation for classification. This is inspired by BERT.
-2.  **Positional Embeddings**: Since self-attention is permutation-invariant, the model has no inherent sense of patch order. Learnable positional embeddings are added to each patch embedding to provide this spatial information.
-
-### The Complete Data Flow
+### Complete data flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     ViT Complete Data Flow                              │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: Patching and Embedding
-──────────────────────────────
-Input Image (B, H, W, C)
-    │
-    ├─► PatchEmbedding Layer → Patch Embeddings (B, num_patches, D)
-    │
-    ├─► Prepend [CLS] Token → Sequence (B, num_patches + 1, D)
-    │
-    ├─► Add Positional Embeddings
-    │
-    └─► Final Input Sequence (B, L, D) ← READY FOR TRANSFORMER
-
-
-STEP 2: Transformer Encoder Stack (repeated for N layers)
-────────────────────────────────────────────────────────
-Input Sequence (B, L, D)
-    │
-    ├─► TransformerLayer 1
-    │   ├─► [Norm] -> Multi-Head Self-Attention -> [Add & Norm]
-    │   └─► [Norm] -> Feed-Forward Network      -> [Add & Norm]
-    │
-    ├─► TransformerLayer 2
-    │   └─► ...
-    │
-    ├─► TransformerLayer N
-    │
-    └─► Final Hidden States (B, L, D)
-
-
-STEP 3: Classification Head
-───────────────────────────
-Final Hidden States (B, L, D)
-    │
-    ├─► Select the [CLS] token's hidden state: (B, D)
-    │
-    ├─► Final Layer Normalization
-    │
-    ├─► [Optional] Dropout
-    │
-    ├─► Dense Layer (Classification)
-    │
-    └─► Logits (B, num_classes)
+Input image (B, H, W, C)
+    |
+    +-> PatchEmbedding (Conv2D, kernel=stride=patch_size)  -> (B, N, D)
+    +-> prepend CLS token                                  -> (B, N+1, D)
+    +-> add positional embedding, optional dropout
+    |
+    +-> TransformerLayer x num_layers
+    |     [Norm] -> Multi-Head Self-Attention -> Add
+    |     [Norm] -> Feed-Forward Network      -> Add
+    |
+    +-> final Layer Normalization                          -> (B, N+1, D)
+    |
+    +-- include_top=True  -> take CLS state -> optional dropout -> Dense -> logits (B, num_classes)
+    +-- include_top=False -> pooling: 'cls' | 'mean' | 'max' -> (B, D), or None -> (B, N+1, D)
 ```
+
+The head emits **logits**, so compile with `from_logits=True`.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 Patch Embedding Layer
+### 4.1 Patch embedding
 
-This layer performs the critical image-to-sequence conversion. It is implemented as a single `Conv2D` layer.
+Implemented as a single `Conv2D` with `kernel_size = strides = patch_size` and `filters = embed_dim`, which extracts and embeds every patch in one operation. The output is reshaped from `(B, H', W', D)` to `(B, H'*W', D)`.
 
--   `kernel_size` = `patch_size`
--   `strides` = `patch_size`
--   `filters` = `embed_dim`
+Image height and width must be exact multiples of the patch size; the constructor raises `ValueError` otherwise.
 
-This single convolution operation efficiently extracts and embeds all patches in parallel. The output is then reshaped from `(B, H', W', D)` to `(B, H'*W', D)`.
+### 4.2 Transformer layer
 
-### 4.2 Transformer Layer
+The repeated block is a configurable `TransformerLayer`. Both normalization placements are supported through `normalization_position`:
 
-This is the standard building block of the Transformer, used repeatedly. This implementation uses a highly configurable `TransformerLayer` class.
+| Value | Order | Notes |
+| :--- | :--- | :--- |
+| `"post"` | `SubLayer -> Add -> Norm` | **Default in this implementation.** Can need learning-rate warmup at depth. |
+| `"pre"` | `Norm -> SubLayer -> Add` | Matches the published ViT. Generally more stable to train. |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    TransformerLayer (Internal)              │
-└─────────────────────────────────────────────────────────────┘
-Input: (B, L, D)
-  │
-  ▼ (Pre-Norm path shown)
-┌──────────────────────────┐
-│ Layer Normalization      │
-└──────────────────────────┘
-  │
-  ▼
-┌──────────────────────────┐
-│ Multi-Head Self-Attention│  ← Mixes information across patches
-└──────────────────────────┘
-  │
-  │
-  ▼
-Add & (Optional Stochastic Depth)
-(Input + Attention Output)
-  │
-  ▼
-┌──────────────────────────┐
-│ Layer Normalization      │
-└──────────────────────────┘
-  │
-  ▼
-┌──────────────────────────┐
-│ Feed-Forward Network     │  ← Processes each patch representation
-│ (e.g., MLP, SwiGLU)      │
-└──────────────────────────┘
-  │
-  │
-  ▼
-Add & (Optional Stochastic Depth)
-(FFN Input + FFN Output)
-  │
-  ▼
-Output: (B, L, D)
-```
+The default is `"post"` and therefore does **not** reproduce the paper's block; pass `normalization_position="pre"` if you want the published configuration.
+
+### 4.3 Pooling and the CLS token
+
+When `include_top=False`, `pooling="mean"` and `pooling="max"` deliberately **exclude position 0**: averaging the CLS token into the patch statistics mixes a summary vector into the thing it summarizes. Only `pooling="cls"` reads position 0, and it reads it alone. `pooling=None` returns the full token sequence, which is what a detection or segmentation head wants.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy matplotlib
-```
-
-### Your First ViT Model (30 seconds)
-
-Let's build and train a tiny ViT on the CIFAR-10 dataset.
-
 ```python
 import keras
-from keras.datasets import cifar10
 import numpy as np
+from keras.datasets import cifar10
 
-# Local imports from your project structure
 from dl_techniques.models.vision.vit.model import ViT
 
-# 1. Load and preprocess data
-(X_train, y_train), (X_test, y_test) = cifar10.load_data()
-X_train = X_train.astype("float32") / 255.0
-X_test = X_test.astype("float32") / 255.0
+# 1. Data (a subset keeps this example fast).
+(x_train, y_train), (x_test, y_test) = cifar10.load_data()
+x_train = x_train[:2000].astype("float32") / 255.0
+y_train = y_train[:2000]
+x_test = x_test[:1000].astype("float32") / 255.0
+y_test = y_test[:1000]
 
-# 2. Create a ViT model
-# We use a small scale and patch size for the small 32x32 images
+# 2. Model. 'pico' and patch_size=4 suit 32x32 inputs.
 model = ViT(
     input_shape=(32, 32, 3),
     num_classes=10,
-    scale="pico",  # 'pico' is a custom smaller scale for quick tests
+    scale="pico",
     patch_size=4,
     include_top=True,
-    dropout_rate=0.1
+    dropout_rate=0.1,
 )
 
-# 3. Compile the model
+# 3. Compile. The head emits logits.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
-print("✅ ViT model created and compiled successfully!")
 model.summary_detailed()
 
-# 4. Train the model (for a few epochs as a demo)
-history = model.fit(
-    X_train, y_train,
-    batch_size=128,
-    epochs=5,
-    validation_data=(X_test, y_test)
-)
-print("✅ Training Complete!")
-
-# 5. Evaluate the model
-loss, acc = model.evaluate(X_test, y_test)
-print(f"\nTest Accuracy: {acc * 100:.2f}%")
+# 4. Train and evaluate.
+model.fit(x_train, y_train, batch_size=128, epochs=1, validation_data=(x_test, y_test))
+loss, acc = model.evaluate(x_test, y_test)
+print(f"Test accuracy: {acc * 100:.2f}%")
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `ViT` (Model Class)
+### 6.1 `ViT` (model class)
 
-**Purpose**: The main Keras `Model` subclass that assembles the complete ViT architecture.
+`dl_techniques.models.vision.vit.model.ViT` -- the `keras.Model` subclass that assembles the architecture.
 
-**Location**: `dl_techniques.models.vision.vit.model.ViT`
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `input_shape` | `(224, 224, 3)` | Input image shape `(H, W, C)`; `H` and `W` must divide by the patch size. |
+| `num_classes` | `1000` | Output classes; used only when `include_top=True`. |
+| `scale` | `"base"` | Key into `ViT.SCALE_CONFIGS`. |
+| `patch_size` | `16` | Int for square patches, or `(h, w)`. |
+| `include_top` | `True` | `False` turns the model into a feature extractor. |
+| `pooling` | `None` | `'cls'`, `'mean'`, `'max'` or `None`. |
+| `dropout_rate` | `0.0` | General dropout. |
+| `attention_dropout_rate` | `0.0` | Dropout on attention weights. |
+| `pos_dropout_rate` | `0.0` | Dropout after the positional embedding. |
+| `kernel_initializer` | `None` | `None` resolves to `TruncatedNormal(stddev=0.02)`, the ViT reference. |
+| `normalization_type` | `"layer_norm"` | Also `rms_norm`, `batch_norm`, `band_rms`, `adaptive_band_rms`, `dynamic_tanh`. |
+| `normalization_position` | `"post"` | `'pre'` or `'post'` (see 4.2). |
+| `ffn_type` | `"mlp"` | Also `swiglu`, `differential`, `glu`, `geglu`, `residual`, `swin_mlp`. |
+| `activation` | `"gelu"` | FFN activation. |
+| `use_layer_scale` | `False` | Enables per-block LayerScale. |
+| `layer_scale_init_value` | `1e-5` | Initial LayerScale value. |
 
-```python
-from dl_techniques.models.vision.vit.model import ViT
+Also available: `normalization_kwargs`, `kernel_regularizer`, `bias_initializer`, `bias_regularizer`, `name`.
 
-# Create a standard ViT-Base model for classification
-model = ViT(
-    input_shape=(224, 224, 3),
-    num_classes=1000,
-    scale="base",
-    patch_size=16
-)
+Useful methods:
 
-# Create a ViT-Small as a feature extractor
-feature_extractor = ViT(
-    input_shape=(384, 384, 3),
-    scale="small",
-    patch_size=16,
-    include_top=False,
-    pooling="cls" # Output the [CLS] token representation
-)
-```
-
-**Key Parameters**:
-
-| Parameter | Description |
+| Method | Purpose |
 | :--- | :--- |
-| `input_shape` | Shape of input images `(H, W, C)`. |
-| `num_classes` | Number of output classes (if `include_top=True`). |
-| `scale` | Model size: 'tiny', 'small', 'base', 'large', 'huge'. |
-| `patch_size` | The size of square patches (e.g., 16 for 16x16). |
-| `include_top` | If `False`, the model becomes a feature extractor. |
-| `pooling` | Pooling mode for feature extraction: 'cls', 'mean', 'max', or `None`. |
-| `normalization_type` | 'layer_norm' (default), 'rms_norm', etc. |
-| `ffn_type` | 'mlp' (default), 'swiglu', etc. |
+| `ViT.from_variant(variant, ...)` | Build from a `MODEL_VARIANTS` key (see 6.2). |
+| `model.get_feature_extractor()` | Return a **new, randomly initialized** twin with `include_top=False, pooling="cls"`. It does not copy this instance's weights. |
+| `model.summary_detailed()` | Log scale, patch grid, sequence length, dimensions and parameter count. |
+| `model.load_pretrained_weights(path)` | Load a local `.keras` checkpoint layer by layer. |
 
-### 6.2 `create_vit`
+### 6.2 `create_vit` and `from_variant`
 
-**Purpose**: A high-level factory function for convenient and safe `ViT` model creation. Resnet-template parity: the first positional argument is the variant key (`"vit_pico".."vit_huge"`).
-
-**Location**: `dl_techniques.models.vision.vit.create_vit`
+`create_vit` is the factory; its first argument is the variant key and it routes through `ViT.from_variant`.
 
 ```python
-from dl_techniques.models.vision.vit import create_vit
+from dl_techniques.models.vision.vit import ViT, create_vit
 
-# CIFAR-10 ViT-pico
-model = create_vit("vit_pico", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
-
-# ImageNet ViT-base from a local pretrained checkpoint
-model = create_vit("vit_base", num_classes=1000,
-                   pretrained="/path/to/vit_base_imagenet.keras")
-```
-
-> **Note**: `create_vision_transformer` was renamed to `create_vit` in plan
-> `plan_2026-05-12_f2d29729`. The old name was removed without a back-compat
-> alias — only two in-repo callers existed (`train_vit.py` and the test
-> suite), both updated.
-
-### 6.3 `from_variant` and pretrained-weights API
-
-The `ViT` class exposes a `from_variant` classmethod and a `MODEL_VARIANTS`
-registry that mirrors `ResNet.from_variant`:
-
-```python
-from dl_techniques.models.vision.vit import ViT
-
-# Variant registry: maps user-facing variant keys to internal scale configs.
 print(sorted(ViT.MODEL_VARIANTS.keys()))
 # ['vit_base', 'vit_huge', 'vit_large', 'vit_pico', 'vit_small', 'vit_tiny']
 
-# Build from a variant key.
-model = ViT.from_variant("vit_pico", num_classes=10, input_shape=(32, 32, 3),
-                         patch_size=4)
+# Factory, CIFAR-sized.
+model = create_vit("vit_pico", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
 
-# Pretrained from local .keras checkpoint -- works.
-model = ViT.from_variant("vit_base", pretrained="/path/to/weights.keras",
-                         num_classes=1000)
-
-# Pretrained=True -- raises NotImplementedError. No public ViT weights in the
-# dl_techniques format are hosted; this is a loud failure on purpose so that
-# silent fall-throughs to random init don't masquerade as successful loads.
-try:
-    ViT.from_variant("vit_base", pretrained=True)
-except NotImplementedError as e:
-    print(e)  # "No public ViT checkpoints are distributed for this implementation. ..."
+# Classmethod, equivalent entry point.
+model = ViT.from_variant("vit_pico", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
 ```
 
-**Weight loading uses `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`**
-(layer-by-layer `set_weights` after a probe forward pass) rather than
-`model.load_weights(by_name=True)`. The latter is broken in Keras 3.8+ for
-`.keras` files — see `plans/LESSONS.md` L71.
+### 6.3 Pretrained weights
 
-> **Deep supervision** for ViT is deferred to a follow-up plan and is not
-> available in this iteration.
+There are **no hosted checkpoints** for this implementation. `pretrained=True` raises `NotImplementedError` rather than silently returning a randomly initialized model:
+
+```python
+try:
+    ViT.from_variant("vit_base", pretrained=True)
+except NotImplementedError as exc:
+    print(exc)
+    # No public ViT checkpoints are distributed for this implementation. ...
+```
+
+A local checkpoint path works:
+
+```python
+model = ViT.from_variant("vit_base", num_classes=1000,
+                         pretrained="/path/to/vit_base.keras")
+```
+
+Weight loading goes through `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` (full load plus layer-by-layer `set_weights` after a probe forward pass) rather than `model.load_weights(by_name=True)`, which Keras 3.8+ rejects for `.keras` files.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation supports several standard scales, defined by their embedding dimension, number of attention heads, and number of layers.
+Parameter counts below were measured by building each model at `input_shape=(224, 224, 3)`, `patch_size=16`, `num_classes=1000`.
 
-| Scale | Embed Dim | Heads | Layers | MLP Ratio | Approx. Params |
-| :---: | :---: |:---: |:---: |:---: |:---:|
-| **`pico`** | 192 | 3 | 6 | 4.0 | ~3M |
-| **`tiny`** | 192 | 3 | 12 | 4.0 | ~5M |
-| **`small`**| 384 | 6 | 12 | 4.0 | ~22M |
-| **`base`** | 768 | 12 | 12 | 4.0 | ~86M |
-| **`large`**| 1024 | 16 | 24 | 4.0 | ~307M |
-| **`huge`** | 1280 | 16 | 32 | 4.0 | ~632M |
+| Scale | Variant key | Embed dim | Heads | Layers | MLP ratio | Params |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| `pico` | `vit_pico` | 192 | 3 | 6 | 4.0 | 3,048,232 |
+| `tiny` | `vit_tiny` | 192 | 3 | 12 | 4.0 | 5,717,416 |
+| `small` | `vit_small` | 384 | 6 | 12 | 4.0 | 22,050,664 |
+| `base` | `vit_base` | 768 | 12 | 12 | 4.0 | 86,567,656 |
+| `large` | `vit_large` | 1024 | 16 | 24 | 4.0 | 304,326,632 |
+| `huge` | `vit_huge` | 1280 | 16 | 32 | 4.0 | 632,199,400 |
 
-**Guideline**:
--   **`tiny`/`small`**: Good for fine-tuning on medium-sized datasets (e.g., CIFAR-100, Flowers-102) or for applications where inference speed is key.
--   **`base`**: The standard for ImageNet-scale pre-training and transfer learning.
--   **`large`/`huge`**: Require massive datasets (e.g., ImageNet-21k, JFT-300M) for pre-training to be effective. Best used via transfer learning with pre-trained weights.
+Guidance:
+
+- `pico` / `tiny` / `small`: small-image experiments and fine-tuning on medium datasets.
+- `base`: the usual choice for ImageNet-scale pre-training and transfer.
+- `large` / `huge`: only worth training with very large datasets; otherwise use them via transfer learning.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Feature Extraction
-
-Use a ViT as a backbone to extract features for another task, like k-NN classification or clustering.
+### Example 1: feature extraction
 
 ```python
-# 1. Create the feature extractor model
-feature_extractor = ViT(
-    input_shape=(224, 224, 3),
-    scale="base",
-    include_top=False,
-    pooling="cls" # Get a single vector per image
-)
-# For real use, you would load pretrained weights here.
+import numpy as np
+from dl_techniques.models.vision.vit.model import ViT
 
-# 2. Extract features from a batch of images
-dummy_images = np.random.rand(32, 224, 224, 3)
-features = feature_extractor.predict(dummy_images)
-print(f"Extracted features shape: {features.shape}") # (32, 768)
+extractor = ViT(
+    input_shape=(224, 224, 3),
+    scale="small",
+    patch_size=16,
+    include_top=False,
+    pooling="cls",     # one vector per image
+)
+
+images = np.random.rand(8, 224, 224, 3).astype("float32")
+features = extractor.predict(images, verbose=0)
+print(features.shape)  # (8, 384)
 ```
 
-### Example 2: Fine-Tuning a Pre-trained ViT
+Use `pooling=None` instead to get the full `(B, num_patches + 1, embed_dim)` token sequence for a dense-prediction head.
 
-A common workflow is to load a pre-trained model and fine-tune it on a new, smaller dataset.
+### Example 2: frozen backbone plus a new head
 
 ```python
-# Assume you have pretrained weights saved at 'vit_base_imagenet.keras'
+import keras
+from dl_techniques.models.vision.vit.model import ViT
 
-# 1. Load the pretrained base model (as a feature extractor)
-base_model = ViT(
+backbone = ViT(
     input_shape=(224, 224, 3),
-    scale="base",
+    scale="small",
+    patch_size=16,
     include_top=False,
-    pooling="cls"
+    pooling="cls",
 )
-# base_model.load_weights('vit_base_imagenet.keras')
-base_model.trainable = False # Freeze the backbone
+# backbone.load_pretrained_weights("/path/to/vit_small.keras")
+backbone.trainable = False
 
-# 2. Add a new classification head for our custom task (e.g., 10 classes)
 inputs = keras.Input(shape=(224, 224, 3))
-x = base_model(inputs, training=False)
+x = backbone(inputs, training=False)
 x = keras.layers.Dropout(0.2)(x)
 outputs = keras.layers.Dense(10, name="new_head")(x)
-finetune_model = keras.Model(inputs, outputs)
+finetune = keras.Model(inputs, outputs)
 
-# 3. Compile and fine-tune
-finetune_model.compile(
+finetune.compile(
     optimizer="adam",
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-    metrics=["accuracy"]
+    metrics=["accuracy"],
 )
-# finetune_model.fit(train_dataset, ...)
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Using Modern Components
-
-This implementation makes it easy to experiment with modern components.
+### Swapping block internals
 
 ```python
-# Create a ViT with RMS Normalization and a SwiGLU FFN
+from dl_techniques.models.vision.vit.model import ViT
+
 modern_vit = ViT(
     input_shape=(256, 256, 3),
     num_classes=100,
@@ -540,199 +301,89 @@ modern_vit = ViT(
     patch_size=16,
     normalization_type="rms_norm",
     ffn_type="swiglu",
-    normalization_position="pre" # Pre-Norm is often more stable
-)
-modern_vit.summary_detailed()
-```
-
-### Pattern 2: Accessing Intermediate Layer Outputs
-
-You can create a model that outputs features from every Transformer block, which is useful for feature pyramid networks or detailed analysis.
-
-```python
-# 1. Create a base ViT
-vit_base = ViT(input_shape=(224, 224, 3), scale="base", include_top=False)
-
-# 2. Build a new model to tap into intermediate layers
-inputs = keras.Input(shape=(224, 224, 3))
-x = vit_base.patch_embed(inputs)
-# ... apply CLS token and positional embedding ...
-x = vit_base.pos_embed(ops.concatenate([...]))
-
-layer_outputs = []
-for layer in vit_base.transformer_layers:
-    x = layer(x)
-    layer_outputs.append(x)
-
-feature_pyramid_model = keras.Model(inputs=inputs, outputs=layer_outputs)
-# Now the model outputs a list of 12 tensors, one for each layer's output.
-```
-
----
-
-## 10. Performance Optimization
-
-### Mixed Precision Training
-
-ViTs benefit greatly from mixed precision, which uses float16 to accelerate computations.
-
-```python
-# Enable mixed precision globally
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = ViT(scale="base", ...)
-model.compile(...)
-```
-
-### Flash Attention
-
-For GPUs that support it (e.g., A100, H100), you can enable `flash` attention in the `TransformerLayer` for a significant speedup and memory reduction.
-
-```python
-model = ViT(
-    scale="base",
-    # Pass custom arguments down to the TransformerLayer
-    # This requires modifying the ViT class to accept attention_args
-    # and pass them to its TransformerLayer instances.
+    normalization_position="pre",
+    use_layer_scale=True,
 )
 ```
-*(Note: This example assumes a modification to the `ViT` class to pass `attention_args` down to `TransformerLayer`.)*
 
----
+### Reading every block's output
 
-## 11. Training and Best Practices
-
-### Data Augmentation
-
-ViTs, having fewer inductive biases, are more reliant on data augmentation than CNNs.
--   **Strong Augmentations**: Use techniques like RandAugment, Mixup, and CutMix during training.
--   **Resolution**: Pre-training on a lower resolution (e.g., 224x224) and fine-tuning on a higher resolution (e.g., 384x384) is a common and effective strategy. The model's positional embeddings can be interpolated to handle the new sequence length.
-
-### Optimizer and Scheduler
-
--   **Optimizer**: **AdamW** is the standard optimizer for ViTs, as weight decay is crucial for regularization.
--   **Learning Rate Schedule**: A cosine decay schedule with a linear warmup period is the most common and effective choice.
-
----
-
-## 12. Serialization & Deployment
-
-The `ViT` model and its custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
-
-```python
-# Create and train model
-model = ViT(...)
-# model.compile(...) and model.fit(...)
-
-# Save the entire model
-model.save('my_vit_model.keras')
-print("Model saved to my_vit_model.keras")
-
-# Load the model in a new session
-loaded_model = keras.models.load_model('my_vit_model.keras')
-print("Model loaded successfully")
-```
-
----
-
-## 13. Testing & Validation
-
-### Unit Tests
+`model.transformer_layers` is a plain Python list, so intermediate activations can be collected by running the stack manually.
 
 ```python
 import keras
-import numpy as np
 from dl_techniques.models.vision.vit.model import ViT
 
-def test_model_creation_all_scales():
-    """Test that models can be created from all standard scales."""
-    for scale in ViT.SCALE_CONFIGS.keys():
-        model = ViT(input_shape=(224, 224, 3), num_classes=10, scale=scale, patch_size=16)
-        assert model is not None
-        print(f"✓ ViT-{scale} created successfully")
+vit = ViT(input_shape=(32, 32, 3), scale="pico", patch_size=4, include_top=False)
+vit(keras.ops.zeros((1, 32, 32, 3)))  # build
 
-def test_forward_pass_shape_classifier():
-    """Test the output shape of a classifier."""
-    model = ViT(input_shape=(32, 32, 3), num_classes=10, scale="pico", patch_size=4)
-    dummy_input = np.random.rand(4, 32, 32, 3)
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Classifier forward pass has correct shape")
+x = keras.ops.zeros((2, 32, 32, 3))
+x = vit.patch_embed(x)
+cls = keras.ops.broadcast_to(vit.cls_token, (2, 1, vit.embed_dim))
+x = keras.ops.concatenate([cls, x], axis=1)
+x = vit.pos_embed(x)
 
-def test_forward_pass_shape_extractor():
-    """Test the output shape of a feature extractor."""
-    model = ViT(input_shape=(32, 32, 3), scale="pico", patch_size=4, include_top=False, pooling="cls")
-    dummy_input = np.random.rand(4, 32, 32, 3)
-    output = model.predict(dummy_input)
-    embed_dim = ViT.SCALE_CONFIGS["pico"][0]
-    assert output.shape == (4, embed_dim)
-    print("✓ Feature extractor forward pass has correct shape")
-
-# Run tests
-if __name__ == '__main__':
-    test_model_creation_all_scales()
-    test_forward_pass_shape_classifier()
-    test_forward_pass_shape_extractor()
-    print("\n✅ All tests passed!")
+per_layer = []
+for layer in vit.transformer_layers:
+    x = layer(x)
+    per_layer.append(x)
+print(len(per_layer), per_layer[-1].shape)  # 6 (2, 65, 192)
 ```
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 10. Performance and Training Notes
 
-**Issue 1: Model does not converge on a small dataset.**
+### Mixed precision
 
--   **Cause**: ViTs have weak inductive biases and require large amounts of data to learn spatial hierarchies from scratch. On small datasets (like CIFAR-10), they can easily overfit or fail to learn meaningful representations without heavy regularization and data augmentation.
--   **Solution 1**: Use strong data augmentation (RandAugment, Mixup, CutMix).
--   **Solution 2**: Add more regularization (increase `dropout_rate`, use AdamW with significant `weight_decay`).
--   **Solution 3 (Best)**: **Use a pre-trained model**. Fine-tuning a ViT pre-trained on ImageNet is far more effective than training from scratch on a small dataset.
+```python
+keras.mixed_precision.set_global_policy("mixed_float16")
+```
 
-**Issue 2: `ValueError: Image height/width must be divisible by patch size`.**
+Set the policy before constructing the model; every layer then picks it up.
 
--   **Cause**: The input image dimensions are not a multiple of the patch size.
--   **Solution**: Resize or pad your input images to a compatible resolution before feeding them to the model. For example, if using `patch_size=16`, image sizes like 224, 256, 384, or 512 are valid.
+### Training recipe
 
-### Frequently Asked Questions
-
-**Q: How does ViT handle images of different resolutions during inference?**
-
-A: The standard ViT requires a fixed input resolution because the positional embeddings are learned for a specific sequence length. If you provide a different resolution, the number of patches changes, and the model won't have corresponding positional embeddings. Advanced techniques like 2D interpolation of the positional embedding map can adapt the model to new resolutions.
-
-**Q: What is the difference between `pooling='cls'` and `pooling='mean'`?**
-
-A:
--   **`pooling='cls'`**: Uses the output representation of the special `[CLS]` token, which is trained to aggregate global information. This is the standard method from the paper.
--   **`pooling='mean'`**: Computes the average of all *patch* token representations (excluding the `[CLS]` token). Some studies have found this to work as well as or even slightly better than the `[CLS]` token for certain downstream tasks.
-
-**Q: Can I use this for object detection or segmentation?**
-
-A: Yes, but not directly. This implementation provides the **backbone** (feature extractor). To perform detection or segmentation, you would need to attach additional heads, such as a detection head (like in DETR) or a segmentation decoder (like in U-Net, but with a ViT encoder). The `include_top=False, pooling=None` configuration is ideal for this, as it provides the full sequence of patch representations.
+- **Optimizer**: AdamW. Weight decay does real work here.
+- **Schedule**: cosine decay with a linear warmup. Warmup matters more with the default `normalization_position="post"`.
+- **Augmentation**: ViTs lean on it. RandAugment, Mixup and CutMix are the usual set.
+- **Resolution**: pre-train at 224 and fine-tune higher. Positional embeddings are learned per position, so changing resolution changes the sequence length and the embeddings must be interpolated or re-learned.
 
 ---
 
-## 15. Technical Details
+## 11. Serialization
 
-### Positional Embeddings
+The model and its layers are registered for the `.keras` format.
 
-The choice of positional embedding is crucial. This implementation uses 1D **learned, absolute positional embeddings**, which is the most common variant. A unique vector is learned for each position in the sequence (0 for the `[CLS]` token, 1 for the first patch, etc.). These vectors are simply added to the patch embeddings. Other possibilities not implemented here include:
--   **2D Positional Embeddings**: Learning separate embeddings for the X and Y coordinates of each patch.
--   **Relative Positional Embeddings**: Modifying the attention mechanism to directly encode the relative distance between patches, rather than their absolute positions.
--   **Sinusoidal (Fixed) Embeddings**: Using the fixed sinusoidal functions from the original "Attention Is All You Need" paper.
-
-### Pre-Norm vs. Post-Norm
-
-The `normalization_position` parameter controls the placement of the Layer Normalization.
--   **`post` (Original)**: `SubLayer -> Add -> Norm`. Can be unstable to train for very deep models, often requiring learning rate warmup.
--   **`pre` (More Modern)**: `Norm -> SubLayer -> Add`. Generally more stable, allows for training without warmup, and often leads to better performance. This implementation supports both.
+```python
+model.save("my_vit.keras")
+loaded = keras.models.load_model("my_vit.keras")
+```
 
 ---
 
-## 16. Citation
+## 12. Troubleshooting
 
-If you use ViT in your research, please cite the original paper:
+- `ValueError: Image height (...) must be divisible by patch height (...)` -- resize the input or change `patch_size`.
+- `ValueError: Unsupported scale: ...` -- `scale` takes `pico|tiny|small|base|large|huge`; the `vit_*` keys belong to `from_variant`/`create_vit`, not to the constructor.
+- `pretrained=True` raises `NotImplementedError` -- expected, since no public pretrained weights are hosted; pass a local `.keras` path instead.
+- Loss stuck near `ln(num_classes)` on a small dataset -- ViTs from scratch need augmentation, weight decay and warmup, or pre-trained weights.
+- Accuracy far below expectation with a correct-looking setup -- check that the loss uses `from_logits=True`; the head is unactivated.
+- Out of memory at high resolution -- attention is quadratic in patch count. Increase `patch_size` before reducing batch size.
+
+---
+
+## 13. Technical Details
+
+**Positional embeddings.** Learned, absolute, 1D, one vector per sequence position, added to the patch embeddings. Not implemented here: 2D factorized embeddings, relative position biases, and fixed sinusoidal embeddings.
+
+**Initialization.** `kernel_initializer=None` resolves to `TruncatedNormal(stddev=0.02)`, matching the reference ViT convention (HuggingFace's `ViTConfig.initializer_range`). It is passed as a config dict, not an `Initializer` instance, so that each layer draws its own weights.
+
+**Deep supervision.** Not implemented. `ViT` has no `enable_deep_supervision` parameter and no deep-supervision code path.
+
+---
+
+## 14. Citation
 
 ```bibtex
 @article{dosovitskiy2020image,
@@ -742,3 +393,9 @@ If you use ViT in your research, please cite the original paper:
   year={2020}
 }
 ```
+
+Related work referenced by the implementation:
+
+- Vaswani et al., 2017. Attention Is All You Need. [arXiv:1706.03762](https://arxiv.org/abs/1706.03762)
+- Touvron et al., 2021. Training data-efficient image transformers & distillation through attention. [arXiv:2012.12877](https://arxiv.org/abs/2012.12877)
+- Xiong et al., 2020. On Layer Normalization in the Transformer Architecture. [arXiv:2002.04745](https://arxiv.org/abs/2002.04745)

@@ -4,30 +4,9 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of the entire **MobileNet** family of models, from **V1 to V4**. These models represent a lineage of highly efficient convolutional neural networks designed specifically for on-device and mobile vision applications where computational resources are limited.
+A Keras 3 implementation of the **MobileNet** family, V1 through V4 — a lineage of efficient convolutional networks designed for on-device vision, where compute, power and memory are all scarce.
 
-The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBottleneck` layer, showcasing how a unified building block can be configured to create a wide range of modern architectures.
-
----
-
-## Table of Contents
-
-1. [Overview: What is MobileNet and Why It Matters](#1-overview-what-is-mobilenet-and-why-it-matters)
-2. [The Problem MobileNet Solves](#2-the-problem-mobilenet-solves)
-3. [How MobileNet Works: Core Concepts & Evolution](#3-how-mobilenet-works-core-concepts--evolution)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details: The Evolution of the Block](#15-technical-details-the-evolution-of-the-block)
-16. [Citation](#16-citation)
+V2, V3 and V4 are built on a shared `UniversalInvertedBottleneck` layer, which shows how one configurable block covers a wide range of modern architectures.
 
 ---
 
@@ -35,221 +14,170 @@ The implementations for V2, V3, and V4 leverage a flexible `UniversalInvertedBot
 
 ### What is the MobileNet Family?
 
-**MobileNet** is a class of convolutional neural networks designed by Google to run efficiently on mobile and edge devices. The core idea is to achieve the best possible accuracy while respecting the strict computational, power, and memory constraints of on-device applications. Each version in the series—from V1 to V4—introduces new architectural innovations to push the boundaries of this efficiency-accuracy trade-off.
+**MobileNet** is a class of convolutional networks from Google aimed at mobile and edge devices: the best accuracy attainable under strict latency, power and memory budgets. Each version adds an architectural idea that moves that trade-off.
 
 ### The Evolution of Efficiency
 
 | Model | Key Innovation | Description |
 | :--- | :--- | :--- |
-| **MobileNetV1** | Depthwise Separable Convolutions | Drastically reduced computation by factorizing standard convolutions into a depthwise and a pointwise convolution. |
-| **MobileNetV2** | Inverted Residuals & Linear Bottlenecks | Introduced blocks that first expand and then project feature maps, with residual connections between the narrow "bottleneck" layers. This improved feature reuse and gradient flow. |
-| **MobileNetV3** | Hardware-Aware NAS, Squeeze-and-Excite, Hard-Swish | Utilized Neural Architecture Search (NAS) to find an optimal architecture. Added lightweight attention (Squeeze-and-Excite) and a more efficient non-linearity (hard-swish). |
-| **MobileNetV4** | Universal Inverted Bottleneck (UIB) & Mobile MQA | Introduced a flexible "Universal" block that can represent different block styles (including ConvNeXt-like structures). Added an optional mobile-friendly Multi-Query Attention (MQA) module, creating hybrid vision transformer models. |
+| **MobileNetV1** | Depthwise separable convolutions | Factorizes a standard convolution into a depthwise and a pointwise convolution, cutting computation by roughly 8-9x. |
+| **MobileNetV2** | Inverted residuals and linear bottlenecks | Expands, processes, then projects back down, with residual connections between the narrow bottlenecks. |
+| **MobileNetV3** | Hardware-aware NAS, squeeze-and-excite, hard-swish | Architecture found by search, with lightweight channel attention and a cheaper non-linearity. |
+| **MobileNetV4** | Universal Inverted Bottleneck (UIB) and Mobile MQA | One flexible block that can act as several block styles, plus optional multi-query attention in the late stages. |
 
-### Why MobileNet Matters
+### Why it matters
 
-**The Server-Side AI Problem**:
-```
-Problem: Classify an image from a user's phone.
-Standard (Cloud) Approach:
-  1. User's phone sends the image to a powerful server.
-  2. A massive model (e.g., ResNet, ViT) on the server processes the image.
-  3. The server sends the result back.
-  4. Limitation: Requires internet, introduces latency, raises privacy concerns,
-     and has high server-side costs.
-```
-
-**The MobileNet Solution**:
-```
-MobileNet (On-Device) Approach:
-  1. A small, efficient MobileNet model runs directly on the user's phone.
-  2. The image is processed locally in milliseconds.
-  3. The result is available instantly.
-  4. Benefit: Works offline, has near-zero latency, preserves user privacy,
-     and has no server costs. Essential for real-time applications like
-     live camera filters, augmented reality, and on-device assistants.
-```
+Running the model on the device instead of a server removes the round trip: it works offline, adds no network latency, keeps the image on the phone, and costs nothing to serve. That is only possible if inference fits inside a frame budget on a phone CPU or NPU, which is the constraint every MobileNet version is designed against.
 
 ---
 
 ## 2. The Problem MobileNet Solves
 
-### The "Big Model" Dilemma
+Large models reach high accuracy at a cost that edge devices cannot pay. Three constraints bind at once:
 
-While large models achieve state-of-the-art accuracy, their computational demands make them impractical for billions of devices at the edge. The core problem is the three-way constraint of **latency, power, and size**.
+| Constraint | What it means in practice |
+| :--- | :--- |
+| **Latency** | Real-time video work must finish within a frame, roughly 33 ms at 30 fps. |
+| **Power** | Heavy compute drains the battery and thermally throttles the device. |
+| **Size** | The model must fit in storage and in the RAM available at inference time. |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Constraints of On-Device AI                            │
-│                                                             │
-│  1. Latency: For real-time applications (e.g., video        │
-│     analysis), inference must be faster than the frame rate │
-│     (e.g., < 33ms).                                         │
-│                                                             │
-│  2. Power Consumption: High computational load drains the   │
-│     battery, making the application unusable.               │
-│                                                             │
-|  3. Model Size: The model must be small enough to be stored │
-│     on the device and fit into limited RAM during execution.│
-└─────────────────────────────────────────────────────────────┘
-```
-
-The MobileNet family directly tackles this challenge by redesigning the fundamental building blocks of convolutional networks to be as computationally frugal as possible, allowing powerful computer vision to be deployed ubiquitously.
+MobileNet answers this by redesigning the building block itself rather than by pruning a large network after the fact.
 
 ---
 
 ## 3. How MobileNet Works: Core Concepts & Evolution
 
-The innovation of MobileNet can be traced through the evolution of its core building block.
+**1. Depthwise separable convolutions (V1).** A standard convolution is split into a *depthwise* convolution (one filter per input channel, mixing space but not channels) and a *pointwise* `1x1` convolution (mixing channels). The factorization is the foundation of the whole family.
 
-#### **1. Depthwise Separable Convolutions (MobileNetV1)**
-The foundation of the entire family. A standard convolution is factorized into two cheaper operations:
--   **Depthwise Convolution**: A single filter is applied to each input channel independently. It mixes spatial information but not channel information.
--   **Pointwise Convolution (1x1 Conv)**: A 1x1 convolution is used to combine the outputs of the depthwise layer, mixing channel information.
-This factorization reduces computation by 8-9x compared to a standard convolution with minimal loss in accuracy.
+**2. Inverted residuals and linear bottlenecks (V2).** The block runs `narrow -> wide -> narrow` rather than ResNet's `wide -> narrow -> wide`. The final projection is **linear** — no activation — because a non-linearity in a low-dimensional bottleneck destroys information. Residual connections join the narrow ends when the stride is 1.
 
-#### **2. Inverted Residuals and Linear Bottlenecks (MobileNetV2)**
-MobileNetV2 redesigned the block to improve information flow:
--   **Inverted Bottleneck**: Instead of `wide -> narrow -> wide` (like in ResNet), the block is `narrow -> wide -> narrow`. The input and output are low-dimensional "bottlenecks," while the internal structure is expanded to a higher dimension for feature processing.
--   **Linear Bottlenecks**: The final pointwise convolution in the block has *no activation function*. This prevents non-linearities from destroying information in the low-dimensional bottleneck.
--   **Residual Connections**: Skip connections are added between the bottlenecks, allowing for the training of much deeper and more powerful networks.
+**3. NAS, squeeze-and-excite and h-swish (V3).** The layout was searched rather than hand-designed, targeting measured mobile-CPU latency. It adds squeeze-and-excite channel attention and the cheaper hard-swish activation, and trims the final stage.
 
-#### **3. NAS, Squeeze-and-Excite, and h-swish (MobileNetV3)**
-MobileNetV3 was discovered, not just designed.
--   **Neural Architecture Search (NAS)**: An algorithm searched for the optimal combination of blocks, kernel sizes, and channel counts, specifically targeting low latency on mobile CPUs.
--   **Squeeze-and-Excite (SE)**: A lightweight attention mechanism that adaptively re-weights channel features, allowing the network to focus on what's important.
--   **Hard-Swish (h-swish)**: A computationally cheaper approximation of the Swish activation function, providing the benefits of a modern non-linearity without the performance cost.
-
-#### **4. Universal Inverted Bottleneck and Mobile MQA (MobileNetV4)**
-MobileNetV4 introduces a flexible, unified building block and optional attention.
--   **Universal Inverted Bottleneck (UIB)**: A single, highly configurable block that can act like a classic inverted residual, a ConvNeXt-style block, or a new "Extra Depthwise" variant. This gives NAS a richer search space to find even better architectures.
--   **Mobile Multi-Query Attention (MQA)**: An optional, efficient attention layer that can be added to the later stages of the network, creating a "hybrid" model that combines the strengths of convolutions and transformers for higher accuracy.
+**4. Universal Inverted Bottleneck and Mobile MQA (V4).** One configurable block subsumes the classic inverted residual, a ConvNeXt-like ordering, a plain FFN and a two-depthwise "ExtraDW" form, which widens the search space. The hybrid variants add mobile multi-query attention to the late stages.
 
 ---
 
 ## 4. Architecture Deep Dive
 
 ### 4.1 `MobileNetV1`
-- **Stem**: A single standard `3x3` convolution.
-- **Body**: A stack of 13 `DepthwiseSeparableBlock` layers. Some blocks have a stride of 2 for downsampling.
-- **Head**: Global average pooling followed by a `1x1` convolution that acts as a fully connected layer.
+- **Stem**: one standard `3x3` convolution.
+- **Body**: 13 `DepthwiseSeparableBlock` layers (`MobileNetV1.ARCHITECTURE`), some with stride 2.
+- **Head**: global average pooling, dropout, then a dense classifier.
 
 ### 4.2 `MobileNetV2`
-- **Stem**: A single standard `3x3` convolution.
-- **Body**: A sequence of 17 inverted residual blocks, organized into 7 stages. Each block consists of a 1x1 expansion, a 3x3 depthwise convolution, and a 1x1 linear projection. Residual connections are used for blocks with a stride of 1.
-- **Head**: A final `1x1` convolution to expand features, followed by global average pooling and a dense classifier.
+- **Stem**: one standard `3x3` convolution.
+- **Body**: 17 inverted residual blocks in 7 stages, from the paper's `(t, c, n, s)` table. The first stage has expansion factor `t=1`. Residual connections apply to stride-1 blocks whose input and output widths match.
+- **Head**: a `1x1` convolution expanding to 1280 channels, then pooling, dropout and a dense classifier.
 
 ### 4.3 `MobileNetV3`
-- **Stem**: A `3x3` convolution optimized for efficiency.
-- **Body**: A stack of inverted residual blocks found by NAS. Key differences from V2 include the use of `5x5` kernels in some layers, the integration of Squeeze-and-Excite modules, and the use of ReLU and hard-swish activations at different depths.
-- **Head**: An "efficient last stage" that reduces computation before the final pooling and classification layers.
+- **Stem**: an efficiency-tuned `3x3` convolution.
+- **Body**: NAS-derived inverted residual blocks — `5x5` kernels in some layers, squeeze-and-excite in some, and ReLU or hard-swish depending on depth.
+- **Head**: the paper's "efficient last stage", which moves work before the final pooling.
 
 ### 4.4 `MobileNetV4`
-- **Stem**: A `3x3` convolution similar to previous versions.
-- **Body**: A stack of Universal Inverted Bottleneck (UIB) blocks. The type of UIB block (`"IB"`, `"ExtraDW"`, etc.) is specific to each stage of the network. For "hybrid" variants, the later stages are followed by a `MobileMQA` attention layer.
-- **Head**: Global average pooling and a two-layer classifier head (Dense -> ReLU -> Dropout -> Dense).
+- **Stem**: a `3x3` convolution.
+- **Body**: seven stages of UIB blocks; the `block_types` entry for each stage selects the block shape. Hybrid variants insert `MobileMQA` attention at `attention_stages` (5 and 6 by default).
+- **Head**: global average pooling, then `Dense(1280) -> ReLU -> Dropout -> Dense(num_classes, softmax)`.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
 ```bash
-# Ensure you have the required dependencies
 pip install keras>=3.0 tensorflow>=2.16 numpy
 ```
-
-### Your First MobileNetV4 Model (30 seconds)
-
-Let's build a small MobileNetV4 for a simple classification task on CIFAR-10.
 
 ```python
 import keras
 import numpy as np
 
-# Local imports from your project structure
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
-# 1. Create a small MobileNetV4 model for CIFAR-10 (32x32 images, 10 classes)
+# 1. A small MobileNetV4 for CIFAR-10 (32x32 images, 10 classes)
 model = create_mobilenetv4(
-    variant="small",  # A very small and fast V4 variant
+    variant="small",
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
 )
 
-# 2. Compile the model
+# 2. Compile. The V4 head ends in softmax, so from_logits=False.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5),
-    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False), # Softmax is included
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
     metrics=["accuracy"],
 )
-print("✅ MobileNetV4 model created and compiled successfully!")
 model.summary()
 
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3).astype("float32")
-dummy_labels = np.random.randint(0, 10, batch_size)
+# 3. Dummy data
+dummy_images = np.random.rand(16, 32, 32, 3).astype("float32")
+dummy_labels = np.random.randint(0, 10, 16)
 
-# 4. Train for one step
+# 4. One training step
 loss, acc = model.train_on_batch(dummy_images, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+print(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
-# 5. Run inference
+# 5. Inference
 predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Classes and Creation Functions
-
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`MobileNetV1`** | `...mobilenet.mobilenet_v1.MobileNetV1` | The Keras `Model` for the V1 architecture. |
-| **`create_mobilenetv1`** | `...mobilenet.mobilenet_v1.create_mobilenetv1` | Convenience function to create `MobileNetV1` models. |
-| **`MobileNetV2`** | `...mobilenet.mobilenet_v2.MobileNetV2` | The Keras `Model` for the V2 architecture. |
-| **`create_mobilenetv2`** | `...mobilenet.mobilenet_v2.create_mobilenetv2` | Convenience function to create `MobileNetV2` models. |
-| **`MobileNetV3`** | `...mobilenet.mobilenet_v3.MobileNetV3` | The Keras `Model` for the V3 architecture. |
-| **`create_mobilenetv3`** | `...mobilenet.mobilenet_v3.create_mobilenetv3` | Convenience function to create `MobileNetV3` models. |
-| **`MobileNetV4`** | `...mobilenet.mobilenet_v4.MobileNetV4` | The Keras `Model` for the V4 architecture. |
-| **`create_mobilenetv4`** | `...mobilenet.mobilenet_v4.create_mobilenetv4` | Convenience function to create `MobileNetV4` models. |
+| **`MobileNetV1`** | `...mobilenet.mobilenet_v1.MobileNetV1` | Keras `Model` for V1. |
+| **`create_mobilenetv1`** | `...mobilenet.mobilenet_v1.create_mobilenetv1` | Factory for `MobileNetV1`. |
+| **`MobileNetV2`** | `...mobilenet.mobilenet_v2.MobileNetV2` | Keras `Model` for V2. |
+| **`create_mobilenetv2`** | `...mobilenet.mobilenet_v2.create_mobilenetv2` | Factory for `MobileNetV2`. |
+| **`MobileNetV3`** | `...mobilenet.mobilenet_v3.MobileNetV3` | Keras `Model` for V3. |
+| **`create_mobilenetv3`** | `...mobilenet.mobilenet_v3.create_mobilenetv3` | Factory for `MobileNetV3`. |
+| **`MobileNetV4`** | `...mobilenet.mobilenet_v4.MobileNetV4` | Keras `Model` for V4. |
+| **`create_mobilenetv4`** | `...mobilenet.mobilenet_v4.create_mobilenetv4` | Factory for `MobileNetV4`. |
+
+All four factories share the same signature shape:
+
+```python
+create_mobilenetv4(          # same for v1 / v2 / v3
+    variant="medium",        # default variant differs per version: see section 7
+    num_classes=1000,
+    input_shape=None,        # V4 defaults to (224, 224, 3)
+    width_multiplier=1.0,
+    pretrained=False,        # True raises NotImplementedError
+    **kwargs,                # forwarded to the model, e.g. include_top, dropout_rate
+)
+```
+
+`kwargs` reaches the constructor arguments `dropout_rate`, `weight_decay`,
+`kernel_initializer` and `include_top` on every version, plus `depths`, `dims`,
+`block_types`, `strides`, `use_attention` and `attention_stages` on V4.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-Each MobileNet version comes with several pre-configured variants.
+The variant key is a **name**, not a width string. Each entry of `MODEL_VARIANTS` is the config the
+factory applies; `width_multiplier` passed alongside a variant overrides the variant's own value.
 
-### MobileNetV1 Variants (by `width_multiplier`)
-`"1.0"`, `"0.75"`, `"0.5"`, `"0.25"`
+| Version | Variants (`MODEL_VARIANTS` keys) | What the key sets | Factory default |
+| :--- | :--- | :--- | :--- |
+| **V1** | `large` (α=1.0), `medium` (0.75), `small` (0.5), `pico` (0.25) | `width_multiplier` | `large` |
+| **V2** | `large` (α=1.4), `medium` (1.0), `small` (0.75), `nano` (0.5), `pico` (0.35) | `width_multiplier` | `medium` |
+| **V3** | `large`, `small` | the NAS block table | `large` |
+| **V4** | `small`, `medium`, `large`, `hybrid_medium`, `hybrid_large` | depths, dims, block types, attention | `medium` |
 
-### MobileNetV2 Variants (by `width_multiplier`)
-`"1.0"`, `"0.75"`, `"0.5"`, `"0.35"` (plus a `"1.4"` variant exists)
-
-### MobileNetV3 Variants
-`"large"`, `"small"` (both can be scaled with `width_multiplier`)
-
-### MobileNetV4 Variants
--   **Conv-Only**: `"small"`, `"medium"`, `"large"`
--   **Hybrid (with Attention)**: `"hybrid_medium"`, `"hybrid_large"`
-
-These five strings are the complete key set of `MobileNetV4.MODEL_VARIANTS`. There
-is no `"conv_small"`, `"conv_medium"` or `"conv_large"` -- `from_variant` raises
-`ValueError` on them. (The names are deliberately not the paper's MNv4-Conv-S/M/L:
-these ladders are hand-written depth/width tables, not the NAS-found specifications
--- see `mobilenet_v4.py`'s module docstring.)
+Anything else raises `ValueError`. In particular there is no `"conv_small"`, `"conv_medium"` or
+`"conv_large"` on V4, and no `"1.0"` / `"0.5"` style key on V1 or V2 — use `width_multiplier` for
+that. (The V4 names are deliberately not the paper's MNv4-Conv-S/M/L: these ladders are
+hand-written depth/width tables, not the NAS-found specifications — see `mobilenet_v4.py`'s module
+docstring.)
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Creating a Model for a Custom Dataset (CIFAR-100)
-
-Adapt a MobileNetV3 model for a dataset with 100 classes and 32x32 images.
+### Example 1: A model for a custom dataset (CIFAR-100)
 
 ```python
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import create_mobilenetv3
@@ -257,244 +185,203 @@ from dl_techniques.models.vision.mobilenet.mobilenet_v3 import create_mobilenetv
 cifar100_model = create_mobilenetv3(
     variant="small",
     num_classes=100,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
 )
 cifar100_model.summary()
 ```
 
-### Example 2: Using the Width Multiplier to Adjust Model Size
+### Example 2: Scaling with the width multiplier
 
-The `width_multiplier` (α) scales the number of channels in every layer, providing a simple way to trade accuracy for size and latency.
+`width_multiplier` (α) scales the channel count of every layer, trading accuracy for size and
+latency. Halving it cuts parameters by roughly 4x.
 
 ```python
+import numpy as np
+
 from dl_techniques.models.vision.mobilenet.mobilenet_v2 import create_mobilenetv2
 
-# Default MobileNetV2 1.0 has ~3.5M params
-default_v2 = create_mobilenetv2(variant="1.0")
+default_v2 = create_mobilenetv2(variant="medium", input_shape=(224, 224, 3))   # alpha = 1.0
+nano_v2 = create_mobilenetv2(variant="nano", input_shape=(224, 224, 3))        # alpha = 0.5
+custom_v2 = create_mobilenetv2(                                                # same, explicitly
+    variant="medium", width_multiplier=0.5, input_shape=(224, 224, 3)
+)
 
-# MobileNetV2 0.5 has ~1.95M params
-small_v2 = create_mobilenetv2(variant="0.5")
+# Models are lazily built; one forward pass before count_params().
+for model in (default_v2, nano_v2, custom_v2):
+    model(np.zeros((1, 224, 224, 3), dtype="float32"))
 
-# You can also use the multiplier directly on a variant
-custom_small_v2 = create_mobilenetv2(variant="1.0", width_multiplier=0.5)
-
-print(f"Default V2 params: {default_v2.count_params():,}")
-print(f"Small V2 (variant) params: {small_v2.count_params():,}")
-print(f"Small V2 (multiplier) params: {custom_small_v2.count_params():,}")
+print(f"medium (alpha=1.0):  {default_v2.count_params():,}")  # 3,540,136
+print(f"nano   (alpha=0.5):  {nano_v2.count_params():,}")     # 1,987,544
+print(f"medium x 0.5:        {custom_v2.count_params():,}")   # 1,987,544
 ```
 
-### Example 3: Using MobileNet as a Feature Extractor
-
-For downstream tasks like object detection or segmentation, create a "headless" model by setting `include_top=False`.
+### Example 3: MobileNet as a feature extractor
 
 ```python
+import numpy as np
+
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
-# Create a headless V4 backbone for feature extraction
 backbone = create_mobilenetv4(
     variant="hybrid_medium",
     include_top=False,
-    input_shape=(256, 256, 3)
+    input_shape=(256, 256, 3),
 )
 
-# The output is the feature map from the final stage
-# For a 256x256 input, the output shape will be (None, 8, 8, 320)
-backbone.summary()
+features = backbone(np.zeros((1, 256, 256, 3), dtype="float32"))
+print(f"Output shape: {features.shape}")  # (1, 8, 8, 320)
 ```
 
-All four versions share this contract: `include_top=False` returns the **4-D feature map**,
-never a pooled vector. Until 2026-08-15 V1 alone applied its global average pooling
-unconditionally and returned `(batch, channels)`, so a detection or segmentation head built
-against V2/V3/V4 silently received the wrong rank from V1. If you want the pooled vector,
-add one `keras.layers.GlobalAveragePooling2D()` yourself.
+All four versions share this contract: `include_top=False` returns the **4-D feature map**, never a
+pooled vector. If you want the pooled vector, add a `keras.layers.GlobalAveragePooling2D()`
+yourself.
 
-`summary()` on a never-called model now runs a real dummy forward pass to materialize the
-weights. `keras.Model.build(...)` alone does not: on a subclassed model it only marks the
-model built, and all four versions previously printed a summary whose parameter count was
-exactly 0.
+`summary()` on a never-called model runs a real dummy forward pass to materialize the weights;
+`keras.Model.build(...)` alone does not, since on a subclassed model it only marks the model built.
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning from Pre-trained Weights
+### Fine-tuning from your own checkpoint
 
-While this implementation does not ship with pre-trained weights, it is designed to load them easily. If you have a `.keras` file with ImageNet weights, you can load them and fine-tune on a new task.
+No pretrained weights ship with this package and nothing is downloadable: `pretrained=True` raises
+`NotImplementedError` on all four factories. To fine-tune, train a model yourself, save it, then
+reuse the backbone:
 
 ```python
-# Assume you TRAINED a MobileNetV4-Medium yourself and saved it to
-# "mobilenet_v4_medium.keras". Nothing is downloadable: `pretrained=True`
-# raises `NotImplementedError` and no checkpoint ships with dl_techniques.
+import keras
+import numpy as np
 
-# 1. Create a new model for a custom task (e.g., 20 classes)
-# The `from_config` logic in the custom model classes handles this.
-# You would first load the full model and then build a new one.
-# (A more direct weight loading API would be needed for production use)
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
-# Hypothetical fine-tuning setup
-# pretrained_model = keras.models.load_model("path/to/weights.keras")
-# backbone = keras.Model(pretrained_model.inputs, pretrained_model.get_layer("...").output)
-# backbone.trainable = False
-#
-# inputs = keras.Input(shape=(128, 128, 3))
-# x = backbone(inputs, training=False)
-# outputs = keras.layers.Dense(20, activation="softmax")(x)
-# fine_tune_model = keras.Model(inputs, outputs)
+source = create_mobilenetv4(variant="small", num_classes=10, input_shape=(64, 64, 3))
+source(np.zeros((1, 64, 64, 3), dtype="float32"))  # build before saving
+source.save("mobilenet_v4_small.keras")
+
+# Later: reload and put a fresh head on the headless backbone.
+backbone = create_mobilenetv4(
+    variant="small", include_top=False, input_shape=(64, 64, 3)
+)
+backbone(np.zeros((1, 64, 64, 3), dtype="float32"))
+restored = keras.models.load_model("mobilenet_v4_small.keras")
+backbone.set_weights(restored.get_weights()[: len(backbone.get_weights())])
+backbone.trainable = False
+
+inputs = keras.Input(shape=(64, 64, 3))
+x = backbone(inputs, training=False)
+x = keras.layers.GlobalAveragePooling2D()(x)
+outputs = keras.layers.Dense(20, activation="softmax")(x)
+fine_tune_model = keras.Model(inputs, outputs)
 ```
+
+The weight-slice copy above works only because the headless model is a strict prefix of the full
+one; check `len(backbone.get_weights())` against your own checkpoint before relying on it.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-All MobileNet models are well-suited for mixed precision training, which uses 16-bit floating-point numbers for computations. This can provide a significant speedup (up to 2-3x) on modern GPUs with Tensor Cores.
+MobileNets train well under mixed precision on GPUs with Tensor Cores.
 
 ```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
+import keras
 
-# Create model (will automatically use mixed precision)
-model = create_mobilenetv4("medium", num_classes=1000)
-model.compile(...)
+from dl_techniques.models.vision.mobilenet.mobilenet_v4 import create_mobilenetv4
 
-# When training, use a LossScaleOptimizer to prevent numeric underflow
-# Keras's model.fit() handles this automatically.
+keras.mixed_precision.set_global_policy("mixed_float16")
+
+model = create_mobilenetv4("small", num_classes=10, input_shape=(32, 32, 3))
+# model.fit() applies loss scaling automatically.
 ```
+
+Set the policy before the model is constructed, and restore it with
+`keras.mixed_precision.set_global_policy("float32")` afterwards.
+
+Depthwise convolutions are memory-bandwidth bound rather than FLOP bound, so a MobileNet often
+does not speed up on a big GPU the way its FLOP count suggests. The gain shows on the mobile
+hardware it targets.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Regularization
-
--   **Optimizer**: **AdamW** or **RMSprop** are common choices. The original papers often used RMSprop with a specific decay and momentum. For general use, AdamW is a robust starting point.
--   **Weight Decay**: MobileNets are sensitive to weight decay. The values in the constructors (e.g., `4e-5` for V2) are taken from the original papers and are good defaults.
--   **Learning Rate Schedule**: A **cosine decay** or **exponential decay** schedule is highly recommended over a fixed learning rate for achieving the best results.
-
-### Data Augmentation
-
--   Like all modern ConvNets, MobileNets benefit significantly from strong data augmentation. Techniques like **RandAugment**, **Mixup**, and **CutMix** are effective for training from scratch.
+-   **Optimizer**: AdamW is a solid default; the original papers used RMSprop with tuned decay and momentum.
+-   **Weight decay**: MobileNets are sensitive to it. The constructor defaults (`4e-5` for V1/V2, `1e-5` for V3/V4) come from the papers and target ImageNet — reduce them for small datasets.
+-   **Schedule**: cosine or exponential decay beats a fixed learning rate.
+-   **Augmentation**: RandAugment, Mixup and CutMix help when training from scratch, though a small model needs less augmentation than a large one.
 
 ---
 
 ## 12. Serialization & Deployment
 
-All model classes (`MobileNetV1` through `MobileNetV4`) and their custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+All four model classes and their custom layers round-trip through the `.keras` format.
 
 ```python
-# Create and train a model
-model = create_mobilenetv3("small", num_classes=10)
-# model.compile(...) and model.fit(...)
+import keras
+import numpy as np
 
-# Save the entire model to a single file
-model.save('my_mobilenetv3_model.keras')
+from dl_techniques.models.vision.mobilenet.mobilenet_v3 import create_mobilenetv3
 
-# Load the model in a new session, including its architecture, weights,
-# and optimizer state.
-loaded_model = keras.models.load_model('my_mobilenetv3_model.keras')
-print("✅ Model loaded successfully!")
+model = create_mobilenetv3("small", num_classes=10, input_shape=(32, 32, 3))
+model(np.zeros((1, 32, 32, 3), dtype="float32"))  # build before saving
+model.save("my_mobilenetv3_model.keras")
+
+loaded_model = keras.models.load_model("my_mobilenetv3_model.keras")
 ```
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
-
-You can validate the implementations with simple tests to ensure all variants can be created and produce the correct output shapes.
+The package's tests live in `tests/test_models/test_mobilenet/`, and
+`tests/test_models/test_readme_examples.py` pins the V4 variant names this README documents. A
+minimal self-check:
 
 ```python
-import keras
 import numpy as np
+
 from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
 from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 
-def test_creation_all_variants():
-    """Test model creation for all variants of all versions."""
-    for variant in MobileNetV1.MODEL_VARIANTS.keys():
-        MobileNetV1.from_variant(variant, num_classes=10)
-    print("✓ All MobileNetV1 variants created successfully")
+for cls in (MobileNetV1, MobileNetV2, MobileNetV3, MobileNetV4):
+    for variant in cls.MODEL_VARIANTS:
+        model = cls.from_variant(variant, num_classes=10, input_shape=(32, 32, 3))
+        assert model is not None
 
-    for variant in MobileNetV2.MODEL_VARIANTS.keys():
-        MobileNetV2.from_variant(variant, num_classes=10)
-    print("✓ All MobileNetV2 variants created successfully")
-
-    for variant in ["large", "small"]:
-        MobileNetV3.from_variant(variant, num_classes=10)
-    print("✓ All MobileNetV3 variants created successfully")
-    
-    for variant in MobileNetV4.MODEL_VARIANTS.keys():
-        MobileNetV4.from_variant(variant, num_classes=10, input_shape=(32, 32, 3))
-    print("✓ All MobileNetV4 variants created successfully")
-
-def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
-    model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(96, 96, 3))
-    dummy_input = np.random.rand(4, 96, 96, 3).astype("float32")
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
-
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
+model = MobileNetV4.from_variant("small", num_classes=10, input_shape=(96, 96, 3))
+output = model.predict(np.random.rand(4, 96, 96, 3).astype("float32"))
+assert output.shape == (4, 10)
 ```
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Troubleshooting
 
-**Issue 1: Training accuracy is very low or not improving.**
-
--   **Cause**: MobileNets, being smaller models, can be sensitive to hyperparameters. The learning rate might be too high, or the weight decay might be inappropriate for your dataset.
--   **Solution**: Start with a lower learning rate (e.g., `1e-4`) and use a learning rate schedule. Ensure your data is properly normalized. The default weight decay values are tuned for ImageNet and may need adjustment for smaller datasets.
-
-### Frequently Asked Questions
-
-**Q: Which MobileNet version should I use?**
-
-A:
--   **For the best accuracy/latency trade-off on modern hardware**: Start with **MobileNetV4**. The `small` or `medium` variants are excellent general-purpose backbones.
--   **For a robust, well-understood baseline**: **MobileNetV2** is a fantastic choice and is widely supported in production environments.
--   **If you need a CPU-optimized model with good performance**: **MobileNetV3** is still highly competitive.
--   **For legacy systems or maximum simplicity**: **MobileNetV1** is the original, but V2 generally offers better performance for a similar cost.
-
-**Q: What is the `width_multiplier`?**
-
-A: It's a hyperparameter (α) that uniformly scales the number of channels (filters) in every layer of the network. A `width_multiplier` of `0.5` means every layer will have half the number of filters as the base model, reducing the parameter count and computational cost by roughly 4x. It's the primary way to customize the size of a MobileNet model.
-
-**Q: What's the main difference between MobileNetV2 and V3?**
-
-A: MobileNetV3 is essentially a MobileNetV2-like architecture that has been fine-tuned by a search algorithm (NAS). The key upgrades are the addition of Squeeze-and-Excite (attention) modules, the use of a more efficient `h-swish` activation, and a redesigned, faster final stage.
+-   **`ValueError` on a variant name** — see section 7; V1/V2 keys are names, not width strings, and V4 has no `conv_*` keys.
+-   **`count_params()` raises "the layer isn't built"** — these are subclassed models; call the model on one batch first.
+-   **`summary()` shows 0 parameters** — same cause, on an older build. Run a forward pass first.
+-   **A downstream head gets the wrong rank** — `include_top=False` returns a 4-D feature map on all four versions; pool it yourself.
+-   **Accuracy stalls** — lower the learning rate (start near `1e-4`), check input normalization, and reduce the ImageNet-tuned weight decay for a small dataset.
+-   **`pretrained=True` raises `NotImplementedError`** — no trained weights ship with this package.
 
 ---
 
 ## 15. Technical Details: The Evolution of the Block
 
-The innovation in the MobileNet family can be seen by comparing the structure of their core building blocks.
+-   **V1 (depthwise separable)**:
+    `Input -> 3x3 DWConv -> BN -> ReLU -> 1x1 PWConv -> BN -> ReLU`
 
--   **MobileNetV1 Block (Depthwise Separable Conv)**:
-    `Input -> 3x3 DWConv -> BN -> ReLU -> 1x1 PWConv -> BN -> ReLU -> Output`
+-   **V2 (inverted residual)**:
+    `Input -> 1x1 Expand -> BN -> ReLU6 -> 3x3 DWConv -> BN -> ReLU6 -> 1x1 Project (linear) -> BN -> Add`
 
--   **MobileNetV2 Block (Inverted Residual)**:
-    `Input -> 1x1 Conv (Expand) -> BN -> ReLU6 -> 3x3 DWConv -> BN -> ReLU6 -> 1x1 Conv (Project) -> BN -> Add -> Output`
-    (The final projection is *linear*, and the `Add` is the residual connection)
+-   **V3 (V2 + SE + h-swish)**:
+    `... -> 1x1 Expand -> ... -> DWConv (3x3 or 5x5) -> ... -> Squeeze-Excite -> 1x1 Project -> ...`
 
--   **MobileNetV3 Block (V2 + SE + h-swish)**:
-    `... -> 1x1 Conv (Expand) -> ... -> 3x3 DWConv -> ... -> Squeeze-Excite -> 1x1 Conv (Project) -> ...`
-    (Also uses `h-swish` and different kernel sizes found by NAS)
-
--   **MobileNetV4 Block (Universal Inverted Bottleneck)**:
-    The UIB is highly flexible. It has an optional depthwise convolution on *either
-    side* of the expansion, and which of the two positions is occupied is what
-    names the block:
+-   **V4 (Universal Inverted Bottleneck)**: the UIB has an optional depthwise convolution on
+    *either side* of the expansion, and which positions are occupied names the block:
 
     | `block_type` | start DW (pre-expansion) | middle DW (post-expansion) |
     |---|---|---|
@@ -503,37 +390,30 @@ The innovation in the MobileNet family can be seen by comparing the structure of
     | `"ConvNext"` | 7x7     | –   |
     | `"ExtraDW"`  | 3x3     | 3x3 |
 
-    So `"ExtraDW"` is:
-    `Input -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Expand) -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 1x1 Conv (Project) -> ...`
-    This adds more spatial mixing capability compared to the V2/V3 blocks.
+    So `"ExtraDW"` is
+    `Input -> 3x3 DWConv -> BN -> Act -> 1x1 Expand -> BN -> Act -> 3x3 DWConv -> BN -> Act -> 1x1 Project -> ...`
 
-    **What matters is the position, not the count.** `"IB"` and `"ConvNext"` both
-    own exactly one depthwise convolution and are different architectures: the
-    start DW mixes space at the *unexpanded* channel count, before the block goes
-    wide, which is the ConvNeXt ordering and the reason it conventionally uses a
-    larger kernel. An earlier version of this section described `"ExtraDW"` as
-    `Expand -> 3x3 DWConv -> 5x5 DWConv -> Project`, with *both* depthwise convs
-    after the expansion. That is not the paper's ExtraDW — it is an inverted
-    bottleneck with two stacked middle depthwise convs. The layer can still build
-    that shape (`use_dw1=True, use_dw2=True`), but it is an extra degree of freedom
-    this implementation offers, not one of the four named structures.
+    **The position matters, not the count.** `"IB"` and `"ConvNext"` each own exactly one depthwise
+    convolution and are different architectures: the start DW mixes space at the *unexpanded*
+    channel count, before the block goes wide, which is the ConvNeXt ordering and the reason that
+    position conventionally uses a larger kernel. Setting `use_dw1=True, use_dw2=True` on the layer
+    stacks two middle depthwise convolutions instead — a shape the layer supports, but not the
+    paper's ExtraDW.
 
 ---
 
 ## 16. Citation
 
-If you use these models in your research, please cite the original works:
-
--   **MobileNetV1**:
+-   **MobileNetV1** — *MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications*, arXiv:1704.04861:
     ```bibtex
     @article{howard2017mobilenets,
-      title={Mobilenets: Efficient convolutional neural networks for mobile vision applications},
+      title={MobileNets: Efficient convolutional neural networks for mobile vision applications},
       author={Howard, Andrew G and Zhu, Menglong and Chen, Bo and Kalenichenko, Dmitry and Wang, Weijun and Weyand, Tobias and Andreetto, Marco and Adam, Hartwig},
       journal={arXiv preprint arXiv:1704.04861},
       year={2017}
     }
     ```
--   **MobileNetV2**:
+-   **MobileNetV2** — *Inverted Residuals and Linear Bottlenecks*, arXiv:1801.04381:
     ```bibtex
     @inproceedings{sandler2018mobilenetv2,
       title={MobileNetV2: Inverted residuals and linear bottlenecks},
@@ -543,21 +423,21 @@ If you use these models in your research, please cite the original works:
       year={2018}
     }
     ```
--   **MobileNetV3**:
+-   **MobileNetV3** — *Searching for MobileNetV3*, arXiv:1905.02244:
     ```bibtex
     @inproceedings{howard2019searching,
-      title={Searching for mobilenetv3},
+      title={Searching for MobileNetV3},
       author={Howard, Andrew and Sandler, Mark and Chu, Grace and Chen, Liang-Chieh and Chen, Bo and Tan, Mingxing and Wang, Weijun and Zhu, Yukun and Pang, Ruoming and Vasudevan, Vijay and Le, Quoc V and Adam, Hartwig},
       booktitle={Proceedings of the IEEE/CVF international conference on computer vision},
       pages={1314--1324},
       year={2019}
     }
     ```
--   **MobileNetV4**:
+-   **MobileNetV4** — *MobileNetV4: Universal Models for the Mobile Ecosystem*, arXiv:2404.10518:
     ```bibtex
-    @article{mobilenetv4,
-      title={{MobileNetV4 - Universal Inverted Bottleneck and Mobile MQA}},
-      author={Dan-Feltrim, Daniel and T-Gotmare, Arjun and G-Hegde, Shruthi and Gabriel, Gabriel L. and Clienti, Luca and Hashem, Mostafa and L-Ferez, Jose M.},
+    @article{qin2024mobilenetv4,
+      title={MobileNetV4: Universal Models for the Mobile Ecosystem},
+      author={Qin, Danfeng and Leichner, Chas and Delakis, Manolis and Fornoni, Marco and Luo, Shixin and Yang, Fan and Wang, Weijun and Banbury, Colby and Ye, Chengxi and Akin, Berkin and Aggarwal, Vaibhav and Zhu, Tenghui and Moro, Daniele and Howard, Andrew},
       journal={arXiv preprint arXiv:2404.10518},
       year={2024}
     }

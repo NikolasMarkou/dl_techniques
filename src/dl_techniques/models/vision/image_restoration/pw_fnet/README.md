@@ -4,229 +4,115 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)** in **Keras 3**, based on the paper ["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration"](https://arxiv.org/abs/2507.13663) by Jiang et al. (2025).
+A Keras 3 implementation of the **Pyramid Wavelet-Fourier Network (PW-FNet)**, from
+["Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image
+Restoration"](https://arxiv.org/abs/2507.13663) (Jiang et al., 2025).
 
-The architecture replaces expensive self-attention mechanisms with a highly efficient Fourier Transform-based token mixer within a hierarchical U-Net structure, delivering state-of-the-art performance with a fraction of the computational cost. This implementation is built with modern Keras best practices, ensuring it is robust, easy to understand, and fully serializable.
+The architecture replaces self-attention with a Fourier-domain token mixer inside a
+hierarchical U-Net, so global context costs `O(N log N)` instead of `O(N^2)` in the number
+of pixels. Every block and the model itself are serializable through the standard `.keras`
+format.
 
 ![image](pw_fnet_intro.jpg)
 
 ---
 
-## Table of Contents
-
-1. [Overview: What is PW-FNet and Why It Matters](#1-overview-what-is-pw-fnet-and-why-it-matters)
-2. [The Problem PW-FNet Solves](#2-the-problem-pw-fnet-solves)
-3. [How PW-FNet Works: Core Concepts](#3-how-pw-fnet-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
-
----
-
 ## 1. Overview: What is PW-FNet and Why It Matters
 
-### What is a PW-FNet?
+### What is PW-FNet?
 
-The **Pyramid Wavelet-Fourier Network (PW-FNet)** is a deep learning architecture designed for fast and effective image restoration. It challenges the dominance of Transformers by demonstrating that their key advantage—global modeling—can be achieved more efficiently. Instead of using self-attention, PW-FNet captures global context by performing feature mixing in the frequency domain using the Fast Fourier Transform (FFT).
+PW-FNet is an image-restoration network built for speed. Its premise is that the useful
+part of a Transformer for restoration is the **global receptive field**, not self-attention
+specifically, and that a Fourier transform provides that field directly: every frequency
+coefficient already depends on every spatial location.
 
 ![image](pw_fnet_attention_types.jpg)
 
-Its design is based on a U-Net-like pyramid structure that processes features at multiple scales, analogous to how wavelet transforms decompose signals into different frequency bands.
+### Key Ideas
 
-### Key Innovations
-
-1.  **Fourier Transform as Token Mixer**: The core of PW-FNet is its replacement of the self-attention "token mixer" with a simple yet powerful block that applies a 2D FFT, performs a convolution in the frequency domain, and transforms the result back with an inverse FFT. This captures global information with remarkable efficiency.
-2.  **Global Modeling without Attention**: It proves that the global receptive field, a key benefit of Transformers, can be achieved without the quadratic complexity of self-attention. The Fourier transform inherently considers all spatial locations at once.
-3.  **Hierarchical Processing**: It uses a U-Net encoder-decoder structure to create and process feature maps at multiple scales, enabling the effective restoration of both large-scale structures and fine-grained details.
-4.  **Extreme Efficiency**: By avoiding self-attention, PW-FNet is significantly faster, more memory-efficient, and has far fewer parameters than leading Transformer-based restoration models like Restormer or NAFNet.
+1. **Fourier transform as the token mixer.** Each block applies a 2D FFT, mixes channels
+   with a pointwise convolution and GELU in the frequency domain, then transforms back.
+2. **Global modeling without attention.** No attention map is ever materialized, so memory
+   does not grow quadratically with resolution.
+3. **Hierarchical, multi-input multi-output.** A 3-level U-Net predicts a residual at full,
+   half and quarter resolution, each added to a correspondingly downsampled copy of the
+   input, so a loss can be applied at every scale.
 
 ![image](pw_fnet_block.jpg)
 
-### Why PW-FNet Matters
+### How This Implementation Differs From the Paper
 
-**Transformer-based Restoration Problem**:```
-Problem: Remove rain from a high-resolution photograph in real-time.
-Transformer (e.g., Restormer) Approach:
-  1. Divide the image into patches (tokens).
-  2. Use a deep stack of Transformer blocks to compute self-attention
-     between these tokens, modeling global dependencies.
-  3. Limitation: Self-attention has quadratic complexity, making the model
-     slow, memory-hungry, and parameter-heavy. Real-time processing on
-     edge devices is often infeasible.
-```
+The **intra-block** half of the paper — the Fourier token mixer — is what this package
+implements. The **inter-block** half is simplified:
 
-**PW-FNet's Solution**:```
-PW-FNet Approach:
-  1. Use a standard U-Net structure for multi-scale feature processing.
-  2. Inside each block, instead of self-attention, apply a Fourier transform
-     to the feature map to switch to the frequency domain.
-  3. Perform a simple, lightweight convolution on the frequency representation.
-  4. Transform back to the spatial domain.
-  5. Benefit: Achieves a global receptive field with O(N log N) complexity,
-     making it exceptionally fast and lightweight while matching or exceeding
-     the performance of much heavier models.```
-
-### Real-World Impact
-
-PW-FNet provides a powerful and practical baseline for a wide range of image restoration tasks where efficiency is critical:
--   **Image Deraining & Desnowing**: Removing adverse weather effects.
--   **Image Dehazing**: Restoring clarity in foggy or hazy images.
--   **Underwater Image Enhancement**: Correcting color and visibility distortions.
--   **Motion Deblurring**: Sharpening images affected by motion blur.
--   **Super-Resolution**: Upscaling low-resolution images.
+| Paper | This package |
+| :--- | :--- |
+| A pyramid **wavelet**-based multi-input multi-output structure, decomposing into frequency sub-bands | No wavelet transform anywhere. The multi-scale inputs are plain `average_pool` copies, the multi-scale outputs are plain residuals, and the pyramid is the U-Net's own resolutions. The "Wavelet" in the name is not implemented. |
+| Results across deraining, dehazing, desnowing, deblurring, super-resolution and enhancement | Architecture only. Nothing here has been trained or benchmarked, and no weights ship with the package. |
+| Named model scales | No variant table. The model is parameterized continuously by `width` and the per-level block counts. |
 
 ---
 
 ## 2. The Problem PW-FNet Solves
 
-### The Limitations of Transformer-based Restoration Models
+Transformer restoration models are effective and expensive. Their cost has three parts:
 
-While Transformer-based models have set new state-of-the-art records in image restoration, their reliance on self-attention mechanisms creates significant practical barriers:
-1.  **High Computational Cost**: The quadratic complexity of self-attention makes training and inference slow, especially for high-resolution images.
-2.  **Large Memory Footprint**: The attention maps consume a substantial amount of GPU memory.
-3.  **High Parameter Count**: These models are often very large, making them difficult to deploy on resource-constrained devices.
+1. **Compute** — global self-attention is quadratic in the pixel count, which bites hardest
+   exactly where restoration is needed, at high resolution.
+2. **Memory** — the attention maps themselves dominate activation memory.
+3. **Parameters** — the resulting models are awkward to deploy on constrained devices.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Transformer-based Restoration Models                       │
-│                                                             │
-│  Primary Tool: Self-Attention for global context.           │
-│                                                             │
-│  The Efficiency Problem:                                    │
-│  - Methods like Restormer and Uformer are highly effective  │
-│    but come at a steep computational price.                 │
-│  - This complexity limits their use in real-time scenarios  │
-│    like autonomous driving or live video enhancement.       │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### How PW-FNet Changes the Game
-
-PW-FNet provides a paradigm shift by rethinking how global context should be modeled.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The PW-FNet Solution                                       │
-│                                                             │
-│  1. Replace the Self-Attention Mechanism: The central idea  │
-│     is to swap the complex and costly self-attention module │
-│     with an efficient frequency-domain operator.            │
-│                                                             │
-│  2. Global Modeling via Fourier Transform: The Fourier      │
-│     transform is a natural tool for global analysis. Every  │
-│     point in the frequency domain depends on every point in │
-│     the spatial domain, providing a global receptive field  │
-│     by default.                                             │
-│                                                             │
-│  3. Efficiency First: The entire architecture is built      │
-│     around simple, fast operations (Conv2D, FFT, LayerNorm) │
-│     making it an order of magnitude more efficient than its │
-│     Transformer counterparts.                               │
-└─────────────────────────────────────────────────────────────┘
-```
-
-The model demonstrates that superior performance doesn't have to come at a high computational cost, making it an ideal baseline for practical applications.
+PW-FNet keeps the global receptive field and drops all three costs by swapping the mixer.
+The whole network is built from `Conv2D`, `DepthwiseConv2D`, normalization, GELU and the
+FFT — operations that are fast and well supported everywhere.
 
 ---
 
 ## 3. How PW-FNet Works: Core Concepts
 
-### The U-Net Encoder-Decoder Architecture
-
-PW-FNet is built on a familiar and robust 3-level U-Net architecture.
--   **Encoder**: A series of `PW_FNet_Block`s and `PWFNetDownsample` layers that progressively reduce the spatial resolution while increasing the feature (channel) dimension.
--   **Bottleneck**: A set of `PW_FNet_Block`s that process the features at the lowest resolution.
--   **Decoder**: A series of `PW_FNet_Block`s and `PWFNetUpsample` layers that restore the spatial resolution. Skip connections pass high-frequency details from the encoder to the decoder.
-
-### The Fourier Token Mixer
-
-The key innovation lies inside the `PW_FNet_Block`. Instead of a self-attention module, it uses a Fourier-based token mixer.
+### The Fourier token mixer
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Fourier Token Mixer                       │
-│                                                                  │
-│  Input Features (Spatial Domain)                                 │
-│           │                                                      │
-│           ├─► Pointwise Conv (Expand channels)                   │
-│           │                                                      │
-│           ├─► 2D Fast Fourier Transform (FFT)                    │
-│           │      (Switch to Frequency Domain)                    │
-│           │                                                      │
-│           ├─► Pointwise Conv + GELU (Process frequency info)     │
-│           │                                                      │
-│           ├─► 2D Inverse FFT (IFFT)                              │
-│           │      (Switch back to Spatial Domain)                 │
-│           │                                                      │
-│           └─► Pointwise Conv (Project back to original channels) │
-│                                                                  │
-│  Output Features (Spatial Domain)                                │
-└──────────────────────────────────────────────────────────────────┘
+Input features (spatial)
+   │
+   ├─► Pointwise Conv          expand C -> hidden (2x by default)
+   ├─► FFT2D                   real/imag concatenated -> 2*hidden channels
+   ├─► Pointwise Conv + GELU   mix in the frequency domain
+   ├─► IFFT2D                  real part only -> hidden channels
+   └─► Pointwise Conv          project hidden -> C
+Output features (spatial)
 ```
-This entire sequence is computationally lightweight and effectively mixes information across the entire feature map.
 
-### The Complete Data Flow
+The FFT and IFFT are a **float32 island**: both cast their input to float32 because
+`keras.ops.fft2` has no float16 kernel, and cast the result back to the layer's compute
+dtype. Mixed precision therefore works, but the transform itself is never run in half
+precision.
+
+### The complete data flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     PW-FNet Complete Data Flow                          │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: ENCODING
-────────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► Intro Conv2D → (B, H, W, D)
-    │
-    ├─► Encoder Level 1 (PW-FNet Blocks) ───(Skip1)───►
-    │
-    ├─► PWFNetDownsample → (B, H/2, W/2, 2D)
-    │
-    ├─► Encoder Level 2 (PW-FNet Blocks) ───(Skip2)───►
-    │
-    └─► PWFNetDownsample → (B, H/4, W/4, 4D)
-
-
-STEP 2: BOTTLENECK
-──────────────────
-Encoded Features
-    │
-    └─► Middle Blocks (PW-FNet Blocks)
-
-
-STEP 3: DECODING
-────────────────
-Bottleneck Features
-    │
-    ├─► PWFNetUpsample → (B, H/2, W/2, 2D) ◄───(Concat Skip2)─┐
-    │                                                   │
-    ├─► Reduce Conv2D → (B, H/2, W/2, 2D) <─────────────┘
-    │
-    ├─► Decoder Level 2 (PW-FNet Blocks)
-    │
-    ├─► PWFNetUpsample → (B, H, W, D) ◄──────(Concat Skip1)─┐
-    │                                                 │
-    ├─► Reduce Conv2D → (B, H, W, D) <────────────────┘
-    │
-    └─► Decoder Level 1 (PW-FNet Blocks)
-
-
-STEP 4: MULTI-SCALE OUTPUT
-──────────────────────────
-The model produces residual images at 3 resolutions, which are
-added to downsampled versions of the original input to produce the final outputs.
-[out_full_res, out_half_res, out_quarter_res]
+Input (B, H, W, C_img)
+  │                                       input_l1 = avg_pool(input)      (H/2)
+  │                                       input_l2 = avg_pool(input_l1)   (H/4)
+  ├─► intro Conv2D 3x3                                       -> (B, H,   W,   D)
+  ├─► Encoder level 1: enc_blk_nums[0] blocks ──(skip1)──►
+  ├─► PWFNetDownsample                                       -> (B, H/2, W/2, 2D)
+  ├─► Encoder level 2: enc_blk_nums[1] blocks ──(skip2)──►
+  ├─► PWFNetDownsample                                       -> (B, H/4, W/4, 4D)
+  ├─► Bottleneck: middle_blk_num blocks
+  │      └─► output_l2 Conv2D  ──► out_quarter = input_l2 + residual
+  ├─► PWFNetUpsample, concat skip2, reduce Conv2D 1x1        -> (B, H/2, W/2, 2D)
+  ├─► Decoder level 2: dec_blk_nums[0] blocks
+  │      └─► output_l1 Conv2D  ──► out_half    = input_l1 + residual
+  ├─► PWFNetUpsample, concat skip1, reduce Conv2D 1x1        -> (B, H,   W,   D)
+  ├─► Decoder level 1: dec_blk_nums[1] blocks
+  │      └─► output_l0 Conv2D  ──► out_full    = input + residual
+  │
+  └─► returns [out_full, out_half, out_quarter]
 ```
+
+Because the heads predict residuals, the network only has to learn the degradation, not
+the image.
 
 ---
 
@@ -234,297 +120,315 @@ added to downsampled versions of the original input to produce the final outputs
 
 ### 4.1 `PW_FNet_Block`
 
-This is the core building block of the model. It is a residual block containing two main sub-modules:
-1.  **Fourier Token Mixer**: As described above, this module provides global feature mixing. It is wrapped in a residual connection.
-2.  **Feed-Forward Network (FFN)**: A simple MLP-like module consisting of a pointwise convolution to expand channels, a 3x3 depthwise convolution to capture local patterns, a GELU activation, and another pointwise convolution to project back. This is also wrapped in a residual connection.
+Two pre-normalized residual sub-modules:
 
-Each sub-module is preceded by a `LayerNormalization` layer for stable training.
+1. **Token mixer**: `x = x + Project(IFFT(GELU(Conv_freq(FFT(Expand(Norm1(x)))))))`
+2. **Feed-forward**: `x = x + Project(GELU(DepthwiseConv3x3(Expand(Norm2(x)))))`
 
-### 4.2 Scaling Layers
+The hidden width is `int(dim * ffn_expansion_factor)`, default `2.0`. The block preserves
+its input shape.
 
--   **`PWFNetDownsample`**: A `Conv2D` layer with a kernel size of 4 and a stride of 2 is used to learn an optimal way to halve the spatial dimensions and double the channel dimension.
--   **`PWFNetUpsample`**: A `Conv2DTranspose` layer with a kernel size of 2 and a stride of 2 is used to double the spatial dimensions and halve the channel dimension.
+The FFN has two forms. `use_spatial_ffn=True` (the default) is the architecture's own
+depthwise-convolution FFN, which keeps spatial structure. `use_spatial_ffn=False` swaps in
+a Dense-based FFN from the shared factory (`ffn_type="mlp"`, `"swiglu"`, `"geglu"`, ...),
+which is an experiment knob rather than the reference path; it requires `ffn_type` and
+raises `ValueError` without it.
 
-### 4.3 Multi-Scale Outputs
+### 4.2 Scaling layers
 
-The model's `call` method returns a list of three tensors, corresponding to the restored image at **full, half, and quarter resolution**. This is designed to facilitate **hierarchical supervision**, where a loss is computed at each scale to guide the network more effectively during training. The final output is a residual added to the original (downsampled) input, which helps the model focus on learning the degradation.
+- **`PWFNetDownsample`**: `Conv2D(dim, kernel_size=4, strides=2, padding="same")`. Halves
+  the resolution and doubles the channels.
+- **`PWFNetUpsample`**: `Conv2DTranspose(dim, kernel_size=2, strides=2)`. Doubles the
+  resolution and halves the channels. Matching kernel and stride is what keeps transposed
+  convolution from producing checkerboard artifacts.
+
+### 4.3 The depth is fixed at 2 levels
+
+`call` returns exactly three tensors and the topology is written out by name (`down1`,
+`down2`, `up2`, `up1`, `output_l2`, `output_l1`, `output_l0`), so `enc_blk_nums` and
+`dec_blk_nums` set **how many blocks run at each level**, never how many levels there are.
+Both lists must have exactly two entries; any other length raises `ValueError`.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy matplotlib
-```
-
-### Your First Restoration Model (30 seconds)
-
-Let's train a PW-FNet to remove synthetic noise from images.
-
 ```python
 import keras
 import numpy as np
-import matplotlib.pyplot as plt
 
-# Assuming model.py is in your project directory
 from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet
 
-# 1. Generate dummy data
+
 def generate_data(num_samples, shape=(64, 64, 3)):
-    clean_images = np.random.rand(num_samples, *shape).astype("float32")
-    noise = np.random.normal(0, 0.1, clean_images.shape).astype("float32")
-    noisy_images = np.clip(clean_images + noise, 0.0, 1.0)
-    return noisy_images, clean_images
+    clean = np.random.rand(num_samples, *shape).astype("float32")
+    noise = np.random.normal(0, 0.1, clean.shape).astype("float32")
+    return np.clip(clean + noise, 0.0, 1.0), clean
 
-X_train_noisy, X_train_clean = generate_data(128)
-X_test_noisy, X_test_clean = generate_data(20)
 
-# 2. Create a lightweight PW-FNet model for the demo
+noisy, clean = generate_data(128)
+
 model = PW_FNet(
     img_channels=3,
-    width=32,          # Base channel width
-    middle_blk_num=2,  # Blocks in the bottleneck
-    enc_blk_nums=[1, 1], # Blocks in encoder stages
-    dec_blk_nums=[1, 1]  # Blocks in decoder stages
+    width=32,            # base channel width
+    middle_blk_num=2,    # bottleneck blocks
+    enc_blk_nums=[1, 1], # blocks per encoder level (exactly 2 entries)
+    dec_blk_nums=[1, 1], # blocks per decoder level (exactly 2 entries)
 )
 
-# 3. Compile the model with a loss for each of the 3 outputs
+# One loss per output scale, weighted towards full resolution.
 model.compile(
     optimizer="adam",
-    # Use the same loss for all three output scales
-    loss="mean_absolute_error"
+    loss=["mae", "mae", "mae"],
+    loss_weights=[0.6, 0.3, 0.1],
 )
-print("✅ PW-FNet model created and compiled successfully!")
 
-# 4. Prepare target data for multi-scale supervision
-# The model outputs a list of 3 images [full, half, quarter].
-# We need to provide a corresponding list/tuple of ground truths for training.
-y_train_full = X_train_clean
-y_train_half = keras.layers.AveragePooling2D(2)(X_train_clean)
-y_train_quarter = keras.layers.AveragePooling2D(2)(y_train_half)
+# Targets must match the three returned scales.
+target_full = clean
+target_half = np.asarray(keras.layers.AveragePooling2D(2)(clean))
+target_quarter = np.asarray(keras.layers.AveragePooling2D(2)(target_half))
 
-# 5. Train the model
 model.fit(
-    X_train_noisy,
-    (y_train_full, y_train_half, y_train_quarter),
-    epochs=10,
+    noisy,
+    (target_full, target_half, target_quarter),
+    epochs=1,
     batch_size=16,
-    verbose=1
+    verbose=1,
 )
-print("✅ Training Complete!")
 
-# 6. Restore a test image and visualize
-# The model.predict() returns a list of the 3 restored images
-restored_images = model.predict(X_test_noisy[:1])
-full_res_restored = restored_images[0]
-
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 3, 1)
-plt.imshow(X_test_noisy[0])
-plt.title("Noisy Input")
-plt.axis('off')
-plt.subplot(1, 3, 2)
-plt.imshow(full_res_restored[0])
-plt.title("Restored Output")
-plt.axis('off')
-plt.subplot(1, 3, 3)
-plt.imshow(X_test_clean[0])
-plt.title("Ground Truth")
-plt.axis('off')
-plt.show()
-
+restored = model.predict(noisy[:1])
+print([r.shape for r in restored])
+# [(1, 64, 64, 3), (1, 32, 32, 3), (1, 16, 16, 3)]
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `PW_FNet` (Model Class)
+| Component | Location | Purpose |
+| :--- | :--- | :--- |
+| `PW_FNet` | `...pw_fnet.model` | The full U-Net. Returns `[full, half, quarter]`. |
+| `create_pw_fnet` | `...pw_fnet.model` | Thin factory over the constructor with the reference defaults. |
+| `PW_FNet_Block` | `...pw_fnet.model` | Token mixer plus FFN. Shape-preserving. |
+| `PWFNetDownsample` / `PWFNetUpsample` | `...pw_fnet.model` | Learned 2x scaling. |
+| `FFTLayer` / `IFFTLayer` | `dl_techniques.layers.fft_layers` | 2D FFT to concatenated real/imag channels, and back. |
 
-**Purpose**: The main Keras `Model` that assembles the full U-Net architecture.
+All five are re-exported from the package `__init__`.
 
-**Key Parameters**:
+### `PW_FNet` constructor arguments
 
-| Parameter | Type | Description | Default |
+| Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `img_channels` | `int` | Number of channels for input/output images (e.g., 3 for RGB). | `3` |
-| `width` | `int` | The base channel width of the network. Controls model capacity. | `32` |
-| `middle_blk_num` | `int` | Number of `PW_FNet_Block`s in the bottleneck. | `4` |
-| `enc_blk_nums` | `List[int]` | Block counts for the two encoder stages (high-res, then low-res). **Exactly 2 entries.** | `[2, 2]` |
-| `dec_blk_nums` | `List[int]` | Block counts for the two decoder stages (low-res, then high-res). **Exactly 2 entries.** | `[2, 2]` |
+| `img_channels` | `int` | `3` | Input/output channels. Must be positive. |
+| `width` | `int` | `32` | Base channel width; levels use `width`, `2*width`, `4*width`. |
+| `middle_blk_num` | `int` | `4` | Bottleneck blocks. Must be non-negative. |
+| `enc_blk_nums` | `List[int]` | `[2, 2]` | Blocks per encoder level. **Exactly 2 entries.** |
+| `dec_blk_nums` | `List[int]` | `[2, 2]` | Blocks per decoder level. **Exactly 2 entries.** |
+| `normalization_type` | `str` | `'layer_norm'` | Any type the normalization factory accepts (`'rms_norm'`, `'band_rms'`, `'dynamic_tanh'`, ...). |
+| `norm_kwargs` | `dict` | `None` | Forwarded to every normalization layer. |
+| `use_spatial_ffn` | `bool` | `True` | `False` selects a factory FFN instead. |
+| `ffn_type` | `str` | `None` | Factory FFN name. Required when `use_spatial_ffn=False`. |
+| `ffn_kwargs` | `dict` | `None` | Forwarded to the factory FFN. |
 
-> **The depth is FIXED at 2 levels; these lists do not set it.** The encoder,
-> decoder and the three output heads are written out by name, and the model
-> returns exactly three scales, so a third entry has nowhere to go. Passing a
-> list of any other length raises `ValueError`. Before 2026-08-15 the docstring
-> claimed the length determined the number of scales: `[2, 2, 2]` silently
-> built a 2-level network and dropped the third entry, and `[2]` raised
-> `IndexError` from the middle of the constructor.
-
-### 6.2 `PW_FNet_Block` (Layer Class)
-
-**Purpose**: The core feature processing block containing the Fourier Token Mixer and the Feed-Forward Network. It maintains the input tensor's shape.
-
-### 6.3 Utility Layers
-
-- **`FFTLayer`**: A serializable layer that applies a 2D FFT and concatenates the real and imaginary parts into a real-valued tensor.
-- **`IFFTLayer`**: A serializable layer that performs the inverse operation of `FFTLayer`.
-- **`PWFNetDownsample`**: A trainable strided `Conv2D` layer for downsampling.
-- **`PWFNetUpsample`**: A trainable `Conv2DTranspose` layer for upsampling.
+`create_pw_fnet` takes the same arguments and forwards them unchanged. Note that
+`ffn_expansion_factor` is a `PW_FNet_Block` argument only: the model does not forward it,
+so every block in a `PW_FNet` runs at the `2.0` default.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-The paper derives small, medium, and large model variants from a single trained network by using the different multi-scale outputs during inference.
+There is no `MODEL_VARIANTS` table and none was invented — the architecture is a single
+3-level U-Net scaled continuously by `width` and the block counts. Parameter counts below
+were measured on `img_channels=3` and are independent of input resolution.
 
--   **PW-FNet-S (Small)**: Use the quarter-resolution output (`outputs[2]`) and upsample it twice. Fastest but lowest quality.
--   **PW-FNet-M (Medium)**: Use the half-resolution output (`outputs[1]`) and upsample it once. Balanced performance.
--   **PW-FNet-L (Large)**: Use the full-resolution output (`outputs[0]`) directly. Highest quality but slowest.
+| `width` | `middle_blk_num` | `enc`/`dec` blocks | Parameters |
+| ---: | ---: | :--- | ---: |
+| 16 | 1 | `[1, 1]` | 222,617 |
+| 16 | 2 | `[1, 1]` | 323,097 |
+| 32 | 2 | `[1, 1]` | 1,269,801 |
+| 32 | 4 | `[2, 2]` (the defaults) | 2,317,225 |
+| 64 | 4 | `[2, 2]` | 9,193,289 |
 
-This allows for dynamic, adaptive inference based on the available computational budget.
+Parameters scale roughly with `width^2`, so `width` is the coarse capacity knob and the
+block counts are the fine one.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Inference with a Specific Output Scale
-
-During inference, you typically only need the full-resolution output.
+### Example 1: Inference at a single scale
 
 ```python
-# Assuming 'model' is trained
+import numpy as np
+
 noisy_image = np.random.rand(1, 128, 128, 3).astype("float32")
 
-# The model returns a list of 3 images
-all_outputs = model.predict(noisy_image)
-full_resolution_output = all_outputs[0]
-
-print(f"Shape of full-res output: {full_resolution_output.shape}")
+full, half, quarter = model.predict(noisy_image)
+print(full.shape, half.shape, quarter.shape)
+# (1, 128, 128, 3) (1, 64, 64, 3) (1, 32, 32, 3)
 ```
 
-### Example 2: Building a Training Pipeline with Weighted Hierarchical Loss
+The half- and quarter-resolution heads are supervision targets, not a cheaper inference
+path: they are produced by the bottleneck and the first decoder stage, so computing them
+does not let you skip the rest of the network.
 
-For best results, you can use a custom training loop or a compiled loss that weights the outputs from the three scales.
+### Example 2: Non-default normalization and FFN
 
 ```python
-# Define a loss function that applies to the multi-scale outputs
-def hierarchical_loss(y_true, y_pred):
-    # y_true and y_pred are lists/tuples of 3 tensors each
-    y_true_l0, y_true_l1, y_true_l2 = y_true
-    y_pred_l0, y_pred_l1, y_pred_l2 = y_pred
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import create_pw_fnet
 
-    loss_l0 = keras.losses.mean_absolute_error(y_true_l0, y_pred_l0)
-    loss_l1 = keras.losses.mean_absolute_error(y_true_l1, y_pred_l1)
-    loss_l2 = keras.losses.mean_absolute_error(y_true_l2, y_pred_l2)
-
-    # Give more weight to the full-resolution loss
-    return (0.6 * loss_l0) + (0.3 * loss_l1) + (0.1 * loss_l2)
-
-# model.compile(optimizer="adam", loss=hierarchical_loss)
-# model.fit(...)
+model = create_pw_fnet(
+    width=32,
+    normalization_type="rms_norm",
+    norm_kwargs={"epsilon": 1e-6},
+    use_spatial_ffn=False,
+    ffn_type="swiglu",
+    ffn_kwargs={"dropout_rate": 0.1},
+)
 ```
+
+Both knobs change the parameter count. `use_spatial_ffn=False` also gives up the depthwise
+convolution, which is the block's only source of local spatial mixing.
+
+---
+
+## 9. Advanced Usage Patterns
+
+### Weighting the multi-scale losses
+
+Keras applies a compiled loss **per output**, so a single callable receives one `y_true`
+and one `y_pred` tensor, not the three-element lists. Weighting the scales is done with
+`loss_weights`, not by unpacking inside a custom loss:
+
+```python
+model.compile(
+    optimizer="adam",
+    loss=["mae", "mae", "mae"],
+    loss_weights=[0.6, 0.3, 0.1],
+)
+```
+
+A custom loss can still be passed in the list — it is simply called three times, once per
+scale.
+
+---
+
+## 10. Performance Optimization
+
+```python
+import keras
+
+keras.mixed_precision.set_global_policy("mixed_float16")
+model = create_pw_fnet(width=16, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
+```
+
+The three outputs come back as float16. The FFT and IFFT stay in float32 internally (see
+section 3), so expect one cast in and one cast out per block — the transform is exact
+either way.
+
+Restoration is normally trained on crops. Because the model is fully convolutional, a model
+trained on 128x128 patches runs unchanged on full images at inference; the only constraint
+is that both spatial dimensions be divisible by 4, since the encoder halves twice.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Loss Function
-
-The original paper finds that an **L1 loss in the Fourier domain** (`L = ||F(output) - F(ground_truth)||_1`) yields the best results. However, a standard spatial-domain L1 loss (Mean Absolute Error) with hierarchical supervision, as shown in the examples, is also a very strong and simpler alternative.
-
-### Optimizer and Schedule
-
-The authors use the **AdamW optimizer** with a **cosine annealing learning rate schedule**. This combination is standard for training high-performance vision models and is recommended for PW-FNet.
+- **Supervise all three scales.** The half- and quarter-resolution heads exist for exactly
+  that and cost nothing extra at training time.
+- **Loss.** An L1 (MAE) loss on each scale is the simple, strong default for restoration;
+  L1 in the Fourier domain is a natural companion given the architecture.
+- **Optimizer.** AdamW with cosine decay is the usual choice for this class of model.
+- **Residual heads.** Targets are the clean images, not the residuals — the addition of the
+  downsampled input happens inside `call`.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `PW_FNet` model and all its custom sub-layers are **fully serializable** using Keras 3's modern `.keras` format. Each custom layer is decorated with `@register_dl_technique(...)` (from `dl_techniques.utils.keras_registration`) and implements `get_config`, ensuring that the model's architecture and weights can be saved and loaded seamlessly.
-
-Two things about the keys are worth knowing before you rename anything here.
-
-`PW_FNet` and `PW_FNet_Block` register under the defining module's dotted path,
-`dl_techniques.models.pw_fnet.model><ClassName>` — `vision/` and `image_restoration/` are
-stripped because a family directory under `models/` is a filing decision, not a namespace.
-
-`PWFNetDownsample` and `PWFNetUpsample` register under the same module path, so their keys are
-also `dl_techniques.models.pw_fnet.model><ClassName>` (normalized 2026-08-29 from the coarse
-`dl_techniques.pw_fnet`). They carry no exception: like every other class here they also bind
-the legacy alias, so `keras.saving.get_registered_object("Custom>PWFNetDownsample")` and
-`("Custom>PWFNetUpsample")` resolve to the classes (2026-09-01). They were called `Downsample`
-and `Upsample` until 2026-09-01, and both then carried `legacy_alias=False` because `ideogram4`
-registers classes with those same two bare names and the `Custom>` namespace is flat, so
-aliasing either side would have put two classes on one key. The package prefix removes the
-duplicate at its source, which is why the flag is gone rather than merely relaxed -- do not
-rename these back.
-
-### Saving and Loading
+Every class here is decorated with `@register_dl_technique` and implements `get_config`, so
+`.keras` files round-trip with no `custom_objects` argument. A save/load/predict round-trip
+reproduces the original outputs exactly (max absolute difference 0.0).
 
 ```python
-# Create and train model
-# ... (see Quick Start guide)
+import keras
 
-# Save the entire model to a single file
-model.save('pwfnet_denoiser.keras')
-print("Model saved to pwfnet_denoiser.keras")
-
-# Load the model in a new session. Keras 3 handles custom objects automatically.
-loaded_model = keras.models.load_model('pwfnet_denoiser.keras')
-print("Model loaded successfully")
-
-# Verify the loaded model can make predictions
-restored = loaded_model.predict(X_test_noisy[:1])
-print(f"Restored image shape: {restored[0].shape}")
+model.save("pwfnet_denoiser.keras")
+loaded = keras.models.load_model("pwfnet_denoiser.keras")
+restored = loaded.predict(noisy[:1])
 ```
+
+All four classes register under the defining module's dotted path,
+`dl_techniques.models.pw_fnet.model><ClassName>` — the `vision/` and `image_restoration/`
+directories are a filing decision, not a namespace — and each also binds the legacy
+`Custom><ClassName>` alias. The scaling layers carry the `PWFNet` prefix because the legacy
+alias namespace is keyed by the bare class name alone and `Downsample` / `Upsample` are
+already claimed elsewhere in the library; do not rename them back.
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 13. Testing & Validation
 
-**Issue 1: Checkerboard artifacts in the output.**
+```python
+import numpy as np
 
--   **Cause**: This is a common issue with transposed convolutions (`PWFNetUpsample` layer).
--   **Solution**: The current implementation uses `kernel_size=2, strides=2`, which is the standard way to mitigate this. If artifacts persist, you can replace the layer with a sequence of `UpSampling2D` followed by a `Conv2D`, which often produces smoother results at a slight computational cost.
+from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet
 
-### Frequently Asked Questions
 
-**Q: Why use Fourier Transform instead of Self-Attention?**
+def test_output_scales():
+    model = PW_FNet(width=8, middle_blk_num=1, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
+    outputs = model(np.random.rand(1, 32, 32, 3).astype("float32"))
+    assert [tuple(o.shape) for o in outputs] == [
+        (1, 32, 32, 3), (1, 16, 16, 3), (1, 8, 8, 3),
+    ]
+```
 
-A: **Efficiency**. The 2D FFT has a computational complexity of O(N log N), where N is the number of pixels. Global self-attention has a complexity of O(N²). For a 256x256 image, this is a massive difference, allowing PW-FNet to be orders of magnitude faster while still modeling global dependencies.
+The package's own suite is `tests/test_models/test_pw_fnet/`.
 
-**Q: How does this relate to Wavelets?**
+---
 
-A: The "Wavelet" in the name refers to the model's multi-scale (or multi-frequency) analysis. The U-Net's pyramid structure, which processes the image at different resolutions, is analogous to a discrete wavelet transform that decomposes a signal into different frequency sub-bands. The Fourier transform is then applied to the features *within* each of these scales.
+## 14. Troubleshooting
+
+- `enc_blk_nums and dec_blk_nums must each have exactly 2 entries` — the depth is fixed;
+  the lists set block counts per level, not the number of levels.
+- `ffn_type must be specified when use_spatial_ffn=False` — pick a factory FFN name.
+- **A custom loss raises `OperatorNotAllowedInGraphError` while iterating `y_true`** — the
+  loss is called once per output with plain tensors. Use `loss_weights` (section 9).
+- **Shape mismatch during `fit`** — the targets must be a 3-tuple ordered
+  `(full, half, quarter)`, matching the model's return order.
+- **Odd input sizes** — both spatial dimensions must be divisible by 4.
 
 ---
 
 ## 15. Technical Details
 
-### The `PW_FNet_Block`
+**Frequency representation.** `FFTLayer` takes `[B, H, W, C]`, treats the input as complex
+with zero imaginary part, applies `fft2` over the spatial axes, and returns
+`[B, H, W, 2*C]` with the real and imaginary parts concatenated on the channel axis. That
+is why `freq_conv` is `2 * hidden_dim` wide. `IFFTLayer` splits the channel axis back into
+a real/imaginary pair, applies `ifft2`, and keeps only the real part.
 
-The core block consists of two main residual operations:
-1.  **Token Mixer**: `x_res = Project(IFFT(GELU(Conv_freq(FFT(Expand(Norm(x)))))))`
-    `x = x + x_res`
-2.  **Feed-Forward Network**: `x_ffn = Project(GELU(DepthwiseConv(Expand(Norm(x)))))`
-    `x = x + x_ffn`
+**Why this is not attention.** The frequency-domain pointwise convolution mixes channels at
+each frequency independently; the spatial mixing is entirely in the transform. There is no
+data-dependent weighting between positions, which is precisely what makes it linear in
+parameters and `O(N log N)` in compute.
 
-This design is simple, efficient, and highly effective.
+**Complexity.** For `N` pixels, the token mixer is `O(N log N)` against global
+self-attention's `O(N^2)` — at 256x256 that is a difference of several orders of magnitude
+in the mixing term.
 
 ---
 
 ## 16. Citation
 
-If you use PW-FNet in your research, please cite the original paper:
-
 ```bibtex
 @article{jiang2025global,
-  title={Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image Restoration},
-  author={Jiang, Xingyu and Gao, Ning and Dou, Hongkun and Zhang, Xiuhui and Zhong, Xiaoqing and Deng, Yue and Li, Hongjue},
+  title={Global Modeling Matters: A Fast, Lightweight and Effective Baseline for
+         Efficient Image Restoration},
+  author={Jiang, Xingyu and Gao, Ning and Dou, Hongkun and Zhang, Xiuhui and
+          Zhong, Xiaoqing and Deng, Yue and Li, Hongjue},
   journal={arXiv preprint arXiv:2507.13663},
   year={2025}
-}```
+}
+```

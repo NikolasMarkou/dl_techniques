@@ -1,33 +1,15 @@
-# SqueezeNet: Highly Efficient Convolutional Architectures
+# SqueezeNet and SqueezeNodule-Net
 
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18%2B-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of the **SqueezeNet V1** and **SqueezeNodule-Net (V2)** architectures. SqueezeNet models are pioneering, efficient convolutional networks (ConvNets) designed to achieve high accuracy with a dramatically reduced parameter count and model size.
+Keras 3 implementations of two related efficient ConvNets:
 
-This implementation includes the original SqueezeNet V1 with its innovative **Fire Module**, and SqueezeNodule-Net, an evolution optimized for medical imaging tasks that uses a **Simplified Fire Module** and supports 3D convolutions.
+- **SqueezeNet V1** (`squeezenet_v1.py`) -- the original architecture built from **Fire modules**. The authors report AlexNet-level ImageNet accuracy with 50x fewer parameters.
+- **SqueezeNodule-Net** (`squeezenet_v2.py`) -- a medical-imaging variant built from **simplified Fire modules** (3x3 expand only), with 2D and 3D configurations.
 
----
-
-## Table of Contents
-
-1. [Overview: What is SqueezeNet and Why It Matters](#1-overview-what-is-squeezenet-and-why-it-matters)
-2. [The Problem SqueezeNet Solves](#2-the-problem-squeezenet-solves)
-3. [How SqueezeNet Works: Core Concepts](#3-how-squeezenet-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+They are separate architectures, not a version upgrade; neither deprecates the other.
 
 ---
 
@@ -35,525 +17,339 @@ This implementation includes the original SqueezeNet V1 with its innovative **Fi
 
 ### What is SqueezeNet?
 
-**SqueezeNet** is a family of deep convolutional neural networks that set a new standard for computational efficiency. The original paper demonstrated AlexNet-level accuracy on ImageNet with **50 times fewer parameters**, resulting in a model size of less than 0.5MB. Its design is centered around a clever micro-architectural block called the **Fire module**.
+SqueezeNet is a small convolutional classifier whose whole design is organised around cutting parameters rather than adding capacity. Its building block, the Fire module, first "squeezes" the channel count with `1x1` convolutions and then "expands" it again with a mix of `1x1` and `3x3` convolutions.
 
 ### Key Innovations
 
-1.  **The Fire Module (V1)**: SqueezeNet's core building block, which "squeezes" and "expands" feature maps to reduce computation. It consists of:
-    *   A **squeeze** layer of `1x1` convolutions to act as a bottleneck, reducing the number of input channels.
-    *   An **expand** layer with a mix of `1x1` and `3x3` convolutions that processes the squeezed features in parallel.
-2.  **Strategic Parameter Reduction**: The architecture is guided by three principles:
-    *   Replace expensive `3x3` filters with `1x1` filters where possible.
-    *   Decrease the number of input channels to `3x3` filters using the squeeze layer.
-    *   Downsample late in the network to preserve large feature maps.
-3.  **Simplified Fire Module (SqueezeNodule-Net V2)**: An evolution of the Fire module that forces spatial feature learning by removing the `1x1` path in the expand layer. It also uses a wider information bottleneck, which has proven effective for detailed tasks like medical image analysis.
-
-### Why SqueezeNet Matters
-
-**The Problem of Large Models**:
-```
-Problem: Deploy an accurate image classifier on a device with limited
-         memory and compute power (e.g., a smartphone or embedded system).
-
-Traditional CNN Approach (e.g., AlexNet, VGG):
-  1. Use deep stacks of large convolutional layers.
-  2. Limitation: Results in massive models (e.g., AlexNet > 200MB) that
-     are slow, power-hungry, and difficult to deploy over the air or on-device.
-  3. Result: High accuracy is chained to high-end hardware.
-```
-
-**SqueezeNet's Solution**:
-```
-SqueezeNet Approach:
-  1. Redesign the core building block (the Fire module) to be
-     aggressively parameter-efficient.
-  2. The squeeze/expand design drastically cuts down the parameter count
-     in each layer without a proportional drop in accuracy.
-  3. Benefit: Achieves competitive accuracy in a tiny footprint (<1MB),
-     unlocking deployment in resource-constrained environments.
-```
-
-### Real-World Impact
-
-SqueezeNet is an ideal choice for applications where efficiency is paramount:
-
--   📱 **Mobile & Edge Computing**: Its small size and low computational cost make it perfect for on-device inference.
--   🌐 **Distributed Training**: Smaller models are faster to transfer across networks.
--   🚗 **Autonomous Systems**: Enables real-time vision tasks on embedded hardware in drones and vehicles.
--   🩺 **Medical Imaging (SqueezeNodule-Net)**: The V2 variant is adapted for specialized tasks like nodule detection in 2D or 3D CT scans.
+1. **The Fire module.** A `1x1` squeeze convolution creates a narrow bottleneck, then two parallel expand convolutions (`1x1` and `3x3`) widen it back and are concatenated on the channel axis.
+2. **Three design rules.** Prefer `1x1` filters over `3x3`; reduce the input channel count seen by the surviving `3x3` filters; downsample late so most layers work on large feature maps.
+3. **No fully-connected classifier.** The head is a `1x1` convolution with `num_classes` filters followed by global average pooling, which removes the parameter-heavy dense layers of AlexNet-era models.
+4. **Simplified Fire module (SqueezeNodule-Net).** The `1x1` expand path is removed entirely, so every expanded channel carries `3x3` spatial context, and the squeeze ratio is raised to widen the bottleneck.
 
 ---
 
 ## 2. The Problem SqueezeNet Solves
 
-### The Burden of Model Size
+Parameter count in a convolution is `in_channels * k * k * out_channels`. A stack of `3x3` layers over wide feature maps therefore spends most of its budget on the `3x3` kernels, which is why AlexNet-era classifiers ran to hundreds of megabytes and could not be shipped to a phone or an embedded board.
 
-Before SqueezeNet, there was a direct correlation between a model's accuracy and its size. This created a significant barrier to deploying deep learning in the real world.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Model Deployment                            │
-│                                                             │
-│  Large, Accurate Models (e.g., VGG-16):                     │
-│    - High accuracy on benchmarks.                           │
-│    - Prohibitively large (~500MB), requiring significant    │
-│      storage, memory, and bandwidth.                        │
-│                                                             │
-│  Smaller, Faster Models:                                    │
-│    - Easy to deploy.                                        │
-│    - Historically suffered from a significant accuracy gap. │
-└─────────────────────────────────────────────────────────────┘
-```
-
-SqueezeNet fundamentally challenged this assumption by showing that architectural innovation, rather than sheer scale, could be the key to both accuracy and efficiency.
-
-### How SqueezeNet Changes the Game
-
-SqueezeNet introduced a new way of thinking about network design, focusing on "architectural MIPS" (millions of instructions per second) and parameter count as first-class citizens alongside accuracy.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  The SqueezeNet Design Philosophy                            │
-│                                                              │
-│  1. Squeeze Channels:                                        │
-│     - The number of parameters in a 3x3 conv layer is        │
-│       (input_channels * 3 * 3 * output_channels).            │
-│     - By using a 1x1 "squeeze" layer first, we dramatically  │
-│       reduce `input_channels` for the expensive 3x3 convs.   │
-│                                                              │
-│  2. Use 1x1 Filters for Expansion:                           │
-│     - A 1x1 convolution is 9x cheaper than a 3x3 convolution.│
-│     - The Fire module's expand layer uses many 1x1 filters   │
-│       to build channel depth cheaply.                        │
-└──────────────────────────────────────────────────────────────┘
-```
-
-This principled approach results in an incredibly compact yet powerful architecture.
+The Fire module attacks both factors at once: `1x1` kernels cost `9x` less than `3x3` kernels for the same channel counts, and the squeeze layer shrinks `in_channels` before the remaining `3x3` convolution ever runs. The paper's result is that the accuracy cost of this is much smaller than the size saving.
 
 ---
 
 ## 3. How SqueezeNet Works: Core Concepts
 
-### The Hierarchical Multi-Stage Architecture
-
-SqueezeNet uses a traditional CNN structure: an initial convolutional layer (the "stem"), followed by a series of Fire modules, with max-pooling layers periodically reducing the spatial resolution.
+### The Fire module
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                      SqueezeNet Architecture Flow                │
-│                                                                  │
-│  Input Image ───►┌──────────────────┐  (Downsamples 2x)          │
-│                  │  Conv1 + MaxPool │                            │
-│                  └────────┬─────────┘                            │
-│                           │                                      │
-│                  ┌────────▼─────────┐                            │
-│                  │   Fire Modules   │ (e.g., Fire2, Fire3)       │
-│                  └────────┬─────────┘                            │
-│                           │                                      │
-│                  ┌────────▼─────────┐  (Downsamples 2x)          │
-│                  │     MaxPool      │                            │
-│                  └────────┬─────────┘                            │
-│                           │                                      │
-│                  ┌────────▼─────────┐                            │
-│                  │   Fire Modules   │ (e.g., Fire4, Fire5)       │
-│                  └────────┬─────────┘                            │
-│                           │ ... and so on ...                    │
-│                           │                                      │
-│                  ┌────────▼──────────┐                           │
-│                  │ Classification Head│                          │
-│                  └────────────────────┘                          │
-└──────────────────────────────────────────────────────────────────┘
+Input (C_in channels)
+    |
+    +-> squeeze:  Conv 1x1, s1x1 filters, ReLU        -> (H, W, s1x1)
+    |
+    +-> expand 1x1: Conv 1x1, e1x1 filters, ReLU  --+
+    +-> expand 3x3: Conv 3x3, e3x3 filters, ReLU  --+-> concat -> (H, W, e1x1 + e3x3)
 ```
 
-### The Complete Data Flow
+The expensive `3x3` convolution sees only `s1x1` input channels. In `fire3` of the V1 configuration that is 16 channels instead of 128.
+
+### Squeeze ratio
+
+`SR = s1x1 / (e1x1 + e3x3)` measures how hard the bottleneck squeezes.
+
+| Configuration | Typical SR | Effect |
+| :--- | :--- | :--- |
+| SqueezeNet V1 | 0.125 (e.g. `16 / (64 + 64)`) | Aggressive compression, fewest parameters. |
+| SqueezeNodule-Net `v1` | 0.25 (`16 / 64`) | Lighter of the two nodule configurations. |
+| SqueezeNodule-Net `v2` | 0.50 early (`32 / 64`), 0.25 late | Wider bottleneck through the early stages. |
+
+### Network shape
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       SqueezeNet Complete Data Flow                     │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: STEM
-────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► Conv2D (e.g., 7x7 kernel, stride 2)
-    │
-    └─► MaxPooling2D (3x3, stride 2)
-
-
-STEP 2: FIRE MODULES & DOWNSAMPLING
-───────────────────────────────────
-Feature Map
-    │
-    ├─► Stack of Fire Modules (or SimplifiedFireModules)
-    │   (Each module maintains the resolution)
-    │
-    ├─► [Periodically] MaxPooling2D (3x3, stride 2)
-    │
-    └─► Repeat until all Fire modules are processed
-
-
-STEP 3: CLASSIFICATION HEAD
-───────────────────────────
-Final Feature Map
-    │
-    ├─► [Optional] Dropout
-    │
-    ├─► Final Conv2D (1x1 kernel, filters = num_classes)
-    │
-    ├─► Global Average Pooling
-    │
-    └─► Softmax Activation -> Probabilities (B, num_classes)
+Input (B, H, W, 3)
+    |
+    +-> conv1 (kernel/stride from the variant, ReLU, valid padding)
+    +-> maxpool 3x3 stride 2, valid
+    |
+    +-> fire2 ... fire9, with maxpool 3x3/2 inserted at the variant's pool positions
+    +-> dropout (after the last Fire module)
+    |
+    +-- include_top=False -> the feature map after dropout
+    +-- include_top=True  -> conv10 (1x1, num_classes filters, ReLU)
+                             -> GlobalAveragePooling -> softmax -> (B, num_classes)
 ```
+
+The head ends in **softmax**, so the model outputs probabilities. Compile with `from_logits=False` (the default).
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `FireModule` (SqueezeNetV1)
+### 4.1 `FireModule` (V1)
 
--   **Purpose**: The fundamental, parameter-efficient building block of the V1 architecture.
--   **Architecture**:
-    1.  **Squeeze Layer**: A `Conv2D` layer with only `1x1` filters. Its sole purpose is to reduce the channel dimensionality of its input, creating a bottleneck.
-    2.  **Expand Layer**: Takes the low-dimensional output from the squeeze layer and feeds it to two parallel `Conv2D` layers: one with `1x1` filters and one with `3x3` filters.
-    3.  **Concatenation**: The outputs of the two expand layers are concatenated along the channel axis, producing the final output of the module.
+`FireModule(s1x1, e1x1, e3x3, kernel_regularizer=None, kernel_initializer=...)`. Squeeze `1x1` -> parallel `1x1` and `3x3` expands -> channel concatenation. Output width is `e1x1 + e3x3`; spatial size is unchanged.
 
-### 4.2 `SimplifiedFireModule` (SqueezeNodule-Net V2) and Squeeze Ratio
+### 4.2 `SimplifiedFireModule` (SqueezeNodule-Net)
 
--   **Purpose**: An evolution of the Fire module designed to force spatial feature learning and widen the information bottleneck.
--   **Architecture**: It is a simpler version of the original:
-    1.  **Squeeze Layer**: A `1x1` `Conv2D` layer, same as in V1.
-    2.  **Expand Layer**: This layer contains **only the `3x3` convolutional path**. The `1x1` expand path is completely removed.
--   **How it Works**:
-    1.  **Forced Spatial Context**: By removing the `1x1` expand path (which only mixes channels), the module is forced to learn features that incorporate local spatial information from the `3x3` convolution. This is hypothesized to be more effective for tasks requiring texture and shape analysis, like medical imaging.
-    2.  **Wider Bottleneck (Squeeze Ratio)**: The Squeeze Ratio (SR), `s1x1 / total_expand_filters`, controls how much information is squeezed. SqueezeNetV1 uses a very low SR (e.g., 0.125) for maximum compression. SqueezeNoduleNetV2 uses a higher SR (e.g., 0.50), creating a wider bottleneck that allows more information to pass through, which can improve accuracy and training speed on complex datasets.
+`SimplifiedFireModule(s1x1, e3x3, ...)`. Same squeeze, but only the `3x3` expand path. Output width is `e3x3`. Dropping the `1x1` path means no output channel is a pure channel mixture -- every one carries local spatial context, which is the stated motivation for texture-heavy medical images.
+
+### 4.3 Valid padding and the minimum input size
+
+Every downsampling stage uses `padding='valid'`: a strided stem convolution plus three `pool_size=3, strides=2` max-pools. Under valid padding an axis of length `n` becomes `(n - k) // s + 1`, which reaches **zero** for small inputs, and Keras 3.8 does not raise on a zero-length spatial axis -- the model would emit a correctly shaped, all-NaN tensor.
+
+`spatial_guard.py` walks that arithmetic before construction and raises a `ValueError` naming the collapsing stage, the axis and the minimum legal extent. The minima are computed per variant, not tabulated:
+
+| Variant family | Minimum spatial extent per axis |
+| :--- | ---: |
+| V1 `"1.0"`, `"1.0_bypass"` (7x7 stem, pools after conv1/fire4/fire8) | 35 |
+| V1 `"1.1"` (3x3 stem, pools after conv1/fire3/fire5) | 31 |
+| All SqueezeNodule-Net variants | 35 |
+
+This is why CIFAR-sized `32x32` input works with `"1.1"` and raises with `"1.0"`.
+
+### 4.4 Bypass connections
+
+The `"1.0_bypass"` variant adds identity residuals around `fire3`, `fire5`, `fire7` and `fire9` -- the four positions where a Fire module's input and output widths match (128, 256, 384, 512). This is the paper's "simple bypass"; it adds no parameters.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First SqueezeNet Model (30 seconds)
-
-Let's build a SqueezeNetV1 for a simple classification task on CIFAR-10.
-
 ```python
 import keras
 import numpy as np
 
-# Local imports from your project structure
-from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
+from dl_techniques.models.vision.squeezenet import create_squeezenet_v1
 
-# 1. Create a SqueezeNetV1 model for CIFAR-10 (32x32 images, 10 classes)
-# We use variant "1.1" which is better suited for small images.
+# 1. Model. "1.1" clears the 31-pixel floor, so 32x32 input is legal.
 model = create_squeezenet_v1(
     variant="1.1",
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
 )
 
-# 2. Compile the model
+# 2. Compile. The head ends in softmax, so the loss reads probabilities.
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=1e-3),
     loss=keras.losses.SparseCategoricalCrossentropy(),
     metrics=["accuracy"],
 )
-print("✅ SqueezeNetV1 model created and compiled successfully!")
 model.summary()
 
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3).astype("float32")
-dummy_labels = np.random.randint(0, 10, batch_size)
+# 3. One training step on dummy data.
+images = np.random.rand(16, 32, 32, 3).astype("float32")
+labels = np.random.randint(0, 10, 16)
+loss, acc = model.train_on_batch(images, labels)
+print(f"loss={loss:.4f} acc={acc:.4f}")
 
-# 4. Train for one step
-loss, acc = model.train_on_batch(dummy_images, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
-
-# 5. Run inference
-predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+# 4. Inference.
+predictions = model.predict(images, verbose=0)
+print(predictions.shape)  # (16, 10)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Classes and Creation Functions
+### 6.1 Public API
 
-| Component | Location | Purpose |
+Everything below is importable straight from `dl_techniques.models.vision.squeezenet`.
+
+| Name | Module | Purpose |
 | :--- | :--- | :--- |
-| **`SqueezeNetV1`** | `...squeezenet.squeezenet_v1` | The main Keras `Model` for the V1 architecture. |
-| **`create_squeezenet_v1`** | `...squeezenet.squeezenet_v1` | Recommended function to create `SqueezeNetV1` models. |
-| **`SqueezeNoduleNetV2`**|`...squeezenet.squeezenet_v2`| The main Keras `Model` for the V2/NoduleNet architecture. |
-| **`create_squeezenodule_net_v2`**|`...squeezenet.squeezenet_v2`| Recommended function to create `SqueezeNoduleNetV2` models.|
+| `SqueezeNetV1` | `squeezenet_v1` | Functional `keras.Model` for the V1 architecture. |
+| `create_squeezenet_v1` | `squeezenet_v1` | Factory for `SqueezeNetV1`. |
+| `FireModule` | `squeezenet_v1` | Squeeze/expand block with both expand paths. |
+| `SqueezeNoduleNetV2` | `squeezenet_v2` | Functional `keras.Model` for SqueezeNodule-Net (2D and 3D). |
+| `create_squeezenodule_net_v2` | `squeezenet_v2` | Factory for `SqueezeNoduleNetV2`. |
+| `SimplifiedFireModule` | `squeezenet_v2` | Squeeze/expand block with only the `3x3` path. |
 
-### 6.2 Core Building Blocks
+### 6.2 Factory arguments
 
-| Layer | Location | Purpose |
+Both factories take the same four named arguments and forward everything else to the constructor:
+
+| Argument | Default | Description |
 | :--- | :--- | :--- |
-| **`FireModule`** | `...squeezenet.squeezenet_v1` | The core block of the V1 architecture with squeeze/expand. |
-| **`SimplifiedFireModule`** |`...squeezenet.squeezenet_v2` | The core block of the V2 architecture with only a 3x3 expand path.|
+| `variant` | `"1.0"` / `"v2"` | Key into the class's `MODEL_VARIANTS`. |
+| `num_classes` | `1000` | Output classes. |
+| `input_shape` | `(224, 224, 3)` | Input shape; 4D `(D, H, W, C)` for the 3D variants. |
+| `weights` | `None` | Unsupported. Any non-`None` value raises `NotImplementedError`. |
+
+Constructor arguments reachable through `**kwargs`:
+
+| Argument | Default | Description |
+| :--- | :--- | :--- |
+| `include_top` | `True` | `False` returns the post-dropout feature map. |
+| `dropout_rate` | `0.5` | Dropout after the last Fire module. |
+| `kernel_regularizer` | `None` | Applied to every convolution. |
+| `kernel_initializer` | Caffe xavier | Fire and bypass convolutions. |
+| `use_bypass` (V1 only) | from variant | `False`, `"simple"` or `"complex"`; an explicit value overrides the variant. |
+| `use_3d` (V2 only) | from variant | Switches Conv/MaxPool/GlobalAveragePooling to their 3D forms. |
+
+### 6.3 Pretrained weights
+
+None are distributed. Passing `weights=<anything>` to either factory (or to `from_variant`) raises `NotImplementedError` rather than quietly returning a random model. To reuse a local checkpoint, build the architecture and `keras.models.load_model()` the file.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-### SqueezeNetV1 Variants
+### SqueezeNetV1
 
-| Variant | Key Differences |
-|:---:|:---|
-| **`1.0`** | 7x7 stem convolution, pooling after Fire modules 1, 4, 8. **Warning: May fail on inputs < 64x64.** |
-| **`1.1`** | 3x3 stem convolution, different pooling strategy. More efficient and stable on smaller inputs. |
-| **`1.0_bypass`** | Same as `1.0` but adds residual (bypass) connections around some Fire modules to improve gradient flow. |
+Parameter counts measured at `input_shape=(224, 224, 3)`, `num_classes=1000`.
 
-### SqueezeNoduleNetV2 Variants
+| Variant | Stem | Pools after | Bypass | Params |
+| :--- | :--- | :--- | :--- | ---: |
+| `1.0` | `7x7`, 96 filters, stride 2 | conv1, fire4, fire8 | none | 1,248,424 |
+| `1.1` | `3x3`, 64 filters, stride 2 | conv1, fire3, fire5 | none | 1,235,496 |
+| `1.0_bypass` | `7x7`, 96 filters, stride 2 | conv1, fire4, fire8 | simple, at fire3/5/7/9 | 1,248,424 |
 
-| Variant | Squeeze Ratios (SR) | Dimensions |
-|:---:|:---|:---|
-| **`v1`** | SR=0.25 for all modules. Lighter version. | 2D |
-| **`v2`** | SR=0.50 for early modules, SR=0.25 for later ones. Wider bottleneck. | 2D |
-| **`v1_3d`**| SR=0.25 for all modules. | 3D |
-| **`v2_3d`**| SR=0.50 / 0.25. Wider bottleneck. | 3D |
+All three share one Fire schedule:
+
+| Module | `s1x1` | `e1x1` | `e3x3` | Output width |
+| :--- | ---: | ---: | ---: | ---: |
+| fire2, fire3 | 16 | 64 | 64 | 128 |
+| fire4, fire5 | 32 | 128 | 128 | 256 |
+| fire6, fire7 | 48 | 192 | 192 | 384 |
+| fire8, fire9 | 64 | 256 | 256 | 512 |
+
+### SqueezeNoduleNetV2
+
+| Variant | Squeeze filters (fire2..fire9) | Dimensionality | Params at 224x224x3, 1000 classes |
+| :--- | :--- | :--- | ---: |
+| `v1` | 16, 16, 32, 32, 48, 48, 64, 64 | 2D | 878,504 |
+| `v2` | 32, 32, 64, 64, 96, 96, 64, 64 | 2D | 1,160,808 |
+| `v1_3d` | same as `v1` | 3D | -- |
+| `v2_3d` | same as `v2` | 3D | -- |
+
+Expand widths are the same for all four: 64, 64, 128, 128, 192, 192, 256, 256. All four use the `7x7` stem and pool after conv1, fire4 and fire8. The `_3d` variants take a 4D `(D, H, W, C)` input, so they have no entry in that column; `v2_3d` with `num_classes=2` measures 2,545,154 parameters.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Using SqueezeNet as a Feature Extraction Backbone
-
-You can use a headless SqueezeNet as a lightweight backbone for other tasks.
+### Example 1: backbone for a downstream task
 
 ```python
-from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
 import numpy as np
+from dl_techniques.models.vision.squeezenet import create_squeezenet_v1
 
-# 1. Create the feature extractor by setting include_top=False
 backbone = create_squeezenet_v1(
     variant="1.0",
     include_top=False,
-    input_shape=(224, 224, 3)
+    input_shape=(224, 224, 3),
 )
 
-# 2. Extract features
-dummy_images = np.random.rand(2, 224, 224, 3).astype("float32")
-features = backbone.predict(dummy_images)
-
-# The output is the feature map from the final Fire module (before the head)
-# Spatial resolution is downsampled by 32x for this variant
-print(f"Output shape: {features.shape}") # (2, 13, 13, 512)
+images = np.random.rand(2, 224, 224, 3).astype("float32")
+features = backbone.predict(images, verbose=0)
+print(features.shape)  # (2, 12, 12, 512)
 ```
 
-### Example 2: Creating a 3D Model for Volumetric Data
+The trailing width is always 512 (the `fire9` output). The spatial size follows the variant's valid-padding arithmetic, not a clean power of two: `"1.0"` gives `12x12` at 224 input and `"1.1"` gives `13x13`.
 
-SqueezeNodule-Net V2 is designed to work with 3D data like CT scans.
+### Example 2: a 3D model for volumetric data
 
 ```python
-from dl_techniques.models.vision.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
+from dl_techniques.models.vision.squeezenet import create_squeezenodule_net_v2
 
-# Create a 3D model for a binary classification task on 64x64x64 volumes
 model_3d = create_squeezenodule_net_v2(
     variant="v2_3d",
     num_classes=2,
-    input_shape=(64, 64, 64, 1) # (depth, height, width, channels)
+    input_shape=(64, 64, 64, 1),   # (depth, height, width, channels)
 )
+print(f"{model_3d.count_params():,}")  # 2,545,154
+```
 
-print(f"3D model params: {model_3d.count_params():,}")
-model_3d.summary()
+### Example 3: bypass connections
+
+```python
+from dl_techniques.models.vision.squeezenet import create_squeezenet_v1
+
+bypass_model = create_squeezenet_v1(
+    variant="1.0_bypass",
+    num_classes=100,
+    input_shape=(224, 224, 3),
+)
+print([l.name for l in bypass_model.layers if l.name.startswith("add")])
+# ['add_fire3', 'add_fire5', 'add_fire7', 'add_fire9']
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Using Bypass Connections for Better Training
+### Overriding a variant's bypass setting
 
-The `1.0_bypass` variant of SqueezeNetV1 incorporates residual connections, similar to ResNet. This can improve gradient flow and make it easier to train deeper or more complex models based on the SqueezeNet architecture.
+`use_bypass` is resolved from an `is None` sentinel, not from truthiness, so an explicit `False` genuinely turns the bypass off even on `"1.0_bypass"`:
 
 ```python
-from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
-
-# Create the bypass variant
-# This is useful for tasks where training might be unstable
-bypass_model = create_squeezenet_v1(
-    variant="1.0_bypass",
-    num_classes=100,
-    input_shape=(224, 224, 3)
-)
-
-# The Add layers in the summary show where the bypass connections are:
-# add_fire3, add_fire5, add_fire7, add_fire9 -- the four positions where the
-# input and output widths of a Fire module match (128, 256, 384, 512).
-bypass_model.summary()
+plain = create_squeezenet_v1("1.0_bypass", num_classes=10,
+                             input_shape=(64, 64, 3), use_bypass=False)
+print([l.name for l in plain.layers if l.name.startswith("add")])  # []
 ```
 
----
+`"complex"` is also accepted: it bypasses every Fire module, inserting a `1x1` projection where the widths do not match.
 
-## 10. Performance Optimization
-
-### Mixed Precision Training
-
-SqueezeNet's simple convolutional structure is ideal for mixed precision training, which can significantly accelerate training on modern GPUs with Tensor Cores.
+### Mixed precision
 
 ```python
-import keras
-
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Create model (will automatically use mixed precision)
-model = create_squeezenet_v1("1.1", num_classes=1000)
-model.compile(...)
-
-# When training, use a LossScaleOptimizer to prevent numeric underflow
-# Keras's model.fit() handles this automatically.
+keras.mixed_precision.set_global_policy("mixed_float16")
 ```
 
----
-
-## 11. Training and Best Practices
-
-### Optimizer and Regularization
-
--   **Optimizer**: **Adam** or **AdamW** are excellent choices for training SqueezeNet models.
--   **Regularization**: The `dropout_rate` (default is 0.5) is a crucial hyperparameter for preventing overfitting. It is applied after the final Fire module. You can also pass a `kernel_regularizer` to the constructor to apply weight decay to all convolutional layers.
-
-### Input Image Size
-
--   **Crucial Consideration**: The default SqueezeNet V1.0 architecture uses `3x3` max-pooling with `'valid'` padding. This can cause the model to fail (either crash or produce `NaN` outputs) if the input image is too small (e.g., 32x32).
--   **Recommendation**: For small images (< 64x64), **use the `1.1` variant**, which has a more forgiving pooling strategy. For larger images (>= 64x64), the `1.0` variant is fine.
+Set the policy before constructing the model. `model.fit()` handles loss scaling.
 
 ---
 
-## 12. Serialization & Deployment
+## 10. Training Notes
 
-All SqueezeNet models and their custom `FireModule` layers are fully serializable using Keras 3's modern `.keras` format.
+- **Optimizer**: Adam or AdamW work well; the models are small enough that the schedule rarely needs tuning.
+- **Regularization**: `dropout_rate` (default `0.5`) sits between the last Fire module and the head. `kernel_regularizer` reaches every convolution.
+- **Initialization**: the stem and Fire convolutions use Caffe's xavier filler (`fan_in`-normalized, i.e. `lecun_uniform` here) and `conv10` alone uses `Normal(0, 0.01)`, transcribed from the reference prototxt. `caffe_reference_init.py` carries the derivation.
+- **Input size**: check the minimum extent in 4.3 before picking a variant for small images.
 
-### Saving and Loading
+---
+
+## 11. Serialization
 
 ```python
-import keras
-from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule
-
-# Create and train model
-model = SqueezeNetV1.from_variant("1.1", num_classes=10, input_shape=(32,32,3))
-# model.compile(...) and model.fit(...)
-
-# Save the entire model to a single file
-model.save('my_squeezenet_model.keras')
-
-# Load the model back, providing the custom classes for deserialization
-loaded_model = keras.models.load_model(
-    'my_squeezenet_model.keras',
-    custom_objects={"SqueezeNetV1": SqueezeNetV1, "FireModule": FireModule}
-)
-print("✅ SqueezeNetV1 model loaded successfully!")```
-
-*Note: The same process applies to `SqueezeNoduleNetV2` and `SimplifiedFireModule`.*
-
----
-
-## 13. Testing & Validation
-
-### Unit Tests
-
-You can validate the implementation with simple tests to ensure all variants can be created and run a forward pass.
-
-```python
-import numpy as np
-from dl_techniques.models.vision.squeezenet.squeezenet_v1 import create_squeezenet_v1
-from dl_techniques.models.vision.squeezenet.squeezenet_v2 import create_squeezenodule_net_v2
-
-def test_v1_variants():
-    create_squeezenet_v1("1.0", num_classes=10, input_shape=(64, 64, 3))
-    create_squeezenet_v1("1.1", num_classes=10, input_shape=(32, 32, 3))
-    print("✓ SqueezeNetV1 variants created successfully")
-
-def test_v2_variants():
-    create_squeezenodule_net_v2("v2", num_classes=10, input_shape=(64, 64, 3))
-    create_squeezenodule_net_v2("v2_3d", num_classes=10, input_shape=(64, 64, 64, 1))
-    print("✓ SqueezeNoduleNetV2 variants created successfully")
-
-def test_forward_pass_shape():
-    model = create_squeezenet_v1("1.1", num_classes=10, input_shape=(32, 32, 3))
-    dummy_input = np.random.rand(4, 32, 32, 3).astype("float32")
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
-
-if __name__ == '__main__':
-    test_v1_variants()
-    test_v2_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
+model.save("my_squeezenet.keras")
+loaded = keras.models.load_model("my_squeezenet.keras")
 ```
 
----
-
-## 14. Troubleshooting & FAQs
-
-**Issue 1: My training crashes or the output is `NaN` with 32x32 images.**
-
--   **Cause**: You are likely using `SqueezeNetV1` with the `"1.0"` variant. Its aggressive `3x3` max-pooling with `'valid'` padding reduces the feature map dimensions to a size smaller than the pooling kernel.
--   **Solution**: For images smaller than 64x64, **always use the `"1.1"` variant**. It has a different stem and pooling strategy designed to be more robust.
-
-### Frequently Asked Questions
-
-**Q: What is the main difference between SqueezeNetV1 and SqueezeNoduleNetV2?**
-
-A: There are two key differences. First, SqueezeNoduleNetV2 uses a **`SimplifiedFireModule`** that removes the `1x1` expand path to force spatial feature learning. Second, it generally uses a **higher Squeeze Ratio**, creating a wider bottleneck to preserve more information, which is beneficial for complex patterns. It also adds native support for 3D convolutions.
-
-**Q: Why is SqueezeNet so small?**
-
-A: The efficiency comes from the **Fire module**. The `1x1` squeeze layer acts as a bottleneck, dramatically reducing the number of channels that the more expensive `3x3` convolutions have to process. This design is the primary driver of its extreme parameter reduction.
-
-**Q: When should I use the `1.0_bypass` variant?**
-
-A: Use the bypass variant when you are training a deeper network or if you find that training is unstable. The residual connections help gradients flow more easily through the network, which can stabilize and accelerate training, similar to how they work in ResNet.
+The models and both Fire-module layers are registered, so no `custom_objects` argument is needed.
 
 ---
 
-## 15. Technical Details
+## 12. Troubleshooting
 
-### The Fire Module Bottleneck
-
-The core principle of SqueezeNet is the squeeze-expand bottleneck. A `FireModule` might receive a feature map with a large number of channels, squeeze it down to a very small number, and then expand it back up.
-
--   **Example Flow**:
-    `Input (128 channels) -> Squeeze (16 channels) -> Expand (64 from 1x1 + 64 from 3x3) -> Output (128 channels)`
-
-In this example, the expensive `3x3` convolution only sees an input with 16 channels instead of 128, providing a massive reduction in computation and parameters.
-
-### Squeeze Ratio (SR)
-
-The Squeeze Ratio is a key hyperparameter that controls the compression level of the Fire module. It is defined as:
-`SR = num_squeeze_filters / num_expand_filters`
-
--   A **low SR** (e.g., 0.125 in SqueezeNetV1) creates a very aggressive bottleneck, maximizing parameter efficiency.
--   A **high SR** (e.g., 0.50 in SqueezeNoduleNetV2) creates a wider bottleneck, preserving more information at the cost of slightly more parameters. This can lead to better accuracy on fine-grained tasks.
+- `ValueError: ... collapses to length 0 at stage ...` -- the input is smaller than the variant's minimum extent (4.3). Use `"1.1"` for 32-pixel inputs, or enlarge the input.
+- `NotImplementedError` from `weights=` -- expected; no checkpoints ship with this package.
+- `ValueError: num_classes must be a positive integer` / `dropout_rate must be in range [0, 1)` -- constructor validation.
+- Loss much higher than expected -- the head already applies softmax; do not pass `from_logits=True`.
+- A backbone output with an unexpected spatial size -- valid padding, not `same`. See Example 1.
 
 ---
 
-## 16. Citation
+## 13. Technical Details
 
-This implementation is based on the official papers. If you use these models in your research, please consider citing the original works:
+**Head.** `conv10` is a `1x1` convolution with `num_classes` filters and a ReLU activation, followed by global average pooling and softmax. The softmax is applied at every `num_classes`, including 2; there is no binary special case, so the output shape is always `(B, num_classes)`.
 
--   **SqueezeNet V1**:
+**Initializers.** `STEM_INITIALIZER` and `HEAD_INITIALIZER` are different fillers on purpose. `HEAD_INITIALIZER` is stored as a serialized config dict and copied at each call site, because one shared seedless `Initializer` instance replays its draw.
+
+**Fire numbering.** Modules are named `fire2` through `fire9`, matching the paper; the stem convolution is `conv1` and the head convolution is `conv10`.
+
+---
+
+## 14. Citation
+
+- **SqueezeNet**:
     ```bibtex
     @article{iandola2016squeezenet,
-      title={SqueezeNet: AlexNet-level accuracy with 50x fewer parameters and< 0.5 MB model size},
+      title={SqueezeNet: AlexNet-level accuracy with 50x fewer parameters and <0.5MB model size},
       author={Iandola, Forrest N and Han, Song and Moskewicz, Matthew W and Ashraf, Khalid and Dally, William J and Keutzer, Kurt},
       journal={arXiv preprint arXiv:1602.07360},
       year={2016}
     }
     ```
--   **SqueezeNodule-Net (V2 basis)**:
+- **SqueezeNodule-Net**:
     ```bibtex
     @article{tsivgoulis2022improved,
       title={An improved SqueezeNet model for the diagnosis of lung cancer in CT scans},

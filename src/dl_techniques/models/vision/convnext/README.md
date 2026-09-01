@@ -4,30 +4,9 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks (ConvNets) that were modernized to compete with and often outperform Vision Transformers (ViTs) by progressively incorporating architectural decisions from ViTs into a standard ResNet.
+A Keras 3 implementation of the **ConvNeXt V1 and V2** architectures. ConvNeXt models are pure convolutional networks that were modernized to compete with Vision Transformers by progressively folding ViT design decisions into a standard ResNet.
 
-The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which introduces Global Response Normalization (GRN).
-
----
-
-## Table of Contents
-
-1. [Overview: What is ConvNeXt and Why It Matters](#1-overview-what-is-convnext-and-why-it-matters)
-2. [The Problem ConvNeXt Solves](#2-the-problem-convnext-solves)
-3. [How ConvNeXt Works: Core Concepts](#3-how-convnext-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+The implementation covers both ConvNeXt V1 and ConvNeXt V2, which adds Global Response Normalization (GRN).
 
 ---
 
@@ -35,314 +14,203 @@ The implementation includes both ConvNeXt V1 and the improved ConvNeXt V2, which
 
 ### What is ConvNeXt?
 
-**ConvNeXt** is a family of pure convolutional neural networks that was designed to challenge the dominance of Vision Transformers. The authors of the original paper systematically investigated architectural differences between a standard ResNet and a Vision Transformer, and progressively adapted the ResNet to incorporate modern design principles, ultimately creating a ConvNet that matched or exceeded the performance of state-of-the-art Transformers on image classification.
+**ConvNeXt** is a family of pure convolutional networks. The authors of the original paper walked a standard ResNet through the architectural differences that separate it from a Vision Transformer, one change at a time, and reported a ConvNet that matches or exceeds contemporary Transformers on ImageNet classification.
 
 ### Key Innovations
 
-1.  **Modernized Architecture (V1)**: ConvNeXt V1 redesigns a standard ResNet with several key changes inspired by ViTs:
-    *   A "patchify" stem using a `4x4` non-overlapping convolution.
-    *   Large `7x7` depthwise convolution kernels to increase the effective receptive field.
-    *   An inverted bottleneck structure, similar to MobileNetV2.
-    *   The replacement of BatchNorm with LayerNorm for more stable training.
-    *   Fewer activation and normalization layers for a more streamlined design.
-2.  **Global Response Normalization (V2)**: The primary evolution from V1 to V2 is the introduction of Global Response Normalization (GRN), a simple layer added to each block. GRN encourages channel-wise feature competition and enhances feature diversity, leading to improved model performance, especially when paired with self-supervised pre-training methods.
-3.  **Efficiency and Simplicity**: As pure ConvNets, ConvNeXt models do not rely on the complex and memory-intensive self-attention mechanism, making them generally simpler to implement, understand, and optimize for various hardware platforms.
-
-### Why ConvNeXt Matters
-
-**Standard Vision Transformer (ViT) Problem**:
-```
-Problem: Classify a high-resolution image efficiently.
-ViT Approach:
-  1. Split the image into patches and process them with a deep stack of
-     self-attention layers.
-  2. Limitation: Self-attention has O(N²) complexity, where N is the number of
-     patches. This makes ViTs slow and memory-hungry with high-resolution inputs.
-  3. Result: Standard ViTs can be inefficient for real-time or on-device use.
-```
-
-**ConvNeXt's Solution**:
-```
-ConvNeXt Approach:
-  1. Start with a classic, efficient ResNet architecture.
-  2. Systematically apply modern design principles (larger kernels, layer norm,
-     inverted bottlenecks) to boost performance without sacrificing the
-     linear complexity of convolutions.
-  3. Add a simple normalization layer (GRN in V2) to further improve
-     representational quality.
-  4. Benefit: Achieves Transformer-level accuracy while retaining the efficiency
-     and simplicity of a pure ConvNet.
-```
-
-### Real-World Impact
-
-ConvNeXt is an excellent choice for a wide range of computer vision tasks where a strong, general-purpose backbone is needed:
-
--   🖼️ **Image Classification**: Its primary design target, where it achieves state-of-the-art results.
--   **Object Detection & Segmentation**: A powerful feature extractor for dense prediction tasks.
--   **Transfer Learning**: Pre-trained ConvNeXt models are excellent starting points for fine-tuning on custom datasets.
--   ☁️ **Efficient Cloud Deployment**: Offers a compelling accuracy/compute trade-off for large-scale vision services.
+1.  **Modernized architecture (V1)**: a "patchify" stem (`4x4` conv, stride 4), large `7x7` depthwise kernels, an inverted bottleneck, LayerNorm instead of BatchNorm, and fewer activation and normalization layers overall.
+2.  **Global Response Normalization (V2)**: one extra layer per block that encourages channel-wise feature competition. It is the only architectural difference between V1 and V2, and it pairs well with masked-autoencoder pre-training.
+3.  **Simplicity**: no self-attention, so cost is linear in the number of pixels and the operators are the ones every accelerator already optimizes.
 
 ---
 
 ## 2. The Problem ConvNeXt Solves
 
-### The Efficiency-Accuracy Trade-off
+Vision architectures have traded accuracy against compute:
 
-In computer vision, there has long been a trade-off between model accuracy and computational efficiency.
+| Family | Strength | Cost |
+| :--- | :--- | :--- |
+| CNNs | local operations and weight sharing make them cheap | historically weaker at long-range dependencies |
+| ViTs | self-attention models global context directly | quadratic in the number of patches, so high-resolution input is expensive |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Vision Architectures                        │
-│                                                             │
-│  Convolutional Neural Networks (CNNs):                      │
-│    - Highly efficient due to local operations and shared weights.
-│    - Traditionally struggled to model long-range, global    │
-│      dependencies as effectively as Transformers.           │
-│                                                             │
-│  Vision Transformers (ViTs):                                │
-│    - Excellent at modeling global context via self-attention.
-│    - Suffer from quadratic complexity, making them slow and │
-│      inefficient, especially with high-resolution inputs.   │
-└─────────────────────────────────────────────────────────────┘
-```
+ConvNeXt argues that most of the Transformer's gain came from macro/micro design choices and training recipes rather than from self-attention itself. Applying those choices to a ConvNet gives a competitive model that keeps convolutional cost:
 
-ConvNeXt challenges this dichotomy by demonstrating that a well-designed ConvNet can effectively capture features at multiple scales and achieve global context awareness without abandoning the efficiency of the convolutional operator.
-
-### How ConvNeXt Changes the Game
-
-ConvNeXt proves that many of the performance gains attributed to the Transformer architecture are not due to self-attention itself, but rather to other architectural and training strategy improvements. By applying these improvements to a ConvNet, it provides a highly competitive alternative.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The ConvNeXt Modernization Strategy                        │
-│                                                             │
-│  1. Macro Design:                                           │
-│     - Adopt a ViT-like stage compute ratio and a "patchify" │
-│       stem for better multi-scale feature extraction.       │
-│                                                             │
-│  2. Micro Design:                                           │
-│     - Use large 7x7 depthwise convolutions to increase the  │
-│       receptive field, mimicking the global view of attention.
-│     - Employ an inverted bottleneck block for higher capacity.
-│     - Use Layer Normalization and GELU activation for       │
-│       consistency with modern Transformer designs.          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-This principled approach results in a simple, scalable, and powerful architecture that serves as a robust baseline for many vision tasks.
+-   **Macro design**: ViT-like stage compute ratios and a patchify stem.
+-   **Micro design**: `7x7` depthwise convolutions for a wide receptive field, an inverted bottleneck for capacity, LayerNorm and GELU for consistency with Transformer blocks.
 
 ---
 
 ## 3. How ConvNeXt Works: Core Concepts
 
-### The Hierarchical Multi-Stage Architecture
-
-ConvNeXt retains the classic hierarchical structure of a CNN, processing an image in four stages at progressively decreasing resolutions.
+ConvNeXt keeps the classic multi-stage hierarchy of a CNN, reducing resolution between stages.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                      ConvNeXt Architecture Stages                │
-│                                                                  │
-│  Input Image ───►┌──────────────────┐  (Downsamples 4x)          │
-│   (H, W)         │   "Patchify" Stem  │                          │
-│                  └────────┬─────────┘                            │
-│                           │ (H/4, W/4)                           │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 1     │                            │
-│                  │(ConvNeXt Blocks) │                            │
-│                  └────────┬─────────┘                            │
-│                           │ Downsample 2x                        │
-│                           ▼ (H/8, W/8)                           │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 2     │                            │
-│                  │(ConvNeXt Blocks) │                            │
-│                  └────────┬─────────┘                            │
-│                           │ Downsample 2x                        │
-│                           ▼ (H/16, W/16)                         │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 3     │                            │
-│                  │(ConvNeXt Blocks) │                            │
-│                  └────────┬─────────┘                            │
-│                           │ Downsample 2x                        │
-│                           ▼ (H/32, W/32)                         │
-│                  ┌────────▼─────────┐  (Maintains resolution)    │
-│                  │      Stage 4     │                            │
-│                  │(ConvNeXt Blocks) │                            │
-│                  └────────┬─────────┘                            │
-│                           │                                      │
-│                  ┌────────▼──────────┐                           │
-│                  │ Classification Head│                          │
-│                  └────────────────────┘                          │
-└──────────────────────────────────────────────────────────────────┘
+Input (H, W, 3)
+   │
+   ├─► Stem: Conv2D SxS stride S, padding "valid" -> LayerNorm   (H/S,  W/S,  D0)
+   │
+   ├─► Stage 0: N0 x ConvNeXt block                              (H/S,  W/S,  D0)
+   ├─► Downsample: LayerNorm -> Conv2D SxS stride S, "same"
+   ├─► Stage 1: N1 x ConvNeXt block                              (H/S², W/S², D1)
+   ├─► Downsample
+   ├─► Stage 2: N2 x ConvNeXt block                              (H/S³, W/S³, D2)
+   ├─► Downsample
+   ├─► Stage 3: N3 x ConvNeXt block                              (H/S⁴, W/S⁴, D3)
+   │
+   └─► Head (include_top): GlobalAveragePooling -> LayerNorm -> Dense
+                                                                 (B, num_classes)
 ```
 
-### The Complete Data Flow
+`S` is the `strides` argument, default 4. Note the **divergence from the paper**: the inter-stage
+downsamples here reuse the stem stride, so with the default `S = 4` a four-stage model reduces
+resolution by 4⁴ = 256x in total, not the paper's 32x. A 512x512 input leaves a 2x2 final feature
+map. Set `strides=2` for a stem-plus-2x-downsample layout closer to the reference.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       ConvNeXt Complete Data Flow                       │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: STEM
-────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► "Patchify" Conv2D (4x4 kernel, stride 4)
-    │
-    ├─► Layer Normalization
-    │
-    └─► Feature Map 0: (B, H/4, W/4, D₀)
-
-
-STEP 2: STAGES 1-4
-──────────────────
-Feature Map (Input to Stage `i`)
-    │
-    ├─► [If i > 0] Downsampling Block (Stride-2 Conv + LayerNorm)
-    │
-    ├─► Stack of ConvNeXt Blocks (V1 or V2)
-    │   (Each block maintains the resolution)
-    │
-    └─► Feature Map (Output of Stage `i`)
-
-
-STEP 3: CLASSIFICATION HEAD
-───────────────────────────
-Final Feature Map
-    │
-    ├─► Global Average Pooling
-    │
-    ├─► Layer Normalization
-    │
-    ├─► [Optional] Dropout
-    │
-    ├─► Dense Layer (Classifier)
-    │
-    └─► Logits (B, num_classes)
-```
+The blocks are **transform-only**: a block returns `F(x)`, and the model owns the residual add and
+the drop-path (`residual = x; x = block(x); x = drop_path(x); x = add([residual, x])`). With
+`include_top=False` the head is dropped and the final stage feature map is returned. `depths` gives
+the per-stage block counts and `dims` the widths; the number of stages follows the length of those
+lists, so a two-stage variant such as `cifar10` is a legal configuration.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `Patchify Stem`
+### 4.1 Patchify stem
 
--   **Purpose**: To perform initial, aggressive downsampling, analogous to the patch embedding layer in a ViT.
--   **Implementation**: A single `Conv2D` layer with a kernel size of 4 and a stride of 4. This is followed by a `LayerNormalization` layer.
--   **Functionality**: It divides the input image into non-overlapping `4x4` patches and embeds them into a higher-dimensional feature space, reducing the spatial resolution by 4x (e.g., 224x224 -> 56x56).
+A single `Conv2D` with kernel size and stride both equal to `strides` (default 4) and padding
+`"valid"` (`"same"` when `strides == 1`), followed by `LayerNormalization`. It splits the image into
+non-overlapping patches and embeds them, reducing resolution 4x (224 -> 56).
 
-### 4.2 `ConvNeXtV1Block`
+### 4.2 `ConvNextV1Block`
 
--   **Purpose**: The main building block of the V1 architecture, designed for efficient and powerful feature extraction.
--   **Architecture**: Follows an inverted bottleneck design:
-    1.  **Depthwise Convolution**: A large `7x7` depthwise `Conv2D` layer to mix spatial information. This is the key to its large receptive field.
-    2.  **Layer Normalization**: Normalizes the features.
-    3.  **Channel Mixing MLP**: Two `1x1` `Conv2D` layers (pointwise convolutions) with a GELU activation in between. The first `1x1` conv expands the channel dimension by a factor of 4, and the second projects it back down.
-    4.  **Residual Connection**: The output of the block is added to the input (skip connection).
+The inverted bottleneck that carries the V1 network. Its `call` is, in order:
 
-### 4.3 `ConvNeXtV2Block` and Global Response Normalization (GRN)
+1.  **Depthwise `7x7` convolution** (`kernel_size`) — mixes spatial information and supplies the large receptive field.
+2.  **LayerNorm** (or a bias-free BatchNorm, via the block's `normalization_type`).
+3.  **Pointwise `1x1` convolution** expanding the channels 4x, then the activation (GELU by default).
+4.  **Dropout and spatial dropout** (both no-ops at the default rate 0).
+5.  **Pointwise `1x1` convolution** projecting back down.
+6.  **Learnable per-channel `gamma` scaling** (`use_gamma`).
 
--   **Purpose**: The improved block in the V2 architecture, which enhances feature diversity.
--   **Architecture**: It is identical to the `ConvNeXtV1Block` but with a **Global Response Normalization (GRN)** layer added after the channel mixing MLP.
--   **How GRN Works**:
-    1.  **Aggregate**: It computes the L2-norm of each feature map across the spatial dimensions (H, W), resulting in a single value per channel. `x_agg = ||X[:, :, c]||`
-    2.  **Normalize**: It computes a normalization score for each channel by dividing its aggregated value by the sum of all aggregated values. `s_c = x_agg_c / Σ(x_agg_i)`
-    3.  **Recalibrate**: It multiplies the original input feature map `X` by the computed scores `s_c`. This amplifies channels with unique features and suppresses redundant ones, encouraging feature competition.
+The residual add is not inside the block; the model applies it around the block's output.
+
+### 4.3 `ConvNextV2Block` and Global Response Normalization
+
+Identical to the V1 block plus a **GRN** layer inserted between the activation and the projecting
+`1x1` convolution — that is, inside the widened 4x channel space, not at the end of the block. GRN
+works in three steps:
+
+1.  **Aggregate**: the L2 norm of each channel's feature map over the spatial dimensions, one scalar per channel.
+2.  **Normalize**: divide each channel's aggregate by the mean of all aggregates, giving a relative-importance score.
+3.  **Recalibrate**: rescale the features by those scores, apply the layer's own `gamma`/`beta`, and add the result to its input. Channels carrying distinctive responses are amplified and redundant ones damped, which is the feature competition the paper describes.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
 ```bash
-# Ensure you have the required dependencies
 pip install keras>=3.0 tensorflow>=2.16 numpy
 ```
 
-### Your First ConvNeXt Model (30 seconds)
-
-Let's build a small ConvNeXtV2 for a simple classification task on CIFAR-10.
+Build a small ConvNeXt V2 for CIFAR-10-shaped input:
 
 ```python
 import keras
 import numpy as np
 
-# Local imports from your project structure
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
 # 1. Create a tiny ConvNeXtV2 model for CIFAR-10 (32x32 images, 10 classes)
-# The implementation automatically handles the smaller input size.
 model = create_convnext_v2(
-    variant="atto",  # A very small and fast V2 variant
+    variant="atto",  # a very small and fast V2 variant
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
 )
 
-# 2. Compile the model
+# 2. Compile
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=["accuracy"],
 )
-print("✅ ConvNeXtV2 model created and compiled successfully!")
 model.summary()
 
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3).astype("float32")
-dummy_labels = np.random.randint(0, 10, batch_size)
+# 3. Dummy data
+dummy_images = np.random.rand(16, 32, 32, 3).astype("float32")
+dummy_labels = np.random.randint(0, 10, 16)
 
-# 4. Train for one step
+# 4. One training step
 loss, acc = model.train_on_batch(dummy_images, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+print(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
-# 5. Run inference
+# 5. Inference
 predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Classes and Creation Functions
+### 6.1 Model classes and creation functions
 
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`ConvNeXtV1`** | `...convnext.convnext_v1.ConvNeXtV1` | The main Keras `Model` for the V1 architecture. |
-| **`create_convnext_v1`** | `...convnext.convnext_v1.create_convnext_v1` | Recommended convenience function to create `ConvNeXtV1` models. |
-| **`ConvNeXtV2`** | `...convnext.convnext_v2.ConvNeXtV2` | The main Keras `Model` for the V2 architecture. |
-| **`create_convnext_v2`** | `...convnext.convnext_v2.create_convnext_v2` | Recommended convenience function to create `ConvNeXtV2` models. |
+| **`ConvNeXtV1`** | `...convnext.convnext_v1.ConvNeXtV1` | Keras `Model` for the V1 architecture. |
+| **`create_convnext_v1`** | `...convnext.convnext_v1.create_convnext_v1` | Convenience factory for `ConvNeXtV1`. |
+| **`ConvNeXtV2`** | `...convnext.convnext_v2.ConvNeXtV2` | Keras `Model` for the V2 architecture. |
+| **`create_convnext_v2`** | `...convnext.convnext_v2.create_convnext_v2` | Convenience factory for `ConvNeXtV2`. |
 
-### 6.2 Core Building Blocks
+All four names are exported from `dl_techniques.models.vision.convnext`.
+
+### 6.2 Core building blocks
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
-| **`ConvNextV1Block`** | `...layers.convnext_v1_block.ConvNextV1Block` | The core block of the V1 architecture. |
-| **`ConvNextV2Block`** | `...layers.convnext_v2_block.ConvNextV2Block` | The core block of the V2 architecture, including GRN. |
+| **`ConvNextV1Block`** | `dl_techniques.layers.convnext_v1_block` | The core block of the V1 architecture. |
+| **`ConvNextV2Block`** | `dl_techniques.layers.convnext_v2_block` | The V1 block plus GRN. |
+
+### 6.3 Factory signature
+
+```python
+create_convnext_v1(  # identical signature for create_convnext_v2
+    variant="tiny",
+    num_classes=1000,
+    input_shape=(None, None, 3),
+    pretrained=False,
+    weights_dataset="imagenet",
+    weights_input_shape=None,
+    cache_dir=None,
+    **kwargs,          # forwarded to the model, e.g. include_top, drop_path_rate
+)
+```
+
+Constructor arguments reachable through `**kwargs` include `depths`, `dims`, `drop_path_rate`,
+`stochastic_mode`, `kernel_size`, `activation`, `use_bias`, `kernel_regularizer`, `dropout_rate`,
+`spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer` and
+`include_top`.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured variants for both V1 and V2.
-
-### ConvNeXt V1 Variants
+### ConvNeXt V1 variants (`ConvNeXtV1.MODEL_VARIANTS`)
 
 | Variant | Depths | Dimensions |
-|:---:|:---|:---|
+|:---|:---|:---|
+| **`cifar10`** | `[5, 5]` | `[96, 192]` |
 | **`tiny`** | `[3, 3, 9, 3]` | `[96, 192, 384, 768]` |
 | **`small`**| `[3, 3, 27, 3]` | `[96, 192, 384, 768]` |
 | **`base`** | `[3, 3, 27, 3]` | `[128, 256, 512, 1024]` |
 | **`large`**| `[3, 3, 27, 3]`| `[192, 384, 768, 1536]` |
 | **`xlarge`**|`[3, 3, 27, 3]` | `[256, 512, 1024, 2048]` |
 
-### ConvNeXt V2 Variants
+### ConvNeXt V2 variants (`ConvNeXtV2.MODEL_VARIANTS`)
 
 | Variant | Depths | Dimensions |
-|:---:|:---|:---|
+|:---|:---|:---|
+| **`cifar10`** | `[5, 5]` | `[96, 192]` |
 | **`atto`** | `[2, 2, 6, 2]` | `[40, 80, 160, 320]` |
 | **`femto`**| `[2, 2, 6, 2]` | `[48, 96, 192, 384]` |
 | **`pico`** | `[2, 2, 6, 2]` | `[64, 128, 256, 512]` |
@@ -352,244 +220,187 @@ This implementation provides several pre-configured variants for both V1 and V2.
 | **`large`**| `[3, 3, 27, 3]`| `[192, 384, 768, 1536]` |
 | **`huge`** | `[3, 3, 27, 3]` | `[352, 704, 1408, 2816]`|
 
+`cifar10` is a two-stage configuration for small images; it is not part of the paper's variant
+family. `MODEL_VARIANTS` is the authoritative list — passing any other name raises `ValueError`.
+
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Using ConvNeXt as a Feature Extraction Backbone
-
-You can use a headless ConvNeXt as a powerful backbone for downstream tasks like object detection or semantic segmentation.
+### Example 1: ConvNeXt as a feature-extraction backbone
 
 ```python
-from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
 import numpy as np
 
-# 1. Create the feature extractor by setting include_top=False
+from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
+
+# include_top=False drops the classification head
 backbone = create_convnext_v1(
-    variant="base",
+    variant="tiny",
     include_top=False,
-    input_shape=(512, 512, 3)
+    input_shape=(512, 512, 3),
 )
 
-# 2. Extract features
-dummy_images = np.random.rand(2, 512, 512, 3).astype("float32")
-features = backbone.predict(dummy_images)
+features = backbone.predict(np.random.rand(1, 512, 512, 3).astype("float32"))
 
-# The output is the feature map from the final stage
-# Spatial resolution is downsampled by 32x
-print(f"Output shape: {features.shape}") # (2, 16, 16, 1024)
-backbone.summary()
+# Final-stage feature map: 512 / 4**4 = 2 spatial, width = dims[-1] = 768
+print(f"Output shape: {features.shape}")  # (1, 2, 2, 768)
 ```
 
-### Example 2: Creating a Micro-Variant Model (ConvNeXt V2)
-
-ConvNeXt V2 introduced several smaller variants that are highly efficient for mobile or resource-constrained applications.
+### Example 2: A micro variant with a custom class count
 
 ```python
+import numpy as np
+
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
-# Create a ConvNeXtV2-Pico model for a 100-class problem
 pico_model = create_convnext_v2(
     variant="pico",
     num_classes=100,
-    input_shape=(96, 96, 3)
+    input_shape=(96, 96, 3),
 )
 
+# The model is lazily built: run one forward pass before counting parameters,
+# otherwise count_params() raises "the layer isn't built".
+pico_model(np.zeros((1, 96, 96, 3), dtype="float32"))
 print(f"Pico model params: {pico_model.count_params():,}")
-pico_model.summary()
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Fine-tuning from Pre-trained Weights
+### Fine-tuning from a local checkpoint
 
-This implementation supports loading pre-trained weights, even when your new task has a different number of classes or a different input image size.
+No pretrained weights are distributed with this package, and none are downloadable. Setting the
+`pretrained` argument to `True` raises `NotImplementedError` rather than silently returning random
+weights; pass a path to a local `.keras` checkpoint instead. The loader tolerates a different classifier width and a different
+input resolution: mismatching weights are skipped and reported.
 
 ```python
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
-# Assume you have downloaded pre-trained ImageNet weights for ConvNeXtV2-Base
-# and saved them to "convnext_v2_base_imagenet.keras"
-
-# 1. Create a new model for a custom task (e.g., 20 classes, 128x128 images)
-# The `pretrained` argument points to the local weights file.
-# The code automatically handles mismatches in the classifier and input shape.
 fine_tune_model = create_convnext_v2(
     variant="base",
-    num_classes=20,                 # Different number of classes
-    input_shape=(128, 128, 3),      # Different input shape
-    pretrained="path/to/convnext_v2_base_imagenet.keras"
+    num_classes=20,                 # may differ from the checkpoint
+    input_shape=(128, 128, 3),      # may differ from the checkpoint
+    pretrained="path/to/convnext_v2_base.keras",
 )
-
-# Passing `input_shape` here is optional. Until 2026-08-15 it was mandatory in
-# practice: the pre-load dummy forward used `input_shape` verbatim, and the default
-# `(None, None, 3)` made it build `(1, None, None, 3)` and fail, with the enclosing
-# handler re-reporting the failure as "Failed to load weights from ..." and hiding
-# the cause. With no spatial dims given, the load now materializes weights at
-# 224x224 (`PRETRAINED_BUILD_SPATIAL`); the model stays fully convolutional.
-
-# 2. The model will load the backbone weights and skip the original classifier.
-# You can now fine-tune this model on your custom dataset.
-fine_tune_model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-5), # Use a low learning rate
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-print("✅ Model ready for fine-tuning!")
-fine_tune_model.summary()
 ```
+
+`input_shape` may be left at its default `(None, None, 3)`; the pre-load build then materializes
+weights at `PRETRAINED_BUILD_SPATIAL` (224) and the model stays fully convolutional.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-ConvNeXt models are well-suited for mixed precision training, which uses 16-bit floating-point numbers for computations where possible. This can provide a significant speedup (up to 2-3x) on modern GPUs with Tensor Cores.
+ConvNeXt trains well under mixed precision, which is worth a substantial speedup on GPUs with
+Tensor Cores.
 
 ```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
+import keras
 
-# Create model (will automatically use mixed precision)
-model = create_convnext_v2("base", num_classes=1000)
-model.compile(...)
+from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
 
-# When training, use a LossScaleOptimizer to prevent numeric underflow
-# Keras's model.fit() handles this automatically.
+keras.mixed_precision.set_global_policy("mixed_float16")
+
+model = create_convnext_v2("atto", num_classes=10, input_shape=(32, 32, 3))
+# model.fit() applies loss scaling automatically.
 ```
+
+Set the policy before constructing the model, and reset it with
+`keras.mixed_precision.set_global_policy("float32")` when you are done.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Regularization
-
--   **Optimizer**: **AdamW** is highly recommended. The weight decay component of AdamW is a crucial regularizer for modern architectures like ConvNeXt.
--   **Learning Rate Schedule**: A **cosine decay** schedule, often with a few epochs of linear warmup at the beginning of training, generally yields the best results.
--   **Stochastic Depth (Drop Path)**: This is a powerful regularization technique that randomly drops entire residual blocks during training. It is enabled via the `drop_path_rate` argument. A good starting value is `0.1` or `0.2` for smaller models, increasing for larger ones.
-
-### Data Augmentation
-
--   ConvNeXt models benefit significantly from strong data augmentations, as they have weaker inductive biases than older CNNs. Techniques like **RandAugment**, **Mixup**, and **CutMix** are highly effective and often necessary to achieve state-of-the-art results.
+-   **Optimizer**: AdamW. Its decoupled weight decay is an important regularizer here.
+-   **Schedule**: cosine decay with a short linear warmup.
+-   **Stochastic depth**: `drop_path_rate` randomly drops residual branches during training. Start
+    around `0.1`-`0.2` for the small variants and raise it for the large ones.
+-   **Augmentation**: ConvNeXt has weaker inductive biases than older CNNs and benefits from strong
+    augmentation (RandAugment, Mixup, CutMix). The paper's reported numbers depend on it.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `ConvNeXtV1`, `ConvNeXtV2`, and all their custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+`ConvNeXtV1`, `ConvNeXtV2` and their custom layers round-trip through the `.keras` format.
 
 ```python
-# Create and train model
-model = create_convnext_v1("tiny", num_classes=10)
-# model.compile(...) and model.fit(...)
+import keras
 
-# Save the entire model to a single file
-model.save('my_convnext_model.keras')
+from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
 
-# Load the model in a new session, including its architecture, weights,
-# and optimizer state.
-loaded_model = keras.models.load_model('my_convnext_model.keras')
-print("✅ Model loaded successfully!")
+model = create_convnext_v1("cifar10", num_classes=10, input_shape=(32, 32, 3))
+model.save("my_convnext_model.keras")
+
+loaded_model = keras.models.load_model("my_convnext_model.keras")
 ```
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
-
-You can validate the implementation with simple tests to ensure all variants can be created and produce the correct output shapes.
+The package's own tests live in `tests/test_models/test_convnext/`. A minimal check that the small
+variants build and produce the right output shape (`from_variant` is the classmethod the factories
+call):
 
 ```python
-import keras
 import numpy as np
+
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
-def test_creation_all_variants():
-    """Test model creation for all V1 and V2 variants."""
-    for variant in ConvNeXtV1.MODEL_VARIANTS.keys():
-        model = ConvNeXtV1.from_variant(variant, num_classes=10, input_shape=(64, 64, 3))
-        assert model is not None
-        print(f"✓ ConvNeXtV1-{variant} created successfully")
+for variant in ("cifar10", "tiny"):
+    assert ConvNeXtV1.from_variant(variant, num_classes=10, input_shape=(64, 64, 3))
 
-    for variant in ConvNeXtV2.MODEL_VARIANTS.keys():
-        model = ConvNeXtV2.from_variant(variant, num_classes=10, input_shape=(64, 64, 3))
-        assert model is not None
-        print(f"✓ ConvNeXtV2-{variant} created successfully")
-
-def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
-    model = ConvNeXtV2.from_variant("tiny", num_classes=10, input_shape=(128, 128, 3))
-    dummy_input = np.random.rand(4, 128, 128, 3).astype("float32")
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
-
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
+model = ConvNeXtV2.from_variant("atto", num_classes=10, input_shape=(64, 64, 3))
+output = model.predict(np.random.rand(4, 64, 64, 3).astype("float32"))
+assert output.shape == (4, 10)
 ```
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Troubleshooting
 
-**Issue 1: Training is unstable or the loss becomes `NaN`.**
-
--   **Cause 1**: The learning rate may be too high, especially at the start of training.
--   **Solution 1**: Use a smaller peak learning rate (e.g., `5e-4` or `1e-4`) and implement a linear warmup schedule for the first 5-10 epochs.
--   **Cause 2**: Insufficient regularization for your dataset size and model capacity.
--   **Solution 2**: Increase the `weight_decay` in the AdamW optimizer (e.g., to `0.05`). Increase the `drop_path_rate` (e.g., to `0.2` or higher for larger models).
-
-### Frequently Asked Questions
-
-**Q: What is the main difference between ConvNeXt V1 and V2?**
-
-A: The single architectural difference is that **ConvNeXt V2 adds a Global Response Normalization (GRN) layer** to each block. This simple layer enhances inter-channel feature competition, leading to improved performance. V2 was also co-designed with a masked autoencoder pre-training method, which further boosts its capabilities.
-
-**Q: Why should I use ConvNeXt instead of a Vision Transformer?**
-
-A: **Simplicity and Efficiency.** ConvNeXt demonstrates that you can achieve Transformer-level performance using a standard, pure ConvNet. This can be advantageous as convolutions are highly optimized on many hardware platforms (like GPUs and mobile CPUs) and the architecture is often simpler to understand, implement, and deploy than self-attention-based models.
-
-**Q: Can I get multi-scale feature maps for detection/segmentation?**
-
-A: Yes. While this implementation doesn't have a dedicated `extract_features` method, you can easily create a new Keras model that outputs the intermediate feature maps from the original model's layers. You can access the layers by name (e.g., after each `downsample` layer) to build a feature pyramid.
+-   **`ValueError: Unknown variant`** — the name is not a key of `MODEL_VARIANTS`; see section 7.
+-   **`NotImplementedError` from the `pretrained` flag** — no trained weights ship with this
+    package. Pass a local checkpoint path instead.
+-   **Loss goes to `NaN`** — lower the peak learning rate (`5e-4` or below) and add a warmup.
+-   **Overfitting on a small dataset** — raise `weight_decay` (0.05 is a common value) and
+    `drop_path_rate`.
+-   **Feature map collapses to 1x1** — with the default `strides=4` every stage divides resolution
+    by 4, so a four-stage model needs a 256-pixel side to keep any spatial extent. Use the
+    two-stage `cifar10` variant, `strides=2`, or a larger input.
 
 ---
 
 ## 15. Technical Details
 
-### Stochastic Depth (Drop Path)
+### Stochastic depth (drop path)
 
-This model implements a linearly increasing stochastic depth rate. The probability of a residual block being skipped is lowest at the start of the network and highest at the end. This is controlled by the `drop_path_rate` parameter. This regularization technique is very effective for ConvNeXt, as it forces the network to learn redundant representations and makes it more robust. The drop path is applied with a `(B, 1, 1, 1)` noise shape, ensuring that entire blocks are dropped for each sample in the batch, rather than individual pixels.
+Per-block drop rates are `linear_drop_path_rates(sum(depths), drop_path_rate)`: linearly spaced
+from 0.0 at the first block to `drop_path_rate` at the last, counted over the whole network rather
+than per stage. The noise shape is `(B, 1, 1, 1)`, so an entire residual branch is dropped per
+sample rather than individual pixels. `stochastic_mode="depth"` drops the branch outright;
+`stochastic_mode="gradient"` keeps the forward value and stochastically drops the gradient.
 
-### V1 Block vs. V2 Block
+### V1 block vs V2 block
 
-The core evolution is the addition of GRN.
+-   **V1**: `DepthwiseConv -> Norm -> Expand 1x1 -> GELU -> Project 1x1 -> gamma`
+-   **V2**: `DepthwiseConv -> Norm -> Expand 1x1 -> GELU -> GRN -> Project 1x1 -> gamma`
 
--   **ConvNeXtV1Block Flow**:
-    `Input -> DepthwiseConv -> LayerNorm -> Expand MLP -> GELU -> Project MLP -> Add -> Output`
--   **ConvNeXtV2Block Flow**:
-    `Input -> DepthwiseConv -> LayerNorm -> Expand MLP -> GELU -> Project MLP -> **GRN** -> Add -> Output`
-
-The GRN layer is placed just before the final residual connection, allowing it to recalibrate the features generated by the block before they are passed on to the next layer.
+GRN acts on the expanded 4x-wide activations, so the channel competition happens where the block
+has the most channels to compete over. The residual add wraps the block in both cases.
 
 ---
 
 ## 16. Citation
 
-This implementation is based on the official ConvNeXt papers. If you use this model in your research, please consider citing the original works:
-
--   **ConvNeXt V1**:
+-   **ConvNeXt V1** — *A ConvNet for the 2020s*, arXiv:2201.03545:
     ```bibtex
     @article{liu2022convnet,
       title={A ConvNet for the 2020s},
@@ -598,7 +409,7 @@ This implementation is based on the official ConvNeXt papers. If you use this mo
       year={2022}
     }
     ```
--   **ConvNeXt V2**:
+-   **ConvNeXt V2** — *Co-designing and Scaling ConvNets with Masked Autoencoders*, arXiv:2301.00808:
     ```bibtex
     @article{woo2023convnextv2,
       title={ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders},

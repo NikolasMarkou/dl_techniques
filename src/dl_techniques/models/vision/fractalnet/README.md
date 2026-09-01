@@ -4,30 +4,13 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of **FractalNet**, a self-similar deep neural network that achieves great depths without using residual connections. Instead, it relies on a recursive fractal expansion rule that creates an exponential number of paths through the network, regularized by a "drop-path" training scheme.
+A Keras 3 implementation of **FractalNet**, a deep classifier that reaches great depth
+without a single residual connection. Depth comes from a recursive expansion rule that
+generates an exponential number of paths of many different lengths, and the paths are
+regularized by dropping them at random during training ("drop-path").
 
-The architecture is constructed from recursive `FractalBlock` layers, providing a powerful alternative to standard ResNet-like designs.
-
----
-
-## Table of Contents
-
-1. [Overview: What is FractalNet and Why It Matters](#1-overview-what-is-fractalnet-and-why-it-matters)
-2. [The Problem FractalNet Solves](#2-the-problem-fractalnet-solves)
-3. [How FractalNet Works: Core Concepts](#3-how-fractalnet-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+The model is a short stack of `FractalBlock` stages over a plain `ConvBlock` base unit,
+followed by a global pool and a linear classifier.
 
 ---
 
@@ -35,498 +18,421 @@ The architecture is constructed from recursive `FractalBlock` layers, providing 
 
 ### What is FractalNet?
 
-**FractalNet** is a deep convolutional neural network that challenges the necessity of residual connections for training very deep models. Instead of adding identity shortcuts (like in ResNet), FractalNet builds depth using a **recursive, self-similar design**. A block of depth `B` joins a **deep** branch that *composes* two blocks of depth `B-1` (the second consuming the first's output) with a **shallow** branch that is a single base block on the same input. That composition is what makes the longest path `2^(B-1)` blocks long while the shortest stays 1, and it creates a fractal pattern with an immense number of distinct paths from input to output.
+FractalNet questions whether identity shortcuts are the essential ingredient in training
+very deep networks. Its answer is that what matters is having **short paths from input to
+loss alongside the long ones**, and that a recursive rule supplies those directly:
 
-### Key Innovations
-
-1.  **Recursive Fractal Expansion**: The architecture is defined by a simple, elegant rule: a deep block is the combination of shallower blocks. This creates a self-similar structure at all scales.
-2.  **Implicit Deep Ensembling**: The fractal design implicitly contains an ensemble of sub-networks of varying depths. Any path from the input to the output forms a valid, shallower network.
-3.  **Drop-Path Regularization**: The key to training FractalNet is **drop-path**, a stochastic training method where entire sub-branches of the fractal are randomly dropped. This forces the network to learn robust features and ensures that all paths, short and long, are trained effectively.
-
-### Why FractalNet Matters
-
-**The Ultra-Deep Network Problem**:
 ```
-Problem: Train a very deep neural network without gradients vanishing or exploding.
-ResNet's Solution:
-  1. Add identity "skip connections" that bypass layers.
-  2. This creates a direct path for gradients to flow, allowing for networks with
-     hundreds or even thousands of layers.
-  3. Limitation: This design makes the network heavily reliant on the short paths
-     created by the skip connections.
+F_1(x) = block(x)
+F_k(x) = join( F_{k-1}(F_{k-1}(x)) , block(x) )
 ```
 
-**FractalNet's Solution**:
-```
-FractalNet's Approach:
-  1. Create a massive number of paths of varying lengths through recursive design,
-     but without explicit skip connections.
-  2. During training, use drop-path to randomly disable entire branches, forcing the
-     network to learn to use a diverse set of paths.
-  3. At inference, use the entire network (all paths active), which acts like averaging
-     the predictions of an exponential-sized ensemble of networks.
-  4. Benefit: Achieves the performance of ultra-deep networks through a different
-     philosophy—redundancy and ensembling rather than identity shortcuts.
-```
+The deep branch **composes** two depth-`k-1` fractals — the second consumes the first's
+output — while the shallow branch is a single base block on the same input. Composition,
+not parallelism, is what makes the longest path `2^(k-1)` blocks long while the shortest
+stays exactly 1.
 
-### Real-World Impact
+### Key Ideas
 
-FractalNet offers a different perspective on deep learning architecture and is valuable for:
+1. **Recursive expansion.** One rule, applied `k` times, produces a self-similar block
+   holding `2^k - 1` base blocks (`L(1)=1`, `L(k)=2*L(k-1)+1`). No weights are shared;
+   every leaf is an independent instance.
+2. **Implicit ensembling.** Every route from input to output is a valid, shallower
+   network. The number of distinct routes follows `P(1)=1`, `P(k)=P(k-1)^2 + 1`
+   (1, 2, 5, 26, 677) — super-exponential in the depth.
+3. **Drop-path.** During training each input to a join is dropped by its own Bernoulli
+   draw, so a different sub-network is trained at each step. At inference every path is
+   live and the joins average them.
 
--   🖼️ **Image Classification**: Demonstrates competitive performance against ResNets on standard benchmarks like CIFAR and ImageNet.
--   🔬 **Architectural Research**: Provides a compelling alternative to residual networks and serves as a testbed for ideas like stochastic depth and implicit ensembling.
--   💪 **Robust Feature Learning**: The drop-path mechanism encourages the learning of highly robust and redundant features.
+### How This Implementation Differs From the Paper
+
+This package implements the paper's expansion rule and its **local** drop-path. Several
+things in Larsson et al. (2017) are deliberately not here, and the README describes the
+code rather than the paper:
+
+| Paper | This package |
+| :--- | :--- |
+| Local **and** global drop-path, sampled 50/50 per mini-batch (global picks one column and runs the whole network through it) | Local drop-path only. There is no global mode and no alternation. |
+| A drop-path schedule / per-depth rates | A single `drop_path_rate` applies at every join and every depth, with no schedule. |
+| CIFAR configuration of 5 blocks x 4 columns with filters 64/128/256/512/512 | Four repo-defined variants (`micro`/`small`/`medium`/`large`), none of which reproduces the paper's configuration. |
+| Base unit ordered Conv -> Dropout -> BatchNorm -> ReLU | `ConvBlock` is ordered Conv -> Norm -> Activation -> Dropout, with the normalization and activation configurable. |
+
+Nothing in this repository has been trained or benchmarked, so no accuracy number here is
+this implementation's; the paper's results belong to the paper.
 
 ---
 
 ## 2. The Problem FractalNet Solves
 
-### The Challenge of Depth
+Plain deep networks suffer from vanishing gradients and from *degradation*: past a certain
+depth, adding layers increases even the training error. ResNet solved this by making every
+block skippable, which creates an implicit short path around each one.
 
-Before 2015, training very deep neural networks was notoriously difficult. As networks got deeper, they suffered from the **vanishing gradient problem**, where the signal from the loss function would diminish as it propagated backward through many layers, causing the early layers to stop learning.
+FractalNet takes the same insight — a very deep network is trainable when short paths
+coexist with long ones — and supplies the short paths explicitly instead of implicitly:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Deep Architectures                          │
-│                                                             │
-│  "Plain" Deep Networks:                                     │
-│    - Suffer from vanishing gradients.                       │
-│    - Often exhibit "degradation," where adding more layers  │
-│      actually increases the training error.                 │
-│                                                             │
-│  ResNet's Solution (The "Highway"):                         │
-│    - Identity skip connections create an information highway│
-│      allowing gradients to bypass layers and flow freely.   │
-│    - Solved the degradation problem and enabled extreme depth.
-└─────────────────────────────────────────────────────────────┘
-```
-
-FractalNet questioned if these explicit highways were the *only* solution. It proposed an alternative: what if instead of one superhighway, we built a massive network of redundant side roads?
-
-### How FractalNet Changes the Game
-
-FractalNet's design provides a rich connectivity pattern where the effective depth is dynamic and stochastic during training.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The FractalNet Redundancy Strategy                         │
-│                                                             │
-│  1. Create Redundant Paths:                                 │
-│     - The recursive structure creates 2^(B-1) distinct paths│
-│       in a block of depth B.                                │
-│     - This provides many ways for information to flow, with │
-│       paths of many different lengths.                      │
-│                                                             │
-│  2. Force the Use of All Paths:                             │
-│     - Drop-path randomly "closes" paths during training.    │
-│     - The network cannot rely on any single path (short or  │
-│       long) and must learn to solve the task using whatever │
-│       sub-network is available in each training step.       │
-│                                                             │
-│  3. Average the Ensemble at Inference:                      │
-│     - With all paths open, the network behaves like a huge  │
-│       ensemble, improving generalization.                   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-This approach successfully trains very deep networks by treating depth as a form of ensembling, not just sequential processing.
+- The recursion creates paths of length `1, 2, 4, ..., 2^(k-1)` all reaching the same join.
+- The shortest path is a single convolution no matter how deep the block is. That path is
+  what trains early; the long path is what the short path teaches.
+- Drop-path stops the network from collapsing onto any one of them.
 
 ---
 
 ## 3. How FractalNet Works: Core Concepts
 
-### The Hierarchical Multi-Stage Architecture
-
-Like most CNNs, FractalNet processes an image through several stages, progressively downsampling the spatial resolution while increasing the number of feature channels.
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      FractalNet Architecture Stages                 │
-│                                                                     │
-│  Input Image ───►┌──────────────────┐  (Downsamples 2x)             │
-│   (H, W)         │   Fractal Stage 1  │  (e.g., Depth=2, Filters=32)│
-│                  └────────┬─────────┘                               │
-│                           │ (H/2, W/2)                              │
-│                  ┌────────▼─────────┐  (Downsamples 2x)             │
-│                  │ Fractal Stage 2  │  (e.g.Depth=3, Filters=64)    │
-│                  └────────┬─────────┘                               │
-│                           │ (H/4, W/4)                              │
-│                  ┌────────▼─────────┐  (Downsamples 2x)             │
-│                  │ Fractal Stage 3  │  (e.g.Depth=3, Filters=128)   │
-│                  └────────┬─────────┘                               │
-│                           │ (H/8, W/8)                              │
-│                  ┌────────▼──────────┐                              │
-│                  │ Classification Head│                             │
-│                  └────────────────────┘                             │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### The Complete Data Flow
+The model is a plain sequence of stages. Each stage is one `FractalBlock` at **constant
+resolution**, followed by max-pooling when that stage's stride exceeds 1. There is no stem
+and no bottleneck.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       FractalNet Complete Data Flow                     │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: FRACTAL STAGE 1
-───────────────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► FractalBlock(depth=D₁, filters=F₁, stride=2)
-    │   (This block contains its own recursive structure and downsamples)
-    │
-    └─► Feature Map 1: (B, H/2, W/2, F₁)
-
-
-STEP 2: FRACTAL STAGE 2
-───────────────────────
-Feature Map 1
-    │
-    ├─► FractalBlock(depth=D₂, filters=F₂, stride=2)
-    │
-    └─► Feature Map 2: (B, H/4, W/4, F₂)
-
-
-STEP 3: FRACTAL STAGE 3, etc.
-─────────────────────────────
-... (Continue for all defined stages)
-
-
-STEP 4: CLASSIFICATION
-──────────────────────
-Final Feature Map
-    │
-    ├─► Global Average Pooling
-    │
-    ├─► [Optional] Dropout
-    │
-    ├─► Dense Layer (Classifier)
-    │
-    └─► Logits (B, num_classes)
+Input (B, H, W, 3)
+  │
+  ├─► Stage 0: FractalBlock(depth=D0, filters=F0)  ──► MaxPool(2)  ──► (B, H/2, W/2, F0)
+  │
+  ├─► Stage 1: FractalBlock(depth=D1, filters=F1)  ──► MaxPool(2)  ──► (B, H/4, W/4, F1)
+  │
+  ├─► Stage 2: FractalBlock(depth=D2, filters=F2)  ──► MaxPool(2)  ──► (B, H/8, W/8, F2)
+  │
+  ├─► GlobalAveragePooling2D
+  ├─► Dropout(classifier_dropout_rate)
+  └─► Dense(num_classes)   ──►  RAW LOGITS (no softmax)
 ```
+
+Downsampling happens **between** blocks, never inside one. The deep branch applies its
+base block `2^(k-1)` times, so a stride inside the block would shrink the deep branch
+`2^(k-1)` times against the shallow branch's once and the join would receive mismatched
+shapes. `FractalBlock` rejects a strided `block_config` with a `ValueError` for that
+reason.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `FractalBlock` (The Recursive Engine)
+### 4.1 `FractalBlock` (the recursive engine)
 
--   **Purpose**: To implement the recursive fractal expansion rule, which is the heart of the architecture.
--   **Architecture**:
-    *   **Base Case (depth=1)**: The recursion terminates at a single, standard `ConvBlock` (Conv-Norm-Act). This is the fundamental unit of computation.
-    *   **Recursive Step (depth > 1)**: A `FractalBlock` of depth `k` builds a **deep** branch of two *composed* depth-`k-1` `FractalBlock`s (`deep_second` consumes `deep_first`'s output) and a **shallow** branch that is a single base `ConvBlock` on the same input. **The two depth-`k-1` blocks are NOT parallel over the same input** — that form shipped until 2026-08-14 and made every path traverse exactly one convolution at any depth, invisibly to parameter count, layer count and output shape.
-    *   **Drop-Path & Join**: The join drops each of the two inputs by its own per-sample Bernoulli draw and averages only the **survivors**; when both draws drop, one is revived by a fair coin, so the join is never a zero map.
--   **Benefit**: This design creates `2^k - 1` leaf `ConvBlock`s (`L(1)=1`, `L(k)=2*L(k-1)+1`) and an exponential number of paths, with a longest path of `2^(k-1)` blocks and a shortest of 1. No parameters are shared: every leaf is an independent instance.
+```
+              input
+         ┌──────┴───────┐
+    DEEP │              │ SHALLOW
+         ▼              ▼
+   FractalBlock      ONE base
+   depth = k-1        block
+         │              │
+         ▼              │
+   FractalBlock         │   (composed: consumes
+   depth = k-1          │    the first's OUTPUT)
+         └──────┬───────┘
+                ▼
+   drop-path join: mean over the SURVIVING branches
+                ▼
+              output
+```
 
-### 4.2 `ConvBlock` (The Base Unit)
+- **Base case (`depth=1`)**: a single `ConvBlock`. The recursion bottoms out here.
+- **Recursive case**: `deep_second(deep_first(x))` against `shallow(x)`, joined under
+  drop-path. The two depth-`k-1` blocks are composed, **not** run in parallel over the
+  same input.
+- **Cost**: `2^k - 1` leaf convolutions, so parameters and FLOPs grow exponentially in
+  `depth`. The shipped variants stay at depth <= 5 for that reason.
 
--   **Purpose**: To serve as the "leaf" nodes in the fractal tree. It performs the actual feature extraction.
--   **Implementation**: A standard sequence of `Conv2D` -> `Normalization` (e.g., `BatchNorm`) -> `Activation` (e.g., `ReLU`).
--   **Functionality**: This implementation uses a highly configurable `ConvBlock` that allows for easy experimentation with different normalization and activation functions.
+The composition is easy to get wrong invisibly: parameter count, layer count and output
+shape are identical under the parallel form, and only the receptive field distinguishes
+them (with 3x3 `same` convolutions a correct depth-`k` block spans `1 + 2*2^(k-1)` pixels
+— 3, 5, 9, 17). That measurement is pinned by
+`tests/test_layers/test_fractal_block.py::TestFractalExpansionRule`.
+
+### 4.2 `ConvBlock` (the base unit)
+
+The leaf of the fractal tree: `Conv2D` -> normalization -> activation -> dropout, with the
+normalization type (`batch_norm` by default) and activation (`relu`) selected by string.
+`FractalNet` constructs one `ConvBlock` per stage purely to harvest its `get_config()`;
+that dict is what `FractalBlock` stores and re-instantiates per leaf, which is what makes
+the recursive structure serializable and why every leaf in a stage is configured
+identically while holding independent weights.
 
 ### 4.3 Local drop-path (inside `FractalBlock._join`)
 
--   **Purpose**: To regularize the network during training by randomly dropping entire computational paths.
--   **Functionality**: `FractalBlock` does **not** use the `StochasticDepth` layer. Drop-path is implemented inline in `FractalBlock._join`: during training each of the join's two inputs is dropped by its own per-sample Bernoulli draw with probability `drop_path_rate`, and the join averages only the **survivors** — a mean over a varying number of paths, not a fixed `0.5` scaling. When both draws drop, one branch is revived by a fair coin, so the join is never a zero map. (An independent `StochasticDepth` per branch plus a fixed `0.5` was the previous implementation; it emitted exactly zero at rate `drop_path_rate ** 2`, about 2.3% of samples at the 0.15 default.) At inference the join is the plain mean of the two branches.
--   **Benefit**: This is the critical component that makes FractalNet trainable. It prevents co-adaptation of paths and forces the network to learn redundant features, making the final "ensembled" model at inference time much more robust.
+Drop-path is inline in the join, not a `StochasticDepth` layer.
+
+- **Training**: each of the two inputs is dropped by its own per-sample Bernoulli draw with
+  probability `drop_path_rate`, and the join averages only the **survivors** — a mean over
+  a varying number of paths, not a fixed `0.5` scaling.
+- **Both dropped**: one branch is revived by a fair coin, so at least one path is always
+  live and the join is never a zero map. Without that rescue a join emits exactly zero for
+  the sample, at rate `drop_path_rate ** 2` (about 2.3% at the 0.15 default), and the zero
+  then propagates through every remaining stage.
+- **Inference** (or `drop_path_rate == 0.0`): the plain mean of the two branches.
+
+Each block owns a `keras.random.SeedGenerator`, so the draws are reproducible under a
+seeded run and independent between blocks.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First FractalNet Model (30 seconds)
-
-Let's build and compile a small FractalNet for CIFAR-10.
-
 ```python
-import keras
 import numpy as np
 
-# Local imports from your project structure
 from dl_techniques.models.vision.fractalnet.model import create_fractal_net
 
-# 1. Create a FractalNet-Small model for CIFAR-10 (32x32 images, 10 classes)
-# The create_fractal_net function also compiles the model.
+# Build and compile a FractalNet-Small for CIFAR-10.
+# The factory compiles with SparseCategoricalCrossentropy(from_logits=True),
+# which matches the head's raw-logit output.
 model = create_fractal_net(
     variant="small",
     num_classes=10,
     input_shape=(32, 32, 3),
-    learning_rate=1e-3
+    learning_rate=1e-3,
 )
-print("✅ FractalNet model created and compiled successfully!")
-model.summary()
+model.summary()  # 1,033,194 parameters
 
-# 2. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3).astype("float32")
-dummy_labels = np.random.randint(0, 10, batch_size)
+images = np.random.rand(16, 32, 32, 3).astype("float32")
+labels = np.random.randint(0, 10, 16)
 
-# 3. Train for one step
-# Note: drop-path is active during training
-history = model.fit(dummy_images, dummy_labels, epochs=1, verbose=1)
-print(f"\n✅ Training step complete!")
+# Drop-path is active here.
+model.fit(images, labels, epochs=1, verbose=1)
 
-# 4. Run inference
-# Note: drop-path is disabled during inference, using the full network
-predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+# Drop-path is off here: every path is live and the joins average them.
+predictions = model.predict(images)
+print(predictions.shape)  # (16, 10)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 Model Class and Creation Functions
-
 | Component | Location | Purpose |
 | :--- | :--- | :--- |
-| **`FractalNet`** | `...fractalnet.model.FractalNet` | The main Keras `Model` that assembles the fractal stages. |
-| **`create_fractal_net`** | `...fractalnet.model.create_fractal_net` | Recommended convenience function to create and compile `FractalNet` models. |
+| `FractalNet` | `dl_techniques.models.vision.fractalnet.model` | The Keras `Model` that assembles the fractal stages and the head. |
+| `create_fractal_net` | `dl_techniques.models.vision.fractalnet.model` | Builds a variant **and compiles it**. Use this unless you want to compile yourself. |
+| `FractalBlock` | `dl_techniques.layers.fractal_block` | The recursive block. Drop-path lives in its `_join`. |
+| `ConvBlock` | `dl_techniques.layers.standard_blocks` | The base-case unit at the leaves. |
 
-### 6.2 Core Building Blocks
+### Key constructor arguments
 
-| Layer | Location | Purpose |
+| Argument | Default | Meaning |
 | :--- | :--- | :--- |
-| **`FractalBlock`** | `...layers.fractal_block.FractalBlock` | The core recursive block that defines the fractal structure. |
-| **`ConvBlock`** | `...layers.standard_blocks.ConvBlock` | The base-case convolutional unit used at the leaves of the fractal. |
-| *(local drop-path)* | `FractalBlock._join` | Drop-path is inline in the join, not a separate `StochasticDepth` layer. |
+| `num_classes` | `10` | Head width. Only used when `include_top=True`. |
+| `depths` | `(2, 3, 3)` | Fractal expansion level per stage — **not** a block count. |
+| `filters` | `(32, 64, 128)` | Channels per stage. Must match `depths` in length. |
+| `strides` | `(2, 2, 2)` | Max-pool stride after each stage. Must match `filters` in length. |
+| `drop_path_rate` | `0.15` | Per-branch drop probability at every join. |
+| `dropout_rate` | `0.1` | Dropout inside each `ConvBlock`. |
+| `normalization_type` | `"batch_norm"` | Any type the normalization factory accepts. |
+| `activation_type` | `"relu"` | Activation inside each `ConvBlock`. |
+| `global_pool` | `"avg"` | `"avg"` or `"max"`. Anything else raises `ValueError`. |
+| `classifier_dropout_rate` | `0.2` | Dropout before the final `Dense`. |
+| `include_top` | `True` | `False` returns the final stage's feature map. |
+| `input_shape` | `(32, 32, 3)` | Must be 3D. |
+
+`create_fractal_net` adds `variant`, `optimizer` (default `"adam"`), `learning_rate`
+(default `0.001`), `loss` and `metrics`, and forwards everything else to the constructor.
+There are no pretrained weights in this package.
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured variants based on the original paper.
+`FractalNet.MODEL_VARIANTS` holds four repo-defined presets. They are **not** the paper's
+configurations. Parameter counts below were measured at `input_shape=(32, 32, 3)` with
+`num_classes=10`.
 
-| Variant | Depths | Filters | Description |
-|:---:|:---|:---|:---|
-| **`micro`** | `[1, 2, 2]` | `[16, 32, 64]` | A very small model, suitable for testing or small datasets like MNIST. |
-| **`small`**| `[2, 3, 3]` | `[32, 64, 128]` | A standard configuration for datasets like CIFAR-10/100. |
-| **`medium`**|`[3, 4, 4]` | `[64, 128, 256]`| A larger, more capable model. |
-| **`large`**| `[4, 5, 5]` | `[96, 192, 384]`| A deep configuration suitable for larger-scale datasets like ImageNet. |
+| Variant | `depths` | `filters` | Leaf convolutions | Parameters |
+| :--- | :--- | :--- | :--- | ---: |
+| `micro` | `[1, 2, 2]` | `[16, 32, 64]` | 1 + 3 + 3 | 94,762 |
+| `small` | `[2, 3, 3]` | `[32, 64, 128]` | 3 + 7 + 7 | 1,033,194 |
+| `medium` | `[3, 4, 4]` | `[64, 128, 256]` | 7 + 15 + 15 | 9,770,890 |
+| `large` | `[4, 5, 5]` | `[96, 192, 384]` | 15 + 31 + 31 | 48,301,162 |
+
+A depth-`k` stage holds `2^k - 1` leaf convolutions, which is why the parameter count grows
+roughly an order of magnitude per variant.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Using FractalNet as a Feature Extraction Backbone
-
-You can use a headless FractalNet as a backbone for downstream tasks like segmentation or detection.
+### Example 1: FractalNet as a feature-extraction backbone
 
 ```python
-# 1. Create the feature extractor
+import numpy as np
+
+from dl_techniques.models.vision.fractalnet.model import FractalNet
+
 backbone = FractalNet.from_variant(
     "medium",
     include_top=False,
-    input_shape=(256, 256, 3)
+    input_shape=(256, 256, 3),
 )
 
-# 2. Extract features
-dummy_images = np.random.rand(2, 256, 256, 3).astype("float32")
-features = backbone.predict(dummy_images)
-
-# The output is the feature map from the final fractal stage
-# Spatial resolution is downsampled by 8x (2^3 stages)
-print(f"Output shape: {features.shape}") # (2, 32, 32, 256)
+features = backbone.predict(np.random.rand(2, 256, 256, 3).astype("float32"))
+print(features.shape)  # (2, 32, 32, 256) -- three stride-2 stages downsample by 8
 ```
 
-### Example 2: Creating a Custom FractalNet Architecture
+### Example 2: A custom four-stage architecture
 
-You can easily define your own FractalNet by specifying the depths and filters for each stage.
+`depths`, `filters` and `strides` must all have the same length — adding a stage without
+extending `strides` raises `ValueError`.
 
 ```python
-# Create a deep but narrow FractalNet with 4 stages
-custom_model = FractalNet(
-    num_classes=50,
-    depths=[2, 3, 4, 2],         # Four stages with varying fractal depths
-    filters=[32, 64, 128, 256],  # Filters for each stage
-    input_shape=(128, 128, 3),
-    drop_path_rate=0.2           # Increase regularization for deeper model
-)
+from dl_techniques.models.vision.fractalnet.model import FractalNet
 
-custom_model.summary()
+custom = FractalNet(
+    num_classes=50,
+    depths=[2, 3, 4, 2],
+    filters=[32, 64, 128, 256],
+    strides=[2, 2, 2, 2],       # one entry per stage
+    input_shape=(128, 128, 3),
+    drop_path_rate=0.2,
+)
+print(custom.count_params())  # 3,339,282
 ```
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Adjusting Regularization with Drop-Path
+### Tuning `drop_path_rate`
 
-The `drop_path_rate` is the most important hyperparameter for regularizing a FractalNet.
-
--   For **smaller datasets or shallower models**, a lower rate (`0.0 - 0.1`) might be sufficient.
--   For **larger datasets or deeper models** (like `medium` or `large` variants), a higher rate (`0.15 - 0.25`) is crucial to prevent overfitting and ensure all paths are trained.
+It is the architecture's main regularizer. Lower it (`0.0 - 0.1`) for small datasets or
+shallow variants; raise it (`0.15 - 0.25`) for deep variants, where the long paths
+otherwise go undertrained.
 
 ```python
-# A model for a large dataset with strong regularization
+from dl_techniques.models.vision.fractalnet.model import create_fractal_net
+
 model = create_fractal_net(
     "large",
     num_classes=1000,
     input_shape=(224, 224, 3),
-    drop_path_rate=0.25  # Higher drop-path rate
+    drop_path_rate=0.25,
 )
 ```
 
-### Pattern 2: Understanding Training vs. Inference Behavior
-
-It's important to remember the dual nature of the model:
-
--   **During `model.fit()` (training=True)**: The model is a stochastic ensemble. Drop-path is active, and in each step, a different sub-network is trained.
--   **During `model.predict()` or `model.evaluate()` (training=False)**: The model is a deterministic, deep network. Drop-path is turned off, and the full "averaged" ensemble is used for prediction. This is why FractalNet generalizes well.
+Remember the two regimes this creates: `fit()` trains a randomly sampled sub-network at
+each step, while `predict()` and `evaluate()` run every path and average at the joins.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-FractalNet, being a standard CNN, benefits greatly from mixed precision training, which can accelerate training significantly on compatible GPUs (NVIDIA Tensor Core).
+Mixed precision works out of the box — the model is ordinary convolutions and Keras
+handles loss scaling inside `fit()`:
 
 ```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
+import keras
 
-# Create model (will automatically use mixed precision)
+from dl_techniques.models.vision.fractalnet.model import create_fractal_net
+
+keras.mixed_precision.set_global_policy("mixed_float16")
 model = create_fractal_net("medium", num_classes=100)
-
-# Keras's model.fit() will handle loss scaling automatically.
 ```
+
+Memory scales with `2^depth`, not with `depth`. A stage at `depth=6` costs twice a stage at
+`depth=5`; prefer more stages over deeper ones when a run does not fit.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Learning Rate
-
--   **Optimizer**: The original paper used **SGD with Nesterov momentum**. This remains a strong choice. Modern optimizers like **AdamW** also work well.
--   **Learning Rate Schedule**: A **cosine decay** or a **step decay** learning rate schedule is highly recommended. A few epochs of linear warmup at the start can also help stabilize training.
-
-### Data Augmentation
-
--   FractalNets benefit from standard data augmentation techniques used for CNNs. For image classification, this includes:
-    -   Random horizontal flips
-    -   Random crops (after padding)
-    -   Techniques like Cutout or Mixup can also be effective.
+- **Optimizer**: the paper used SGD with Nesterov momentum; AdamW also works. The factory
+  defaults to Adam.
+- **Schedule**: cosine or step decay, optionally with a few warmup epochs.
+- **Loss**: the head emits raw logits. `create_fractal_net` defaults to
+  `SparseCategoricalCrossentropy(from_logits=True)`; if you compile the model yourself, do
+  not pass the string `"sparse_categorical_crossentropy"`, which is `from_logits=False` and
+  mis-trains silently.
+- **Augmentation**: standard CNN augmentation — random flips, padded random crops, and
+  Cutout or Mixup.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `FractalNet` model and all its custom layers (`FractalBlock`) are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+`FractalNet`, `FractalBlock` and `ConvBlock` are registered and implement `get_config`, so
+the `.keras` format round-trips without a `custom_objects` argument. A save/load/predict
+round-trip on `create_fractal_net("small")` reproduces the original outputs exactly
+(max absolute difference 0.0).
 
 ```python
-# Create and train the model
-model = create_fractal_net("small", num_classes=10)
-# ... model.fit(...)
+import keras
 
-# Save the entire model to a single file
-model.save('my_fractalnet_model.keras')
-
-# Load the model in a new session
-# The custom FractalBlock layer is automatically handled.
-loaded_model = keras.models.load_model('my_fractalnet_model.keras')
-print("✅ Model loaded successfully!")
+model.save("fractalnet.keras")
+loaded = keras.models.load_model("fractalnet.keras")
 ```
+
+Saving a compiled model and reloading it emits a Keras warning that the optimizer state was
+skipped when the saved optimizer had not yet been built. It is harmless for inference;
+re-compile before resuming training.
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
-
-Simple tests can validate that all model variants are created correctly and that the forward pass produces the expected output shape.
-
 ```python
-import keras
 import numpy as np
+
 from dl_techniques.models.vision.fractalnet.model import FractalNet
 
+
 def test_creation_all_variants():
-    """Test model creation for all variants."""
-    for variant in FractalNet.MODEL_VARIANTS.keys():
+    for variant in FractalNet.MODEL_VARIANTS:
         model = FractalNet.from_variant(variant, num_classes=10, input_shape=(64, 64, 3))
         assert model is not None
-        print(f"✓ FractalNet-{variant} created successfully")
+
 
 def test_forward_pass_shape():
-    """Test the output shape of a forward pass."""
     model = FractalNet.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
-    dummy_input = np.random.rand(4, 32, 32, 3).astype("float32")
-    output = model.predict(dummy_input)
+    output = model.predict(np.random.rand(4, 32, 32, 3).astype("float32"))
     assert output.shape == (4, 10)
-    print("✓ Forward pass has correct shape")
-
-# Run tests
-if __name__ == '__main__':
-    test_creation_all_variants()
-    test_forward_pass_shape()
-    print("\n✅ All tests passed!")
 ```
+
+The package's own suites are `tests/test_models/test_fractalnet/` and
+`tests/test_layers/test_fractal_block.py`; the latter holds the receptive-field test that
+pins the expansion rule.
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Troubleshooting
 
-**Issue 1: Training loss is unstable or NAN.**
-
--   **Cause 1**: The learning rate might be too high.
--   **Solution 1**: Use a smaller learning rate and consider a warmup schedule.
--   **Cause 2**: Poor weight initialization.
--   **Solution 2**: Ensure you are using a standard initialization like `he_normal` for the convolutional kernels, which is the default in this implementation.
-
-### Frequently Asked Questions
-
-**Q: How is FractalNet different from ResNet?**
-
-A: The core difference is the mechanism used to enable deep network training. **ResNet** uses explicit **identity skip connections** to create a direct path for gradients. **FractalNet** creates an **implicit ensemble** of many paths of varying lengths through its recursive structure and uses **drop-path** to ensure all paths are trained.
-
-**Q: What is the point of the two branches in a `FractalBlock`?**
-
-A: The two branches create path *length* diversity, which is the whole point. The **deep** branch composes two depth-`k-1` `FractalBlock`s and the **shallow** branch is a single base block on the same input, so at each join a long path and a short path meet. All instances have **independent sets of weights**. Note that the two branches are of different depths — they are not two copies of the same sub-block run in parallel.
-
-**Q: Is FractalNet computationally expensive?**
-
-A: A `FractalBlock` of depth `k` contains `2^k - 1` base `ConvBlock`s. This means the computational cost and parameter count grow exponentially with the fractal depth. However, the models are designed with reasonable depths (e.g., up to 5 per stage), making them comparable to other deep CNNs like ResNet.
+- `Length of strides (N) must equal length of filters (M)` — `strides` defaults to three
+  entries. Pass one per stage whenever you change the number of stages.
+- `block_config['strides'] must be 1 inside a FractalBlock` — downsample between stages via
+  `strides`, not inside the base block.
+- **Out of memory at a modest `depth`** — cost is `2^depth`, not `depth`. Drop the stage
+  depth by one before touching the batch size.
+- **Loss is NaN or unstable** — lower the learning rate and add warmup. The default
+  `he_normal` initialization is already the right one for ReLU.
+- **Accuracy far below the loss's implied level** — check you did not compile with the
+  string `"sparse_categorical_crossentropy"` against the logit head.
 
 ---
 
 ## 15. Technical Details
 
-### The Mathematics of Fractal Expansion and Drop-Path
+**Expansion.** `F_1(x) = block(x)`, `F_k(x) = join(DP(F_{k-1}(F_{k-1}(x))), DP(block(x)))`,
+where the two `F_{k-1}` instances are composed and `DP` is the drop-path operator.
 
-The architecture is defined by the paper's recursive rule `f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]`, i.e.
-`F_1(x) = block(x)`
-`F_k(x) = join(DP(F_{k-1}(F_{k-1}(x))), DP(block(x)))`
-where the two `F_{k-1}` instances are **composed** (the second consumes the first's output), `block` is a single base `ConvBlock` on the same input, and `DP` is the drop-path operator. The rule is **not** `0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))` — that parallel form shipped until 2026-08-14 and collapsed every path to a single convolution.
+**Counts at depth `k`.** Leaf blocks `2^k - 1`; longest path `2^(k-1)`; shortest path 1;
+distinct paths `P(k) = P(k-1)^2 + 1`.
 
-**Drop-Path during Training**:
-The drop-path operator `DP` can be seen as multiplying the branch output by a Bernoulli random variable `b ~ Bernoulli(1 - p)`, where `p` is the `drop_path_rate`.
-`DP(y) = y * b`
+**Drop-path.** `DP(y) = y * b` with `b ~ Bernoulli(1 - drop_path_rate)`, drawn per sample
+and per branch, followed by renormalization over the survivors. The deepest path is active
+only when nothing on it is dropped, so short paths are trained far more often than long
+ones — which is the intended asymmetry.
 
-This means that during each forward pass, a random sub-graph of the full fractal network is sampled and trained. The deepest path is only active if no branches are dropped, while the shallowest paths are active much more frequently.
-
-**Inference as Ensemble Averaging**:
-At test time, the drop-path probability `p` is set to 0, so `DP(y) = y`. The final output is the deterministic average over all paths in the network (`P(1)=1`, `P(k)=P(k-1)^2 + 1`: 1, 2, 5, 26, 677 — super-exponential in the depth). This is analogous to averaging the predictions of a massive, jointly trained ensemble of neural networks, which is key to FractalNet's strong generalization performance.
+**Inference.** `p` is effectively 0, every join is a plain mean, and the output is a
+deterministic average over the whole path ensemble.
 
 ---
 
 ## 16. Citation
 
-This implementation is based on the original FractalNet paper. If you use this model or its concepts in your research, please cite the original work:
-
 ```bibtex
 @inproceedings{larsson2017fractalnet,
-  title={Fractalnet: Ultra-deep neural networks without residuals},
+  title={FractalNet: Ultra-Deep Neural Networks without Residuals},
   author={Larsson, Gustav and Maire, Michael and Shakhnarovich, Gregory},
   booktitle={International Conference on Learning Representations (ICLR)},
-  year={2017}
-}```
+  year={2017},
+  note={arXiv:1605.07648}
+}
+```

@@ -4,29 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of **CBAMNet**, a convolutional neural network enhanced with the **Convolutional Block Attention Module (CBAM)**. This lightweight and effective attention mechanism refines features at each stage of the network, allowing the model to learn *what* and *where* to focus in the feature maps.
-
-The architecture consists of standard convolutional blocks, each followed by a `CBAM` layer that sequentially applies channel and spatial attention.
-
----
-
-## Table of Contents
-
-1. [Overview: What is CBAMNet and Why It Matters](#1-overview-what-is-cbamnet-and-why-it-matters)
-2. [The Problem CBAMNet Solves](#2-the-problem-cbamnet-solves)
-3. [How CBAMNet Works: Core Concepts](#3-how-cbamnet-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Troubleshooting & FAQs](#13-troubleshooting--faqs)
-14. [Technical Details](#14-technical-details)
-15. [Citation](#15-citation)
+A Keras 3 implementation of **CBAMNet**, a convolutional network built from plain conv stages, each followed by a **Convolutional Block Attention Module (CBAM)**. CBAM is a lightweight module that refines a feature map by learning *what* to emphasize (channel attention) and then *where* to emphasize it (spatial attention).
 
 ---
 
@@ -34,499 +12,364 @@ The architecture consists of standard convolutional blocks, each followed by a `
 
 ### What is CBAMNet?
 
-**CBAMNet** is a convolutional neural network that incorporates the **Convolutional Block Attention Module (CBAM)** to improve its representational power. Instead of treating all features equally, CBAMNet learns to selectively emphasize important features and suppress irrelevant ones. It does this by inferring attention maps along two separate dimensions: **channel** and **spatial**.
+**CBAMNet** is a convolutional network whose every stage ends in a CBAM block. Rather than treating all channels and all pixels as equally informative, it infers two attention maps per stage — one along the channel axis, one along the spatial axes — and multiplies them into the features.
 
 ### Key Innovations
 
-1.  **Factorized Attention**: CBAM decouples the attention mechanism into two sequential sub-modules: a Channel Attention Module and a Spatial Attention Module. This makes the attention mechanism lightweight and efficient.
-2.  **Channel Attention ("What")**: This module learns the importance of each feature channel. It aggregates spatial information using both average and max pooling, then uses a shared Multi-Layer Perceptron (MLP) to compute channel-wise attention weights.
-3.  **Spatial Attention ("Where")**: This module learns the most informative spatial regions. It aggregates channel information using pooling operations along the channel axis and then uses a convolutional layer to generate a 2D spatial attention map.
-4.  **Sequential Refinement**: The key architectural choice is to apply channel attention first, which refines the feature map by re-weighting channels. The subsequent spatial attention module then operates on these channel-refined features to identify important spatial locations.
+1.  **Factorized attention**: attention is split into a channel module and a spatial module, each cheap on its own, instead of one dense attention over the whole tensor.
+2.  **Channel attention ("what")**: average- and max-pool over space give two channel descriptors; a shared bottleneck MLP maps both, the results are summed and passed through a sigmoid.
+3.  **Spatial attention ("where")**: average- and max-pool along the channel axis give two 2-D maps; they are concatenated and passed through a single convolution and a sigmoid.
+4.  **Sequential refinement**: channel first, then spatial. The paper reports this ordering beating both the reverse order and a parallel arrangement.
 
-### Why CBAMNet Matters
+### Why it matters
 
-**Standard CNN Problem**:
-```
-Problem: Extract the most relevant features from an image.
-Standard CNN Approach:
-  1. Apply a series of convolutional filters to the entire feature map.
-  2. Limitation: Each filter is applied uniformly across all spatial locations
-     and the network treats all feature channels with equal importance. This can
-     lead to computational resources being wasted on less informative regions
-     or features.
-  3. Result: The model may struggle to distinguish between subtle but important
-     features and background noise, potentially limiting its accuracy.
-```
-
-**CBAMNet's Solution**:
-```
-CBAMNet Approach:
-  1. After a standard convolution, insert a lightweight CBAM block.
-  2. First, the Channel Attention module decides "what" is important by
-     assigning a weight to each feature channel.
-  3. Second, the Spatial Attention module decides "where" to focus by
-     assigning a weight to each spatial location (pixel).
-  4. The input feature map is multiplied by these attention maps, effectively
-     recalibrating it to highlight the most salient information.
-  5. Benefit: Improves model accuracy and interpretability with a negligible
-     increase in parameters and computation, making the network more focused
-     and efficient.
-```
-
-### Real-World Impact
-
-CBAMNet is a general-purpose architecture suitable for a wide range of computer vision tasks where feature salience is important:
-
--   🖼️ **Image Classification**: Improves accuracy by focusing on discriminative object parts.
--   🎯 **Object Detection**: Enhances feature maps to better localize objects of interest.
--   🎨 **Image Segmentation**: Helps in distinguishing object boundaries from the background.
--   🔄 **Domain Adaptation**: Can improve generalization by focusing on domain-invariant features.
+A plain convolution applies the same filters everywhere and weighs every channel alike, so background pixels get the same treatment as the object and an edge detector counts as much as a texture detector. CBAM adds an input-dependent recalibration that costs very few parameters — the channel MLP is a bottleneck and the spatial branch is one convolution — and it is a drop-in that needs no change to the surrounding architecture.
 
 ---
 
 ## 2. The Problem CBAMNet Solves
 
-### The Limitation of Uniform Feature Processing
+A standard CNN learns filters but has no explicit mechanism to rank them at inference time. Two consequences follow:
 
-In a standard CNN, the network learns feature detectors (filters), but it applies them uniformly. It lacks an explicit mechanism to dynamically prioritize the most informative features or regions based on the input context.
+| Uniformity | Consequence |
+| :--- | :--- |
+| Every spatial location is processed identically | Background gets as much capacity as the object of interest. |
+| Every channel counts equally | Weakly informative channels dilute the strong ones downstream. |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Standard Convolutions                       │
-│                                                             │
-│  - All spatial locations in a feature map are treated equally.
-│    (The background pixels get as much computation as the    │
-│    foreground object).                                      │
-│                                                             │
-│  - All feature channels are considered equally important.   │
-│    (A channel detecting simple edges is weighted the same as│
-│    one detecting complex textures).                         │
-│                                                             │
-│  This can lead to suboptimal feature representations, where │
-│  critical information is diluted by noise or irrelevant data.
-└─────────────────────────────────────────────────────────────┘
-```
-
-### How CBAM Changes the Game
-
-CBAM introduces a dynamic, input-dependent attention mechanism that allows the network to adaptively refine its feature maps.
+CBAM makes the refinement explicit. For a feature map `F`:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  The CBAM Adaptive Refinement Strategy                      │
-│                                                             │
-│  1. For a given feature map F, CBAM computes:               │
-│     - A channel attention map Mc (What to focus on).        │
-│     - A spatial attention map Ms (Where to focus on).       │
-│                                                             │
-│  2. The refinement is applied sequentially:                 │
-│     - F' = F * Mc (Recalibrate channels).                   │
-│     - F'' = F' * Ms (Recalibrate spatial locations).        │
-│                                                             │
-│  The refined map F'' now has its most important features    │
-│  and regions amplified, providing a better representation   │
-│  for subsequent layers.                                     │
-└─────────────────────────────────────────────────────────────┘
+F'  = F  * Mc(F)      # channel attention: what
+F'' = F' * Ms(F')     # spatial attention: where
 ```
-This "learn to focus" ability makes the CNN more efficient and powerful, often leading to better performance on complex visual tasks.
+
+Both maps are functions of the input, so what the network emphasizes changes from image to image.
 
 ---
 
 ## 3. How CBAMNet Works: Core Concepts
 
-### The Sequential Attention Mechanism
-
-CBAMNet is built from a series of stages. Each stage consists of a standard convolutional block followed by a CBAM block. The CBAM block itself performs two sequential operations.
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                     CBAM Block Data Flow                         │
-│                                                                  │
-│  Input Feature Map ────►┌───────────────────┐                    │
-│        (F)              │ Channel Attention │───► Refined Feature│
-│                         │       (Mc)        │      Map (F')      │
-│                         └────────┬──────────┘                    │
-│                                  │ (Element-wise multiplication) │
-│                                  │                               │
-│                         ┌────────▼──────────┐                    │
-│       F' ─────────────► │ Spatial Attention │───► Final Refined  │
-│                         │       (Ms)        │   Feature Map (F'')│
-│                         └────────┬──────────┘                    │
-│                                  │ (Element-wise multiplication) │
-│                                  ▼                               │
-│                              Output                              │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### The Complete Data Flow in CBAMNet
+Each stage is `Conv2D(dim, 3x3, ReLU) -> BatchNormalization -> CBAM(dim) -> MaxPooling2D(2x2)`, so
+each stage halves the spatial resolution. The order is deliberate: attention operates on normalized
+activations, and pooling then acts on features whose salience has already been accounted for.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     CBAMNet Complete Data Flow                          │
-└─────────────────────────────────────────────────────────────────────────┘
-
-STEP 1: STAGE 0
-────────────────
-Input Image (B, H, W, 3)
-    │
-    ├─► Conv2D -> (B, H, W, D₀)
-    │
-    ├─► BatchNormalization
-    │
-    ├─► CBAM Block (Channel Attention -> Spatial Attention)
-    │
-    ├─► MaxPooling2D -> (B, H/2, W/2, D₀)
-    │
-    └─► Feature Map 0
-
-
-STEP 2: STAGE 1
-────────────────
-Feature Map 0
-    │
-    ├─► Conv2D -> (B, H/2, W/2, D₁)
-    │
-    ├─► BatchNormalization
-    │
-    ├─► CBAM Block
-    │
-    ├─► MaxPooling2D -> (B, H/4, W/4, D₁)
-    │
-    └─► Feature Map 1
-
-
-... (Repeat for all stages) ...
-
-
-STEP N: CLASSIFICATION
-──────────────────────
-Final Feature Map
-    │
-    ├─► Global Average Pooling -> (B, D_final)
-    │
-    ├─► Dense Layer (Classifier)
-    │
-    └─► Logits (B, num_classes)
+Input (B, H, W, 3)
+   │
+   ├─► Stage 0: Conv2D(D0) -> BN -> CBAM -> MaxPool2x2     (B, H/2,  W/2,  D0)
+   ├─► Stage 1: Conv2D(D1) -> BN -> CBAM -> MaxPool2x2     (B, H/4,  W/4,  D1)
+   ├─► ...                                                  one stage per entry of `dims`
+   │
+   └─► Head (include_top): GlobalAveragePooling2D -> Dense(num_classes, softmax)
+                                                            (B, num_classes)
 ```
+
+Inside one CBAM block:
+
+```
+F ──► ChannelAttention ──► Mc ──► multiply ──► F' ──► SpatialAttention ──► Ms ──► multiply ──► F''
+```
+
+The head ends in **softmax**, so the model outputs probabilities, not logits — compile with
+`from_logits=False`. With `include_top=False` the final stage's 4-D feature map is returned.
+
 ---
 
 ## 4. Architecture Deep Dive
 
 ### 4.1 `ChannelAttention`
 
--   **Purpose**: To decide "what" features are important. It computes a 1D attention vector that re-weights the channels.
--   **Architecture**:
-    1.  **Aggregate**: Applies both Global Average Pooling and Global Max Pooling to the input feature map to create two channel descriptors.
-    2.  **Learn**: Both descriptors are fed through a shared MLP with a bottleneck structure (a reduction layer followed by an expansion layer).
-    3.  **Combine & Activate**: The two output vectors from the MLP are added together and passed through a sigmoid function to produce the final channel attention weights.
+Decides "what". Global average pooling and global max pooling produce two channel descriptors; a
+**shared** MLP with a reduction/expansion bottleneck (`ratio`) maps each; the two outputs are added
+and squashed by a sigmoid into per-channel weights.
 
 ### 4.2 `SpatialAttention`
 
--   **Purpose**: To decide "where" to focus. It generates a 2D attention map to re-weight spatial locations.
--   **Architecture**:
-    1.  **Aggregate**: Applies average pooling and max pooling along the channel axis to create two 2D feature maps that summarize the information at each spatial location.
-    2.  **Combine**: The two maps are concatenated together.
-    3.  **Learn**: A single 7x7 convolutional layer is applied to the concatenated map, followed by a sigmoid activation, to produce the final spatial attention map.
+Decides "where". Average and max pooling along the channel axis give two `(H, W, 1)` maps; they are
+concatenated and passed through one `kernel_size x kernel_size` convolution (7x7 by default) and a
+sigmoid, producing a single spatial weight map.
 
-### 4.3 `CBAM` Layer
+### 4.3 `CBAM`
 
--   **Purpose**: The main block that orchestrates the sequential application of channel and spatial attention.
--   **Functionality**: Takes an input feature map `F`, applies `ChannelAttention` to get `Mc`, multiplies `F` by `Mc` to get `F'`, then applies `SpatialAttention` to `F'` to get `Ms`, and finally multiplies `F'` by `Ms` to get the output.
+Sequences the two: multiply `F` by the channel map, then multiply the result by the spatial map
+computed from that result. Constructor arguments are `channels`, `ratio` (default 8),
+`kernel_size` (default 7), plus separate initializers, regularizers and bias flags for the channel
+and spatial branches (`channel_kernel_regularizer`, `spatial_kernel_regularizer`, ...).
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
 ```bash
-# Ensure you have the required dependencies
 pip install keras>=3.0 tensorflow>=2.16 numpy
 ```
-
-### Your First CBAMNet Model (30 seconds)
-
-Let's build a tiny CBAMNet for CIFAR-10 classification.
 
 ```python
 import keras
 import numpy as np
 
-# Local imports from your project structure
-# Ensure cbam_net.py and the attention layers are in the correct path
 from dl_techniques.models.vision.cbam import CBAMNet
 
-# 1. Create a tiny CBAMNet model for CIFAR-10 (32x32 images, 10 classes)
+# 1. A tiny CBAMNet for CIFAR-10 (32x32 images, 10 classes)
 model = CBAMNet.from_variant(
     "tiny",
     num_classes=10,
-    input_shape=(32, 32, 3)
+    input_shape=(32, 32, 3),
 )
 
-# 2. Compile the model
+# 2. Compile. The head ends in softmax, so from_logits=False.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
     metrics=["accuracy"],
 )
-print("✅ CBAMNet model created and compiled successfully!")
 model.summary()
 
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_images = np.random.rand(batch_size, 32, 32, 3).astype("float32")
-dummy_labels = np.random.randint(0, 10, batch_size)
+# 3. Dummy data
+dummy_images = np.random.rand(16, 32, 32, 3).astype("float32")
+dummy_labels = np.random.randint(0, 10, 16)
 
-# 4. Train for one step
+# 4. One training step
 loss, acc = model.train_on_batch(dummy_images, dummy_labels)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}, Accuracy: {acc:.4f}")
+print(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
-# 5. Run inference
+# 5. Inference
 predictions = model.predict(dummy_images)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, num_classes)
+print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `CBAMNet` (Model Class)
+### 6.1 `CBAMNet` and its factory
 
-**Purpose**: The main Keras `Model` subclass that assembles the complete CBAMNet architecture.
+Both names are exported from `dl_techniques.models.vision.cbam`:
 
-**Location**: `dl_techniques.models.vision.cbam.CBAMNet`
+| Name | Purpose |
+| :--- | :--- |
+| **`CBAMNet`** | The Keras `Model` subclass. `CBAMNet.from_variant(...)` builds a named variant. |
+| **`create_cbam_net`** | Thin factory over `from_variant` with a default variant of `"tiny"`. |
 
 ```python
-from dl_techniques.models.vision.cbam import CBAMNet
+from dl_techniques.models.vision.cbam import CBAMNet, create_cbam_net
 
-# Create from a standard variant
-model = CBAMNet.from_variant(
-    "base",
-    num_classes=1000,
-    input_shape=(224, 224, 3)
-)
+# Same model, two entry points.
+model = CBAMNet.from_variant("base", num_classes=1000, input_shape=(224, 224, 3))
+model = create_cbam_net("base", num_classes=1000, input_shape=(224, 224, 3))
 
-# Create a custom model
+# Or a fully custom stage ladder.
 custom_model = CBAMNet(
     num_classes=100,
     dims=[32, 64, 128, 256],
-    attention_ratio=16
+    attention_ratio=16,
+    input_shape=(64, 64, 3),
 )
 ```
-### 6.2 Core Building Blocks
+
+Constructor arguments: `num_classes`, `dims`, `attention_ratio` (default 8),
+`attention_kernel_size` (default 7), `kernel_initializer`, `kernel_regularizer`, `include_top`,
+`input_shape`. `from_variant` and `create_cbam_net` additionally take `pretrained` and
+`weights_dataset`; `input_shape` defaults to `(224, 224, 3)` on both.
+
+### 6.2 Core building blocks
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
-| **`CBAM`** | `...layers.attention.convolutional_block_attention.CBAM` | The main attention block applying channel then spatial attention. |
-| **`ChannelAttention`** | `...layers.attention.channel_attention.ChannelAttention` | Computes channel-wise attention weights ("what"). |
-| **`SpatialAttention`** | `...layers.attention.spatial_attention.SpatialAttention` | Computes spatial attention weights ("where"). |
+| **`CBAM`** | `dl_techniques.layers.attention.convolutional_block_attention` | Channel attention then spatial attention. |
+| **`ChannelAttention`** | `dl_techniques.layers.attention.channel_attention` | Channel weights ("what"). |
+| **`SpatialAttention`** | `dl_techniques.layers.attention.spatial_attention` | Spatial weights ("where"). |
 
 ---
 
 ## 7. Configuration & Model Variants
 
-This implementation provides several pre-configured variants.
+`CBAMNet.MODEL_VARIANTS` sets only the stage widths; the number of stages is the length of `dims`,
+and each stage halves the resolution.
 
-| Variant | Dims | Description |
-|:---:|:---|:---|
-| **`tiny`** | `[64, 128]` | A very small model, suitable for quick experiments or simple datasets. |
-| **`small`**| `[64, 128, 256]` | A medium-sized model with three stages. |
-| **`base`** | `[128, 256, 512]`| A larger model for more complex datasets like ImageNet. |
+| Variant | Dims | Stages | Total downsampling |
+|:---|:---|:---:|:---:|
+| **`tiny`** | `[64, 128]` | 2 | 4x |
+| **`small`**| `[64, 128, 256]` | 3 | 8x |
+| **`base`** | `[128, 256, 512]`| 3 | 8x |
+
+Any other name raises `ValueError`. Widths are free-form through the constructor's `dims`.
 
 ---
 
-## 8. Comprehensive Usage Examples
+## 8. Usage Examples
 
-### Example 1: Using CBAMNet as a Feature Extraction Backbone
-
-You can use a headless CBAMNet as a feature backbone for tasks like object detection or segmentation.
+### Example 1: CBAMNet as a feature-extraction backbone
 
 ```python
-# 1. Create the feature extractor
+import numpy as np
+
+from dl_techniques.models.vision.cbam import CBAMNet
+
 backbone = CBAMNet.from_variant(
     "base",
     include_top=False,
-    input_shape=(224, 224, 3)
+    input_shape=(224, 224, 3),
 )
 
-# 2. Extract features
-dummy_images = np.random.rand(2, 224, 224, 3).astype("float32")
-features = backbone.predict(dummy_images)
+features = backbone(np.zeros((2, 224, 224, 3), dtype="float32"))
 
-# The output is the feature map from the final stage
-# Spatial resolution is downsampled by 8x for the 'base' variant (3 stages of pooling)
-print(f"Output shape: {features.shape}") # (2, 28, 28, 512)
+# Three stages of 2x pooling: 224 / 8 = 28, width = dims[-1] = 512
+print(f"Output shape: {features.shape}")  # (2, 28, 28, 512)
 ```
 
-### Example 2: Accessing Multi-Scale Features
+### Example 2: Multi-scale features for an FPN
 
-To build a Feature Pyramid Network (FPN), you can access the outputs of intermediate stages.
+`CBAMNet` is a subclassed model, so it has no functional graph: `model.input` raises
+`AttributeError` and you cannot slice it with `keras.Model(inputs, outputs)`. Walk `model.stages`
+instead — it is a list of per-stage layer lists, in call order.
 
 ```python
-# 1. Create the base model
-base_model = CBAMNet.from_variant(
+import numpy as np
+
+from dl_techniques.models.vision.cbam import CBAMNet
+
+backbone = CBAMNet.from_variant(
     "small",
     include_top=False,
-    input_shape=(256, 256, 3)
+    input_shape=(256, 256, 3),
 )
+backbone(np.zeros((1, 256, 256, 3), dtype="float32"))  # build
 
-# 2. Identify the output layers of each stage
-# The output of each CBAM block is a good feature representation
-stage_output_names = [
-    'stage_0_cbam',
-    'stage_1_cbam',
-    'stage_2_cbam'
-]
-stage_outputs = [base_model.get_layer(name).output for name in stage_output_names]
-
-# 3. Create a new model that outputs these features
-feature_extractor = keras.Model(
-    inputs=base_model.input,
-    outputs=stage_outputs
-)
-
-# 4. Get the multi-scale features
-dummy_images = np.random.rand(1, 256, 256, 3).astype("float32")
-multi_scale_features = feature_extractor.predict(dummy_images)
-
-print("Multi-scale feature map shapes:")
-for name, features in zip(stage_output_names, multi_scale_features):
-    print(f"  - {name}: {features.shape}")
+x = np.zeros((1, 256, 256, 3), dtype="float32")
+for stage_index, stage_layers in enumerate(backbone.stages):
+    for layer in stage_layers:
+        x = layer(x, training=False)
+    print(f"stage {stage_index}: {tuple(x.shape)}")
+# stage 0: (1, 128, 128, 64)
+# stage 1: (1, 64, 64, 128)
+# stage 2: (1, 32, 32, 256)
 ```
+
+To capture the pre-pooling feature map of a stage instead, stop after the stage's `CBAM` layer —
+each stage list is `[conv, bn, cbam, pool]`, and every layer carries a name such as
+`stage_0_cbam`, reachable with `backbone.get_layer("stage_0_cbam")`.
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Customizing Attention Regularization
+### Regularizing the two attention branches separately
 
-You can apply different regularization strengths to the channel and spatial attention components to fine-tune model behavior.
+`CBAM` takes independent regularizers for the channel MLP and the spatial convolution, so you can
+push the spatial map towards smoother solutions without over-constraining the channel weights.
 
 ```python
+import keras
+
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 
-# Apply stronger L2 regularization to the spatial attention kernel
-# This might encourage the model to learn smoother, less noisy spatial maps.
 custom_cbam = CBAM(
     channels=128,
     ratio=16,
     channel_kernel_regularizer=keras.regularizers.L2(1e-5),
-    spatial_kernel_regularizer=keras.regularizers.L2(1e-4) # Stronger regularization
+    spatial_kernel_regularizer=keras.regularizers.L2(1e-4),  # stronger
 )
-
-# You can integrate this into a custom model build
-# ...
 ```
+
+`CBAMNet` itself exposes a single `kernel_regularizer`, which reaches its `Conv2D` and `Dense`
+layers; per-branch control means building the blocks yourself.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-CBAMNet supports mixed precision training, which uses 16-bit floating-point precision for many operations to accelerate training on modern GPUs without significant accuracy loss.
-
 ```python
-# Enable mixed precision globally
-keras.mixed_precision.set_global_policy('mixed_float16')
+import keras
 
-# Create model (will automatically use mixed precision)
-model = CBAMNet.from_variant("base", num_classes=1000)
-model.compile(...) # Use a LossScaleOptimizer if using TensorFlow backend directly
+from dl_techniques.models.vision.cbam import CBAMNet
+
+keras.mixed_precision.set_global_policy("mixed_float16")
+
+model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+# model.fit() applies loss scaling automatically.
 ```
+
+Set the policy before constructing the model, and restore `"float32"` afterwards. Note that the
+softmax head runs in the compute dtype; if you need a float32 output layer, build the head yourself
+with an explicit `dtype="float32"`.
 
 ---
 
 ## 11. Training and Best Practices
 
--   **Optimizer**: **AdamW** is a robust choice, as weight decay can be an effective regularizer.
--   **Learning Rate Schedule**: A **cosine decay** schedule often provides the best results for training deep CNNs from scratch.
--   **Data Augmentation**: Standard vision augmentations like random flips, rotations, and color jitter are highly recommended. For more challenging datasets, consider stronger augmentations like **RandAugment** or **Mixup**.
+-   **Optimizer**: AdamW, with weight decay doing the regularization work.
+-   **Schedule**: cosine decay works well for training these stacks from scratch.
+-   **Augmentation**: flips, crops and colour jitter as a baseline; RandAugment or Mixup for harder datasets.
+-   **`attention_ratio`**: the channel MLP bottleneck. Lower it (4, or 2) on small datasets to give the channel branch more capacity; raise it to save parameters.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `CBAMNet` model and all its custom layers are fully serializable using Keras 3's modern `.keras` format.
-
-### Saving and Loading
+`CBAMNet` and its custom layers round-trip through the `.keras` format; the classes are registered,
+so no `custom_objects` argument is needed.
 
 ```python
-# Create and train model
-model = CBAMNet.from_variant("tiny", num_classes=10)
-# model.compile(...) and model.fit(...)
+import keras
+import numpy as np
 
-# Save the entire model
-model.save('my_cbam_model.keras')
+from dl_techniques.models.vision.cbam import CBAMNet
 
-# Load the model in a new session
-# The custom CBAM objects will be deserialized automatically
-loaded_model = keras.models.load_model(
-    'my_cbam_model.keras',
-    custom_objects={'CBAMNet': CBAMNet} # Not needed if registered globally, but good practice
-)
-print("✅ Model loaded successfully!")
+model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+model(np.zeros((1, 32, 32, 3), dtype="float32"))  # build before saving
+model.save("my_cbam_model.keras")
+
+loaded_model = keras.models.load_model("my_cbam_model.keras")
 ```
+
+### Pretrained weights
+
+None are distributed and none are downloadable: setting the `pretrained` argument to `True` raises
+`NotImplementedError`. Pass a local checkpoint path instead, e.g.
+`CBAMNet.from_variant("tiny", pretrained="/path/to/weights.keras")`.
 
 ---
 
-## 13. Troubleshooting & FAQs
+## 13. Troubleshooting
 
-**Issue 1: Training accuracy is low or stalls.**
-
--   **Cause**: The attention mechanism might be struggling to learn meaningful maps, especially on smaller or simpler datasets.
--   **Solution 1**: Try a smaller `attention_ratio` (e.g., 4 or 2) in the CBAM block to give the channel attention MLP more capacity.
--   **Solution 2**: Ensure you are using sufficient data augmentation. Attention mechanisms can sometimes overfit to spurious correlations in the training data.
-
-### Frequently Asked Questions
-
-**Q: What is the difference between channel and spatial attention?**
-
-A: **Channel attention** focuses on "what" is important. It assigns a different weight to each feature map (channel) to emphasize the most informative ones. **Spatial attention** focuses on "where" is important. It assigns a different weight to each pixel location to highlight the most relevant regions in the feature map.
-
-**Q: Is the CBAM block computationally expensive?**
-
-A: No, it is designed to be very lightweight. The channel attention MLP has very few parameters due to its bottleneck design, and the spatial attention uses a single convolution. The overhead compared to a standard ResNet block is minimal.
-
-**Q: Why is attention applied sequentially (channel then spatial)?**
-
-A: The authors of the CBAM paper found empirically that applying channel attention first, followed by spatial attention, yielded better results than applying them in parallel or in the reverse order. The intuition is that the network first decides which features are most important, and then, based on those refined features, it decides where to focus its attention.
+-   **`model.input` raises `AttributeError`** — this is a subclassed model with no functional graph. See Example 2 for the multi-scale pattern.
+-   **`count_params()` says the layer isn't built** — call the model on one batch first.
+-   **Loss looks wrong / accuracy stuck at chance** — the head already applies softmax; compile with `from_logits=False`.
+-   **`ValueError` on a variant name** — only `tiny`, `small`, `base` exist; use `dims` for anything else.
+-   **`NotImplementedError` from the `pretrained` flag** — no trained weights ship with this package.
+-   **Input too small** — each stage halves the resolution, so a 3-stage variant needs at least 8 pixels per side.
 
 ---
 
 ## 14. Technical Details
 
-### Channel Attention (`Mc`)
-
-The channel attention map `Mc` for an input feature map `F` is computed as:
+### Channel attention (`Mc`)
 
 `Mc(F) = σ( MLP(AvgPool(F)) + MLP(MaxPool(F)) )`
 
--   `AvgPool(F)` and `MaxPool(F)` produce two different spatial context descriptors.
--   `MLP` is a shared Multi-Layer Perceptron with one hidden layer that models the inter-channel relationships.
--   `σ` is the sigmoid function.
+-   `AvgPool` and `MaxPool` reduce over the spatial axes, giving two channel descriptors.
+-   `MLP` is shared between the two paths and has one hidden layer of `channels / ratio` units.
+-   `σ` is the sigmoid.
 
-### Spatial Attention (`Ms`)
-
-The spatial attention map `Ms` for a feature map `F` is computed as:
+### Spatial attention (`Ms`)
 
 `Ms(F) = σ( f⁷ˣ⁷([AvgPool(F); MaxPool(F)]) )`
 
--   `AvgPool(F)` and `MaxPool(F)` are now applied along the channel axis to generate two 2D maps.
--   `[;]` denotes concatenation of the two maps.
--   `f⁷ˣ⁷` is a 7x7 convolutional layer that processes the concatenated map to generate the final spatial attention map.
--   `σ` is the sigmoid function.
+-   Here the pools reduce over the channel axis, giving two `(H, W, 1)` maps.
+-   `[;]` is concatenation; `f⁷ˣ⁷` is one convolution with `kernel_size` 7 by default.
+-   `σ` is the sigmoid.
+
+Both maps broadcast against `F`, so the module adds no reshaping cost to the trunk.
 
 ---
 
 ## 15. Citation
 
-This implementation is based on the following paper. If you use this model in your research, please cite the original work:
-
--   **CBAM: Convolutional Block Attention Module**
+-   **CBAM: Convolutional Block Attention Module**, arXiv:1807.06521:
     ```bibtex
     @inproceedings{woo2018cbam,
-      title={Cbam: Convolutional block attention module},
+      title={CBAM: Convolutional block attention module},
       author={Woo, Sanghyun and Park, Jongchan and Lee, Joon-Young and Kweon, In So},
       booktitle={Proceedings of the European conference on computer vision (ECCV)},
       pages={3--19},
