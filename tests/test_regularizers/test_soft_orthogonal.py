@@ -9,6 +9,7 @@ This module provides comprehensive tests for:
 - Serialization/deserialization
 """
 
+import math
 import pytest
 import tensorflow as tf
 import numpy as np
@@ -313,24 +314,70 @@ def test_scaling_effect_on_regularization_strength(conv_small: tf.Tensor, conv_l
     assert small_no_scaling != small_with_scaling, "Scaling should affect regularization values"
     assert ratio_no_scaling > ratio_with_scaling, "Scaling should reduce the ratio between large and small"
 
-    # The exact ratio depends on implementation, but should be significantly reduced
-    assert ratio_with_scaling < ratio_no_scaling * 0.5, "Scaling should substantially reduce the large/small ratio"
+    # Derivation (soft_orthogonal.py module docstring, "Size normalization"):
+    # `use_matrix_scaling` divides the ENTIRE regularization value -- orthogonality term
+    # plus L1 plus L2 -- by sqrt(rank), where `rank` is the side length of the Gram matrix
+    # actually used, i.e. rank = min(units, fan_in).
+    #
+    #   conv_small  (3, 3,  8, 16):  fan_in = 3*3*8  =  72, units = 16 -> rank = min(16,  72) = 16
+    #   conv_large  (3, 3, 32, 64):  fan_in = 3*3*32 = 288, units = 64 -> rank = min(64, 288) = 64
+    #
+    # The divisor is a per-tensor constant, so toggling the flag is a pure global gain and
+    # the large/small ratio transforms EXACTLY:
+    #
+    #   ratio_with = (large / sqrt(64)) / (small / sqrt(16))
+    #              = ratio_no * sqrt(16) / sqrt(64)
+    #              = ratio_no * 4 / 8
+    #              = ratio_no * 0.5                                  <-- an EQUALITY, not a bound
+    #
+    # WARNING to a future reader: the superseded assertion here was
+    #     assert ratio_with_scaling < ratio_no_scaling * 0.5
+    # Under sqrt(rank) that is an exact-boundary STRICT inequality and can NEVER hold. It
+    # used to pass only because the OLD divisor was rank**2, which gives a factor of
+    #     16**2 / 64**2 = 256 / 4096 = 1/16,
+    # comfortably inside the `* 0.5` bound. The test did not drift; it was measuring a
+    # divisor that no longer exists. Do NOT "restore" the strict bound.
+    expected_factor = math.sqrt(16.0) / math.sqrt(64.0)
+    assert expected_factor == 0.5, "sqrt(16)/sqrt(64) is exactly 0.5"
+    assert float(ratio_with_scaling) == pytest.approx(
+        float(ratio_no_scaling) * expected_factor, rel=1e-6
+    ), "Toggling use_matrix_scaling rescales the large/small ratio by exactly sqrt(16)/sqrt(64)"
+
+    # The same identity read one tensor at a time: R(False) / R(True) == sqrt(rank).
+    # This inverts a published identity rather than recomputing `_kernel_gram`'s reshape,
+    # so it reads `rank` OUT of the implementation instead of re-implementing it.
+    assert float(small_no_scaling / small_with_scaling) == pytest.approx(
+        math.sqrt(16.0), rel=1e-6
+    ), "conv_small rank is min(16, 72) = 16, so the divisor is sqrt(16) = 4"
+    assert float(large_no_scaling / large_with_scaling) == pytest.approx(
+        math.sqrt(64.0), rel=1e-6
+    ), "conv_large rank is min(64, 288) = 64, so the divisor is sqrt(64) = 8"
 
 
 def test_scaling_across_filter_sizes() -> None:
     """
-    Test 2: Verify scaling behavior across different filter sizes.
+    Test 2: pin the sqrt(rank) divisor across filter counts, INCLUDING the Gram
+    orientation flip at units > fan_in.
 
-    This test confirms that:
-    1. Without scaling, regularization grows rapidly with filter count
-    2. With scaling, regularization grows more slowly and consistently
+    Every kernel here is (3, 3, 3, filters), so fan_in = 3*3*3 = 27 for all of them while
+    `units` sweeps past it. `rank` is therefore min(filters, 27) and SATURATES at 27, which
+    means the classic premise "scaling always reduces the growth rate" is FALSE for the
+    saturated pairs -- their per-pair factor is exactly 1.0. That premise is deliberately
+    not asserted here.
     """
-    # Define filter sizes to test
     filter_sizes = [8, 16, 32, 64, 128]
+
+    # Derivation: rank = min(units, fan_in) with fan_in = 27 throughout.
+    #   filters =   8 -> min(  8, 27) =  8   units <= fan_in: Gram is W^T W, side = units
+    #   filters =  16 -> min( 16, 27) = 16   units <= fan_in
+    #   filters =  32 -> min( 32, 27) = 27   ORIENTATION FLIP: units > fan_in, Gram is W W^T
+    #   filters =  64 -> min( 64, 27) = 27   saturated
+    #   filters = 128 -> min(128, 27) = 27   saturated
+    expected_ranks = [8, 16, 27, 27, 27]
+
     results_no_scaling = []
     results_with_scaling = []
 
-    # Create regularizers
     ortho_no_scaling = SoftOrthonormalConstraintRegularizer(
         lambda_coefficient=1.0,
         l1_coefficient=0.0,
@@ -345,22 +392,39 @@ def test_scaling_across_filter_sizes() -> None:
         use_matrix_scaling=True
     )
 
-    # Test with each filter size
     for filters in filter_sizes:
-        # Create test weights with fixed kernel size but different filter count
         tf.random.set_seed(42)  # For reproducibility
         weights = tf.random.normal((3, 3, 3, filters))
 
-        # Calculate regularization values
-        val_no_scaling = ortho_no_scaling(weights).numpy()
-        val_with_scaling = ortho_with_scaling(weights).numpy()
+        val_no_scaling = float(ortho_no_scaling(weights).numpy())
+        val_with_scaling = float(ortho_with_scaling(weights).numpy())
 
         results_no_scaling.append(val_no_scaling)
         results_with_scaling.append(val_with_scaling)
 
         print(f"Filters: {filters}, No scaling: {val_no_scaling:.6f}, With scaling: {val_with_scaling:.6f}")
 
-    # Calculate growth rates between consecutive filter sizes
+    # ---- The rank sequence, read OUT of the implementation via the published identity ----
+    # R(use_matrix_scaling=False) / R(use_matrix_scaling=True) == sqrt(rank), because the
+    # divisor is a uniform per-tensor constant. Squaring that observable ratio therefore
+    # recovers `rank` without re-implementing `_kernel_gram`'s reshape logic (a test that
+    # recomputes the code's own math is just a second copy of it).
+    implied_ranks = [
+        (no / with_) ** 2
+        for no, with_ in zip(results_no_scaling, results_with_scaling)
+    ]
+    print(f"Implied ranks: {implied_ranks}  (expected {expected_ranks})")
+
+    # This is the assertion that pins the Gram ORIENTATION FLIP at units > fan_in: nothing
+    # else in this suite can see it. If it fails, the rank model -- not the tolerance -- is
+    # wrong, and the correct response is to report it, not to retune this expectation.
+    for filters, expected_rank, implied_rank in zip(filter_sizes, expected_ranks, implied_ranks):
+        assert implied_rank == pytest.approx(float(expected_rank), rel=1e-5), (
+            f"filters={filters}: expected rank min({filters}, 27) = {expected_rank}, "
+            f"implied {implied_rank}"
+        )
+
+    # ---- Per-pair growth-rate factor ----
     growth_rates_no_scaling = [results_no_scaling[i] / results_no_scaling[i - 1]
                                for i in range(1, len(results_no_scaling))]
 
@@ -370,17 +434,114 @@ def test_scaling_across_filter_sizes() -> None:
     print(f"Growth rates without scaling: {growth_rates_no_scaling}")
     print(f"Growth rates with scaling: {growth_rates_with_scaling}")
 
-    # Without scaling, growth rate should be higher than with scaling
-    assert all(g_no > g_with for g_no, g_with in zip(growth_rates_no_scaling, growth_rates_with_scaling)), \
-        "Growth rate should be lower with scaling enabled"
+    # Derivation: g_with[i] / g_no[i] = (r_{i-1} / r_i) ** 0.5, since each value carries a
+    # 1/sqrt(rank) factor and the ratio keeps only the two ranks involved.
+    #   8  -> 16 : sqrt( 8/16) = sqrt(0.5)      = 0.707107
+    #   16 -> 32 : sqrt(16/27)                  = 0.769800
+    #   32 -> 64 : sqrt(27/27) = 1.0            <-- rank saturated, scaling changes NOTHING
+    #   64 -> 128: sqrt(27/27) = 1.0            <-- rank saturated
+    expected_pair_factors = [
+        math.sqrt(expected_ranks[i - 1] / expected_ranks[i])
+        for i in range(1, len(expected_ranks))
+    ]
+    assert expected_pair_factors[0] == pytest.approx(math.sqrt(0.5), rel=1e-12)
+    assert expected_pair_factors[2] == 1.0 and expected_pair_factors[3] == 1.0
 
-    # Check scaling effect between smallest and largest filter counts
+    for i, (g_no, g_with, factor) in enumerate(
+            zip(growth_rates_no_scaling, growth_rates_with_scaling, expected_pair_factors)):
+        assert g_with == pytest.approx(g_no * factor, rel=1e-5), (
+            f"pair {filter_sizes[i]}->{filter_sizes[i + 1]}: expected the scaled growth "
+            f"rate to be {factor} times the unscaled one"
+        )
+
+    # The superseded premise `all(g_no > g_with)` is FALSE once rank saturates: the last
+    # two factors are exactly 1.0, so the growth rates are EQUAL there. Assert the true
+    # shape instead -- strictly smaller while rank is still growing, equal afterwards.
+    assert growth_rates_with_scaling[0] < growth_rates_no_scaling[0]
+    assert growth_rates_with_scaling[1] < growth_rates_no_scaling[1]
+    assert growth_rates_with_scaling[2] == pytest.approx(growth_rates_no_scaling[2], rel=1e-5)
+    assert growth_rates_with_scaling[3] == pytest.approx(growth_rates_no_scaling[3], rel=1e-5)
+
+    # ---- Smallest-to-largest ----
+    # ratio_with / ratio_no = sqrt(r_first / r_last) = sqrt(8/27) = 0.544331 < 1, so the
+    # end-to-end statement "scaling reduces the largest/smallest ratio" still holds.
     ratio_no_scaling = results_no_scaling[-1] / results_no_scaling[0]
     ratio_with_scaling = results_with_scaling[-1] / results_with_scaling[0]
 
     print(
         f"Ratio from smallest to largest - No scaling: {ratio_no_scaling:.6f}, With scaling: {ratio_with_scaling:.6f}")
+    end_to_end_factor = math.sqrt(8.0 / 27.0)
+    assert end_to_end_factor == pytest.approx(0.5443310, abs=1e-6)
+    assert ratio_with_scaling == pytest.approx(ratio_no_scaling * end_to_end_factor, rel=1e-5)
     assert ratio_with_scaling < ratio_no_scaling, "Scaling should reduce the ratio between largest and smallest"
+
+
+@pytest.mark.parametrize("lambda_coefficient,l1_coefficient,l2_coefficient,term_name", [
+    (0.0, 1.0, 0.0, "l1-only"),
+    (0.0, 0.0, 1.0, "l2-only"),
+    (1.0, 0.0, 0.0, "orthogonality-only"),
+])
+@pytest.mark.parametrize("regularizer_cls", [
+    SoftOrthogonalConstraintRegularizer,
+    SoftOrthonormalConstraintRegularizer,
+])
+def test_matrix_scaling_divisor_applies_to_every_term(
+        regularizer_cls: Any,
+        lambda_coefficient: float,
+        l1_coefficient: float,
+        l2_coefficient: float,
+        term_name: str
+) -> None:
+    """
+    Test the "pure global gain" property: the `use_matrix_scaling` divisor is applied to
+    the L1 and L2 terms as well as to the orthogonality term.
+
+    Derivation (soft_orthogonal.py module docstring): the divisor is uniform across terms,
+    so for ANY coefficient triple
+
+        R(use_matrix_scaling=False) / R(use_matrix_scaling=True) == sqrt(rank)
+
+    Kernel is (3, 3, 3, 16): fan_in = 3*3*3 = 27, units = 16, rank = min(16, 27) = 16,
+    so the expected ratio is sqrt(16) = 4.0 for EVERY term in isolation.
+
+    Zeroing two of the three coefficients is what makes this discriminating. With all three
+    terms active the orthogonality term dominates the total at the default coefficients, so
+    the measured ratio would read ~sqrt(rank) whether the divisor were uniform or applied
+    to the orthogonality term alone. Under the SUPERSEDED behaviour (divisor on the
+    orthogonality term only, and rank**2 at that) the l1-only and l2-only rows would read
+    exactly 1.0 while the orthogonality row read rank**2 = 256.
+    """
+    tf.random.set_seed(42)
+    weights = tf.random.normal((3, 3, 3, 16))
+
+    expected_ratio = math.sqrt(16.0)  # sqrt(min(16, 27)) = sqrt(16) = 4.0
+    assert expected_ratio == 4.0
+
+    no_scaling = regularizer_cls(
+        lambda_coefficient=lambda_coefficient,
+        l1_coefficient=l1_coefficient,
+        l2_coefficient=l2_coefficient,
+        use_matrix_scaling=False
+    )
+    with_scaling = regularizer_cls(
+        lambda_coefficient=lambda_coefficient,
+        l1_coefficient=l1_coefficient,
+        l2_coefficient=l2_coefficient,
+        use_matrix_scaling=True
+    )
+
+    value_no_scaling = float(no_scaling(weights).numpy())
+    value_with_scaling = float(with_scaling(weights).numpy())
+
+    # Anti-vacuity: the isolated term must actually produce a penalty, otherwise the ratio
+    # below would be 0/0 and the test would pass without measuring anything.
+    assert value_with_scaling > 0.0, f"{term_name} produced no penalty; the ratio is vacuous"
+
+    ratio = value_no_scaling / value_with_scaling
+    print(f"{regularizer_cls.__name__} {term_name}: R(False)/R(True) = {ratio:.6f}")
+    assert ratio == pytest.approx(expected_ratio, rel=1e-5), (
+        f"{term_name}: the sqrt(rank) divisor must apply to this term too"
+    )
 
 
 def test_scaling_consistency_between_dense_and_conv(
