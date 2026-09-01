@@ -1,4 +1,5 @@
-"""Bottleneck monitoring callback for the bias-free ConvUNeXt denoiser.
+"""
+Bottleneck monitoring callback for the bias-free ConvUNeXt denoiser.
 
 Provides :class:`ConvUnextBottleneckMonitorCallback`, a Keras callback that
 inspects the deepest-stage latent (the bottleneck) of a bias-free ConvUNeXt
