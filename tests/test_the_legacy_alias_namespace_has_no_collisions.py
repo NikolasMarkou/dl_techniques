@@ -376,14 +376,6 @@ class TestTheLegacyAliasNamespace:
             "hides the duplicate from this arm. Found:\n  " + "\n  ".join(shadows)
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "measured RED at 755f06a38: 8 legacy_alias=False sites (5 distinct names). "
-            "Retired by plan-2026-09-01-dcc1574a steps 3-5; XPASS is the signal that "
-            "they landed."
-        ),
-    )
     def test_no_site_refuses_the_legacy_alias(self):
         """(b) The refusal population is EXACTLY empty.
 
@@ -403,14 +395,6 @@ class TestTheLegacyAliasNamespace:
             "default. Found:\n  " + "\n  ".join(offenders)
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "measured RED at 755f06a38: 3 duplicate bare names (Downsample, MLPBlock, "
-            "Upsample), each hidden behind a refusal on both sides. Retired by "
-            "plan-2026-09-01-dcc1574a steps 3-4; XPASS is the signal."
-        ),
-    )
     def test_no_two_registered_objects_share_a_bare_name(self):
         """(c) The latent duplicates -- the ones a refusal hides from arm (a).
 
@@ -457,17 +441,15 @@ class TestTheLegacyAliasNamespace:
         ("dl_techniques.models.vision_language.ideogram4.vae", ("Upsample",)),
     )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "measured RED at 755f06a38: all 8 classes resolve their legacy alias to None. "
-            "Retired by plan-2026-09-01-dcc1574a steps 3-5; XPASS is the signal."
-        ),
-    )
-    def test_the_eight_refusing_classes_satisfy_the_registration_contract(
+    def test_the_eight_formerly_refusing_classes_bind_their_legacy_alias(
         self, registration_contract
     ):
         """(d) The runtime half, through the fixture built for exactly this audit.
+
+        There are no refusing classes left -- arm (b) pins that population at zero. These
+        eight are the ones that USED to refuse, and this arm asserts the runtime
+        consequence of them no longer doing so: each binds its bare ``Custom>{__name__}``
+        alias back to itself.
 
         ``registration_contract`` is ``tests/conftest.py``'s
         ``assert_package_qualified_registration``, called here at its DEFAULT
