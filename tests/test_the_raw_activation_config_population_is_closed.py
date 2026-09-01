@@ -37,9 +37,20 @@ or ``resolve_activation_layer`` -- every one of which accepts a callable. The
 
 Re-derived at HEAD 2026-08-23: **72 sites / 54 files** (69 with a bare
 ``self.X`` value plus 3 that already special-cased ``keras.layers.Layer`` but
-let a plain callable through raw). 65 were repaired. The 7 below are
+let a plain callable through raw). 65 were repaired. The 6 below are
 **provably** unreachable, pinned by name with the evidence that makes them so --
 not by a count.
+
+UPDATED 2026-09-01 (plan-2026-09-01-e6d380a5 step 7): the roster was 7. The
+seventh, ``layers/yolo12_blocks.py::ConvBlock::activation``, is gone because that
+class was DELETED as a duplicate of ``layers/standard_blocks.ConvBlock``, whose
+activation config key is ``activation_type`` and therefore never entered this
+population. Note the trap this nearly walked into: the evidence string
+``activation: bool = True`` is STILL in ``yolo12_blocks.py`` -- it is the
+signature of the surviving ``yolo12_conv_block()`` helper -- so
+``test_the_provable_residue_is_still_provable``'s first assertion would have kept
+passing on an unrelated line. What actually caught the removal was its SECOND
+assertion (the site no longer appears in the sweep). Do not weaken that one.
 """
 
 import ast
@@ -64,8 +75,6 @@ _ACTIVATION_KEY = re.compile(r"(^|_)activation$")
 #: noise. The evidence string is re-checked against the source below, so the
 #: ruling rots loudly if someone drops the coercion.
 _PROVABLY_NOT_AN_ACTIVATION_OBJECT = {
-    "dl_techniques/layers/yolo12_blocks.py::ConvBlock::activation":
-        "activation: bool = True",
     "dl_techniques/layers/transformers/energy_transformer.py::HopfieldNetwork::activation":
         "self.activation = str(activation)",
     "dl_techniques/layers/transformers/energy_transformer.py::EnergyTransformer::hopfield_activation":
@@ -191,4 +200,4 @@ class TestTheRawActivationFamilyIsClosed:
         'the same sites are still the ones exempt' are different claims and only
         the second is what an exemption asserts.
         """
-        assert len(population) == len(_PROVABLY_NOT_AN_ACTIVATION_OBJECT) == 7
+        assert len(population) == len(_PROVABLY_NOT_AN_ACTIVATION_OBJECT) == 6

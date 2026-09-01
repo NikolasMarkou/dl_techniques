@@ -6,11 +6,20 @@ import os
 from typing import Dict, Any, Tuple
 import tensorflow as tf
 
-# Import the YOLOv12 building blocks
+# Import the YOLOv12 building blocks.
+#
+# `ConvBlock`, `AreaAttention` and `AttentionBlock` USED to live in
+# `dl_techniques.layers.yolo12_blocks`. They no longer do: the duplicate
+# `ConvBlock` was folded into the shared `standard_blocks.ConvBlock`, the
+# attention layer moved to `layers/attention/` (reachable as
+# `create_attention_layer('area', ...)`), and the block moved to
+# `layers/transformers/` RENAMED `AreaAttentionBlock`. Each class's own suite
+# now lives beside its new home; what is exercised from here is only the
+# yolo12-level composition.
+from dl_techniques.layers.standard_blocks import ConvBlock
+from dl_techniques.layers.attention.area_attention import AreaAttention
+from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
 from dl_techniques.layers.yolo12_blocks import (
-    ConvBlock,
-    AreaAttention,
-    AttentionBlock,
     Bottleneck,
     C3k2Block,
     A2C2fBlock
@@ -18,7 +27,20 @@ from dl_techniques.layers.yolo12_blocks import (
 
 
 class TestConvBlock:
-    """Comprehensive test suite for ConvBlock layer."""
+    """Construction and validation suite for the SHARED `standard_blocks.ConvBlock`.
+
+    This suite used to target `yolo12_blocks.ConvBlock`, which was deleted as a
+    duplicate. It is retargeted rather than removed because the `groups=0`,
+    `padding='invalid'` and `filters<=0` cases are real guards on the widened
+    shared class, and the widening (`groups`, `use_bias`, an activation-off path)
+    is exactly what made the deletion possible. The API differences are
+    deliberate and asserted below: `activation=False` is now
+    `activation_type='linear'`, the normalization sub-layer is `.norm` not `.bn`,
+    and the defaults are the shared class's (`relu`, `use_bias=True`,
+    `glorot_uniform`), NOT the yolo12 ones -- the yolo12 configuration is applied
+    by `yolo12_blocks.yolo12_conv_block()` and is guarded by the norm-epsilon
+    census test, not here.
+    """
 
     @pytest.fixture
     def sample_input(self) -> keras.KerasTensor:
@@ -44,7 +66,7 @@ class TestConvBlock:
             'strides': 2,
             'padding': 'valid',
             'groups': 4,
-            'activation': False,
+            'activation_type': 'linear',
             'use_bias': True,
             'kernel_initializer': 'he_normal',
             'kernel_regularizer': keras.regularizers.L2(1e-4)
@@ -60,9 +82,9 @@ class TestConvBlock:
         assert layer.strides == 1
         assert layer.padding == "same"
         assert layer.groups == 1
-        assert layer.activation is True
-        assert layer.use_bias is False
-        assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
+        assert layer.activation_type == "relu"
+        assert layer.use_bias is True
+        assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert layer.kernel_regularizer is None
 
         # Check that layer is not built yet
@@ -70,8 +92,8 @@ class TestConvBlock:
 
         # Check that sub-layers are created but not built
         assert layer.conv is not None
-        assert layer.bn is not None
-        assert layer.act is not None
+        assert layer.norm is not None
+        assert layer.activation is not None
         assert not layer.conv.built
 
     def test_initialization_custom(self, custom_layer_config):
@@ -83,12 +105,16 @@ class TestConvBlock:
         assert layer.strides == 2
         assert layer.padding == "valid"
         assert layer.groups == 4
-        assert layer.activation is False
+        assert layer.activation_type == "linear"
         assert layer.use_bias is True
         assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
 
-        # When activation=False, act should be None
-        assert layer.act is None
+        # "No activation" is spelled `activation_type='linear'`, which builds a
+        # weightless `keras.layers.Activation('linear')` -- an exact identity, not
+        # a `None` sub-layer. Asserting `is None` here would be asserting the
+        # DELETED class's shape.
+        assert isinstance(layer.activation, keras.layers.Activation)
+        assert layer.activation.weights == []
 
     def test_parameter_validation(self):
         """Test that invalid parameters raise appropriate errors."""
@@ -99,12 +125,15 @@ class TestConvBlock:
         with pytest.raises(ValueError, match="filters must be positive"):
             ConvBlock(filters=-10)
 
-        # Test invalid kernel_size values
-        with pytest.raises(ValueError, match="kernel_size must be positive"):
+        # kernel_size and strides are validated by the `Conv2D` sub-layer, not by
+        # `ConvBlock` itself -- the deleted yolo12 class re-checked them with its
+        # own message. Both still raise `ValueError` at construction; the `match`
+        # strings name Keras' wording so this stays a real guard rather than a
+        # bare `pytest.raises(ValueError)`.
+        with pytest.raises(ValueError, match=r"`kernel_size` argument must be"):
             ConvBlock(filters=64, kernel_size=0)
 
-        # Test invalid strides values
-        with pytest.raises(ValueError, match="strides must be positive"):
+        with pytest.raises(ValueError, match=r"`strides` argument must be"):
             ConvBlock(filters=64, strides=-1)
 
         # Test invalid groups values
@@ -130,7 +159,7 @@ class TestConvBlock:
 
         # Check that all sub-layers are built
         assert layer.conv.built
-        assert layer.bn.built
+        assert layer.norm.built
 
         # Verify output shape
         expected_shape = layer.conv.compute_output_shape(sample_input.shape)
@@ -145,12 +174,12 @@ class TestConvBlock:
         assert not keras.ops.any(keras.ops.isnan(output))
         assert not keras.ops.any(keras.ops.isinf(output))
 
-        # With SiLU activation, output should have some positive values
+        # With the default ReLU activation, output should have positive values
         assert keras.ops.any(keras.ops.greater(output, 0))
 
     def test_forward_pass_without_activation(self, sample_input):
         """Test forward pass with activation disabled."""
-        layer = ConvBlock(filters=128, activation=False)
+        layer = ConvBlock(filters=128, activation_type='linear')
         output = layer(sample_input)
 
         assert not keras.ops.any(keras.ops.isnan(output))
@@ -563,8 +592,8 @@ class TestYOLOv12Integration:
         inputs = keras.Input(shape=sample_input.shape[1:])
 
         # Multi-scale attention processing
-        x1 = AttentionBlock(dim=256, area=1)(inputs)  # Global attention
-        x2 = AttentionBlock(dim=256, area=4)(inputs)  # Local attention
+        x1 = AreaAttentionBlock(dim=256, area=1)(inputs)  # Global attention
+        x2 = AreaAttentionBlock(dim=256, area=4)(inputs)  # Local attention
 
         # Combine features
         x = keras.layers.Add()([x1, x2])
@@ -590,7 +619,7 @@ class TestYOLOv12Integration:
         x = C3k2Block(filters=256, n=2)(x)
         x = A2C2fBlock(filters=256, n=1, area=2)(x)
         x = Bottleneck(filters=256)(x)
-        outputs = ConvBlock(filters=128, activation=False)(x)
+        outputs = ConvBlock(filters=128, activation_type='linear')(x)
 
         model = keras.Model(inputs, outputs)
         original_prediction = model(sample_input)
@@ -664,7 +693,7 @@ class TestYOLOv12EdgeCases:
 
     def test_different_batch_sizes(self):
         """Test with different batch sizes including batch_size=1."""
-        layer = AttentionBlock(dim=128)
+        layer = AreaAttentionBlock(dim=128)
 
         batch_sizes = [1, 2, 8, 16]
         for batch_size in batch_sizes:
