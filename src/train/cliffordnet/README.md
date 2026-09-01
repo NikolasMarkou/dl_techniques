@@ -300,13 +300,6 @@ MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.resize_cc3m_to_ssd \
    utilization. For repeat runs on the same data, convert to TFRecord shards
    with `train.common.tfrecord` — sequential reads from ~256 MiB shards recover
    several times the throughput. `resize_cc3m_to_ssd.py` is the cheaper fix.
-4. **There is no multi-resolution curriculum, on purpose.** An earlier version
-   raised resolution mid-run; the lower-res compiled kernels stayed resident
-   while the higher-res ones compiled, spiking VRAM and OOMing repeatedly on a
-   12 GB card. Use one fixed `--image-size`.
-
-> **Removed 2026-08-10.** The three denoising pipelines, the routing-LM trainer,
-> the COCO multi-task trainer, the depth-estimation trainer, the embedding and
-> LM U-Net trainers and the Wikipedia pretraining helper were deleted along with
-> the model modules and strided `*BlockDSv2` blocks they depended on. Recover
-> them from git history if needed.
+4. **Do not raise resolution mid-run.** A multi-resolution curriculum keeps the
+   lower-res compiled kernels resident while the higher-res ones compile,
+   spiking VRAM and OOMing on a 12 GB card. Use one fixed `--image-size`.

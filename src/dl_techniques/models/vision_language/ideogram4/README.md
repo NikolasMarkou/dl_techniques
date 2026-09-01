@@ -6,10 +6,9 @@ language-model features, a **Flux2 KL-VAE**, a **logit-normal time schedule +
 Euler flow-matching sampler**, a velocity loss, an inference pipeline, and
 training code.
 
-> Plan: `plans/plan_2026-06-12_59a18a10/` (iter-1).
 > The DiT is conditioned on a **precomputed `llm_features` tensor** — the
-> original Qwen3-VL-8B text/vision encoder is **not** reimplemented in Keras
-> (decision D1). This is a **trainable architecture with a runnable tiny
+> original Qwen3-VL-8B text/vision encoder is **not** reimplemented in Keras.
+> This is a **trainable architecture with a runnable tiny
 > preset**, NOT a drop-in for the released quantized checkpoint. See
 > `CLAUDE.md` for the full "what doesn't fit / skipped / changed" report.
 
@@ -80,9 +79,9 @@ model = create_ideogram4_transformer("tiny", num_layers=4)   # field overrides
 
 | layer | file | role |
 |-------|------|------|
-| `Ideogram4MRoPE` | `layers/embedding/multi_axis_rope.py` | 3D `(t,h,w)` multi-axis rotary; static one-hot band-interleave (D-003) |
+| `Ideogram4MRoPE` | `layers/embedding/multi_axis_rope.py` | 3D `(t,h,w)` multi-axis rotary; static one-hot band-interleave |
 | `ScalarSinusoidalEmbedding` | `layers/embedding/scalar_sinusoidal_embedding.py` | time `t∈[0,1]` → `emb_dim`; freqs stored as a **non-trainable weight** (serialization-safe) |
-| `Ideogram4Attention` | `layers/attention/ideogram4_attention.py` | fused QKV + per-head RMS QK-norm + mRoPE inject + **additive** block-diagonal segment mask + manual SDPA (D-004) |
+| `Ideogram4Attention` | `layers/attention/ideogram4_attention.py` | fused QKV + per-head RMS QK-norm + mRoPE inject + **additive** block-diagonal segment mask + manual SDPA |
 | `Ideogram4TransformerBlock` | `layers/transformers/ideogram4_block.py` | **4-stream tanh-gated AdaLN** (scale+gate, NO shift) with a **4-RMSNorm sandwich** (post-norm inside the residual) |
 | `Ideogram4FinalLayer` | `layers/transformers/ideogram4_block.py` | affine-free LayerNorm + `(1 + AdaLN(silu(c)))` scale + `Dense(in_channels)` velocity head |
 
@@ -121,7 +120,7 @@ CFG) then decode**. Conditioning is the `llm_features` tensor passed to
 `unconditional_transformer=` to recover PyTorch's two-model form. The Euler loop
 keeps its index descending (that is the order `guidance_schedule` is written in)
 and indexes the step grid in reverse, which is what makes `t` descend noise ->
-data with a negative `dt` (D-002; pinned by
+data with a negative `dt` (pinned by
 `tests/test_models/test_ideogram4/test_sampler_direction.py`).
 
 ### Loss — `losses/flow_matching_velocity_loss.py`
@@ -140,10 +139,10 @@ is deliberately left to the sampling level (the trainer), not the loss.
 | `SwiGLUFFN` | `layers/ffn/swiglu_ffn.py` | the block MLP (configured bias-free, `expansion=1`, `multiple_of=intermediate_size` so the rounded hidden equals `intermediate_size` exactly) |
 | `Sampling` | `layers/sampling.py` | VAE KL reparameterization |
 | `keras.layers.GroupNormalization` | Keras built-in | VAE `GroupNorm32(groups=32, eps=1e-6)` — NOT the repo norms factory (see CLAUDE.md) |
-| upsample (op sequence) | stock Keras (`UpSampling2D` + `Conv2D`) | **D-005**: a thin `Upsample` wrapper (UpSampling2D nearest×2 + Conv2D 3×3 same) built so the subclassed `Decoder` can OWN it. The repo's shared string-dispatch upsample helper was rejected here because it built into a functional graph rather than an ownable sub-layer; that helper was deleted in 2026-08. |
+| upsample (op sequence) | stock Keras (`UpSampling2D` + `Conv2D`) | A thin `Upsample` wrapper (UpSampling2D nearest×2 + Conv2D 3×3 same) built so the subclassed `Decoder` can OWN it, rather than a functional-graph helper. |
 
-Two layers were deliberately built net-new instead of reusing near-misses
-(**D-002**): `ScalarSinusoidalEmbedding` (the existing `TimestepEmbedding` stores
+Two layers are deliberately net-new instead of reusing near-misses:
+`ScalarSinusoidalEmbedding` (the existing `TimestepEmbedding` stores
 freqs as a plain tensor, breaking `.keras` round-trip) and
 `Ideogram4TransformerBlock` (structurally distinct from the repo's
 `AdaLNZeroConditionalBlock`).
@@ -184,7 +183,7 @@ from dl_techniques.models.vision_language.ideogram4.transformer import create_id
 model = create_ideogram4_transformer("tiny")
 ```
 
-Real smoke-train (the command actually run for this iteration):
+Smoke-train:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.ideogram4.train_ideogram4 \
@@ -194,16 +193,13 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.ideogram4.train_
 > Note: with `CUDA_VISIBLE_DEVICES=1` the only visible device is index `0`, so
 > pass `--gpu 0`.
 
-**Observed result**: loss **2.59 → 1.67** over 8 epochs on an RTX 4070, **no
-NaN**. Artifacts written under
-`results/ideogram4/ideogram4_tiny_20260612_154608/` (`best_model.keras`,
-`config.json`, `training_log.csv`). The trainer slices image-token velocities
-`[:, T:]` for the velocity MSE.
-
 The trainer (`train/ideogram4/train_ideogram4.py`) generates a synthetic
-packed-index flow-matching dataset; CLI flags include `--variant`, `--epochs`,
-`--steps-per-epoch`, `--batch-size`, `--num-text-tokens`, `--grid-h`,
-`--grid-w`, `--learning-rate`, `--mixed-bfloat16`, `--gpu`, `--seed`.
+packed-index flow-matching dataset and slices image-token velocities `[:, T:]`
+for the velocity MSE; it writes `best_model.keras`, `config.json` and
+`training_log.csv` under `results/ideogram4/<run>/`. CLI flags: `--variant`,
+`--epochs`, `--steps-per-epoch`, `--batch-size`, `--num-text-tokens`,
+`--grid-h`, `--grid-w`, `--learning-rate`, `--output-dir`, `--mixed-bfloat16`,
+`--gpu`, `--seed`.
 
 ---
 

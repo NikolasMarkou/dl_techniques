@@ -10,11 +10,9 @@ memory-augmented neural networks (MANNs) modelled on the NTM/DNC literature.
 from train.ntm import CopyTaskGenerator, CopyTaskConfig, evaluate_copy_task
 ```
 
-Older revisions of this document imported every example from a standalone
-benchmarks package that does not exist in this repository, so none of those
-snippets ever ran. If a snippet you found elsewhere imports from anything other
-than `train.ntm`, it is stale — the package is not installable under any other
-name.
+If a snippet you found elsewhere imports these names from a standalone
+benchmarks package, it is stale: no such package exists here, and this one is
+not installable under any other name.
 
 ## Contents at a glance
 
@@ -42,11 +40,10 @@ There are **three**: `train_ntm.py`, `train_multitask.py` and
 `tests/test_train/test_ntm/test_ntm_trainers.py::TestCommandLineContract`, which
 tripwires `setup_gpu`.
 
-Only `train_ntm.py` still takes its common flags from
-`train.common.create_base_argument_parser`. `train_multitask.py` and
-`run_benchmark_suite.py` build a **local** `argparse.ArgumentParser` (the
-Pattern 2 shape documented in `src/train/CLAUDE.md`), because the shared
-vision-oriented parser contributed five flags neither of them reads.
+All three build a **local** `argparse.ArgumentParser` (the Pattern 2 shape
+documented in `src/train/CLAUDE.md`) rather than extending
+`train.common.create_base_argument_parser`, whose vision-oriented flags none of
+them reads.
 
 ### 1. Copy task — `train_ntm.py`
 
@@ -69,8 +66,11 @@ Flags (verbatim from `--help`):
 
 | Flag | Default | Notes |
 |------|---------|-------|
-| `--dataset` | `copy` | only choice is `copy` |
-| `--epochs`, `--batch-size`, `--learning-rate`, `--patience`, `--gpu` | from the base parser | wired through |
+| `--epochs` | `100` | maximum training epochs |
+| `--batch-size` | `64` | rows per batch |
+| `--learning-rate` | `0.001` | Adam learning rate |
+| `--patience` | `50` | EarlyStopping patience |
+| `--gpu` | `None` | GPU device index |
 | `--memory-size` | `128` | memory locations |
 | `--memory-dim` | `20` | width of one memory slot |
 | `--controller-dim` | `100` | controller hidden size |
@@ -84,11 +84,10 @@ Flags (verbatim from `--help`):
 | `--num-eval-samples` | `20` | sequences drawn for the post-training report |
 | `--success-threshold` | `0.9` | sequence accuracy above which the log says SUCCESS |
 
-The base parser also exposes `--image-size`, `--weight-decay`, `--lr-schedule`
-and `--show-plots`. **`train_ntm.py` does not read any of them** — they are
-inherited from the shared vision-oriented parser and are silent no-ops here.
-`train_multitask.py` used to inherit the same dead tail and no longer does: it
-moved to a local parser and now rejects those flags outright.
+Both NTM trainers use **local** parsers, so this table is the whole surface:
+there is no inherited vision-oriented tail (`--dataset`, `--image-size`,
+`--weight-decay`, `--lr-schedule`, `--show-plots`), and passing one is an error
+rather than a silent no-op.
 
 ### 2. Multi-task — `train_multitask.py`
 
@@ -129,17 +128,12 @@ the whole surface — there is no inherited base-parser tail):
 | `--max-vector-size` | `16` | feature width every task is padded/truncated to |
 | `--gpu` | `None` | GPU device index |
 
-The last six of those (`--controller-type` through `--max-vector-size`) are new:
-those `MultitaskNTMConfig` fields previously had no flag at all. Conversely
-`--dataset`, `--image-size`, `--weight-decay`, `--lr-schedule` and `--show-plots`
-are **gone** — they came from the shared parser, were never read here, and the
-local parser now *refuses* them rather than accepting them as silent no-ops.
-Only `train_ntm.py` still carries that inherited-no-op tail (see its own note
-above).
+Every `MultitaskNTMConfig` field has a flag here. `--dataset`, `--image-size`,
+`--weight-decay`, `--lr-schedule` and `--show-plots` do not exist on this
+parser and are refused.
 
-> **There is no `train_multitask_v2.py`.** Two near-duplicate multi-task
-> trainers used to exist; the argparse-less one was deleted and the surviving
-> file *is* the former v2, renamed. Any reference to `v2` predates that.
+> **There is no `train_multitask_v2.py`.** `train_multitask.py` is the only
+> multi-task trainer; a reference to a `v2` file is stale.
 
 Ctrl-C during `fit` saves the partially trained model to
 `<results_dir>/multitask_ntm_interrupted.keras` before returning.
@@ -180,9 +174,8 @@ MPLBACKEND=Agg python -m train.ntm.run_benchmark_suite \
 > so `model.predict` raises. `run_full_suite` contains each failure to its own
 > benchmark, logs it with a traceback and keeps going — so a run against a
 > copy-task model legitimately prints ~4 tracebacks and still writes a report
-> with the 2 benchmarks it could run. **Measured** (step 8 of
-> `plan-2026-08-03T161943-02be1d7e`, freshly-built untrained copy-shaped NTM,
-> input `(23, 10)` → output `(23, 8)`): `copy_task` and
+> with the 2 benchmarks it could run. For a copy-shaped NTM (input `(23, 10)` →
+> output `(23, 8)`): `copy_task` and
 > `length_generalization` recorded; `associative_recall` and `memory_capacity`
 > failed with `Matrix size-incompatible: In[0]: [32,13], In[1]: [18,128]`,
 > `scan` with `expected shape=(None, 23, 10), found shape=(32, 7)`, and `babi`
@@ -199,8 +192,7 @@ nor this CLI can reach it.
 
 `run_benchmark_suite.py` (above) now drives `BenchmarkHarness.run_full_suite`,
 `save_report`, `ScanGenerator`, `BabiGenerator` and the `evaluate_*` functions
-end to end, so the bulk of what this section used to list is exercised. What
-remains genuinely caller-less:
+end to end. What is genuinely caller-less:
 
 - `create_benchmark_callbacks` (`harness.py`) — no entry point builds them.
 - `BenchmarkHarness.run_algorithmic_benchmark` — implemented but absent from
@@ -273,18 +265,17 @@ Also available: `evaluate_associative_recall`, `evaluate_babi_task`,
 Each of these is true of the code as it stands. They are the things most likely
 to waste your afternoon.
 
-**1. `evaluate_copy_task`'s `per_step_accuracy` / `bit_error_rate` changed
-meaning.** They are now reduced over masked-true (output-phase) elements only.
-Previously they were reduced over the whole tensor, where the masked-out
-positions were zeroed on *both* sides and therefore agreed trivially — for the
-default `CopyTaskConfig` that is roughly half the timeline. **Any historical
-number quoted from this function was diluted upward and is not comparable with
-what you get today; the new numbers read lower.** `sequence_accuracy` is
+**1. `evaluate_copy_task`'s `per_step_accuracy` / `bit_error_rate` are reduced
+over masked-true (output-phase) elements only.** Reducing them over the whole
+tensor instead dilutes them upward, because the masked-out positions are zeroed
+on *both* sides and agree trivially — for the default `CopyTaskConfig` that is
+roughly half the timeline. **Any number quoted from an older version of this
+function is not comparable with what you get today.** `sequence_accuracy` is
 deliberately unchanged: it is reduced over the full tensor precisely *because*
 masked positions agree trivially, which is what makes it mean "the supervised
 region matched exactly".
 
-**2. `BabiGenerator` implements 10 of the 20 bAbI tasks — but it now says so.**
+**2. `BabiGenerator` implements 10 of the 20 bAbI tasks, and says so.**
 The implemented ids are 1, 2, 3, 6, 7, 8, 11, 15, 17, 19, held in one place as
 `BabiGenerator.IMPLEMENTED_TASK_IDS` (derived from the task-generator map, so
 the two cannot disagree). `BabiTaskConfig.task_ids` defaults to exactly that
@@ -296,16 +287,13 @@ ValueError: bAbI tasks [4, 5, 9, 10, 12, 13, 14, 16, 18, 20] are not implemented
 Implemented task ids: [1, 2, 3, 6, 7, 8, 11, 15, 17, 19].
 ```
 
-The two branches that used to swallow that error — `generate_all_tasks`'s bare
-`except ValueError: continue` and `run_babi_benchmark`'s `verbose`-gated one —
-are **deleted**, not merely logged. A short result dict is no longer a possible
-outcome. The consequence to know: `run_babi_benchmark` now also stops swallowing
-a model/benchmark **input-shape** mismatch, which used to be silent whenever
-`verbose=False`; it aborts the bAbI benchmark loudly instead, contained by
+Neither `generate_all_tasks` nor `run_babi_benchmark` swallows that error, so a
+short result dict is not a possible outcome. The consequence to know:
+`run_babi_benchmark` does not swallow a model/benchmark **input-shape**
+mismatch either; it aborts the bAbI benchmark loudly, contained by
 `run_full_suite`'s own `except Exception`.
 
-The remaining honest limitation is that the other ten tasks are still
-unimplemented — the fix here was to stop under-reporting, not to write them.
+The other ten tasks remain unimplemented.
 
 **3. `AlgorithmicTaskGenerator.SUPPORTED_TASKS` lists 10 tasks; only
 `insertion_sort` is reachable from a trainer.** The other nine (`bubble_sort`,
@@ -319,21 +307,19 @@ pairs, action lengths `{1: 6, 2: 84, 3: 204, 4: 136, 6: 8, 8: 8}`. The real SCAN
 release has ~20,900 pairs with action sequences up to 48 tokens. Treat any number
 from this generator as a smoke signal, not a SCAN result.
 
-Every split is now non-degenerate, and a degenerate one would raise rather than
-return. Measured `(train, test)` sizes at the current grammar:
+Every split is non-degenerate, and a degenerate one raises rather than
+returns. `(train, test)` sizes at the current grammar:
 
 | `split_type` | train / test | Holds out |
 |--------------|--------------|-----------|
 | `simple` | 356 / 90 | a random 20% |
-| `length` | 294 / 152 | action sequences longer than a **corpus-derived** threshold (`observed_max * 22 // 48`, the SCAN paper's train/max ratio) — not the old hardcoded 24, which this grammar could never exceed and which therefore returned 446/0 |
+| `length` | 294 / 152 | action sequences longer than a **corpus-derived** threshold (`observed_max * 22 // 48`, the SCAN paper's train/max ratio); a hardcoded threshold this grammar can never exceed would return 446/0 |
 | `add_prim_jump` | 288 / 158 | every composed command containing `jump` |
 | `add_prim_turn_left` | 392 / 54 | every composed command containing `turn left` |
 | `template_around_right` | 442 / **4** | the `<prim> around right` template |
 
-An unrecognised `split_type` string now raises `ValueError` naming the five
-supported members. It used to silently alias to `simple`, as did
-`template_around_right` itself, which was declared in `ScanSplit` but never
-dispatched.
+An unrecognised `split_type` string raises `ValueError` naming the five
+supported members; none of them silently aliases to `simple`.
 
 > **`template_around_right` is a probe, not a peer split.** Its held-out side is
 > exactly 4 samples (`walk|run|jump|look around right`) out of 446. That is the

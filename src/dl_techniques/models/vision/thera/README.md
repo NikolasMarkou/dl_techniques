@@ -5,8 +5,7 @@
 This document is the user-facing record of porting **THERA** (aliasing-free
 arbitrary-scale super-resolution with neural heat fields) from its reference
 JAX/Flax implementation into `dl_techniques` (Keras 3 / TF 2.18). It is a *port*,
-not a wrapper: every math operation was reimplemented. Decision IDs (`D-NNN`)
-reference `plans/plan_2026-06-11_f662207d/decisions.md`.
+not a wrapper: every math operation was reimplemented.
 
 ---
 
@@ -26,7 +25,7 @@ training.
 
 `{edsr-baseline, rdn} × {air, plus, pro}` — backbone × refiner tail. All six are
 genuine architectural configs (not aliases): `air` uses `hidden_dim=32`, `plus`
-and `pro` use `hidden_dim=512` (D-009).
+and `pro` use `hidden_dim=512`.
 
 | | air (identity tail) | plus (ConvNeXt tail) | pro (SwinIR/RSTB tail) |
 |---|---|---|---|
@@ -67,14 +66,10 @@ reimplementing them:
   (`metrics/ssim_metric.py`) → training/eval metrics.
 - **`train/common`** scaffold (`setup_gpu`, `set_seeds`, `create_callbacks`,
   `save_config_json`, `EpochMetricsPlotCallback`, `collect_image_paths`).
-
-`SpatialLayer` (`layers/spatial_layer.py`) *was* initially rejected for
-`make_grid`, on the grounds that it samples linspace *endpoints* and z-score
-normalizes where THERA needs the un-normalized pixel-*center* grid. That was
-true of the code and false of the concept: on 2026-08-31 the two conventions
-became knobs (`alignment`, `channel_order`, `normalization`), the pixel-center
-constructor moved into that module as `coordinate_grid`, and
-`layers/grid_sample.py` was deleted. See §3 H4.
+- **`layers/spatial_layer.py`** — endpoint-vs-pixel-center alignment, channel
+  order and normalization are explicit knobs (`alignment`, `channel_order`,
+  `normalization`), so the same module serves both `SpatialLayer` and THERA's
+  un-normalized pixel-center `coordinate_grid`. See §3 H4.
 
 ---
 
@@ -85,7 +80,7 @@ Each JAX→Keras divergence, with the reason.
 ### G1 — `pmap` / `n_devices` multi-device → single-GPU `model.fit`
 THERA replicates over devices with `jax.pmap` and threads `n_devices` through the
 data and step. **Dropped entirely.** The port is single-GPU `model.fit` with a
-custom `train_step`. (INV-6)
+custom `train_step`.
 
 ### G2 — `jax.tree_util` hypernetwork param-tree → explicit `ops.split`/reshape
 The Flax hypernetwork emits a flat `phi` vector that a `jax.tree_util` param-tree
@@ -96,12 +91,11 @@ train-from-scratch (no weight port), the split layout is *our* internally-consis
 choice — there is no JAX layout to match. Crucially, the per-pixel field weights
 (phase, kernel) are **`call` INPUTS** produced by the hypernetwork, NOT module
 weights; the `HeatField` owns only the global shared `components` and scalar `k`.
-(D-004 / D-008, INV-5)
 
 ### G3 — `repeat_vmap` over `(params, coords, t)` → batched `einsum`
 THERA `vmap`s the field evaluation over every query pixel and threads a nested
 param tree. Keras has no `vmap`. This becomes a single **batched einsum** over the
-leading `(B, Hq, Wq)` dims (D-004, INV-5):
+leading `(B, Hq, Wq)` dims:
 
 ```
 einsum('...c,ck->...k')   # coord projection (shared components)
@@ -115,20 +109,20 @@ inserted) before the heat envelope can broadcast against `(B, Hq, Wq, hidden)`
 
 ### G4 — Orbax/pickle `.pkl` checkpoints → `.keras` save (no weight port)
 THERA ships Orbax/pickle checkpoints. The port saves `.keras`. **The pretrained-
-weight port is deliberately OUT of scope** (Q2): all variants are *train-from-
+weight port is deliberately OUT of scope**: all variants are *train-from-
 scratch*. The deployable artifact is the inner `Thera` saved as `thera_model.keras`
-(NOT the `TheraTrainingModel` wrapper, D-012).
+(NOT the `TheraTrainingModel` wrapper).
 
 ### G5 — `chunkax` inference tiling → not ported
 THERA tiles large-image inference with `chunkax`. **Not ported.** If a future
 large-image inference path OOMs, a plain-Python coord-axis tiling loop is the
-documented fallback (INV-6 allows it for inference only).
+documented fallback (inference only).
 
 ### H4 — no Keras `grid_sample` → a `keras.ops` gather+lerp sampler
 Keras 3 has no `grid_sample`. `layers/spatial_layer.py` provides a
 **`keras.ops` gather+lerp sampler** (`interpolate_grid`, order 0 = nearest,
 order 1 = differentiable bilinear) and the coordinate constructor
-`coordinate_grid` (D-003). The convention was source-verified against the
+`coordinate_grid`. The convention was source-verified against the
 reference `model/utils.py`: pixel-center normalized grid
 `linspace(-0.5+1/(2n), 0.5-1/(2n), n)`, output `(h, w, 2)` with channel order
 `[h, w]`, `indexing='ij'`; coord→pixel map `pix = coord·size + (size-1)/2`;
@@ -136,44 +130,33 @@ border `mode='nearest'` = clamp to `[0, size-1]`. THERA therefore calls
 `coordinate_grid(size)` — whose defaults are exactly `alignment='centers'`,
 `channel_order='ij'`, `normalization='none'`.
 
-> **Two corrections to what this section used to say**, both dated 2026-08-31.
->
-> 1. **"`SpatialLayer` does not cover `make_grid`."** True of the code as
->    written — it was hard-coded to linspace *endpoints* with z-score
->    normalization — and false of the concept. The two were the same generator
->    under different conventions. Making alignment, channel order and
->    normalization explicit knobs collapsed them into one module, and the
->    duplicate `layers/grid_sample.py` was deleted.
->    `tests/test_layers/test_spatial_layer.py` pins the equality at `atol=0`.
-> 2. **"Keras 3 has no `map_coordinates`."** It does: `keras.ops.image.map_coordinates`
->    exists in keras 3.8. It is not used here because it has no batch
->    semantics — every input axis, batch and channel included, must be supplied
->    as its own coordinate plane — so a batched `(B,Hq,Wq,C)` sampler through it
->    would materialize four full index grids. The heading no longer claims
->    otherwise. The sampler was also ported off raw `tf` (`tf.gather_nd` → a
->    linearized `keras.ops.take`) and measured bit-identical: max abs diff 0.0
->    across shapes and orders, and 0.0 with a float16 grid.
+`keras.ops.image.map_coordinates` does exist in keras 3.8, but it is not used
+here: it has no batch semantics — every input axis, batch and channel included,
+must be supplied as its own coordinate plane — so a batched `(B,Hq,Wq,C)` sampler
+through it would materialize four full index grids. The sampler is pure
+`keras.ops` (a linearized `keras.ops.take`), not raw `tf`. Grid equality between
+the pixel-center and endpoint conventions is pinned at `atol=0` by
+`tests/test_layers/test_spatial_layer.py`.
 
 These are pure functions (not a Layer): they are stateless, and the Jacobian-TV
-helper must call `interpolate_grid` *bare* inside a nested tape (D-003).
+helper must call `interpolate_grid` *bare* inside a nested tape.
 
 ### H5 — `jax.jacrev` analytic Jacobian → nested `tf.GradientTape.batch_jacobian`
 THERA's aliasing-TV regularizer uses `jax.jacrev` for the exact per-pixel spatial
 Jacobian `d(field)/d(rel_coords)` evaluated at `t=0`. Keras has no `jacrev`. The
 port computes it with a **nested `tf.GradientTape.batch_jacobian`** over a
 flattened pixel axis `N = B·Hq·Wq`, with `experimental_use_pfor=False` and
-`persistent=True` (D-010). This is **EXACT, not finite-difference** (Q3 forbids
-finite-difference). Two subtleties:
+`persistent=True`. This is **EXACT, not finite-difference**. Two subtleties:
 
 - pfor vectorization (`batch_jacobian` default) does **not** compose with a second
   outer tape → `None` weight-grads. `experimental_use_pfor=False` builds an
   unrolled per-output loop the outer tape *can* differentiate — still exact.
 - TF requires `persistent=True` when `experimental_use_pfor=False` in eager mode.
 
-STOP-IF #1 (the highest-risk falsifier) was cleared: the outer-tape weight-grad
-oracle confirms non-`None`, finite, non-zero grads to both `heat_field.components`
-and the hypernetwork `out_conv.kernel`, and the nested tape composes under
-`model.fit`'s `tf.function` graph mode with no `run_eagerly` needed (D-012).
+The outer-tape weight-grad oracle confirms non-`None`, finite, non-zero grads to
+both `heat_field.components` and the hypernetwork `out_conv.kernel`, and the
+nested tape composes under `model.fit`'s `tf.function` graph mode with no
+`run_eagerly` needed.
 
 ### The differentiability nuance
 THERA's use of `interpolate_grid` is **order=0 NEAREST**. The TV coordinate-Jacobian does
@@ -181,20 +164,20 @@ THERA's use of `interpolate_grid` is **order=0 NEAREST**. The TV coordinate-Jaco
 `rel = coords − nearest(coords)` (nearest is piecewise-constant, zero-gradient
 a.e.) into the heat field. Therefore the sampler need not be differentiable for
 THERA's exact-Jacobian deliverable; a fully-differentiable order=1 path exists for
-future use but is not on the TV path (corrected/clarified finding, D-003 / D-008).
+future use but is not on the TV path.
 
 ### EDSR `res_scale` quirk
 THERA's reference EDSR block stores but **never applies** `res_scale` (a
 jax-enhance quirk): it returns `x + body(x)`. The port implements
 `x + res_scale·body(x)` with **default `res_scale=1.0`** — numerically identical to
-THERA at 1.0, and a caller may pass `0.1` to recover canonical EDSR (D-005). A
+THERA at 1.0, and a caller may pass `0.1` to recover canonical EDSR. A
 faithful superset, not a deviation.
 
 ### SwinIR RSTB assembly
 The `pro` tail's RSTB is **assembled from the existing NHWC `SwinTransformerBlock`**
 — no PatchEmbed/Unembed needed (the repo block is already NHWC). For non-window-
 divisible / non-square inputs, the tail **reflect-pads to the next window-size
-multiple then crops back** to the exact original `H, W` (D-007), rather than
+multiple then crops back** to the exact original `H, W`, rather than
 asserting divisibility (which would forbid the arbitrary crop sizes the
 hypernetwork emits).
 
@@ -203,15 +186,14 @@ A nested `List[List[Layer]]` **is** tracked for `trainable_weights` (Keras
 flattens nesting for variable collection) but its inner layers' weights are **NOT
 restored** on `.keras` reload → a 100% output mismatch that is masked if you only
 spot-check init=ones/zeros weights. All sublayers are stored in **flat** attribute
-lists, with stage boundaries recovered by offset-slicing (iter-1 lesson, D-007 /
-D-009). The round-trip test compares a *forward output*, not just weight shapes.
+lists, with stage boundaries recovered by offset-slicing. The round-trip test compares a *forward output*, not just weight shapes.
 
 ### Trainer: standardize / denorm / `+source_nearest` live in the trainer
-The `Thera` model emits a **raw residual field** (D-009). THERA's standardize
+The `Thera` model emits a **raw residual field**. THERA's standardize
 (`(x−MEAN)/√VAR`), denorm (`out·√VAR+MEAN`), and `+ nearest-upsampled source`
 residual add all live in the **trainer/eval**, not the model — the trainer owns
 the channel statistics and the upsampled-source term; baking them into the model
-would double-apply them (D-012). The trainer uses manual
+would double-apply them. The trainer uses manual
 `tf.clip_by_global_norm` (NOT the optimizer's `global_clipnorm`, to avoid double-
 clipping) and `jit_compile=False` (the nested persistent tape + dynamic query
 shapes do not trace under XLA).
@@ -252,9 +234,9 @@ both THERA and a bicubic baseline.
 
 ## 5. Known limitations
 
-- **Train-from-scratch only.** No JAX→Keras weight port (G4 / Q2). Numbers depend
+- **Train-from-scratch only.** No JAX→Keras weight port (G4). Numbers depend
   on the training corpus and budget, not on porting paper-SOTA weights.
-- **Beating bicubic needs real training.** SC-12 (THERA > bicubic baseline) is a
+- **Beating bicubic needs real training.** Beating the bicubic baseline is a
   property of a *trained* model. The shipped unit/smoke tests assert only shape,
   finiteness, and round-trip — an untrained model will not beat bicubic, and the
   eval tests intentionally do **not** assert quality.
@@ -267,13 +249,13 @@ both THERA and a bicubic baseline.
   implementation builds it once at build time from a fixed `img_size`. That is a
   requirement here, not a stylistic choice: this tail builds every Swin block
   with `(B, None, None, embed_dim)` and reflect-pads `H`/`W` up to a window-size
-  multiple with *symbolic* amounts (D-007), so there is no static resolution to
+  multiple with *symbolic* amounts, so there is no static resolution to
   build from. The mask is partitioned with the same `window_partition` that
   partitions the data, so its window order matches by construction; equality with
   an independently derived wrap-status oracle — and bit-identical output between
   a statically-shaped and a dynamically-shaped build — are asserted in
   `tests/test_layers/test_transformers/test_swin_shift_mask.py`. Non-divisible
-  inputs remain handled by pad-to-multiple + crop (D-007). Two rules apply on
+  inputs remain handled by pad-to-multiple + crop. Two rules apply on
   top of the mask, and they differ in *when* they are evaluated:
 
   - **Single-window fallback** (`min(H, W) <= window_size` ⇒ shift `0`, the
@@ -288,22 +270,6 @@ both THERA and a bicubic baseline.
     because a data-dependent raise cannot be expressed inside a trace and
     guarding it would break this tail outright.
 
-  > Historical note, in two parts. Before `plan-2026-07-31-ddc92265` this
-  > section described a dynamic shift mask that did not exist —
-  > `SwinTransformerBlock` built no mask at all, so every shifted block ran
-  > unmasked full attention over each physical window. Shifted-block numerics
-  > changed when the mask landed; any checkpoint trained before that commit will
-  > produce different outputs. Then, within the same plan, the single-window
-  > fallback was **static-only** for two commits (`e25d2bac`..`373aa826`), which
-  > made this block shape-dependent: at `min(H, W) == window_size` an eager call
-  > dropped the shift while a dynamically-shaped trace kept it, so this tail
-  > silently took the opposite branch from `models/vision/swin_transformer` at
-  > identical geometry (measured 512/512 elements, ~97% relative). `7200487b`
-  > made the rule runtime-conditional. Measured cost to `TheraTailPro`
-  > (`embed_dim=32, depths=(2,2), window_size=8`, seeded weights, dynamic trace):
-  > `8x8` max |diff| `3.627e-03`, `16x8` `2.528e-03`; `16x16`, `24x24` and
-  > `20x12` bit-identical, because the pro tail reflect-pads to a window
-  > multiple and never reaches the single-window rule at those sizes.
 - **No `chunkax` tiling** (G5): very large single-image inference may OOM; the
   documented fallback is a plain-Python coord-axis tiling loop (not yet
   implemented).

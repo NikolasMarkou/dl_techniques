@@ -3,12 +3,11 @@
 Pattern-5 (depth-estimation) training scaffold for
 `dl_techniques.models.vision.depth_anything.DepthAnything` on MegaDepth RGB+depth pairs.
 
-> **Status (post-`plan_2026-05-10_54e6e303`)**: in-tree
-> `dl_techniques.models.vision.vit.ViT` as the default encoder
-> (`--encoder-kind real`). DPT decoder default is `linear`. `train_step`
+> The default encoder is the in-tree `dl_techniques.models.vision.vit.ViT`
+> (`--encoder-kind real`). The DPT decoder default is `linear`. `train_step`
 > dispatches to a clean labeled path or a semi-sup path that adds FAL +
 > stop-gradient pseudo-label L1 consistency. Semi-supervised data feed
-> is now wired end-to-end via `--unlabeled-image-glob`, which builds an
+> is wired end-to-end via `--unlabeled-image-glob`, which builds an
 > `UnlabeledImageDataset` paired with `MegaDepthDataset` into
 > `((x_lab, x_unlab), y_lab)` batches. On-step EMA decay is driven by
 > `TeacherEMACallback` (`--ema-schedule {cosine,linear,none}`). External
@@ -58,8 +57,8 @@ on this machine.
 - Loads MegaDepth RGB+depth pairs via `train.common.megadepth.MegaDepthDataset`.
 - Builds a `DepthAnything` model via `create_depth_anything(...)`.
 - Compiles with a **masked L1 + multi-scale gradient-matching loss**
-  (locally-defined `DepthEstimationLoss`, copy of the CliffordNet trainer's
-  loss). This is compatible with the model's default sigmoid output range.
+  (locally-defined `DepthEstimationLoss`). The model's final projection is
+  linear and unclamped, so the loss sees raw depth predictions.
 - Wraps the five depth metrics from `dl_techniques.metrics.depth_metrics`
   with a small `_DepthOnlyMetricWrapper` so they ignore the mask channel
   produced by `MegaDepthDataset`.
@@ -78,6 +77,8 @@ on this machine.
 | Flag                          | Default                                   | Notes |
 |-------------------------------|-------------------------------------------|-------|
 | `--megadepth-root`            | `/media/arxwn/data0_4tb/datasets/Megadepth` | Path to MegaDepth root. |
+| `--train-split`               | `0.9`                                     | Labeled train/val split fraction. |
+| `--min-valid-ratio`           | `0.1`                                     | Minimum fraction of valid depth pixels for a pair to be kept. |
 | `--max-train-files`           | `10000`                                   | Cap on training pairs. |
 | `--max-val-files`             | `1000`                                    | Cap on validation pairs. |
 | `--encoder-type`              | `vit_l`                                   | One of `{vit_s,vit_b,vit_l}`. |
@@ -166,13 +167,9 @@ but the model behind it isn't trained as advertised.
 
 ## Reference implementation
 
-This trainer was derived 1:1 from `src/train/cliffordnet/train_depth_estimation.py`
-(config dataclass, callback wiring, optimizer setup, MegaDepth dataset usage).
-**That file was deleted on 2026-08-10** together with the `CliffordNetUNet` /
-`create_cliffordnet_depth` model it trained, so this trainer is now the only
-Pattern-5 trainer in the repo and the reference implementation is itself — read
-`git log`/`git show` for the original if the lineage matters. The differences that
-were recorded against it:
+This is the only Pattern-5 (depth-estimation) trainer in the repo. Its shape —
+config dataclass, callback wiring, optimizer setup, MegaDepth dataset usage —
+comes from the former CliffordNet depth trainer, from which it differs in:
 
 - Single-output model (no deep supervision), so no `_MultiScaleDataset` or
   `DeepSupervisionWeightScheduler`.

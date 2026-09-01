@@ -15,7 +15,7 @@ noise levels it was not explicitly trained on.
 
 ## Data domain: `[0, 1]` (not zero-centered)
 
-All four trainers normalize with `image / 255.0` — a **strictly-positive** `[0, 1]` domain.
+All three trainers normalize with `image / 255.0` — a **strictly-positive** `[0, 1]` domain.
 The single choke point is `common.py`'s `DATA_MIN = 0.0` / `DATA_MAX = 1.0`; every clip in the
 pipeline is driven from those two constants. **Do not add a second normalizer.**
 
@@ -27,14 +27,13 @@ one**. `common.py`'s DC / sum-to-one probe (logged at build time, next to the ho
 probe) reports `‖f(c·1) − c·1‖ / ‖c·1‖`; by homogeneity that number cannot depend on `c`, and
 its value *is* `‖f(1) − 1‖`.
 
-> **The `[-0.5,+0.5]` → `[0,1]` migration was a pure DC shift, not a rescale.** Peak-to-peak
-> width is `1.0` in both domains, so every `sigma` default, `sigma_255 = sigma·255`, and
-> `PsnrMetric`/`SsimMetric` `max_val=1.0` are **unchanged and still exactly correct**.
-> Rescaling any of them would silently corrupt every reported dB number and **nothing would
-> fail**.
+> **The domain is a DC choice, not a scale choice.** Peak-to-peak width is `1.0`, so every
+> `sigma` default, `sigma_255 = sigma·255`, and `PsnrMetric`/`SsimMetric` `max_val=1.0` are
+> exactly correct as written. Rescaling any of them would silently corrupt every reported dB
+> number and **nothing would fail**.
 >
-> Every checkpoint trained before the migration is **invalid** and cannot be shifted post hoc
-> (a bias-free net has no mechanism to subtract a DC offset). New runs stamp
+> A checkpoint trained on a `[-0.5,+0.5]` domain is **invalid** here and cannot be shifted post
+> hoc (a bias-free net has no mechanism to subtract a DC offset). Runs stamp
 > `data_range: "[0,1]"` into `config.json`; `DenoiserPrior.from_pretrained` **refuses** any
 > checkpoint that lacks it. Full rationale: `research/2026_bfunet_unit_domain_migration.md`.
 
@@ -97,7 +96,7 @@ the `TrainingConfig` programmatically. `--max-train-files` / `--max-val-files` c
 
 ## Shared CLI (`add_common_arguments`)
 
-All four trainers expose this flag set (defined once in `common.py`). Model-specific flags are
+All three trainers expose this flag set (defined once in `common.py`). Model-specific flags are
 in the per-trainer sections below.
 
 **Data & schedule**
@@ -114,7 +113,7 @@ in the per-trainer sections below.
 | `--warmup-epochs` | 10% of epochs | LR warmup length |
 | `--max-train-files` / `--max-val-files` | None | Cap source images |
 | `--steps-per-epoch` / `--validation-steps` | None | Bound epoch length |
-| `--mixed-precision` | off | Enable `mixed_float16`. **Measured slower** than fp32 for base@256/b4 on a 4090 (XLA is disabled by the bilinear-upsample grad). Off by default. |
+| `--mixed-precision` | off | Enable `mixed_float16`. **Slower** than fp32 for base@256/b4 on a 4090 (XLA is disabled by the bilinear-upsample grad). Off by default. |
 
 **Architecture (shared)**
 
@@ -144,7 +143,7 @@ in the per-trainer sections below.
 > `create_bfcnn_denoiser` call themselves. The trainer forwards `--block-normalization` unchanged.
 > As a result **all three are degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is
 > a valid scaled score (Miyasawa/Tweedie) — and so is a denoiser someone builds through the model
-> factory without this trainer, which was NOT true before 2026-08-15 (plan `d4f9beb2`, D-020).
+> factory without this trainer.
 
 **Noise curriculum** — training sweeps `sigma_max` from a narrow low-noise range up to a wide one:
 
@@ -268,11 +267,11 @@ Model-specific flags (beyond the shared set):
 | `--initial-kernel-size` | 5 | Kernel size for the stem conv (`custom` only) |
 | `--kernel-size` | 3 | Kernel size for the residual blocks (`custom` only) |
 
-> **`--activation` was retired.** BFCNN now uses the shared `--block-activation` /
+> **BFCNN has no `--activation` flag.** It uses the shared `--block-activation` /
 > `--block-activation-alpha` knobs (default `leaky_relu` slope `0.1`), and its residual blocks run
 > the real variance-only `BiasFreeBatchNorm` (the BFCNN model builder itself resolves
 > `normalization_type='batchnorm'` to `'bias_free_batchnorm'`), so every BFCNN is degree-1
-> homogeneous — previously it used stock `relu` + `BatchNormalization(center=False)` and was not.
+> homogeneous.
 
 ```bash
 # Full BFCNN base training run
@@ -328,7 +327,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
 - **Additive-only self-iteration.** `--self-iterate` is rejected at parse time with
   `--multiplicative-noise` / `--composite-noise`: the Miyasawa residual-as-score identity (and the
   clean-image fixed point that makes 2–5 passes non-decreasing) holds for additive noise only.
-- **Mixed precision is usually slower here** — leave it off unless you have measured a win.
+- **Mixed precision is usually slower here** — leave it off unless you measure a win.
 - **Outputs go to repo-root `results/`.** Do not point `--output-dir` inside `src/`.
 - **Always set `MPLBACKEND=Agg`** to avoid X11 crashes on headless/remote systems.
 

@@ -1,7 +1,6 @@
 # SD3 MMDiT — dual-stream rectified-flow text-to-image transformer
 
-This package had **no `README.md`** until 2026-08-18. It has always had
-[`PORT_NOTES.md`](PORT_NOTES.md), which is the authority on *what did and did not
+[`PORT_NOTES.md`](PORT_NOTES.md) is the authority on *what did and did not
 survive the port from PyTorch*; this file is the orientation layer and does not
 restate it.
 
@@ -56,10 +55,8 @@ the integration.
 The two packages share five module names and are **not** duplicates left un-merged:
 `sd3_mmdit/config.py` imports `AutoEncoderParams` from `ideogram4.config`, and the
 VAE is the reused `ideogram4.vae.AutoEncoder` at `z_channels=16` rather than a
-second implementation. `validate_vae_groupnorm` used to be a byte-equivalent
-second copy here; it was deleted in favour of the same one-way import in
-`plan-2026-08-31-a4e0c303/iter-1/step-3`, so `ideogram4.config` is now its single
-owner (guarded at the sd3 name by
+second implementation. `validate_vae_groupnorm` is imported from `ideogram4.config`,
+its single owner, rather than re-declared here (guarded at the sd3 name by
 `tests/test_models/test_sd3_mmdit/test_config_groupnorm_validation.py`). One real
 asymmetry: `ideogram4` implements classifier-free guidance and `sd3_mmdit` does
 not.

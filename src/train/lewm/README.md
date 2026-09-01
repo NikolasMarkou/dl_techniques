@@ -8,13 +8,13 @@ dataset by default; an HDF5 PushT loader skeleton is provided for real data.
 - **Model**: `src/dl_techniques/models/vision/lewm/`
 - **Dataset producers**: `src/dl_techniques/datasets/pusht_hdf5.py`
 - **Loss regularizer**: `src/dl_techniques/regularizers/sigreg.py`
-- **Upstream reference**: Sobal et al., 2024 (LeWM) — PyTorch source at `/tmp/lewm_source/`
+- **Upstream reference**: Sobal et al., 2024 (LeWM), PyTorch
 
-This script is explicitly framed by its author as a **smoke test** — it
-validates the end-to-end pipeline (encoder, action embedder, AR predictor,
-SIGReg, optimizer step, serialization round-trip), not a production training
-recipe. Defaults target a 56x56 / 2-step / 64-projection configuration that
-runs in seconds on CPU.
+The script is a **smoke test**: it validates the end-to-end pipeline (encoder,
+action embedder, AR predictor, SIGReg, optimizer step, serialization
+round-trip), not a production training recipe. Its defaults track upstream LeWM
+(224x224, `history_size=3`, `sigreg_num_proj=1024`); `--smoke` swaps in a
+56x56 / 2-step / 64-projection preset that runs in seconds on CPU.
 
 ---
 
@@ -49,21 +49,19 @@ Losses are added via `self.add_loss()` inside `call`:
 Per-component trackers `pred_loss` and `sigreg_loss` are exposed as Keras
 metrics so they appear next to `loss` in the CSV log.
 
-### Anchored Design Decisions
+### Design points worth knowing
 
-- **D-001**: target encoder is **live** (no EMA, no `stop_gradient`).
-  Gradients flow through both context and target paths, matching upstream
-  LeWM (distinct from BYOL/DINO/JEPA conventions). See model.py call().
-  Note: the sibling `src/train/video_jepa/` model now diverges further
-  from LeWM by adopting an EMA target encoder with `stop_gradient`
-  (`plan_2026-05-23_15151c75/D-001`), because the patch-grid 30 fps video
-  setting hit a time-invariance failure mode that single-CLS LeWM does not.
-- **D-002**: `MLPProjector` uses **LayerNorm**, not BatchNorm. Follows
-  upstream `MLP(norm_fn=nn.LayerNorm)`. Sidesteps BN-batch-of-1 failures.
-- **D-002 (config)**: `num_frames` is a serialized field with a sentinel
-  `0` that gets derived to `history_size + num_preds` in `__post_init__`.
-  Explicit values must cover the training sequence length or `__post_init__`
-  raises.
+- The target encoder is **live** (no EMA, no `stop_gradient`). Gradients flow
+  through both context and target paths, matching upstream LeWM (distinct from
+  BYOL/DINO/JEPA conventions). See `model.py`'s `call()`. The sibling
+  `src/train/video_jepa/` model diverges here: it uses an EMA target encoder
+  with `stop_gradient`, because the patch-grid 30 fps video setting hits a
+  time-invariance failure mode that single-CLS LeWM does not.
+- `MLPProjector` uses **LayerNorm**, not BatchNorm, following upstream
+  `MLP(norm_fn=nn.LayerNorm)`. Sidesteps BN-batch-of-1 failures.
+- `num_frames` is a serialized config field with a sentinel `0` that is derived
+  to `history_size + num_preds` in `__post_init__`. Explicit values must cover
+  the training sequence length or `__post_init__` raises.
 
 ### Inference: `rollout(pixels_history, action_sequence)`
 
@@ -72,8 +70,7 @@ Autoregressive rollout from a history of pixel observations.
 - Inputs: `pixels_history` `(B, S, HS, H, W, C)`, `action_sequence` `(B, S, T, A)`.
 - Output: `predicted_emb` shaped `(B, S, T+1, D)`.
 - **S must equal 1.** Only `pixels_history[:, 0]` is encoded; passing
-  `S > 1` raises `ValueError` (DECISION plan_2026-05-23_692fd5e5/D-001).
-  Tile externally or call `rollout` once per history.
+  `S > 1` raises `ValueError`. Tile externally or call `rollout` once per history.
 - The first `HS` time entries are encoder-derived; the remainder are
   predictor-derived. Score only the predictor-derived tail against ground
   truth.
@@ -222,178 +219,21 @@ auto-enabled.
 
 ---
 
-## Deep Review
+## Known limitations
 
-Original punch list from reading the script and every model component.
-The "Fixed" subsection below records what landed in
-`plan_2026-05-23_692fd5e5`.
-
-### Pattern Conformance
-
-- The script intentionally **does not** follow Pattern 1/2/3/4/5 in
-  `src/train/CLAUDE.md`. It rolls its own minimal callback set because the
-  shared `EpochAnalyzerCallback` does not understand dict inputs or
-  `add_loss`-only training. The reason is documented at the call site
-  (`_build_callbacks` docstring) — acceptable, but means the script is
-  outside the analyzer ecosystem and will not produce the standard
+- **`PushTHDF5Dataset` is an UNTESTED SKELETON.** It has never been run against
+  a real PushT HDF5 file. Windows are read on demand via `h5py` indexing with a
+  per-epoch index-level shuffle (`shuffle_seed`); `tf.image.resize` is called
+  inside the Python generator, which works but is not the idiomatic
+  `tf.data.map` path.
+- **Outside the analyzer ecosystem.** The script rolls its own minimal callback
+  set (see Callbacks above), so it produces none of the standard analyzer
   visualizations.
-- It correctly uses `setup_gpu(args.gpu)` from `train.common`.
-- It writes to `results/` at repo root (matches the user feedback memory
-  `feedback_results_dir`).
-- No `kernel_regularizer=L2(...)` is added alongside AdamW — avoids the
-  double-weight-decay foot-gun called out in CLAUDE.md.
-
-### Smells / Issues
-
-1. **`--img-size`/`--patch-size`/`--encoder-scale` decoupling.** The
-   defaults are 56/14/`tiny`, but `ViT(scale='tiny')` may have its own
-   internal expectations on input shape and patch count. There is no
-   assertion that `img_size % patch_size == 0` or that the chosen ViT
-   variant tolerates a 56x56 input. A wrong combo will fail deep inside the
-   encoder build, far from the CLI.
-
-2. **`--embed-dim` is silently load-bearing.** It must equal the ViT
-   encoder output dim for the projector identity assumption (model.py:75-80
-   comment notes this). There is no check; setting `--embed-dim 256`
-   silently produces a 256-dim projector input vs 192-dim encoder output
-   and crashes at first matmul.
-
-3. **`--num-frames` is not a CLI arg.** It is always derived as
-   `history_size + num_preds`. Fine for training; but if a user wants the
-   predictor's positional table to be larger than the training window (so
-   `rollout` can extend beyond `T`), there is no way to do it from CLI.
-   Currently `rollout` reuses positions `0..HS-1` via slicing — fine — but
-   any future use case that wants longer rollouts than `num_frames` would
-   silently OOB the positional embedding.
-
-4. **Reload check uses `next(iter(dataset))` after `model.fit`.** The
-   dataset is `.repeat()`ed but `next(iter(...))` creates a fresh iterator
-   — that is fine, but means the first batch is materialized twice (once
-   for fit warm-up, once here). For a dataset backed by `from_generator`
-   with a seeded RNG, both iterations produce the same data, so the check
-   is deterministic; for a stateful generator it could surprise.
-
-5. **Reload check failure is logged, not raised.** Line 226-228 logs an
-   error if `max|delta| >= 1e-4` but the script exits 0. CI / wrappers
-   would not catch a regression in serialization. Consider exiting non-zero
-   on failure, or at minimum setting a flag the caller can check.
-
-6. **`rollout` silently broadcasts `pixels_history[:, 0]` over `S`.** The
-   docstring warns about it, but no `ValueError` is raised when the caller
-   passes distinct per-`S` histories — they are dropped without complaint.
-   A `tf.debugging.assert_equal` (or a Python-side `if S > 1: log warning`)
-   would surface this.
-
-7. **`PushTHDF5Dataset` is **untested on real data**.** The author flags
-   this in the docstring. Specific risks:
-   - `tf.image.resize` is called from inside a Python generator via
-     `.numpy()` — works on CPU eagerly but adds per-window TF kernel
-     launch overhead. A `tf.data.Dataset.map` would be more idiomatic.
-   - `_load_raw` reads the entire `/pixels` array into memory. PushT is
-     small, but a larger HDF5 file would OOM.
-   - No support for proprioceptive state despite the `proprio_key`
-     parameter — it is stored but never consumed.
-
-8. **`history_size = 2` default differs from upstream `3`.** OK for smoke
-   testing, but easy to forget when comparing against published numbers.
-
-9. **`sigreg_num_proj = 64` default vs upstream `1024`.** Same issue. The
-   `--help` text calls this out, but it is the kind of default that
-   silently makes training look noisier than it should at full scale.
-
-10. **No `train.common.create_base_argument_parser` use.** This script
-    repeats `--batch-size`, `--epochs`, `--learning-rate`, `--weight-decay`,
-    `--seed`, `--gpu` locally. The base parser would have given consistent
-    flag names. Not a bug, but drift from the rest of the codebase.
-
-11. **`train.common.setup_gpu` is imported but the script also has
-    `os.environ.setdefault("MPLBACKEND", "Agg")` at import time.** The
-    CLAUDE.md convention is `MPLBACKEND=Agg` on the command line. Either is
-    fine; both is belt-and-braces and harmless.
-
-12. **No deterministic dataset shuffle seed.** `set_seeds` seeds the
-    Python/NumPy/TF RNGs, but `synthetic_lewm_dataset` uses
-    `np.random.default_rng(seed)` once at construction, then iterates
-    deterministically. Fine. `PushTHDF5Dataset` has no shuffle whatsoever —
-    windows are produced in file order — and there is no `.shuffle()` call
-    anywhere. For real training this is a problem.
-
-13. **`encode_pixels` rebuilds `H, W, C` from `self.config`, not from the
-    actual input tensor shape.** If a caller passes mismatched pixel
-    dimensions at inference, `ops.reshape` will fail with an opaque shape
-    error rather than a `ValueError` naming the inputs.
-
-14. **Missing CLI mirror for `emb_dropout_rate`, `projector_hidden_dim`,
-    `img_channels`.** All hardcoded in `_build_model` to either CLI or
-    config defaults. Low priority.
-
-### Suggestions
-
-- Add an `assert img_size % patch_size == 0` and an
-  `assert embed_dim == ViT(scale).embed_dim` check at the top of
-  `_build_model`. Fail fast with a clear message.
-- Promote the reload check to a `sys.exit(1)` on failure (or behind a
-  `--strict-reload` flag) so CI catches regressions.
-- Add `--shuffle-buffer` for the HDF5 path.
-- Consider adopting `create_base_argument_parser(..., default_dataset=None)`
-  and adding LeWM-specific flags on top, even if `--dataset` is ignored.
-- Add a regression test under `tests/test_models/test_lewm/` that drives
-  one step of `train_lewm.py` via `subprocess` against `--synthetic`
-  defaults (the test suite already has the pieces; the script is small
-  enough to invoke directly).
-- If `rollout` distinct-per-S histories matter, change the input contract
-  to `(B, HS, H, W, C)` and remove the `S` dimension from
-  `pixels_history` entirely (callers can replicate themselves).
-
-### What I did NOT verify
-
-- Did not run the script (per instructions).
-- Did not run the test suite.
-- Did not inspect `AdaLNZeroConditionalBlock` internals.
-- Did not check whether `ViT(scale='tiny', patch_size=14)` builds cleanly
-  for `img_size=56`.
-- Did not validate `PushTHDF5Dataset` against any real HDF5 file.
-
-### Fixed in plan_2026-05-23_692fd5e5
-
-- **Issue 1, 2 (--img-size/--patch-size/--encoder-scale/--embed-dim
-  decoupling)**: `_build_model` now fail-fasts at the CLI on
-  `img_size % patch_size != 0`, unknown `encoder_scale`, or `embed_dim`
-  mismatch with `ViT.SCALE_CONFIGS[scale][0]`.
-- **Issue 5 (reload check non-fatal)**: reload check now raises
-  `RuntimeError` on `max|delta| >= 1e-4` and `sys.exit(1)` on any reload
-  exception. Existing log output preserved.
-- **Issue 6 (rollout silent broadcast)**: `rollout` now raises
-  `ValueError` when `S != 1`. Anchored as
-  `DECISION plan_2026-05-23_692fd5e5/D-001` at the check site.
-- **Issue 7 (PushTHDF5Dataset)**:
-  - Removed dead `proprio_key` parameter (grep confirmed zero callers).
-  - Replaced eager full `/pixels` load with on-demand `h5py`-indexed
-    reads inside the generator.
-  - Added per-epoch index-level shuffle (seeded via new
-    `shuffle_seed` parameter).
-  - Class docstring marks **UNTESTED SKELETON**.
-- **Issue 8, 9 (smoke defaults divergence)**: script defaults now match
-  upstream (`history_size=3, depth=6, heads=16, dim_head=64, mlp_dim=2048,
-  sigreg_num_proj=1024, img_size=224, batch_size=16, epochs=50,
-  steps_per_epoch=200`). New `--smoke` flag applies the fast-CPU preset;
-  explicit user flags still win.
-- **Issue 10 (`create_base_argument_parser`)**: script now extends
-  `train.common.create_base_argument_parser`; LeWM-specific flags layered
-  on top.
-- **New regression test** under `tests/test_train/test_lewm/`: arg
-  validation (3 cases), rollout `S>1` guard, 1-epoch synthetic fit +
-  reload round-trip. Runtime ~53s on CPU.
-
-### Intentionally left
-
-- **Issue 3 (`--num-frames` not on CLI)**: low-value; derived in
-  `LeWMConfig.__post_init__`.
-- **Issue 4 (reload check uses `next(iter(dataset))`)**: working as
-  intended; synthetic dataset is deterministic per `--seed`.
-- **Issue 11 (`MPLBACKEND=Agg` belt-and-braces)**: harmless.
-- **Issue 12 (synthetic dataset shuffle determinism)**: addressed for
-  HDF5 path; synthetic stays deterministic by design.
-- **Issue 13 (`encode_pixels` rebuilds H,W,C from config)**: low priority.
-- **Issue 14 (CLI mirrors for `emb_dropout_rate`, `projector_hidden_dim`,
-  `img_channels`)**: low priority.
+- **`emb_dropout_rate`, `projector_hidden_dim` and `img_channels` have no CLI
+  mirror** — they are set in `_build_model` from config defaults.
+- **`num_frames` is not a CLI flag.** It is always `history_size + num_preds`,
+  so a rollout longer than the training window would run past the predictor's
+  positional table.
+- **`encode_pixels` rebuilds `H, W, C` from the config, not from the input
+  tensor**, so a mismatched pixel shape fails with an opaque reshape error
+  rather than a named `ValueError`.

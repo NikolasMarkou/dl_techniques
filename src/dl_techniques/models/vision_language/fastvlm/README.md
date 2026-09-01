@@ -89,7 +89,7 @@ Again: this is **this repo's** `RepMixerBlock`, not FastViT's. Use `dl_technique
 Input (B, H, W, C) ─► flatten to (B, H*W, C) ─► TransformerLayer ─► reshape ─► [LayerScale] ─► (B, H, W, C)
 ```
 
-**The default `attention_type` is `'group_query'`, not plain multi-head.** It is configured with `num_kv_heads == num_heads`, so the arithmetic is that of ordinary MHA — but it is the only wired attention type that carries **positional information** into stage 3. `'multi_head'` and `'window'` are accepted and carry none. This is a weight-path change relative to models built before 2026-08-19.
+**The default `attention_type` is `'group_query'`, not plain multi-head.** It is configured with `num_kv_heads == num_heads`, so the arithmetic is that of ordinary MHA — but it is the only wired attention type that carries **positional information** into stage 3. `'multi_head'` and `'window'` are accepted and carry none.
 
 Because attention is positional here, `attention_max_seq_len` (default `2048`) is the RoPE table length and is a real limit: the stage-3 grid is `(H/16) * (W/16)` tokens, so the default covers inputs up to roughly 720 px. A larger encoder input needs a larger value or RoPE raises. It is consumed only when `attention_type='group_query'`.
 

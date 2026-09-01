@@ -177,7 +177,7 @@ correspond to nothing upstream.
 
 | Variant | What it is | Trainable parameters, measured from random init | Where the figure is held |
 |---|---|---:|---|
-| `tiny` | the test/CI geometry | **24,818** | MEASURED, not asserted anywhere: `Sam3Image.from_variant("tiny").build(None)` then `count_params()`, on CPU at this commit |
+| `tiny` | the test/CI geometry | **24,818** | not asserted anywhere: `Sam3Image.from_variant("tiny").build(None)` then `count_params()`, on CPU |
 | `small` | a development geometry | **5,881,614** | `SMALL_TOTAL` in `tests/test_models/test_sam3/test_model.py` |
 | `sam3` | the released configuration | **821,708,598** | `SHIPPED_TOTAL` in `tests/test_models/test_sam3/test_model.py`, and matched against the trainer's refusal message in `tests/test_train/test_sam3/test_train_sam3.py` |
 
@@ -188,8 +188,8 @@ closed form against per-component figures instead. Read the row as a closed form
 cross-checked per component, not as a routinely-executed end-to-end count.
 
 The trainer **refuses** the `sam3` variant outright, and its refusal message
-carries the reason: 821,708,598 parameters at a measured **10,072.9 MiB forward
-peak** leaves no room for AdamW moments on a 12 GB card. That refusal message is
+carries the reason: 821,708,598 parameters at a **10,072.9 MiB forward
+peak** leave no room for AdamW moments on a 12 GB card. That refusal message is
 the single home of the 10,072.9 MiB figure — a measurement, carried by no
 assertion — and `Sam3TrainingConfig(variant="sam3")` raising it is asserted in
 `tests/test_train/test_sam3/test_train_sam3.py`. This table is the single prose
@@ -239,12 +239,12 @@ trainer.fit(dataset)
   range. Those two module names are deliberately not spelled anywhere in this
   package, including here: the constraint's gate is a grep over every file in
   it, and a prose mention erodes that instrument as effectively as a real
-  import would — a failure already measured four times in this repository on
-  the sibling backend-purity grep.
+  import would — a failure seen repeatedly in this repository on the sibling
+  backend-purity grep.
 
 Deep supervision over the decoder's per-layer outputs is available and
-optional. What it was measured to do — and, just as importantly, what it was
-measured **not** to do — is recorded in [`sam3_image.py`](sam3_image.py)'s
+optional. What it does — and, just as importantly, what it does **not** do — is
+recorded in [`sam3_image.py`](sam3_image.py)'s
 docstring, with the comparator named beside each number, because the answer
 depends entirely on the comparator. Read §8 before reading that result as a
 capability result.
@@ -353,10 +353,10 @@ Every serializable class here carries `@register_dl_technique(...)`, from
 `models/`'s `vision_language/` family directory and `sam/` subfamily container stripped, both
 being a filing decision rather than a namespace. `Sam3TrainingModel` resolves to
 `dl_techniques.models.sam3.training_model>Sam3TrainingModel` and `Sam3Image` to
-`dl_techniques.models.sam3.sam3_image>Sam3Image` (both measured 2026-08-29 with
+`dl_techniques.models.sam3.sam3_image>Sam3Image` (both readable with
 `keras.saving.get_registered_name`). The helper additionally binds the legacy
-`Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
-archive names — this is why the SAM 3 archives on disk keep loading across the re-key.
+`Custom>ClassName` as an alias to the **same object**, which is what an older
+archive names — this is why the SAM 3 archives on disk keep loading.
 
 ### Loading a checkpoint written before this package moved — registrar-first
 

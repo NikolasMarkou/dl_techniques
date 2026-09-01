@@ -4,9 +4,6 @@ Training scripts for ConvNeXt V1 / V2 (+ V2 MAE pretraining), plus a driver that
 compares the two stochastic-regularization modes (`depth` vs `gradient`) so you
 can choose between them.
 
-Plan: `plans/plan_2026-06-03_bf1e592d` (follow-up to `plan_2026-06-03_943569ad`,
-which added the `stochastic_mode` kwarg to the models).
-
 ## Scripts
 
 | Script | Purpose |
@@ -69,51 +66,29 @@ Driver flags: `--model {v1,v2}`, `--variant`, `--dataset`, `--epochs`,
 `--no-epoch-analyzer`, `--modes depth gradient`. The driver runs CPU-only and
 forwards each child its own GPU via the hard-set child env.
 
-## Findings: `depth` vs `gradient`
+## Which mode to prefer
 
-Two A/B runs on CIFAR-10, seed 42, identical config per pair (only
-`stochastic_mode` differs). `Δ = gradient − depth`.
+**Prefer `stochastic_mode='depth'`.** On CIFAR-10 A/B pairs (seed 42, identical
+config, only the mode differing), `gradient` (forward-identity) memorizes the
+training set harder — higher train accuracy, faster-climbing val_loss — while
+`depth` (`StochasticDepth`) generalizes better: best val_accuracy 0.6078 vs
+0.5952 on the `tiny` variant at `strides=2` over 100 epochs, and 0.5182 vs
+0.5123 on the 2-stage `cifar10` variant over 30 epochs.
 
-**Run 1 — `cifar10` variant (toy, 2-stage), 30 epochs, batch 128**
+Absolute val-accuracy is modest (~0.60): this recipe has no strong augmentation
+and `strides=2` is aggressive, so the model overfits hard. The *relative*
+comparison is valid, and the overfit regime is exactly where a residual
+regularizer matters. For a publication-grade claim, run multiple seeds
+(`--seed`) and/or add augmentation; a ~1 pt gap at a single seed is suggestive,
+not definitive.
 
-| Metric | depth | gradient | winner |
-|--------|------:|---------:|:------:|
-| best val_accuracy | **0.5182** | 0.5123 | depth (+0.6 pt) |
-| best val_loss | **1.357** | 1.368 | depth |
-| best train_accuracy | 0.5466 | 0.5470 | ~tie |
-
-**Run 2 — `tiny` variant (4-stage, ~28M params), `strides=2`, 100 epochs, batch 128**
-
-| Metric | depth | gradient | winner |
-|--------|------:|---------:|:------:|
-| best val_accuracy | **0.6078** | 0.5952 | depth (+1.26 pt) |
-| best val_loss | **1.2615** | 1.289 | depth |
-| best train_accuracy | 0.986 | 0.996 | gradient (overfits more) |
-| final val_loss | **2.41** | 2.70 | depth |
-
-**Conclusion: prefer `stochastic_mode='depth'`.** `gradient` (forward-identity)
-memorizes the training set harder — higher train accuracy, lower train loss,
-faster-climbing val_loss — while `depth` (`StochasticDepth`) generalizes better
-(higher val accuracy, lower val loss). This is the expected direction:
-`StochasticDepth` is the stronger regularizer. The val-accuracy gap widened from
-+0.6 pt (toy, 30 ep) to +1.26 pt (tiny, 100 ep), and the train/val divergence
-sharpened — the bigger/longer run strengthened the conclusion.
-
-**Caveats.** Absolute val-accuracy is modest (~0.60): this recipe has no strong
-augmentation and `strides=2` is aggressive, so the model overfits hard. The
-*relative* comparison is valid (identical config, both modes), and the overfit
-regime is exactly where a residual regularizer matters. For a publication-grade
-claim, run multiple seeds (`--seed`) and/or add augmentation; treat a ~1 pt gap
-at a single seed as suggestive, not definitive.
-
-## Gotchas (discovered while running the experiment)
+## Gotchas
 
 1. **ConvNeXt heads emit logits — compile with `from_logits=True`.** The V1/V2
-   classifier head is a bare `Dense(num_classes)` with no softmax. `train_convnext_v1.py`
-   originally used `SparseCategoricalCrossentropy(from_logits=False)`, which took
-   `log()` of raw logits: init loss ~9.5 (vs `ln(10)=2.30`), saturated gradients,
-   val-accuracy pinned at 0.10 (random). Fixed to `from_logits=True` (V2 was
-   already correct).
+   classifier head is a bare `Dense(num_classes)` with no softmax. With
+   `from_logits=False` the loss takes `log()` of raw logits: init loss ~9.5 (vs
+   `ln(10)=2.30`), saturated gradients, val-accuracy pinned at 0.10 (random).
+   Both trainers compile with `from_logits=True`.
 2. **4-stage variants need `--strides 2` on 32×32 inputs.** The stem and the
    inter-stage downsample convs both use `--strides` (default 4). On CIFAR the
    default-4 path collapses spatial dims to 2×2 then runs a 4×4/stride-4 conv →

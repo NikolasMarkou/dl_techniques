@@ -102,7 +102,7 @@ The official backbones have no equivalent in `keras.applications` — there is n
 | `mci2` | `MobileNetV3Large` |
 | `vit_b16` | `MobileNetV3Large` |
 
-This is functional buildability chosen over weights fidelity, recorded as the package's D-001. Every tabulated variant also sets `backbone_weights=None`, so not even the substitute's ImageNet weights are loaded. **Nothing here reproduces published MobileCLIP numbers.**
+This is functional buildability chosen over weights fidelity. Every tabulated variant also sets `backbone_weights=None`, so not even the substitute's ImageNet weights are loaded. **Nothing here reproduces published MobileCLIP numbers.**
 
 > **Name collision to watch.** `mci0`/`mci1`/`mci2` mean **opposite things** in the two models. In v2 they name real MCi rows (`models.fastvit.MCI_VARIANTS`); in v1 they are keys of `_BACKBONE_ALIASES` resolving to MobileNet stand-ins.
 
@@ -350,7 +350,7 @@ model.save('mobileclip2_s0.keras')
 restored = keras.models.load_model('mobileclip2_s0.keras')
 ```
 
-Every class carries `@register_dl_technique` (from `dl_techniques.utils.keras_registration`), a complete `get_config` and a `compute_output_shape`. The package string is the defining module's dotted path with the `vision_language/` family directory stripped: `dl_techniques.models.mobile_clip.mobile_clip_v1>MobileClipModel`, `...mobile_clip_v2>MobileClipV2Model`, and `dl_techniques.models.mobile_clip.components><ClassName>` for the three component classes. FastViT blocks register under `dl_techniques.layers.fastvit.<module>`. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias.
+Every class carries `@register_dl_technique` (from `dl_techniques.utils.keras_registration`), a complete `get_config` and a `compute_output_shape`. The package string is the defining module's dotted path with the `vision_language/` family directory stripped: `dl_techniques.models.mobile_clip.mobile_clip_v1>MobileClipModel`, `...mobile_clip_v2>MobileClipV2Model`, and `dl_techniques.models.mobile_clip.components><ClassName>` for the three component classes. FastViT blocks register under `dl_techniques.layers.fastvit.<module>`. Older archives still load through the legacy `Custom>ClassName` alias.
 
 Three v2 details matter if you subclass or extend:
 
@@ -428,7 +428,7 @@ Every known divergence carries a stable id — a deviation that is silently abso
 | Id | Deviation |
 |---|---|
 | **X-1** | **No structural reparameterization.** Train-time multi-branch form only; no fusion path exists or is tested. The reference release also runs the multi-branch form (`inference_mode=False`), so this matches what it actually executes. |
-| **X-2** | **One `use_bias` for both qkv and the output projection.** The shared `MultiHeadAttention` cannot express timm's unbiased-qkv + biased-proj split, so each attention block is short exactly one bias vector of length `dim`. MEASURED and pinned. |
+| **X-2** | **One `use_bias` for both qkv and the output projection.** The shared `MultiHeadAttention` cannot express timm's unbiased-qkv + biased-proj split, so each attention block is short exactly one bias vector of length `dim`. Pinned by test. |
 | **X-3** | **`mci0`/`mci1`/`mci2` have no local oracle.** Transcribed from timm upstream, which is not installed here. `mci3`/`mci4` *do* have a committed oracle. |
 | **X-4** | **No pretrained weights.** Architecture only; **no accuracy claim**. Any comparison against published MobileCLIP2 numbers is invalid by construction. |
 | **X-5** | **`RepMixerBlock` is a different architecture sharing the name.** `layers/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/vision_language/fastvlm/` and deliberately untouched. Use `layers/fastvit/FastVitRepMixerBlock` for anything that must match timm block-for-block. |
@@ -445,7 +445,7 @@ Use **v2** for anything that should correspond to the published architecture, or
 | Paper | MobileCLIP (Vasu et al., 2024) | MobileCLIP2 (Faghri et al., 2025) |
 | Image tower | `keras.applications` MobileNet **substitute** | faithful FastViT **MCi** |
 | Text tower | `MobileClipTextEncoder` | the same class, shared |
-| Faithful? | **No**, by its own D-001 | Yes, modulo X-1..X-5 |
+| Faithful? | **No** (substitute image tower) | Yes, modulo X-1..X-5 |
 | Variant keys | `b`, `s0`, `s1`, `s2` | `mobileclip2_s0/s2/s3/s4`, `mobileclip_s3/s4` |
 | Image projection | a separate `ImageProjectionHead` | the tower's own terminal `Dense` |
 | `call` output | features + scale; `None` for a missing modality | features + both logits matrices; absent keys omitted |

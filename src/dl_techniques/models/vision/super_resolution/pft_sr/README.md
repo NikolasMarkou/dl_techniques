@@ -256,15 +256,14 @@ size: the official repo ships exactly two configs, PFT and PFT_light.
 | **`base`** | paper (PFT) | 240 | `[4, 4, 4, 6, 6, 6]` | 6 | 2.0 | 32 | 18,656,163 |
 | **`repo_medium`** | repo-original | 80 | `[6, 6, 6, 8, 8, 8]` | 8 | 2.0 | 8 | 2,744,483 |
 
-Parameter counts are MEASURED at `scale=4` on a `(1, 32, 32, 3)` input. Quote the
+Parameter counts are measured at `scale=4` on a `(1, 32, 32, 3)` input. Quote the
 *trainable* count: `count_params()` also counts each shifted block's
 `(1, window^2, window^2)` non-trainable attention-mask buffer, which at window 32
 dominates the total (13,219,603 for `light`, 34,384,803 for `base`) while adding no
 model capacity.
 
-`repo_medium` was called `large` until 2026-08-23, when `base` was corrected from a
-60-wide model to the paper's 240-wide one; at that point an 80-wide variant sitting
-*between* the two published sizes could no longer honestly be called "large".
+`repo_medium` is 80-wide, i.e. it sits *between* the two published sizes, which is
+why it is not called "large".
 
 ---
 

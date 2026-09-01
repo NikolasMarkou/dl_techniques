@@ -1,13 +1,15 @@
 # RMSNorm Variants Comprehensive Study
 
-A multi-experiment harness comparing four normalization layers across diverse
+A multi-experiment harness comparing normalization layers across diverse
 models, tasks, and regimes — designed to deliver a defensible
 **PASS / FAIL / INDISTINGUISHABLE** verdict for each variant's specific
 theoretical claim, not merely a test-accuracy column.
 
-Plan: `plans/plan_2026-05-14_3764496e`.
+## The variants
 
-## The four variants
+`config.NORM_VARIANTS` is the canonical 8-tuple, `rms_norm` first as the
+baseline. The strings are factory keys for
+`dl_techniques.layers.norms.factory.create_normalization_layer`.
 
 | Norm | Trainable params per layer | Distinguishing mechanism |
 |------|----------------------------|--------------------------|
@@ -15,6 +17,10 @@ Plan: `plans/plan_2026-05-14_3764496e`.
 | `band_rms` | 1 scalar | Constrains output RMS to `[1-α, 1]` band |
 | `zero_centered_rms_norm` | `d` (per-feature γ) | Centers inputs before RMS (DC removal) |
 | `zero_centered_band_rms_norm` | 1 scalar | Centers + band constraint |
+| `adaptive_band_rms` | 1 scalar | Band width adapted from the input |
+| `band_logit_norm` | 1 scalar | Logit-parameterized band |
+| `dynamic_tanh` | per-layer scalars | Tanh squashing in place of an RMS rescale |
+| `zero_centered_adaptive_band_rms_norm` | 1 scalar | Centering + adaptive band |
 
 The parameter-count asymmetry (1 vs `d`) is a confound. Every experiment is
 run in **two modes**:
@@ -35,6 +41,13 @@ across modes**.
 | E3 | TinyTransformer | IMDb seq=128 | fp32, AdamW, 30ep | NLP-domain transferability; activation RMS stats |
 | E4 | DeepResidual (24 blocks) | Synthetic polynomial reg | **fp16, batch=16**, 60ep | γ-growth + DC drift under adversarial regime |
 | E5 | NormLayerMicrobench | Synthetic Gaussian reg | fp32, K=16 stack, 30ep | Layer-level baseline / callback sanity |
+| E6 | 4-layer / d=192 transformer | Wikipedia 10k packed CLM (tiktoken `cl100k_base`) | fp32 | Headline `final_val_perplexity`; norm at block-input, block-output and final pre-logits |
+
+Each trainer also takes a `--regime` flag selecting a sub-experiment axis (LR /
+batch / mixed precision / depth), including the stress regimes `lr_extreme`,
+`wd_zero`, `bs_4` and `mp_fp16_lowloss` on E1/E3/E4/E5/E6. Some norm × regime
+cells are EXPECTED to fail — that is the robustness signal, not a sweep
+failure.
 
 ## Probes
 
@@ -53,8 +66,10 @@ variant's theoretical claim:
    (`scale` L2 for RMSNorm-family, `band_param` post-sigmoid value for
    BandRMS-family).
 
-Additionally, `EpochAnalyzerCallback` (data-free) logs weight and spectral
-statistics every 5 epochs.
+Three further callbacks live in `callbacks.py`: `CalibrationCallback`
+(ECE-15 + Brier), `RobustnessProbe` (input perturbation over 4 Gaussian sigmas)
+and `DistributionShiftProbe` (below). `EpochAnalyzerCallback` (data-free) logs
+weight and spectral statistics every 5 epochs.
 
 ## Reproducing
 
@@ -88,15 +103,13 @@ Per variant, the report writer applies these decision rules:
 
 - **PASS**: the variant's hypothesis-test column rejects the null vs. RMSNorm
   baseline at `p < 0.05` (paired permutation, B=10000) AND the direction
-  matches the claim, in **at least 2 of the 5 experiments** AND **in both
-  modes**.
+  matches the claim, in **at least 2 experiments** AND **in both modes**.
 - **FAIL**: the same column rejects the null in the **opposite** direction
   in any experiment.
-- **INDISTINGUISHABLE**: neither PASS nor FAIL — within seed noise at n=5
-  (LESSONS L77).
+- **INDISTINGUISHABLE**: neither PASS nor FAIL — within seed noise at n=5.
 
 The headline accuracy column is reported but is NOT the verdict driver —
-saturation routinely makes it uninformative (LESSONS L61).
+saturation routinely makes it uninformative.
 
 ## Statistical inference
 
@@ -113,120 +126,93 @@ via `train.rms_variants_train.stats`):
 ```
 src/train/rms_variants_train/
 ├── __init__.py
-├── config.py                 ExperimentConfig + build_norm_kwargs + NORM_VARIANTS (8-tuple as of Phase 3)
+├── config.py                 ExperimentConfig + build_norm_kwargs + NORM_VARIANTS (8-tuple)
 ├── seed_utils.py             set_seeds(seed)
 ├── stats.py                  re-export from train.common.stats
-├── callbacks.py              6 callbacks: 4 probes + CalibrationCallback + RobustnessProbe (Phase 3)
-├── sweep.py                  subprocess sweep driver (Phase 3: --gpu CLI hard-sets CUDA_VISIBLE_DEVICES)
-├── report.py                 summary.md writer + 3 Phase 3 post-hoc derivations
+├── hypotheses.py             VARIANT_HYPOTHESES registry + evaluate_hypothesis / evaluate_all
+├── callbacks.py              7 callbacks: 4 mechanistic probes + Calibration + Robustness + DistributionShift
+├── sweep.py                  subprocess sweep driver (--gpu hard-sets CUDA_VISIBLE_DEVICES per cell)
+├── report.py                 summary.md writer + post-hoc derivations
+├── norm_overhead_bench.py    standalone per-norm compute-overhead CLI
 ├── README.md                 this file
-├── RESULTS.md                Phase 1 verdict (published) + Phase 3 design appendix
-├── PHASE3_PLAN.md            Phase 3 operational plan (per-chunk commands + falsification signals)
+├── RESULTS.md                published verdict block + design appendix
+├── PHASE3_PLAN.md            operational sweep plan (per-chunk commands + falsification signals)
 └── experiments/
-    ├── __init__.py           (each trainer accepts a --regime sub-experiment flag as of Phase 3)
+    ├── __init__.py
     ├── e1_vit_cifar10.py
     ├── e2_resnet_cifar100.py
     ├── e3_tinytransformer_imdb.py
     ├── e4_deep_residual_reg.py
-    └── e5_norm_layer_microbench.py
+    ├── e5_norm_layer_microbench.py
+    └── e6_clm_wiki.py
 ```
 
-## Phase 3 additions
+## Hypothesis registry
 
-Phase 3 (plan `plan_2026-05-18_63121227`) extends the 7-norm harness to 8
-by integrating `zero_centered_adaptive_band_rms_norm` (the 8th library
-variant). It also broadens the metrics suite (calibration ECE-15 + Brier;
-input-perturbation robustness over 4 Gaussian sigmas; epochs-to-threshold
-convergence; late-training stability) and parameterises four new
-sub-experiment axes (LR / batch / mixed-precision / depth) through a
-`--regime` argparse flag on each trainer. The Phase 2 GPU env propagation
-bug is fixed: `sweep.py` now exposes a `--gpu` CLI that hard-sets
-`CUDA_VISIBLE_DEVICES` for each cell subprocess (the parent shell's value
-can no longer leak through). See `PHASE3_PLAN.md` for the operational
-sweep recipe.
-
-## Phase 3 refinements (plan `plan_2026-05-18_e1f12eab`)
-
-The harness is refined with four falsifiability-oriented features. None
-modify the Phase 1 RESULTS.md verdict block (I2 invariant), the
-`VARIANT_CRITERIA` PASS/FAIL rule (I4), or the GPU `--gpu` hard-set contract.
-Everything below is additive.
-
-### Hypothesis Registry
-
-`train.rms_variants_train.hypotheses.VARIANT_HYPOTHESES` is a dict mapping each
-of the 8 norm variants to a single falsifiable claim with a numerical STOP-IF
-threshold on a metric column the harness already collects. Each entry is a
+`train.rms_variants_train.hypotheses.VARIANT_HYPOTHESES` maps each of the 8 norm
+variants to a single falsifiable claim with a numerical STOP-IF threshold on a
+metric column the harness already collects. Each entry is a
 `HypothesisSpec(claim, metric_column, comparator, threshold, applicable_experiments, applicable_modes, min_samples, reduction, notes)`.
+Thresholds come from each layer's documented design claim, not from observed
+data.
 
 `evaluate_hypothesis(variant, df, experiment=..., mode=...) -> Verdict` returns
 one of `CONFIRMED` / `REJECTED` / `INCONCLUSIVE` / `N/A`. `evaluate_all(df)`
 groups by `(experiment, norm_type, mode)` and emits a per-cell verdict frame.
+`report.write_report` consumes it, attaches a `hypothesis_verdict` column to
+`headline_summary.csv`, writes `hypothesis_verdicts.csv` (per-cell observed vs
+threshold), and renders a "Hypothesis verdicts" block in `summary.md` beside the
+PASS/FAIL block.
 
-`report.write_report` consumes `evaluate_all`, attaches a `hypothesis_verdict`
-column to `headline_summary.csv`, writes `hypothesis_verdicts.csv` (per-cell
-observed vs threshold), and renders a "Hypothesis verdicts" block in
-`summary.md` alongside the existing PASS/FAIL block. Thresholds are stated
-from each layer's documented design claim — not tuned post-hoc to match
-observed Phase 1 data.
+`report.py:OVERALL_RULES` + `compute_overall_recommendation` produce
+`overall_recommendation.csv` with a 4-slot taxonomy: RECOMMENDED_DEFAULT /
+RECOMMENDED_NICHE / NULL / AVOID. They enforce a `1.5x` step-time ceiling
+measured by `norm_overhead_bench.py`, whose `overhead.csv` carries step time
+(fp32/fp16), params and peak GPU memory per norm.
 
-### Distribution-Shift Probe
+## Distribution-shift probe
 
-`callbacks.DistributionShiftProbe` evaluates val accuracy on
-**CIFAR-10-C** (Hendrycks & Dietterich 2019) corruptions via
-`tensorflow_datasets` `cifar10_corrupted/{corruption}_{severity}`. Wired into
-E1 by default (severity 3, 5 corruption-type subset: gaussian_noise,
-defocus_blur, brightness, contrast, jpeg_compression; max 500 samples per
-corruption). E2 wiring (CIFAR-100-C) is identical and is a one-line addition
-when needed.
+`callbacks.DistributionShiftProbe` evaluates val accuracy on **CIFAR-10-C**
+(Hendrycks & Dietterich 2019) corruptions via `tensorflow_datasets`
+`cifar10_corrupted/{corruption}_{severity}`. Wired into E1 by default (severity
+3; corruption subset gaussian_noise, defocus_blur, brightness, contrast,
+jpeg_compression; max 500 samples per corruption). E2 wiring (CIFAR-100-C) is
+identical and is a one-line addition when needed.
 
-**Hard contract — never raises.** On missing TFDS dataset, missing
+**Hard contract — never raises.** On a missing TFDS dataset, a missing
 `tensorflow_datasets` package, or any load error, the probe writes a
-`dist_shift.csv` with a `reason` column populated and logs a WARNING. No
-cell is poisoned by probe failure. This is anchored at
-`DECISION plan_2026-05-18_e1f12eab/D-002`.
+`dist_shift.csv` with a populated `reason` column and logs a WARNING. No cell is
+poisoned by probe failure.
 
-### Sweep `--regimes`
+## Sweep regimes and the cell cap
 
 `sweep.py --regimes <csv>` makes the regime axis a first-class sweep dimension
-instead of a shell loop. Cells multiply by the regime count. Unsupported
+instead of a shell loop. Cells multiply by the regime count; unsupported
 (experiment, regime) pairs are filtered with a one-line log via the
 `EXPERIMENT_REGIMES` table (mirroring each trainer's `_REGIME_MAP`).
 
-A hard `--max-cells` build-time guard (default 1000) refuses oversized
-builds **before any subprocess is launched** — prevents the
-partial-sweep / inconsistent-results-dir failure mode. Anchored at
-`DECISION plan_2026-05-18_e1f12eab/D-003`. Bump `--max-cells` explicitly
-for full-Cartesian-product sweeps; the default flags any > 1000-cell build
-as a smell to chunk instead.
+A hard `--max-cells` build-time guard (default 1000) refuses oversized builds
+**before any subprocess is launched**, which prevents the partial-sweep /
+inconsistent-results-dir failure mode. Bump it explicitly for full-Cartesian
+sweeps; the default flags any >1000-cell build as a smell to chunk instead.
 
-Non-default regimes get a `regime_<name>` segment in the out-dir path so
-the default-regime layout (under which Phase 1 RESULTS.md was generated)
-remains byte-identical (I2 invariant).
+Non-default regimes get a `regime_<name>` segment in the out-dir path, so the
+default-regime layout (the one `RESULTS.md` was generated under) stays
+byte-identical.
 
-### Generalization Gap Metric
+## Generalization gap metric
 
-Every trainer's `results.csv` now includes a `generalization_gap` column:
+Every trainer's `results.csv` includes a `generalization_gap` column:
 
-- **Classification (E1/E2/E3)**: `final_acc - final_val_acc` — positive value
-  indicates overfitting.
-- **Regression (E4/E5)**: `final_val_loss - final_loss` — positive value
-  indicates worse generalization.
+- **Classification (E1/E2/E3)**: `final_acc - final_val_acc` — positive means
+  overfitting.
+- **Regression (E4/E5)**: `final_val_loss - final_loss` — positive means worse
+  generalization.
 
-NaN-tolerant (any computation error → NaN). Consumed by the
-`band_logit_norm` hypothesis registry entry (claim: classification
-generalization gap ≤ 0.20) and reported in `headline_summary.csv`.
+NaN-tolerant (any computation error → NaN). Consumed by the `band_logit_norm`
+hypothesis-registry entry (claim: classification generalization gap ≤ 0.20) and
+reported in `headline_summary.csv`.
 
-## Phase 3 v3 (refined) — runnable plan + frozen rules
-
-`PHASE3_PLAN.md` v3 supersedes v2 in-place. v3 adds:
-
-- **Pre-registered analysis rules** — `report.py:OVERALL_RULES` + `compute_overall_recommendation` produce `overall_recommendation.csv` (4-slot taxonomy: RECOMMENDED_DEFAULT / RECOMMENDED_NICHE / NULL / AVOID). Rules locked at plan-approval; changing them post-approval requires a PIVOT (D-002).
-- **Per-norm compute-overhead bench** — `norm_overhead_bench.py` standalone CLI emits `overhead.csv` (step-time fp32/fp16, params, peak GPU mem). Enforces the `1.5×` step-time ceiling in OVERALL_RULES (D-001).
-- **E6 causal-LM trainer** — `experiments/e6_clm_wiki.py`: 4-layer / d=192 transformer trained on Wikipedia 10k via packed CLM (tiktoken cl100k_base). Headline `final_val_perplexity`. Norm applied at all three positions (block-input, block-output, final pre-logits) per D-004.
-- **Stress regimes** — `lr_extreme`, `wd_zero`, `bs_4`, `mp_fp16_lowloss` on E1/E3/E4/E5/E6. Some norm × regime cells are EXPECTED to fail — that's the SIGNAL of robustness, not a sweep failure.
-- **ViT + ResNet `normalization_kwargs` plumbing** — additive, default-off bit-exact (D-003). E1/E2 PM mode is now legitimately param-matched.
-
-Operational note (HC12 / LESSONS L111): the sweep itself and the SC13 smoke gate remain USER-launched. `PHASE3_PLAN.md` v3 ships the runnable commands with explicit pre-warm TFDS + HF Wikipedia recipe + `tee` logging mitigations (LESSONS L110, L114).
-
-Plan: `plans/plan_2026-05-18_6776f8ba/{plan.md, decisions.md, summary.md, verification.md}`.
+The sweep and its smoke gate are USER-launched; `PHASE3_PLAN.md` ships the
+runnable commands with the pre-warm TFDS + HF Wikipedia recipe and `tee`
+logging.

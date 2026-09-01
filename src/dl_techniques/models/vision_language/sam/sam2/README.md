@@ -181,14 +181,9 @@ location so a reader knows where to look, not restated:
 | [`memory_bank.py`](memory_bank.py) | object-pointer tokens sit at the TAIL; conditioning frames always take temporal slot `t_pos = 0` | `test_memory_bank.py` |
 | [`memory_attention.py`](memory_attention.py) | four independently configurable positional-encoding sites, asymmetric in the shipped SAM 2.1 setting | `test_memory.py` |
 
-> **`SAM2MemoryBank` is not to be confused with the former
-> `src/dl_techniques/models/memory_bank/`.** That package was
-> `WaveFieldMemoryLLM`'s keyed read/write store for language modelling — a
-> different data structure with a colliding name. It was reviewed and REJECTED
-> as a reuse target here; nothing in this package derives from it. **The package
-> itself was DELETED by the 2026-08-24 family restructure** (`d0b599ff2` /
-> `452d663d2`), so the collision no longer exists; the note is kept because the
-> name `SAM2MemoryBank` still invites the confusion.
+> **`SAM2MemoryBank` is unrelated to a language-modelling memory bank.** It is
+> SAM 2's per-video slot store and nothing else; no keyed read/write store for
+> language modelling is reused here.
 
 ## 6. Variants
 
@@ -228,19 +223,15 @@ Three properties of that wrapper are load-bearing and stated at the class:
 - **`obj_ptr_proj` (6 variables) still ships FROZEN.** Stated rather than left
   looking fixed.
 
-### The measured non-result
+### The mask head does not learn jointly
 
 **SAM 2's mask head does not learn under joint training, the cause is known,
-and it is UNFIXED.** Every objective arm failed — plain BCE, the shipped
+and it is UNFIXED.** Every objective arm fails — plain BCE, the shipped
 focal+dice, upstream's `alpha_t` weighting, and dice-only. The binding
 constraint is **the jointly-trained image encoder**, not the loss family and
-not the step budget: measured on the trainer's own 8 diverse targets and within
-the same step budget, the SAME decoder with a **frozen** encoder reaches mask
-IoU **1.0000**, against **0.0091** for the jointly-trained arm.
-
-Two earlier written diagnoses — that the loss composition was at fault, and
-that it was "the decoder's convergence rate at `lr=1e-4` / 240 steps" — are
-both SUPERSEDED by that pair.
+not the step budget: on the trainer's own 8 diverse targets and within the same
+step budget, the SAME decoder with a **frozen** encoder reaches mask IoU
+**1.0000**, against **0.0091** for the jointly-trained arm.
 
 This is the reason the scope note above says the package makes no accuracy
 claim: the training path demonstrably runs, and on the one configuration that
@@ -254,33 +245,29 @@ Every serializable class here carries `@register_dl_technique(...)`, from
 `models/`'s `vision_language/` family directory and `sam/` subfamily container stripped, both
 being a filing decision rather than a namespace. `SAM2TrainingModel` resolves to
 `dl_techniques.models.sam2.training_model>SAM2TrainingModel` and `SAM2` to
-`dl_techniques.models.sam2.model>SAM2` (both measured 2026-08-29 with
+`dl_techniques.models.sam2.model>SAM2` (both readable with
 `keras.saving.get_registered_name`). The helper additionally binds the legacy
-`Custom>ClassName` as an alias to the **same object**, which is what a pre-2026-08-29
+`Custom>ClassName` as an alias to the **same object**, which is what an older
 archive names, so `keras.saving.get_registered_object("Custom>SAM2TrainingModel")` still
 returns the class once its module is imported.
 `SAM2MemoryBank` is the deliberate exception: it is a plain-Python container with no weights
 (§5) and carries no decorator at all. `.keras` round trips are covered by the test gate.
 
-### `SAM2FpnNeck.fpn_interp_model` was narrowed — legacy spellings load, new code raises
+### `SAM2FpnNeck.fpn_interp_model` — narrow at construction, forgiving on load
 
-The neck's 2x top-down step used to run through a repo-local string-dispatch helper (since
-deleted) that lowercased its argument, stripped it, and accepted `"nn"` as a synonym for
-`"nearest"`. The step is now an owned
+The neck's 2x top-down step is an owned
 `keras.layers.UpSampling2D(size=(2, 2), interpolation=fpn_interp_model,
-name="top_down_upsample")` sub-layer, created in `__init__` and built in `build()`, and
-`UpSampling2D` accepts none of those spellings. So:
+name="top_down_upsample")` sub-layer, created in `__init__` and built in `build()`. So:
 
 * **`__init__` raises `ValueError`** on anything outside `{"nearest", "bilinear"}` — including
-  `"nn"`, `"NEAREST"` and `" nearest "`, all of which used to work.
+  the legacy spellings `"nn"`, `"NEAREST"` and `" nearest "`.
 * **`from_config` normalizes and remaps**, logging a warning: `.lower().strip()`, then
   `"nn" -> "nearest"`. Every archive carrying a legacy spelling still loads.
 
-The substitution changes **no numerics and no weights**: `"nn"` and `"nearest"` reached the
-identical `UpSampling2D(interpolation="nearest")` op before the change, and the sub-layer is
-weightless, so `count_params()` and the weight-path list are unchanged (guarded by
+The sub-layer is weightless, so `count_params()` and the weight-path list are unaffected
+(guarded by
 `tests/test_models/test_sam2/test_neck.py::TestTopDownUpsampleSubLayer`). The shipped `tiny`
-and `hiera_l` variants both default to `"nearest"` and are unaffected.
+and `hiera_l` variants both default to `"nearest"`.
 
 ### Loading a checkpoint written before this package moved — registrar-first
 
@@ -304,13 +291,12 @@ exactly as effectively as a real reference would.)
 > `SAM2TrainingModel` is never entered into the registry by a package import under
 > **either** of its keys — neither the current
 > `dl_techniques.models.sam2.training_model>SAM2TrainingModel` nor the legacy
-> `Custom>SAM2TrainingModel` alias a pre-2026-08-29 archive names — and Keras falls
-> straight through to the failing fallback. RE-MEASURED 2026-08-29 in a fresh process:
-> after `import dl_techniques.models.vision_language.sam.sam2`,
+> `Custom>SAM2TrainingModel` alias an older archive names — and Keras falls
+> straight through to the failing fallback. In a fresh process, after
+> `import dl_techniques.models.vision_language.sam.sam2`,
 > `keras.saving.get_registered_object` returns `None` for both keys and
 > `training_model` is absent from `sys.modules`. This is a statement about import SIDE
-> EFFECTS, not about how the key is spelled, and the registration migration
-> did not change it. SAM 1's and
+> EFFECTS, not about how the key is spelled. SAM 1's and
 > SAM 3's inits both import theirs, which is why this trips people on SAM 2
 > and only on SAM 2. The rule that holds for all three is: **import the module
 > that DEFINES the saved class.**
@@ -330,8 +316,8 @@ Replacing that import with `import dl_techniques.models.vision_language.sam.sam2
 nothing else reproduces the `TypeError` above.
 
 One further caveat for anyone A/B-ing a checkpoint's outputs across a change:
-**SAM 2's forward pass is nondeterministic on GPU.** Measured on one RTX 4070,
-on a single 796,401-parameter `SAM2TrainingModel` checkpoint, holding commit,
+**SAM 2's forward pass is nondeterministic on GPU.** On one RTX 4070, on a
+single 796,401-parameter `SAM2TrainingModel` checkpoint, holding commit,
 weights, seed and input fixed: 8 runs produced **three** distinct output digests
 while all 8 produced one identical weight digest, and 3 runs of the same probe
 on CPU produced a single output digest. Compare outputs on CPU, or a
