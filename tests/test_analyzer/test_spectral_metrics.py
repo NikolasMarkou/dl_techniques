@@ -26,6 +26,8 @@ from dl_techniques.analyzer.spectral_metrics import (
     classify_learning_phase,
     detect_correlation_trap,
     compute_mp_softrank,
+    calc_mp_edges,
+    calc_mp_soft_rank,
 )
 
 
@@ -919,3 +921,90 @@ class TestRuntimeWarningFilterIsNarrow:
         assert "filterwarnings" in called, (
             "the narrow, message-scoped filters are gone entirely"
         )
+
+
+# =====================================================================
+# S2 — the shared MP-edge helper and the theoretical-edge soft rank
+# =====================================================================
+
+class TestCalcMpEdgesIsTheSingleSourceOfTruth:
+    """`detect_correlation_trap` and `calc_mp_soft_rank` share ONE edge formula."""
+
+    def test_the_trap_detector_reports_the_helper_edges(self):
+        """The detector's published edges must BE the helper's, not a copy of it.
+
+        This is the DRY guard: an edit to one spelling and not the other reddens
+        here, which is exactly how the softrank wiring drifted from the detector.
+        """
+        rng = np.random.default_rng(11)
+        N, M = 200, 50
+        W = rng.normal(size=(N, M))
+        rand_evals = np.sort(np.linalg.svd(W, compute_uv=False) ** 2)[::-1]
+
+        result = detect_correlation_trap(rand_evals, N, M)
+        expected_minus, expected_plus = calc_mp_edges(float(np.mean(rand_evals)), N / M)
+
+        assert result["mp_lambda_plus"] == pytest.approx(expected_plus, rel=1e-15)
+        assert result["mp_lambda_minus"] == pytest.approx(expected_minus, rel=1e-15)
+        # Anti-vacuity: the two edges must be genuinely different numbers, so an
+        # all-zero helper could not satisfy both.
+        assert expected_plus > expected_minus > 0.0
+
+    def test_the_edges_use_the_ww_inverse_sqrt_q_spelling(self):
+        """`(1 +/- 1/sqrt(Q))^2`, never `(1 +/- sqrt(Q))^2` (D-002)."""
+        sigma_sq, Q = 3.0, 4.0
+        minus, plus = calc_mp_edges(sigma_sq, Q)
+        assert plus == pytest.approx(sigma_sq * (1.0 + 0.5) ** 2)
+        assert minus == pytest.approx(sigma_sq * (1.0 - 0.5) ** 2)
+        # The refuted spelling would give 3*(1+2)^2 = 27.0.
+        assert plus != pytest.approx(sigma_sq * (1.0 + np.sqrt(Q)) ** 2)
+
+    def test_degenerate_aspect_ratio_returns_zero_edges(self):
+        assert calc_mp_edges(1.0, 0.0) == (0.0, 0.0)
+
+
+class TestCalcMpSoftRankNeedsNoRandomization:
+    """The theoretical-edge form is a real number with `spectral_randomize=False`."""
+
+    def test_a_spiked_spectrum_scores_below_a_pure_bulk(self):
+        rng = np.random.default_rng(5)
+        N, M = 400, 100
+        bulk = np.sort(
+            np.linalg.svd(rng.normal(size=(N, M)), compute_uv=False) ** 2)[::-1]
+
+        spiked = bulk.copy()
+        spiked[0] = bulk[0] * 20.0
+
+        soft_bulk = calc_mp_soft_rank(bulk, N, M)
+        soft_spiked = calc_mp_soft_rank(spiked, N, M)
+
+        assert soft_spiked < soft_bulk, (
+            f"a 20x spike did not lower the soft rank: "
+            f"bulk={soft_bulk} spiked={soft_spiked}"
+        )
+        assert soft_spiked > 0.0
+
+    def test_it_is_not_the_constant_one(self):
+        """The wiring defect's signature: exactly 1.0 regardless of the spectrum."""
+        rng = np.random.default_rng(6)
+        N, M = 300, 60
+        evals = np.sort(
+            np.linalg.svd(rng.normal(size=(N, M)), compute_uv=False) ** 2)[::-1]
+        evals[0] *= 50.0
+
+        assert calc_mp_soft_rank(evals, N, M) != pytest.approx(1.0, abs=1e-6)
+
+    def test_degenerate_inputs_return_zero(self):
+        assert calc_mp_soft_rank(np.array([]), 10, 5) == 0.0
+        assert calc_mp_soft_rank(np.array([1.0, 2.0]), 0, 5) == 0.0
+        assert calc_mp_soft_rank(np.zeros(10), 10, 5) == 0.0
+
+    def test_the_ww_spike_count_port_is_untouched(self):
+        """`compute_mp_softrank` is a faithful WW port and must NOT be rewritten.
+
+        Only its WIRING was the defect. Pinned here so a later cleanup that
+        "removes the unused function" has to argue with a guard first.
+        """
+        evals = np.array([100.0, 10.0, 5.0, 1.0])
+        assert compute_mp_softrank(evals, 0) == 1.0
+        assert compute_mp_softrank(evals, 1) == pytest.approx(10.0 / 100.0)

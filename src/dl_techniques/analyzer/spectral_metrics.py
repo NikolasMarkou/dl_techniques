@@ -568,13 +568,9 @@ def detect_correlation_trap(
     Q = N / M
     inv_sqrtQ = 1.0 / np.sqrt(Q)
 
-    # Marchenko-Pastur edges
-    # DECISION plan_2026-06-03_bc986e52/D-002: MP edge uses (1 + 1/sqrt(Q))^2 (WeightWatcher
-    # RMT_Util.calc_lambda_plus/minus), NOT (1 + sqrt(Q))^2. Q=N/M with N the LARGER dim, so
-    # 1/sqrt(Q)=sqrt(M/N)<=1. Do NOT revert to sqrt(Q) — that overestimates the edge by a factor
-    # for every rectangular layer. Authoritative: findings/ww-authoritative-reference.md A/B.
-    mp_lambda_plus = sigma_sq * (1.0 + inv_sqrtQ) ** 2
-    mp_lambda_minus = sigma_sq * max(0.0, (1.0 - inv_sqrtQ) ** 2)
+    # Marchenko-Pastur edges — shared with `calc_mp_soft_rank` via `calc_mp_edges`,
+    # which carries the D-002 rationale for the (1 +/- 1/sqrt(Q))^2 spelling.
+    mp_lambda_minus, mp_lambda_plus = calc_mp_edges(sigma_sq, Q)
 
     # Tracy-Widom fluctuation threshold
     # DECISION plan_2026-06-03_bc986e52/D-003: Tracy-Widom per WeightWatcher
@@ -673,6 +669,82 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
     except Exception as e:
         logger.debug(f"Error calculating matrix entropy: {e}")
         return 0.0
+
+
+# ---------------------------------------------------------------------
+
+def calc_mp_edges(sigma_sq: float, Q: float) -> Tuple[float, float]:
+    """Marchenko-Pastur bulk edges for a random matrix of aspect ratio ``Q``.
+
+    Args:
+        sigma_sq: Bulk variance estimate (in eigenvalue units, i.e. sigma^2).
+        Q: Aspect ratio ``N / M`` with ``N`` the LARGER dimension, so ``Q >= 1``.
+
+    Returns:
+        Tuple ``(lambda_minus, lambda_plus)``: the lower and upper MP edges.
+        ``(0.0, 0.0)`` when ``Q`` is non-positive.
+
+    Notes:
+        Single source of truth for the MP edge, shared by ``detect_correlation_trap``
+        and ``calc_mp_soft_rank``. Duplicating the two lines is what let the softrank
+        wiring drift away from the trap detector in the first place.
+    """
+    if Q <= 0.0:
+        return 0.0, 0.0
+
+    inv_sqrtQ = 1.0 / np.sqrt(Q)
+
+    # DECISION plan_2026-06-03_bc986e52/D-002: MP edge uses (1 + 1/sqrt(Q))^2 (WeightWatcher
+    # RMT_Util.calc_lambda_plus/minus), NOT (1 + sqrt(Q))^2. Q=N/M with N the LARGER dim, so
+    # 1/sqrt(Q)=sqrt(M/N)<=1. Do NOT revert to sqrt(Q) — that overestimates the edge by a factor
+    # for every rectangular layer. Authoritative: findings/ww-authoritative-reference.md A/B.
+    lambda_plus = float(sigma_sq * (1.0 + inv_sqrtQ) ** 2)
+    lambda_minus = float(sigma_sq * max(0.0, (1.0 - inv_sqrtQ) ** 2))
+    return lambda_minus, lambda_plus
+
+
+# ---------------------------------------------------------------------
+
+def calc_mp_soft_rank(evals: np.ndarray, N: int, M: int) -> float:
+    """Marchenko-Pastur soft rank from the spectrum's own THEORETICAL edge.
+
+    WeightWatcher ``RMT_Util.calc_mp_soft_rank(evals, Q, sigma) =
+    calc_lambda_plus(Q, sigma) / max(evals)``. Unlike the spike-count form
+    (``compute_mp_softrank``) this needs no randomization pass, so it is a real
+    number at the shipped ``spectral_randomize=False`` default.
+
+    Args:
+        evals: Eigenvalues of the ORIGINAL (un-randomized) weight matrix.
+        N: Maximum dimension of the weight matrix.
+        M: Minimum dimension of the weight matrix.
+
+    Returns:
+        ``lambda_plus / lambda_max``. Small when the spectrum carries strong
+        outliers beyond the bulk; near ``1.0`` for a pure MP bulk. Not clamped —
+        a spectrum entirely inside its own theoretical edge exceeds ``1.0``, and
+        that is information, not an error. ``0.0`` on empty or degenerate input.
+    """
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-013
+    # This is the form the analyzer WIRES for the reported `mp_softrank` column. Do
+    # NOT wire `compute_mp_softrank(evals, num_rand_spikes)` there again: at the
+    # shipped `spectral_randomize=False` default `num_rand_spikes` is always 0, so
+    # that form returns EXACTLY 1.0 for every layer of every model, and when
+    # randomization IS on the count comes from the RANDOMIZED spectrum while the
+    # ratio is taken on the ORIGINAL one. See decisions.md D-013.
+    if evals is None or len(evals) == 0 or N < 1 or M < 1:
+        return 0.0
+
+    evals = np.asarray(evals, dtype=float)
+    lambda_max = float(np.max(evals))
+    if lambda_max <= SPECTRAL_EPSILON:
+        return 0.0
+
+    sigma_sq = float(np.mean(evals))
+    if sigma_sq < SPECTRAL_EPSILON:
+        return 0.0
+
+    _, lambda_plus = calc_mp_edges(sigma_sq, N / M)
+    return lambda_plus / lambda_max
 
 
 # ---------------------------------------------------------------------

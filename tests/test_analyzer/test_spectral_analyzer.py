@@ -243,3 +243,59 @@ class TestRecommendationsIgnoreUncomputedPvalues:
             details, analyzer._get_summary(details))
 
         assert any('poor power-law fit' in r for r in recommendations)
+
+
+# =====================================================================
+# S2 — `mp_softrank` was identically 1.0 at shipped defaults (plan step 14)
+# =====================================================================
+
+class TestMpSoftrankIsNotAConstant:
+    """At `spectral_randomize=False` the column was `1.0` for every layer.
+
+    `num_rand_spikes` is `0` unless randomization ran, and
+    `compute_mp_softrank(evals, 0)` returns EXACTLY `lambda_max / lambda_max`.
+    Worse, when randomization DID run the count came from the RANDOMIZED spectrum
+    and was applied to the ORIGINAL one.
+    """
+
+    @staticmethod
+    def _analyze_at_defaults() -> pd.DataFrame:
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        config = AnalysisConfig(analyze_spectral=True)
+        # Pin the regime the defect lives in, rather than trusting the default.
+        assert config.spectral_randomize is False
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models=_two_models_with_different_spectra(), config=config).analyze(results)
+        frame = results.spectral_analysis
+        assert frame is not None and not frame.empty
+        return frame
+
+    def test_the_column_is_populated_at_all(self):
+        """Anti-vacuity: an empty or all-NaN column makes 'not constant' vacuous."""
+        details = self._analyze_at_defaults()
+        column = details[MetricNames.MP_SOFTRANK].dropna()
+        assert len(column) >= 2, (
+            f"the probe analyzed {len(column)} layers; a not-constant assertion "
+            f"needs at least two"
+        )
+        assert (details[MetricNames.HAS_ESD]).all(), "a layer was skipped by the analyzer"
+
+    def test_mp_softrank_is_not_identically_one(self):
+        details = self._analyze_at_defaults()
+        values = details[MetricNames.MP_SOFTRANK].to_numpy(dtype=float)
+
+        assert not np.allclose(values, 1.0), (
+            f"mp_softrank is a constant masquerading as a metric: {values.tolist()}"
+        )
+
+    def test_mp_softrank_discriminates_the_two_spectra(self):
+        """The anisotropic model's spectrum is spikier, so its soft rank is lower."""
+        details = self._analyze_at_defaults()
+        by_model = details.groupby("model_name")[MetricNames.MP_SOFTRANK].mean()
+
+        assert by_model["m_b"] < by_model["m_a"], (
+            f"mp_softrank does not separate an isotropic from a strongly "
+            f"anisotropic spectrum: {by_model.to_dict()}"
+        )
