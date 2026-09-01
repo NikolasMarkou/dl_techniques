@@ -15,8 +15,9 @@ from dl_techniques.losses import (
     # Self-supervised learning
     CLIPContrastiveLoss, DINOLoss, SigLIPContrastiveLoss,
     SymmetricInfoNCELoss, create_symmetric_infonce_loss,
-    # Calibration
+    # Calibration (binary only)
     BrierScoreLoss, SpiegelhalterZLoss, CombinedCalibrationLoss,
+    BrierScoreMetric, SpiegelhalterZMetric,
     # Generative
     WassersteinLoss,
     # Specialized
@@ -31,7 +32,12 @@ from dl_techniques.losses import (
 - `any_loss.py` — AnyLoss framework: differentiable approximations of non-differentiable metrics (F1, accuracy, balanced accuracy, G-mean)
 - `clifford_detection_loss.py` — CliffordNet detection loss
 - `affine_invariant_loss.py` — Affine-invariant distance loss
-- `brier_spiegelhalters_ztest_loss.py` — Calibration losses + metrics (Brier, Spiegelhalter's Z)
+- `brier_spiegelhalters_ztest_loss.py` — Binary calibration losses + metrics. Ships BOTH
+  calibration z-statistics under an explicit `statistic=` knob: Spiegelhalter's (1986)
+  `(1-2p)`-weighted Z (the default) and the strictly weaker calibration-in-the-large test,
+  which is what this module computed under the Spiegelhalter name before 2026-09-02. The
+  penalty is chance-corrected (`relu(Z²-1)`, since `E[Z²]=1` not 0) and divided by `N`, and
+  it decomposes per row so `sample_weight` still selects rows
 - `capsule_margin_loss.py` — Capsule network margin loss with analysis utilities
 - `chamfer_loss.py` — Chamfer distance for point clouds
 - `clip_contrastive_loss.py` / `siglip_contrastive_loss.py` — Contrastive losses for CLIP/SigLIP

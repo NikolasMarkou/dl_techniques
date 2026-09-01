@@ -568,8 +568,8 @@ class Conv2D(BaseConv):
     -   **File**: `src/dl_techniques/losses/brier_spiegelhalters_ztest_loss.py`
     -   **Type**: Keras Loss
     -   **Description**: Loss functions that directly optimize for model calibration.
-        -   `BrierScoreLoss`: Computes the mean squared error between predicted probabilities and one-hot true labels: `(1/N) * Σ(p_i - o_i)²`.
-        -   `SpiegelhalterZLoss`: A differentiable version of the Z-test statistic, which penalizes systematic bias in probability predictions.
+        -   `BrierScoreLoss`: Computes the mean squared error between predicted probabilities and binary true labels: `(1/N) * Σ(p_i - o_i)²`. On binary targets this is exactly `keras.losses.MeanSquaredError` plus a `from_logits` toggle.
+        -   `SpiegelhalterZLoss`: A differentiable batch-level calibration z-statistic. `statistic="spiegelhalter"` (the default) is Spiegelhalter's (1986) statistic, whose residuals carry the `(1 - 2p)` weight from the Murphy decomposition of the Brier score; `statistic="calibration_in_the_large"` is the unweighted calibration-intercept test, which is a strictly weaker statistic and is what this class computed under the Spiegelhalter name before 2026-09-02. Defaults are chance-corrected (`relu(Z² - 1)`, because the null value of `Z²` is 1 rather than 0) and divided by the batch size (`Z² ≈ N b²/v̄`). A calibration statistic is not a proper scoring rule, so it must be used as a small-weight regularizer anchored to one -- `CombinedCalibrationLoss` is that anchored form. Binary classification only.
 
 -   #### `CapsuleMarginLoss`
     -   **File**: `src/dl_techniques/losses/capsule_margin_loss.py`
