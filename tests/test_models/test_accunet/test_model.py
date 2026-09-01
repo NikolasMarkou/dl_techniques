@@ -696,8 +696,8 @@ class TestDocumentedParameterCounts:
     `accunet/README.md` used to carry a contradicting set ("**Verified** parameter
     counts ... ~16.8 M trainable", plus a ~4.5 M / ~16.8 M / ~66.5 M scaling table).
     Every one of those was wrong. Prose claims are only testable by executing the code,
-    so this class executes it; the shape of the guard follows
-    `tests/test_repo_map_numbers.py`.
+    so this class executes it: each documented figure is re-derived from a built model
+    rather than trusted.
     """
 
     # The exact figures printed in `models/vision/accunet/model.py`'s module docstring.

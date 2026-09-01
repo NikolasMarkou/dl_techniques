@@ -216,5 +216,5 @@ and `.py` under `models/` — including this file. Read its regexes before writi
 |---|---|
 | [`CLAUDE.md`](CLAUDE.md) | authoring rules, house module shape, per-leaf census, layer-reuse policy, review findings |
 | `research/2026_keras_custom_models_instructions_v2.md` | **the mandatory guide** for creating any new model or any new layer inside one |
-| `REPO_MAP.md` | repo-wide navigation: which trainer trains which model, registry/factory dispatch, and a ledger of claims the repo's own docs get wrong |
+| `REPO_MAP.md` | repo-wide navigation: which trainer trains which model, and how registry/factory dispatch is wired |
 | `tests/test_models/` | flat, one directory per leaf package; deliberately does not mirror this tree |

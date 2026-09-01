@@ -341,7 +341,7 @@ This library is engineered to be a living knowledge base, bridging the gap betwe
 
 ### Start Here: [`REPO_MAP.md`](./REPO_MAP.md)
 
-Before anything else, read **[`REPO_MAP.md`](./REPO_MAP.md)** — a path-verified router for the repository. It answers *where code of a given kind lives*, *how the registry and factory dispatch is wired*, *which trainer trains which model*, and *which of the many in-tree docs answers your question*. Every number in it sits beside the command that re-derives it, and it carries a ledger of claims the repo's own older docs get wrong.
+Before anything else, read **[`REPO_MAP.md`](./REPO_MAP.md)** — a path-verified router for the repository. It answers *where code of a given kind lives*, *how the registry and factory dispatch is wired*, *which trainer trains which model*, and *which of the many in-tree docs answers your question*.
 
 ### Tutorials & Deep Dives (`research/`)
 
