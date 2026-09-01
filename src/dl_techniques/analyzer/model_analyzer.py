@@ -779,7 +779,9 @@ class ModelAnalyzer:
             summary['confidence_summary'][model_name] = {
                 'mean_entropy': metrics.get('mean_entropy', DEFAULT_METRIC_VALUE),
                 'mean_confidence': float(np.mean(max_prob_values)),
-                'entropy_std': metrics.get('entropy_std', DEFAULT_METRIC_VALUE)
+                # The producer is compute_prediction_entropy_stats, which writes
+                # 'std_entropy'; the reported key stays 'entropy_std' for callers.
+                'entropy_std': metrics.get('std_entropy', DEFAULT_METRIC_VALUE)
             }
 
         # Compile weight summaries
