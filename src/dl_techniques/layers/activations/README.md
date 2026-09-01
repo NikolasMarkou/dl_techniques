@@ -28,6 +28,7 @@ The following layers are supported by the factory system:
 | `routing_probabilities` | `RoutingProbabilitiesLayer` | Parameter-free hierarchical routing using cosine basis patterns (`mode="deterministic"`). |
 | `saturated_mish` | `SaturatedMish` | Mish variant that smoothly saturates for large inputs. |
 | `silu` | `SiLU` | Sigmoid Linear Unit (Swish). |
+| `soft_value_range` | `SoftValueRange` | Smooth, monotone softplus map into `[min_value, max_value]` whose derivative is never structurally zero. |
 | `sparsemax` | `Sparsemax` | Euclidean projection onto the probability simplex (sparse outputs). |
 | `squash` | `SquashLayer` | Vector length normalization for Capsule Networks. |
 | `thresh_max` | `ThreshMax` | Sparse softmax variant using differentiable confidence thresholding. |

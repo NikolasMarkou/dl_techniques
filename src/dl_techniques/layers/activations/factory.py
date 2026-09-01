@@ -70,6 +70,7 @@ from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
+from .soft_value_range import SoftValueRange
 from .sparsemax import Sparsemax
 from .squash import SquashLayer
 from .thresh_max import ThreshMax
@@ -94,6 +95,7 @@ ActivationType = Literal[
     'routing_probabilities',
     'saturated_mish',
     'silu',
+    'soft_value_range',
     'sparsemax',
     'squash',
     'thresh_max',
@@ -302,6 +304,23 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': [],
         'optional_params': {},
         'use_case': 'Self-gated activation that often outperforms ReLU in deep networks.'
+    },
+    'soft_value_range': {
+        'class': SoftValueRange,
+        'description': (
+            'Smooth, monotone softplus map into [min_value, max_value] whose '
+            'derivative is never structurally zero.'
+        ),
+        'required_params': ['min_value'],
+        'optional_params': {
+            'max_value': None,
+            'sharpness': 50.0,
+            'relative_sharpness': True
+        },
+        'use_case': (
+            'Differentiable stand-in for ops.clip when a hard clip would kill '
+            'the gradient outside the interval, e.g. bounded regression heads.'
+        )
     },
     'sparsemax': {
         'class': Sparsemax,
@@ -529,6 +548,17 @@ def validate_activation_config(activation_type: str, **kwargs: Any) -> None:
         beta = kwargs.get('beta', 0.5)
         if alpha <= 0.0 or beta <= 0.0:
             raise ValueError("alpha and beta must be positive")
+
+    elif activation_type == 'soft_value_range':
+        min_value = kwargs.get('min_value')
+        max_value = kwargs.get('max_value')
+        sharpness = kwargs.get('sharpness', 50.0)
+        if sharpness <= 0.0:
+            raise ValueError(f"sharpness must be positive, got {sharpness}")
+        if max_value is not None and max_value < min_value:
+            raise ValueError(
+                f"max_value ({max_value}) must be >= min_value ({min_value})"
+            )
 
     elif activation_type == 'thresh_max':
         slope = kwargs.get('slope', 10.0)

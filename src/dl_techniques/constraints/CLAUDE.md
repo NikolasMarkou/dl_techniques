@@ -5,6 +5,7 @@ Custom Keras weight constraints applied during training to enforce value bounds 
 ## Modules
 
 - `value_range_constraint.py` — `ValueRangeConstraint` that clips weights to a configurable `[min_value, max_value]` range
+- `soft_value_range_constraint.py` — `SoftValueRangeConstraint` that projects weights into `[min_value, max_value]` with a smooth softplus map instead of a hard clip
 
 ## Conventions
 
