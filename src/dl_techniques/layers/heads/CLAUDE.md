@@ -21,7 +21,7 @@ class EnhancementHead(BaseVisionHead):
 ```
 
 `keras.saving.get_registered_name(EnhancementHead)` resolves to
-`dl_techniques.layers.heads.vision.factory>EnhancementHead` (verified 2026-08-29). The package
+`dl_techniques.layers.heads.vision.factory>EnhancementHead`. The package
 string is the defining module's dotted path; under `dl_techniques.models` the 12 family
 directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
 `super_resolution`, `sam`) are stripped, but nothing is stripped under `layers/`.
@@ -29,7 +29,7 @@ directories and the 4 subfamily containers (`image_restoration`, `keypoints`,
 **Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
 independent of `__module__`, so two same-named classes claim one slot and the last import
 silently wins. The helper additionally binds `Custom>ClassName` as a legacy alias to the same
-object — which is why the checkpoints written before 2026-08-29 (and before this package merge)
+object — which is why checkpoints written before the registration migration (and before this package merge)
 still load.
 
 ## Layers (22 classes, grouped by domain)

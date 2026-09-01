@@ -93,7 +93,7 @@ The post-norm-inside-the-residual is unusual but replicated exactly.
   preset** (`in_channels == 32`).
 - **Trainer image-token slice**: the trainer model returns `velocity[:, T:]`
   (image-token velocities only) so the velocity MSE is computed on image tokens.
-- **Time convention settled (2026-08-15, C-26 / D-002)**: `t = 0` is clean data,
+- **Time convention**: `t = 0` is clean data,
   `t = 1` is noise, `v = x1 - x0` points data -> noise, and sampling integrates
   DOWN with a negative step. Until this fix `pipeline.py`'s Euler loop paired an
   ascending step grid with a *decreasing* `LogitNormalSchedule`, so it evaluated
@@ -136,7 +136,7 @@ The port's own D-001 (overall scope) and D-002 (net-new `ScalarSinusoidalEmbeddi
   no raw TF), full `get_config()`/`from_config()` round-trip, centralized
   `dl_techniques.utils.logger` (no `print`). The transformer velocity output is
   **cast to float32** at the head regardless of mixed precision.
-- **Registration keys in this package** (measured 2026-08-29 with
+- **Registration keys in this package** (derived with
   `keras.saving.get_registered_name`):
 
   ```python

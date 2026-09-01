@@ -54,20 +54,20 @@ class ResNet(keras.Model):
 ```
 
 `keras.saving.get_registered_name(ResNet)` resolves to `dl_techniques.models.resnet.model>ResNet`
-(verified 2026-08-29) even though the class lives at
+even though the class lives at
 `src/dl_techniques/models/vision/resnet/model.py`.
 
 The `package` string is the defining module's dotted path with the **12 family directories**
 (`common`, `embeddings_experimental`, `general_purpose`, `graph`, `language`, `memory`,
 `neural_computer`, `point_cloud`, `tabular`, `time_series`, `vision`, `vision_language`) and the
 **4 subfamily containers** (`image_restoration`, `keypoints`, `super_resolution`, `sam`) removed.
-A family is a filing decision, not a namespace — it was already reshuffled once on 2026-08-24, and
-a key derived from it would have broken every archive at that moment.
+A family is a filing decision, not a namespace: it has been reshuffled before, and a key derived
+from it would break every archive the moment it moves again.
 
 **Never a bare `@keras.saving.register_keras_serializable()`**: its key `Custom>ClassName` is
 independent of the defining module, so two same-named model classes claim one slot and the last
 import silently wins. The helper still binds `Custom>ClassName` as an alias, which is why
-pre-2026-08-29 archives keep loading.
+archives written before the registration migration keep loading.
 
 ### Docstring style — measurably mixed
 
