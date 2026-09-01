@@ -71,6 +71,7 @@ References
 
 import numpy as np
 from scipy import stats
+from scipy.special import logsumexp
 from scipy.sparse.linalg import svds
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -82,7 +83,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer.constants import (
     SPECTRAL_EPSILON, SPECTRAL_EVALS_THRESH, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH,
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
-    SPECTRAL_PVALUE_NOT_COMPUTED,
+    SPECTRAL_PVALUE_NOT_COMPUTED, SPECTRAL_ALPHA_SANITY_MAX,
     SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
     SPECTRAL_TW_SAFETY_FACTOR,
     SPECTRAL_SMALL_N_CUTOFF, SPECTRAL_SMALL_N_KMIN,
@@ -707,7 +708,11 @@ def compute_mp_softrank(evals: np.ndarray, num_spikes: int = 0) -> float:
 
 # ---------------------------------------------------------------------
 
-def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> Dict[str, float]:
+def calculate_spectral_metrics(
+        evals: np.ndarray,
+        alpha: float,
+        N: int = 0
+) -> Dict[str, Union[float, bool]]:
     """
     Calculate various spectral metrics from eigenvalues.
 
@@ -717,14 +722,20 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
         N: Maximum matrix dimension (for α̂ normalization). If 0, normalization is skipped.
 
     Returns:
-        Dictionary containing spectral metrics.
+        Dictionary containing spectral metrics, including ``alpha_unreliable``:
+        ``True`` when ``alpha`` exceeds ``SPECTRAL_ALPHA_SANITY_MAX``, in which
+        case every alpha-derived metric in the dict is reported as computed but
+        must not be interpreted as a power-law exponent.
     """
+    alpha_unreliable = bool(alpha > SPECTRAL_ALPHA_SANITY_MAX)
+
     if len(evals) == 0:
         return {
             "norm": 0.0, "log_norm": 0.0, "spectral_norm": 0.0,
             "log_spectral_norm": 0.0, "alpha_weighted": 0.0,
             "alpha_hat": 0.0, "alpha_hat_normalized": 0.0,
-            "log_alpha_norm": 0.0, "stable_rank": 0.0
+            "log_alpha_norm": 0.0, "stable_rank": 0.0,
+            "alpha_unreliable": alpha_unreliable
         }
 
     norm = np.sum(evals)
@@ -739,6 +750,18 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
     # under the single name 'alpha_weighted' and does NOT divide by N. This is the
     # cross-architecture-comparable α̂ exposed as MetricNames.ALPHA_WEIGHTED.
     alpha_weighted = alpha * np.log10(spectral_norm_safe)
+
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-012
+    # log_alpha_norm = log10(sum(evals ** alpha)) is computed in LOG SPACE. Do NOT
+    # "simplify" it back to the direct form: `evals ** alpha` overflows float64 for
+    # a runaway alpha (measured alpha = 3.6e7 at status "success" on a tail whose
+    # points agree to 1e-7), which returned `inf` for the whole layer while the
+    # RuntimeWarning was swallowed upstream. See decisions.md D-012.
+    if alpha > 0:
+        log_evals = np.log(np.maximum(evals, SPECTRAL_EPSILON))
+        log_alpha_norm = float(logsumexp(alpha * log_evals) / np.log(10.0))
+    else:
+        log_alpha_norm = 0.0
 
     # alpha_hat: SETOL-paper notation α̂ for alpha_weighted (alias; value identical).
     alpha_hat = alpha_weighted
@@ -762,8 +785,9 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
         "alpha_weighted": alpha_weighted,
         "alpha_hat": alpha_hat,
         "alpha_hat_normalized": alpha_hat_normalized,
-        "log_alpha_norm": np.log10(np.sum(evals ** alpha)) if alpha > 0 else 0.0,
-        "stable_rank": norm / spectral_norm_safe
+        "log_alpha_norm": log_alpha_norm,
+        "stable_rank": norm / spectral_norm_safe,
+        "alpha_unreliable": alpha_unreliable
     }
 
 

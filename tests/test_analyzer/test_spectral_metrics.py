@@ -805,3 +805,117 @@ class TestGiniIsNotBiasedByMinusOneOverN:
         """Anti-vacuity: the `len < 2` early exit is untouched by the fix."""
         assert calculate_gini_coefficient(np.array([5.0])) == 0.0
         assert calculate_gini_coefficient(np.array([])) == 0.0
+
+
+# =====================================================================
+# log_alpha_norm overflow on a runaway alpha (plan step 13, S6)
+# =====================================================================
+
+class TestLogAlphaNormDoesNotOverflow:
+    """`log10(sum(evals ** alpha))` overflowed to `inf` for a large fitted alpha."""
+
+    @staticmethod
+    def _degenerate_tail() -> np.ndarray:
+        """The executed counterexample from findings/statistical-methodology.md S6.
+
+        A 40-point tail whose values are identical to within 1e-7 makes
+        `fit_powerlaw`'s `1 + n_tail/denominator` denominator collapse, so alpha
+        runs away while `status` stays `"success"`.
+        """
+        rng = np.random.default_rng(0)
+        return np.concatenate([
+            np.linspace(0.01, 1.0, 60),
+            2.0 + rng.normal(0.0, 1e-7, 40),
+        ])
+
+    def test_the_runaway_alpha_path_is_actually_reached(self):
+        """Anti-vacuity: the probe must produce a huge alpha at status success.
+
+        Without this arm a fix could be graded green against a spectrum whose
+        alpha is perfectly ordinary, where no overflow was ever possible.
+        """
+        evals = self._degenerate_tail()
+        alpha, _, _, _, _, status, _ = fit_powerlaw(evals)
+        assert status == "success"
+        assert alpha > 1e6, f"probe did not reach the runaway-alpha path: alpha={alpha}"
+
+    def test_log_alpha_norm_is_finite_for_a_runaway_alpha(self):
+        evals = self._degenerate_tail()
+        alpha, _, _, _, _, status, _ = fit_powerlaw(evals)
+
+        metrics = calculate_spectral_metrics(evals, alpha, N=100)
+
+        assert np.isfinite(metrics["log_alpha_norm"]), (
+            f"log_alpha_norm overflowed: {metrics['log_alpha_norm']!r} "
+            f"at alpha={alpha!r}"
+        )
+
+    def test_a_runaway_alpha_is_flagged_unreliable(self):
+        evals = self._degenerate_tail()
+        alpha, _, _, _, _, _, _ = fit_powerlaw(evals)
+
+        metrics = calculate_spectral_metrics(evals, alpha, N=100)
+
+        assert metrics["alpha_unreliable"] is True, (
+            f"alpha={alpha!r} was reported without an unreliability flag"
+        )
+
+    def test_a_normal_alpha_is_not_flagged_and_is_numerically_unchanged(self):
+        """Anti-vacuity: the fix must be inert on the ordinary path.
+
+        `log10(sum(x**a))` and `logsumexp(a*log(x))/log(10)` must agree to float
+        precision wherever the direct form does not overflow, and the flag must
+        not fire on a healthy fit.
+        """
+        rng = np.random.default_rng(7)
+        evals = np.sort(rng.pareto(2.0, 300) + 0.5)[::-1]
+        alpha = 2.5
+
+        metrics = calculate_spectral_metrics(evals, alpha, N=300)
+        direct = float(np.log10(np.sum(evals ** alpha)))
+
+        assert np.isfinite(direct), "control spectrum must not overflow"
+        assert metrics["log_alpha_norm"] == pytest.approx(direct, rel=1e-12)
+        assert metrics["alpha_unreliable"] is False
+
+    def test_the_flag_boundary_is_the_documented_sanity_bound(self):
+        evals = np.sort(np.random.default_rng(3).pareto(2.0, 200) + 0.5)[::-1]
+        assert calculate_spectral_metrics(evals, 7.9, N=200)["alpha_unreliable"] is False
+        assert calculate_spectral_metrics(evals, 8.1, N=200)["alpha_unreliable"] is True
+
+    def test_empty_evals_still_returns_the_flag(self):
+        """The empty-spectrum early return must carry the same key set."""
+        metrics = calculate_spectral_metrics(np.array([]), alpha=3.0)
+        assert metrics["alpha_unreliable"] is False
+
+
+class TestRuntimeWarningFilterIsNarrow:
+    """A blanket `simplefilter("ignore", RuntimeWarning)` hid the S6 overflow."""
+
+    def test_the_spectral_analyzer_does_not_silence_all_runtime_warnings(self):
+        """No `warnings.simplefilter` CALL may guard the analysis pass.
+
+        Parsed with `ast` rather than matched as text, so the guard sees calls
+        only — a comment naming the banned idiom (there is one, explaining why it
+        is banned) must not satisfy or trip it.
+        """
+        import ast
+        import inspect
+        import textwrap
+        from dl_techniques.analyzer.analyzers import spectral_analyzer
+
+        src = textwrap.dedent(
+            inspect.getsource(spectral_analyzer.SpectralAnalyzer._analyze_single_model))
+        called = {
+            node.func.attr
+            for node in ast.walk(ast.parse(src))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+
+        assert "simplefilter" not in called, (
+            "a blanket RuntimeWarning filter is back; it is what hid the "
+            "log_alpha_norm overflow for the whole analysis pass"
+        )
+        assert "filterwarnings" in called, (
+            "the narrow, message-scoped filters are gone entirely"
+        )

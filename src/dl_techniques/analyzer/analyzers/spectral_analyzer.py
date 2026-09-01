@@ -171,10 +171,22 @@ class SpectralAnalyzer(BaseAnalyzer):
             logger.warning(f"No layers found in model '{model.name}' that meet the criteria for spectral analysis.")
             return details.reset_index()  # Return empty but correctly formatted DataFrame
 
-        # Perform detailed analysis on each qualifying layer
-        # Suppress runtime warnings locally (e.g. divide-by-zero in eigenvalue calculations)
+        # Perform detailed analysis on each qualifying layer.
+        #
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-012
+        # These two filters are NARROW ON PURPOSE. Do NOT collapse them back into a
+        # blanket `simplefilter("ignore", category=RuntimeWarning)`: that form also
+        # swallowed `overflow encountered in power`, which is exactly how a
+        # `log_alpha_norm = inf` reached the published details frame unnoticed.
+        # Only the two benign, expected numeric conditions in the eigenvalue path
+        # are silenced; overflow stays audible. See decisions.md D-012.
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
+            warnings.filterwarnings(
+                "ignore", message="divide by zero encountered",
+                category=RuntimeWarning)
+            warnings.filterwarnings(
+                "ignore", message="invalid value encountered",
+                category=RuntimeWarning)
             self._analyze_layers(details, all_layers)
 
         # Generate and store the per-model summary and recommendations. The summary is

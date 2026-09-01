@@ -38,6 +38,11 @@ SPECTRAL_DEFAULT_MIN_EVALS = 10
 # Documented in README.md's spectral column table.
 SPECTRAL_PVALUE_NOT_COMPUTED = -1.0
 SPECTRAL_DEFAULT_MAX_EVALS = 15000
+# Sanity bound on a fitted power-law exponent. WeightWatcher treats alpha > 8 as an
+# unreliable fit; `fit_powerlaw`'s `1 + n_tail/denominator` is guarded only by
+# `denominator > 1e-10`, so a near-degenerate tail can return alpha ~ 3.6e7 at
+# status "success". Metrics derived from such an alpha are FLAGGED, never clamped.
+SPECTRAL_ALPHA_SANITY_MAX = 8.0
 SPECTRAL_WEAK_RANK_LOSS_TOLERANCE = 1e-6
 SPECTRAL_DEFAULT_BINS = 100
 SPECTRAL_DEFAULT_FIG_SIZE = (10, 6)
