@@ -82,6 +82,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer.constants import (
     SPECTRAL_EPSILON, SPECTRAL_EVALS_THRESH, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH,
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
+    SPECTRAL_PVALUE_NOT_COMPUTED,
     SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
     SPECTRAL_TW_SAFETY_FACTOR,
     SPECTRAL_SMALL_N_CUTOFF, SPECTRAL_SMALL_N_KMIN,
@@ -335,7 +336,8 @@ def powerlaw_goodness_of_fit(
         evals: np.ndarray,
         alpha: float,
         xmin: float,
-        n_bootstraps: int = 100
+        n_bootstraps: int = 100,
+        d_observed: Optional[float] = None
 ) -> float:
     """
     Bootstrap goodness-of-fit test for power-law hypothesis (Clauset et al. 2009).
@@ -349,9 +351,14 @@ def powerlaw_goodness_of_fit(
         alpha: Fitted power-law exponent.
         xmin: Fitted xmin threshold.
         n_bootstraps: Number of bootstrap iterations.
+        d_observed: The KS distance of the fit being tested, when the caller already has
+            it. Preferred over refitting, which would re-search xmin inside the tail and
+            therefore test a different fit from the one reported.
 
     Returns:
-        p-value (0 to 1). Values < 0.1 suggest the power-law is a poor fit.
+        p-value in [0, 1]. Values < 0.1 suggest the power-law is a poor fit.
+        ``SPECTRAL_PVALUE_NOT_COMPUTED`` (-1.0) when the test could not be run at all —
+        that is NOT a rejection of the power law.
     """
     if alpha <= 1.0 or xmin <= 0:
         return 0.0
@@ -359,22 +366,43 @@ def powerlaw_goodness_of_fit(
     data = evals[evals >= xmin]
     n_tail = len(data)
     if n_tail < 5:
-        return 0.0
+        return SPECTRAL_PVALUE_NOT_COMPUTED
 
-    # Observed KS distance
-    _, _, D_obs, _, _, _, _ = fit_powerlaw(data, xmin=xmin)
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-010
+    # Every "could not compute" exit returns SPECTRAL_PVALUE_NOT_COMPUTED, never 0.0.
+    # Do NOT collapse these back to 0.0 for tidiness: 0.0 is a real, decisive p-value
+    # meaning "certainly not a power law", and _generate_recommendations reports it to
+    # the user as an unreliable alpha. Measured: 30% of layers (18 of 60) have a tail
+    # shorter than SPECTRAL_DEFAULT_MIN_EVALS and were all reported as p = 0.0 at
+    # status = success. See decisions.md D-010.
+    if d_observed is not None:
+        D_obs = d_observed
+    else:
+        # Fallback for direct callers only. `fit_powerlaw` ignores an `xmin` argument
+        # (its own docstring says so), so passing one here was inert and misleading.
+        _, _, D_obs, _, _, _, _ = fit_powerlaw(data)
     if D_obs < 0:
-        return 0.0
+        return SPECTRAL_PVALUE_NOT_COMPUTED
 
     count_ge = 0
+    n_valid = 0
     for _ in range(n_bootstraps):
         # Generate synthetic power-law sample: x = xmin * (1 - u)^(-1/(alpha-1))
         u = np.random.uniform(0, 1, n_tail)
         synthetic = xmin * (1.0 - u) ** (-1.0 / (alpha - 1.0))
         _, _, D_syn, _, _, status_syn, _ = fit_powerlaw(synthetic)
-        if status_syn == "success" and D_syn >= D_obs:
+        if status_syn != "success":
+            continue
+        n_valid += 1
+        if D_syn >= D_obs:
             count_ge += 1
 
+    if n_valid == 0:
+        return SPECTRAL_PVALUE_NOT_COMPUTED
+
+    # NOTE the denominator stays `n_bootstraps`, not `n_valid` — failed draws are
+    # dropped from the numerator only. That asymmetry is a known divergence from
+    # Clauset et al. 2009 and is documented, not silently changed, here.
     return count_ge / n_bootstraps
 
 

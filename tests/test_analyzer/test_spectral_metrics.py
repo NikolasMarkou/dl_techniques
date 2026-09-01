@@ -664,3 +664,73 @@ class TestDominanceRatioOnTheRankOnePathology:
         """Anti-vacuity arm: the guard is inert away from the degenerate branch."""
         evals = np.array([10.0, 1.0, 1.0, 1.0])
         assert calculate_dominance_ratio(evals) == pytest.approx(10.0 / 3.0)
+
+
+# =====================================================================
+# C5-real — a short tail must be "not computed", not "certainly not a power law"
+# =====================================================================
+
+class TestShortTailGoodnessOfFit:
+    """`powerlaw_goodness_of_fit` returned 0.0 whenever the fitted tail was too short.
+
+    ``fit_powerlaw`` bails with ``D = -1.0`` below ``SPECTRAL_DEFAULT_MIN_EVALS`` points,
+    and that was mapped to ``0.0`` — indistinguishable from "certainly not a power law",
+    which is what ``_generate_recommendations`` then reports to the user. Measured on 18
+    of 60 random layers (30%), and on BOTH Dense layers of a real 2-model run.
+    """
+
+    @staticmethod
+    def _short_tail_evals(n_tail: int = 6):
+        """Eigenvalues whose tail above `xmin` holds fewer than 10 points."""
+        rng = np.random.default_rng(20260902)
+        xmin = 10.0
+        bulk = rng.uniform(0.1, 1.0, 200)
+        tail = xmin * (1.0 - rng.uniform(0.0, 0.9, n_tail)) ** (-1.0 / 2.0)
+        return np.concatenate([bulk, tail]), xmin
+
+    def test_a_short_tail_reports_the_not_computed_sentinel(self):
+        from dl_techniques.analyzer.constants import SPECTRAL_PVALUE_NOT_COMPUTED
+
+        evals, xmin = self._short_tail_evals()
+
+        # Anti-vacuity: the tail must really be shorter than the fitter's floor, and long
+        # enough to clear the n_tail < 5 early return, so the D = -1.0 path is the one
+        # actually exercised.
+        n_tail = int(np.sum(evals >= xmin))
+        assert 5 <= n_tail < 10, f"probe tail length {n_tail} does not exercise the defect"
+
+        pvalue = powerlaw_goodness_of_fit(evals, alpha=3.0, xmin=xmin, n_bootstraps=10)
+
+        assert pvalue == SPECTRAL_PVALUE_NOT_COMPUTED, (
+            "a tail too short to fit was reported as a decisive rejection of the "
+            f"power law: pvalue={pvalue} (0.0 means 'certainly not a power law')"
+        )
+
+    def test_a_genuine_power_law_still_reports_a_real_pvalue(self):
+        """Anti-vacuity arm: the sentinel must not swallow computable cases."""
+        rng = np.random.default_rng(42)
+        alpha, xmin = 3.0, 1.0
+        data = xmin * (1 - rng.uniform(0, 1, 1000)) ** (-1.0 / (alpha - 1.0))
+
+        pvalue = powerlaw_goodness_of_fit(data, alpha, xmin, n_bootstraps=30)
+        assert 0.0 <= pvalue <= 1.0
+        assert pvalue > 0.05
+
+    def test_the_observed_distance_argument_is_not_inert(self):
+        """`d_observed` must actually be used — unlike the documented-inert `xmin`.
+
+        A large observed KS distance makes every synthetic draw compare below it (p = 0);
+        a zero one makes every draw compare at or above it (p = 1). If the argument were
+        ignored, both calls would return the same number.
+        """
+        rng = np.random.default_rng(7)
+        alpha, xmin = 3.0, 1.0
+        data = xmin * (1 - rng.uniform(0, 1, 500)) ** (-1.0 / (alpha - 1.0))
+
+        p_large_d = powerlaw_goodness_of_fit(
+            data, alpha, xmin, n_bootstraps=10, d_observed=10.0)
+        p_zero_d = powerlaw_goodness_of_fit(
+            data, alpha, xmin, n_bootstraps=10, d_observed=0.0)
+
+        assert p_large_d == pytest.approx(0.0)
+        assert p_zero_d == pytest.approx(1.0)

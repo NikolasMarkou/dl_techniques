@@ -208,3 +208,38 @@ class TestPerModelSpectralSummary:
         assert summary['spectral_summary_per_model']["m_a"][MetricNames.ALPHA] != pytest.approx(
             summary['spectral_summary_per_model']["m_b"][MetricNames.ALPHA]
         )
+
+
+class TestRecommendationsIgnoreUncomputedPvalues:
+    """C5-real — a "not computed" p-value must not be reported as a poor fit."""
+
+    def test_a_not_computed_pvalue_is_not_counted_as_a_poor_fit(self, analyzer):
+        from dl_techniques.analyzer.constants import SPECTRAL_PVALUE_NOT_COMPUTED
+
+        details = pd.DataFrame(
+            [
+                {MetricNames.ALPHA: 2.0, 'pl_pvalue': SPECTRAL_PVALUE_NOT_COMPUTED,
+                 MetricNames.STATUS: StatusCode.SUCCESS.value},
+                {MetricNames.ALPHA: 2.5, 'pl_pvalue': SPECTRAL_PVALUE_NOT_COMPUTED,
+                 MetricNames.STATUS: StatusCode.SUCCESS.value},
+            ]
+        )
+
+        recommendations = analyzer._generate_recommendations(
+            details, analyzer._get_summary(details))
+
+        assert not any('poor power-law fit' in r for r in recommendations), (
+            f"uncomputed p-values were reported as poor fits: {recommendations}"
+        )
+
+    def test_a_genuinely_poor_fit_is_still_reported(self, analyzer):
+        """Anti-vacuity arm: the recommendation must still fire on a real p < 0.1."""
+        details = pd.DataFrame(
+            [{MetricNames.ALPHA: 2.0, 'pl_pvalue': 0.0,
+              MetricNames.STATUS: StatusCode.SUCCESS.value}]
+        )
+
+        recommendations = analyzer._generate_recommendations(
+            details, analyzer._get_summary(details))
+
+        assert any('poor power-law fit' in r for r in recommendations)

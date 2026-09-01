@@ -33,6 +33,10 @@ SPECTRAL_EVALS_THRESH = 1e-5
 SPECTRAL_OVER_TRAINED_THRESH = 2.0
 SPECTRAL_UNDER_TRAINED_THRESH = 6.0
 SPECTRAL_DEFAULT_MIN_EVALS = 10
+# Sentinel for `pl_pvalue` meaning "the goodness-of-fit test did not run", as
+# distinct from a computed p-value of 0.0 ("certainly not a power law").
+# Documented in README.md's spectral column table.
+SPECTRAL_PVALUE_NOT_COMPUTED = -1.0
 SPECTRAL_DEFAULT_MAX_EVALS = 15000
 SPECTRAL_WEAK_RANK_LOSS_TOLERANCE = 1e-6
 SPECTRAL_DEFAULT_BINS = 100

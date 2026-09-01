@@ -90,7 +90,8 @@ from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from ..constants import (
     LayerType, MetricNames, StatusCode, SPECTRAL_DEFAULT_SUMMARY_METRICS,
-    SPECTRAL_HIGH_CONCENTRATION_PERCENTILE, SPECTRAL_WEAK_RANK_LOSS_TOLERANCE
+    SPECTRAL_HIGH_CONCENTRATION_PERCENTILE, SPECTRAL_WEAK_RANK_LOSS_TOLERANCE,
+    SPECTRAL_PVALUE_NOT_COMPUTED
 )
 from .. import spectral_metrics
 from .. import spectral_utils
@@ -221,10 +222,13 @@ class SpectralAnalyzer(BaseAnalyzer):
                 erg_metrics = spectral_metrics.compute_erg_condition(evals, xmin)
 
             # SETOL: Goodness-of-fit p-value (Clauset et al. 2009)
-            pl_pvalue = -1.0
+            pl_pvalue = SPECTRAL_PVALUE_NOT_COMPUTED
             if status == "success" and alpha > 1.0:
+                # Pass the KS distance of the fit we are actually reporting; letting the
+                # test refit would re-search xmin inside the tail and test a different fit.
                 pl_pvalue = spectral_metrics.powerlaw_goodness_of_fit(
-                    evals, alpha, xmin, n_bootstraps=self.config.spectral_bootstraps)
+                    evals, alpha, xmin, n_bootstraps=self.config.spectral_bootstraps,
+                    d_observed=D)
 
             concentration_metrics = {}
             if self.config.spectral_concentration_analysis and Wmats:
