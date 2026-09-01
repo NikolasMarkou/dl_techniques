@@ -1,7 +1,7 @@
 """
 Attention layer factory: one registry, one construction path, strict kwargs.
 
-``ATTENTION_REGISTRY`` maps 33 string keys to the callable that builds each
+``ATTENTION_REGISTRY`` maps 34 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
 the single construction path: it looks the key up, REJECTS any keyword the
 target type does not declare, fills in the registry defaults, and
@@ -11,7 +11,7 @@ not accept is a ``ValueError``, never a discarded argument.
 Public functions:
 
     ``get_attention_info()``           all entries' metadata, copied
-    ``list_attention_types()``         the 33 keys, sorted
+    ``list_attention_types()``         the 34 keys, sorted
     ``get_attention_requirements()``   one entry's metadata, copied
     ``validate_attention_config()``    pre-flight check; raises, builds nothing
     ``assemble_attention_config()``    filter a wrapper's own defaults, then
