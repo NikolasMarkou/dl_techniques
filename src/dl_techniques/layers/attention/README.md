@@ -1,695 +1,210 @@
-# Attention Module
+# `dl_techniques.layers.attention`
 
-The `dl_techniques.layers.attention` module provides a comprehensive collection of attention mechanisms for deep learning, with a unified factory interface for consistent layer creation, configuration management, and parameter validation.
+Thirty-four attention and token-mixing layers behind one factory. `create_attention_layer(attention_type, name=None, **kwargs)`
+looks the type up in `ATTENTION_REGISTRY`, rejects any keyword the target class does not declare,
+fills in the registry defaults and constructs. Nothing on that path filters and drops: an undeclared
+keyword is a `ValueError`, never a discarded argument.
 
-## Overview
+- Factory contract and registry sizes: `src/dl_techniques/layers/CLAUDE.md`.
+- Deeper design notes, including the shared-primitive contracts: `GUIDE.md` in this directory.
 
-This module includes thirty-four different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+The factory is **construction-only**. It standardizes how layers are built, not how they are called;
+see [Call-signature caveats](#call-signature-caveats).
 
-## Available Attention Types
+## Catalogue
 
-The following layers are supported by the factory system with automated parameter validation and defaults:
+Thirty-four keys. `list_attention_types()` returns them sorted; `get_attention_requirements(key)`
+returns one entry's metadata (a deep copy, except the `class` value).
 
-| Type | Class | Description | Use Case | Input Shape |
-|------|-------|-------------|----------|-------------|
-| `anchor` | `AnchorAttention` | Hierarchical attention with anchor tokens. | Long-sequence models where full self-attention is too costly. | `(batch, seq_len, dim)` |
-| `area` | `AreaAttention` | Area attention over a 4D feature map: the flattened `H*W` token sequence is split into `area` contiguous groups and attention runs inside each group, so one `(H*W, H*W)` score matrix becomes `area` independent `(H*W/area, H*W/area)` blocks. `area=1` is plain global attention. Carries a depthwise `5x5` positional-encoding branch added to the attention result and its own `1x1` output projection. Falls back to global attention when `H*W % area != 0` — deliberate, yolo12 feeds it non-divisible extents. | YOLOv12-style detection/dense-prediction backbones needing feature-map self-attention at sub-quadratic pixel cost. | `(batch, H, W, dim)` |
-| `beit` | `BeitAttention` | BEiT self-attention: learnable relative-position bias over a `(Wh, Ww)` **patch grid** with three extra cls-interaction slots, added pre-softmax, plus asymmetric QKV bias (K has **no** bias parameter). | BEiT / BEiT-style ViTs; any ViT wanting a T5-style 2D relative-position bias instead of absolute position embeddings. | `(batch, Wh*Ww + 1, dim)` |
-| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule network dynamic routing. | Experimental models aiming for better contextualization. | `(batch, seq_len, dim)` |
-| `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. | `(batch, H, W, channels)` |
-| `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. | `(batch, H, W, channels)` |
-| `differential` | `DifferentialMultiHeadAttention` | Dual MHA to amplify signal and cancel noise. | Transformers requiring improved focus and reduced hallucination. | `(batch, seq_len, dim)` |
-| `energy` | `EnergyAttention` | Energy-based attention (Energy Transformer). No value matrix: `call()` returns the exact closed-form **negative gradient** of a scalar token-mixing energy. | Energy Transformer blocks whose residual stream is a Lyapunov descent rather than an opaque `attn -> FFN` stack. | `(batch, seq_len, dim)` |
-| `fnet` | `FNetFourierTransform` | Parameter-free token mixing with Fourier Transforms. | Efficient replacement for self-attention in sequence models. | `(batch, seq_len, dim)` |
-| `gated` | `GatedAttention` | Attention with normalization, partial RoPE, and output gating. | High-performance transformers requiring stability and expressiveness. | `(batch, seq_len, dim)` |
-| `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
-| `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. | `(batch, seq_len, dim)` or `[query, key, value]` |
-| `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid + top-K causal SDPA with scatter-back via segment_sum. | Long-context causal language modeling needing exact attention with sub-quadratic cost. | `(batch, seq_len, dim)` |
-| `linear` | `LinearAttention` | Bias-free, degree-1-homogeneous linear (O(N)) attention via a positively-homogeneous feature map + associativity (Miyasawa-compliant, non-causal). | Bias-free denoiser stacks needing O(N), homogeneity-preserving attention; long-sequence self-attention. | `(batch, seq_len, dim)` |
-| `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
-| `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention (wrapper for cross-attention). | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
-| `multi_head_cross` | `MultiHeadCrossAttention` | Unified layer for self- and cross-attention with adaptive softmax. | Core component for encoder-decoders or advanced custom attention. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
-| `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA with KV compression. | Efficient LLM inference with small KV cache. | `(batch, seq_len, dim)` |
-| `non_local` | `NonLocalAttention` | Non-local attention for capturing long-range dependencies in CNNs. | Augmenting CNNs with global context reasoning. | `(batch, H, W, channels)` |
-| `perceiver` | `PerceiverAttention` | Cross-attention from the Perceiver architecture (wrapper for cross-attention). | Cross-modal attention (e.g., text to image) and latent bottleneck models. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
-| `performer` | `PerformerAttention` | Approximates softmax attention with linear complexity via random features. | Models processing very long sequences (e.g., 65K+ tokens). | `(batch, seq_len, dim)` |
-| `ring` | `RingAttention` | Exact attention for long sequences via blockwise processing. | Models requiring near-infinite context length with exact attention. | `(batch, seq_len, dim)` |
-| `rpc` | `RPCAttention` | Robust attention via Principal Component Pursuit decomposition. | Models needing robustness to noise and adversarial attacks. | `(batch, seq_len, dim)` |
-| `shared_weights_cross` | `SharedWeightsCrossAttention`| Cross-attention between modalities with shared weights. | Efficient multi-modal learning where different data types exchange information. | `(batch, total_seq_len, dim)` |
-| `spatial` | `SpatialAttention` | Spatial attention module from CBAM. | CNNs to highlight spatially significant feature regions. | `(batch, H, W, channels)` |
-| `tripse1` | `TripSE1` | Triplet Attention with Post-Fusion Squeeze-and-Excitation. | Vision tasks needing comprehensive 3D attention (Spatial + Channel). | `(batch, H, W, channels)` |
-| `tripse2` | `TripSE2` | Triplet Attention with Pre-Process Squeeze-and-Excitation. | Vision tasks where channel recalibration should precede spatial rotation. | `(batch, H, W, channels)` |
-| `tripse3` | `TripSE3` | Triplet Attention with Parallel Squeeze-and-Excitation. | Vision tasks requiring independent spatial and channel modeling. | `(batch, H, W, channels)` |
-| `tripse4` | `TripSE4` | Hybrid 3D Attention with Affine Fusion of logits. | Advanced vision tasks requiring deep integration of spatial/channel contexts. | `(batch, H, W, channels)` |
-| `single_window` | `SingleWindowAttention` | Single-window Multi-Head Attention over the full sequence as one window (optional relative-position bias). | Vision/sequence models needing windowed attention without grid partitioning. | `(batch, seq_len, dim)` |
-| `wave_field` | `WaveFieldAttention` | FFT-based token mixing with a learned wave-field coupling kernel. | Long-sequence models seeking efficient frequency-domain mixing. | `(batch, seq_len, dim)` |
-| `window` | `WindowAttention` [^win] | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. `O(N*M)` for `N > M = window_size**2`, `O(N^2)` for `N <= M` (short-circuited 2026-08-25; the `O(W^4)` floor it used to have is gone). Folds a 1-D sequence into a `ceil(sqrt(N))` grid, so for text you want `window_band`. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
-| `window_zigzag` | `WindowAttention` [^win] | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. Short-circuited for `N < M` since 2026-08-25 (step 7.1), like `window`: no `O(W^4)` floor. MEASURED 2026-08-25 on `(1,128,64)` at `window_size=128`, CPU peak RSS: `window` 0.680 GB, `window_band` 0.679 GB, `multi_head` 0.674 GB, `window_zigzag` **0.678 GB** (was 17.503 GB). | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
-| `window_band` | `WindowAttention` [^win] | 1-D **symmetric** sliding band over the token sequence: query `i` attends key `j` iff `abs(i - j) <= window_size`, where `window_size` is a HALF-WIDTH IN TOKENS. No grid folding, no square padding. Cost is `O(N^2)`, the same order as `multi_head`, and it is **not** `O(N*W)` — a fused banded kernel is not reachable from `keras.ops`. What it buys over `window` is the right ADJACENCY for a sequence, not a lower asymptotic. | Text encoders with local layers (ModernBERT / Longformer): pass `local_attention // 2`. | `(batch, seq_len, dim)` |
+| Key | Class | What it is | Pick it when | Required params |
+|---|---|---|---|---|
+| `anchor` | `AnchorAttention` | Hierarchical attention through anchor tokens; queries cross-attend only to anchors. | Long sequences where full self-attention is too costly. | `dim`, `num_heads` |
+| `area` | `AreaAttention` | Splits a flattened `H*W` map into `area` contiguous groups and attends inside each; `area=1` is global. Depthwise 5x5 positional branch, own 1x1 output projection. Falls back to global when `H*W % area != 0`. | YOLOv12-style detection backbones needing feature-map self-attention below quadratic pixel cost. | `dim` |
+| `beit` | `BeitAttention` | Learnable relative-position bias over a `(Wh, Ww)` patch grid plus three cls slots, added pre-softmax; asymmetric QKV bias (K has **no** bias). | BEiT-style ViTs; any ViT wanting a 2D relative bias instead of absolute positions. | `dim`, `num_heads`, `window_size` |
+| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule dynamic routing. | Experimental contextualization work. | `num_heads` |
+| `cbam` | `CBAM` | Convolutional Block Attention Module (channel + spatial). | Drop-in refinement for any CNN. | `channels` |
+| `channel` | `ChannelAttention` | The channel half of CBAM. | Channel-wise recalibration in CNNs. | `channels` |
+| `differential` | `DifferentialMultiHeadAttention` | Two attention maps subtracted to cancel common-mode noise. | Transformers wanting sharper focus / less attention noise. | `dim`, `num_heads`, `head_dim` |
+| `energy` | `EnergyAttention` | No value matrix; `call()` returns the closed-form negative gradient of a scalar token-mixing energy. | Energy Transformer blocks whose residual stream is a Lyapunov descent. | `dim` |
+| `fnet` | `FNetFourierTransform` | Parameter-free Fourier token mixing. | Cheap replacement for self-attention. | (none) |
+| `gated` | `GatedAttention` | QK-norm, partial RoPE and an output gate. | Stability-sensitive high-performance transformers. | `dim`, `num_heads` |
+| `group_query` | `GroupedQueryAttention` | GQA: fewer K/V heads than Q heads. | LLMs where the KV cache is the bottleneck. | `dim`, `num_heads`, `num_kv_heads` |
+| `hopfield` | `HopfieldAttention` | Modern Hopfield network retrieval; `update_steps_max=0` mimics standard attention. | Associative-memory tasks. | `key_dim`, `num_heads` |
+| `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid plus top-K causal SDPA, scattered back with `segment_sum`. | Long-context causal LM wanting exact attention sub-quadratically. | `dim`, `num_heads` |
+| `linear` | `LinearAttention` | Bias-free, degree-1-homogeneous O(N) attention via a positive feature map and associativity. | Bias-free denoiser stacks; long non-causal sequences. | `dim` |
+| `mobile_mqa` | `MobileMQA` | Multi-query attention for vision on mobile/edge. | Edge vision models. | `dim` |
+| `multi_head` | `MultiHeadAttention` | Standard MHSA. | The default. | `dim` |
+| `multi_head_cross` | `MultiHeadCrossAttention` | Self- or cross-attention with pluggable attention probabilities. | Encoder-decoders and custom attention. | `dim` |
+| `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA with KV compression into a latent. | LLM inference with a small KV cache. | `dim`, `num_heads`, `kv_latent_dim` |
+| `non_local` | `NonLocalAttention` | Non-local block over spatial positions. | Global context inside a CNN. | `attention_channels` |
+| `perceiver` | `PerceiverAttention` | Perceiver cross-attention into a latent array. | Cross-modal / latent-bottleneck models. | `dim` |
+| `performer` | `PerformerAttention` | Random-feature approximation of softmax attention, linear cost. | Very long sequences. | `dim` |
+| `ring` | `RingAttention` | Exact attention via blockwise online softmax. | Near-unbounded context with exact attention. | `dim` |
+| `rpc` | `RPCAttention` | Principal Component Pursuit decomposition of the attention matrix. | Robustness to noise / adversarial input. | `dim` |
+| `shared_weights_cross` | `SharedWeightsCrossAttention` | Cross-attention between modalities with tied weights. | Multi-modal exchange on one concatenated sequence. | `dim` |
+| `single_window` | `SingleWindowAttention` | MHA over the whole sequence as one window, optional relative bias. | Windowed attention without grid partitioning. | `dim`, `num_heads`, `window_size` |
+| `spatial` | `SpatialAttention` | The spatial half of CBAM. | Highlighting spatial regions in a CNN. | (none) |
+| `tripse1` | `TripSE1` | Triplet attention, post-fusion squeeze-and-excitation. | 3D (spatial + channel) vision attention. | (none) |
+| `tripse2` | `TripSE2` | Triplet attention, pre-process SE. | Channel recalibration before spatial rotation. | (none) |
+| `tripse3` | `TripSE3` | Triplet attention, parallel SE. | Independent spatial and channel modelling. | (none) |
+| `tripse4` | `TripSE4` | Hybrid 3D attention with affine fusion of logits. | Deep spatial/channel integration. | (none) |
+| `wave_field` | `WaveFieldAttention` | FFT token mixing with a learned wave-field coupling kernel. | Frequency-domain mixing on long sequences. | `dim` |
+| `window` | `create_grid_window_attention` -> `WindowAttention` | Swin grid windows. Folds a 1-D sequence into a `ceil(sqrt(N))` grid. `O(N*M)` for `N > M = window_size**2`, `O(N^2)` otherwise. | Vision transformers with local windows. | `dim`, `num_heads`, `window_size` |
+| `window_zigzag` | `create_zigzag_window_attention` -> `WindowAttention` | Zigzag partitioning, grouping frequency-proximate tokens. | Vision models where frequency locality matters. | `dim`, `num_heads`, `window_size` |
+| `window_band` | `create_band_window_attention` -> `WindowAttention` | Symmetric 1-D band: query `i` sees key `j` iff `abs(i-j) <= window_size`, a **half-width in tokens**. Cost is `O(N^2)`, same order as `multi_head`; what it buys is the right adjacency for a sequence, not a lower asymptotic. | Text encoders with local layers (ModernBERT / Longformer): pass `local_attention // 2`. | `dim`, `num_heads`, `window_size` |
 
-[^win]: The `window`, `window_zigzag` and `window_band` registry entries dispatch through the factory functions `create_grid_window_attention` / `create_zigzag_window_attention` / `create_band_window_attention` (which set the partitioning mode); the instance they return is a `WindowAttention` layer.
+Everything not listed as required is optional and has a registry default. Read them with
+`get_attention_requirements(key)['optional_params']` rather than trusting a copy in prose.
 
-### Window-attention factory facts
+### Window-family facts
 
-Three details of the window family are easy to get wrong; they are stated here explicitly because
-they are the frozen reality of the registry, not accidents to be "tidied":
+- The three `window*` keys map to the **wrapper functions** `create_grid_window_attention`,
+  `create_zigzag_window_attention` and `create_band_window_attention` (in `window_attention.py`),
+  each of which fixes a partitioning mode and returns a `WindowAttention` instance. The
+  `WindowAttention` class has no key of its own; import it directly for arbitrary configurations.
+- `window_band` rejects `use_relative_position_bias=True`: the bias indexes a 2-D tile this
+  layout does not have.
+- `create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are test-only.
+  They are deliberately not registered and not exported.
 
-- **The general `WindowAttention` class has no factory key of its own.** `ATTENTION_REGISTRY['window']['class']`, `['window_zigzag']['class']` and `['window_band']['class']` are the module-level **wrapper functions** `create_grid_window_attention`, `create_zigzag_window_attention` and `create_band_window_attention` (defined in `window_attention.py`), not the class. Each wrapper fixes the partitioning mode and returns a `WindowAttention` instance. To construct the class with an arbitrary configuration, import it directly (`from dl_techniques.layers.attention import WindowAttention`).
-- **`SingleWindowAttention` *is* factory-registered**, under the key `single_window`, with `'class': SingleWindowAttention` — it is a normal registry entry, not a direct-instantiation-only layer.
-- **`create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are test-only.** They live in `window_attention.py` and are exercised only by `tests/test_layers/test_attention/test_window_attention.py`. They are intentionally **not** registered in the factory and **not** exported from the package `__init__.py`; they are convenience constructors for tests, not part of the public surface.
+## Construction
 
-### Shared primitives (`common.py`)
+```python
+from dl_techniques.layers.attention import create_attention_layer
 
-`dl_techniques/layers/attention/common.py` is the package's single home for the small primitives
-that every attention layer needs. It holds exactly five module-level names — **no classes, no
-registry entries, no Keras serialization registration**:
+mha = create_attention_layer('multi_head', dim=256, num_heads=8)
+cbam = create_attention_layer('cbam', channels=128, ratio=16)
+gqa = create_attention_layer('group_query', dim=1024, num_heads=16, num_kv_heads=4, name='gqa_1')
+```
 
-| Name | Purpose |
-|------|---------|
-| `MASK_BIAS_VALUE` | The additive `-1e9` bias applied to masked attention logits. |
-| `mask_dtype(compute_dtype)` | The dtype a masked softmax/logsumexp chain must run in (at least `float32`), so the bias stays finite under `mixed_float16`. |
-| `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)` | **The prescribed way to apply an attention mask.** Applies the bias with `ops.where` inside `mask_dtype(...)`, so the `0 * -inf = NaN` product cannot be formed. `rescue_axis` accepts an `int`, a tuple of ints, or `None` (opt out); a `keep` that is statically broadcast across every named axis raises `ValueError` because it provably cannot mask (D-017/D-018). Eleven layers use it — that count is derived mechanically in `common.py`'s module docstring. |
-| `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)` | The `dim % num_heads` constructor precondition, with per-call-site argument naming in the error message. |
-| `compute_attention_scale(head_dim) -> float` | The softmax temperature `1 / sqrt(head_dim)` as a plain Python `float`, to be computed in `__init__`/`build` and never in `call()`. |
+From a config dict (the `type` key selects the entry, the rest are kwargs):
 
-Two things about `apply_attention_mask` that are easy to get wrong, and that it deliberately will
-**not** decide for you:
+```python
+from dl_techniques.layers.attention import create_attention_from_config
 
-- **Polarity is per call site.** `keep` is the *keep predicate*; the helper performs no polarity
-  inference. Pass your site's own spelling verbatim (`rpc_attention` passes
-  `ops.not_equal(mask, 0)`, `capsule_routing_attention` passes a raw boolean, the rest pass their
-  `1 = keep` float mask). A uniform `mask > 0` rewrite inverts masking at two of the eleven sites
-  with no shape error and no exception.
-- **`rescue_axis` is the axis YOUR softmax reduces over.** It defaults to `-1`, which turns on the
-  degenerate-row rescue (a slice that keeps nothing is treated as keeping everything, so no
-  all-`-inf` softmax row is ever formed); `None` is the explicit opt-out. It is never inferred.
-  `ring_attention` is the counter-example that forces this: inside its blockwise online softmax a
-  "row" is one key-axis *tile*, so a per-tile `rescue_axis=-1` would un-mask the **future** under a
-  causal mask (measured at 24.14 by injection, with every finiteness test still passing). Ring
-  therefore opts out per tile and rescues once over the full key axis before its block loop.
+layer = create_attention_from_config(
+    {'type': 'group_query', 'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4, 'name': 'gqa_1'}
+)
+```
 
-It is an implementation detail of the package (not re-exported from `__init__.py`); layers import
-it as `from .common import ...`. **`GUIDE.md` section 3.5 documents the contract *and the limits*
-of each entry** — in particular that `MASK_BIAS_VALUE` is only safe together with `mask_dtype()`
-and the `keras.ops.where` mask form, that `apply_attention_mask` *adds* rather than *replaces* the
-bias (a float64-visible difference at a site that previously replaced it), and that adopting
-`compute_attention_scale` at an existing site requires a bit-identity probe (`x ** -0.5` is *not*
-bit-identical to it). Read that section before adopting any of them at a new call site.
+Discovery and pre-flight validation:
+
+```python
+from dl_techniques.layers.attention import (
+    get_attention_info, validate_attention_config,
+)
+
+info = get_attention_info()['group_query']
+print(info['required_params'], sorted(info['optional_params']))
+
+validate_attention_config('window', dim=96, window_size=7, num_heads=4)  # raises on a bad config
+```
+
+`validate_attention_config` refuses exactly what `create_attention_layer` refuses, including an
+undeclared keyword (a typo like `num_head=4`), so it is a real pre-flight check for callers that go
+on to build the class directly.
+
+Direct instantiation is always available and bypasses factory validation and defaults:
+
+```python
+from dl_techniques.layers.attention import MultiHeadAttention, CBAM, WindowAttention
+
+mha = MultiHeadAttention(dim=512, num_heads=8)
+cbam = CBAM(channels=256, ratio=16)
+win = WindowAttention(dim=96, window_size=7, num_heads=4)
+```
+
+## Customization hooks
+
+Most softmax-based layers expose two hooks; the defaults preserve standard behaviour.
+
+- `probability_type` / `probability_config` — the score normalization, via `ProbabilityOutput`
+  (`dl_techniques.layers.activations.probability_output`): `softmax` (default), `sparsemax`,
+  `threshmax`, `adaptive`. Routing/hierarchical modes are rejected — they consume features, not logits.
+- `qk_norm_type` / `qk_norm_kwargs` — optional Q/K normalization through
+  `create_normalization_layer` (`dl_techniques.layers.norms.factory`): `rms_norm`, `layer_norm`,
+  `zero_centered_rms_norm`, ... or `None`.
+
+```python
+mha = create_attention_layer(
+    'multi_head', dim=256, num_heads=8,
+    probability_type='sparsemax',
+    qk_norm_type='rms_norm',
+)
+```
+
+Non-default hook behaviour:
+
+| Layer | Note |
+|---|---|
+| `gated` | `qk_norm_type` defaults to `'zero_centered_rms_norm'` and cannot be `None`. |
+| `multi_head_latent` | `qk_norm_type` defaults to `'rms_norm'`. |
+| `hopfield` | `qk_norm_type` defaults to `'layer_norm'`; pass `None` for no pattern normalization. |
+| `ring` | Only `qk_norm_type`; the online softmax is tied to exponential normalization. |
+| `non_local` | Also has `output_norm_type` / `output_norm_kwargs` (default `'batch_norm'`). |
+| `channel`, `spatial`, `cbam`, `tripse*`, `fnet`, `performer`, `wave_field` | No hooks — they do not softmax over `Q@K^T`. |
 
 ## Call-signature caveats
 
-The factory (`create_attention_layer`) is **construction-only** — it standardizes how layers are *built*, not how they are *called*. Most layers follow the standard self-attention call signature `call(inputs, attention_mask=None, training=None)`, but 12 layers deviate for intentional, architectural reasons. These are documented (not "fixed"): renaming them would break serialized configs and existing call sites. When invoking these layers directly, use their native signatures:
-
-| Layer | Non-standard call signature | Reason |
-|-------|-----------------------------|--------|
-| `rpc_attention` | mask passed as `mask=` (not `attention_mask=`) | Distinct parameter name predates the standard convention. |
-| `shared_weights_cross_attention` | requires a positional `split_sizes` argument | Needs explicit per-modality segment boundaries to split the concatenated sequence. |
-| `anchor_attention` | accepts **no** mask argument | Anchor/local windowing defines the attention pattern internally. |
-| `performer_attention` | accepts **no** mask argument | FAVOR+ linear-attention kernel does not support a dense additive mask. |
-| `lighthouse_attention` | accepts **no** mask argument; requires static seq-len | Causality is enforced by the pyramid scatter-back shift; raises `RuntimeError` on dynamic/`None` seq-len. |
-| `group_query_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
-| `ring_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
-| `mobile_mqa` | `call(inputs, training=None, attention_mask=None, return_attention_weights=False)` (order swapped + extra flag) | `training` precedes `attention_mask` positionally; an extra `return_attention_weights` flag follows. |
-| `differential_attention` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` (extra positional `layer_idx`) | An extra `layer_idx` positional argument sits between `attention_mask` and `training`. |
-| `spatial` | 4D input `(batch, H, W, channels)`; **no** mask argument | Spatial CBAM attention operates over the full feature map; there is no token mask to apply. |
-| `area` | 4D input `(batch, H, W, channels)`; `attention_mask` is a **spatial keep mask** shaped `(batch, H, W)` or `(batch, H*W)`, not a token mask | The layer attends over flattened spatial positions; `1 = keep`, and the predicate is forwarded verbatim to `apply_attention_mask`, which never infers polarity. The call signature itself is the standard `call(inputs, attention_mask=None, training=None)`. |
-| `non_local` | 4D input `(batch, H, W, channels)`; mask argument **ignored** | Non-local attention computes dense global affinities over spatial positions; a token/sequence mask does not apply. |
-
-For `group_query`/`ring`/`mobile_mqa`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall. For `differential_attention`, pass `training` as a keyword argument: because `layer_idx` is the 3rd positional parameter (`call(inputs, attention_mask=None, layer_idx=0, training=None)`), a positionally-passed `training` would otherwise bind to `layer_idx`.
-
-## Customization Hooks
-
-Most softmax-based attention layers expose two unified customization hooks (defaults preserve standard behavior):
-
-- `probability_type` / `probability_config` — selects the attention-score normalization via `ProbabilityOutput` (from `dl_techniques.layers.activations.probability_output`). Supported types include `softmax` (default), `sparsemax`, `threshmax`, `adaptive` (entropy-adaptive softmax). Routing/hierarchical modes are rejected (they consume features, not logits).
-- `qk_norm_type` / `qk_norm_kwargs` — optional Q/K normalization routed through `create_normalization_layer` (from `dl_techniques.layers.norms.factory`). Set to one of `rms_norm`, `layer_norm`, `zero_centered_rms_norm`, etc., or `None` (default for most layers) for no normalization.
-
-```python
-from dl_techniques.layers.attention import create_attention_layer
-
-mha = create_attention_layer(
-    'multi_head', dim=256, num_heads=8,
-    probability_type='sparsemax',          # sparse attention
-    qk_norm_type='rms_norm',               # QK-norm for training stability
-)
-```
-
-Layer-specific notes:
-- `gated_attention`: `qk_norm_type` defaults to `'zero_centered_rms_norm'` (cannot be `None`).
-- `multi_head_latent_attention` and `lighthouse_attention`: `qk_norm_type` defaults to `'rms_norm'`.
-- `hopfield_attention`: `qk_norm_type` defaults to `'layer_norm'` (use `None` for no pattern normalization).
-- `ring_attention`: only `qk_norm_type` is exposed; the online-softmax algorithm is mathematically tied to exponential normalization and does not support custom `probability_type`.
-- `non_local_attention`: also exposes `output_norm_type` / `output_norm_kwargs` for the spatial output normalization (default `'batch_norm'`).
-- Out-of-scope (no hooks): `channel`, `spatial`, `cbam`, `tripse*`, `fnet`, `performer`, `wave_field` — these layers do not use softmax over Q@K^T scores.
-
-## Factory Interface
-
-### Basic Usage
-
-```python
-from dl_techniques.layers.attention import create_attention_layer
-
-# Create a standard multi-head attention layer
-mha = create_attention_layer('multi_head', dim=256, num_heads=8)
-
-# Create a CBAM block for a CNN
-cbam = create_attention_layer('cbam', channels=128, ratio=16)
-```
-
-```python
-from dl_techniques.layers.attention import create_attention_layer
-
-# Create a standard multi-head attention layer
-mha = create_attention_layer('multi_head', dim=256, num_heads=8)
-
-# Create a TripSE block for 3D attention in a CNN
-tripse = create_attention_layer('tripse1', kernel_size=7, reduction_ratio=0.0625)
-```
-
-### Configuration-Based Creation
-
-```python
-from dl_techniques.layers.attention import create_attention_from_config
-
-config = {
-    'type': 'group_query',
-    'dim': 1024,
-    'num_heads': 16,
-    'num_kv_heads': 4,
-    'name': 'gqa_block_1'
-}
-
-gqa_layer = create_attention_from_config(config)
-```
-
-### Parameter Discovery
-
-```python
-from dl_techniques.layers.attention import get_attention_info
-
-# Get information about all attention types
-info = get_attention_info()
-
-# Print requirements for a specific type
-gqa_info = info['group_query']
-print(f"Required: {gqa_info['required_params']}")
-print(f"Optional: {list(gqa_info['optional_params'].keys())}")
-```
-
-### Validation
-
-```python
-from dl_techniques.layers.attention import validate_attention_config
-
-# Validate configuration before creation
-try:
-    validate_attention_config('window', dim=96, window_size=7, num_heads=4)
-    print("Configuration is valid")
-except ValueError as e:
-    print(f"Validation error: {e}")
-```
-
-## Layer-Specific Parameters
-
-### `anchor`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
-```python
-attn = create_attention_layer(
-    'anchor',
-    dim=512,
-    num_heads=8,
-    dropout_rate=0.1
-)
-```
-
-### `capsule_routing`
-**Required:** `num_heads`  
-**Optional:** `key_dim` (default: None), `routing_iterations` (default: 3)
-```python
-attn = create_attention_layer(
-    'capsule_routing',
-    num_heads=8,
-    key_dim=64,
-    routing_iterations=5
-)
-```
-
-### `cbam`
-**Required:** `channels`  
-**Optional:** `ratio` (default: 8), `kernel_size` (default: 7)
-```python
-attn = create_attention_layer(
-    'cbam',
-    channels=256,
-    ratio=16,
-    kernel_size=5
-)
-```
-
-### `channel`
-**Required:** `channels`  
-**Optional:** `ratio` (default: 8), `use_bias` (default: False)
-```python
-attn = create_attention_layer(
-    'channel',
-    channels=256,
-    ratio=16
-)
-```
-
-### `differential`
-**Required:** `dim`, `num_heads`, `head_dim`  
-**Optional:** `dropout_rate` (default: 0.0), `attention_dropout_rate` (default: 0.0), `lambda_init` (default: 0.8)
-```python
-attn = create_attention_layer(
-    'differential',
-    dim=512,
-    num_heads=8,
-    head_dim=64,
-    attention_dropout_rate=0.1
-)
-```
-
-### `energy`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `head_dim` (default: None), `beta` (default: None), `attn_self` (default: False), `kernel_initializer` (default: None)
-```python
-attn = create_attention_layer(
-    'energy',
-    dim=768,
-    num_heads=12,
-    head_dim=64,
-    attn_self=False
-)
-```
-**Notes:**
-- **Not a weighted sum of values — there is no value matrix.** The layer defines a scalar energy
-  `E_ATT(g) = -(1/beta) * sum_h sum_m logsumexp_n(beta * A_hnm)` over bias-free `(head_dim, num_heads, dim)`
-  key/query projections, and `call()` returns the exact closed-form `-dE_ATT/dg` (a **descent direction**,
-  not a contextualized value). It is therefore **not** a drop-in replacement for `multi_head`: the output is
-  an *update* to be added to the residual stream, not a new token representation.
-- **Two gradient terms.** The update carries a second, ET-specific term (the token in its *key* role) that is
-  absent from vanilla attention and is what makes the recurrent dynamics provably energy-descending. Cost is
-  ~2x standard attention's flops at the same `O(N^2)` scaling.
-- Also exposes `energy(g, attention_mask=None) -> (B,)` and `update(g, attention_mask=None) -> (B, N, D)`.
-- `attn_self=False` (the paper's ET-Full config) masks the diagonal; on a single-token input both the energy
-  and the update are exactly zero.
-- **Mask semantics deviate from the siblings for rank-2 masks:** a `(B, N)` mask is a per-token *validity*
-  mask applied symmetrically to the key **and** query axes (a key-only mask cannot guarantee zero influence
-  here, because the second gradient term sums over query columns). `(B, N, N)` / `(B, H, N, N)` masks keep the
-  house `(key, query)` semantics.
-- Paper: Energy Transformer, [arXiv:2302.07253](https://arxiv.org/abs/2302.07253). Composed by
-  `dl_techniques.layers.transformers.energy_transformer.EnergyTransformer`.
-
-### `fnet`
-**Required:** None  
-**Optional:** `implementation` (default: 'matrix'), `normalize_dft` (default: True)
-```python
-attn = create_attention_layer(
-    'fnet',
-    implementation='matrix'
-)
-```
-**Known limitation:** `implementation='fft'` is **not** implemented — a true O(N log N) FFT path does not exist. Requesting `'fft'` emits a one-time warning and transparently falls back to the matrix DFT (`'matrix'`), whose cost is `O(S^2 * D + S * D^2)` (two complex matmuls), not O(N log N). Output is byte-identical to `'matrix'`.
-
-### `gated`
-**Required:** `dim`, `num_heads`  
-**Optional:** `head_dim` (default: None), `max_seq_len` (default: 4096), `rope_percentage` (default: 0.5), `probability_type` (default: 'softmax'), `probability_config` (default: None), `qk_norm_type` (default: 'zero_centered_rms_norm'), `gate_activation_type` (default: 'sigmoid')
-```python
-attn = create_attention_layer(
-    'gated',
-    dim=768,
-    num_heads=12,
-    max_seq_len=2048
-)
-```
-
-### `group_query`
-**Required:** `dim`, `num_heads`, `num_kv_heads`  
-**Optional:** `max_seq_len` (default: 2048), `dropout_rate` (default: 0.0)
-```python
-attn = create_attention_layer(
-    'group_query',
-    dim=1024,
-    num_heads=16,
-    num_kv_heads=4
-)
-```
-
-### `hopfield`
-**Required:** `num_heads`, `key_dim`  
-**Optional:** `update_steps_max` (default: 0), `update_steps_eps` (default: 1e-4)
-```python
-attn = create_attention_layer(
-    'hopfield',
-    num_heads=8,
-    key_dim=64,
-    update_steps_max=3
-)
-```
-
-### `lighthouse`
-**Required:** `dim`, `num_heads`
-**Optional:** `head_dim` (default: None), `num_levels` (default: 3), `pooling_factor` (default: 4), `top_k` (default: 1536), `full_attention` (default: False), `qk_norm_type` (default: 'rms_norm')
-```python
-# Pyramid path: 3 levels, branch factor 4, top-1536 entries
-attn = create_attention_layer(
-    'lighthouse',
-    dim=768,
-    num_heads=12,
-    num_levels=3,
-    pooling_factor=4,
-    top_k=1536
-)
-
-# Stage-2 SDPA-resume: bypasses pyramid for plain causal MHA
-attn_full = create_attention_layer(
-    'lighthouse',
-    dim=768,
-    num_heads=12,
-    full_attention=True
-)
-```
-
-### `linear`
-**Required:** `dim`
-**Optional:** `num_heads` (default: 8), `head_dim` (default: None), `dropout_rate` (default: 0.0), `use_bias` (default: False), `feature_map` (default: 'relu'), `epsilon` (default: 1e-6)
-```python
-attn = create_attention_layer(
-    'linear',
-    dim=256,
-    num_heads=8,
-    feature_map='relu'
-)
-```
-**Notes:**
-- **Bias-free + degree-1 homogeneous (Miyasawa-compliant):** with `use_bias=False` (the default) every Q/K/V/output projection is bias-free and `f(alpha*x) = alpha*f(x)` for `alpha > 0`, so it drops into bias-free / additive-Gaussian denoiser stacks without breaking the `residual = sigma^2 * score` identity. The `feature_map` must stay positively homogeneous (`relu`, `relu_squared`, `abs`); `elu_plus_one`/`exp`/`softmax` are rejected because they break degree-1.
-- **Non-causal (v1):** `linear.call` has **no** `attention_mask` parameter (it accepts an ignored `mask=` kwarg only for API uniformity). The `N x N` attention matrix is never materialized (`O(N)` associativity path).
-
-### `mobile_mqa`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `use_downsampling` (default: False)
-
-> **Mask caveat:** `mobile_mqa.call` accepts an `attention_mask` argument for signature compatibility but **ignores it** — the mask is never applied to the attention scores. Optional spatial downsampling of K/V changes the key/value length, so a general token mask cannot be applied unambiguously. Do not rely on masking with this layer (a documented limitation, like `spatial`).
-
-```python
-attn = create_attention_layer(
-    'mobile_mqa',
-    dim=256,
-    num_heads=8,
-    use_downsampling=True
-)
-```
-
-### `multi_head`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
-```python
-attn = create_attention_layer(
-    'multi_head',
-    dim=512,
-    num_heads=8,
-    dropout_rate=0.1
-)
-```
-
-### `multi_head_cross`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `probability_type` (default: 'softmax'), `probability_config` (default: None), `qk_norm_type` (default: None)
-```python
-# Create a cross-attention layer with an adaptive (entropy-adaptive softmax)
-# attention-probability function
-attn = create_attention_layer(
-    'multi_head_cross',
-    dim=512,
-    num_heads=8,
-    probability_type='adaptive',
-    probability_config={'min_temp': 0.2, 'max_temp': 1.5}
-)
-```
-
-### `multi_head_latent`
-**Required:** `dim`, `num_heads`, `kv_latent_dim`
-**Optional:** `qk_nope_head_dim` (default: 128), `qk_rope_head_dim` (default: 64), `v_head_dim` (default: 128), `q_latent_dim` (default: None), `qk_norm_type` (default: 'rms_norm')
-```python
-attn = create_attention_layer(
-    'multi_head_latent',
-    dim=2048,
-    num_heads=16,
-    kv_latent_dim=512,
-    q_latent_dim=1536  # Optional query compression
-)
-```
-
-### `non_local`
-**Required:** `attention_channels`  
-**Optional:** `output_norm_type` (default: 'batch_norm'), `attention_mode` (default: 'gaussian')
-```python
-attn = create_attention_layer(
-    'non_local',
-    attention_channels=128,
-    output_norm_type='layer_norm',
-    attention_mode='dot_product'
-)
-```
-
-### `perceiver`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
-```python
-attn = create_attention_layer(
-    'perceiver',
-    dim=256,
-    num_heads=8,
-    dropout_rate=0.1
-)
-```
-
-### `performer`
-**Required:** `dim`
-**Optional:** `num_heads` (default: 8), `nb_features` (default: 256), `ortho_scaling` (default: 0.0), `causal` (default: False)
-```python
-attn = create_attention_layer(
-    'performer',
-    dim=512,
-    num_heads=8,
-    nb_features=256
-)
-```
-**Known limitations:**
-- `ortho_scaling` applies a plain scalar multiply to the random features; it does **not** perform FAVOR+ orthogonalization (that path is not implemented). See the layer docstring.
-- `performer.call` has **no** `attention_mask` parameter (its call signature is `call(inputs, training=None, return_attention_scores=False)`). Factory registration is construction-only; the mask-less call is an intentional, documented quirk and is not renamed. Do not pass `attention_mask` to a factory-created performer layer.
-
-### `ring`
-**Required:** `dim`
-**Optional:** `num_heads` (default: 8), `block_size` (default: 512), `qk_norm_type` (default: None)
-```python
-attn = create_attention_layer(
-    'ring',
-    dim=768,
-    num_heads=12,
-    block_size=1024
-)
-```
-
-### `rpc`
-**Required:** `dim`
-**Optional:** `num_heads` (default: 8), `lambda_sparse` (default: 0.1), `max_pcp_iter` (default: 10), `svd_threshold` (default: 1.0), `probability_type` (default: 'softmax'), `qk_norm_type` (default: None)
-```python
-attn = create_attention_layer(
-    'rpc',
-    dim=512,
-    num_heads=8,
-    lambda_sparse=0.15
-)
-```
-**Known limitations:**
-- `lambda_sparse` is a sparsity-regularization weight (`>0`), **not** a 0-1 dropout-style rate.
-- `rpc.call` uses a `mask` parameter, **not** `attention_mask` (call signature `call(inputs, mask=None, training=None, return_attention_scores=False)`). Factory registration is construction-only; the parameter name is an intentional, documented quirk and is not renamed. Pass `mask=` (not `attention_mask=`) to a factory-created rpc layer.
-
-### `shared_weights_cross`
-**Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0)
-```python
-attn = create_attention_layer(
-    'shared_weights_cross',
-    dim=256,
-    num_heads=4,
-    dropout_rate=0.1
-)
-```
-
-### `spatial`
-**Required:** None  
-**Optional:** `kernel_size` (default: 7), `use_bias` (default: True)
-```python
-attn = create_attention_layer(
-    'spatial',
-    kernel_size=5
-)
-```
-
-### `tripse1` / `tripse2` / `tripse3` / `tripse4`
-**Required:** None  
-**Optional:** `reduction_ratio` (default: 0.0625), `kernel_size` (default: 7), `use_bias` (default: False)
-```python
-# Create TripSE1 (Post-Fusion SE)
-attn = create_attention_layer(
-    'tripse1',
-    reduction_ratio=0.125,
-    kernel_size=5
-)
-```
-
-### `window`
-**Required:** `dim`, `window_size`, `num_heads`  
-**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True)
-```python
-attn = create_attention_layer(
-    'window',
-    dim=96,
-    window_size=7,
-    num_heads=4,
-    dropout_rate=0.05
-)
-```
-
-### `window_zigzag`
-**Required:** `dim`, `window_size`, `num_heads`  
-**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `probability_type` (default: 'softmax'), `probability_config` (default: None), `use_relative_position_bias` (default: False)
-```python
-# Create a zigzag window attention with an adaptive (entropy-adaptive softmax)
-# attention-probability function
-attn = create_attention_layer(
-    'window_zigzag',
-    dim=96,
-    window_size=7,
-    num_heads=4,
-    probability_type='adaptive',
-    probability_config={'min_temp': 0.1, 'max_temp': 2.0}
-)
-```
-
-### `window_band`
-**Required:** `dim`, `window_size` (a HALF-WIDTH IN TOKENS), `num_heads`
-**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `probability_type` (default: 'softmax'), `probability_config` (default: None), `use_relative_position_bias` (default: False, and `True` RAISES — the bias indexes a 2-D tile this layout does not have)
-```python
-# ModernBERT's local_attention=128 means "64 tokens either side", so the
-# half-width to pass is local_attention // 2.
-attn = create_attention_layer(
-    'window_band',
-    dim=768,
-    window_size=128 // 2,
-    num_heads=12
-)
-```
-
-## Direct Layer Instantiation
-
-While the factory is recommended, direct instantiation is always available.
-
-```python
-from dl_techniques.layers.attention import MultiHeadAttention, CBAM, TripSE1, WindowAttention
-
-# Direct instantiation (bypasses factory validation and defaults)
-mha = MultiHeadAttention(dim=512, num_heads=8)
-cbam = CBAM(channels=256, ratio=16)
-tripse = TripSE1(reduction_ratio=0.0625, kernel_size=7)
-window_attn = WindowAttention(dim=96, window_size=7, num_heads=4)
-```
-
-## Integration Patterns
-
-### In a Custom Transformer Block
-
-```python
-import keras
-from dl_techniques.layers.attention import create_attention_layer
-from dl_techniques.utils.keras_registration import register_dl_technique
-
-# The package string is the defining module's dotted path -- `my_project.<module>` for your
-# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
-# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
-# path, so two same-named classes claim one slot and the last import wins.
-@register_dl_technique("my_project.transformer_block")
-class TransformerBlock(keras.layers.Layer):
-    def __init__(self, dim, num_heads, attention_type='multi_head', **kwargs):
-        super().__init__(**kwargs)
-        self.dim = dim
-        self.num_heads = num_heads
-        self.attention_type = attention_type
-        
-        # Create attention using the factory
-        attn_params = {'dim': dim, 'num_heads': num_heads}
-
-        self.attn = create_attention_layer(attention_type, name='attention', **attn_params)
-        # ... other layers like FFN, LayerNorm
-    
-    def call(self, inputs):
-        x = self.attn(inputs)
-        # ... rest of the block
-        return x
-```
-
-### In Model Builders with Configuration Files
-
-```python
-import json
-from dl_techniques.layers.attention import create_attention_from_config
-
-# Load configuration from file
-with open('model_config.json', 'r') as f:
-    config = json.load(f)
-
-# Create attention layer from the 'attention' section of the config
-attention_layer = create_attention_from_config(config['attention'])
-```
-
-## Parameter Validation
-
-The factory performs comprehensive validation on layer creation.
-
-**Missing Required Parameters:**
-```python
-# Raises ValueError: "Required parameters for 'group_query' are missing: ['num_kv_heads']"
-create_attention_layer('group_query', dim=512, num_heads=8)
-```
-
-**Invalid Value Ranges:**
-```python
-# Raises ValueError: "Parameter 'num_heads' must be positive"
-create_attention_layer('multi_head', dim=256, num_heads=-8)
-
-# Raises ValueError: "Parameter 'dropout_rate' must be between 0.0 and 1.0"
-create_attention_layer('multi_head', dim=256, dropout_rate=1.5)
-```
-
-**Unknown Attention Type:**
-```python
-# Raises ValueError: "Unknown attention type 'vanilla_attention'"
-create_attention_layer('vanilla_attention', dim=512)
-```
-
-## Logging and Debugging
-
-The factory provides detailed logging to aid development.
-
-**INFO Level:** Shows parameters used for layer creation.
-```
-INFO Creating 'group_query' layer (GroupedQueryAttention) with parameters: {'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4, 'name': 'gqa_block_1', ...}
-```
-
-**ERROR Level:** Provides context for failed layer creation.
-```
-ERROR Failed to create 'group_query' layer (GroupedQueryAttention). Required parameters: ['dim', 'num_heads', 'num_kv_heads']. Provided parameters: ['dim', 'num_heads']. Please verify parameter compatibility. Original error: ...
-```
-
-## API Reference
-
-### Functions
-
--   **`create_attention_layer(attention_type, name=None, **kwargs)`**: Factory for creating attention layers with validation.
--   **`create_attention_from_config(config)`**: Creates a layer from a configuration dictionary.
--   **`validate_attention_config(attention_type, **kwargs)`**: Validates parameters before creation.
--   **`get_attention_info()`**: Returns a dictionary with details about all available attention types.
+Most layers are `call(inputs, attention_mask=None, training=None)`. **Twelve deviate**, for
+architectural reasons; they are documented, not "fixed", because renaming would break serialized
+configs and call sites.
+
+| Layer | Deviation | Why |
+|---|---|---|
+| `rpc` | mask is `mask=`, not `attention_mask=` | Parameter name predates the convention. |
+| `shared_weights_cross` | positional `split_sizes` required | Needs per-modality segment boundaries. |
+| `anchor` | no mask argument | The anchor/local pattern is defined internally. |
+| `performer` | no mask argument | The FAVOR+ kernel takes no dense additive mask. |
+| `lighthouse` | no mask argument; static seq-len required | Causality comes from the pyramid shift; dynamic/`None` seq-len raises `RuntimeError`. |
+| `group_query` | `call(inputs, training=None, attention_mask=None)` | `training` precedes `attention_mask`. |
+| `ring` | `call(inputs, training=None, attention_mask=None)` | Same order swap. |
+| `mobile_mqa` | order swapped, plus `return_attention_weights` | Same order swap, extra flag. |
+| `differential` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` | Extra positional `layer_idx`. |
+| `spatial` | 4D input; `attention_mask` accepted but **ignored** | CBAM spatial attention runs over the whole feature map; there is no token mask to apply. |
+| `area` | 4D input; `attention_mask` is a **spatial keep mask** `(B, H, W)` or `(B, H*W)` | Attends over flattened spatial positions; `1 = keep`, forwarded verbatim. |
+| `non_local` | 4D input; mask argument **ignored** | Dense global spatial affinities; a token mask does not apply. |
+
+Pass `attention_mask` as a keyword to `group_query` / `ring` / `mobile_mqa`, and pass `training`
+as a keyword to `differential` — positionally it would bind to `layer_idx`.
+
+## Gotchas
+
+- `fnet`: `implementation='fft'` is **not implemented**. It warns once and falls back to the matrix
+  DFT, whose cost is `O(S^2*D + S*D^2)`, not `O(N log N)`. Output is identical to `'matrix'`.
+- `performer`: `ortho_scaling` is a scalar multiply on the random features, not FAVOR+
+  orthogonalization.
+- `rpc`: `lambda_sparse` is a regularization weight (`> 0`), not a 0-1 rate.
+- `mobile_mqa`: accepts `attention_mask` for signature compatibility and **ignores it** — optional
+  K/V downsampling changes the key length, so a token mask cannot be applied unambiguously.
+- `linear`: non-causal. `call` takes only an ignored `mask=` kwarg. Keep `feature_map` positively
+  homogeneous (`relu`, `relu_squared`, `abs`); `elu_plus_one` / `exp` / `softmax` are rejected
+  because they break degree-1 homogeneity and therefore the bias-free denoiser identity.
+- `energy`: the output is an **update to add to the residual stream**, not a contextualized value,
+  so it is not a drop-in for `multi_head`. Cost is about 2x standard attention. A rank-2 `(B, N)`
+  mask is a per-token validity mask applied to key **and** query axes; `(B, N, N)` and
+  `(B, H, N, N)` keep the house `(key, query)` semantics. With `attn_self=False` (the paper's
+  ET-Full config) a single-token input gives exactly zero energy and zero update.
+  ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253))
+- `window` folds a 1-D sequence into a square grid, so for text you want `window_band`.
+
+## Shared primitives (`common.py`)
+
+An implementation detail, not re-exported from `__init__.py`; layers do `from .common import ...`.
+Five module-level names, no classes: `MASK_BIAS_VALUE`, `mask_dtype(compute_dtype)`,
+`apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)`,
+`validate_head_divisibility(dim, num_heads, ...)` and `compute_attention_scale(head_dim)`.
+
+`apply_attention_mask` is the prescribed way to apply a mask: it applies the bias with `ops.where`
+inside `mask_dtype(...)`, so the `0 * -inf = NaN` product is never formed. Two things it will not
+decide for you:
+
+- **Polarity is per call site.** `keep` is the keep predicate and no polarity is inferred. Pass your
+  site's own spelling verbatim; a uniform `mask > 0` rewrite silently inverts masking at some sites.
+- **`rescue_axis` is the axis YOUR softmax reduces over.** Default `-1` enables the degenerate-row
+  rescue; `None` opts out. `ring_attention` must opt out per tile — a per-tile rescue would un-mask
+  the future under a causal mask while every finiteness test still passed.
+
+`GUIDE.md` section 3.5 documents the contract and the limits of each entry, including why adopting
+`compute_attention_scale` at an existing site needs a bit-identity probe (`x ** -0.5` is not
+bit-identical to it). Read it before using these at a new call site.

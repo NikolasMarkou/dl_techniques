@@ -1,764 +1,130 @@
-# Feed-Forward Network (FFN) Module
+# `dl_techniques.layers.ffn`
 
-The `dl_techniques.layers.ffn` module provides a comprehensive collection of feed-forward network implementations for deep learning architectures, with a unified factory interface for consistent layer creation and configuration management.
+Nineteen feed-forward layer classes reachable through one factory.
+`create_ffn_layer(ffn_type, name=None, **kwargs)` looks the type up in `FFN_REGISTRY` (**21 keys** over those 19
+classes — `glu`, `reglu` and `bilinear` are three configurations of `GLUFFN`), rejects any keyword
+the target class does not declare, fills in the registry defaults and constructs. A keyword the type
+does not accept is a `ValueError`, never a silently dropped argument.
 
-## Overview
+The factory contract and the registry sizes are owned by `src/dl_techniques/layers/CLAUDE.md`.
 
-This module includes twenty-one different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
+## Catalogue
 
-## Available FFN Types
+| Key | Class | What it is | Pick it when | Required params |
+|---|---|---|---|---|
+| `mlp` | `MLPBlock` | Dense -> activation -> Dense, with expansion. | The default transformer FFN. | `hidden_dim`, `output_dim` |
+| `swiglu` | `SwiGLUFFN` | SwiGLU gating; hidden width derived from `ffn_expansion_factor` and rounded up to `ffn_multiple_of`. | Modern LLM blocks (LLaMA, Qwen). | `output_dim` |
+| `geglu` | `GeGLUFFN` | GELU-gated linear unit. | GELU-flavoured gated FFN. | `hidden_dim`, `output_dim` |
+| `glu` | `GLUFFN` | Gated linear unit, configurable gate activation (default `swish`). | Gated FFN with your own gate. | `hidden_dim`, `output_dim` |
+| `reglu` | `GLUFFN` (alias) | `GLUFFN` with `activation='relu'` (Shazeer 2020). | ReLU-gated variant. | `hidden_dim`, `output_dim` |
+| `bilinear` | `GLUFFN` (alias) | `GLUFFN` with `activation='linear'` — no gate nonlinearity (Shazeer 2020). | Bilinear variant. | `hidden_dim`, `output_dim` |
+| `gelu_tanh` | `GELUMLPFFN` | Two-layer MLP with the tanh-approximate GELU (SD3-faithful). | Diffusion / transformer blocks that need the tanh GELU exactly. | `hidden_dim` |
+| `differential` | `DifferentialFFN` | Two opponent pathways, differenced. | Feature processing with opponent signals. | `hidden_dim`, `output_dim` |
+| `residual` | `ResidualBlock` | FFN with an internal skip connection. | Deep stacks needing gradient flow inside the block. | `hidden_dim`, `output_dim` |
+| `swin_mlp` | `SwinMLP` | The Swin Transformer MLP. | Swin / windowed-attention vision models. | `hidden_dim` |
+| `squared_relu` | `SquaredReLUFFN` | Primer FFN, fixed `relu(x)**2` (So et al. 2021, arXiv:2109.08668). | Squared-ReLU transformer FFN. | `hidden_dim`, `output_dim` |
+| `lowrank` | `LowRankFFN` | Each projection factorized as `Dense(rank, no bias) -> Dense(out)`. | Parameter-efficient FFN when `rank << dims`. | `hidden_dim`, `output_dim` |
+| `monarch` | `MonarchFFN` | Order-2 Monarch map: a product of two block-diagonal factors (Dao et al. 2022, arXiv:2204.00595). | Structured sub-quadratic replacement for dense projections. | `hidden_dim`, `output_dim` |
+| `mixer` | `MixerBlock` | Canonical MLP-Mixer token + channel mixing (Tolstikhin et al. 2021, arXiv:2105.01601). | Attention-free token mixing over a patch sequence. | `tokens_mlp_dim`, `channels_mlp_dim` |
+| `orthoglu` | `OrthoGLUFFN` | GLU with orthogonality regularization on the projections. | Deep nets needing stable training dynamics. | `hidden_dim`, `output_dim` |
+| `gated_mlp` | `GatedMLP` | Channel-wise GLU from three 1x1 convolutions on rank-4 NHWC/NCHW input. | Position-wise channel gating in vision models. | `filters` |
+| `power_mlp` | `PowerMLPLayer` | Dual-branch MLP (power branch + basis branch). | Approximating sharp nonlinear functions. | `units` |
+| `kan` | `KANLinear` | Kolmogorov-Arnold layer: B-spline learnable univariate activations per connection. | Expressive per-connection nonlinearities; N-D inputs. | `features` |
+| `tversky` | `TverskyProjectionLayer` | Asymmetric Tversky-similarity projection against learned prototypes. | Similarity-based alternative to `Dense`. | `units`, `num_features` |
+| `counting` | `CountingFFN` | Learns to count features along the sequence (`counting_scope` is `global`, `local` or `causal`). | Tasks with an explicit counting flavour. | `output_dim`, `count_dim` |
+| `logic` | `LogicFFN` | Learnable soft logic operations. | Symbolic-flavoured reasoning. | `output_dim`, `logic_dim` |
 
-The following layers are supported by the factory system with automated parameter validation and defaults:
-
-| Type | Class | Description | Use Case |
-|---|---|---|---|
-| `bilinear` | `GLUFFN` (alias) | Bilinear GLU: GLUFFN with `activation='linear'` (no gate nonlinearity, Shazeer 2020) | Identity-gated FFN variant |
-| `counting` | `CountingFFN` | Learns to count features in a sequence | Sequence processing with counting requirements |
-| `differential` | `DifferentialFFN` | Dual-pathway differential processing | Enhanced feature processing with opponent signals |
-| `gated_mlp` | `GatedMLP` | Channel-wise GLU built from three 1x1 convolutions (rank-4 NHWC/NCHW inputs). **Not gMLP**: every kernel is 1x1, so nothing mixes across spatial positions | Position-wise channel gating in vision models. Not a stand-in for attention |
-| `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing in transformers |
-| `gelu_tanh` | `GELUMLPFFN` | Two-layer MLP with tanh-approximate GELU (SD3-faithful) | Diffusion/transformer blocks needing the tanh-GELU variant |
-| `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |
-| `kan` | `KANLinear` | Kolmogorov-Arnold linear layer with B-spline learnable activations | Expressive per-connection nonlinearities; supports N-D inputs |
-| `logic` | `LogicFFN` | FFN with learnable soft logic operations | Tasks requiring symbolic-like reasoning |
-| `lowrank` | `LowRankFFN` | Low-rank factorized FFN (`Dense(rank, no bias) -> Dense(out)` per projection) | Parameter-efficient FFN when rank << dims |
-| `mixer` | `MixerBlock` | Canonical MLP-Mixer token+channel mixing block (rank-3 `(B,S,C)` only) | Attention-free token/channel mixing for patch/token sequences |
-| `mlp` | `MLPBlock` | Standard MLP with intermediate expansion | General purpose feed-forward processing |
-| `monarch` | `MonarchFFN` | Order-2 Monarch-structured FFN (product of two block-diagonal factors) | Sub-quadratic structured replacement for dense FFN projections |
-| `orthoglu` | `OrthoGLUFFN` | Orthogonally-regularized GLU FFN | Deep networks needing stable training dynamics |
-| `power_mlp` | `PowerMLPLayer` | Dual-branch MLP for enhanced expressiveness | Approximating complex, non-linear functions |
-| `reglu` | `GLUFFN` (alias) | ReGLU: GLUFFN with `activation='relu'` (ReLU-gated GLU, Shazeer 2020) | ReLU-gated FFN variant |
-| `residual` | `ResidualBlock` | Residual block with skip connections | Deep networks requiring gradient flow |
-| `squared_relu` | `SquaredReLUFFN` | Primer squared-ReLU FFN (fixed `relu(x)**2` nonlinearity, So et al. 2021) | Transformer FFN with squared-ReLU activation |
-| `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
-| `swin_mlp` | `SwinMLP` | Swin Transformer MLP variant | Vision models and windowed attention |
-| `tversky` | `TverskyProjectionLayer` | Asymmetric Tversky-similarity projection (rank-2 inputs only) | Similarity-based Dense alternative; psychologically-grounded |
-
-## Factory Interface
-
-### Basic Usage
+Everything else is optional with a registry default. Read the defaults from the registry rather
+than from prose:
 
 ```python
-from dl_techniques.layers.ffn import create_ffn_layer
+from dl_techniques.layers.ffn import get_ffn_info
 
-# Create standard MLP
-mlp = create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-
-# Create modern SwiGLU for transformers
-swiglu = create_ffn_layer(
-    'swiglu',
-    output_dim=768,
-    ffn_expansion_factor=4,
-    dropout_rate=0.1
-)
+info = get_ffn_info()['mlp']
+print(info['required_params'])            # ['hidden_dim', 'output_dim']
+print(sorted(info['optional_params']))    # activation, dropout_rate, use_bias, ...
 ```
 
-### Configuration-Based Creation
+## Construction
 
 ```python
-from dl_techniques.layers.ffn import create_ffn_from_config
+from dl_techniques.layers.ffn import create_ffn_layer, create_ffn_from_config
 
-config = {
+mlp = create_ffn_layer('mlp', hidden_dim=512, output_dim=256, activation='relu', dropout_rate=0.1)
+swiglu = create_ffn_layer('swiglu', output_dim=768, ffn_expansion_factor=4, dropout_rate=0.1)
+
+ffn = create_ffn_from_config({
     'type': 'differential',
     'hidden_dim': 1024,
     'output_dim': 512,
     'branch_activation': 'relu',
     'dropout_rate': 0.1,
-    'name': 'diff_ffn_block'
-}
-
-ffn = create_ffn_from_config(config)
+    'name': 'diff_ffn_block',
+})
 ```
 
-### Parameter Discovery
-
-```python
-from dl_techniques.layers.ffn import get_ffn_info
-
-# Get information about all FFN types
-info = get_ffn_info()
-
-# Print requirements for a specific type
-mlp_info = info['mlp']
-print(f"Required: {mlp_info['required_params']}")
-print(f"Optional: {list(mlp_info['optional_params'].keys())}")
-```
-
-### Validation
+Pre-flight validation, for callers that go on to build a class directly:
 
 ```python
 from dl_techniques.layers.ffn import validate_ffn_config
 
-# Validate configuration before creation
-try:
-    validate_ffn_config('swiglu', output_dim=768, ffn_expansion_factor=4)
-    print("Configuration is valid")
-except ValueError as e:
-    print(f"Validation error: {e}")
+validate_ffn_config('swiglu', output_dim=768, ffn_expansion_factor=4)  # raises on a bad config
 ```
 
-## Layer-Specific Parameters
-
-### MLPBlock
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
+Direct import is equally valid when the choice is not config-driven:
 
 ```python
-mlp = create_ffn_layer(
-    'mlp',
-    hidden_dim=2048,
-    output_dim=768,
-    activation='relu',
-    dropout_rate=0.1
-)
-```
+from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN
 
-### SwiGLUFFN
-**Required:** `output_dim`  
-**Optional:** `ffn_expansion_factor` (default: 4), `ffn_multiple_of` (default: 256), `dropout_rate` (default: 0.0), `use_bias` (default: False)
-
-```python
-swiglu = create_ffn_layer(
-    'swiglu',
-    output_dim=768,
-    ffn_expansion_factor=8,
-    ffn_multiple_of=128,
-    dropout_rate=0.1
-)
-```
-
-### DifferentialFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `branch_activation` (default: 'gelu'), `gate_activation` (default: 'sigmoid'), `dropout_rate` (default: 0.0)
-
-```python
-diff_ffn = create_ffn_layer(
-    'differential',
-    hidden_dim=1024,
-    output_dim=768,
-    branch_activation='relu',
-    gate_activation='sigmoid'
-)
-```
-
-### GLUFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `activation` (default: 'swish'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
-
-```python
-glu = create_ffn_layer(
-    'glu',
-    hidden_dim=2048,
-    output_dim=768,
-    activation='sigmoid',
-    dropout_rate=0.1
-)
-```
-
-### GeGLUFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
-
-```python
-geglu = create_ffn_layer(
-    'geglu',
-    hidden_dim=3072,
-    output_dim=768,
-    dropout_rate=0.05
-)
-```
-
-### ResidualBlock
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `activation` (default: 'relu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
-
-```python
-residual = create_ffn_layer(
-    'residual',
-    hidden_dim=1024,
-    output_dim=768,
-    activation='gelu',
-    dropout_rate=0.2
-)
-```
-
-### SwinMLP
-**Required:** `hidden_dim`  
-**Optional:** `output_dim` (default: None), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True)
-
-```python
-swin_mlp = create_ffn_layer(
-    'swin_mlp',
-    hidden_dim=1024,
-    output_dim=768,
-    dropout_rate=0.1,
-    activation='gelu'
-)
-```
-
-### CountingFFN
-**Required:** `output_dim`, `count_dim`  
-**Optional:** `counting_scope` (default: 'local'), `activation` (default: 'gelu')
-
-```python
-counting_ffn = create_ffn_layer(
-    'counting',
-    output_dim=512,
-    count_dim=128,
-    counting_scope='causal'  # 'global', 'local', or 'causal'
-)
-```
-
-### LogicFFN
-**Required:** `output_dim`, `logic_dim`  
-**Optional:** `temperature` (default: 1.0), `use_bias` (default: True)
-
-```python
-logic_ffn = create_ffn_layer(
-    'logic',
-    output_dim=768,
-    logic_dim=256,
-    temperature=1.5
-)
-```
-
-### GatedMLP
-**Required:** `filters`  
-**Optional:** `attention_activation` (default: 'relu'), `output_activation` (default: 'linear')
-
-```python
-gated_mlp = create_ffn_layer(
-    'gated_mlp',
-    filters=128,
-    attention_activation='gelu'
-)
-```
-
-### OrthoGLUFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `activation` (default: 'gelu'), `ortho_reg_factor` (default: 1.0)
-
-```python
-ortho_ffn = create_ffn_layer(
-    'orthoglu',
-    hidden_dim=2048,
-    output_dim=768,
-    ortho_reg_factor=0.01
-)
-```
-
-### PowerMLPLayer
-**Required:** `units`  
-**Optional:** `k` (default: 3), `use_bias` (default: True)
-
-```python
-power_mlp = create_ffn_layer(
-    'power_mlp',
-    units=512,
-    k=2,
-    kernel_initializer='he_normal'
-)
-```
-
-### KANLinear
-**Required:** `features`
-**Optional:** `grid_size` (default: 5), `spline_order` (default: 3), `grid_range` (default: `(-2.0, 2.0)`), `activation` (default: 'swish'), `base_trainable` (default: True), `spline_trainable` (default: True), `kernel_initializer` (default: 'glorot_uniform'), `base_scaler_initializer` (default: 'ones'), `epsilon` (default: 1e-7)
-
-Kolmogorov-Arnold linear layer using B-spline parameterized learnable univariate activations. Forward kernel supports N-D inputs (e.g. `(batch, time, dim)`) via einsum.
-
-```python
-kan = create_ffn_layer(
-    'kan',
-    features=128,
-    grid_size=8,
-    spline_order=3,
-    activation='swish'
-)
-```
-
-### TverskyProjectionLayer
-**Required:** `units`, `num_features`
-**Optional:** `intersection_reduction` (default: 'product', one of `{'product','min','mean'}`), `difference_reduction` (default: 'subtractmatch', one of `{'ignorematch','subtractmatch'}`), `prototype_initializer`, `feature_initializer`, `contrast_initializer`
-
-Asymmetric similarity-based projection layer. **Operates on rank-2 inputs `(batch, input_dim)` only. Output shape is `(batch, units)`.** Not suitable as a drop-in for rank-3 transformer FFNs.
-
-```python
-tversky = create_ffn_layer(
-    'tversky',
-    units=256,
-    num_features=64,
-    intersection_reduction='product',
-    difference_reduction='subtractmatch'
-)
-```
-
-### MonarchFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `nblocks` (default: 4), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-Order-2 Monarch-structured FFN (Dao et al. 2022, arXiv:2204.00595). Each expand/contract projection is a Monarch map = product of two block-diagonal factors interleaved with a reshape/permute, giving an `O(n^1.5)` (for `nblocks = sqrt(n)`) parameter count instead of `O(n^2)`. Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`. **`nblocks` must divide `input_dim`, `hidden_dim` AND `output_dim`** (validated in `__init__`/`build`), so pick dims that are multiples of `nblocks`.
-
-```python
-# input_dim, hidden_dim and output_dim must all be divisible by nblocks (=4 here)
-monarch = create_ffn_layer(
-    'monarch',
-    hidden_dim=256,
-    output_dim=256,
-    nblocks=4,
-    activation='gelu',
-    dropout_rate=0.1
-)
-```
-
-### MixerBlock
-**Required:** `tokens_mlp_dim`, `channels_mlp_dim`  
-**Optional:** `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-Canonical MLP-Mixer block (Tolstikhin et al. 2021, arXiv:2105.01601). **Operates on rank-3 inputs `(B, S, C)` only** (a non-rank-3 input raises `ValueError` at build). It applies a pre-LN residual token-mixing MLP (mixing over the sequence axis `S`, with hidden width `tokens_mlp_dim`) followed by a pre-LN residual channel-mixing MLP (mixing over the channel axis `C`, with hidden width `channels_mlp_dim`). **Output shape equals input shape `(B, S, C)`.**
-
-```python
-# rank-3 input (B, S, C); tokens_mlp_dim mixes over S, channels_mlp_dim mixes over C
-mixer = create_ffn_layer(
-    'mixer',
-    tokens_mlp_dim=32,
-    channels_mlp_dim=128,
-    dropout_rate=0.1
-)
-# e.g. mixer(x) for x of shape (2, 16, 64) returns shape (2, 16, 64)
-```
-
-### SquaredReLUFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-Primer squared-ReLU FFN (So et al. 2021, arXiv:2109.08668): `fc2(square(relu(fc1(x))))` with a fixed `relu(x)**2` nonlinearity (not configurable). Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`.
-
-```python
-squared_relu = create_ffn_layer(
-    'squared_relu',
-    hidden_dim=512,
-    output_dim=256,
-    dropout_rate=0.1
-)
-```
-
-### LowRankFFN
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `rank` (default: None -> resolved to `max(1, hidden_dim // 4)`), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-Low-rank factorized FFN: each expand/contract projection is a product `Dense(rank, use_bias=False) -> Dense(out)`, giving a sub-quadratic parameter count when `rank << dims`. Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`. `rank <= 0` raises `ValueError`.
-
-```python
-lowrank = create_ffn_layer(
-    'lowrank',
-    hidden_dim=512,
-    output_dim=256,
-    rank=16,
-    activation='gelu'
-)
-```
-
-### ReGLU (alias of GLUFFN)
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-ReGLU (Shazeer 2020) is a factory **alias of `GLUFFN` with `activation='relu'`** — no new class. `create_ffn_layer('reglu', ...)` returns a `GLUFFN` whose gate uses ReLU: `output_proj(relu(gate_proj(x)) * value_proj(x))`.
-
-```python
-reglu = create_ffn_layer(
-    'reglu',
-    hidden_dim=2048,
-    output_dim=768,
-    dropout_rate=0.1
-)
-```
-
-### Bilinear (alias of GLUFFN)
-**Required:** `hidden_dim`, `output_dim`  
-**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
-
-Bilinear GLU (Shazeer 2020) is a factory **alias of `GLUFFN` with `activation='linear'`** — no new class, no gate nonlinearity. `create_ffn_layer('bilinear', ...)` returns a `GLUFFN` computing `output_proj(gate_proj(x) * value_proj(x))`.
-
-```python
-bilinear = create_ffn_layer(
-    'bilinear',
-    hidden_dim=2048,
-    output_dim=768,
-    dropout_rate=0.1
-)
-```
-
-## Direct Layer Instantiation
-
-While the factory is the recommended approach for standardized layer creation, direct instantiation remains available for all layer types. This can be useful for specific use cases or when bypassing the factory's automated validation and default handling is desirable.
-
-```python
-from dl_techniques.layers.ffn import MLPBlock, SwiGLUFFN, CountingFFN
-
-# Direct instantiation (bypasses factory validation and defaults)
 mlp = MLPBlock(hidden_dim=512, output_dim=256, activation='relu')
 swiglu = SwiGLUFFN(output_dim=768, ffn_expansion_factor=4)
-
-# Useful for specialized layers with unique parameters
-counting_ffn = CountingFFN(
-    output_dim=512,
-    count_dim=128,
-    counting_scope='local'
-)
 ```
 
-## Integration Patterns
-
-### In Custom Transformer Layers
+Inside a custom block, build the FFN from the caller's config so the block stays type-agnostic:
 
 ```python
 import keras
+from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# The package string is the defining module's dotted path -- `my_project.<module>` for your
-# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
+# The registration string is the defining module's dotted path. Never a bare
 # `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
 # path, so two same-named classes claim one slot and the last import wins.
-@register_dl_technique("my_project.custom_transformer_layer")
-class CustomTransformerLayer(keras.layers.Layer):
-    def __init__(self, hidden_size, ffn_type='mlp', ffn_kwargs=None, **kwargs):
+@register_dl_technique("my_project.ffn_block")
+class FFNBlock(keras.layers.Layer):
+    def __init__(self, ffn_config, **kwargs):
+        # ffn_config is the factory's own kwargs, e.g.
+        # {'ffn_type': 'mlp', 'hidden_dim': 8, 'output_dim': 6}
         super().__init__(**kwargs)
-        self.hidden_size = hidden_size
-        self.ffn_type = ffn_type
-        self.ffn_kwargs = ffn_kwargs or {}
-        
-        # Create FFN using factory
-        from dl_techniques.layers.ffn import create_ffn_layer
-        self.ffn = create_ffn_layer(
-            ffn_type,
-            hidden_dim=hidden_size * 4,
-            output_dim=hidden_size,
-            name='ffn',
-            **self.ffn_kwargs
-        )
-    
-    def call(self, inputs):
-        return self.ffn(inputs)
-    
+        self.ffn_config = dict(ffn_config)
+        self.ffn = create_ffn_layer(**self.ffn_config)
+
+    def call(self, inputs, training=None):
+        return self.ffn(inputs, training=training)
+
     def get_config(self):
-        config = super().get_config()
-        config.update({
-            'hidden_size': self.hidden_size,
-            'ffn_type': self.ffn_type,
-            'ffn_kwargs': self.ffn_kwargs
-        })
-        return config
+        return {**super().get_config(), 'ffn_config': self.ffn_config}
 ```
 
-### In Model Builders
+Storing the config dict (not the built layer) is what makes `get_config()` round-trip: the layer is
+rebuilt from the same keys on load.
 
-```python
-def create_transformer_model(config):
-    """Create transformer model with configurable FFN."""
-    from dl_techniques.layers.ffn import create_ffn_layer
-    
-    ffn_config = config.get('ffn', {'type': 'mlp'})
-    ffn_type = ffn_config.pop('type')
-    
-    # Create FFN layer
-    ffn = create_ffn_layer(
-        ffn_type,
-        hidden_dim=config['hidden_size'] * 4,
-        output_dim=config['hidden_size'],
-        **ffn_config
-    )
-    
-    return ffn
-```
+## Gotchas
 
-### With Configuration Files
-
-```python
-import json
-from dl_techniques.layers.ffn import create_ffn_from_config
-
-# Load configuration from file
-with open('model_config.json', 'r') as f:
-    config = json.load(f)
-
-# Create FFN from configuration
-ffn_config = config['ffn']
-ffn = create_ffn_from_config(ffn_config)
-```
-
-Example configuration file:
-```json
-{
-    "ffn": {
-        "type": "swiglu",
-        "output_dim": 768,
-        "ffn_expansion_factor": 4,
-        "dropout_rate": 0.1,
-        "name": "transformer_ffn"
-    }
-}
-```
-
-## Parameter Validation
-
-The factory performs comprehensive validation:
-
-### Required Parameter Checking
-```python
-# Will raise ValueError for missing required parameters
-create_ffn_layer('mlp', hidden_dim=512)  # Missing output_dim
-```
-
-### Value Range Validation
-```python
-# Will raise ValueError for invalid ranges
-create_ffn_layer('mlp', hidden_dim=-100, output_dim=256)  # Negative hidden_dim
-create_ffn_layer('swiglu', output_dim=768, dropout_rate=1.5)  # Invalid dropout rate
-```
-
-### Activation Function Validation
-```python
-# Will raise ValueError for unknown activation functions
-create_ffn_layer('mlp', hidden_dim=512, output_dim=256, activation='unknown_activation')
-```
-
-### Unsupported Parameter Checking (strict)
-```python
-# Will raise ValueError naming the key, the ffn_type and the accepted set.
-# It is NOT silently dropped -- this used to be a logger.warning.
-create_ffn_layer('mlp', hidden_dim=512, output_dim=256, hiden_dim=1024)
-```
-
-If you are writing a *wrapper* layer that offers generic conveniences
-(`activation`, `dropout_rate`, initializers) across several `ffn_type`s, do not
-hand them to `create_ffn_layer` directly. Pre-filter them with
-`assemble_ffn_config(ffn_type, wrapper_config, caller_args)`, which intersects
-your own dict with what the type accepts while passing the caller's dict
-through untouched -- so a caller's typo still reaches the raise above.
-
-## Logging and Debugging
-
-The factory provides detailed logging for debugging:
-
-### Info Level Logging
-Shows all parameters passed to each layer:
-```
-INFO Creating swiglu FFN layer with parameters:
-INFO   output_dim: 768
-INFO   dropout_rate: 0.1
-INFO   ffn_expansion_factor: 4
-INFO   name: 'ffn_layer'
-INFO   use_bias: True
-```
-
-### Debug Level Logging
-Shows layer creation success:
-```
-DEBUG Successfully created swiglu FFN layer: ffn_layer
-```
-
-### Error Logging
-Detailed error context for failed layer creation:
-```
-ERROR Failed to create mlp FFN layer (MLPBlock). Required parameters: ['hidden_dim', 'output_dim']. 
-      Provided parameters: ['hidden_dim']. Check parameter compatibility and types.
-```
-
-## Best Practices
-
-### 1. Use Factory for All Layers
-```python
-# Preferred: Use factory for validation and consistency
-ffn = create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-logic_ffn = create_ffn_layer('logic', output_dim=768, logic_dim=256)
-
-# Avoid: Direct instantiation, which bypasses centralized validation and defaults
-ffn = MLPBlock(hidden_dim=512, output_dim=256)
-```
-
-### 2. Validate Configurations in Production
-```python
-def create_production_ffn(ffn_type, **params):
-    """Create FFN with production-grade validation."""
-    try:
-        validate_ffn_config(ffn_type, **params)
-        return create_ffn_layer(ffn_type, **params)
-    except ValueError as e:
-        logger.error(f"FFN creation failed: {e}")
-        # Fallback to safe default
-        return create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-```
-
-### 3. Store Configurations for Reproducibility
-```python
-# Store FFN configurations for experiment tracking
-ffn_configs = {
-    'baseline': {'type': 'mlp', 'hidden_dim': 2048, 'output_dim': 768},
-    'modern': {'type': 'swiglu', 'output_dim': 768, 'ffn_expansion_factor': 4},
-    'reasoning': {'type': 'logic', 'output_dim': 768, 'logic_dim': 128}
-}
-
-# Create layers from stored configurations
-ffn_layers = {name: create_ffn_from_config(config) 
-              for name, config in ffn_configs.items()}
-```
-
-## Error Handling
-
-### Common Validation Errors
-
-**Missing Required Parameters:**
-```python
-# Error: Missing output_dim for mlp
-create_ffn_layer('mlp', hidden_dim=512)
-
-# Fix: Provide all required parameters
-create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-```
-
-**Invalid Parameter Values:**
-```python
-# Error: Negative dimension
-create_ffn_layer('mlp', hidden_dim=-100, output_dim=256)
-
-# Fix: Use positive values
-create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-```
-
-**Unknown FFN Type:**
-```python
-# Error: Unsupported type
-create_ffn_layer('unknown_type', hidden_dim=512)
-
-# Fix: Use supported type
-create_ffn_layer('mlp', hidden_dim=512, output_dim=256)
-```
-
-## Advanced Usage
-
-### Custom Parameter Override
-
-```python
-# Override default parameters
-ffn = create_ffn_layer(
-    'mlp',
-    hidden_dim=1024,
-    output_dim=768,
-    activation='swish',          # Override default 'gelu'
-    dropout_rate=0.2,            # Override default 0.0
-    kernel_initializer='he_normal'  # Override default 'glorot_uniform'
-)
-```
-
-### Dynamic FFN Selection
-
-```python
-def create_adaptive_ffn(model_size, efficiency_priority=False):
-    """Create FFN based on model requirements."""
-    if efficiency_priority:
-        return create_ffn_layer('glu', hidden_dim=512, output_dim=256)
-    elif model_size == 'large':
-        return create_ffn_layer('swiglu', output_dim=1024, ffn_expansion_factor=8)
-    else:
-        return create_ffn_layer('mlp', hidden_dim=2048, output_dim=768)
-```
-
-### Multi-FFN Architectures
-
-```python
-class MultiFFNLayer(keras.layers.Layer):
-    """Layer using multiple FFN types in parallel."""
-    
-    def __init__(self, output_dim, **kwargs):
-        super().__init__(**kwargs)
-        self.output_dim = output_dim
-        
-        # Create multiple FFN branches
-        self.ffn_standard = create_ffn_layer('mlp', hidden_dim=output_dim*4, output_dim=output_dim)
-        self.ffn_gated = create_ffn_layer('geglu', hidden_dim=output_dim*4, output_dim=output_dim)
-        self.ffn_reasoning = create_ffn_layer('logic', logic_dim=output_dim//2, output_dim=output_dim)
-        
-        self.output_projection = keras.layers.Dense(output_dim)
-    
-    def call(self, inputs):
-        # Process through all FFN branches
-        out1 = self.ffn_standard(inputs)
-        out2 = self.ffn_gated(inputs)
-        out3 = self.ffn_reasoning(inputs)
-        
-        # Combine outputs
-        combined = keras.ops.concatenate([out1, out2, out3], axis=-1)
-        return self.output_projection(combined)
-```
-
-## API Reference
-
-### Functions
-
-#### `create_ffn_layer(ffn_type, name=None, **kwargs)`
-Factory function for creating FFN layers with validation.
-
-#### `create_ffn_from_config(config)`
-Create FFN layer from configuration dictionary.
-
-#### `validate_ffn_config(ffn_type, **kwargs)`
-Validate FFN configuration parameters before creation.
-
-#### `get_ffn_info()`
-Get comprehensive information about all available FFN types.
-
-### Types
-
-#### `FFNType`
-Literal type defining valid FFN type strings: `'bilinear'`, `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'gelu_tanh'`, `'glu'`, `'kan'`, `'logic'`, `'lowrank'`, `'mixer'`, `'mlp'`, `'monarch'`, `'orthoglu'`, `'power_mlp'`, `'reglu'`, `'residual'`, `'squared_relu'`, `'swiglu'`, `'swin_mlp'`, `'tversky'`.
-
-## Migration Guide
-
-### From Direct Instantiation
-
-**Before:**
-```python
-# Manual parameter handling and validation
-if ffn_type == 'mlp':
-    ffn = MLPBlock(hidden_dim=hidden_dim, output_dim=output_dim, activation=activation)
-elif ffn_type == 'swiglu':
-    ffn = SwiGLUFFN(output_dim=output_dim, ffn_expansion_factor=expansion)
-# ... many more cases
-```
-
-**After:**
-```python
-# Unified factory interface
-ffn = create_ffn_layer(ffn_type, **params)
-```
-
-### Benefits of Migration
-
-1. **Reduced Code**: Eliminate repetitive if/elif chains
-2. **Better Validation**: Automatic parameter validation and error handling
-3. **Consistency**: Standardized parameter handling across all FFN types
-4. **Maintainability**: Central location for FFN creation logic
-5. **Type Safety**: Full type hints and IDE support
-
-## Troubleshooting
-
-### Enable Debug Logging
-```python
-import logging
-logging.getLogger("dl").setLevel(logging.DEBUG)
-```
-
-### Common Issues
-
-**TypeError during layer creation:**
-- Check parameter names match layer's expected interface
-- Verify parameter types (int, float, str, bool)
-- Use `get_ffn_info()` to see expected parameters
-
-**ValueError for unknown activation:**
-- Use standard Keras activation names: 'relu', 'gelu', 'swish', 'tanh', etc.
-- Or pass callable activation functions directly
-
-**Missing specialized layers:**
-- Ensure all custom layer files are correctly placed and imported.
-- All layers in this module are integrated into the factory system.
+- **Rank matters.** `mixer` accepts rank-3 `(B, S, C)` only and returns the same shape; `tversky`
+  accepts rank-2 `(batch, input_dim)` only and returns `(batch, units)`; `gated_mlp` needs rank-4.
+  None of the three is a drop-in for a rank-3 transformer FFN.
+- **`gated_mlp` is not gMLP.** Every kernel is 1x1, so nothing mixes across spatial positions. It is
+  channel gating, not a stand-in for attention.
+- **`monarch`: `nblocks` (default 4) must divide `input_dim`, `hidden_dim` and `output_dim`.**
+  Validated in `__init__`/`build`, so pick dimensions that are multiples of it.
+- **`swiglu` does not take a hidden width directly by default.** It derives one from
+  `ffn_expansion_factor` and rounds it to a multiple of `ffn_multiple_of` (256):
+  `output_dim=768, ffn_expansion_factor=4` builds `hidden_dim=2048`, not 3072. Pass `hidden_dim`
+  explicitly if you need an exact width.
+- **`lowrank`: `rank=None` resolves to `max(1, hidden_dim // 4)`.** `rank <= 0` raises.
+- **`squared_relu` has a fixed nonlinearity.** There is no `activation` parameter.
+- **`reglu` and `bilinear` return a `GLUFFN`,** so an isinstance check on the class cannot tell the
+  three apart; the serialized config carries the `activation`.
+- **An undeclared keyword raises.** `create_ffn_layer('mlp', hidden_dim=8, output_dim=8, foo=1)`
+  raises a `ValueError` naming the key, the type and the accepted set. It is not a warning.
