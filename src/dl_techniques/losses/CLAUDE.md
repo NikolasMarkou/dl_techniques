@@ -92,8 +92,8 @@ has gone stale before.
   an error. `goodhart_loss.py` and `focal_uncertainty_loss.py` are correct exemplars.
   **Which modules still violate this is recorded executably, not in prose:**
   `tests/test_losses/test_the_premature_scalar_family_is_pinned.py` MEASURES the defect per class
-  and goes red the day one is fixed. As of 2026-08-31 it pins 14 classes across 12 modules. Do not
-  duplicate that list here — a prose list rots; the test cannot.
+  and goes red the day one is fixed. Do not duplicate that list here — a prose list rots; the test
+  cannot.
 
 - **Registration.** Every `Loss` subclass carries
   `@register_dl_technique("dl_techniques.losses.<module>")` from

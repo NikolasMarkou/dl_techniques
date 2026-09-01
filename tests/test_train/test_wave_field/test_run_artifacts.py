@@ -1,14 +1,11 @@
 """The wave_field trainer must PERSIST its run config and training history.
 
-Companion to `tests/test_train/test_gpt2/test_run_artifacts.py`; same F-06
-adoption, same reason the guard executes the trainer body instead of grepping
-its source. `src/train/wave_field/` had zero test coverage of any kind before
-this file (`src/train/CLAUDE.md` § (f)).
+Companion to `tests/test_train/test_gpt2/test_run_artifacts.py`, and for the
+same reason it executes the trainer body through a stub harness instead of
+grepping its source: an "it ran without raising" assertion cannot see a run
+artifact that was never written.
 
-This module covered a SECOND trainer, `train.wave_field.train_memory`, in a
-`TestTrainMemoryLlmWritesRunArtifacts` class of 5 tests. That trainer was
-DELETED on user instruction (2026-08-13) and the class went with it; nothing
-else changed here. `src/train/wave_field/` is now a one-trainer package.
+`src/train/wave_field/` is a one-trainer package (`pretrain.py`).
 """
 
 import dataclasses

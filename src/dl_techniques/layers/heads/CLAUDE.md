@@ -104,29 +104,20 @@ still load.
 - **`VisionTaskType` / `TaskType` alias.** Vision's generically-named `TaskType`
   was renamed to `VisionTaskType`; a module-level `TaskType = VisionTaskType`
   alias is kept (and re-exported) as a back-compat safety net (D-003).
-- **`EnhancementHead` module-scope.** Lifted out of `create_enhancement_head()`
-  (was a closure-local registered class). Class name kept EXACTLY
-  `EnhancementHead` so `Custom>EnhancementHead` registration is unchanged. Do
-  NOT re-nest it inside the factory.
-  *Superseded 2026-08-29: the decorator is now
-  `@register_dl_technique("dl_techniques.layers.heads.vision.factory")`, so the primary key is
-  `dl_techniques.layers.heads.vision.factory>EnhancementHead`. **The rule below it is
-  unchanged and still binding**: the legacy alias the helper mints is keyed on the bare class
-  NAME, and `keras.saving.get_registered_object("Custom>EnhancementHead")` still returns this
-  class (measured 2026-08-29). Renaming the class would drop that alias and break every
-  pre-existing archive exactly as before, so the name stays EXACTLY `EnhancementHead`.*
+- **`EnhancementHead` is module-scope**, not a closure-local class inside
+  `create_enhancement_head()`. Do NOT re-nest it. Its primary key is
+  `dl_techniques.layers.heads.vision.factory>EnhancementHead`, and the legacy alias the helper
+  mints is keyed on the bare class NAME — `keras.saving.get_registered_object("Custom>EnhancementHead")`
+  returns this class. Renaming it would drop that alias and break every pre-existing archive, so
+  the name stays EXACTLY `EnhancementHead`.
 - **No caller-dict mutation.** `MultiTaskHead._create_task_heads()` copies each
   per-task config dict before `pop('task_type')` (it used to mutate the caller's
   dict and break round-trips).
-- **Serialization-stable class names.** All 22 names are verbatim. Sub-layers
-  created in `__init__`/`build`, `keras.ops` only, `dl_techniques.utils.logger`
-  only.
-  *This bullet once also required "no `package=` on any decorator"; that half was
-  superseded 2026-08-29 and has been dropped. Every decorator here is now
-  `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")` and each class
-  carries a package-qualified key. It cost no archive because the helper also mints the legacy
-  `Custom>ClassName` alias. The **class names** are still verbatim and must
-  stay so: the alias is keyed on the bare name.*
+- **Serialization-stable class names.** Every decorator here is
+  `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`, so each class carries a
+  package-qualified key plus the legacy `Custom>ClassName` alias. The class names must stay
+  verbatim, because that alias is keyed on the bare name. Sub-layers are created in
+  `__init__`/`build`; `keras.ops` only; `dl_techniques.utils.logger` only.
 - Public API: `from dl_techniques.layers.heads import create_head` (or per-domain
   `from dl_techniques.layers.heads.{nlp,vision,vlm} import ...`).
 - Tests: `tests/test_layers/test_heads/`.

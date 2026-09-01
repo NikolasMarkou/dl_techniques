@@ -1,7 +1,6 @@
 # Ideogram4 — maintainer notes
 
-Keras 3 port of the Ideogram4 neural core. Plan:
-`plans/plan_2026-06-12_59a18a10/` (iter-1). User-facing docs: `README.md`.
+Keras 3 port of the Ideogram4 neural core. User-facing docs: `README.md`.
 
 This file is the **maintainer-facing** record. Read the
 "WHAT DOESN'T FIT / WHAT WAS SKIPPED / WHAT CHANGED" section before touching
@@ -116,19 +115,15 @@ the smoke-train). Minor follow-up only — does not affect correctness.
 
 ## In-code DECISION anchors
 
-The port's own anchors carry the plan-id prefix `plan_2026-06-12_59a18a10`; the
-sampling-direction repair carries `plan-2026-08-14T233721-d4f9beb2`:
-
 | anchor | file:line | summary |
 |--------|-----------|---------|
-| D-002 (`plan-2026-08-14T233721-d4f9beb2`) | `models/vision_language/ideogram4/pipeline.py`, in `Ideogram4Pipeline.__call__`'s Euler loop | reverse-indexed step grid so `t` descends noise -> data with `dt < 0` |
+| D-002 (sampling direction) | `models/vision_language/ideogram4/pipeline.py`, in `Ideogram4Pipeline.__call__`'s Euler loop | reverse-indexed step grid so `t` descends noise -> data with `dt < 0` |
 | D-003 | `layers/embedding/multi_axis_rope.py:183` | static one-hot band-interleave (replaces dynamic scatter) |
 | D-004 | `layers/attention/ideogram4_attention.py:226` | additive finite block-diagonal segment mask (replaces boolean keep-mask) |
 | D-005 | `models/vision_language/ideogram4/vae.py` `class Upsample` | thin `Upsample` wrapper of stock `UpSampling2D` + `Conv2D`, owned by the `Decoder` (rejected the shared functional-graph upsample helper, since deleted) |
 
-Of the port plan (`plan_2026-06-12_59a18a10`), its D-001 (overall scope) and its
-D-002 (net-new `ScalarSinusoidalEmbedding` +
-`Ideogram4TransformerBlock`) are design-level decisions; D-002's anchor lives in
+The port's own D-001 (overall scope) and D-002 (net-new `ScalarSinusoidalEmbedding` +
+`Ideogram4TransformerBlock`) are design-level decisions; that D-002's anchor lives in
 `scalar_sinusoidal_embedding.py`. See `decisions.md`.
 
 ---
@@ -162,13 +157,11 @@ D-002 (net-new `ScalarSinusoidalEmbedding` +
   The package string is the defining module's dotted path with the `models/` **family**
   directories (here `vision_language`) and subfamily containers stripped — a family is a filing
   decision, not a namespace.
-- **`Downsample` / `Upsample` DO carry the legacy alias, as of 2026-09-01.** They used to be
-  registered `legacy_alias=False`, because `dl_techniques.models.pw_fnet.model` claimed the same
-  two bare names and the `Custom>` namespace is flat, so aliasing both sides would have put two
-  classes on one key. The duplicate was removed at its source instead: pw_fnet's pair was renamed
-  `PWFNetDownsample` / `PWFNetUpsample`, these two kept their names, and both now take the house
-  default. Measured 2026-09-01: `keras.saving.get_registered_object("Custom>Downsample")` and
-  `("Custom>Upsample")` return **these** classes. Do not rename them, and do not re-add the flag.
+- **`Downsample` / `Upsample` carry the legacy alias**, taking the house default.
+  `keras.saving.get_registered_object("Custom>Downsample")` and `("Custom>Upsample")` return
+  **these** classes; pw_fnet's same-shaped pair is spelled `PWFNetDownsample` / `PWFNetUpsample`
+  precisely so the flat `Custom>` namespace holds one class per name. Do not rename these two, and
+  do not suppress the alias with `legacy_alias=False`.
   Never a bare `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key is
   independent of `__module__`, which is exactly the collision the qualified key avoids.
 - **Config invariant guards** (`config.py` `__post_init__` +

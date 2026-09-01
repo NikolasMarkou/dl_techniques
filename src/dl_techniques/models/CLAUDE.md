@@ -30,8 +30,7 @@ find src/dl_techniques/models -name '*.py' -not -path '*__pycache__*' | wc -l   
   `dl_techniques.models` itself — import from the leaf package.
 - **Family and subfamily `__init__.py` carry a docstring and nothing else** — no imports, no
   `__all__`. Re-exporting `vision/` would pull 35 packages behind one statement: a real import
-  cost and a real circular-import surface. `plan-2026-08-24T205033-8fd4f20d/D-002`. Do not
-  "finish the job" by adding re-exports.
+  cost and a real circular-import surface. Do not "finish the job" by adding re-exports.
 - **`time_series/__init__.py` is the one exception** — 7 children, curated re-exports, and
   consumers that rely on them. Leave it. It is also why `time_series/{deepar,prism,tirex}`
   can carry an empty `__init__.py` without being broken.
@@ -86,7 +85,7 @@ greps. A different instrument gives a different answer (unanchored `Args:` retur
 `tests/test_models/` is one directory per leaf package, one level deep — `test_beit/`, not
 `test_vision/test_beit/`. This is deliberate: 218 relative imports (`from ..oracle`) reach
 shared oracle modules at `tests/test_models/*.py`, and nesting would rewrite all of them for
-no behavioural gain. `plan-2026-08-24T205033-8fd4f20d/D-001`. Do not "fix" it.
+no behavioural gain. Do not "fix" it.
 
 ## Layer Reuse Policy (factory-first)
 

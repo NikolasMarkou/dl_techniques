@@ -1,34 +1,37 @@
 # Layers Package
 
-The largest package in the library — custom Keras 3 layers organized by domain. All layers follow Keras 3 conventions with full `get_config()` serialization support.
+The largest package in the library — custom Keras 3 layers organized by domain, all with full
+`get_config()` serialization.
 
-> **New layers MUST follow `research/2026_keras_custom_models_instructions_v2.md`.** Read it before creating a new layer — it is the canonical guide for Keras 3 custom layer authoring in this repo (`__init__`/`build`/`call`/`get_config`, serialization, factory registration, tests).
+> **New layers MUST follow `research/2026_keras_custom_models_instructions_v2.md`** — the canonical
+> guide for Keras 3 custom layer authoring here (`__init__`/`build`/`call`/`get_config`,
+> serialization, factory registration, tests). Read it before writing a new layer.
 
 ## Structure
 
-One row per subpackage. **F** = has a `factory.py`. Names carrying a trap are marked and explained
-in § Naming traps below.
+One row per subpackage. **F** = has a `factory.py`. Several class names collide across packages —
+see § Naming traps.
 
 | Subpackage | F | Contents |
 |---|:-:|---|
-| `attention/` | ✅ | Multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, anchor, channel, spatial, CBAM, progressive focused, wave field, window, mobile MQA, non-local, RPC, shared-weights cross, single-window, tripse, gated, linear (Miyasawa-compliant O(N)), lighthouse, energy, area (YOLOv12 4D spatial), FNet Fourier transform |
-| `ffn/` | ✅ | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting FFN, diff FFN, logic FFN, Swin MLP, residual block |
-| `norms/` | ✅ | RMS, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (`norms/polar_weight_norm.py`, not factory-registered) |
-| `embedding/` | ✅ | Patch (1D/2D), learned positional, fixed 2D sinusoidal, RoPE, dual RoPE, continuous RoPE, continuous sin/cos, scalar/timestep sinusoidal, multi-axis (t/h/w) RoPE, BERT / ModernBERT / ALBERT-factorized token embeddings |
-| `activations/` | ✅ | GoLU, Mish, hard sigmoid, hard swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability output, routing probabilities, basis function |
-| `heads/` | ✅ | Task heads in three sub-packages — `nlp/`, `vision/`, `vlm/` (see below) |
-| `logic/` | ✅ | Arithmetic operators, logic operators, neural circuit |
-| `memory/` | ✅ | NTM family, SOM family, NeuroGrid (see below) |
-| `mixtures/` | ✅ | `RBFLayer` (`radial_basis_function.py`), `KMeansLayer` (`kmeans.py`, differentiable K-means), `GMMLayer` (`gmm.py`, differentiable GMM with isometric-kernel regularization). `factory.py` exposes `MixtureType` + `create_mixture_layer` / `create_mixture_from_config`. Import via `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer` |
-| `sequence_pooling/` | ✅ | Pool a `(B, T, D)` sequence to `(B, D)`: `SequencePooling` (`sequence_pooling.py` — 18 strategies: positional `cls`/`first`/`last`/`middle`, statistical `mean`/`max`/`min`/`sum`, composite `mean_max`/`mean_std`/`mean_max_min`, learnable `attention`/`multi_head_attention`/`weighted`, `top_k_mean`/`top_k_max`, and `none`/`flatten`; four of them reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
-| `transformers/` | — | Standard transformer, Swin block, Swin conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork` (`energy_transformer.py`), `GatedLinearAttentionBlock` (`gated_linear_attention_block.py`), `AreaAttentionBlock` (`area_attention_block.py`) |
-| `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/` (which assembles them into the MCi tower): `FastVitConvMlp`, `RepConditionalPosEnc`, `FastVitRepMixer`, `FastVitRepMixerBlock`, `ReparamLargeKernelConv`, `FastVitPatchEmbed`, `FastVitAttentionBlock`, `FastVitStage`. Curated `__init__` re-export, no factory. Train-time multi-branch form only — no reparameterization / fusion path. See `fastvit/README.md` |
+| `attention/` | Y | 34 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more |
+| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block |
+| `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
+| `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings. `HierarchicalCodebookEmbedding` is direct-import-only |
+| `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function |
+| `heads/` | Y | Task heads in `nlp/`, `vision/`, `vlm/` — see below |
+| `logic/` | Y | Arithmetic operators, logic operators, neural circuit |
+| `memory/` | Y | NTM family, SOM family, NeuroGrid — see below |
+| `mixtures/` | Y | `RBFLayer`, `KMeansLayer` (differentiable K-means), `GMMLayer` (differentiable GMM with isometric-kernel regularization) |
+| `sequence_pooling/` | Y | `(B, T, D)` → `(B, D)`. `SequencePooling` covers 18 strategies (positional `cls`/`first`/`last`/`middle`, statistical, composite, learnable `attention`/`multi_head_attention`/`weighted`, top-k, `none`/`flatten`); four are reused by `heads/nlp/`. Plus `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
+| `transformers/` | — | Standard transformer, Swin block / conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork`, `GatedLinearAttentionBlock`, `AreaAttentionBlock` |
+| `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/`. Curated `__init__`, no factory; train-time multi-branch form only, no reparameterization path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
-| `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/`: connection layer, field embedding, gauge-invariant attention, holonomic transformer, holonomy layer, manifold stress, parallel transport |
+| `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/` (connection, field embedding, gauge-invariant attention, holonomic transformer, holonomy, manifold stress, parallel transport) |
 | `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, residual ACF, scaler |
 | `time_series/` | — | Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequential block, N-BEATS/N-BEATSx blocks, PRISM blocks, quantile heads, TCN, temporal fusion, xLSTM blocks |
-| `reasoning/` | — | HRM reasoning core, HRM reasoning module, HRM sparse puzzle embedding |
+| `reasoning/` | — | HRM reasoning core, reasoning module, sparse puzzle embedding |
 | `physics/` | — | Lagrange layer, approximate Lagrange layer |
 | `fusion/` | — | Multimodal fusion layer |
 | `tokenizers/` | — | BPE tokenizer |
@@ -46,67 +49,43 @@ in § Naming traps below.
 | `positional_sine_2d` (`embedding/`) | emits **channels-first** `(B, 2*num_pos_feats, H, W)` |
 | embedding `call()` paths | all graph-safe — no eager ops |
 
-### `embedding/` factory keys (13)
-
-`patch_1d`, `patch_2d`, `positional_learned`, `rope`, `dual_rope`, `continuous_rope`,
-`continuous_sincos`, `bert_embeddings`, `modern_bert_embeddings`, `albert_factorized`,
-`positional_sine_2d`, `scalar_sinusoidal`, `mrope_ideogram4`.
-
-`HierarchicalCodebookEmbedding` is direct-import-only (not factory-registered).
-
 ### `memory/` — the single canonical home
 
-Merged from a previously-separate NTM subpackage. Four families via `dl_techniques.layers.memory.*`:
+Three families under `dl_techniques.layers.memory.*`: **NTM** (`NeuralTuringMachine` plus its
+memory/head/controller/cell parts, the abstract bases, `AddressingMode` with CONTENT + HYBRID only,
+the state dataclasses and the addressing utilities), **SOM** (`SOMLayer` N-D hard winner,
+`SOM2dLayer`, `SoftSOMLayer` differentiable with per-dim or global softmax), and **NeuroGrid** (a
+differentiable topographic memory grid, orthogonal hypersphere init + soft-orthonormal
+regularization). `factory.py` exposes `create_mann(...)` and `create_som_2d(...)`; **`create_mann`
+is the ONLY MANN construction path** — there is no standalone MANN class, it returns a
+`NeuralTuringMachine` configured to preserve the historical MANN output shape.
 
-| Family | Modules | Exports |
-|---|---|---|
-| **NTM** | `ntm_interface.py`, `baseline_ntm.py` | `NTMConfig`, `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`, `NTMCell`, `NeuralTuringMachine`, abstract `BaseMemory`/`BaseHead`/`BaseController`/`BaseNTM`, `AddressingMode` (CONTENT + HYBRID only), state dataclasses (`MemoryState`, `HeadState`, `NTMOutput`), utilities (`cosine_similarity`, `circular_convolution`, `sharpen_weights`) |
-| **SOM** | `som_nd_layer.py`, `som_2d_layer.py`, `som_nd_soft_layer.py` | `SOMLayer` (N-D hard winner), `SOM2dLayer` (2D specialization), `SoftSOMLayer` (differentiable, per-dim or global softmax) |
-| **NeuroGrid** | `neuro_grid.py` | `NeuroGrid` topographic memory grid — differentiable soft-assignment; orthogonal hypersphere init + soft-orthonormal regularization |
-| **Factory** | `factory.py` | `create_mann(...)`, `create_som_2d(...)`. **`create_mann` is the ONLY MANN construction path** — there is no standalone MANN class; it returns a `NeuralTuringMachine` configured to preserve the historical MANN output shape |
+### `heads/`
 
-### `heads/` — one merged package
-
-Consolidates the formerly-separate `nlp_heads/`, `vision_heads/` and `vlm_heads/`:
-
-| Sub-package | Heads |
-|---|---|
-| `heads/nlp/` | text/token classification, QA, similarity, generation, multiple-choice, multi-task. Pooling reuses the shared `SequencePooling` for the four delegated strategies `cls`/`mean`/`max`/`last`; the learnable `attention` strategy stays inline (different mechanism + weights) |
-| `heads/vision/` | detection, segmentation, depth, classification, instance segmentation, enhancement, multi-task, plus `VisionTaskType` (with a `TaskType` back-compat alias) |
-| `heads/vlm/` | captioning, VQA, visual grounding, image-text matching, multi-task |
-
-Each sub-package keeps its own `factory.py` + `task_types.py`. A top-level `heads/factory.py` exposes
-a `create_head(domain, ...)` dispatch facade; `heads/task_types.py` aggregates the enums/configs.
-Import via `from dl_techniques.layers.heads import create_head`, or
-`from dl_techniques.layers.heads.nlp import create_nlp_head` (likewise `.vision`, `.vlm`).
-See `heads/CLAUDE.md` and `heads/README.md`.
+One merged package with `nlp/`, `vision/` and `vlm/` sub-packages, a `create_head(domain, ...)`
+dispatch facade and per-domain factories. **`heads/CLAUDE.md` owns it** — read that, not this file.
 
 ### Standalone layers (top-level files)
 
-Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE,
-complex-valued layers, conditional output, ConvNeXt v1/v2 blocks, KANvolution (convolutional KAN),
-depthwise separable, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal
-block, FFT layers, Gaussian filter/pyramid, global sum pool (any spatial rank), HANC block/layer, hierarchical MLP stem,
-inverted residual block, IO preparation, KAN linear, Laplacian filter, layer scale, mobile-one block,
-modality projection, MothNet blocks, MPS layer, multi-level feature compilation, one-hot encoding,
-orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible — see its module
-docstring), patch merging, pixel shuffle, random Fourier features, RepMixer block (`repmixer_block.py`), res-path,
-restricted Boltzmann machine, rigid simplex, router, sampling, scheduled dropout, selective gradient
-mask, shearlet transform, sparse autoencoder, spatial layer, squeeze-excitation, standard blocks,
-stochastic depth/gradient, strong augmentation, TabM blocks, Tversky projection, universal inverted
-bottleneck, vector quantizer, YOLO12 blocks/heads.
-
-`sampling.py` provides Gaussian-ball / thin-shell hypersphere / von Mises-Fisher reparameterization
-samplers plus an inline factory; `vmf` adds `VMFSampling` and the closed-form `vmf_kl_divergence`.
+`ls src/dl_techniques/layers/*.py` is the authoritative list; the families are convolutional blocks
+(bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable, dynamic Conv2D, inverted residual,
+mobile-one, universal inverted bottleneck, RepMixer, patch merging, pixel shuffle), signal/image
+primitives (Canny, CLAHE, Gaussian filter and pyramid, Laplacian, shearlet, FFT, augmentation),
+structured-linear layers (BitLinear, KAN linear, KANvolution, MPS, orthoblock, orthogonal
+butterfly, rigid simplex, Tversky projection, random Fourier features), regularization and routing
+(layer scale, scheduled dropout, stochastic depth/gradient, selective gradient mask,
+squeeze-excitation, router, FiLM, conditional output), and model-specific blocks (BLT, capsules,
+EoMT mask, FNet encoder, fractal, HANC, hierarchical MLP stem, MothNet, TabM, YOLO12).
+`sampling.py` adds Gaussian-ball / thin-shell hypersphere / von Mises-Fisher reparameterization
+samplers plus an inline factory; `vmf` adds `VMFSampling` and `vmf_kl_divergence`.
 
 ### Naming traps
 
 | Trap | Detail |
 |---|---|
-| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (a different architecture sharing the name, consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
-| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabm_blocks.py`'s two-Dense ensemble block was called `MLPBlock` until 2026-09-01 and is now **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` kept the bare name because it is the FFN factory's `'mlp'` key (`ffn/factory.py`), so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
-| **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` used the same two bare names until 2026-09-01 and now spells them **`PWFNetDownsample`** / **`PWFNetUpsample`**. The pw_fnet pair is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. They are NOT interchangeable and must not be merged |
-| **Why prefix instead of `legacy_alias=False`** | Suppressing the legacy alias on both sides of a duplicate name also works, and was what the tree did until 2026-09-01. It leaves the duplicate in place, so it costs both classes their `Custom>` alias forever and the next same-named class re-opens the same hazard. A package prefix removes the duplicate at its source; `research/2026_keras_custom_models_instructions_v2.md` mandates it. As of 2026-09-01 **0** sites under `src/` pass `legacy_alias=False` |
+| **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
+| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabm_blocks.py`'s two-Dense ensemble block is **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` keeps the bare name because it is the FFN factory's `'mlp'` key, so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
+| **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` spells its pair **`PWFNetDownsample`** / **`PWFNetUpsample`**. pw_fnet's is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. NOT interchangeable; do not merge them |
 
 ## Conventions
 
@@ -127,20 +106,20 @@ subpackage with an `__all__`, prefer the package-level import.
 ### Other conventions
 
 - Docstrings in `layers/` use **Sphinx/reST** (`:param:` / `:type:` / `:raises:`), not Google
-  `Args:`, in the large majority of modules. The count, its date and the re-deriving grep are printed
-  once, in `src/dl_techniques/CLAUDE.md` § Core Conventions → Code Style. In `attention/` it is
-  mandatory; `attention/channel_attention.py` is the reference exemplar.
+  `Args:`, in the large majority of modules. In `attention/` it is mandatory;
+  `attention/channel_attention.py` is the reference exemplar.
 - Subpackages with `factory.py` support config-driven construction.
 - All layers implement `get_config()` for Keras serialization.
 - Layers follow the Keras 3 pattern: `__init__`, `build`, `call`, `get_config`.
 
 ## Layer Reuse Policy (factory-first)
 
-> **Before implementing ANY new layer, you MUST first check for an existing one to reuse.** Authoring a bespoke layer is the last resort, not the first move — this package already ships a large, tested layer surface.
+> **Before implementing ANY new layer, check for an existing one to reuse.** A bespoke layer is the
+> last resort, not the first move.
 
-Check in this precedence order; only proceed to the next step when nothing fits:
+Check in this precedence order; proceed to the next step only when nothing fits.
 
-1. **The relevant domain factory** — each factory exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
+1. **The relevant domain factory** — each exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
 
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
@@ -156,18 +135,17 @@ Check in this precedence order; only proceed to the next step when nothing fits:
    | Task heads | `create_head(domain, ...)` in `heads/factory.py` (NLP / vision / VLM) | n/a |
    | Transformer blocks | `TransformerLayer` in `transformers/transformer.py` (direct import) | n/a |
 
-   > **Note on transformer blocks**: `transformers/` has no `create_*_layer` factory. Use `TransformerLayer` directly — it is highly configurable (selectable attention / FFN / normalization types and normalization position via its config) and composes the domain factories above internally, so it covers most cases without a custom block. The package also offers higher-level `create_*_encoder` builders (`transformers/vision_encoder.py`, `transformers/text_encoder.py`).
+   > **Transformer blocks have no `create_*_layer` factory.** Use `TransformerLayer` directly — its config selects attention / FFN / normalization types and normalization position, and it composes the domain factories internally, so it covers most cases without a custom block. Higher-level `create_*_encoder` builders live in `transformers/vision_encoder.py` and `transformers/text_encoder.py`.
 
-2. **An existing standalone layer** — if no factory covers your need, search the subpackages and the top-level Standalone Layers list above before writing your own. The reuse surface is broad; a close match often already exists.
+2. **An existing standalone layer** — search the subpackages and the standalone list above before writing your own. The reuse surface is broad; a close match often already exists.
 
-3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions_v2.md` (full serialization, `build`, `get_config`, tests). Place it in the appropriate domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it via the factory too.
+3. **Only then, a new custom layer**, following `research/2026_keras_custom_models_instructions_v2.md` (full serialization, `build`, `get_config`, tests). Place it in the right domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it.
 
 ### The factory contract
 
-**1. Every factory RAISES `ValueError` on an undeclared keyword.** Verified by execution 2026-08-19
-for attention, ffn, norms, activations and embedding: each rejects a `bogus_key=1`. A new factory, or
-any new registry-backed dispatch, does the same. **Never filter-and-drop** — each of these was
-silent, and each passed its tests:
+**1. Every factory RAISES `ValueError` on an undeclared keyword.** Attention, ffn, norms,
+activations and embedding each reject a `bogus_key=1`; a new factory, or any new registry-backed
+dispatch, does the same. **Never filter-and-drop** — each of these was silent, and passed its tests:
 
 | Misspelling | Consequence |
 |---|---|
@@ -186,18 +164,19 @@ are deliberately NOT registered.
 entry's `required_params`: `hidden_dim` is required for 13 of the 21 FFN types and derived for
 `swiglu` (a two-thirds rule plus `ffn_multiple_of`).
 
-**4. When you audit "who calls factory X", also sweep "who builds X's argument dict without calling X
-directly."** 9 files pass an `ffn_args=` dict to a wrapper rather than calling `create_ffn_layer`
-themselves. Such a site is invisible to an AST call inventory of the factory, and invisible to a suite
-sweep run at site defaults (the break needs a non-empty caller dict to appear). A `**kwargs`-splat
-site has the identical blind spot. Use `assemble_ffn_config()` / `assemble_attention_config()` so
-those dicts go through the same validation — `models/language/qwen/qwen3.py:416` is the repaired exemplar and
-carries a comment explaining why it must not be simplified back to a bare dict literal.
+**4. When you audit "who calls factory X", also sweep "who builds X's argument dict without calling
+X directly."** Files that pass an `ffn_args=` dict to a wrapper rather than calling
+`create_ffn_layer` themselves are invisible to an AST call inventory of the factory, and invisible
+to a suite sweep run at site defaults (the break needs a non-empty caller dict to appear). A
+`**kwargs`-splat site has the identical blind spot. Use `assemble_ffn_config()` /
+`assemble_attention_config()` so those dicts go through the same validation —
+`models/language/qwen/qwen3.py` is the repaired exemplar and carries a comment explaining why it
+must not be simplified back to a bare dict literal.
 
 **5. Normalization epsilon.** The factory sets `1e-6`; Keras' `LayerNormalization` /
-`BatchNormalization` default to `1e-3` (both confirmed by execution 2026-08-19). Route normalization
-through the factory. Constructing directly makes `epsilon=` mandatory, with a cited reference. Do not
-blanket-fix — MobileNet's reference BN genuinely is `1e-3`.
+`BatchNormalization` default to `1e-3` — 1000x in every denominator, with no shape symptom and no
+warning. Route normalization through the factory. Constructing directly makes `epsilon=` mandatory,
+with a cited reference. Do not blanket-fix — MobileNet's reference BN genuinely is `1e-3`.
 
 ## Testing
 

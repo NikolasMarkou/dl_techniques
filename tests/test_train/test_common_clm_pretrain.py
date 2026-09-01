@@ -383,7 +383,8 @@ class TestModuleSurface:
             assert name in hub.__all__
 
     def test_it_delegates_to_the_canonical_steps_per_epoch_helper(self):
-        # src/train/CLAUDE.md D-001: never roll a local estimator.
+        # `src/train/CLAUDE.md` § `train.common.nlp` API: `estimate_clm_steps_per_epoch`
+        # is the canonical chunk-aware helper. Never roll a local estimator.
         from train.common import nlp
 
         assert cp.estimate_clm_steps_per_epoch is nlp.estimate_clm_steps_per_epoch
