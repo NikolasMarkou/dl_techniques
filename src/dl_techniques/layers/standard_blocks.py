@@ -61,7 +61,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.standard_blocks", legacy_alias=False)
+@register_dl_technique("dl_techniques.layers.standard_blocks")
 class ConvBlock(keras.layers.Layer):
     """
     Configurable convolutional block with normalization, activation, and optional pooling.

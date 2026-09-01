@@ -96,17 +96,18 @@ def assert_package_qualified_registration(
         assert only the SHAPE -- a module move then legitimately changes the key
         without reddening an unrelated test.
     :type expected_package: str or None
-    :param expect_legacy_alias: `False` for the classes that deliberately claim
-        NO bare `Custom>` alias. Three of them are still genuine duplicate NAMES
-        with a twin in another package -- `Downsample`, `MLPBlock`, `Upsample` --
-        where aliasing either side recreates the import-order collision. The
-        fourth, `standard_blocks.ConvBlock`, is a SURVIVOR: its twin
-        `yolo12_blocks.ConvBlock` was deleted on 2026-09-01 by
-        `plan-2026-09-01-e6d380a5`, so there is no longer a second claimant --
-        and the flag stays anyway, because re-minting a bare `Custom>ConvBlock`
-        binding is a registry change, not a cleanup. Do not "tidy" it away just
-        because the collision evaporated. The `Custom>` key must resolve to
-        nothing at all in every one of these cases.
+    :param expect_legacy_alias: `False` for a class that deliberately claims NO
+        bare `Custom>` alias, in which case the `Custom>` key must resolve to
+        nothing at all. The RULE, not a roster: the flag belongs on BOTH members
+        of a pair of registered objects that share one bare `__name__`, because
+        the flat `Custom>` namespace cannot hold two claimants
+        (`keras_registration.py` raises `AliasCollisionError`). It is not a
+        stylistic choice and it is not a way to refuse old keys. A class whose
+        bare name is unique takes the house default, `True`. The population of
+        classes needing `False` is currently EMPTY -- the last duplicate names
+        were resolved by package-prefix renames, not by refusals -- and
+        `tests/test_the_legacy_alias_namespace_has_no_collisions.py` re-derives
+        that from the tree, so do not re-add a refusal here by hand.
     :type expect_legacy_alias: bool
     :return: the package-qualified registry key.
     :rtype: str

@@ -87,21 +87,7 @@ from .common import (
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-09-01T055648-e6d380a5/D-014
-# `legacy_alias=False` is REQUIRED, not stylistic. The bare legacy key
-# `Custom>AreaAttention` is module-independent, and while the pre-move
-# `yolo12_blocks.AreaAttention` still exists (it is deleted later in the same plan)
-# both classes would claim it — `register_dl_technique` raises `AliasCollisionError`
-# at import time, so the whole package fails to import. Do NOT "fix" that by dropping
-# the flag once the old class is gone either: D-002 is a CLEAN BREAK on serialization
-# keys — no `legacy_packages=`, no alias preservation, and no bare `Custom>` key for a
-# class whose canonical key is its module path. See decisions.md D-014 for THIS
-# flag (the forced choice and why it stays after step 7), and D-002 for the
-# clean-break rule it enforces. The sibling `AreaAttentionBlock` deliberately does
-# NOT carry this flag -- see its own D-017 anchor for why the two differ.
-@register_dl_technique(
-    "dl_techniques.layers.attention.area_attention", legacy_alias=False
-)
+@register_dl_technique("dl_techniques.layers.attention.area_attention")
 class AreaAttention(keras.layers.Layer):
     """
     Area attention over a 4D ``(batch, height, width, channels)`` feature map.
