@@ -424,15 +424,6 @@ dl_techniques/
 └── REPO_MAP.md                # Path-verified router — read this first
 ```
 
-> **`models/` is grouped into families, and a family is a grouping — not a namespace you
-> import from.** Every family `__init__.py` carries a docstring and nothing else, so
-> `import dl_techniques.models.vision` gives you no models: always import from the *leaf*
-> package (`from dl_techniques.models.vision.resnet.model import create_resnet`). The one
-> exception is `time_series/`, which re-exports its 7 children. The full catalogue — all 11
-> families, all 80 leaf packages, one line each — is
-> [`src/dl_techniques/models/README.md`](./src/dl_techniques/models/README.md), and the
-> authoring rules are in [`src/dl_techniques/models/CLAUDE.md`](./src/dl_techniques/models/CLAUDE.md).
-
 ---
 
 ## Contributing
