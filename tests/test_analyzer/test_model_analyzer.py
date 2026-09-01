@@ -106,3 +106,72 @@ class TestEntropyStdKey:
             "entropy_std is not the producer's std_entropy: "
             f"reported={confidence['entropy_std']} expected={expected}"
         )
+
+
+# ---------------------------------------------------------------------
+# C8 -- the multi-input warning
+# ---------------------------------------------------------------------
+
+def _build_multi_input_model(name: str = "mi_model") -> keras.Model:
+    """A two-input functional model, so ``_identify_multi_input_models`` flags it."""
+    keras.utils.set_random_seed(7)
+    left = keras.Input(shape=(N_FEATURES,), name="left")
+    right = keras.Input(shape=(N_FEATURES,), name="right")
+    merged = keras.layers.Concatenate(name=f"{name}_cat")([left, right])
+    outputs = keras.layers.Dense(N_CLASSES, activation="softmax", name=f"{name}_out")(merged)
+    return keras.Model(inputs=[left, right], outputs=outputs, name=name)
+
+
+class TestMultiInputWarning:
+    """The limited-analysis warning for multi-input models must actually fire.
+
+    Defect guarded (C8): ``analyze()`` computed
+    ``affected_models = analysis_types & self._multi_input_models``. ``analysis_types``
+    holds ANALYSIS-TYPE names ('weights', 'calibration', ...) while
+    ``_multi_input_models`` holds MODEL names, so the intersection was empty unless a
+    model happened to be named after an analysis type. ``if affected_models:`` was
+    therefore always false and the warning was unreachable.
+    """
+
+    def test_warning_names_the_multi_input_model(self, tmp_path, caplog):
+        model = _build_multi_input_model()
+        rng = np.random.default_rng(3)
+        x = {
+            "left": rng.standard_normal((N_SAMPLES, N_FEATURES)).astype("float32"),
+            "right": rng.standard_normal((N_SAMPLES, N_FEATURES)).astype("float32"),
+        }
+        y = rng.integers(0, N_CLASSES, size=N_SAMPLES)
+
+        analyzer = ModelAnalyzer(
+            models={"mi_model": model},
+            config=_quiet_config(analyze_information_flow=True),
+            output_dir=str(tmp_path / "c8"),
+        )
+        assert analyzer._multi_input_models == {"mi_model"}, (
+            "anti-vacuity: the probe was not detected as multi-input, so the warning "
+            "would be correctly absent for a reason unrelated to the defect"
+        )
+
+        with caplog.at_level("WARNING"):
+            analyzer.analyze(
+                DataInput(x_data=x, y_data=y), analysis_types={"information_flow"}
+            )
+
+        # Match the WARNING specifically. The constructor also logs an INFO record
+        # containing 'multi-input' ("Detected multi-input models: ..."), and a filter
+        # loose enough to catch that one passes against the unfixed code.
+        limited = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and "limited" in record.getMessage().lower()
+            and "multi-input" in record.getMessage().lower()
+        ]
+        assert limited, (
+            "no limited-analysis warning was emitted for a multi-input model; "
+            "records seen: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        assert any("mi_model" in message for message in limited), (
+            f"the warning fired but does not name the affected model: {limited}"
+        )

@@ -412,12 +412,11 @@ class ModelAnalyzer:
                 if (analyzer.requires_data() and
                     analysis_type in [ANALYSIS_TYPE_CALIBRATION, ANALYSIS_TYPE_INFORMATION_FLOW] and
                     self._multi_input_models):
-                    # Check if any models to be analyzed are multi-input
-                    affected_models = (analysis_types & self._multi_input_models
-                                     if hasattr(analysis_types, 'intersection')
-                                     else self._multi_input_models)
-                    if affected_models:
-                        logger.warning(f"Limited {analysis_type} analysis for multi-input models: {affected_models}")
+                    # Every model in self.models is analyzed, so every multi-input model
+                    # is affected. Intersecting with `analysis_types` compared
+                    # analysis-type names against MODEL names and was always empty.
+                    affected_models = self._multi_input_models
+                    logger.warning(f"Limited {analysis_type} analysis for multi-input models: {affected_models}")
 
                 # Execute the analysis
                 analyzer.analyze(self.results, data, self._prediction_cache)
