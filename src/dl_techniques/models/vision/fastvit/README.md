@@ -258,8 +258,8 @@ it — inside MobileCLIP2 that name is fixed by the module constant
   The package string is the defining module's dotted path:
   `dl_techniques.models.fastvit.model>FastVitImageEncoder` here, and
   `dl_techniques.layers.fastvit.<module>><ClassName>` for the eight blocks in
-  `dl_techniques/layers/fastvit/`. Pre-2026-08-29 archives still load through the legacy
-  `Custom>ClassName` alias the helper also binds.
+  `dl_techniques/layers/fastvit/`. Archives written before the registration migration
+  still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
@@ -286,16 +286,14 @@ path, and none is tested. The reference release passes `inference_mode=False`
 everywhere, i.e. it too runs the multi-branch form, so this port matches what the
 reference actually executes.
 
-**No claim of numerical identity to a fused form is made or tested here.** An
-earlier version of this section claimed the fused form is "mathematically
-identical", making X-1 "a speed deviation, not an accuracy one". That was wrong
-as shipped: fusing parallel branches requires them to sample the same input
-pixels, and under Keras' asymmetric `padding='same'` the strided `k x k` and
-`1 x 1` branches did not — MEASURED, a one-pixel offset at stride 2. The padding
-convention has since been fixed to the reference's symmetric `kernel_size // 2`
-(see the `layers/fastvit/README.md` deviation list), so the branches **are** now
-fusible in principle; but no fusion code exists, so "the fused form is identical"
-remains an unexecuted claim and is not asserted anywhere.
+**No claim of numerical identity to a fused form is made or tested here.** Fusing
+parallel branches requires them to sample the same input pixels; the padding
+convention here is the reference's symmetric `kernel_size // 2` (see the
+`layers/fastvit/README.md` deviation list), so the branches **are** fusible in
+principle. Keras' asymmetric `padding='same'` would instead offset the strided
+`k x k` and `1 x 1` branches by one pixel at stride 2 and make them unfusible.
+Since no fusion code exists, "the fused form is identical" is an unexecuted claim
+and is not asserted anywhere.
 
 ### X-2 — One `use_bias` for both qkv and the output projection
 
@@ -309,17 +307,17 @@ bias vector of length `dim`**. `use_bias=True` would instead add a spurious
 two available settings; a third option would require editing the shared
 `MultiHeadCrossAttention`, which is out of scope.
 
-MEASURED: the attention sub-layer has exactly **2 weights, both kernels, zero
+The attention sub-layer has exactly **2 weights, both kernels, zero
 biases**. Pinned by `test_attention_has_no_bias_weights` so it cannot drift
 silently.
 
 ### X-3 — `mci0` / `mci1` / `mci2` have no local oracle
 
-> **Narrowed on 2026-08-14.** `mci3` / `mci4` now have a REAL committed oracle
-> (see below). X-3 applies to `mci0` / `mci1` / `mci2` only.
+X-3 applies to `mci0` / `mci1` / `mci2` only; `mci3` / `mci4` have a real
+committed oracle (see below).
 
 Those three stage tables are transcribed from **timm upstream**
-(`timm/models/fastvit.py`, fetched 2026-08-13), **not** from the supplied
+(`timm/models/fastvit.py`), **not** from the supplied
 `mobileclip2.py`, which defines only `fastvit_mci3` and `fastvit_mci4`. `timm` is
 **not installed** in this environment, so nothing here can check those three rows
 against timm itself — only against a second hand transcription of the same fetch.

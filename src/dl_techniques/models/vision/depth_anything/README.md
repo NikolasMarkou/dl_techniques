@@ -7,26 +7,20 @@ estimation architecture (`encoder + DPT-style decoder`). Source files:
 src/dl_techniques/models/vision/depth_anything/
 ├── __init__.py        # public API: DepthAnything, create_depth_anything, DPTDecoder
 ├── components.py      # DPTDecoder layer (linear default + upsample_factor)
-└── model.py           # DepthAnything keras.Model + create_depth_anything factory
+├── model.py           # DepthAnything keras.Model + create_depth_anything factory
+└── teacher_ema.py     # TeacherEMACallback, cosine_ema_schedule, linear_ema_schedule
 ```
 
-> **Status (post-`plan_2026-05-10_54e6e303`).** The model uses the in-tree
-> `dl_techniques.models.vision.vit.ViT` as its real encoder (`encoder_kind='real'`,
-> default); the DPT decoder defaults to `linear` output;  `train_step`
-> dispatches to a clean labeled-only path or a clearly-delimited
-> semi-supervised path that adds FAL on pooled features **and** an L1
-> pseudo-label consistency term on student-vs-teacher depth on `x_unlab`.
-> On-step EMA decay is provided by `TeacherEMACallback` with cosine/linear
-> schedules, and `DepthAnything.from_pretrained_encoder(path)` loads encoder
-> weights from a saved `.keras` checkpoint and re-syncs the teacher.
-> `StrongAugmentation` supports any number of channels, applies per-sample
-> brightness/contrast factors, and mixes the depth target by the same CutMix box
-> as the image (the mixing now happens in `train_step`, not in `call`). Save/load round-trip is verified
-> end-to-end on CPU (max-abs-diff = 0.0). The legacy Conv-BN-ReLU encoder
-> is preserved behind `encoder_kind='placeholder'` for back-compat.
->
-> Only one residual note remains (`tf.GradientTape` in the custom
-> `train_step` — required by the semi-sup path). See "Known Issues" below.
+The encoder is the in-tree `dl_techniques.models.vision.vit.ViT` (`encoder_kind='real'`,
+the default); the DPT decoder defaults to a `linear` output. `train_step` dispatches to a
+clean labeled-only path or a semi-supervised path that adds FAL on pooled features **and**
+an L1 pseudo-label consistency term on student-vs-teacher depth over `x_unlab`. On-step EMA
+decay is provided by `TeacherEMACallback` with cosine/linear schedules, and
+`DepthAnything.from_pretrained_encoder(path)` loads encoder weights from a saved `.keras`
+checkpoint and re-syncs the teacher. `StrongAugmentation` supports any number of channels,
+applies per-sample brightness/contrast factors, and mixes the depth target by the same
+CutMix box as the image (the mixing happens in `train_step`, not in `call`). The legacy
+Conv-BN-ReLU encoder is preserved behind `encoder_kind='placeholder'` for back-compat.
 
 ---
 
@@ -62,7 +56,6 @@ the augmented image together with every identically-mixed target. Both training
 paths go through it — the labeled path for `y`, the semi-supervised path a
 second time for the teacher's pseudo-depth. `model(x, training=True)` is a plain
 un-augmented forward pass.
-```
 
 `train_step` accepts two input shapes:
 
@@ -72,14 +65,6 @@ un-augmented forward pass.
   L1-consistency term over `x_unlab` against the weight-shared frozen
   teacher, plus a Feature-Alignment Loss term on unlabeled features when
   `use_feature_alignment=True` as well.
-
-  This used to read "active only when `enable_semi_supervised=True` **AND**
-  `use_feature_alignment=True`", and that was an accurate description of a
-  bug rather than of a design: both terms sat under the FAL flag while
-  `train_step` routed on `enable_semi_supervised` alone, so
-  `enable_semi_supervised=True, use_feature_alignment=False` unpacked the
-  unlabeled batch and used it for nothing. Fixed in
-  `plan-2026-08-17T183311-79c63e38` (D-033).
 
 ---
 
@@ -120,20 +105,15 @@ DepthAnything(
 > kwarg. `input_shape` is accepted as a deprecated alias for one cycle so
 > previously-saved configs continue to load.
 
-**Save/load — D-009 (was D-004).** `DepthAnything` overrides Keras 3's
-`load_own_variables` to force-build the nested sub-Models with a dummy
-forward before the framework restores into them; without it the path-based
-restore lands on a tree whose sub-layers do not exist yet and (with a
-wrapped `ViT` sub-Model) 55/172 kernel arrays come back re-initialized.
-The save side is the stock Keras recursive save. The matching
-`save_own_variables` override that D-004 added — a flat numeric-keyed dump
-of `self.weights` — was removed on 2026-08-22: it did **not** bypass the
-framework's path-walking as its comment claimed, it ran alongside it, so
-every archive held both families and was exactly 2x its necessary size
-(`vit_l`/384: 610 weights, 1220 HDF5 datasets, 4.88 GB → 2.44 GB after
-removal, round-trip delta unchanged at exactly 0.0 over two full round
-trips). See `# DECISION plan-2026-08-22T035419-a11304c8/D-009` in
-`model.py` and the guard
+**Save/load.** `DepthAnything` overrides Keras 3's `load_own_variables` to
+force-build the nested sub-Models with a dummy forward before the framework
+restores into them; without it the path-based restore lands on a tree whose
+sub-layers do not exist yet and (with a wrapped `ViT` sub-Model) 55 of 172 kernel
+arrays come back re-initialized. The save side is the stock Keras recursive save;
+the model must not add a second, flat dump of `self.weights` on top of it, because
+that runs alongside the framework's path-walking rather than replacing it and
+doubles every archive (`vit_l`/384: 610 weights, 1220 HDF5 datasets, 4.88 GB
+instead of 2.44 GB). The guard is
 `tests/test_models/test_depth_anything/test_the_archive_holds_each_weight_once.py`.
 
 **EMA teacher.** `update_teacher_ema(decay=0.999)` advances the frozen
@@ -287,8 +267,7 @@ model.save('depth_anything.keras')
 loaded = keras.models.load_model('depth_anything.keras')
 ```
 
-Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
-`plan_2026-05-10_bd098beb`).
+The round-trip is exact on CPU (max-abs-diff = 0.0).
 
 ---
 
@@ -325,118 +304,21 @@ Verified end-to-end on CPU (max-abs-diff = 0.0; SC-6 in
 
 ## Known Issues
 
-The 14-item review from `plan_2026-05-10_44694bc9` plus D-005 has been
-folded into the work below. Item numbers are kept stable for traceability.
+* Custom `train_step` uses `tf.GradientTape` rather than the default Keras
+  `train_step`. This is a *sanctioned* exception, not an open defect: the
+  semi-supervised path is dual-batch with asymmetric augmentation and reads a
+  teacher outside the loss graph, none of which
+  `compute_loss(x, y, y_pred, sample_weight, training)` can carry. The rationale
+  is written into `model.py`'s module docstring so it ships with the code. Do not
+  cite this file as precedent for an ordinary single-batch model. *(LOW.)*
 
-**FIXED in `plan_2026-05-10_bd098beb`**:
-
-* **#1** — Encoder is now a real `ViT` backbone (`encoder_kind='real'`,
-  default). Placeholder Conv-BN-ReLU preserved behind `'placeholder'`.
-* **#2** — Frozen teacher is now weight-shared at build via
-  `keras.models.clone_model(student) + set_weights(student.get_weights())`.
-  EMA advance via `update_teacher_ema(decay=...)`.
-* **#3** — Semi-supervised infrastructure wired: `enable_semi_supervised`
-  flag, `train_step` accepts `((x_lab, x_unlab), y_lab)`,
-  `FeatureAlignmentLoss` term on unlabeled features.
-* **#4** — `train_step` Keras-3 API (was fixed in `plan_44694bc9`); the
-  `# DECISION plan_2026-05-10_44694bc9/D-003` anchor is preserved.
-* **#6** — `DPTDecoder.output_activation` defaults to `'linear'`. Compatible
-  with `AffineInvariantLoss` and the masked-L1 + gradient loss.
-* **#7** — Real ViT encoder is constructed in `__init__`, not `build()`,
-  for the real path; serialization is verified by SC-6 (max-abs-diff = 0.0)
-  via the `load_own_variables` force-build (D-004, narrowed by D-009).
-* **#8** — Dead `if X is not None` guards and `_create_fallback_decoder`
-  removed.
-* **#10** — `encoder_type` now actually selects ViT scale
-  (`small`/`base`/`large`) — no longer cosmetic.
-* **#11** — `input_shape` renamed to `image_shape` (legacy kwarg accepted
-  for one cycle).
-* **#13** — `frozen_encoder` weight-share issue subsumed by #2.
-* **#14** — `compile()` override no longer stashes dead `self.depth_loss` /
-  `self.feature_loss`.
-* **D-005** — `StrongAugmentation` uses `keras.random.uniform/shuffle`
-  (and a graph-mode cutmix gate).
-
-**FIXED in `plan_2026-05-10_54e6e303`** (this plan):
-
-* **#2-deeper** — On-step EMA decay schedule + integration. New module
-  `dl_techniques/models/vision/depth_anything/teacher_ema.py` provides
-  `cosine_ema_schedule(start, end, total_steps)`,
-  `linear_ema_schedule(...)`, and `TeacherEMACallback(schedule, warmup_steps)`.
-  `DepthAnything.from_pretrained_encoder(weights_path)` loads encoder
-  weights from a `.keras` checkpoint and re-syncs the teacher.
-* **#3-deeper** — Pseudo-label depth on the unlabeled stream
-  (`DepthAnything._pseudo_label_depth`, stop-gradient L1 consistency in
-  the semi-sup path) + dataset-side pairing utilities
-  `train.common.megadepth.UnlabeledImageDataset` and
-  `pair_labeled_unlabeled` yielding `((x_lab, x_unlab), y_lab)` via
-  `tf.data.Dataset.from_generator` + zip.
-* **#5** — `train_step` refactored into a clean labeled-only path
-  (`_train_step_labeled`: forward + `compute_loss` + apply grads) and a
-  clearly delimited semi-supervised branch
-  (`_train_step_semi_supervised`: labeled + FAL + pseudo-label
-  consistency). The D-003 anchor is preserved at the labeled
-  `compute_loss` call.
-* **#9** — `_apply_cutmix`'s mask keeps its trailing singleton axis and
-  broadcasts over any channel count (1/3/4, and a target's); brightness/contrast
-  factors are per-sample with shape `(B, 1, 1, 1)` so each image gets distinct
-  jitter.
-* **C-2 / C-19** — `_apply_cutmix` returns the paste box and the donor
-  permutation, `train_step` mixes image and target together, the
-  feature-alignment term no longer bypasses `self.augmentation`, and the
-  colour-jitter clip follows `input_value_range`. RED-proven in
-  `tests/test_layers/test_strong_augmentation.py::TestTargetAwareCutMix` /
-  `::TestDeclaredInputValueRange` and
-  `tests/test_models/test_depth_anything/test_depth_anything.py::TestTrainPathAugmentation`.
-* **Multi-epoch FAL stability test** — added at
-  `tests/test_models/test_depth_anything/test_depth_anything.py`
-  (`TestMultiEpochFALStability`): 3 epochs * 2 steps semi-sup synthetic;
-  asserts losses finite, last <= 1.5 * first, and teacher weights moved.
-
-**FIXED in `plan-2026-08-17T183311-79c63e38`** (D-033):
-
-* **The consistency term was gated on the wrong flag.** Both the FAL term
-  and the pseudo-label consistency term sat under `use_feature_alignment`,
-  while `train_step` routes to `_train_step_semi_supervised` on
-  `enable_semi_supervised` alone. `enable_semi_supervised=True,
-  use_feature_alignment=False` — two independent CLI flags in
-  `src/train/depth_anything/` — therefore unpacked `x_unlab`, used it for
-  nothing, and silently trained labeled-only at half the throughput, with
-  `update_teacher_ema` a no-op too. The teacher is now built under either
-  flag, consistency is gated on the teacher's existence, and
-  `use_feature_alignment` governs only the FAL term. The trainer's EMA
-  callback condition was widened to match.
-* **`self._loss_tracker` was never fed.** Keras 3 updates it inside the
-  DEFAULT `train_step`, not inside `compute_loss`, and both step methods
-  explicitly skipped `"loss"` in their metrics loop. MEASURED:
-  `history.history["loss"] == [0.0, 0.0]` across two epochs, so every
-  `ModelCheckpoint`/`EarlyStopping`/`ReduceLROnPlateau` monitoring `"loss"`
-  was dead. `test_step` is not overridden, which is why `val_loss` was real
-  and the shipped trainer (which monitors `val_loss`) never exposed it.
-  Both paths now route through `_finalize_train_step`.
-* **The returned logs dict nested under `"compile_metrics"`.** Now flat.
-  Scope correction: this was *never* visible in `history.history`, because
-  Keras' `pythonify_logs` recursively splices nested dicts into the parent
-  and discards the outer key. It was visible only to a direct
-  `model.train_step(batch)` caller.
-
-Guards: `tests/test_models/test_depth_anything/test_train_step.py`
-(8 tests, 6 RED-proven at `b0914e836`).
-
-**STILL OPEN**:
-
-* **#5 (base note)** — Custom `train_step` uses `tf.GradientTape` rather
-  than default Keras `train_step`. This is now a *sanctioned* exception
-  rather than an open issue: the semi-supervised path is dual-batch with
-  asymmetric augmentation and reads a teacher outside the loss graph, none
-  of which `compute_loss(x, y, y_pred, sample_weight, training)` can carry.
-  The rationale is written into `model.py`'s module docstring so it ships
-  with the code. Do not cite this file as precedent for an ordinary
-  single-batch model. *(LOW.)*
-
-**REMOVED** (issue no longer applicable):
-
-* **#12** — there are now tests.
+Both `train_step` paths route their metrics through `_finalize_train_step`, which
+feeds `self._loss_tracker`; Keras 3 updates that tracker inside the default
+`train_step` rather than inside `compute_loss`, so a custom step that skips
+`"loss"` in its metrics loop makes `history.history["loss"]` all zeros and kills
+every `ModelCheckpoint` / `EarlyStopping` / `ReduceLROnPlateau` that monitors it.
+The returned logs dict is flat, not nested under `"compile_metrics"`.
+Guards: `tests/test_models/test_depth_anything/test_train_step.py`.
 
 ---
 
@@ -449,10 +331,7 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`
 - Oquab, Maxime et al. **"DINOv2: Learning Robust Visual Features without
   Supervision."** 2023.
 - In-tree canonical Keras-3 `train_step` pattern:
-  `src/dl_techniques/models/language/masked_language_model/mlm.py:309-343`.
-- D-004 save/load override:
-  `src/dl_techniques/models/vision/depth_anything/model.py` (search for
-  `# DECISION plan_2026-05-10_bd098beb/D-004`).
+  `src/dl_techniques/models/language/masked_language_model/mlm.py`.
 
 ---
 
@@ -461,9 +340,7 @@ Guards: `tests/test_models/test_depth_anything/test_train_step.py`
 - `src/train/depth_anything/` — Pattern-5 training scaffold for this model
   (MegaDepth + masked depth loss + visualization callbacks).
 - `src/train/CLAUDE.md` § "Pattern 5: Depth Estimation (MegaDepth)" — the pattern
-  this trainer implements. (Its original exemplar,
-  `src/train/cliffordnet/train_depth_estimation.py`, was deleted on 2026-08-10;
-  `train_depth_anything.py` is now the only surviving Pattern-5 trainer.)
+  this trainer implements. `train_depth_anything.py` is the only Pattern-5 trainer.
 - `src/dl_techniques/models/vision/depth_anything/components.py` — `DPTDecoder` source.
 - `src/dl_techniques/models/vision/depth_anything/model.py` — `DepthAnything` source.
 - `tests/test_models/test_depth_anything/` — pytest coverage.

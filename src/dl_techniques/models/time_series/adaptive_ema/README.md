@@ -346,7 +346,7 @@ model.save("adaptive_ema.keras")
 restored = keras.saving.load_model("adaptive_ema.keras")
 ```
 Round-trip works because:
-- The model is decorated with `@register_dl_technique("dl_techniques.models.adaptive_ema.model")` (from `dl_techniques.utils.keras_registration`), so `AdaptiveEMASlopeFilterModel` resolves under `dl_techniques.models.adaptive_ema.model>AdaptiveEMASlopeFilterModel`; the legacy `Custom>AdaptiveEMASlopeFilterModel` alias the helper also binds keeps pre-2026-08-29 archives loading.
+- The model is decorated with `@register_dl_technique("dl_techniques.models.adaptive_ema.model")` (from `dl_techniques.utils.keras_registration`), so `AdaptiveEMASlopeFilterModel` resolves under `dl_techniques.models.adaptive_ema.model>AdaptiveEMASlopeFilterModel`; the legacy `Custom>AdaptiveEMASlopeFilterModel` alias the helper also binds keeps pre-migration archives loading.
 - All constructor args are scalars or a small JSON-able dict.
 
 ### ONNX

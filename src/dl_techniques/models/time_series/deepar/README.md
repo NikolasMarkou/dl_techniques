@@ -293,7 +293,7 @@ Feed it a `tf.data.Dataset` yielding the input dict. A bare dict-of-arrays as `x
 
 ## 12. Serialization & Deployment
 
-The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.deepar.model>DeepAR`. The legacy `Custom>DeepAR` alias that helper also binds keeps pre-2026-08-29 archives loading.
+The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.deepar.model>DeepAR`. The legacy `Custom>DeepAR` alias that helper also binds keeps pre-migration archives loading.
 
 ```python
 base.save("deepar_model.keras")

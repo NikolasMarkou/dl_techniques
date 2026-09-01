@@ -12,17 +12,10 @@ create_convunext(input_shape, use_bias=True, ...)  -> keras.Model
 term makes the model degree-1 homogeneous (`f(a*x) = a*f(x)`) and therefore
 scale-invariant across noise levels. Both arms are the same graph.
 
-> **History, because it changes how you read the rest of the repo.** Until 2026-08-14
-> this package shipped a subclassed `ConvUNextModel`, and
-> `models/vision/bias_free_denoisers/bfconvunext.py` shipped a separate functional builder for
-> the bias-free arm. They were two implementations of one architecture. They are now
-> merged onto the **functional** graph, here. `ConvUNextModel`, its own `ConvUNextStem`,
-> its bespoke `create_inference_model_from_training_model`, `PRETRAINED_WEIGHTS` and
-> `_download_weights` **no longer exist**, and neither does `src/train/convunext/`.
-> `bfconvunext.py` survives as thin `use_bias=False` wrappers plus the Keras registrar
-> (see [§8](#8-relationship-to-bfconvunext)).
-
-Every code block below was executed against this tree before it was written down.
+The bias-free arm is reached through thin wrappers in
+`models/vision/bias_free_denoisers/bfconvunext.py`, which also carries the Keras
+registrar (see [§8](#8-relationship-to-bfconvunext)). There is no subclassed
+`ConvUNextModel`; this functional builder is the only implementation.
 
 ---
 
@@ -124,8 +117,8 @@ therefore does not mean "provably, strictly bias-free":
 
 | Site | Behaviour | Why |
 |---|---|---|
-| `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence today; the trainer's `verify_bias_free` logs it and does not raise. Pre-existing, now documented. |
-| `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | Held by an earlier decision (`plan_2026-07-11_bb4b38b5/D-001`) that forbids adding knobs there. It is bias-free on BOTH arms. |
+| `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence; the trainer's `verify_bias_free` logs it and does not raise. |
+| `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | No knob is exposed there by design. It is bias-free on BOTH arms. |
 | The frozen Gabor bank | hardcoded `use_bias=False`, `trainable=False` | A frozen biased filter bank is a meaningless construct. |
 
 A fourth asymmetry is about activations rather than bias: `block_activation`,
@@ -269,13 +262,11 @@ back.get_layer('final_output')
 # ValueError: No such layer: final_output. ...
 ```
 
-The deleted `ConvUNextModel` CONSTRUCTED its final projection regardless and merely
-skipped applying it, so `include_top=False` still carried the head's weights and a
-checkpoint could move between the two settings. **A functional graph cannot reproduce
-that**, and this was measured rather than argued: `keras.Model(inputs, outputs)` prunes
-every layer not on a path to an output, so a constructed-but-unapplied projection owns
-no weights and is not reachable through `get_layer`. The weight-compatibility contract
-is therefore GONE, not preserved — `include_top=False` yields a strictly smaller
+`include_top=False` does **not** preserve weight compatibility with `include_top=True`.
+`keras.Model(inputs, outputs)` prunes every layer not on a path to an output, so a
+constructed-but-unapplied projection would own no weights and would not be reachable
+through `get_layer`; a functional graph cannot carry the head across the two settings.
+`include_top=False` therefore yields a strictly smaller
 weight list, its primary output is the full-resolution decoder feature map
 (`initial_filters` channels), and `set_weights` between the two settings raises.
 `include_top=False` combined with `final_projection_groups != 1` raises rather than
@@ -324,8 +315,7 @@ produces round-trip deltas that look like reinitialized weights.
 
 ## 8. Relationship to `bfconvunext`
 
-`src/dl_techniques/models/vision/bias_free_denoisers/bfconvunext.py` is now 289 lines
-(`wc -l`, 2026-08-24) and does exactly two jobs:
+`src/dl_techniques/models/vision/bias_free_denoisers/bfconvunext.py` does exactly two jobs:
 
 1. **Thin `use_bias=False` wrappers.** `create_convunext_denoiser(input_shape, *,
    block_normalization=None, **kwargs)` is a pure delegator: it forwards every other
@@ -337,10 +327,8 @@ produces round-trip deltas that look like reinitialized weights.
    `enable_deep_supervision=True`. Neither wrapper enumerates a parameter, so nothing can
    be silently dropped and nothing can drift out of step: `create_convunext` declares no
    `**kwargs`, so an unknown forwarded keyword raises `TypeError` at the call, and a
-   parameter added here is reachable through the bias-free arm the same day. (Until
-   2026-08-24 `create_convunext_denoiser` hand-copied 38 of these 42 parameters into its
-   own signature and forwarded them via a `dict(locals())` capture; `include_top` and
-   `output_channels` were among the four it had lost.)
+   parameter added here is reachable through the bias-free arm the same day. Do not
+   re-enumerate the parameters in either wrapper's signature.
 2. **The Keras registrar.** Importing it registers `ConvUNextStem`, `ConvNextV1Block`,
    `GlobalResponseNormalization`, `MatchChannels`, `GaborFiltersInitializer` and
    `SpatialLinearAttention` so `keras.models.load_model` resolves them.
@@ -363,16 +351,9 @@ module path — `@register_dl_technique("dl_techniques.models.convunext.model")`
 `dl_techniques.utils.keras_registration`, giving the key
 `dl_techniques.models.convunext.model>ConvUNextStem`.
 
-It did not always. Until 2026-08-29 it kept the string `dl_techniques.bias_free_denoisers`,
-naming the module it was defined in before the merge, so that the key stayed byte-stable for
-`.keras` artifacts written before the move. The 2026-08-29 registration migration
-moved every site in `src/` from the stock
-`@keras.saving.register_keras_serializable` onto the helper and initially preserved that
-string, along with 37 other pre-existing explicit ones; the same day the user confirmed there
-are no checkpoints, which was the exemption's entire basis, and all 34 non-conforming strings
-were normalized. `SpatialLinearAttention` in the same file is
+`SpatialLinearAttention` in the same file is
 `dl_techniques.models.convunext.model>SpatialLinearAttention`, so the two classes in this one
-file now sit under the **same** package string, as the rule requires.
+file sit under the **same** package string, as the rule requires.
 
 ## 9. Package surface
 

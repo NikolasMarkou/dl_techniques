@@ -94,7 +94,7 @@ The code integrates with the `dl_techniques` factories and follows the repo's Ke
 
 - **Normalization factory** `create_normalization_layer()` — see §6.1 for the working values.
 - **FFN factory** `create_ffn_layer()` — the factory offers seven types, but the xLSTM blocks can only construct `swiglu`; see §6.2.
-- **Serialization** — every class implements `get_config()` and registers with `@register_dl_technique`. The keys are `dl_techniques.models.xlstm.model>xLSTM`, `dl_techniques.models.xlstm.forecaster>xLSTMForecaster`, and `dl_techniques.layers.time_series.xlstm_blocks><ClassName>` for the six cells, layers and blocks. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
+- **Serialization** — every class implements `get_config()` and registers with `@register_dl_technique`. The keys are `dl_techniques.models.xlstm.model>xLSTM`, `dl_techniques.models.xlstm.forecaster>xLSTMForecaster`, and `dl_techniques.layers.time_series.xlstm_blocks><ClassName>` for the six cells, layers and blocks. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
 - **Keras 3 discipline** — layers created in `__init__`, weights in `build()`, proper RNN Cell/Layer infrastructure, `keras.ops` throughout, full type hints, masking and state handling, and validation that raises on bad configurations.
 
 ---

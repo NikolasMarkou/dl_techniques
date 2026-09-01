@@ -1,8 +1,7 @@
 # TabM — parameter-efficient batched MLP ensembles for tabular data
 
-This file was **0 bytes** until 2026-08-18. `model.py`'s module docstring is the
-long-form reference and remains the authority on the mechanism; this README is the
-orientation layer.
+`model.py`'s module docstring is the long-form reference and remains the authority
+on the mechanism; this README is the orientation layer.
 
 ## What it is
 
@@ -41,7 +40,7 @@ classifier), not a calibrated predictive variance.
 
 ## Variants
 
-Measured 2026-08-18 at `n_num_features=10, cat_cardinalities=[3, 5], n_classes=2`:
+At `n_num_features=10, cat_cardinalities=[3, 5], n_classes=2`:
 
 | variant | `hidden_dims` | `k` | `arch_type` | params | `call` output |
 |:---|:---|:---:|:---|---:|:---|

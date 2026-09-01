@@ -367,7 +367,7 @@ If it goes to `NaN`, it is almost always `sigma` collapsing. `min_sigma` exists 
 
 ## 12. Serialization & Deployment
 
-`MDNModel` registers as `dl_techniques.models.mdn.model>MDNModel` through `register_dl_technique` (`dl_techniques.utils.keras_registration`), so `.keras` archives load with no `custom_objects`. The legacy `Custom>MDNModel` alias the helper also binds keeps pre-2026-08-29 archives loading.
+`MDNModel` registers as `dl_techniques.models.mdn.model>MDNModel` through `register_dl_technique` (`dl_techniques.utils.keras_registration`), so `.keras` archives load with no `custom_objects`. The legacy `Custom>MDNModel` alias the helper also binds keeps pre-migration archives loading.
 
 ```python
 model.save("mdn_model.keras")

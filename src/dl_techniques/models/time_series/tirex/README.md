@@ -305,7 +305,7 @@ The label shape is `(batch, prediction_length)`; the loss broadcasts it against 
 
 ## 12. Serialization & Deployment
 
-`TiRexCore` registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.tirex.model>TiRexCore`, and `TiRexExtended` as `dl_techniques.models.tirex.model_extended>TiRexExtended`. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
+`TiRexCore` registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.tirex.model>TiRexCore`, and `TiRexExtended` as `dl_techniques.models.tirex.model_extended>TiRexExtended`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 ```python
 model.save("my_tirex_model.keras")

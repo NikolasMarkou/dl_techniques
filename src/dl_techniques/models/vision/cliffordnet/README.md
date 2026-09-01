@@ -43,15 +43,6 @@ two names — `CliffordNet` and `create_cliffordnet`. `CliffordNetLM` is **not**
 re-exported; import it from `dl_techniques.models.vision.cliffordnet.lm` directly. That
 `__all__` is pinned by `tests/test_models/test_cliffordnet/test_model.py`.
 
-**Removed 2026-08-10.** The denoiser (`CliffordNetDenoiser`), the conditional and
-confidence-interval denoisers, the Laplacian autoencoder (`CliffordLaplacianUNet`),
-the routing LM (`CliffordNetLMRouting`), the U-Net depth/segmentation model
-(`CliffordNetUNet`, `create_cliffordnet_depth`), the bidirectional embedding U-Net
-(`CliffordNetEmbedding`) and the LM U-Net (`CliffordNetLMUNet`) were all deleted
-together with the strided `CliffordNetBlockDSv2` / `CausalCliffordNetBlockDSv2`
-blocks they were built on. Do not re-document them; recover them from git history
-if they are ever needed.
-
 All models share the same algebraic core: `SparseRollingGeometricProduct` and `GatedGeometricResidual` from `src/dl_techniques/layers/geometric/clifford_block.py`.
 
 ---
@@ -223,7 +214,7 @@ Full isotropic / causal vision-and-sequence blocks composed of the primitives ab
 
 ## 6. Architectural Compliance
 
-Every model in the family was audited against the core properties of the Clifford geometric product. The audit verifies that each model fully exploits the algebra's strengths and does not introduce components (FFN, attention) that would undermine those properties.
+Every model in the family exploits the core properties of the Clifford geometric product and introduces no component (FFN, attention) that would undermine them.
 
 ### What the Clifford block provides
 

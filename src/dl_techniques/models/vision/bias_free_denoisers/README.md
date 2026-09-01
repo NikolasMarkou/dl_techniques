@@ -91,8 +91,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 
 > ### ⚠️ Degree-1 homogeneity is NOT automatic — it needs THREE things, and it is worth a lot
 >
-> `use_bias=False` alone does **not** give you `D(αy) = αD(y)`. Verified by measurement (2026-07-12,
-> `analyses/analysis_2026-07-12_103e465c/`), all three of these are required:
+> `use_bias=False` alone does **not** give you `D(αy) = αD(y)`. All three of these are required:
 >
 > | requirement | why | if you get it wrong |
 > |---|---|---|
@@ -100,7 +99,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 > | `block_activation` **positively homogeneous** (`relu`, `leaky_relu`) | `f(αx) = αf(x)` for α>0 | the factory default **`gelu` makes exact homogeneity mathematically IMPOSSIBLE** |
 > | `use_bias=False` everywhere, `convnext_version='v1'` | no additive constants anywhere | GRN's trainable `beta` (V2) breaks it |
 >
-> Get all three right and homogeneity is **exact to float32**: measured rel. err `2.5e-05`, **flat**
+> Get all three right and homogeneity is **exact to float32**: rel. err `2.5e-05`, **flat**
 > across `α ∈ [0.12, 9.9]` (an 80× range — flat means rounding noise, not violation; a real violation
 > *grows* with α). A bias-broken control fires at `8.3e-01`, so the probe detects failure.
 >

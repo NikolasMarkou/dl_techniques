@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **81 leaf packages** grouped into **11 family directories**.
+Complete model architectures — **85 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (81 of 81 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (85 of 85 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -39,7 +39,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
 | [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
-| [`embeddings_experimental/`](embeddings_experimental/) | 5 | ASCII text-embedding encoders, built to be compared against each other |
+| [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
 | [`graph/`](graph/) | 3 | models over explicit graph inputs |
 | [`neural_computer/`](neural_computer/) | 2 | external-memory / differentiable-computer architectures |
@@ -47,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **86** | |
+| **Sum** | **85** | |
 
 ### `vision/` (35)
 
@@ -111,10 +111,8 @@ direct-child count, because those two nest one level further. Re-derive with the
 | `tree_transformer/` | Tree Transformer |
 | `wave_field/` | wave-field LLM |
 
-Seven of these (`fnet`, `fftnet`, `mamba`, `hierarchical_reasoning_model`,
-`tiny_recursive_model`, `tree_transformer`, `mini_vec2vec`) sat under other headings before
-2026-08-24. They are filed here by input modality — token sequences — which is not a claim
-that `mamba` is only a language model.
+Packages here are filed by input modality — token sequences — which is not a claim that
+`mamba`, `fnet` or `fftnet` is only a language model.
 
 ### `vision_language/` (9)
 
@@ -191,16 +189,12 @@ into `CLAUDE.md`.
 | `vision/vit_siglip/` | SigLIP | **a ViT with a two-stage conv patch-embedding stem**. SigLIP's contribution is a *loss* — the pairwise sigmoid objective — and this package contains no text tower and no loss at all, so nothing in it can be sigmoid-contrastive | `model.py` lines 5-12 and 75-76 say so at the site |
 | `neural_computer/nam/` | Neural *Additive* Model | Neural Arithmetic **Module** — a differentiable-computer cell, not a GAM | `__init__.py` line 1 |
 
-`vision/image_restoration/pw_fnet/` was listed here until 2026-08-26 and has been **removed:
-the name does not misattribute.** PW-FNet is the architecture's own name in Jiang et al.,
-*Global Modeling Matters: A Fast, Lightweight and Effective Baseline for Efficient Image
-Restoration* — the paper builds a pyramid wavelet MIMO structure between blocks and uses
-Fourier transforms in place of self-attention inside them, which is what this package
-implements. What is true is narrower and is an implementation gap, not a naming one: **there
-is no wavelet or DWT operation in `model.py`** (`grep -niE 'wavelet|dwt|haar|pywt'` matches
-only the three prose occurrences of the model's name), so the pyramid is built from the
-encoder/decoder resolution ladder and multi-scale supervision alone. `README.md` line 485
-already explains that reading of the name.
+`vision/image_restoration/pw_fnet/` is **not** in that list: PW-FNet is the architecture's
+own name in Jiang et al., *Global Modeling Matters: A Fast, Lightweight and Effective
+Baseline for Efficient Image Restoration*. Its gap is an implementation one, not a naming
+one — there is no wavelet or DWT operation in `model.py`, so the pyramid is built from the
+encoder/decoder resolution ladder and multi-scale supervision alone. That package's own
+`README.md` records the gap.
 
 ## What you may claim in these docs
 

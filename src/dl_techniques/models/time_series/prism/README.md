@@ -195,7 +195,7 @@ PRISMModel.MODEL_VARIANTS = {
 - **`base`** — wider, for multivariate sets (ETT, Weather).
 - **`large`** — long context, deeper wavelets.
 
-### Band budget per preset (measured, not hand-computed)
+### Band budget per preset
 
 Every preset multiplies `tree_depth` and `num_wavelet_levels` into one number, `min_band_len` (L-4). It also depends on `context_len`, a caller argument, so a preset alone does not determine it. At `context_len=96, overlap_ratio=0.25`:
 
@@ -298,7 +298,7 @@ model.save("prism.keras")
 restored = keras.models.load_model("prism.keras")     # no custom_objects
 ```
 
-`PRISMModel`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISMModel`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
+`PRISMModel`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISMModel`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 `kernel_initializer` and `kernel_regularizer` are normalized via `keras.initializers.get` / `keras.regularizers.get` in `get_config()`; `quantile_levels` round-trips as a list (or `None` in point mode).
 
@@ -345,13 +345,13 @@ Run a forward pass and pull the router's intermediate output through a `keras.Mo
   min_band_len     = deepest_leaf_seg // 2 ** num_wavelet_levels
   ```
 
-  `min_band_len` must be `>= 1`; `__init__` raises `ValueError` at 0, naming all four knobs, the computed lengths, and a `context_len` that does work. Measured over a 36-cell grid, **depth alone does not separate working configurations from broken ones**: `context_len=96, tree_depth=2, num_wavelet_levels=4` is refused, while `context_len=256, tree_depth=4, num_wavelet_levels=3` is fine. Do not read a "`tree_depth > 3` is bad" rule out of this — compute `min_band_len`.
+  `min_band_len` must be `>= 1`; `__init__` raises `ValueError` at 0, naming all four knobs, the computed lengths, and a `context_len` that does work. **Depth alone does not separate working configurations from broken ones**: `context_len=96, tree_depth=2, num_wavelet_levels=4` is refused, while `context_len=256, tree_depth=4, num_wavelet_levels=3` is fine. Do not read a "`tree_depth > 3` is bad" rule out of this — compute `min_band_len`.
 
   At `min_band_len == 1` the configuration is supported but statistically degenerate: that band is one timestep, so the router sees `mean == min == max` and both first-difference statistics are a fabricated exact `0.0`. Prefer `>= 2` if the deepest band is meant to carry information; `__init__` warns at 1, because README prose is not reachable from a `from_variant(...)` call site.
 
   **Legacy checkpoints.** `from_config` routes through `__init__`, so a `.keras` file whose config has `min_band_len == 0` now raises at `load_model` instead of loading. This is deliberate: such a model produced `inf`/NaN band statistics on every forward pass. Re-train at a supported configuration; no migration makes those weights meaningful.
 
-  **A dynamic time axis defeats the guard.** The degenerate-band check branches on the STATIC band length and deliberately falls through when it is unknown. Measured: a `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None, None, 7])])` returns `nan_frac == 1.0` where the same model returns `0.0` eager. `PRISMModel.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature, or `padded_batch` pipeline — the shipped ONNX exporter already does.
+  **A dynamic time axis defeats the guard.** The degenerate-band check branches on the STATIC band length and deliberately falls through when it is unknown. A `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None, None, 7])])` returns `nan_frac == 1.0` where the same model returns `0.0` eager. `PRISMModel.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature, or `padded_batch` pipeline — the shipped ONNX exporter already does.
 
   Cost is separately exponential in depth: each layer instantiates `2^tree_depth` leaf segments plus the shallower levels.
 - **L-5. `PRISMNode.call()` uses `keras.ops.cond`** for the interpolation branch. Under the TF backend `ops.cond` traces both branches, so it is control-flow tidiness, not a speed-up — a latent inefficiency when benchmarking very large trees.

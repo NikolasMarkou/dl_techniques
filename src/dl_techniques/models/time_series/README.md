@@ -1,7 +1,7 @@
 # `models/time_series/` — the forecasting family
 
-There is no README here until 2026-08-18, but **every subpackage already had one**;
-this file is the index and the shared-contract page, not a summary of the eight.
+This file is the index and the shared-contract page, not a summary of the eight;
+every subpackage has a README of its own.
 
 ## The subpackages
 
