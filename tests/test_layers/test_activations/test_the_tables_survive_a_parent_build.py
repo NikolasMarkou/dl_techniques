@@ -61,6 +61,7 @@ from dl_techniques.layers.activations.probability_output import ProbabilityOutpu
 from dl_techniques.layers.activations.routing_probabilities import (
     RoutingProbabilitiesLayer,
 )
+from dl_techniques.layers.activations.soft_value_range import SoftValueRange
 from dl_techniques.layers.activations.thresh_max import ThreshMax
 
 _PACKAGE_DIR = os.path.join(
@@ -124,6 +125,14 @@ _RECIPES = {
         mode="trainable",
         bias_initializer=keras.initializers.Constant(0.5),
     ),
+    # STATELESS. `SoftValueRange` defines `build()` (for `self.built` bookkeeping)
+    # but creates NO weights, so the per-weight loops below iterate zero times for
+    # it and the weight-name comparison compares [] with []. Its case is therefore
+    # carried by the two assertions that are NOT weight-based: that the parent
+    # composition actually BUILT the child, and that the composed model runs finite.
+    # The recipe is registered rather than waived so that a future weight added to
+    # this layer is covered automatically, which is the whole point of the AST walk.
+    "SoftValueRange": lambda: SoftValueRange(min_value=-1.0, max_value=1.0),
     "ThreshMax": lambda: ThreshMax(
         trainable_slope=True,
         slope_initializer=keras.initializers.Constant(3.0),

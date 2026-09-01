@@ -113,6 +113,19 @@ float64 caller (repo decision ``plan-2026-07-29T070705-9bfc04c5/D-007``, idiom a
 This function NEVER hard-clips. An exact bound guard belongs in the constraint
 wrapper, where it is a projection detail, not in the differentiable map.
 
+Using it in an ``activation=`` slot
+-----------------------------------
+The function takes required parameters beyond ``x``, so it cannot be handed to an
+``activation=`` slot directly. **Do not bind them with ``functools.partial``**: Keras
+cannot serialize a bare ``partial``, so the model saves but reloads with the
+activation missing or as a broken reference. Pass the registered
+:class:`SoftValueRange` LAYER instead -- it is callable, carries its own
+``get_config``, and survives a ``.keras`` round trip::
+
+    keras.layers.Dense(16, activation=SoftValueRange(min_value=-1.0, max_value=1.0))
+
+or, equivalently, apply the layer as its own step in the graph.
+
 References:
     - Arjovsky, M., Chintala, S., & Bottou, L. (2017). "Wasserstein GAN."
       https://arxiv.org/abs/1701.07875 -- the weight-clipping critic whose
@@ -127,10 +140,58 @@ References:
 """
 
 import keras
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+
+# ---------------------------------------------------------------------
+# Shared validation
+# ---------------------------------------------------------------------
+
+
+def _validated_bounds(
+        min_value: float,
+        max_value: Optional[float],
+        sharpness: float,
+) -> Tuple[float, Optional[float]]:
+    """Validate the three range parameters and return them as plain floats.
+
+    ONE validator, two call sites -- :func:`soft_value_range` and
+    :class:`SoftValueRange`. Duplicating the checks would let the Layer and the
+    function drift into rejecting different inputs while both test suites stayed
+    green, which is the same defect class the single-formula rule exists to prevent.
+
+    :param min_value: Lower bound ``lo``.
+    :type min_value: float
+    :param max_value: Upper bound ``hi``, or ``None`` for one-sided mode.
+    :type max_value: Optional[float]
+    :param sharpness: Knee steepness. Must be strictly positive.
+    :type sharpness: float
+    :return: ``(lo, hi)`` as Python floats, with ``hi`` left as ``None`` in
+        one-sided mode.
+    :rtype: Tuple[float, Optional[float]]
+    :raises ValueError: If ``sharpness <= 0``, or if ``max_value < min_value``. The
+        message names the offending value(s).
+    """
+    if sharpness <= 0.0:
+        raise ValueError(
+            f"sharpness must be strictly positive, got {sharpness}. It is the knee "
+            f"steepness of softplus(beta * u) / beta; a non-positive value inverts "
+            f"or annihilates the map."
+        )
+
+    lo = float(min_value)
+    hi = None if max_value is None else float(max_value)
+
+    if hi is not None and hi < lo:
+        raise ValueError(
+            f"max_value must be >= min_value, got min_value={lo} and max_value={hi}. "
+            f"The interval [{lo}, {hi}] is empty."
+        )
+
+    return lo, hi
 
 
 # ---------------------------------------------------------------------
@@ -180,21 +241,7 @@ def soft_value_range(
     :rtype: keras.KerasTensor
     :raises ValueError: If ``sharpness <= 0``, or if ``max_value < min_value``.
     """
-    if sharpness <= 0.0:
-        raise ValueError(
-            f"sharpness must be strictly positive, got {sharpness}. It is the knee "
-            f"steepness of softplus(beta * u) / beta; a non-positive value inverts "
-            f"or annihilates the map."
-        )
-
-    lo = float(min_value)
-    hi = None if max_value is None else float(max_value)
-
-    if hi is not None and hi < lo:
-        raise ValueError(
-            f"max_value must be >= min_value, got min_value={lo} and max_value={hi}. "
-            f"The interval [{lo}, {hi}] is empty."
-        )
+    lo, hi = _validated_bounds(min_value, max_value, sharpness)
 
     # Degenerate interval: the two branches collapse onto the single point `lo`, so
     # short-circuit rather than divide by a zero width in the relative-sharpness rule.
@@ -254,3 +301,236 @@ def soft_value_range(
         y = hi - _soft_ramp(hi - y)
 
     return keras.ops.cast(y, input_dtype)
+
+
+# ---------------------------------------------------------------------
+# Keras layer implementations
+# ---------------------------------------------------------------------
+
+
+@register_dl_technique("dl_techniques.layers.activations.soft_value_range")
+class SoftValueRange(keras.layers.Layer):
+    """Softly map activations into ``[min_value, max_value]`` without hard clipping.
+
+    A thin, stateless :class:`keras.layers.Layer` wrapper over the module-level
+    :func:`soft_value_range`. It owns no weights and re-derives no math: ``call``
+    delegates, so the Layer and the function can never disagree.
+
+    Use it where the output should be *the identity in the interior* and only softly
+    constrained at the edges -- a smooth projection. It is a poor choice as a general
+    saturating head; ``min + (max - min) * sigmoid(x)`` is better there. See the
+    module docstring for the full comparison and for which guarantees are
+    unconditional (``y <= hi``, monotonicity, the ``log(2)/beta`` interior bias)
+    versus which are real-valued properties float32 realises only in-regime (strict
+    interiority; a nonzero gradient outside the interval, which underflows once the
+    distance exceeds roughly ``88/beta``).
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+                             x  [B, ..., F]
+                                     |
+                                     v
+                 +-------------------------------------------+
+                 | y = lo + softplus(beta*(x - lo)) / beta    |   lower knee
+                 +--------------------+----------------------+
+                                     |
+                                     v   (only when max_value is not None)
+                 +-------------------------------------------+
+                 | y = hi - softplus(beta*(hi - y)) / beta    |   upper knee
+                 +--------------------+----------------------+
+                                     |
+                                     v
+                             y  [B, ..., F]
+
+    The two knees are composed, not applied independently: the upper branch reads the
+    already-lifted value. That is what makes ``y <= hi`` structural, and it is also
+    the source of the small low-sharpness lower-bound undershoot documented in the
+    module docstring.
+
+    Choosing ``sharpness``
+    ^^^^^^^^^^^^^^^^^^^^^^
+
+    ======================================  ===============================================
+    Role                                    Suggested ``sharpness``
+    ======================================  ===============================================
+    Weight projection (e.g. a WGAN critic)  50 - 200, relative. Tight box, small interior bias.
+    Bounded output activation               5 - 15, relative. A gentle knee trains better.
+    Non-negativity floor                    ``max_value=None`` with
+                                            ``relative_sharpness=False``, 1 - 20 in DATA units.
+    ======================================  ===============================================
+
+    Larger ``sharpness`` buys a harder knee and costs regime width -- the outside
+    gradient, the whole reason to prefer this over ``keras.ops.clip``, underflows to
+    exactly zero sooner. That is the trade, not a free knob.
+
+    **Mixed precision.** :func:`soft_value_range` already widens float16/bfloat16
+    inputs to float32 before touching ``beta * x`` (which overflows fp16 at any
+    realistic ``beta``) and casts the result back, so under a ``mixed_float16``
+    global policy this layer is safe as written and its output stays float16 like
+    every other layer's. If you want the OUTPUT itself kept at full precision -- for
+    instance a bounded head whose values feed a loss -- say so explicitly with
+    ``SoftValueRange(..., dtype="float32")`` rather than relying on the internal
+    upcast, which is a numerical guard and not a dtype promise.
+
+    Input shape:
+        Arbitrary. Use the keyword argument ``input_shape`` when using this layer as
+        the first layer in a model.
+
+    Output shape:
+        Same shape as the input.
+
+    :param min_value: Lower bound ``lo``. Always applied.
+    :type min_value: float
+    :param max_value: Upper bound ``hi``. ``None`` (the default) selects one-sided
+        mode -- a smooth floor at ``lo`` and no ceiling.
+    :type max_value: Optional[float]
+    :param sharpness: Knee steepness. Must be strictly positive. Defaults to 50.0.
+    :type sharpness: float
+    :param relative_sharpness: When ``True`` (default) ``beta = sharpness / (hi - lo)``
+        so ``sharpness`` is expressed in interval widths. Ignored -- not an error --
+        when ``max_value is None``.
+    :type relative_sharpness: bool
+    :param kwargs: Additional keyword arguments passed to the Layer base class, such
+        as ``name``, ``dtype``, ``trainable``, etc.
+
+    :raises ValueError: If ``sharpness <= 0``, or if ``max_value < min_value``.
+
+    Example:
+
+    .. code-block:: python
+
+        import keras
+        from dl_techniques.layers.activations.soft_value_range import SoftValueRange
+
+        inputs = keras.Input(shape=(32,))
+        x = keras.layers.Dense(16)(inputs)
+        outputs = SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=10.0)(x)
+        model = keras.Model(inputs, outputs)
+
+    Note:
+        There is deliberately NO ``enforce_hard_bounds`` option here. An exact
+        ``maximum``/``minimum`` guard on a forward-pass output would reintroduce the
+        exactly-zero gradient this map exists to remove, which is a defect in an
+        activation, not a feature. The hard guard exists only in the weight-constraint
+        wrapper, where the value is assigned outside any tape and no gradient is at
+        stake.
+    """
+
+    def __init__(
+            self,
+            min_value: float,
+            max_value: Optional[float] = None,
+            sharpness: float = 50.0,
+            relative_sharpness: bool = True,
+            **kwargs: Any
+    ) -> None:
+        """Validate the range parameters and store them.
+
+        :param min_value: Lower bound ``lo``.
+        :type min_value: float
+        :param max_value: Upper bound ``hi``, or ``None`` for one-sided mode.
+        :type max_value: Optional[float]
+        :param sharpness: Knee steepness. Must be strictly positive.
+        :type sharpness: float
+        :param relative_sharpness: Whether ``sharpness`` is expressed in interval
+            widths.
+        :type relative_sharpness: bool
+        :param kwargs: Additional keyword arguments for the Layer base class.
+        :raises ValueError: If ``sharpness <= 0``, or if ``max_value < min_value``.
+        """
+        super().__init__(**kwargs)
+
+        # ONE validator, shared with the function -- see `_validated_bounds`. The
+        # checks are NOT restated here: a second copy is a second thing to drift.
+        lo, hi = _validated_bounds(min_value, max_value, sharpness)
+
+        self.min_value = lo
+        self.max_value = hi
+        self.sharpness = float(sharpness)
+        self.relative_sharpness = bool(relative_sharpness)
+
+        # Elementwise and shape-preserving, so a mask passes straight through.
+        self.supports_masking = True
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Mark the layer built. It is stateless -- there is nothing to create.
+
+        There is no shape contract to assert either: the map is elementwise and
+        accepts any rank. Deliberately NO weight-creation guard is paired with this
+        in the tests, because a ``len(weights) > 0`` assertion on a genuinely
+        weightless layer is vacuous.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``None``.
+        :rtype: None
+        """
+        super().build(input_shape)
+
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Apply the soft value-range map element-wise.
+
+        :param inputs: Input tensor of any shape.
+        :type inputs: keras.KerasTensor
+        :param training: Training or inference mode. Unused; the map has no
+            training-dependent behaviour. Kept for API consistency.
+        :type training: Optional[bool]
+        :return: Tensor of the same shape and dtype as ``inputs``.
+        :rtype: keras.KerasTensor
+        """
+        return soft_value_range(
+            inputs,
+            min_value=self.min_value,
+            max_value=self.max_value,
+            sharpness=self.sharpness,
+            relative_sharpness=self.relative_sharpness,
+        )
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Return the output shape, which equals the input shape.
+
+        Reads only stored configuration, so it works on an UNBUILT instance.
+
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: The same shape tuple, unchanged.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return input_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the config needed to rebuild the layer.
+
+        :return: The base Layer config plus all four range parameters.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            "min_value": self.min_value,
+            "max_value": self.max_value,
+            "sharpness": self.sharpness,
+            "relative_sharpness": self.relative_sharpness,
+        })
+        return config
+
+    def __repr__(self) -> str:
+        """Return a short representation naming the interval and the sharpness.
+
+        :return: A string such as
+            ``SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=50.0)``.
+        :rtype: str
+        """
+        return (
+            f"SoftValueRange(min_value={self.min_value}, "
+            f"max_value={self.max_value}, sharpness={self.sharpness}, "
+            f"relative_sharpness={self.relative_sharpness}, name='{self.name}')"
+        )

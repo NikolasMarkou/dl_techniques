@@ -16,6 +16,7 @@ Measured numbers quoted in the assertions come from the plan's
 ``findings/measured-numerics.md`` (keras 3.8.0 / TF 2.18, float32 CPU).
 """
 
+import functools
 import math
 
 import keras
@@ -23,7 +24,10 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.activations.soft_value_range import soft_value_range
+from dl_techniques.layers.activations.soft_value_range import (
+    SoftValueRange,
+    soft_value_range,
+)
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -473,3 +477,455 @@ class TestDtypes:
             f"range [{y_np.min()!r}, {y_np.max()!r}] escaped the float16 image of "
             f"the bounds [{lo16!r}, {hi16!r}]"
         )
+
+
+# =====================================================================
+# The `SoftValueRange` Layer
+# =====================================================================
+#
+# The Layer is a thin adapter over the function tested above: `call` delegates,
+# `__init__` shares the function's ONE validator. So these classes deliberately do
+# NOT re-test the numerics -- they test the Layer contract (guide v2 § 16.3): config
+# round trip, `.keras` round trip on values, unbuilt `compute_output_shape`,
+# degenerate shapes, the three dtype arms, XLA-vs-eager, knob pinning, and that the
+# thing actually trains.
+#
+# NOTE ON WEIGHTS: `SoftValueRange` is genuinely stateless -- zero weights, zero
+# sub-layers. Guide v2's per-variable gradient-flow rule and its
+# `len(trainable_variables) > 0` anti-vacuity assertion are therefore N/A and are
+# NOT written here (writing them would produce guards that cannot fail). The one
+# weight-related assertion the checklist mandates -- weight values equal at
+# `atol=0.0` before the loaded model's first call -- IS written, and its docstring
+# records that it is vacuous for this layer rather than omitting it silently.
+
+
+class TestLayerConstructionAndKnobs:
+    """Every constructor knob pinned: its default, and that changing it is observable.
+
+    A default that silently changed would alter the numerics of every existing call
+    site. Both halves are needed: the value assertions catch a changed default, the
+    sensitivity assertions catch a knob that stopped being wired to anything.
+    """
+
+    def test_defaults_are_pinned(self) -> None:
+        layer = SoftValueRange(min_value=-1.0)
+        assert layer.min_value == -1.0
+        assert layer.max_value is None
+        assert layer.sharpness == 50.0
+        assert layer.relative_sharpness is True
+
+    def test_supports_masking_is_enabled(self) -> None:
+        """Elementwise and shape-preserving, so a mask must pass through unchanged."""
+        assert SoftValueRange(min_value=-1.0, max_value=1.0).supports_masking is True
+
+    def test_the_layer_owns_no_weights(self) -> None:
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        layer.build((None, 8))
+        assert layer.built is True
+        assert len(layer.weights) == 0
+        assert len(layer.trainable_variables) == 0
+
+    def test_min_value_changes_the_output(self) -> None:
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        a = _np(SoftValueRange(min_value=-1.0, max_value=1.0)(x))
+        b = _np(SoftValueRange(min_value=-0.5, max_value=1.0)(x))
+        assert not np.allclose(a, b), "min_value is not wired to the output"
+
+    def test_max_value_changes_the_output(self) -> None:
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        a = _np(SoftValueRange(min_value=-1.0, max_value=1.0)(x))
+        b = _np(SoftValueRange(min_value=-1.0, max_value=0.5)(x))
+        assert not np.allclose(a, b), "max_value is not wired to the output"
+
+    def test_max_value_none_selects_one_sided_mode(self) -> None:
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        y = _np(SoftValueRange(min_value=-1.0)(x))
+        assert np.all(y >= -1.0)
+        assert y.max() > 1.0, "one-sided mode must have no ceiling"
+
+    def test_sharpness_changes_the_output(self) -> None:
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        a = _np(SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=5.0)(x))
+        b = _np(SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=50.0)(x))
+        assert not np.allclose(a, b), "sharpness is not wired to the output"
+
+    def test_relative_sharpness_changes_the_output_in_two_sided_mode(self) -> None:
+        """Width 2, so relative gives ``beta = 25`` and absolute gives ``beta = 50``."""
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        a = _np(SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=50.0,
+                               relative_sharpness=True)(x))
+        b = _np(SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=50.0,
+                               relative_sharpness=False)(x))
+        assert not np.allclose(a, b), "relative_sharpness is not wired to the output"
+
+    def test_validation_is_shared_with_the_function(self) -> None:
+        """The Layer must reject exactly what the function rejects, and say so.
+
+        The checks live in ONE private validator called by both; a second copy could
+        drift into accepting something the function refuses while both suites stayed
+        green.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=0.0)
+        assert "0.0" in str(excinfo.value)
+
+        with pytest.raises(ValueError) as excinfo:
+            SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=-7.5)
+        assert "-7.5" in str(excinfo.value)
+
+        with pytest.raises(ValueError) as excinfo:
+            SoftValueRange(min_value=1.0, max_value=-2.0)
+        message = str(excinfo.value)
+        assert "1.0" in message and "-2.0" in message, message
+
+    def test_repr_names_the_interval(self) -> None:
+        text = repr(SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=10.0))
+        assert "SoftValueRange" in text
+        assert "-1.0" in text and "1.0" in text and "10.0" in text
+
+
+class TestLayerForwardPass:
+
+    def test_forward_is_finite_and_shape_preserving(self) -> None:
+        x = np.random.default_rng(0).standard_normal((4, 6, 8)).astype("float32") * 5.0
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        y = layer(x)
+        assert tuple(y.shape) == (4, 6, 8)
+        y_np = _np(y)
+        assert np.all(keras.ops.convert_to_numpy(keras.ops.all(keras.ops.isfinite(y))))
+        assert np.all(y_np >= -1.0) and np.all(y_np <= 1.0)
+
+    def test_the_layer_agrees_with_the_function_exactly(self) -> None:
+        """`call` delegates, so this must be bit-identical, not merely close."""
+        x = np.linspace(-5.0, 5.0, 101).astype("float32")[None, :]
+        layer = SoftValueRange(min_value=-2.0, max_value=3.0, sharpness=12.0,
+                               relative_sharpness=False)
+        direct = _np(soft_value_range(x, -2.0, 3.0, sharpness=12.0,
+                                      relative_sharpness=False))
+        np.testing.assert_array_equal(_np(layer(x)), direct)
+
+    def test_training_flag_does_not_change_the_output(self) -> None:
+        x = np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        np.testing.assert_array_equal(
+            _np(layer(x, training=True)), _np(layer(x, training=False))
+        )
+
+    def test_a_mask_passes_straight_through(self) -> None:
+        inputs = keras.Input(shape=(5,))
+        masked = keras.layers.Masking(mask_value=0.0)(
+            keras.layers.Reshape((5, 1))(inputs)
+        )
+        out = SoftValueRange(min_value=-1.0, max_value=1.0)(masked)
+        assert out._keras_mask is not None, "the mask was dropped by the layer"
+
+
+class TestComputeOutputShape:
+
+    def test_unbuilt_instance_from_stored_config(self) -> None:
+        """The mandated case: it must answer from configuration alone, unbuilt."""
+        layer = SoftValueRange.from_config(
+            SoftValueRange(min_value=-1.0, max_value=1.0).get_config()
+        )
+        assert layer.built is False
+        assert layer.compute_output_shape((None, 7)) == (None, 7)
+        assert layer.compute_output_shape((3, 4, 5)) == (3, 4, 5)
+        assert layer.built is False, "compute_output_shape must not build the layer"
+
+    def test_matches_the_realised_forward_shape(self) -> None:
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        x = np.zeros((2, 3, 4), dtype="float32")
+        assert tuple(layer.compute_output_shape(x.shape)) == tuple(layer(x).shape)
+
+
+class TestSerialization:
+
+    def test_get_config_from_config_reproduces_every_parameter(self) -> None:
+        original = SoftValueRange(min_value=-2.5, max_value=4.0, sharpness=17.0,
+                                  relative_sharpness=False, name="svr")
+        config = original.get_config()
+        for key in ("min_value", "max_value", "sharpness", "relative_sharpness"):
+            assert key in config, f"{key} missing from get_config()"
+        restored = SoftValueRange.from_config(config)
+        assert restored.min_value == original.min_value
+        assert restored.max_value == original.max_value
+        assert restored.sharpness == original.sharpness
+        assert restored.relative_sharpness == original.relative_sharpness
+        assert restored.name == original.name
+
+    def test_get_config_round_trips_the_one_sided_none(self) -> None:
+        restored = SoftValueRange.from_config(
+            SoftValueRange(min_value=0.0).get_config()
+        )
+        assert restored.max_value is None
+
+    def test_keras_round_trip_matches_on_values(self, tmp_path) -> None:
+        """`.keras` round trip compared on VALUES at ``rtol=0``, ``training=False``.
+
+        Also performs the mandated weight-value comparison at ``atol=0.0`` BEFORE the
+        loaded model's first call. **That comparison is VACUOUS here**: the layer is
+        genuinely stateless, so both sides carry zero weights and the assertion can
+        never fail. It is written rather than omitted so the absence is a recorded
+        fact, not a silent gap -- see this section's header comment.
+        """
+        inputs = keras.Input(shape=(8,))
+        hidden = keras.layers.Dense(4, name="dense")(inputs)
+        outputs = SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=13.0,
+                                 relative_sharpness=False, name="svr")(hidden)
+        model = keras.Model(inputs, outputs)
+
+        x = np.random.default_rng(1).standard_normal((6, 8)).astype("float32") * 3.0
+        expected = _np(model(x, training=False))
+
+        path = tmp_path / "svr.keras"
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        svr_before = loaded.get_layer("svr")
+        assert len(svr_before.weights) == 0
+        np.testing.assert_allclose(
+            np.concatenate([_np(w).ravel() for w in svr_before.weights] or [np.zeros(0)]),
+            np.concatenate([_np(w).ravel() for w in
+                            model.get_layer("svr").weights] or [np.zeros(0)]),
+            rtol=0.0, atol=0.0,
+        )
+
+        actual = _np(loaded(x, training=False))
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+        # A round trip compares the model with ITSELF, so it is satisfied by any
+        # call -- including an identity one. This pins that the reloaded model is
+        # still doing the bounding: the Dense output escapes [-1, 1], the model
+        # output does not.
+        raw = _np(model.get_layer("dense")(keras.ops.convert_to_tensor(x)))
+        assert raw.min() < -1.0 or raw.max() > 1.0, (
+            "the probe input never left the interval, so the bound assertion below "
+            "is vacuous"
+        )
+        assert np.all(actual >= -1.0) and np.all(actual <= 1.0)
+
+        restored = loaded.get_layer("svr")
+        assert restored.min_value == -1.0
+        assert restored.max_value == 1.0
+        assert restored.sharpness == 13.0
+        assert restored.relative_sharpness is False
+
+    def test_the_layer_is_serializable_in_an_activation_slot(self, tmp_path) -> None:
+        """An ``activation=`` slot must survive a save/load -- hence a LAYER, not a
+        ``functools.partial``.
+
+        ``soft_value_range`` takes required parameters beyond ``x``, so binding them
+        would normally reach for ``functools.partial``; Keras cannot serialize one,
+        and the model would reload with a broken activation reference. The registered
+        Layer is callable AND carries its own config, so it round trips.
+        """
+        inputs = keras.Input(shape=(8,))
+        outputs = keras.layers.Dense(
+            4,
+            activation=SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=20.0),
+            name="dense",
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        x = np.random.default_rng(2).standard_normal((5, 8)).astype("float32") * 4.0
+        expected = _np(model(x, training=False))
+
+        path = tmp_path / "svr_activation.keras"
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        activation = loaded.get_layer("dense").activation
+        assert isinstance(activation, SoftValueRange), (
+            f"the activation reloaded as {type(activation)!r}, not a SoftValueRange"
+        )
+        assert activation.sharpness == 20.0
+        reloaded = _np(loaded(x, training=False))
+        np.testing.assert_allclose(reloaded, expected, rtol=0.0, atol=0.0)
+        # Same anti-vacuity concern as the round trip above: prove the reloaded
+        # activation still bounds, rather than merely agreeing with itself.
+        assert np.all(reloaded >= -1.0) and np.all(reloaded <= 1.0)
+        no_activation = keras.layers.Dense(4)
+        no_activation.build((None, 8))
+        no_activation.set_weights(loaded.get_layer("dense").get_weights())
+        raw = _np(no_activation(x))
+        assert raw.min() < -1.0 or raw.max() > 1.0, (
+            "the pre-activation never left the interval; the bound assertion is vacuous"
+        )
+
+    def test_a_bare_partial_in_the_same_slot_is_not_serializable(self) -> None:
+        """The counterpart pin for the docstring's warning, so the claim is tested.
+
+        This asserts the LIMITATION, not a feature: if a future Keras learns to
+        serialize a bare ``functools.partial``, this test XFAILs loudly and the
+        module docstring's advice can be revisited.
+        """
+        activation = functools.partial(soft_value_range, min_value=-1.0, max_value=1.0)
+        # `TypeError` specifically, not bare `Exception`: a serializer that crashed
+        # for some other reason would prove nothing about `partial`.
+        with pytest.raises(TypeError) as excinfo:
+            keras.activations.serialize(activation)
+        assert "functools.partial" in str(excinfo.value), str(excinfo.value)
+
+
+class TestDegenerateShapes:
+
+    @pytest.mark.parametrize("shape", [(0, 4), (1, 4), (2, 0), (2, 1)])
+    def test_degenerate_static_lengths(self, shape) -> None:
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        x = np.zeros(shape, dtype="float32")
+        y = layer(x)
+        assert tuple(y.shape) == shape
+        y_np = _np(y)
+        assert np.all(np.isfinite(y_np)) if y_np.size else True
+
+    def test_symbolic_trace_with_an_unknown_batch(self) -> None:
+        """A `TensorSpec([None, ...])` trace: nothing in `call` may read a shape."""
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+
+        @tf.function(input_signature=[tf.TensorSpec([None, 6], tf.float32)])
+        def _traced(t):
+            return layer(t)
+
+        for n in (0, 1, 7):
+            x = np.random.default_rng(3).standard_normal((n, 6)).astype("float32")
+            y = _np(_traced(tf.constant(x)))
+            assert y.shape == (n, 6)
+            assert np.all(np.isfinite(y)) if y.size else True
+
+    def test_functional_model_with_an_unknown_batch(self) -> None:
+        inputs = keras.Input(shape=(6,))
+        outputs = SoftValueRange(min_value=-1.0, max_value=1.0)(inputs)
+        model = keras.Model(inputs, outputs)
+        assert tuple(model.output_shape) == (None, 6)
+
+
+class TestLayerDtypes:
+    """The three mandated arms. `float32` is the control, not a formality: it is what
+    proves the other two are measuring a dtype effect and not a broken layer."""
+
+    def test_float32_control(self) -> None:
+        x = keras.ops.convert_to_tensor(
+            np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        )
+        assert keras.backend.standardize_dtype(x.dtype) == "float32"
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        y = layer(x)
+        assert keras.backend.standardize_dtype(y.dtype) == "float32"
+        assert np.all(keras.ops.convert_to_numpy(keras.ops.all(keras.ops.isfinite(y))))
+
+    def test_float64_is_not_silently_narrowed(self, float64_policy) -> None:
+        """Built INSIDE the test, and the REALISED input dtype is asserted first."""
+        x = keras.ops.convert_to_tensor(
+            np.linspace(-3.0, 3.0, 51).astype("float64")[None, :]
+        )
+        assert keras.backend.standardize_dtype(x.dtype) == "float64", (
+            "the float64 arm never realised float64; the guard below cannot fail"
+        )
+        layer = SoftValueRange(min_value=-1.0, max_value=1.0)
+        y = layer(x)
+        assert keras.backend.standardize_dtype(y.dtype) == "float64"
+        y_np = _np(y)
+        assert np.all(np.isfinite(y_np))
+        assert np.all(y_np >= -1.0) and np.all(y_np <= 1.0)
+
+    def test_mixed_float16_at_extreme_beta_stays_finite(
+            self, mixed_float16_policy
+    ) -> None:
+        """The fp16 regression arm: ``beta = 200 / 0.02 = 10000``, which overflows
+        float16 in ``beta * x`` without the function's widen-when-narrower upcast.
+
+        The bounds are compared CAST TO THE OUTPUT DTYPE: ``0.01`` is not
+        representable in float16 and rounds UP to ``0.010002136230468750``, so a
+        saturated output reads ``> 0.01`` in float64 while being exactly the float16
+        image of the bound.
+        """
+        layer = SoftValueRange(min_value=-0.01, max_value=0.01, sharpness=200.0)
+        x = keras.ops.cast(
+            keras.ops.convert_to_tensor(
+                np.linspace(-1.0, 1.0, 201).astype("float32")[None, :]
+            ),
+            "float16",
+        )
+        y = layer(x)
+        assert keras.backend.standardize_dtype(y.dtype) == "float16"
+        y_np = _np(y).astype(np.float64)
+        assert np.all(np.isfinite(y_np)), "fp16 overflow: the upcast is missing"
+        hi16, lo16 = float(np.float16(0.01)), float(np.float16(-0.01))
+        assert np.all(y_np >= lo16) and np.all(y_np <= hi16), (
+            f"range [{y_np.min()!r}, {y_np.max()!r}] escaped the float16 image of "
+            f"the bounds [{lo16!r}, {hi16!r}]"
+        )
+
+    def test_an_explicit_float32_layer_dtype_keeps_the_output_wide(
+            self, mixed_float16_policy
+    ) -> None:
+        """Pins the docstring's mixed-precision advice: `dtype="float32"` is what
+        keeps the OUTPUT at full precision. The internal upcast is a numerical guard,
+        not a dtype promise, so under the global policy the output is float16."""
+        x = keras.ops.convert_to_tensor(
+            np.linspace(-3.0, 3.0, 51).astype("float32")[None, :]
+        )
+        assert keras.backend.standardize_dtype(
+            SoftValueRange(min_value=-1.0, max_value=1.0)(x).dtype) == "float16"
+        assert keras.backend.standardize_dtype(
+            SoftValueRange(min_value=-1.0, max_value=1.0, dtype="float32")(x).dtype
+        ) == "float32"
+
+
+class TestXlaMatchesEager:
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"min_value": -1.0, "max_value": 1.0},
+            {"min_value": -1.0, "max_value": 1.0, "sharpness": 5.0},
+            {"min_value": 0.0},
+        ],
+    )
+    def test_jit_compiled_call_agrees_with_eager(
+            self, assert_xla_matches_eager, kwargs
+    ) -> None:
+        """`fit()` runs a traced `jit_compile` graph, not eager; eager-only is not a fix.
+
+        atol is 1e-6: the map is a chain of elementwise ops on values of order 1, so
+        the only legitimate disagreement is float32 rounding at ~1.19e-07 per op.
+        Measured deviation on this stack is 0.0 for all three arms.
+        """
+        layer = SoftValueRange(**kwargs)
+        x = np.linspace(-5.0, 5.0, 128).astype("float32").reshape(8, 16)
+        assert_xla_matches_eager(layer, x, 1e-6, f"SoftValueRange({kwargs})")
+
+
+class TestTrainingSmoke:
+
+    def test_a_soft_value_range_head_trains(self) -> None:
+        """Regression smoke: a bounded head must actually reduce the loss.
+
+        The targets sit strictly INSIDE ``[-1, 1]``, so the model can reach them: a
+        hard `clip` head could not, because samples driven outside the box would stop
+        receiving gradient. Sharpness 50 (relative, width 2 -> ``beta = 25``) keeps
+        the interior bias at ``log(2)/25 = 0.0277``, well below the signal.
+        """
+        keras.utils.set_random_seed(17)
+        rng = np.random.default_rng(17)
+        x = rng.standard_normal((256, 8)).astype("float32")
+        w = rng.standard_normal((8, 1)).astype("float32")
+        y = np.tanh(x @ w).astype("float32") * 0.5  # inside [-1, 1] by construction
+
+        model = keras.Sequential([
+            keras.Input(shape=(8,)),
+            keras.layers.Dense(16, activation="relu"),
+            keras.layers.Dense(1),
+            SoftValueRange(min_value=-1.0, max_value=1.0, sharpness=50.0),
+        ])
+        model.compile(optimizer=keras.optimizers.Adam(1e-2), loss="mse")
+        history = model.fit(x, y, epochs=8, batch_size=32, verbose=0)
+
+        losses = history.history["loss"]
+        assert all(np.isfinite(losses)), f"non-finite loss: {losses}"
+        assert losses[-1] < losses[0], (
+            f"loss did not decrease: first {losses[0]!r}, last {losses[-1]!r}"
+        )
+        predictions = _np(model(x, training=False))
+        assert np.all(np.isfinite(predictions))
+        assert np.all(predictions >= -1.0) and np.all(predictions <= 1.0)
