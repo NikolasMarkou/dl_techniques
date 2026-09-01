@@ -7,6 +7,9 @@ from typing import Dict, Any
 import tensorflow as tf
 
 from dl_techniques.layers.ffn.diff_ffn import DifferentialFFN
+from dl_techniques.regularizers.soft_orthogonal import (
+    SoftOrthonormalConstraintRegularizer,
+)
 
 
 class TestDifferentialFFN:
@@ -56,8 +59,8 @@ class TestDifferentialFFN:
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
-        # Default regularizer should be SoftOrthonormalConstraintRegularizer
-        assert layer.kernel_regularizer is not None  # Should have default regularizer
+        # No kernel regularizer by default -- None means OFF, not "substitute one".
+        assert layer.kernel_regularizer is None
         assert layer.bias_regularizer is None
 
         # Check that layer is not built yet
@@ -482,22 +485,42 @@ class TestDifferentialFFN:
             assert not keras.ops.any(keras.ops.isinf(output)), "Inf detected"
 
 
-def test_default_kernel_regularizer_coefficients_are_pinned():
-    """The default regularizer's four coefficients are pinned at the call site.
+def test_kernel_regularizer_none_is_a_true_off_switch():
+    """`kernel_regularizer=None` means NO regularizer, and it reaches the Dense layers.
 
-    DECISION plan-2026-09-01T201957-15d7a40e/D-002: `diff_ffn` was the only
-    consumer that constructed `SoftOrthonormalConstraintRegularizer()` bare, so
-    it silently inherited the `DEFAULT_SOFTORTHOGONAL_L2` `1e-4 -> 0.0` flip.
-    The call site now states all four values; this guard fails if a future
-    library-default change is silently inherited again, in either direction.
+    Supersedes DECISION plan-2026-09-01T201957-15d7a40e/D-002, which pinned the
+    coefficients of a substituted default. The substitution is gone: this layer
+    used to install a `SoftOrthonormalConstraintRegularizer` whenever the
+    argument was None, which made the parameter impossible to switch off at all.
+
+    Asserting `layer.losses == []` after a real forward pass is the
+    discriminating check -- an attribute-only assertion would still pass if a
+    regularizer were attached to the sub-layers by some other route.
     """
     layer = DifferentialFFN(hidden_dim=8, output_dim=4)
-    cfg = layer.kernel_regularizer.get_config()
+    assert layer.kernel_regularizer is None
 
-    assert cfg["l2_coefficient"] == 0.0
-    assert cfg["l1_coefficient"] == 0.0
-    assert cfg["lambda_coefficient"] == 1e-3
-    assert cfg["use_matrix_scaling"] is True
+    layer(keras.random.normal([2, 3, 6]))
+    assert layer.losses == []
+    for sub in (layer.positive_dense, layer.negative_dense, layer.output_proj):
+        assert sub.kernel_regularizer is None
+
+
+def test_kernel_regularizer_opt_in_reaches_the_sublayers():
+    """An explicitly passed regularizer is installed and actually contributes a loss.
+
+    The anti-vacuity partner to the test above: together they show the switch
+    moves in both directions, so neither is satisfied by a layer that simply
+    never regularizes anything.
+    """
+    reg = SoftOrthonormalConstraintRegularizer(
+        lambda_coefficient=1e-3, l1_coefficient=0.0,
+        l2_coefficient=0.0, use_matrix_scaling=True)
+    layer = DifferentialFFN(hidden_dim=8, output_dim=4, kernel_regularizer=reg)
+
+    layer(keras.random.normal([2, 3, 6]))
+    assert len(layer.losses) > 0
+    assert all(float(loss) > 0.0 for loss in layer.losses)
 
 
 class TestDifferentialFFNEdgeCases:

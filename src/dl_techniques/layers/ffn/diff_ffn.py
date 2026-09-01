@@ -51,10 +51,10 @@ Let ``x`` be the input vector.
 
 So the standard FFN form ``y = f(x)`` becomes
 ``y = g(f_pos(max(0, x)) - f_neg(max(0, -x)))``: the model has to express its
-function as a difference of two non-negative component functions. When you
-pass no ``kernel_regularizer``, the layer installs a
-``SoftOrthonormalConstraintRegularizer``, which keeps each branch's
-transformation well conditioned and stops the features collapsing.
+function as a difference of two non-negative component functions. The
+kernels are unregularized unless you pass a ``kernel_regularizer``; a
+``SoftOrthonormalConstraintRegularizer`` is a good choice, since it keeps each
+branch's transformation well conditioned and stops the features collapsing.
 
 References:
 The design combines several existing ideas:
@@ -83,7 +83,6 @@ from typing import Callable, Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
 
@@ -206,10 +205,10 @@ class DifferentialFFN(keras.layers.Layer):
     :param bias_initializer: Initializer for the biases, also cloned per
         Dense. Defaults to 'zeros'.
     :type bias_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Regularizer for the kernels. When None, the
-        layer installs a ``SoftOrthonormalConstraintRegularizer`` instead of
-        leaving the kernels unregularized. Pass one explicitly to turn that
-        off.
+    :param kernel_regularizer: Regularizer for the kernels. Defaults to None,
+        which means no kernel regularization. Consider
+        ``SoftOrthonormalConstraintRegularizer`` to keep the two branches well
+        conditioned.
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param bias_regularizer: Regularizer for the biases. Defaults to None.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
@@ -235,10 +234,8 @@ class DifferentialFFN(keras.layers.Layer):
     :vartype kernel_initializer: keras.initializers.Initializer
     :ivar bias_initializer: The resolved bias initializer.
     :vartype bias_initializer: keras.initializers.Initializer
-    :ivar kernel_regularizer: The regularizer actually in use. This is the
-        ``SoftOrthonormalConstraintRegularizer`` default when the argument was
-        None, so it is never None.
-    :vartype kernel_regularizer: keras.regularizers.Regularizer
+    :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
+    :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
     :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar positive_dense: ``Dense(hidden_dim)`` on the positive path.
@@ -300,9 +297,8 @@ class DifferentialFFN(keras.layers.Layer):
         """
         Validate the configuration and create the nine sub-layers.
 
-        Every argument is documented on the class. When ``kernel_regularizer``
-        is None a ``SoftOrthonormalConstraintRegularizer`` is installed in its
-        place, so the layer is never built without kernel regularization.
+        Every argument is documented on the class. ``kernel_regularizer``
+        defaults to None, which leaves the kernels unregularized.
 
         :raises ValueError: If ``hidden_dim`` is not positive or is odd, if
             ``output_dim`` is not positive, or if ``dropout_rate`` is outside
@@ -330,15 +326,10 @@ class DifferentialFFN(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
 
-        # Handle regularizer - use default if None provided
-        if kernel_regularizer is None:
-            # All four explicit: the l2 default flipped 1e-4 -> 0.0; 0.0 is now the deliberate pin.
-            # DECISION plan-2026-09-01T201957-15d7a40e/D-002
-            self.kernel_regularizer = SoftOrthonormalConstraintRegularizer(
-                lambda_coefficient=1e-3, l1_coefficient=0.0,
-                l2_coefficient=0.0, use_matrix_scaling=True)
-        else:
-            self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        # None means NO kernel regularizer. This layer used to substitute a
+        # SoftOrthonormalConstraintRegularizer here, which made the argument
+        # impossible to switch off; pass one explicitly to opt in.
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # CREATE all sub-layers in __init__ (Pattern 2: Composite Layer)
