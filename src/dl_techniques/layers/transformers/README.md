@@ -737,6 +737,70 @@ Consumed 3x per block by Qwen3-Next (`models/language/qwen/components.py`).
 -   **`chunk_size`** (default `64`): block width of the chunked scan, in timesteps. Must be positive. A pure performance knob — the result is the same for every value (pinned at float64 for `{1, 7, 16, 64, 256}`); larger blocks mean fewer sequential steps but a wider `(chunk_size, chunk_size)` intra-block matmul, so cost is quadratic in this value and linear in the step count. Ignored on the symbolic-length fallback path.
 -   **`use_bias`** (default `False`), **`kernel_initializer`** (default `'glorot_uniform'`), **`bias_initializer`** (default `'zeros'`), **`kernel_regularizer`**, **`bias_regularizer`**.
 
+## AreaAttentionBlock
+
+### Overview
+
+The `dl_techniques.layers.transformers.area_attention_block.AreaAttentionBlock` is the YOLOv12 detector's attention stage, and it operates on a 4D `(B, H, W, C)` feature map rather than a `(B, S, D)` token sequence. It is a **bare residual pair**:
+
+```
+x = inputs + attn(inputs)
+x = x + mlp2(mlp1(x))
+```
+
+`attn` is `dl_techniques.layers.attention.area_attention.AreaAttention` (registered as the `'area'` attention type): multi-head self-attention that either runs globally (`area=1`) or within `area` contiguous groups of the flattened token sequence, with a depthwise positional-encoding branch and an output projection. `mlp1`/`mlp2` are a 1x1-convolution pair that expands the channel width to `int(dim * mlp_ratio)` and projects it back.
+
+It lands here, in **Specialized and Hybrid Blocks**, for the same reason `SwinConvBlock` does: it is a purpose-built block, not a `TransformerLayer` configuration. It was named `AttentionBlock` while it lived in `layers/yolo12_blocks.py`; the rename is deliberate, since a bare `AttentionBlock` in a shared package's `__all__` collides with everything.
+
+### Two deliberate declines
+
+Both are stated in the module docstring as well, because the obvious "bring it up to the house shape" edit is a numerics change wearing a refactor's clothes:
+
+-   **No Pre/Post-Norm, no LayerScale, no StochasticDepth.** The residual shape above is exactly the pre-move block's. Inserting a normalization before either residual branch, a learned residual scale, or a drop-path would each change the function the block computes.
+-   **The MLP is a `ConvBlock` pair, not `create_ffn_layer('gated_mlp', ...)`.** `'gated_mlp'` is the one 4D-capable FFN type in `ffn/factory.py`, but it carries no normalization stage — substituting it **drops the intermediate BatchNorm** that `mlp1` applies to the hidden activation.
+
+### Normalization arrives as data
+
+The block hardcodes no epsilon. YOLOv12's `epsilon=1e-3, momentum=0.97` pair (a PyTorch/Ultralytics port; PyTorch's `momentum=0.03` is Keras' `0.97`) keeps exactly one home, `dl_techniques.layers.yolo12_blocks.YOLO12_NORM_KWARGS`, and is threaded in through `normalization_kwargs`. `layers/transformers/` sits *below* `layers/yolo12_blocks.py` in the dependency order and must not import it.
+
+**`normalization_kwargs=None` therefore gives you the normalization factory's defaults (`epsilon=1e-6`), not YOLOv12's.** Measured on the relocation's equivalence grid, omitting it moves the block output by `3.1e-02 .. 8.3e-02` — 255x-285x the float32 reassociation tolerance. It is not a cosmetic argument.
+
+### Usage
+
+```python
+from dl_techniques.layers.transformers import AreaAttentionBlock
+from dl_techniques.layers.yolo12_blocks import YOLO12_NORM_KWARGS
+
+# Global attention over the whole map.
+block = AreaAttentionBlock(dim=256, num_heads=8, area=1)
+
+# Area-grouped attention, configured the way YOLOv12 builds it.
+yolo_block = AreaAttentionBlock(
+    dim=256,
+    num_heads=8,
+    area=4,
+    normalization_kwargs=dict(YOLO12_NORM_KWARGS),
+)
+y = yolo_block(features)      # (B, H, W, 256) -> same shape
+```
+
+`area > 1` engages only when the flattened sequence length `H * W` is divisible by `area`; otherwise the attention sub-layer falls back to global attention. That fallback is exercised, not theoretical — YOLOv12 feeds spatial extents that do not divide evenly.
+
+### Arguments
+
+| Argument | Type | Description | Default |
+| --- | --- | --- | --- |
+| `dim` | `int` | **Required.** Feature width, and the output channel count. Must be divisible by `num_heads`. | |
+| `num_heads` | `int` | Number of attention heads. | `8` |
+| `mlp_ratio` | `float` | MLP hidden width is `int(dim * mlp_ratio)`. | `1.2` |
+| `area` | `int` | Number of attention groups; `1` is global attention. | `1` |
+| `use_bias` | `bool` | Whether the block's convolutions (`mlp1`, `mlp2` and the four inside the attention) carry a bias. | `False` |
+| `normalization_kwargs` | `Optional[Dict]` | Forwarded to the normalization factory by every `ConvBlock` in the block and its attention. `None` means `epsilon=1e-6` — see above. | `None` |
+| `kernel_initializer` | `str` or initializer | Initializer for every convolution. | `'he_normal'` |
+
+`call(inputs, attention_mask=None, training=None)`. The mask is a **keep** mask (`1 = keep`) over spatial positions, shaped `(B, H, W)` or `(B, H*W)`, and is forwarded verbatim to the attention sub-layer.
+
+
 ## EnergyTransformer / HopfieldNetwork
 
 The `dl_techniques.layers.transformers.energy_transformer` module implements the Energy Transformer (ET) block of Hoover et al., NeurIPS 2023 ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)).

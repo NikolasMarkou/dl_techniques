@@ -139,8 +139,8 @@ def pinned(tmp_path_factory) -> Any:
 #: Flipped to ``True`` by step 4, together with the body of `build_new_area_attention`.
 NEW_ARM_IS_RELOCATED_ATTENTION = True
 
-#: Flip to ``True`` in step 6, together with the body of `build_new_area_attention_block`.
-NEW_ARM_IS_RELOCATED_BLOCK = False
+#: Flipped to ``True`` by step 6, together with the body of `build_new_area_attention_block`.
+NEW_ARM_IS_RELOCATED_BLOCK = True
 
 
 def build_new_area_attention(pinned_module: Any, **kwargs: Any) -> keras.layers.Layer:
@@ -175,21 +175,35 @@ def build_new_area_attention(pinned_module: Any, **kwargs: Any) -> keras.layers.
 
 
 def build_new_area_attention_block(pinned_module: Any, **kwargs: Any) -> keras.layers.Layer:
-    """Construct the "new" attention-block arm.
+    """Construct the "new" attention-block arm -- REPOINTED by step 6.
 
-    STEP 6 repoints this function. Replace the body with::
+    Note the D-006 rename: the relocated class is ``AreaAttentionBlock``, not
+    ``AttentionBlock``.
 
-        from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
-        return AreaAttentionBlock(**kwargs)
+    Every newly-added knob keeps its default here (``use_bias=False``, and every knob the
+    attention sub-layer gained in step 4 -- ``dropout_rate=0.0``, ``qk_norm_type=None``,
+    ``probability_type='softmax'``, ``attention_mask=None``). I2 is an equivalence claim at
+    the yolo12 constructor arguments only.
 
-    and set ``NEW_ARM_IS_RELOCATED_BLOCK = True``. Note the D-006 rename: the relocated class
-    is ``AreaAttentionBlock``, not ``AttentionBlock``.
+    ``normalization_kwargs`` is the ONE exception, for exactly the reason spelled out on
+    `build_new_area_attention`: the pre-move ``yolo12_blocks.ConvBlock`` HARDCODED the D-067
+    pair ``epsilon=1e-3, momentum=0.97`` in the block's ``mlp1``/``mlp2`` as well as inside
+    the attention, while ``standard_blocks.ConvBlock`` reaches the normalization factory
+    whose defaults are ``epsilon=1e-6, momentum=0.99``. Under D-005 that pair keeps exactly
+    ONE home (``yolo12_blocks.YOLO12_NORM_KWARGS``) and is threaded to the relocated block as
+    DATA by its yolo12 caller. Measured with it OMITTED, on this exact probe grid: max|delta|
+    3.099632e-02 .. 8.306503e-02 against bounds of 1.19e-04 .. 2.98e-04, i.e. 255x-285x over
+    tolerance at every point. The harness SEES the epsilon; threading it aims the comparison
+    at the configuration under test rather than silencing a discriminator.
 
-    :param pinned_module: the loaded pre-move module (used only while unrelocated).
+    :param pinned_module: the loaded pre-move module (unused now that the arm is relocated).
     :param kwargs: constructor arguments shared by both arms.
     :return: an unbuilt layer.
     """
-    return pinned_module.AttentionBlock(**kwargs)
+    from dl_techniques.layers.transformers.area_attention_block import AreaAttentionBlock
+    from dl_techniques.layers.yolo12_blocks import YOLO12_NORM_KWARGS
+
+    return AreaAttentionBlock(normalization_kwargs=dict(YOLO12_NORM_KWARGS), **kwargs)
 
 
 def build_reference_area_attention(pinned_module: Any, **kwargs: Any) -> keras.layers.Layer:

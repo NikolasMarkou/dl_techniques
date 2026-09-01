@@ -34,6 +34,12 @@ Specialized and Hybrid Blocks:
 - AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
   conditional transformer block; norms/attention/FFN/AdaLN activation are
   factory-configurable.
+- AreaAttentionBlock: the yolo12 attention stage over a 4D `[B, H, W, C]`
+  feature map — `AreaAttention` plus a 1x1-conv MLP, each in a plain residual
+  add. Deliberately bare: no Pre/Post-Norm, no LayerScale, no StochasticDepth,
+  and its MLP is a `ConvBlock` pair rather than an `ffn/` type (see the module
+  docstring for why each is declined). Renamed from `AttentionBlock` on
+  relocation out of `layers/yolo12_blocks.py`.
 - GatedLinearAttentionBlock: a recurrent sequence-mixing block carrying one
   `(head_dim, head_dim)` state per head, rewritten each timestep by a gated
   outer product and read out after that write (`out_t = q_t^T S_t + v_t^(2)`);
@@ -105,6 +111,7 @@ from .adaln_zero import AdaLNZeroConditionalBlock
 from .free_transformer import BinaryMapper, FreeTransformerLayer
 from .progressive_focused_transformer import PFTBlock
 from .gated_linear_attention_block import GatedLinearAttentionBlock
+from .area_attention_block import AreaAttentionBlock
 
 # ---------------------------------------------------------------------
 # Energy Transformer (arXiv:2302.07253)
@@ -146,6 +153,7 @@ __all__ = [
     "FreeTransformerLayer",
     "PFTBlock",
     "GatedLinearAttentionBlock",
+    "AreaAttentionBlock",
 
     # Energy Transformer
     "EnergyTransformer",
