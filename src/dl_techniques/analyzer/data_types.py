@@ -103,7 +103,10 @@ class AnalysisResults:
 
     # Spectral analysis (WeightWatcher)
     spectral_analysis: Optional[pd.DataFrame] = None
+    # Aggregate over the layers of ALL models at once. Retained for backwards
+    # compatibility; prefer `spectral_summary_per_model`, which does not mix models.
     spectral_summary: Dict[str, Any] = field(default_factory=dict)
+    spectral_summary_per_model: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     spectral_recommendations: Dict[str, List[str]] = field(default_factory=dict)
     spectral_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
     spectral_rand_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)

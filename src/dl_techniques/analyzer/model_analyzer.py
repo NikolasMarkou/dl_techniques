@@ -625,6 +625,7 @@ class ModelAnalyzer:
             'training_metrics': (self._serialize_training_metrics()
                                if self.results.training_metrics else None),
             'spectral_summary': self.results.spectral_summary,
+            'spectral_summary_per_model': self.results.spectral_summary_per_model,
             'spectral_recommendations': self.results.spectral_recommendations,
             'multi_input_models': list(self._multi_input_models),
         }
@@ -746,7 +747,10 @@ class ModelAnalyzer:
             'confidence_summary': {},  # Separate confidence summary for clarity
             'weight_summary': {},
             'training_summary': {},
-            'spectral_summary': self.results.spectral_summary
+            # Cross-model aggregate, kept for backwards compatibility.
+            'spectral_summary': self.results.spectral_summary,
+            # Per-model spectral summaries, keyed by model name.
+            'spectral_summary_per_model': self.results.spectral_summary_per_model
         }
 
         # Determine which analyses were actually performed based on results

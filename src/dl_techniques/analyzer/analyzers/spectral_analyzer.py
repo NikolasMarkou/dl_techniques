@@ -126,6 +126,7 @@ class SpectralAnalyzer(BaseAnalyzer):
         results.spectral_esds = {}
         results.spectral_rand_esds = {}
         results.spectral_recommendations = {}
+        results.spectral_summary_per_model = {}
 
         for model_name, model in self.models.items():
             logger.info(f"Starting spectral analysis for model: {model.name}")
@@ -142,12 +143,15 @@ class SpectralAnalyzer(BaseAnalyzer):
                     results.spectral_rand_esds[model_name] = self._rand_esd_cache
                 if hasattr(self, '_recommendations'):
                     results.spectral_recommendations[model_name] = self._recommendations
+                if hasattr(self, '_model_summary'):
+                    results.spectral_summary_per_model[model_name] = self._model_summary
 
         if all_model_details:
             # Consolidate results into a single DataFrame
             results.spectral_analysis = pd.concat(all_model_details, ignore_index=True)
 
-            # Compute and store summary metrics
+            # Compute and store summary metrics. NOTE this aggregate mixes the layers of
+            # every model; `results.spectral_summary_per_model` keeps them separate.
             results.spectral_summary = self._get_summary(results.spectral_analysis)
         else:
             logger.warning("Spectral analysis did not produce any results for any model.")
@@ -172,9 +176,11 @@ class SpectralAnalyzer(BaseAnalyzer):
             warnings.simplefilter("ignore", category=RuntimeWarning)
             self._analyze_layers(details, all_layers)
 
-        # Generate and store recommendations for this model
-        summary = self._get_summary(details)
-        self._recommendations = self._generate_recommendations(details, summary)
+        # Generate and store the per-model summary and recommendations. The summary is
+        # kept (not discarded after the recommendations) so callers can read a per-model
+        # figure instead of only the cross-model aggregate.
+        self._model_summary = self._get_summary(details)
+        self._recommendations = self._generate_recommendations(details, self._model_summary)
 
         # Convert layer_id index to a column for robust concatenation
         return details.reset_index()

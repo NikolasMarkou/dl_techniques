@@ -111,3 +111,100 @@ class TestSummaryExcludesFailedFits:
 
         assert summary[MetricNames.ALPHA] == pytest.approx(3.0)
         assert summary['total_layers_analyzed'] == 2
+
+
+def _two_models_with_different_spectra():
+    """Two single-Dense models whose weight spectra differ by construction.
+
+    Returns:
+        Dict mapping model name to model. Model ``m_a`` carries an isotropic Gaussian
+        kernel; ``m_b`` carries a strongly anisotropic one, so their fitted alphas differ.
+    """
+    import keras
+
+    rng = np.random.default_rng(20260902)
+
+    def _build(name: str, kernel: np.ndarray) -> keras.Model:
+        inputs = keras.Input(shape=(kernel.shape[0],), name=f"{name}_in")
+        dense = keras.layers.Dense(kernel.shape[1], use_bias=False, name=f"{name}_dense")
+        model = keras.Model(inputs=inputs, outputs=dense(inputs), name=name)
+        dense.set_weights([kernel.astype("float32")])
+        return model
+
+    n, m = 64, 32
+    isotropic = rng.normal(size=(n, m))
+    anisotropic = isotropic * np.linspace(1.0, 40.0, m)[None, :]
+    return {"m_a": _build("m_a", isotropic), "m_b": _build("m_b", anisotropic)}
+
+
+class TestPerModelSpectralSummary:
+    """C4 — the spectral summary must not collapse every model into one mean."""
+
+    def test_the_summary_is_reported_per_model(self):
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        models = _two_models_with_different_spectra()
+        config = AnalysisConfig(analyze_spectral=True)
+        results = AnalysisResults()
+        SpectralAnalyzer(models=models, config=config).analyze(results)
+
+        frame = results.spectral_analysis
+        assert frame is not None and not frame.empty
+
+        # Anti-vacuity: the two models must genuinely disagree on alpha, otherwise a
+        # cross-model mean would be indistinguishable from a per-model one.
+        per_model_alpha = {
+            name: float(group[MetricNames.ALPHA].mean())
+            for name, group in frame.groupby('model_name')
+        }
+        assert set(per_model_alpha) == {"m_a", "m_b"}
+        assert abs(per_model_alpha["m_a"] - per_model_alpha["m_b"]) > 1e-3, (
+            f"degenerate probe: both models fitted the same alpha {per_model_alpha}"
+        )
+
+        per_model = results.spectral_summary_per_model
+        assert set(per_model) == {"m_a", "m_b"}, (
+            "spectral summary is not reported per model; the only summary available is the "
+            f"cross-model aggregate {results.spectral_summary.get(MetricNames.ALPHA)!r}"
+        )
+        for name, expected in per_model_alpha.items():
+            assert per_model[name][MetricNames.ALPHA] == pytest.approx(expected), (
+                f"model '{name}' summary alpha is not its own layers' mean: "
+                f"reported={per_model[name][MetricNames.ALPHA]!r} expected={expected!r}"
+            )
+
+    def test_the_flat_aggregate_is_retained_for_backwards_compatibility(self):
+        """The published flat `spectral_summary` keeps its cross-model meaning."""
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        models = _two_models_with_different_spectra()
+        results = AnalysisResults()
+        SpectralAnalyzer(models=models, config=AnalysisConfig(analyze_spectral=True)).analyze(results)
+
+        frame = results.spectral_analysis
+        expected = float(frame[MetricNames.ALPHA].mean())
+        assert results.spectral_summary[MetricNames.ALPHA] == pytest.approx(expected)
+
+    def test_get_summary_statistics_surfaces_the_per_model_summary(self, tmp_path):
+        """The public entry point must expose both shapes, not only the aggregate."""
+        from dl_techniques.analyzer.model_analyzer import ModelAnalyzer
+
+        models = _two_models_with_different_spectra()
+        analyzer = ModelAnalyzer(
+            models=models,
+            config=AnalysisConfig(
+                analyze_spectral=True,
+                save_plots=False,
+                save_format='json',
+                verbose=False,
+            ),
+            output_dir=str(tmp_path / "c4"),
+        )
+        analyzer.analyze(analysis_types={"spectral"})
+        summary = analyzer.get_summary_statistics()
+
+        assert 'spectral_summary' in summary
+        assert set(summary['spectral_summary_per_model']) == {"m_a", "m_b"}
+        assert summary['spectral_summary_per_model']["m_a"][MetricNames.ALPHA] != pytest.approx(
+            summary['spectral_summary_per_model']["m_b"][MetricNames.ALPHA]
+        )
