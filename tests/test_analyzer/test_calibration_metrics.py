@@ -106,7 +106,12 @@ class TestBrierScore:
         assert bs == pytest.approx(2.0)
 
     def test_brier_decomposition_sums(self):
-        """Reliability - Resolution + Uncertainty should approximate total Brier."""
+        """The identity the function is NAMED for: BS = Rel - Res + Unc.
+
+        REPAIRED (plan-2026-09-01T225724-e79ad4bd step 15): this test was named
+        for the identity and asserted only `>= 0` on each of the three terms — it
+        never formed the sum, so it passed while the identity failed by 30-65%.
+        """
         np.random.seed(42)
         y_true = np.random.randint(0, 3, 300)
         y_prob = np.random.dirichlet(np.ones(3), 300)
@@ -115,6 +120,13 @@ class TestBrierScore:
         assert decomp['reliability'] >= 0
         assert decomp['resolution'] >= 0
         assert decomp['uncertainty'] >= 0
+
+        recombined = (
+            decomp['reliability'] - decomp['resolution'] + decomp['uncertainty'])
+        assert recombined == pytest.approx(decomp['brier_score'], abs=1e-12), (
+            f"the decomposition does not decompose: "
+            f"Rel - Res + Unc = {recombined!r} vs BS = {decomp['brier_score']!r}"
+        )
 
 
 class TestReliabilityData:
@@ -154,3 +166,97 @@ class TestPredictionEntropy:
         for key in ['entropy', 'mean_entropy', 'std_entropy', 'median_entropy',
                      'max_entropy', 'min_entropy']:
             assert key in stats
+
+
+# =====================================================================
+# S7 — the Brier decomposition must actually decompose (plan step 15)
+# =====================================================================
+
+def _top1_brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Top-1 Brier score, derived here independently of the module under test.
+
+    The binary outcome is "was the top-1 prediction correct" and the forecast is
+    the top-1 confidence. This is the scalar the decomposition must reproduce.
+    """
+    scores = np.max(y_prob, axis=1)
+    outcomes = (np.argmax(y_prob, axis=1) == y_true).astype(float)
+    return float(np.mean((scores - outcomes) ** 2))
+
+
+class TestBrierDecompositionIdentity:
+    """`Rel - Res + Unc` was formed from TWO different outcome spaces.
+
+    Reliability and resolution came from a top-1 BINARY reduction while
+    uncertainty came from MULTICLASS one-hot base rates, so the identity failed
+    by 30-65% at every K.
+    """
+
+    @staticmethod
+    def _probe(n_classes: int, n: int = 2000, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        y_prob = rng.dirichlet(np.ones(n_classes), n)
+        y_true = np.array([rng.choice(n_classes, p=row) for row in y_prob])
+        return y_true, y_prob
+
+    @pytest.mark.parametrize("n_classes", [2, 3, 10])
+    def test_the_identity_holds(self, n_classes):
+        y_true, y_prob = self._probe(n_classes)
+        decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=15)
+
+        # Anti-vacuity: all three terms zero would satisfy any identity.
+        assert decomp['uncertainty'] > 1e-3, "degenerate probe: zero uncertainty"
+        assert decomp['brier_score'] > 1e-3, "degenerate probe: zero Brier score"
+
+        recombined = (
+            decomp['reliability'] - decomp['resolution'] + decomp['uncertainty'])
+        assert recombined == pytest.approx(decomp['brier_score'], abs=1e-12), (
+            f"K={n_classes}: Rel - Res + Unc = {recombined!r} vs "
+            f"BS = {decomp['brier_score']!r}"
+        )
+
+    @pytest.mark.parametrize("n_classes", [2, 3, 10])
+    def test_the_reported_brier_score_is_the_top1_one(self, n_classes):
+        """The decomposed scalar must be the top-1 Brier score, not a stand-in.
+
+        `brier_score + binning_residual` reconstructs the RAW top-1 Brier score
+        computed independently in this file, so the decomposition is anchored to
+        a real quantity rather than to an internally-consistent invention.
+        """
+        y_true, y_prob = self._probe(n_classes)
+        decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=15)
+
+        raw = _top1_brier_score(y_true, y_prob)
+        assert raw > 1e-3, "degenerate probe"
+        assert decomp['brier_score'] + decomp['binning_residual'] == pytest.approx(
+            raw, abs=1e-12), (
+            f"K={n_classes}: binned BS {decomp['brier_score']!r} + residual "
+            f"{decomp['binning_residual']!r} != raw top-1 BS {raw!r}"
+        )
+
+    def test_uncertainty_is_the_top1_correctness_variance(self):
+        """`Unc = acc * (1 - acc)` on the top-1 correctness variable.
+
+        The shipped value was `sum(p_c * (1 - p_c))` over MULTICLASS base rates,
+        which is a different quantity in a different outcome space.
+        """
+        y_true, y_prob = self._probe(3)
+        decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=15)
+
+        acc = float(np.mean(np.argmax(y_prob, axis=1) == y_true))
+        multiclass_form = float(np.sum(
+            np.mean(np.eye(3)[y_true], axis=0) * (1 - np.mean(np.eye(3)[y_true], axis=0))))
+
+        # Anti-vacuity: the two candidate formulas must actually differ here.
+        assert abs(acc * (1 - acc) - multiclass_form) > 1e-3
+
+        assert decomp['uncertainty'] == pytest.approx(acc * (1 - acc), abs=1e-12)
+
+    def test_a_perfectly_confident_and_correct_model_decomposes_to_zero(self):
+        y_true = np.array([0, 1, 2, 0, 1, 2])
+        y_prob = np.eye(3)[y_true]
+        decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=10)
+
+        assert decomp['brier_score'] == pytest.approx(0.0, abs=1e-12)
+        assert decomp['reliability'] == pytest.approx(0.0, abs=1e-12)
+        assert decomp['resolution'] == pytest.approx(0.0, abs=1e-12)
+        assert decomp['uncertainty'] == pytest.approx(0.0, abs=1e-12)

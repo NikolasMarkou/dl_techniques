@@ -44,18 +44,38 @@ from typing import Dict, List
 # Internal Helper Function for Binning
 # ------------------------------------------------------------------------------
 
-def _get_bin_info(
-    y_true: np.ndarray, y_prob: np.ndarray, n_bins: int
+def _get_binary_bin_info(
+    outcomes: np.ndarray, scores: np.ndarray, n_bins: int
 ) -> List[Dict[str, float]]:
     """
-    Internal helper to compute bin-wise statistics for equal-width bins.
+    Compute equal-width bin statistics for a (binary outcome, scalar score) pair.
 
-    This function calculates the confidence, accuracy, count, and proportion of
-    samples within each bin. It handles edge cases for binning.
+    This is the single binning primitive of the module. Every calibration
+    quantity here — top-1 ECE/AECE/MCE, the reliability diagram, the Brier
+    decomposition and classwise ECE — is a reduction over a binary outcome
+    binned by a scalar score in [0, 1]; only the choice of that pair differs.
+
+    Interface contract:
+        - ``outcomes`` and ``scores`` must be 1-D and the same length.
+        - ``outcomes`` carries values in {0.0, 1.0}; ``scores`` values in [0, 1].
+        - The FIRST bin is closed on the left so a score of exactly 0.0 is never
+          dropped; every other bin is half-open ``(lower, upper]``. This edge
+          handling lives here and nowhere else.
+        - Empty bins are RETAINED, with ``count = 0`` and zeroed statistics, so
+          the returned list always has exactly ``n_bins`` entries in bin order.
+
+    Args:
+        outcomes (np.ndarray): Binary outcome per sample. Shape: (n_samples,)
+        scores (np.ndarray): Forecast score per sample. Shape: (n_samples,)
+        n_bins (int): Number of equal-width bins over [0, 1].
+
+    Returns:
+        List[Dict[str, float]]: One dict per bin with keys ``prop_in_bin``,
+        ``accuracy`` (mean outcome in the bin), ``confidence`` (mean score in the
+        bin), ``count`` and ``center``.
     """
-    y_pred = np.argmax(y_prob, axis=1)
-    confidences = np.max(y_prob, axis=1)
-    accuracies = (y_pred == y_true).astype(float)
+    outcomes = np.asarray(outcomes, dtype=float)
+    scores = np.asarray(scores, dtype=float)
 
     bin_boundaries = np.linspace(0, 1, n_bins + 1)
     bin_lowers = bin_boundaries[:-1]
@@ -65,15 +85,15 @@ def _get_bin_info(
     for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
         # Handle the first bin to be inclusive of 0.0
         if bin_lower == 0.0:
-            in_bin = (confidences >= bin_lower) & (confidences <= bin_upper)
+            in_bin = (scores >= bin_lower) & (scores <= bin_upper)
         else:
-            in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
+            in_bin = (scores > bin_lower) & (scores <= bin_upper)
 
         prop_in_bin = np.mean(in_bin)
 
         if prop_in_bin > 0:
-            accuracy_in_bin = np.mean(accuracies[in_bin])
-            avg_confidence_in_bin = np.mean(confidences[in_bin])
+            accuracy_in_bin = np.mean(outcomes[in_bin])
+            avg_confidence_in_bin = np.mean(scores[in_bin])
             count = np.sum(in_bin)
         else:
             accuracy_in_bin = 0.0
@@ -88,6 +108,45 @@ def _get_bin_info(
             "center": (bin_lower + bin_upper) / 2
         })
     return bin_info
+
+
+def _top1_outcome_and_score(
+    y_true: np.ndarray, y_prob: np.ndarray
+) -> tuple:
+    """Reduce a multiclass prediction to the top-1 (correctness, confidence) pair.
+
+    Args:
+        y_true (np.ndarray): True class labels. Shape: (n_samples,)
+        y_prob (np.ndarray): Predicted probabilities. Shape: (n_samples, n_classes)
+
+    Returns:
+        tuple: ``(outcomes, scores)`` — ``outcomes[i]`` is 1.0 when the argmax
+        prediction is correct, ``scores[i]`` is the top-1 confidence.
+    """
+    outcomes = (np.argmax(y_prob, axis=1) == y_true).astype(float)
+    scores = np.max(y_prob, axis=1)
+    return outcomes, scores
+
+
+def _get_bin_info(
+    y_true: np.ndarray, y_prob: np.ndarray, n_bins: int
+) -> List[Dict[str, float]]:
+    """
+    Internal helper to compute bin-wise statistics for equal-width bins.
+
+    Top-1 specialization of :func:`_get_binary_bin_info`: the binary outcome is
+    "the argmax prediction was correct" and the score is the top-1 confidence.
+
+    Args:
+        y_true (np.ndarray): True class labels. Shape: (n_samples,)
+        y_prob (np.ndarray): Predicted probabilities. Shape: (n_samples, n_classes)
+        n_bins (int): Number of equal-width bins over [0, 1].
+
+    Returns:
+        List[Dict[str, float]]: See :func:`_get_binary_bin_info`.
+    """
+    outcomes, scores = _top1_outcome_and_score(y_true, y_prob)
+    return _get_binary_bin_info(outcomes, scores, n_bins)
 
 
 # ------------------------------------------------------------------------------
@@ -297,13 +356,33 @@ def compute_brier_score_decomposition(
     y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15
 ) -> Dict[str, float]:
     """
-    Decompose the Brier Score into Reliability, Resolution, and Uncertainty.
+    Decompose the TOP-1 Brier Score into Reliability, Resolution, and Uncertainty.
 
-    BS = Reliability - Resolution + Uncertainty
+    Murphy's (1973) three-term partition of the Brier score for the binary
+    forecasting problem "was the top-1 prediction correct, at the top-1
+    confidence":
 
-    - **Reliability**: Measures calibration error (lower is better).
-    - **Resolution**: Measures how well the model separates outcomes (higher is better).
-    - **Uncertainty**: Inherent unpredictability of the data (model-independent).
+        BS = Reliability - Resolution + Uncertainty
+
+    - **Reliability**: Mean squared gap between a bin's mean confidence and its
+      observed accuracy (calibration error; lower is better).
+    - **Resolution**: Mean squared spread of the bins' accuracies about the
+      overall accuracy (discrimination; higher is better).
+    - **Uncertainty**: ``acc * (1 - acc)`` — the variance of the top-1
+      correctness variable, i.e. the irreducible part.
+
+    The identity holds EXACTLY against the returned ``brier_score``, which is the
+    Brier score of the BINNED forecast (each sample's confidence replaced by its
+    bin's mean confidence). ``binning_residual`` is the difference between the raw
+    and binned top-1 Brier scores, so the raw score is
+    ``brier_score + binning_residual``. It shrinks as ``n_bins`` grows.
+
+    Note:
+        This function has no caller inside the library — ``CalibrationAnalyzer``
+        imports only ``compute_ece``, ``compute_brier_score``,
+        ``compute_reliability_data`` and ``compute_prediction_entropy_stats``. It
+        is retained as a public diagnostic, not deleted; a wrong public formula is
+        worse than an unused correct one.
 
     Args:
         y_true (np.ndarray): True class labels. Shape: (n_samples,)
@@ -311,40 +390,67 @@ def compute_brier_score_decomposition(
         n_bins (int, optional): Number of bins for reliability/resolution.
 
     Returns:
-        Dict[str, float]: Dictionary with 'reliability', 'resolution', and 'uncertainty'.
+        Dict[str, float]: Dictionary with 'reliability', 'resolution',
+        'uncertainty', 'brier_score' (the exactly-decomposed binned top-1 Brier
+        score) and 'binning_residual'.
 
     Example:
         >>> y_true = np.array([0, 1, 1, 0, 1, 0, 1, 0])
         >>> y_prob = np.array([[0.8,0.2],[0.3,0.7],[0.1,0.9],[0.9,0.1],
         ...                    [0.4,0.6],[0.7,0.3],[0.2,0.8],[0.6,0.4]])
         >>> decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=4)
-        >>> print(f"{decomp['reliability']:.4f}")
-        0.0211
+        >>> recombined = (decomp['reliability'] - decomp['resolution']
+        ...               + decomp['uncertainty'])
+        >>> bool(np.isclose(recombined, decomp['brier_score']))
+        True
     """
-    n_samples, n_classes = y_prob.shape
-    y_true_onehot = np.eye(n_classes)[y_true]
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-014
+    # Every term below is computed in ONE outcome space: the top-1 correctness
+    # variable. Do NOT restore the multiclass one-hot base-rate uncertainty
+    # (`sum(p_c * (1 - p_c))`) beside bin statistics taken from a top-1 binary
+    # reduction — mixing the two is what broke the identity by 30-65%.
+    # See decisions.md D-014.
+    outcomes, scores = _top1_outcome_and_score(y_true, y_prob)
+    n_samples = len(outcomes)
+    if n_samples == 0:
+        return {
+            "reliability": 0.0, "resolution": 0.0, "uncertainty": 0.0,
+            "brier_score": 0.0, "binning_residual": 0.0,
+        }
 
-    # 1. Uncertainty: Inherent randomness of the outcome
-    base_rate = np.mean(y_true_onehot, axis=0)
-    uncertainty = np.sum(base_rate * (1 - base_rate))
+    overall_accuracy = float(np.mean(outcomes))
 
-    # 2. Reliability and Resolution (bin-based)
-    bin_info = _get_bin_info(y_true, y_prob, n_bins)
-    overall_accuracy = np.mean(y_true == np.argmax(y_prob, axis=1))
+    # 1. Uncertainty: variance of the top-1 correctness variable.
+    uncertainty = overall_accuracy * (1.0 - overall_accuracy)
+
+    # 2. Reliability and Resolution (bin-based, same binner as every other metric).
+    bin_info = _get_binary_bin_info(outcomes, scores, n_bins)
 
     reliability = 0.0
     resolution = 0.0
+    binned_brier = 0.0
 
     for bin_data in bin_info:
         if bin_data["count"] > 0:
             prop_in_bin = bin_data["count"] / n_samples
             reliability += prop_in_bin * (bin_data["accuracy"] - bin_data["confidence"]) ** 2
             resolution += prop_in_bin * (bin_data["accuracy"] - overall_accuracy) ** 2
+            # Brier score of the binned forecast: within a bin the forecast is the
+            # bin's mean confidence, so E[(f_bin - o)^2] = f^2 - 2*f*acc + acc.
+            binned_brier += prop_in_bin * (
+                bin_data["confidence"] ** 2
+                - 2.0 * bin_data["confidence"] * bin_data["accuracy"]
+                + bin_data["accuracy"]
+            )
+
+    raw_brier = float(np.mean((scores - outcomes) ** 2))
 
     return {
-        "reliability": reliability,
-        "resolution": resolution,
-        "uncertainty": uncertainty
+        "reliability": float(reliability),
+        "resolution": float(resolution),
+        "uncertainty": float(uncertainty),
+        "brier_score": float(binned_brier),
+        "binning_residual": float(raw_brier - binned_brier),
     }
 
 # ------------------------------------------------------------------------------
