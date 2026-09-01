@@ -6,6 +6,7 @@ including its mathematical properties, integration with Keras, and edge cases.
 The regularizer should encourage weights to converge to -1, 0, or 1.
 """
 
+import logging
 import math
 
 import pytest
@@ -247,17 +248,95 @@ def test_monotonicity_regions():
     assert float(regularizer(x5)) < float(regularizer(x6))
 
 
-def test_config_serialization():
-    """Test configuration serialization and deserialization."""
-    original_reg = TriStatePreferenceRegularizer(scale=2.0)
-    config = original_reg.get_config()
+def test_config_serialization_round_trips_every_key():
+    """`get_config()` -> `from_config()` must preserve EVERY key it emits.
 
-    # Recreate from config
-    new_reg = TriStatePreferenceRegularizer.from_config(config)
+    The key set is fixed by the constructor signature of the current API:
+    multiplier, target, reduction, quadratic_tails, annealable, name.
+    `scale` and `base_coefficient` are gone; the old version of this test read
+    them and died with AttributeError.
+    """
+    original = TriStatePreferenceRegularizer(
+        multiplier=2.5,
+        target=0.5,
+        reduction="mean",
+        quadratic_tails=True,
+        annealable=True,
+        name="tri_state_roundtrip",
+    )
+    config = original.get_config()
 
-    assert new_reg.scale == original_reg.scale
-    assert new_reg.base_coefficient == original_reg.base_coefficient
+    assert set(config) == {
+        "multiplier",
+        "target",
+        "reduction",
+        "quadratic_tails",
+        "annealable",
+        "name",
+    }
 
+    rebuilt = TriStatePreferenceRegularizer.from_config(config)
+    rebuilt_config = rebuilt.get_config()
+    for key in config:
+        assert rebuilt_config[key] == config[key], key
+
+    # Config equality alone would not catch a key that is emitted but never
+    # consumed by __init__, so also pin the BEHAVIOUR. The two instances must
+    # agree bit-for-bit on a fixed input -- an exact 0.0 delta, not a tolerance:
+    # both evaluate the identical float32 expression on identical inputs.
+    weights = tf.constant([[-0.9, 0.2], [0.6, -0.35]], dtype=tf.float32)
+    assert abs(float(original(weights)) - float(rebuilt(weights))) == 0.0
+
+
+def test_config_reports_the_current_annealed_multiplier():
+    """`get_config` emits `multiplier_value`, i.e. the CURRENT multiplier.
+
+    This is a design choice being pinned, not a defect: with `annealable=True`
+    the multiplier lives in a non-trainable `keras.Variable` that a
+    `TriStatePressureScheduler` ramps during training, and `get_config`
+    deliberately reads that variable rather than the constructor argument, so a
+    model saved mid-anneal reloads at the pressure it was actually trained at.
+    (The class docstring documents the annealing mechanism; it does not spell
+    out this serialization consequence, so the pin lives here.)
+    """
+    reg = TriStatePreferenceRegularizer(multiplier=1.0, annealable=True)
+    reg.set_multiplier(3.5)
+
+    assert reg.get_config()["multiplier"] == 3.5
+    assert TriStatePreferenceRegularizer.from_config(
+        reg.get_config()
+    ).multiplier_value == 3.5
+
+
+def test_legacy_scale_kwarg_maps_to_target_and_warns(caplog):
+    """The `scale=` deprecation shim survives, and says so.
+
+    Old semantics pre-multiplied the weights by `scale`, so the wells sat at
+    0 and +/- 1/scale. The shim therefore maps scale -> target = 1/scale:
+    scale=2.0 -> target = 1/2.0 = 0.5.
+
+    The module warns through the repo logger (`dl_techniques.utils.logger`),
+    NOT through `warnings.warn`, so this uses `caplog` rather than
+    `pytest.warns`. A shim with no test is a shim that gets deleted by accident.
+    """
+    with caplog.at_level(logging.WARNING, logger="dl"):
+        reg = TriStatePreferenceRegularizer(scale=2.0)
+
+    assert reg.target == 0.5
+
+    warnings_logged = [
+        rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING
+    ]
+    assert any(
+        "`scale` is deprecated" in msg and "target=0.5" in msg
+        for msg in warnings_logged
+    ), warnings_logged
+
+
+def test_legacy_scale_rejects_non_positive():
+    """The shim validates before translating; 1/scale would otherwise blow up."""
+    with pytest.raises(ValueError, match="scale must be positive"):
+        TriStatePreferenceRegularizer(scale=0.0)
 
 
 def test_keras_integration():
