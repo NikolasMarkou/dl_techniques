@@ -670,8 +670,13 @@ class ModelAnalyzer:
             """
             if isinstance(obj, np.integer):
                 return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
+            elif isinstance(obj, (np.floating, float)):
+                # Strict JSON has no NaN/Infinity literals. A failed spectral fit
+                # leaves NaN in the erg columns, so a bare `NaN` token used to be
+                # written and the artifact could not be read by any strict parser.
+                # `None` is the analyzer's "not computed" value in JSON.
+                value = float(obj)
+                return None if not np.isfinite(value) else value
             elif isinstance(obj, np.ndarray):
                 return obj.tolist()
             elif isinstance(obj, pd.DataFrame):
@@ -693,7 +698,9 @@ class ModelAnalyzer:
         try:
             filepath = self.output_dir / filename
             with open(filepath, 'w') as f:
-                json.dump(results_dict, f, indent=JSON_INDENT)
+                # allow_nan=False makes any non-finite value that escaped
+                # convert_numpy fail loudly instead of writing an unparseable file.
+                json.dump(results_dict, f, indent=JSON_INDENT, allow_nan=False)
             logger.info(f"Saved results to: {filepath}")
         except Exception as e:
             logger.error(f"Could not save results: {e}")

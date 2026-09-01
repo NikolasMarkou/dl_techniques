@@ -313,3 +313,96 @@ class TestSmoothedModelRecurrent:
         np.testing.assert_array_equal(
             produced[2], original[2], err_msg="the LSTM bias was disturbed"
         )
+
+
+# ---------------------------------------------------------------------
+# C9 -- the JSON artifact must be parseable
+# ---------------------------------------------------------------------
+
+SPECTRAL_FEATURES = 20
+
+
+def _reject_json_constant(token: str):
+    """``parse_constant`` hook: strict JSON has no NaN/Infinity/-Infinity."""
+    raise ValueError(f"analysis_results.json contains the non-JSON constant {token!r}")
+
+
+def _build_spectral_probe(name: str, zeroed: bool) -> keras.Model:
+    """A model wide enough for spectral analysis, optionally degenerate.
+
+    Args:
+        name: Model name.
+        zeroed: When True the hidden kernel is set to all zeros, which makes the
+            power-law fit fail and leaves NaN in the erg metric columns.
+
+    Returns:
+        keras.Model: The probe.
+    """
+    keras.utils.set_random_seed(13)
+    # Both kernel dimensions must clear `spectral_min_evals` (10): the analyzer gates on
+    # M = min(N, M), so the default 6-feature input of the other probes is skipped
+    # outright and would make this guard vacuous.
+    inputs = keras.Input(shape=(SPECTRAL_FEATURES,), name=f"{name}_in")
+    hidden = keras.layers.Dense(16, activation="relu", name=f"{name}_h")
+    x = hidden(inputs)
+    outputs = keras.layers.Dense(N_CLASSES, activation="softmax", name=f"{name}_out")(x)
+    model = keras.Model(inputs=inputs, outputs=outputs, name=name)
+    if zeroed:
+        weights = hidden.get_weights()
+        weights[0] = np.zeros_like(weights[0])
+        hidden.set_weights(weights)
+    return model
+
+
+class TestJsonArtifactParseability:
+    """``analysis_results.json`` must be strict, parseable JSON.
+
+    Defect guarded (C9): ``json.dump`` ran with ``allow_nan`` at its default True and
+    ``convert_numpy`` passed NaN straight through ``float()``, so a failed spectral fit
+    wrote a bare ``NaN`` token. The file then could not be read by any strict parser.
+    The ``try/except`` around the dump downgrades a write failure to a log line, so this
+    guard asserts on the FILE, never on the absence of an exception.
+    """
+
+    def _run(self, tmp_path):
+        models = {
+            "good": _build_spectral_probe("good", zeroed=False),
+            "degenerate": _build_spectral_probe("degenerate", zeroed=True),
+        }
+        analyzer = ModelAnalyzer(
+            models=models,
+            config=_quiet_config(analyze_spectral=True),
+            output_dir=str(tmp_path / "c9"),
+        )
+        analyzer.analyze(analysis_types={"spectral"})
+
+        # Anti-vacuity: the spectral frame must exist and must contain a FAILED fit,
+        # otherwise no NaN is generated and the parse below succeeds trivially.
+        frame = analyzer.results.spectral_analysis
+        assert frame is not None and not frame.empty, (
+            "no spectral analysis was produced, so no NaN can reach the artifact"
+        )
+        assert frame.isna().to_numpy().sum() > 0, (
+            "the probe produced no NaN cells; this guard would pass either way. "
+            f"statuses: {frame['status'].tolist() if 'status' in frame else 'n/a'}"
+        )
+        return analyzer.output_dir / "analysis_results.json"
+
+    def test_the_artifact_parses_under_a_strict_parser(self, tmp_path):
+        artifact = self._run(tmp_path)
+        assert artifact.exists(), "save_results wrote no artifact at all"
+
+        text = artifact.read_text()
+        json.loads(text, parse_constant=_reject_json_constant)
+
+    def test_the_artifact_carries_no_bare_non_finite_tokens(self, tmp_path):
+        """A literal-token check, independent of the parser's own leniency."""
+        artifact = self._run(tmp_path)
+        text = artifact.read_text()
+
+        offenders = [
+            token for token in ("NaN", "Infinity", "-Infinity") if token in text
+        ]
+        assert not offenders, (
+            f"analysis_results.json contains bare non-JSON tokens: {offenders}"
+        )
