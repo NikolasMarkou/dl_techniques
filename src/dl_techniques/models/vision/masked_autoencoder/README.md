@@ -1,1013 +1,323 @@
-# Masked Autoencoder (MAE) Framework - Complete Usage Guide
+# Masked Autoencoder (MAE)
 
-## Table of Contents
+A convolutional **masked autoencoder** for self-supervised pre-training: mask most of an image,
+reconstruct it, and keep the encoder. The recipe follows He, Chen, Xie, Li, Dollár & Girshick,
+*Masked Autoencoders Are Scalable Vision Learners*, CVPR 2022
+([arXiv:2111.06377](https://arxiv.org/abs/2111.06377)), adapted to **convolutional** encoders in
+the FCMAE style of ConvNeXt V2 (Woo et al., CVPR 2023,
+[arXiv:2301.00808](https://arxiv.org/abs/2301.00808)).
 
-1. [Introduction](#introduction)
-2. [What is Masked Autoencoding?](#what-is-masked-autoencoding)
-3. [Quick Start](#quick-start)
-4. [Detailed Setup](#detailed-setup)
-5. [Training the MAE](#training-the-mae)
-6. [Working with ConvNeXt V2](#working-with-convnext-v2)
-7. [Fine-tuning for Downstream Tasks](#fine-tuning-for-downstream-tasks)
-8. [Visualization and Evaluation](#visualization-and-evaluation)
-9. [Advanced Usage](#advanced-usage)
-10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
+`MaskedAutoencoder` wraps **an encoder you supply**. It is not a ViT and it does not drop tokens:
+masked patches are replaced in place and the full image goes through the encoder.
 
----
+> `pretrained=True` raises `NotImplementedError` on every backbone in this repository, so there is
+> no ConvNeXt V2 checkpoint to hand this class. Pre-train one here, or pass an encoder you already
+> trained and saved.
 
-## Introduction
+## 1. Overview: What is Masked Autoencoding and Why It Matters
 
-The Masked Autoencoder (MAE) framework provides a powerful self-supervised learning approach for training vision models without labeled data. This guide shows you how to use the framework to pretrain encoders that can then be fine-tuned for various computer vision tasks.
+Hide most of an image, ask a model to reconstruct the hidden parts, and the only way to succeed is
+to learn what things look like. No labels are needed, so the training corpus is limited by disk
+rather than by an annotation budget, and the resulting encoder transfers to classification,
+detection and segmentation with far less labelled data than training from scratch.
 
-### Why Use MAE?
-
-- **No Labels Required**: Train on unlabeled image datasets
-- **Better Representations**: Learn robust visual features through reconstruction
-- **Transfer Learning**: Pretrained encoders work well on downstream tasks
-- **Data Efficiency**: Requires less labeled data for fine-tuning
-- **Proven Results**: Used successfully in ConvNeXt V2, ViT, and other architectures
-
----
-
-## What is Masked Autoencoding?
-
-Masked autoencoding is a self-supervised learning technique inspired by BERT:
-
-1. **Random Masking**: Randomly hide patches of the input image (e.g., 75%)
-2. **Encoding**: Process the masked image through an encoder
-3. **Decoding**: Reconstruct the original image from the encoded features
-4. **Loss**: Compute reconstruction loss only on masked patches
-
-This forces the encoder to learn meaningful representations that capture image structure and semantics.
-
-### Key Concepts
+The pipeline is four steps:
 
 ```
-Original Image (224x224x3)
-        ↓
-Random Patch Masking (75% patches hidden)
-        ↓
-Encoder (ConvNeXt, ResNet, etc.)
-        ↓
-Encoded Features (7x7x768)
-        ↓
-Decoder (Lightweight Conv Layers)
-        ↓
-Reconstructed Image (224x224x3)
-        ↓
-Loss = MSE(masked_patches_original, masked_patches_reconstructed)
+  image (224, 224, 3)
+    -> PatchMasking: hide 75% of the 16x16 patches
+    -> encoder: a conv feature extractor you supply   -> (14, 14, C)
+    -> ConvDecoder: lightweight upsampling stack      -> (224, 224, 3)
+    -> loss: MSE on the MASKED patches only
 ```
 
----
+Two design consequences worth internalizing: the loss is computed **only on masked patches**, so
+the model gets no credit for copying visible pixels; and the decoder is deliberately cheap, so
+representation quality is forced into the encoder, which is the part you keep.
 
-## Encoder contract
+## 2. The Problem MAE Solves
 
-`MaskedAutoencoder` wraps an encoder you supply. Three rules, all enforced by the
-constructor:
+Supervised pre-training needs a labelled image for every gradient step, which caps the usable
+corpus at the labelling budget. Contrastive self-supervision removes the labels but replaces them
+with a training-systems problem: large batches, negative sampling, and augmentation recipes that
+have to be tuned.
 
-1.  **`encoder` is a `keras.Model`** — the first positional argument. There is no
-    `encoder_dims` and no `encoder_output_shape` parameter; a non-model raises
-    `TypeError`.
-2.  **The encoder must return a 4-D `(B, H', W', C')` feature map.** A
-    token-sequence ViT does not fit, and raises `ValueError`.
-3.  **The encoder's total downsampling must equal `2 ** len(decoder_dims)`** —
-    `2 ** decoder_depth`, i.e. **16x** at the defaults. `ConvDecoder` upsamples
-    exactly 2x per `decoder_dims` entry, so a /4 encoder under the default decoder
-    reconstructs at 4x the input resolution. The constructor raises, naming both
-    sizes. Before 2026-08-15 it did not, and the mismatch surfaced only as a
-    broadcast failure inside `compute_loss` on the first training step.
+Masked autoencoding needs neither. The pretext task is generated from the image itself, the loss
+is a plain MSE, the batch size is a memory decision rather than a hyperparameter, and a high mask
+ratio (75%) makes the task hard enough that trivial interpolation does not solve it.
 
-## Quick Start
+## 3. The Encoder Contract
 
-Here's a minimal example to get started:
+`MaskedAutoencoder` wraps an encoder you supply. Three rules, **all enforced by the constructor**:
+
+1. **`encoder` is a `keras.Model`** — the first positional argument. There is no `encoder_dims`
+   and no `encoder_output_shape` parameter; a non-model raises `TypeError`.
+2. **The encoder must return a 4-D `(B, H', W', C')` feature map.** A token-sequence ViT does not
+   fit and raises `ValueError`.
+3. **The encoder's total downsampling must equal `2 ** len(decoder_dims)`** — that is
+   `2 ** decoder_depth`, so **16x** at the defaults. `ConvDecoder` upsamples exactly 2x per
+   `decoder_dims` entry, so a /4 encoder under the default decoder would reconstruct at 4x the
+   input resolution. The constructor raises, naming both sizes and suggesting a `decoder_depth`.
+
+The check compares resolved **spatial sizes**, not a downsampling ratio: a ratio comparison
+silently accepts a 33x33 -> 8x8 encoder (floor division gives 4 either way) whose decoder then
+emits 128x128 against a 33x33 target.
+
+## 4. Architecture Deep Dive
+
+| Component | What it does |
+|:---|:---|
+| `PatchMasking(patch_size, mask_ratio, mask_value)` | Splits the image into `patch_size` squares, samples a per-sample mask, and substitutes `mask_value` at masked positions. Returns `(masked_images, mask, patches)`; `mask` is `(B, num_patches)`. |
+| your encoder | Any `keras.Model` meeting § 3. Sees the *masked* image, full resolution. |
+| `ConvDecoder(decoder_dims, output_channels)` | One 2x upsample + conv block per `decoder_dims` entry, then a projection to `output_channels`. |
+| `MaskedAutoencoder` | Composes the three, owns `compute_loss`, `train_step`, `test_step` and a `reconstruction_loss` metric. |
+
+`call()` returns a dictionary, not a tensor:
+
+| Key | Shape |
+|:---|:---|
+| `reconstruction` | `(B, H, W, C)` |
+| `mask` | `(B, num_patches)`, 1 = masked |
+| `masked_input` | `(B, H, W, C)` — the encoder's actual input |
+| `encoded` | the encoder's feature map |
+
+When `decoder_dims` is left `None` it is derived from the encoder's channel count: halve it
+`decoder_depth` times, with a floor of 64. A /16 encoder emitting 768 channels therefore gets
+`[384, 192, 96, 64]`, and one emitting 32 channels gets `[64, 64, 64, 64]`.
+
+`mask_value` selects what replaces a masked patch: `"learnable"` (a trained mask token, the
+default), `"zero"`, `"noise"`, or any float.
+
+## 5. Quick Start Guide
 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision.masked_autoencoder import (
-    MaskedAutoencoder,
-    visualize_reconstruction,
-)
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
-# 1. Create MAE model. MAE takes an ENCODER MODEL, not a dimension list.
-#    `strides=2` is required: ConvNeXtV2 applies `strides` at the stem AND at
-#    each of the 3 inter-stage downsamples, so `strides=2` gives 2**4 = 16x
-#    total -- exactly the default decoder's upsampling factor (see § Encoder
-#    contract below). The shipped default `strides=4` gives 256x and a 1x1
-#    feature map at 224, which the constructor rejects.
+# `strides=2` is REQUIRED. ConvNeXtV2 applies `strides` at the stem AND at each of
+# the 3 inter-stage downsamples, so strides=2 gives 2**4 = 16x total -- exactly the
+# default decoder's upsampling factor. The shipped default strides=4 gives 256x and
+# a 1x1 feature map at 224, which the constructor rejects (§ 3).
 encoder = ConvNeXtV2.from_variant(
     "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
-)  # -> (None, 14, 14, 768)
+)   # -> (None, 14, 14, 768)
 
 mae = MaskedAutoencoder(
     encoder=encoder,
-    patch_size=16,                          # 16x16 patches
-    mask_ratio=0.75,                        # Mask 75% of patches
-    input_shape=(224, 224, 3)
+    patch_size=16,               # 16x16 patches -> 14x14 = 196 of them
+    mask_ratio=0.75,             # hide 75%
+    input_shape=(224, 224, 3),
 )
+mae.compile(optimizer=keras.optimizers.Adam(1e-4))
 
-# 2. Compile
-mae.compile(optimizer=keras.optimizers.Adam(learning_rate=1e-4))
+images = np.random.rand(8, 224, 224, 3).astype("float32")   # unlabelled, in [0, 1]
+mae.fit(images, epochs=1, batch_size=4, verbose=0)
 
-# 3. Train on unlabeled images
-# Assuming train_images is array of shape (N, 224, 224, 3)
-mae.fit(train_images, epochs=100, batch_size=64)
+out = mae(images[:1], training=True)
+print(tuple(int(d) for d in out["reconstruction"].shape))   # (1, 224, 224, 3)
 
-# 4. Visualize results
-sample_image = train_images[0]
-original, masked, reconstructed = mae.visualize(sample_image)
-
-# 5. Extract pretrained encoder for downstream tasks
-encoder = mae.encoder
+pretrained_encoder = mae.encoder      # this is the artifact you keep
 ```
 
----
+Note `mae.fit(images, ...)` takes **only** images: `train_step` builds its own target from the
+input, so there is no `y` argument.
 
-## Detailed Setup
-
-### Step 1: Prepare Your Data
-
-MAE works with unlabeled images. Prepare your dataset:
+A tiny encoder for tests and smoke runs, and the shape the constructor demands:
 
 ```python
-import numpy as np
-from pathlib import Path
-from PIL import Image
-
-def load_images_from_directory(image_dir, target_size=(224, 224)):
-    """Load and preprocess images from directory."""
-    image_paths = list(Path(image_dir).glob("**/*.jpg"))
-    images = []
-    
-    for path in image_paths:
-        img = Image.open(path).convert('RGB')
-        img = img.resize(target_size)
-        img_array = np.array(img) / 255.0  # Normalize to [0, 1]
-        images.append(img_array)
-    
-    return np.array(images, dtype=np.float32)
-
-# Load unlabeled images
-train_images = load_images_from_directory("data/unlabeled_images")
-print(f"Loaded {len(train_images)} images with shape {train_images.shape}")
-```
-
-### Step 2: Create the MAE Model
-
-The key is specifying your encoder architecture dimensions:
-
-```python
-from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
-from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
-
-def convnext_encoder(variant, input_shape=(224, 224, 3)):
-    """A /16 ConvNeXtV2 feature extractor -- see the Encoder contract above."""
-    return ConvNeXtV2.from_variant(
-        variant, include_top=False, input_shape=input_shape, strides=2
-    )
-
-# ConvNeXt-Tiny (balanced)
-mae_tiny = MaskedAutoencoder(
-    encoder=convnext_encoder("tiny"),      # 14x14x768
-    patch_size=16,
-    mask_ratio=0.75,
-    decoder_dims=[512, 256, 128, 64],      # 4 entries -> 16x upsampling
-    input_shape=(224, 224, 3)
-)
-
-# ConvNeXt-Base (larger, better representations)
-mae_base = MaskedAutoencoder(
-    encoder=convnext_encoder("base"),      # 14x14x1024
-    patch_size=16,
-    mask_ratio=0.75,
-    decoder_dims=[512, 256, 128, 64],
-    input_shape=(224, 224, 3)
-)
-```
-
-### Step 3: Understanding Key Parameters
-
-**Encoder Parameter:**
-- `encoder`: a **built or buildable `keras.Model`** that maps `(B, H, W, C)` to a
-  4-D `(B, H', W', C')` feature map. There is no `encoder_dims` and no
-  `encoder_output_shape`; both are read off the encoder itself. `H'`/`W'` must
-  satisfy the scale contract below or the constructor raises.
-
-**Masking Parameters:**
-- `patch_size`: Size of square patches (16 is standard)
-- `mask_ratio`: Fraction of patches to mask (0.75 = 75%)
-- `mask_value`: How to mask patches ("learnable", "zero", "noise")
-
-**Decoder Parameters:**
-- `decoder_dims`: List of channel dimensions for decoder layers
-- `decoder_depth`: Number of decoder layers (if decoder_dims=None)
-
-**Loss Parameters:**
-- `norm_pix_loss`: Whether to normalize pixels per patch (usually False)
-
----
-
-## Training the MAE
-
-### Basic Training
-
-```python
-# Compile with optimizer
-mae.compile(
-    optimizer=keras.optimizers.AdamW(
-        learning_rate=1e-4,
-        weight_decay=0.05
-    )
-)
-
-# Train
-history = mae.fit(
-    train_images,
-    epochs=100,
-    batch_size=64,
-    validation_split=0.1,
-    callbacks=[
-        keras.callbacks.ModelCheckpoint(
-            'mae_checkpoint.keras',
-            save_best_only=True,
-            monitor='val_loss'
-        ),
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=10,
-            restore_best_weights=True
-        )
-    ]
-)
-```
-
-### Training with tf.data Pipeline
-
-For larger datasets, use tf.data for efficiency:
-
-```python
-import tensorflow as tf
-
-def create_mae_dataset(image_paths, batch_size=64, image_size=(224, 224)):
-    """Create efficient tf.data pipeline for MAE training."""
-    
-    def load_and_preprocess(path):
-        # Load image
-        img = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(img, channels=3)
-        
-        # Resize and normalize
-        img = tf.image.resize(img, image_size)
-        img = tf.cast(img, tf.float32) / 255.0
-        
-        return img
-    
-    # Create dataset
-    dataset = tf.data.Dataset.from_tensor_slices(image_paths)
-    dataset = dataset.map(load_and_preprocess, 
-                         num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    
-    return dataset
-
-# Create dataset
-train_paths = ["path/to/image1.jpg", "path/to/image2.jpg", ...]
-train_dataset = create_mae_dataset(train_paths, batch_size=64)
-
-# Train
-mae.fit(train_dataset, epochs=100)
-```
-
-### Training with Data Augmentation
-
-Add augmentation to improve learned representations:
-
-```python
-def augment_for_mae(image):
-    """Apply augmentation suitable for MAE pretraining."""
-    # Random flip
-    image = tf.image.random_flip_left_right(image)
-    
-    # Random crop and resize
-    image = tf.image.random_crop(image, size=[200, 200, 3])
-    image = tf.image.resize(image, [224, 224])
-    
-    # Color jittering
-    image = tf.image.random_brightness(image, max_delta=0.2)
-    image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-    image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
-    
-    # Clip to valid range
-    image = tf.clip_by_value(image, 0.0, 1.0)
-    
-    return image
-
-# Update dataset pipeline
-dataset = dataset.map(lambda x: augment_for_mae(x), 
-                     num_parallel_calls=tf.data.AUTOTUNE)
-```
-
-### Learning Rate Scheduling
-
-Use a learning rate schedule for better convergence:
-
-```python
-# Cosine decay with warmup
-total_steps = len(train_images) // batch_size * epochs
-warmup_steps = total_steps // 10
-
-lr_schedule = keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=1e-4,
-    decay_steps=total_steps - warmup_steps,
-    alpha=1e-6  # Minimum learning rate
-)
-
-# With warmup
-class WarmupCosineDecay(keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, warmup_steps, total_steps, peak_lr=1e-4, min_lr=1e-6):
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.peak_lr = peak_lr
-        self.min_lr = min_lr
-        self.cosine_decay = keras.optimizers.schedules.CosineDecay(
-            peak_lr, total_steps - warmup_steps, alpha=min_lr/peak_lr
-        )
-    
-    def __call__(self, step):
-        if step < self.warmup_steps:
-            # Linear warmup
-            return self.peak_lr * (step / self.warmup_steps)
-        else:
-            # Cosine decay
-            return self.cosine_decay(step - self.warmup_steps)
-
-lr_schedule = WarmupCosineDecay(
-    warmup_steps=warmup_steps,
-    total_steps=total_steps,
-    peak_lr=1e-4
-)
-
-mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=lr_schedule))
-```
-
----
-
-## Working with ConvNeXt V2
-
-### Method 1: Training MAE with ConvNeXt Configuration
-
-```python
-from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
-from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
-
-# Create MAE with a ConvNeXt-Tiny encoder
-mae = MaskedAutoencoder(
-    encoder=ConvNeXtV2.from_variant(
-        "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
-    ),
-    patch_size=16,
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3)
-)
-
-# Train MAE
-mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=1e-4))
-mae.fit(train_images, epochs=100, batch_size=64)
-
-# Save MAE model
-mae.save('mae_convnext_tiny.keras')
-```
-
-### Method 2: Loading Pretrained ConvNeXt Encoder
-
-If you have a pretrained ConvNeXt V2 model, you can initialize the MAE encoder:
-
-```python
-# An encoder you trained and saved earlier. NOTE: `pretrained=True` raises
-# `NotImplementedError` -- no ConvNeXt V2 checkpoint ships with dl_techniques.
-pretrained_encoder = keras.models.load_model("my_convnext_encoder.keras")
-
-# Pass it straight in -- there is no separate "MAE encoder" to transfer into.
-mae = MaskedAutoencoder(
-    encoder=pretrained_encoder,
-    patch_size=16,
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3)
-)
-
-# `mae.encoder` IS `pretrained_encoder`; MAE training continues from its weights.
-```
-
-### Method 3: Extracting Encoder After MAE Training
-
-After training MAE, extract the encoder for use:
-
-```python
-# Train MAE
-mae.fit(train_images, epochs=100)
-
-# Save just the encoder
-mae.encoder.save('convnext_encoder_pretrained.keras')
-
-# Later, load for downstream tasks
-encoder = keras.models.load_model('convnext_encoder_pretrained.keras')
-
-# Use in a new model
-inputs = keras.Input(shape=(224, 224, 3))
-features = encoder(inputs)
-# Add your task-specific head here
-```
-
----
-
-## Fine-tuning for Downstream Tasks
-
-After MAE pretraining, use the encoder for supervised tasks:
-
-### Classification Task
-
-```python
-from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 import keras
+import numpy as np
+from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder
 
-# Load trained MAE
-mae = keras.models.load_model('mae_convnext_tiny.keras')
+def conv_encoder(input_shape=(64, 64, 3), width=(16, 24, 32, 32)):
+    """A /16 encoder: four stride-2 stages, matching the default decoder_depth=4."""
+    inputs = keras.Input(shape=input_shape)
+    x = inputs
+    for filters in width:
+        x = keras.layers.Conv2D(filters, 3, strides=2, padding="same")(x)
+        x = keras.layers.Activation("gelu")(x)
+    return keras.Model(inputs, x, name="mae_encoder")
 
-# Extract encoder
-encoder = mae.encoder
-encoder.trainable = True  # Make it trainable
-
-# Build classifier
-inputs = keras.Input(shape=(224, 224, 3))
-features = encoder(inputs)
-
-# Add classification head
-x = keras.layers.GlobalAveragePooling2D()(features)
-x = keras.layers.LayerNormalization()(x)
-x = keras.layers.Dropout(0.2)(x)
-outputs = keras.layers.Dense(10, activation='softmax')(x)  # 10 classes
-
-# Create model
-classifier = keras.Model(inputs, outputs, name='classifier')
-
-# Compile
-classifier.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-5),  # Lower LR for fine-tuning
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# Fine-tune on labeled data
-classifier.fit(
-    train_images_labeled,
-    train_labels,
-    epochs=50,
-    validation_split=0.2
-)
+mae = MaskedAutoencoder(encoder=conv_encoder(), patch_size=16, mask_ratio=0.75,
+                        input_shape=(64, 64, 3))
+x = np.random.rand(4, 64, 64, 3).astype("float32")
+out = mae(x, training=True)
+print(sorted(out))
+# ['encoded', 'mask', 'masked_input', 'reconstruction']
+print(tuple(int(d) for d in out["reconstruction"].shape),
+      tuple(int(d) for d in out["mask"].shape), mae.decoder_dims)
+# (4, 64, 64, 3) (4, 16) [64, 64, 64, 64]
 ```
 
-### Two-Stage Fine-tuning (Recommended)
+## 6. Component Reference
 
-Freeze encoder first, then unfreeze:
+### `MaskedAutoencoder(...)`
 
-```python
-# Stage 1: Train only the classifier head
-encoder.trainable = False
-classifier.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
-classifier.fit(train_data, epochs=10)
+| Argument | Default | Meaning |
+|:---|:---:|:---|
+| `encoder` | — | a `keras.Model`; see § 3 |
+| `patch_size` | `16` | masking granularity, in pixels |
+| `mask_ratio` | `0.75` | fraction of patches hidden |
+| `decoder_dims` | `None` | channel widths, one per 2x upsample. `None` derives them from the encoder |
+| `decoder_depth` | `4` | number of upsamples when `decoder_dims is None` |
+| `norm_pix_loss` | `False` | normalize each target patch before the MSE |
+| `mask_value` | `"learnable"` | `"learnable"`, `"zero"`, `"noise"`, or a float |
+| `input_shape` | `(224, 224, 3)` | image shape `(H, W, C)` |
+| `non_mask_value` | `0.0` | weight given to unmasked patches in the loss |
 
-# Stage 2: Fine-tune entire model
-encoder.trainable = True
-classifier.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-5),  # Much lower LR
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
-classifier.fit(train_data, epochs=40)
-```
+`create_mae_model(encoder, patch_size=16, mask_ratio=0.75, decoder_dims=None,
+input_shape=(224, 224, 3), **kwargs)` is a thin factory over the same constructor.
 
-### Segmentation Task
+### Choosing the knobs
 
-```python
-# Extract encoder
-encoder = mae.encoder
+| Knob | Guidance |
+|:---|:---|
+| `mask_ratio` | 0.75 is the paper's value; its ablation shows a broad plateau around it. Much lower and the pretext task reduces to interpolation. |
+| `patch_size` | Must divide the input. 16 at 224 gives 196 patches; use 8 for small images. |
+| `decoder_depth` | Must match the encoder's downsampling: `2 ** decoder_depth == input / feature_size`. |
+| `norm_pix_loss` | `True` normalizes each target patch, which sharpens local texture at the cost of a decoder output that no longer looks like the image. |
+| `non_mask_value` | `0.0` is the paper's rule — loss on masked patches only. It is applied as a floor (`maximum(mask, non_mask_value)`), so a small positive value adds a weak reconstruction term everywhere. |
 
-# Build U-Net style decoder for segmentation
-inputs = keras.Input(shape=(224, 224, 3))
-features = encoder(inputs)
+### Visualization
 
-# Decoder with skip connections (if you modify encoder to return intermediate features)
-x = keras.layers.Conv2DTranspose(256, 3, strides=2, padding='same')(features)
-x = keras.layers.Conv2DTranspose(128, 3, strides=2, padding='same')(x)
-x = keras.layers.Conv2DTranspose(64, 3, strides=2, padding='same')(x)
-x = keras.layers.Conv2DTranspose(32, 3, strides=2, padding='same')(x)
-outputs = keras.layers.Conv2D(num_classes, 1, activation='softmax')(x)
-
-segmentation_model = keras.Model(inputs, outputs)
-```
-
----
-
-## Visualization and Evaluation
-
-### Visualizing Reconstructions
+`mae.visualize(image)` takes one `(H, W, C)` array and returns
+`(original, masked, reconstructed)`. `visualize_reconstruction(mae, images, num_samples=4)`
+returns a single `(num_samples * H, 3 * W, C)` composite laid out as
+`[original | masked | reconstructed]` per row, clipped to `[0, 1]` — it is an array, not a plot,
+so pass it to `plt.imshow` yourself.
 
 ```python
 from dl_techniques.models.vision.masked_autoencoder import visualize_reconstruction
-import matplotlib.pyplot as plt
 
-# Single image visualization
-sample_image = test_images[0]
-original, masked, reconstructed = mae.visualize(sample_image)
-
-# Plot
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-axes[0].imshow(original)
-axes[0].set_title('Original')
-axes[0].axis('off')
-
-axes[1].imshow(masked)
-axes[1].set_title('Masked Input')
-axes[1].axis('off')
-
-axes[2].imshow(reconstructed)
-axes[2].set_title('Reconstructed')
-axes[2].axis('off')
-
-plt.tight_layout()
-plt.savefig('mae_reconstruction.png')
-plt.show()
-
-# Multiple images grid
-grid = visualize_reconstruction(mae, test_images, num_samples=4)
-plt.figure(figsize=(15, 10))
-plt.imshow(grid)
-plt.axis('off')
-plt.title('MAE Reconstructions (Original | Masked | Reconstructed)')
-plt.savefig('mae_grid.png')
-plt.show()
+original, masked, reconstructed = mae.visualize(x[0])
+grid = visualize_reconstruction(mae, x, num_samples=2)
+print(original.shape, grid.shape)      # (64, 64, 3) (128, 192, 3)
 ```
 
-### Monitoring Training Progress
+## 7. Fine-tuning for Downstream Tasks
+
+The encoder is the deliverable. Pull it out, wrap it, attach a head.
 
 ```python
-import matplotlib.pyplot as plt
+import keras
 
-# Plot training history
-plt.figure(figsize=(12, 4))
+encoder = mae.encoder                     # or keras.models.load_model("encoder.keras")
 
-plt.subplot(1, 2, 1)
-plt.plot(history.history['loss'], label='Train Loss')
-plt.plot(history.history['val_loss'], label='Val Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Reconstruction Loss')
-plt.legend()
-plt.title('Training Progress')
+inputs = keras.Input(shape=(64, 64, 3))
+features = keras.layers.GlobalAveragePooling2D()(encoder(inputs))
+outputs = keras.layers.Dense(10, name="classifier")(features)
+model = keras.Model(inputs, outputs)
 
-# Visualize reconstructions at different epochs
-epochs_to_check = [10, 50, 100]
-fig, axes = plt.subplots(len(epochs_to_check), 3, figsize=(15, 15))
+# Stage 1: frozen encoder, train the head at a normal learning rate.
+encoder.trainable = False
+model.compile(optimizer=keras.optimizers.Adam(1e-3),
+              loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=["accuracy"])
 
-for i, epoch in enumerate(epochs_to_check):
-    # Load checkpoint from that epoch
-    mae_checkpoint = keras.models.load_model(f'checkpoints/mae_epoch_{epoch}.keras')
-    original, masked, reconstructed = mae_checkpoint.visualize(test_images[0])
-    
-    axes[i, 0].imshow(original)
-    axes[i, 0].set_title(f'Epoch {epoch}: Original')
-    axes[i, 1].imshow(masked)
-    axes[i, 1].set_title(f'Epoch {epoch}: Masked')
-    axes[i, 2].imshow(reconstructed)
-    axes[i, 2].set_title(f'Epoch {epoch}: Reconstructed')
-
-plt.tight_layout()
-plt.show()
+# Stage 2: unfreeze and RE-COMPILE at a 100x lower learning rate. A `trainable`
+# change has no effect until compile() runs again.
+encoder.trainable = True
+model.compile(optimizer=keras.optimizers.Adam(1e-5),
+              loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=["accuracy"])
 ```
 
-### Evaluating Learned Representations
+Save the encoder on its own (`mae.encoder.save("encoder.keras")`) rather than the whole MAE when
+the decoder has served its purpose — it reloads with `keras.models.load_model` and no
+`custom_objects`.
 
-Use linear probing to evaluate representation quality:
+## 8. Training
 
-```python
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
-
-# Extract features from MAE encoder
-def extract_features(images, encoder):
-    """Extract features using the encoder."""
-    features = encoder.predict(images, batch_size=32)
-    # Global average pooling
-    features = features.mean(axis=(1, 2))
-    return features
-
-# Extract features
-train_features = extract_features(train_images_labeled, mae.encoder)
-test_features = extract_features(test_images_labeled, mae.encoder)
-
-# Train linear classifier (no fine-tuning)
-clf = LogisticRegression(max_iter=1000)
-clf.fit(train_features, train_labels)
-
-# Evaluate
-predictions = clf.predict(test_features)
-accuracy = accuracy_score(test_labels, predictions)
-print(f"Linear probe accuracy: {accuracy:.4f}")
-```
-
----
-
-## Advanced Usage
-
-### Custom Encoder Architecture
-
-No subclassing is needed, and there is no `_create_encoder_placeholder` hook to
-override: the encoder is a constructor argument. Pass any `keras.Model` whose
-total downsampling is `2 ** decoder_depth`.
+`MaskedAutoencoder` defines its own `train_step` and `test_step`, so `compile()` takes an
+optimizer and nothing else — no loss, no metrics. The tracked metric is `reconstruction_loss`.
 
 ```python
-# A /16 encoder: four stride-2 stages, matching the default decoder_depth=4.
-# A /4 encoder (e.g. a single `Conv2D(64, 7, strides=4)`) is REJECTED by the
-# constructor -- its decoder would emit 4x the input resolution.
-inputs = keras.Input(shape=(224, 224, 3))
-x = keras.layers.Conv2D(64, 7, strides=2, padding='same')(inputs)
-x = keras.layers.LayerNormalization()(x)
-x = keras.layers.Activation('gelu')(x)
-for filters in (128, 256, 512):
-    x = keras.layers.Conv2D(filters, 3, strides=2, padding='same')(x)
-    x = keras.layers.LayerNormalization()(x)
-    x = keras.layers.Activation('gelu')(x)
-custom_encoder = keras.Model(inputs, x, name='custom_encoder')  # (None,14,14,512)
-
-custom_mae = MaskedAutoencoder(
-    encoder=custom_encoder,
-    patch_size=16,
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3),
-)
-```
-
-### Different Masking Strategies
-
-Experiment with masking parameters:
-
-```python
-# Lower mask ratio (easier task, faster convergence)
-mae_easy = MaskedAutoencoder(
-    encoder=convnext_encoder("tiny"),
-    mask_ratio=0.5,  # Only 50% masked
-    patch_size=16,
-    input_shape=(224, 224, 3),
-)
-
-# Learnable mask tokens
-mae_learnable = MaskedAutoencoder(
-    encoder=convnext_encoder("tiny"),
-    mask_value="learnable",  # Learn what to put in masked patches
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3),
-)
-
-# Zero masking (harder task)
-mae_zero = MaskedAutoencoder(
-    encoder=convnext_encoder("tiny"),
-    mask_value="zero",  # Replace with zeros
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3),
-)
-```
-
-### Multi-GPU Training
-
-Scale training to multiple GPUs:
-
-```python
+import keras
 import tensorflow as tf
 
-# Create strategy
-strategy = tf.distribute.MirroredStrategy()
+mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=1.5e-4, weight_decay=0.05))
 
-print(f"Number of devices: {strategy.num_replicas_in_sync}")
+ds = (tf.data.Dataset.from_tensor_slices(images)
+      .shuffle(1000)
+      .map(lambda x: tf.image.random_flip_left_right(x), num_parallel_calls=tf.data.AUTOTUNE)
+      .batch(32)
+      .prefetch(tf.data.AUTOTUNE))
 
-# Create model within strategy scope
-with strategy.scope():
-    mae = MaskedAutoencoder(
-        encoder=convnext_encoder("tiny"),
-        patch_size=16,
-        mask_ratio=0.75,
-        input_shape=(224, 224, 3),
-    )
-    
-    mae.compile(
-        optimizer=keras.optimizers.AdamW(learning_rate=1e-4 * strategy.num_replicas_in_sync)
-    )
-
-# Train (batch size will be split across GPUs)
-mae.fit(train_dataset, epochs=100)
+history = mae.fit(ds, epochs=1, verbose=0)
+print(sorted(history.history))      # ['loss', 'reconstruction_loss']
 ```
 
----
+Practical notes:
 
-## Best Practices
+- **Augmentation should be mild.** Random crop and horizontal flip. Heavy colour jitter fights the
+  reconstruction objective, which is a pixel-space loss.
+- **Normalize to `[0, 1]` or standardize** — but be consistent, because the loss is an MSE in
+  whatever space you feed it.
+- **Long schedules pay.** The paper pre-trains for 800–1600 epochs; the loss curve keeps
+  improving well past the point where reconstructions look plausible.
+- **Judge by transfer, not by reconstruction.** Blurry reconstructions are normal and expected
+  with a lightweight decoder. A linear probe on frozen features is the metric that matters.
+- **Mixed precision** works: set `keras.mixed_precision.set_global_policy("mixed_float16")` before
+  building. `call()` already casts the masked image to the compute dtype, because `PatchMasking`'s
+  scatter ops return float32.
 
-### 1. Dataset Size and Quality
+No accuracy or transfer number appears in this README. Nothing in this repository has trained an
+MAE to a published benchmark, so any such number would describe the papers, not this code.
 
-- **Minimum size**: 10k images for meaningful results
-- **Ideal size**: 100k+ images for strong representations
-- **Image quality**: Use diverse, high-quality images
-- **Augmentation**: Apply augmentation during training
-
-### 2. Hyperparameter Selection
-
-**Mask Ratio:**
-- Start with 0.75 (standard)
-- Lower (0.5-0.6) for easier convergence
-- Higher (0.8-0.9) for harder task, potentially better representations
-
-**Learning Rate:**
-- Start with 1e-4 to 1e-3
-- Use warmup (10% of total steps)
-- Apply cosine decay
-
-**Batch Size:**
-- Larger is better (64-256)
-- Scale learning rate with batch size
-- Use gradient accumulation if GPU memory limited
-
-### 3. Training Duration
-
-- **Small datasets (<50k)**: 100-200 epochs
-- **Medium datasets (50k-500k)**: 200-400 epochs
-- **Large datasets (>500k)**: 400-800 epochs
-- Monitor validation loss for early stopping
-
-### 4. Architecture Choices
-
-**Encoder Size:**
-- Pico/Nano: Fast experiments, small datasets
-- Tiny/Base: Production use, balanced performance
-- Large/Huge: Best quality, requires more compute
-
-**Decoder Size:**
-- Keep lightweight (4-8 layers)
-- Decoder quality doesn't affect encoder learning much
-- Faster decoder = faster training
-
-### 5. Fine-tuning Strategy
-
-1. **Linear probe first**: Evaluate representations without fine-tuning
-2. **Freeze then unfreeze**: Train head, then full model
-3. **Lower learning rate**: Use 10-100x lower LR than pretraining
-4. **Regularization**: Add dropout, weight decay during fine-tuning
-
----
-
-## Troubleshooting
-
-### Problem: Poor Reconstructions
-
-**Symptoms**: Blurry or incoherent reconstructed images
-
-**Solutions:**
-- Train longer (more epochs)
-- Lower mask ratio (0.5-0.6)
-- Check data normalization (should be [0, 1])
-- Increase decoder capacity
-- Verify patch size divides image dimensions
-
-### Problem: Training Instability
-
-**Symptoms**: Loss spikes, NaN values
-
-**Solutions:**
-- Lower learning rate
-- Add gradient clipping
-- Check for corrupted images in dataset
-- Use mixed precision training carefully
-- Verify data is normalized properly
-
-```python
-# Add gradient clipping
-mae.compile(
-    optimizer=keras.optimizers.AdamW(
-        learning_rate=1e-4,
-        clipnorm=1.0  # Clip gradients
-    )
-)
-```
-
-### Problem: Out of Memory
-
-**Symptoms**: GPU OOM errors
-
-**Solutions:**
-- Reduce batch size
-- Use gradient accumulation
-- Lower decoder capacity
-- Use mixed precision training
-
-```python
-# Enable mixed precision
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Use gradient accumulation
-steps_per_epoch = len(train_dataset)
-accumulation_steps = 4
-
-for epoch in range(epochs):
-    for step, batch in enumerate(train_dataset):
-        # Accumulate gradients
-        with tf.GradientTape() as tape:
-            predictions = mae(batch, training=True)
-            loss = mae.compute_loss(x=batch, y_pred=predictions)
-            loss = loss / accumulation_steps
-        
-        grads = tape.gradient(loss, mae.trainable_variables)
-        
-        if (step + 1) % accumulation_steps == 0:
-            mae.optimizer.apply_gradients(zip(grads, mae.trainable_variables))
-```
-
-### Problem: Slow Training
-
-**Symptoms**: Very slow iterations per epoch
-
-**Solutions:**
-- Use tf.data with prefetching
-- Increase num_parallel_calls
-- Cache dataset if it fits in memory
-- Use SSD for data storage
-- Precompute augmentations
-
-```python
-dataset = dataset.cache()  # Cache after expensive operations
-dataset = dataset.prefetch(tf.data.AUTOTUNE)
-```
-
-### Problem: Poor Transfer Performance
-
-**Symptoms**: Fine-tuned model doesn't perform well
-
-**Solutions:**
-- Train MAE longer
-- Try higher mask ratio
-- Use more pretraining data
-- Adjust fine-tuning learning rate
-- Check for distribution shift between pretrain and fine-tune data
-
----
-
-## Complete Example: End-to-End Workflow
-
-Here's a complete example from data loading to fine-tuning:
+## 9. Serialization
 
 ```python
 import keras
 import numpy as np
-import tensorflow as tf
-from pathlib import Path
-from dl_techniques.models.vision.masked_autoencoder import (
-    MaskedAutoencoder,
-    visualize_reconstruction,
-)
-from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 
-# ============================================
-# 1. DATA PREPARATION
-# ============================================
-
-def create_dataset(image_paths, batch_size=64):
-    """Create tf.data pipeline."""
-    def load_image(path):
-        img = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(img, channels=3)
-        img = tf.image.resize(img, [224, 224])
-        img = tf.cast(img, tf.float32) / 255.0
-        return img
-    
-    dataset = tf.data.Dataset.from_tensor_slices(image_paths)
-    dataset = dataset.map(load_image, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    return dataset
-
-# Load unlabeled images
-unlabeled_paths = [str(p) for p in Path("data/unlabeled").glob("*.jpg")]
-train_dataset = create_dataset(unlabeled_paths, batch_size=64)
-
-# ============================================
-# 2. MAE PRETRAINING
-# ============================================
-
-# Create MAE
-mae = MaskedAutoencoder(
-    encoder=ConvNeXtV2.from_variant(
-        "tiny", include_top=False, input_shape=(224, 224, 3), strides=2
-    ),
-    patch_size=16,
-    mask_ratio=0.75,
-    input_shape=(224, 224, 3)
-)
-
-# Compile
-mae.compile(optimizer=keras.optimizers.AdamW(learning_rate=1e-4))
-
-# Train
-history = mae.fit(
-    train_dataset,
-    epochs=100,
-    callbacks=[
-        keras.callbacks.ModelCheckpoint('mae_best.keras', save_best_only=True),
-        keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
-        keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)
-    ]
-)
-
-# Save
-mae.save('mae_trained.keras')
-
-# ============================================
-# 3. VISUALIZATION
-# ============================================
-
-# Load test images
-test_images = np.load('data/test_images.npy')
-
-# Visualize
-grid = visualize_reconstruction(mae, test_images, num_samples=4)
-plt.figure(figsize=(15, 10))
-plt.imshow(grid)
-plt.axis('off')
-plt.savefig('results/mae_reconstructions.png')
-
-# ============================================
-# 4. FINE-TUNING FOR CLASSIFICATION
-# ============================================
-
-# Load labeled data
-(train_images, train_labels), (test_images, test_labels) = keras.datasets.cifar10.load_data()
-train_images = train_images.astype('float32') / 255.0
-test_images = test_images.astype('float32') / 255.0
-
-# Resize to match MAE input
-train_images = tf.image.resize(train_images, [224, 224]).numpy()
-test_images = tf.image.resize(test_images, [224, 224]).numpy()
-
-# Extract encoder
-encoder = mae.encoder
-
-# Build classifier
-inputs = keras.Input(shape=(224, 224, 3))
-features = encoder(inputs)
-x = keras.layers.GlobalAveragePooling2D()(features)
-x = keras.layers.LayerNormalization()(x)
-x = keras.layers.Dropout(0.3)(x)
-outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-classifier = keras.Model(inputs, outputs)
-
-# Stage 1: Freeze encoder
-encoder.trainable = False
-classifier.compile(
-    optimizer=keras.optimizers.Adam(1e-3),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
-classifier.fit(train_images, train_labels, epochs=10, validation_split=0.1)
-
-# Stage 2: Fine-tune encoder
-encoder.trainable = True
-classifier.compile(
-    optimizer=keras.optimizers.Adam(1e-5),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
-classifier.fit(train_images, train_labels, epochs=40, validation_split=0.1)
-
-# Evaluate
-test_loss, test_acc = classifier.evaluate(test_images, test_labels)
-print(f"Test accuracy: {test_acc:.4f}")
-
-# Save
-classifier.save('classifier_finetuned.keras')
+mae(x, training=False)            # build it first
+mae.save("mae.keras")
+restored = keras.models.load_model("mae.keras")
+print(type(restored).__name__)    # MaskedAutoencoder
 ```
 
----
+`get_config()` serializes the nested encoder via `serialize_keras_object`, so the whole model
+round-trips with no `custom_objects`. `input_shape` is coerced back to a tuple on load, because
+JSON returns it as a list and `(None,) + list` raises.
 
-## Conclusion
+## 10. Troubleshooting
 
-The MAE framework provides a powerful approach to self-supervised learning for computer vision. Key takeaways:
+- **`ValueError: Encoder/decoder scale mismatch.`** The encoder's downsampling is not
+  `2 ** len(decoder_dims)`. The message names both spatial sizes and suggests a `decoder_depth`.
+  With a `ConvNeXtV2` encoder this almost always means you left `strides` at its default of 4.
+- **`TypeError: encoder must be a keras.Model instance.`** There is no `encoder_dims` and no
+  `encoder_output_shape` parameter; pass the model itself.
+- **`ValueError: Encoder main output must be 4D tensor (B, H, W, C).`** Token-sequence encoders
+  (a plain ViT) are not supported by `ConvDecoder`.
+- **Reconstructions are blurry.** Expected. The decoder is deliberately lightweight and the loss
+  is an MSE, which is minimized by the conditional mean. Evaluate the encoder, not the pictures.
+- **Loss goes to zero almost immediately.** `mask_ratio` is too low, or `non_mask_value` is large
+  enough that the model is being rewarded for copying visible pixels.
+- **`fit(x, y)` fails or is ignored.** `train_step` derives its own target; pass images only.
+- **Fine-tuning does not improve after unfreezing.** You changed `trainable` without calling
+  `compile()` again.
 
-1. **Pretrain on unlabeled data** with high mask ratios (0.75)
-2. **Train for sufficient epochs** (100-400 depending on dataset size)
-3. **Extract the encoder** for downstream tasks
-4. **Fine-tune carefully** with lower learning rates
-5. **Visualize regularly** to monitor learning progress
+Authoring conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide for new models and
+layers: `research/2026_keras_custom_models_instructions_v2.md`.
 
-For questions or issues, refer to the troubleshooting section or check the framework documentation.
+## 11. Citation
+
+```bibtex
+@inproceedings{he2022mae,
+  title={Masked Autoencoders Are Scalable Vision Learners},
+  author={He, Kaiming and Chen, Xinlei and Xie, Saining and Li, Yanghao and
+          Doll{\'a}r, Piotr and Girshick, Ross},
+  booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year={2022}, eprint={2111.06377}, url={https://arxiv.org/abs/2111.06377}
+}
+
+@inproceedings{woo2023convnextv2,
+  title={{ConvNeXt V2}: Co-designing and Scaling ConvNets with Masked Autoencoders},
+  author={Woo, Sanghyun and Debnath, Shoubhik and Hu, Ronghang and Chen, Xinlei and
+          Liu, Zhuang and Kweon, In So and Xie, Saining},
+  booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year={2023}, eprint={2301.00808}, url={https://arxiv.org/abs/2301.00808}
+}
+```

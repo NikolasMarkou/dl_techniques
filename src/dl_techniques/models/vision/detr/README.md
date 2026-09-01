@@ -1,1139 +1,322 @@
 # DETR: End-to-End Object Detection with Transformers
 
-A modern Keras 3 implementation of DETR (DEtection TRansformer), the groundbreaking model that revolutionized object detection by treating it as a direct set prediction problem using transformers.
+A Keras 3 implementation of **DETR** (Carion, Massa, Synnaeve, Usunier, Kirillov & Zagoruyko,
+*End-to-End Object Detection with Transformers*, ECCV 2020,
+[arXiv:2005.12872](https://arxiv.org/abs/2005.12872)) — object detection as **direct set
+prediction**, with no anchors, no region proposals and no non-maximum suppression.
 
-## Table of Contents
+> **This package ships the architecture only.** There is no Hungarian matcher and no set loss
+> here, so `model.compile(loss=...)` with a stock Keras loss will not train a detector. The
+> ImageNet weights on the ResNet-50 backbone are real and do download; nothing above the
+> backbone is pretrained and there is no DETR checkpoint. Read § 7 before comparing anything to
+> published numbers.
 
-- [Overview](#overview)
-- [Key Innovations](#key-innovations)
-- [Architecture](#architecture)
-- [Implementation Features](#implementation-features)
-- [Deviations from the paper](#deviations-from-the-paper)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Detailed Usage](#detailed-usage)
-- [Configuration Options](#configuration-options)
-- [Training](#training)
-- [Model Components](#model-components)
-- [Performance Considerations](#performance-considerations)
-- [Troubleshooting](#troubleshooting)
-- [References](#references)
+## 1. Overview: What is DETR and Why It Matters
 
-## Overview
+Classical detectors emit thousands of candidate boxes and then post-process them into a final
+set: anchor generation, box regression against hand-designed priors, NMS to remove duplicates.
+Every one of those steps carries hyperparameters that must be tuned per dataset.
 
-DETR (DEtection TRansformer) is a novel approach to object detection that frames the task as a direct set prediction problem. Unlike traditional object detectors that rely on hand-crafted components like anchor boxes, non-maximum suppression (NMS), or region proposals, DETR treats object detection as a direct set-to-set prediction problem using transformers.
+DETR replaces the whole pipeline with one forward pass. A CNN backbone produces a feature map, a
+transformer encoder-decoder attends over it, and `num_queries` learned **object queries** each
+emit exactly one prediction: a class (including a "no object" class) and a box. Training uses
+**bipartite matching** — a Hungarian assignment between predictions and ground truth — so each
+object is claimed by exactly one query and duplicate suppression is learned rather than coded.
 
-### What Makes DETR Special?
+The cost is convergence speed — the original schedule is hundreds of epochs on COCO — and small
+objects are its weakest case.
 
-1. **End-to-End**: No hand-crafted components needed (no NMS, no anchor generation)
-2. **Set Prediction**: Predicts a fixed-size set of detections in parallel
-3. **Transformer-Based**: Leverages the power of self-attention for global reasoning
-4. **Bipartite Matching**: Uses Hungarian algorithm for unique assignment during training
-5. **Simple Architecture**: Remarkably simple compared to traditional detectors
+## 2. The Problem DETR Solves
 
-### When to Use DETR?
+Three structural problems with anchor-based detection:
 
-✅ **Good for:**
-- Research and experimentation with transformer-based detection
-- Applications where you need the simplicity of end-to-end training
-- Scenarios requiring global reasoning over the entire image
-- When you want to avoid tuning anchor-based hyperparameters
+- **Duplicates are a post-processing problem.** Many anchors fire on one object, so NMS is
+  required, and NMS is a non-differentiable heuristic with its own IoU threshold.
+- **Priors are hand-designed.** Anchor scales, aspect ratios and assignment rules encode dataset
+  assumptions that do not transfer.
+- **The receptive field is local.** A convolutional detector reasons about an object from a
+  neighbourhood, not from the whole scene.
 
-⚠️ **Consider alternatives for:**
-- Real-time applications (DETR is computationally expensive)
-- Detecting very small objects (DETR struggles with small instances)
-- Limited computational resources
+DETR's set prediction removes the first two and its encoder self-attention removes the third:
+every feature cell attends to every other, so the model can reason about occlusion and about
+relations between distant objects directly.
 
-## Key Innovations
+## 3. How DETR Works: Core Concepts
 
-### 1. Direct Set Prediction
+**Object queries.** `num_queries` learned embeddings (100 in the paper) are the decoder's input.
+They are not tied to positions or scales; each one learns a specialization over training. The
+model can therefore never detect more than `num_queries` objects in an image.
 
-DETR predicts a fixed set of N object detections in a single pass, where N is larger than the typical number of objects in an image. This eliminates the need for:
-- Anchor box generation
-- Non-maximum suppression (NMS)
-- Region proposal networks
+**Bipartite matching loss.** Predictions and ground-truth boxes are matched one-to-one by a
+Hungarian assignment that minimizes a combined classification + L1 + GIoU cost. Unmatched
+predictions are trained toward the "no object" class. This is what makes the output a *set*.
 
-### 2. Bipartite Matching Loss
+**Auxiliary losses.** With `aux_loss=True` the prediction heads are applied to the output of
+every decoder layer except the last, and the same set loss is computed on each. Without this,
+DETR converges much more slowly.
 
-During training, DETR uses the Hungarian algorithm to find an optimal bipartite matching between predicted and ground-truth objects. This ensures:
-- Each ground-truth object is matched to exactly one prediction
-- Permutation-invariant loss (order doesn't matter)
-- No duplicate predictions for the same object
+**Padding masks.** DETR is trained on variable-size images padded into a batch. A boolean mask
+(`True` = padding) marks the padded pixels; the transformer excludes them from encoder
+self-attention and decoder cross-attention.
 
-### 3. Object Queries
-
-DETR uses learned "object queries" that:
-- Are learned embeddings that represent potential objects
-- Attend to image features via cross-attention
-- Each query learns to specialize in detecting objects at specific locations/scales
-
-### 4. Global Reasoning
-
-The transformer encoder allows every position to attend to every other position, enabling:
-- Global context understanding
-- Long-range dependencies
-- Relational reasoning between objects
-
-## Architecture
+## 4. Architecture Deep Dive
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        DETR Architecture                        │
-└─────────────────────────────────────────────────────────────────┘
-
-Input Image (H × W × 3)
-         ↓
-┌────────────────────┐
-│   CNN Backbone     │  (e.g., ResNet-50)
-│   (Feature Map)    │  Output: H/32 × W/32 × 2048
-└────────────────────┘
-         ↓
-┌────────────────────┐
-│  1×1 Convolution   │  Project to hidden_dim (256)
-│  (Input Projection)│  Output: H/32 × W/32 × 256
-└────────────────────┘
-         ↓
-┌────────────────────┐
-│   Positional       │  2D sinusoidal encoding
-│   Encoding         │  Added to features
-└────────────────────┘
-         ↓
-┌────────────────────┐
-│   Flatten          │  Reshape to sequence
-│                    │  Output: (H/32 × W/32) × 256
-└────────────────────┘
-         ↓
-┌────────────────────┐
-│ Transformer Encoder│  N layers (default: 6)
-│   (Self-Attention) │  Global reasoning
-└────────────────────┘
-         ↓
-      Memory
-         ↓  ────────────────────────┐
-┌────────────────────┐              │
-│ Transformer Decoder│              │
-│   (Object Queries) │ ←────────────┘
-│                    │  Cross-Attention to Memory
-│   N Layers (6)     │  Self-Attention among Queries
-└────────────────────┘
-         ↓
-  Decoder Outputs
-  (One per layer)
-         ↓
-    ┌────────┴────────┐
-    ↓                 ↓
-┌─────────┐    ┌──────────┐
-│  Class  │    │   Bbox   │
-│  Head   │    │   Head   │
-│ (Dense) │    │  (MLP)   │
-└─────────┘    └──────────┘
-    ↓                 ↓
-Predictions    Predictions
-(N × C)        (N × 4)
-
-Where:
-- N = num_queries (e.g., 100)
-- C = num_classes + 1 (includes "no object" class)
+  images (B, H, W, 3)          padding_mask (B, H, W)  True = padding
+      │                                │
+   backbone (CNN)                      │  nearest-downsampled to the
+      │  (B, H/16, W/16, 1024)         │  feature grid, then inverted
+   input_proj  Conv2D 1x1              │  into a keep mask
+      │  (B, H/16, W/16, hidden_dim)   │
+   + PositionEmbeddingSine2D  (2-D sinusoidal, hidden_dim // 2 per axis)
+      │  flattened to (B, H*W/256, hidden_dim)
+   DetrTransformer
+      encoder x num_encoder_layers   self-attention + FFN
+      decoder x num_decoder_layers   self-attn + cross-attn to memory + FFN
+      │  (num_decoder_layers, B, num_queries, hidden_dim)
+      ├─► class_embed  Dense(num_classes + 1)          -> pred_logits (LOGITS)
+      └─► bbox_embed   Dense(d)->ReLU->Dense(d)->ReLU->Dense(4), then sigmoid
+                                                       -> pred_boxes in [0, 1]
 ```
 
-## Implementation Features
+`bbox_embed` is the paper's 3-layer perceptron, built explicitly rather than through
+`create_ffn_layer('mlp', ...)`: that factory key is `MLPBlock`, which is `fc1 -> act -> fc2` —
+**two** Dense layers, not three. Do not "restore reuse" by swapping the factory back in.
 
-### Modern Keras 3 Design
+`hidden_dim` **must be a multiple of 4**. `PositionEmbeddingSine2D` receives
+`num_pos_feats = hidden_dim // 2`, and that value must itself be even because the layer splits it
+between its sine and cosine halves. The constructor raises with the next valid value.
 
-This implementation leverages the latest Keras 3 features and best practices:
+Output dictionary:
 
-✅ **Factory Pattern Integration**
-- Normalization factory: Easy switching between LayerNorm, RMSNorm, BatchNorm, etc.
-- FFN factory: Support for MLP, SwiGLU, GeGLU, and other feed-forward variants
-- Attention factory ready: Extensible for different attention mechanisms
+| Key | Shape | Notes |
+|:---|:---|:---|
+| `pred_logits` | `(B, num_queries, num_classes + 1)` | **logits**; the extra class is "no object" |
+| `pred_boxes` | `(B, num_queries, 4)` | sigmoid, so `[0, 1]`. Nothing here interprets the four numbers; the paper's convention is `cxcywh` and your loss decides |
+| `aux_outputs` | list of `num_decoder_layers - 1` dicts | present only when `aux_loss=True` |
 
-✅ **Component Reusability**
-- Uses `TransformerLayer` from dl_techniques framework
-- Leverages components shared with the rest of this repository
-- Reduces code duplication by ~150 lines
+## 5. Quick Start Guide
 
-✅ **Full Serialization Support**
-- Proper `@register_dl_technique("dl_techniques.models.detr.model")` decorators (from
-  `dl_techniques.utils.keras_registration`), giving `DETR` and `DetrTransformer` the keys
-  `dl_techniques.models.detr.model><ClassName>`
-- Complete `get_config()` implementations
-- Custom `from_config()` for complex models
+`create_detr` builds the paper's configuration: a `keras.applications.ResNet50` backbone with
+real ImageNet weights, frozen by default, tapped at `conv4_block6_out`.
 
-✅ **Type Safety**
-- Full type hints throughout
-- Better IDE support
-- Catch errors at development time
+```python
+import numpy as np
+from dl_techniques.models.vision.detr import create_detr
 
-✅ **Flexible Configuration**
-- Multiple normalization options
-- Multiple FFN architectures
-- Configurable activation functions
+model = create_detr(
+    num_classes=80,          # COCO classes, excluding "no object"
+    num_queries=100,         # max detections per image
+    backbone_name="resnet50",
+    hidden_dim=256,
+)
 
-## Deviations from the paper
+images = np.random.rand(1, 256, 256, 3).astype("float32")
+mask = np.zeros((1, 256, 256), dtype=bool)     # False = valid pixel, True = padding
+
+out = model([images, mask], training=False)
+print(out["pred_logits"].shape, out["pred_boxes"].shape, len(out["aux_outputs"]))
+# (1, 100, 81) (1, 100, 4) 5
+```
+
+The input is always a **two-element list** `[images, padding_mask]`; passing the images alone
+raises. `padding_mask` may be `None` if you have no padding, but the position must be there.
+
+Reading predictions — `pred_logits` holds logits, so apply a softmax before thresholding:
+
+```python
+import keras
+import numpy as np
+
+probs = keras.ops.softmax(out["pred_logits"], axis=-1)
+probs = np.asarray(probs)[..., :-1]              # drop the "no object" column
+scores = probs.max(axis=-1)
+labels = probs.argmax(axis=-1)
+boxes = np.asarray(out["pred_boxes"])            # [0, 1]; cxcywh by convention
+
+keep = scores[0] > 0.7
+print(labels[0][keep], scores[0][keep], boxes[0][keep])
+```
+
+Variable-size images: resize keeping aspect ratio, pad to a common size, and mark the padding.
+
+```python
+import numpy as np
+
+def letterbox(image, target=(512, 512)):
+    """Return (padded_image, padding_mask). True in the mask means padding."""
+    h, w = image.shape[:2]
+    padded = np.zeros((*target, 3), dtype="float32")
+    padded[:h, :w] = image[:target[0], :target[1]]
+    mask = np.ones(target, dtype=bool)
+    mask[:min(h, target[0]), :min(w, target[1])] = False
+    return padded, mask
+```
+
+The mask is honoured **above the backbone**: it is nearest-downsampled onto the feature grid and
+applied as a key mask in encoder self-attention and decoder cross-attention. The convolutional
+backbone is not masked, so padding still leaks into feature cells within one receptive field of
+the boundary — the same behaviour as the reference implementation.
+
+## 6. Component Reference & Configuration
+
+### `create_detr(...)`
+
+| Argument | Default | Meaning |
+|:---|:---:|:---|
+| `num_classes` | — | object classes, **excluding** "no object" |
+| `num_queries` | — | max detections per image; hard ceiling |
+| `backbone_name` | `"resnet50"` | the only supported value; anything else raises `NotImplementedError` |
+| `backbone_trainable` | `False` | `True` fine-tunes the ImageNet backbone |
+| `hidden_dim` | `256` | transformer width; **must be a multiple of 4** |
+| `num_heads` | `8` | attention heads |
+| `num_encoder_layers` / `num_decoder_layers` | `6` / `6` | encoder is the more expensive half |
+| `ffn_dim` | `2048` | FFN hidden width |
+| `dropout_rate` | `0.1` | |
+| `aux_loss` | `True` | emit per-decoder-layer predictions |
+| `activation` | `"relu"` | FFN activation |
+| `normalization_type` | `"layer_norm"` | any normalization-factory key (`"rms_norm"`, ...) |
+| `ffn_type` | `"mlp"` | any FFN-factory key (`"swiglu"`, `"geglu"`, ...) |
+
+`normalization_type` and `ffn_type` are passed straight to `TransformerLayer`'s factories, so
+swapping in RMSNorm or a gated FFN is a one-argument change.
+
+### `DETR(num_classes, num_queries, backbone, transformer, hidden_dim=256, aux_loss=True)`
+
+Use this directly to supply your own backbone. Any `keras.Model` mapping `(B, H, W, 3)` to a 4-D
+feature map works; `input_proj` projects whatever channel count it emits to `hidden_dim`.
+
+```python
+import keras
+import numpy as np
+from dl_techniques.models.vision.detr import DETR, DetrTransformer
+
+backbone = keras.Sequential([
+    keras.layers.Conv2D(64, 3, strides=2, padding="same", activation="relu"),
+    keras.layers.Conv2D(64, 3, strides=2, padding="same", activation="relu"),
+], name="tiny_backbone")
+
+transformer = DetrTransformer(
+    hidden_dim=64, num_heads=4, num_encoder_layers=2, num_decoder_layers=2,
+    ffn_dim=128, dropout_rate=0.1,
+)
+
+model = DETR(num_classes=10, num_queries=20, backbone=backbone,
+             transformer=transformer, hidden_dim=64, aux_loss=True)
+
+images = np.random.rand(2, 128, 128, 3).astype("float32")
+mask = np.zeros((2, 128, 128), dtype=bool)
+out = model([images, mask], training=False)
+print(out["pred_logits"].shape, out["pred_boxes"].shape, len(out["aux_outputs"]))
+# (2, 20, 11) (2, 20, 4) 1
+```
+
+### `DetrTransformer(hidden_dim, num_heads, num_encoder_layers, num_decoder_layers, ffn_dim, ...)`
+
+The encoder-decoder stack, usable on its own. `call(src, key_keep_mask, query_embed, pos_embed)`
+returns one tensor per decoder layer. `key_keep_mask` is a **keep** mask (1 = attend), which is
+the inverse of the padding mask `DETR` accepts.
+
+## 7. Deviations from the paper
 
 Read this before comparing numbers with the reference implementation.
 
 | Item | This implementation | Paper |
 |:---|:---|:---|
-| Padding mask | Honoured **above the backbone**: nearest-downsampled to the feature grid and applied as a key mask in encoder self-attention and decoder cross-attention. The convolutional backbone is *not* masked, so padding still leaks into feature cells within one receptive field of the boundary. | Same — the reference also masks only the transformer. |
+| Set loss | **Not implemented.** No Hungarian matcher, no GIoU loss. The model is architecture-only. | Hungarian matching + classification/L1/GIoU set loss. |
+| Padding mask | Honoured above the backbone; the CNN itself is not masked, so padding leaks into feature cells within one receptive field of the boundary. | Same — the reference also masks only the transformer. |
 | Positional encoding | Added to the running `memory` at the input of **every** encoder layer, so it accumulates down the stack; the decoder adds `query_embed` to the whole decoder input the same way. | Re-injected into `Q` and `K` only, identically at every layer, never into `V`. |
-| Backbone tap | `conv4_block6_out` (C4, stride 16), frozen by default. | C5 (stride 32), fine-tuned at a reduced learning rate. |
+| Backbone tap | `conv4_block6_out` (C4, stride 16, 1024 channels), frozen by default. | C5 (stride 32, 2048 channels), fine-tuned at a reduced learning rate. |
 | Decoder output norm | None; auxiliary outputs are read raw from each decoder layer. | Final `LayerNorm` on the decoder stack. |
 | Pretrained weights | ImageNet weights for the ResNet backbone only. Nothing above it is pretrained; there is no DETR checkpoint. | Full COCO-trained detector. |
 
-The positional-encoding accumulation is a deliberate simplification, not a bug
-report — but it does mean encoder layer *k* sees the encoding scaled roughly
-*k* times, which is not what the paper computes.
-
-## Installation
-
-```bash
-# Install required packages
-pip install keras>=3.8.0 tensorflow>=2.18.0 numpy
-
-# Install dl_techniques framework (if using framework components)
-# pip install dl_techniques
-```
-
-## Quick Start
-
-### Basic Usage
-
-```python
-import keras
-from detr_refactored import create_detr
-
-# Create a DETR model for COCO dataset
-model = create_detr(
-    num_classes=80,      # COCO has 80 classes
-    num_queries=100,     # Detect up to 100 objects
-    backbone_name="resnet50",
-    hidden_dim=256
-)
-
-# Prepare inputs
-image = keras.Input(shape=(None, None, 3), name="image")
-mask = keras.Input(shape=(None, None), dtype="bool", name="mask")
-
-# Get predictions
-outputs = model([image, mask])
-
-# outputs is a dictionary:
-# {
-#     'pred_logits': (batch, 100, 81),  # Class predictions
-#     'pred_boxes': (batch, 100, 4),     # Bbox predictions (x, y, w, h)
-#     'aux_outputs': [...]               # Intermediate predictions
-# }
-```
-
-### Inference Example
-
-```python
-import numpy as np
-import keras
-
-# Load trained model
-model = keras.models.load_model("detr_model.keras")
-
-# Prepare image (normalized to [0, 1])
-image = load_and_preprocess_image("image.jpg")  # Shape: (H, W, 3)
-image_batch = np.expand_dims(image, axis=0)     # Shape: (1, H, W, 3)
-
-# Mask: False = valid pixel, True = padding. It is honoured (see "Deviations
-# from the paper"): padded positions are excluded from encoder self-attention
-# and decoder cross-attention. All-False here means "no padding".
-mask = np.zeros((1, image.shape[0], image.shape[1]), dtype=bool)
-
-# Run inference
-predictions = model([image_batch, mask], training=False)
-
-# Extract predictions
-class_logits = predictions['pred_logits'][0]  # (100, 81)
-boxes = predictions['pred_boxes'][0]           # (100, 4)
-
-# Get class probabilities
-class_probs = keras.ops.softmax(class_logits, axis=-1)
-
-# Filter predictions by confidence threshold
-threshold = 0.7
-max_probs = keras.ops.max(class_probs[:, :-1], axis=-1)  # Exclude "no object"
-keep = max_probs > threshold
-
-# Get filtered predictions
-filtered_boxes = boxes[keep]
-filtered_classes = keras.ops.argmax(class_probs[keep, :-1], axis=-1)
-filtered_scores = max_probs[keep]
-
-print(f"Detected {len(filtered_boxes)} objects")
-```
-
-## Detailed Usage
-
-### 1. Creating a Model
-
-```python
-from detr_refactored import create_detr
-
-model = create_detr(
-    num_classes=80,           # Number of object classes
-    num_queries=100,          # Max detections per image
-    backbone_name="resnet50", # CNN backbone
-    backbone_trainable=False, # Freeze backbone initially
-    hidden_dim=256,           # Transformer dimension
-    num_heads=8,              # Attention heads
-    num_encoder_layers=6,     # Encoder depth
-    num_decoder_layers=6,     # Decoder depth
-    ffn_dim=2048,            # FFN hidden dimension
-    dropout=0.1,             # Dropout rate
-    aux_loss=True,           # Use auxiliary losses
-    activation="relu",       # FFN activation
-    normalization_type="layer_norm",  # Normalization type
-    ffn_type="mlp"           # FFN architecture
-)
-```
-
-### 2. Custom Backbone
-
-```python
-import keras
-
-# Create custom backbone
-custom_backbone = keras.models.Sequential([
-    keras.layers.Conv2D(64, 7, strides=2, padding='same'),
-    keras.layers.BatchNormalization(),
-    keras.layers.ReLU(),
-    # ... more layers
-], name="custom_backbone")
-
-# Create transformer
-from detr_refactored import DetrTransformer
-
-transformer = DetrTransformer(
-    hidden_dim=256,
-    num_heads=8,
-    num_encoder_layers=6,
-    num_decoder_layers=6
-)
-
-# Create DETR model manually
-from detr_refactored import DETR
-
-model = DETR(
-    num_classes=80,
-    num_queries=100,
-    backbone=custom_backbone,
-    transformer=transformer,
-    hidden_dim=256
-)
-```
-
-### 3. Experimenting with Different Architectures
-
-```python
-# Try RMSNorm (faster than LayerNorm)
-model_rms = create_detr(
-    num_classes=80,
-    num_queries=100,
-    normalization_type="rms_norm"
-)
-
-# Try SwiGLU FFN (from LLaMA, GPT-4)
-model_swiglu = create_detr(
-    num_classes=80,
-    num_queries=100,
-    ffn_type="swiglu",
-    activation="swish"
-)
-
-# Try GeGLU FFN (from T5)
-model_geglu = create_detr(
-    num_classes=80,
-    num_queries=100,
-    ffn_type="geglu",
-    activation="gelu"
-)
-
-# Combine different components
-model_advanced = create_detr(
-    num_classes=80,
-    num_queries=100,
-    normalization_type="rms_norm",   # Faster normalization
-    ffn_type="swiglu",                # Modern FFN
-    activation="gelu",                # Better activation
-    num_encoder_layers=8,             # Deeper encoder
-    num_decoder_layers=8              # Deeper decoder
-)
-```
-
-## Configuration Options
-
-### Backbone Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `backbone_name` | CNN backbone identifier | "resnet50" |
-| `backbone_trainable` | Whether to fine-tune backbone | False |
-
-Currently supported backbones:
-- `"resnet50"`: ResNet-50 with ImageNet weights
-
-### Transformer Options
-
-| Option | Description | Default | Range |
-|--------|-------------|---------|-------|
-| `hidden_dim` | Transformer feature dimension | 256 | 128-1024 |
-| `num_heads` | Number of attention heads | 8 | 4-16 |
-| `num_encoder_layers` | Encoder layer count | 6 | 3-12 |
-| `num_decoder_layers` | Decoder layer count | 6 | 3-12 |
-| `ffn_dim` | FFN intermediate dimension | 2048 | 512-4096 |
-| `dropout` | Dropout rate | 0.1 | 0.0-0.5 |
-
-### Architecture Variants
-
-| Option | Description | Options | Default |
-|--------|-------------|---------|---------|
-| `activation` | Activation function | "relu", "gelu", "swish", "mish" | "relu" |
-| `normalization_type` | Normalization layer | "layer_norm", "rms_norm", "batch_norm" | "layer_norm" |
-| `ffn_type` | Feed-forward network type | "mlp", "swiglu", "geglu", "glu" | "mlp" |
-
-### Detection Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `num_classes` | Number of object classes | Required |
-| `num_queries` | Maximum detections per image | 100 |
-| `aux_loss` | Use auxiliary decoder losses | True |
-
-## Training
-
-### Loss Components
-
-DETR uses a combination of losses:
-
-1. **Classification Loss**: Focal loss or cross-entropy for class predictions
-2. **Bounding Box Loss**: L1 loss for box coordinates
-3. **GIoU Loss**: Generalized IoU loss for better box quality
-4. **Bipartite Matching**: Hungarian algorithm for optimal assignment
-
-### Typical Training Setup
-
-```python
-import keras
-from detr_refactored import create_detr
-
-# Create model
-model = create_detr(num_classes=80, num_queries=100)
-
-# Define optimizer with learning rate schedule
-initial_lr = 1e-4
-lr_schedule = keras.optimizers.schedules.CosineDecay(
-    initial_learning_rate=initial_lr,
-    decay_steps=train_steps
-)
-optimizer = keras.optimizers.AdamW(
-    learning_rate=lr_schedule,
-    weight_decay=1e-4
-)
-
-# Compile (note: loss is custom, handled in training loop)
-# DETR requires Hungarian matching which is not a standard Keras loss
-# Typically implemented in a custom training loop
-
-# Training pseudocode (actual implementation requires Hungarian matching)
-for epoch in range(num_epochs):
-    for images, masks, targets in train_dataset:
-        with tf.GradientTape() as tape:
-            predictions = model([images, masks], training=True)
-            
-            # Compute bipartite matching
-            indices = hungarian_matcher(predictions, targets)
-            
-            # Compute losses based on matched predictions
-            loss_class = classification_loss(predictions, targets, indices)
-            loss_bbox = bbox_l1_loss(predictions, targets, indices)
-            loss_giou = giou_loss(predictions, targets, indices)
-            
-            # Auxiliary losses from intermediate decoder layers
-            aux_losses = compute_aux_losses(predictions['aux_outputs'], targets)
-            
-            total_loss = loss_class + loss_bbox + loss_giou + aux_losses
-        
-        # Update weights
-        gradients = tape.gradient(total_loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-```
-
-### Training Tips
-
-1. **Warmup**: Start with a small learning rate and gradually increase
-2. **Backbone**: Initially freeze the backbone, fine-tune later
-3. **Batch Size**: DETR benefits from larger batch sizes (8-16)
-4. **Epochs**: Typically requires 300-500 epochs to converge
-5. **Data Augmentation**: Use strong augmentation (random crop, color jitter, etc.)
-6. **Gradient Clipping**: Clip gradients to prevent instability (max_norm=0.1)
-
-### Hyperparameters (from paper)
-
-```python
-# Original DETR-DC5 (dilated C5) configuration
-config = {
-    'hidden_dim': 256,
-    'num_heads': 8,
-    'num_encoder_layers': 6,
-    'num_decoder_layers': 6,
-    'ffn_dim': 2048,
-    'dropout': 0.1,
-    'num_queries': 100,
-    
-    # Training
-    'learning_rate': 1e-4,
-    'lr_backbone': 1e-5,  # Lower LR for backbone
-    'weight_decay': 1e-4,
-    'epochs': 300,
-    'batch_size': 2,  # Per GPU
-    'gradient_clip': 0.1,
-    
-    # Loss weights
-    'weight_class': 1.0,
-    'weight_bbox': 5.0,
-    'weight_giou': 2.0,
-}
-```
-
-## Model Components
-
-### 1. Backbone
-
-```python
-# The backbone extracts features from the input image
-# Default: ResNet-50 without the final classification layers
-# Output: Feature map of size H/32 × W/32 × 2048
-```
-
-**Purpose**: Extract hierarchical visual features
-
-**Options**:
-- Use pre-trained weights (recommended)
-- Freeze initially, fine-tune later
-- Can be replaced with any CNN (ResNet, EfficientNet, etc.)
-
-### 2. Input Projection
-
-```python
-# Projects backbone features to transformer dimension
-# 1×1 convolution: 2048 → hidden_dim (256)
-```
-
-**Purpose**: Adapt CNN features to transformer dimension
-
-### 3. Positional Encoding
-
-```python
-# 2D sinusoidal positional encoding
-# Encodes spatial position information
-# Added to the projected features
-```
-
-**Purpose**: Provide spatial awareness to the transformer
-
-**Details**:
-- Uses sine and cosine functions of different frequencies
-- Separate encodings for x and y coordinates
-- Concatenated to form full positional encoding
-
-### 4. Transformer Encoder
-
-```python
-# Stack of N transformer layers (default: 6)
-# Each layer: Self-Attention → FFN
-# Enables global reasoning over image features
-```
-
-**Purpose**: Process and refine image features with global context
-
-**Key Points**:
-- Self-attention allows every position to attend to every other position
-- Enables long-range dependencies
-- Pre-normalization architecture
-
-### 5. Transformer Decoder
-
-```python
-# Stack of N transformer layers (default: 6)
-# Each layer: Self-Attention → Cross-Attention → FFN
-# Object queries attend to encoder memory
-```
-
-**Purpose**: Transform object queries into object detections
-
-**Key Points**:
-- Object queries: Learned embeddings (one per potential detection)
-- Self-attention: Queries interact with each other
-- Cross-attention: Queries attend to image features
-- Outputs predictions for each query
-
-### 6. Prediction Heads
-
-```python
-# Class head: Linear layer → (num_classes + 1)
-# Bbox head: Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4), then sigmoid
-#            (three Dense layers, as in the paper)
-```
-
-**Purpose**: Convert decoder outputs to class and box predictions
-
-**Details**:
-- Class prediction: Includes "no object" class
-- Box prediction: Normalized coordinates [0, 1]
-- Applied to all decoder layer outputs for auxiliary losses
-
-## Performance Considerations
-
-### Computational Complexity
-
-DETR is computationally expensive:
-
-| Component | Complexity | Notes |
-|-----------|------------|-------|
-| Backbone | O(HW) | Linear in image size |
-| Encoder Self-Attention | O((HW)²) | Quadratic in sequence length |
-| Decoder Self-Attention | O(N²) | Quadratic in num_queries |
-| Decoder Cross-Attention | O(N × HW) | Queries attend to all positions |
-
-**Memory Requirements**:
-- Encoder attention: (H/32 × W/32)² attention map
-- For 800×1333 images: ~25×42 = 1050 positions
-- Attention matrix: 1050² ≈ 1M elements per head
-
-### Optimization Strategies
-
-1. **Reduce Image Resolution**
-```python
-# Use smaller input images
-target_size = (600, 800)  # Instead of (800, 1333)
-```
-
-2. **Reduce Number of Encoder Layers**
-```python
-model = create_detr(
-    num_classes=80,
-    num_queries=100,
-    num_encoder_layers=3,  # Instead of 6
-    num_decoder_layers=6
-)
-```
-
-3. **Use Efficient Normalization**
-```python
-model = create_detr(
-    num_classes=80,
-    num_queries=100,
-    normalization_type="rms_norm"  # Faster than layer_norm
-)
-```
-
-4. **Mixed Precision Training**
-```python
-keras.mixed_precision.set_global_policy('mixed_float16')
-```
-
-5. **Gradient Checkpointing**
-- Recompute activations during backward pass
-- Trades computation for memory
-
-### Inference Speed
-
-Typical inference times (single image, V100 GPU):
-- **DETR-R50**: ~100ms per image
-- **DETR-R101**: ~150ms per image
-- **Faster R-CNN**: ~50ms per image (for comparison)
-
-DETR is not designed for real-time applications. For faster inference:
-- Use smaller backbone
-- Reduce number of layers
-- Reduce image resolution
-- Consider DETR variants (Deformable DETR, Conditional DETR)
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Model Not Converging
-
-**Symptoms**: Loss stays high, no detections made
-
-**Solutions**:
-```python
-# Increase training duration
-epochs = 500  # DETR needs many epochs
-
-# Check learning rate
-lr = 1e-4  # Original paper value
-
-# Ensure auxiliary losses are enabled
-model = create_detr(..., aux_loss=True)
-
-# Use gradient clipping
-# (in custom training loop)
-```
-
-#### 2. Out of Memory
-
-**Symptoms**: CUDA out of memory errors
-
-**Solutions**:
-```python
-# Reduce batch size
-batch_size = 1  # Start small
-
-# Reduce image resolution
-max_size = 800  # Instead of 1333
-
-# Reduce model size
-model = create_detr(
-    hidden_dim=128,        # Instead of 256
-    num_encoder_layers=3,  # Instead of 6
-    ffn_dim=1024          # Instead of 2048
-)
-
-# Use gradient accumulation
-accumulation_steps = 4  # Simulate larger batch
-```
-
-#### 3. Slow Training
-
-**Symptoms**: Training takes too long
-
-**Solutions**:
-```python
-# Use mixed precision
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# Reduce encoder layers (most expensive)
-model = create_detr(..., num_encoder_layers=3)
-
-# Use RMSNorm (faster than LayerNorm)
-model = create_detr(..., normalization_type="rms_norm")
-
-# Freeze backbone initially
-model = create_detr(..., backbone_trainable=False)
-```
-
-#### 4. Poor Performance on Small Objects
-
-**Symptoms**: Missing small objects in predictions
-
-**Solutions**:
-- DETR struggles with small objects inherently
-- Use multi-scale features (not in basic DETR)
-- Consider Deformable DETR for better small object detection
-- Increase input resolution
-- Use stronger data augmentation with crops
-
-#### 5. Serialization Errors
-
-**Symptoms**: Cannot save/load model
-
-**Solutions**:
-```python
-# Ensure all custom layers are registered. The package string is the defining module's
-# dotted path -- `my_project.<module>` for your own code, `dl_techniques.<module.path>`
-# for code inside this repo (this package uses `dl_techniques.models.detr.model`).
-from dl_techniques.utils.keras_registration import register_dl_technique
-
-@register_dl_technique("my_project.my_layer")
-class MyLayer(keras.layers.Layer):
-    ...
-
-# Use .keras format
-model.save("model.keras")  # Not .h5
-
-# Check get_config() completeness
-config = model.get_config()
-print(config.keys())  # Should include all __init__ params
-```
-
-### Debugging Tips
-
-```python
-# Check model summary
-model.summary()
-
-# Inspect intermediate outputs
-encoder_output = model.transformer.encoder_layers[0](features)
-print(f"Encoder output shape: {encoder_output.shape}")
-
-# Visualize attention weights (requires modification)
-# Add return_attention_weights=True to attention layers
-
-# Check gradient flow
-with tf.GradientTape() as tape:
-    outputs = model([images, masks], training=True)
-    loss = compute_loss(outputs, targets)
-gradients = tape.gradient(loss, model.trainable_variables)
-
-# Check for None gradients
-for var, grad in zip(model.trainable_variables, gradients):
-    if grad is None:
-        print(f"No gradient for {var.name}")
-```
-
-## Advanced Topics
-
-### 1. Panoptic Segmentation
-
-DETR can be extended for panoptic segmentation by adding a mask head:
-
-```python
-# Add mask prediction head after decoder
-mask_head = keras.Sequential([
-    keras.layers.Dense(hidden_dim, activation='relu'),
-    keras.layers.Dense(hidden_dim, activation='relu'),
-    keras.layers.Dense(num_masks)
-])
-```
-
-### 2. Multi-Scale Features
-
-Improve detection of objects at different scales:
-
-```python
-# Extract features from multiple backbone layers
-features_c3 = backbone.get_layer('conv3_block4_out').output
-features_c4 = backbone.get_layer('conv4_block6_out').output
-features_c5 = backbone.get_layer('conv5_block3_out').output
-
-# Combine multi-scale features (e.g., FPN-style)
-```
-
-### 3. Deformable Attention
-
-Replace standard attention with deformable attention for efficiency:
-
-```python
-# Use sparse attention to key sampling locations
-# Reduces complexity from O(HW) to O(K) where K is small
-```
-
-### 4. Conditional DETR
-
-Add conditional spatial query to decoder for faster convergence:
-
-```python
-# Decoder cross-attention conditioned on content query
-# Helps queries focus on relevant regions earlier in training
-```
-
-## Model Variants
-
-### DETR-DC5
-- Uses dilated convolutions in C5 stage of ResNet
-- Larger feature maps (stride 16 instead of 32)
-- Better performance but slower
-
-### DETR-R50
-- Standard ResNet-50 backbone
-- 41.5 AP on COCO (300 epochs)
-
-### DETR-R101
-- ResNet-101 backbone
-- 43.5 AP on COCO (300 epochs)
-- Larger capacity, better performance
-
-### Deformable DETR
-- Uses deformable attention
-- 10× faster convergence
-- Better performance on small objects
-
-### Conditional DETR
-- Adds conditional spatial query
-- Faster convergence than vanilla DETR
-- Similar final performance
-
-## Best Practices
-
-### 1. Training Strategy
-
-```python
-# Phase 1: Train with frozen backbone (50 epochs)
-model = create_detr(..., backbone_trainable=False)
-train(model, epochs=50, lr=1e-4)
-
-# Phase 2: Fine-tune entire model (250 epochs)
-model.backbone.trainable = True
-train(model, epochs=250, lr=1e-5)
-```
-
-### 2. Data Preprocessing
-
-```python
-# Normalize images to [0, 1]
-image = image / 255.0
-
-# Apply ImageNet normalization if using pre-trained backbone
-mean = [0.485, 0.456, 0.406]
-std = [0.229, 0.224, 0.225]
-image = (image - mean) / std
-
-# Resize while maintaining aspect ratio
-# Pad to fixed size or use masking
-```
-
-### 3. Data Augmentation
-
-```python
-# Recommended augmentations
-augmentations = [
-    RandomCrop(min_scale=0.3, max_scale=1.0),
-    RandomHorizontalFlip(p=0.5),
-    ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
-    RandomGrayscale(p=0.1),
-]
-```
-
-### 4. Evaluation
-
-```python
-# Use COCO evaluation metrics
-from pycocotools.cocoeval import COCOeval
-
-# Post-processing: Filter by confidence threshold
-threshold = 0.7
-predictions = filter_predictions(outputs, threshold)
-
-# Compute metrics
-coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
-coco_eval.evaluate()
-coco_eval.accumulate()
-coco_eval.summarize()
-
-# Key metrics:
-# - AP (Average Precision @ IoU=0.50:0.95)
-# - AP50 (Average Precision @ IoU=0.50)
-# - AP75 (Average Precision @ IoU=0.75)
-# - AP_small, AP_medium, AP_large
-```
-
-## Examples
-
-### Complete Training Example
-
-```python
-import keras
-import tensorflow as tf
-from detr_refactored import create_detr
-
-# Hyperparameters
-CONFIG = {
-    'num_classes': 80,
-    'num_queries': 100,
-    'hidden_dim': 256,
-    'epochs': 300,
-    'batch_size': 2,
-    'learning_rate': 1e-4,
-    'weight_decay': 1e-4,
-}
-
-# Create model
-model = create_detr(
-    num_classes=CONFIG['num_classes'],
-    num_queries=CONFIG['num_queries'],
-    hidden_dim=CONFIG['hidden_dim'],
-    backbone_trainable=False  # Freeze initially
-)
-
-# Optimizer with weight decay
-optimizer = keras.optimizers.AdamW(
-    learning_rate=CONFIG['learning_rate'],
-    weight_decay=CONFIG['weight_decay']
-)
-
-# Custom training loop (pseudo-code)
-@tf.function
-def train_step(images, masks, targets):
-    with tf.GradientTape() as tape:
-        predictions = model([images, masks], training=True)
-        
-        # Compute bipartite matching
-        indices = hungarian_matcher(predictions, targets)
-        
-        # Compute losses
-        losses = compute_detr_losses(predictions, targets, indices)
-        total_loss = sum(losses.values())
-    
-    # Update weights
-    gradients = tape.gradient(total_loss, model.trainable_variables)
-    gradients, _ = tf.clip_by_global_norm(gradients, 0.1)
-    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    
-    return losses
-
-# Training loop
-for epoch in range(CONFIG['epochs']):
-    for batch in train_dataset:
-        losses = train_step(batch['images'], batch['masks'], batch['targets'])
-    
-    # Validation
-    if epoch % 10 == 0:
-        val_metrics = evaluate(model, val_dataset)
-        print(f"Epoch {epoch}: AP = {val_metrics['AP']:.3f}")
-    
-    # Unfreeze backbone after 50 epochs
-    if epoch == 50:
-        model.backbone.trainable = True
-        optimizer.learning_rate = 1e-5
-
-# Save final model
-model.save("detr_final.keras")
-```
-
-### Inference with Post-Processing
+The positional-encoding accumulation is a deliberate simplification, not a bug report — but it
+does mean encoder layer *k* sees the encoding scaled roughly *k* times, which is not what the
+paper computes.
+
+No accuracy, AP or throughput number appears in this README. Nothing in this repository has ever
+trained a DETR, so any such number would describe the paper, not this code.
+
+## 8. Training
+
+Training DETR needs a **custom loop or a custom `train_step`** that performs Hungarian matching,
+because the loss is a set loss over an assignment. Neither ships here. The pieces you must supply:
+
+1. A matcher (e.g. `scipy.optimize.linear_sum_assignment`) over the cost matrix
+   `-p(class) + λ_L1 · ||b_pred − b_gt||₁ + λ_giou · (1 − GIoU)`.
+2. A classification loss over all `num_queries` predictions, with the unmatched ones pushed to
+   the "no object" class (the paper down-weights that class by 0.1).
+3. Box L1 + GIoU losses over the matched pairs only.
+4. The same loss applied to every entry of `aux_outputs`, summed.
+
+The paper's recipe: AdamW, `1e-4` for the transformer and `1e-5` for the backbone, weight decay
+`1e-4`, gradient clipping at `0.1`, 300 epochs with a 10x LR drop at epoch 200, batch 2 per GPU.
+Quoted from the paper — not measured here.
+
+Practical notes:
+
+- Freeze the backbone (`backbone_trainable=False`, the default) for the first phase; unfreezing
+  it at a 10x lower learning rate later is the standard schedule.
+- Keep `aux_loss=True`. Convergence is much slower without it.
+- The encoder is the expensive half — attention is quadratic in `H·W / 256` feature cells.
+  Reducing `num_encoder_layers` or the input resolution buys more than anything else.
+- Normalize images the way the backbone expects (ImageNet mean/std for `keras.applications`
+  ResNet-50).
+
+## 9. Serialization & Deployment
+
+`DETR` and `DetrTransformer` register through
+`@register_dl_technique("dl_techniques.models.detr.model")`, so a `.keras` file round-trips with
+no `custom_objects`. `DETR.build` explicitly builds every sublayer, which is what makes the
+weight restore work: Keras calls `load_own_variables()` on each sublayer, and an unbuilt sublayer
+with no variables raises when the saved store has more entries than its (empty) variable list.
 
 ```python
 import keras
 import numpy as np
-from PIL import Image
 
-def predict_objects(model, image_path, confidence_threshold=0.7):
-    """
-    Predict objects in an image.
-    
-    Args:
-        model: Trained DETR model
-        image_path: Path to input image
-        confidence_threshold: Minimum confidence for detections
-    
-    Returns:
-        List of detections: [(class_id, confidence, bbox), ...]
-    """
-    # Load and preprocess image
-    image = Image.open(image_path).convert('RGB')
-    image_array = np.array(image) / 255.0
-    
-    # Resize to model input size
-    h, w = image_array.shape[:2]
-    target_h, target_w = 800, 1333
-    scale = min(target_h / h, target_w / w)
-    new_h, new_w = int(h * scale), int(w * scale)
-    
-    image_resized = tf.image.resize(image_array, (new_h, new_w))
-    
-    # Pad to target size
-    pad_h = target_h - new_h
-    pad_w = target_w - new_w
-    image_padded = tf.pad(
-        image_resized,
-        [[0, pad_h], [0, pad_w], [0, 0]],
-        constant_values=0
-    )
-    
-    # Create mask
-    mask = np.zeros((target_h, target_w), dtype=bool)
-    mask[new_h:, :] = True
-    mask[:, new_w:] = True
-    
-    # Add batch dimension
-    image_batch = np.expand_dims(image_padded, axis=0)
-    mask_batch = np.expand_dims(mask, axis=0)
-    
-    # Predict. The mask is applied to encoder self-attention and decoder
-    # cross-attention, so the letterbox padding contributes nothing there; it
-    # still reaches feature cells within one backbone receptive field of the
-    # boundary (see "Deviations from the paper").
-    predictions = model([image_batch, mask_batch], training=False)
-    
-    # Extract predictions
-    class_logits = predictions['pred_logits'][0]  # (100, 81)
-    boxes = predictions['pred_boxes'][0]           # (100, 4)
-    
-    # Get probabilities
-    probs = tf.nn.softmax(class_logits, axis=-1)
-    
-    # Filter by confidence (exclude "no object" class)
-    max_probs = tf.reduce_max(probs[:, :-1], axis=-1)
-    class_ids = tf.argmax(probs[:, :-1], axis=-1)
-    
-    # Apply threshold
-    keep = max_probs > confidence_threshold
-    
-    # Get detections
-    detections = []
-    for i in tf.where(keep):
-        i = i[0].numpy()
-        class_id = class_ids[i].numpy()
-        confidence = max_probs[i].numpy()
-        box = boxes[i].numpy()
-        
-        # Convert normalized coords to image coords
-        x_center, y_center, width, height = box
-        x1 = (x_center - width / 2) * w
-        y1 = (y_center - height / 2) * h
-        x2 = (x_center + width / 2) * w
-        y2 = (y_center + height / 2) * h
-        
-        detections.append({
-            'class_id': int(class_id),
-            'confidence': float(confidence),
-            'bbox': [float(x1), float(y1), float(x2), float(y2)]
-        })
-    
-    return detections
+model.build([(None, 128, 128, 3), (None, 128, 128)])
+model.save("detr.keras")
+restored = keras.models.load_model("detr.keras")
 
-# Use the function
-model = keras.models.load_model("detr_trained.keras")
-detections = predict_objects(model, "test_image.jpg")
-
-for det in detections:
-    print(f"Class {det['class_id']}: {det['confidence']:.2f} at {det['bbox']}")
+a = np.asarray(model([images, mask], training=False)["pred_boxes"])
+b = np.asarray(restored([images, mask], training=False)["pred_boxes"])
+assert np.allclose(a, b, atol=1e-6)
 ```
 
-## References
+For mixed precision, set `keras.mixed_precision.set_global_policy("mixed_float16")` before
+constructing the model.
 
-### Original Paper
+## 10. Troubleshooting
+
+- **`ValueError: hidden_dim (10) must be a multiple of 4`.** The sine position encoder gets
+  `hidden_dim // 2` features per axis and that must itself be even. The message names the next
+  valid value.
+- **`NotImplementedError: Backbone 'resnet101' not supported.`** `create_detr` only builds
+  `"resnet50"`. For anything else, construct `DETR` directly with your own backbone (§ 6).
+- **The forward pass raises on a bare image tensor.** `call` unpacks `(images, padding_mask)`.
+  Pass `[images, mask]`, or `[images, None]` if there is no padding.
+- **Confidences look wrong / exceed 1.** `pred_logits` are logits. Softmax first, and drop the
+  last column, which is "no object".
+- **Boxes are all near 0.5 and the model does not converge.** Expected without a set loss — see
+  § 8. Also check that `aux_loss=True` and that you are training on all of `aux_outputs`.
+- **Out of memory.** Encoder attention is quadratic in the number of feature cells. Halve the
+  input resolution, cut `num_encoder_layers`, or drop the batch size.
+- **More than `num_queries` objects in an image.** They cannot all be detected. Raise
+  `num_queries`; the paper uses 100 for COCO.
+
+Authoring conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide for new models and
+layers: `research/2026_keras_custom_models_instructions_v2.md`.
+
+## 11. Citation
 
 ```bibtex
-@inproceedings{carion2020end,
-  title={End-to-end object detection with transformers},
-  author={Carion, Nicolas and Massa, Francisco and Synnaeve, Gabriel and Usunier, Nicolas and Kirillov, Alexander and Zagoruyko, Sergey},
-  booktitle={European Conference on Computer Vision},
-  pages={213--229},
-  year={2020},
-  organization={Springer}
+@inproceedings{carion2020detr,
+  title={End-to-End Object Detection with Transformers},
+  author={Carion, Nicolas and Massa, Francisco and Synnaeve, Gabriel and
+          Usunier, Nicolas and Kirillov, Alexander and Zagoruyko, Sergey},
+  booktitle={European Conference on Computer Vision (ECCV)},
+  year={2020}, eprint={2005.12872},
+  url={https://arxiv.org/abs/2005.12872}
 }
 ```
-
-### Related Work
-
-- **Deformable DETR** (2021): Improves convergence speed and small object detection
-- **Conditional DETR** (2021): Faster convergence with conditional cross-attention
-- **DINO** (2022): State-of-the-art DETR with contrastive denoising
-- **ViT-DETR** (2022): Uses Vision Transformer instead of CNN backbone
-
-### Resources
-
-- **Original Implementation**: https://github.com/facebookresearch/detr
-- **Paper**: https://arxiv.org/abs/2005.12872
-- **Tutorial**: https://cocodataset.org/#detection-eval
-- **Keras Documentation**: https://keras.io/guides/
-
-## License
-
-This implementation is provided for research and educational purposes. Please refer to the original DETR paper and implementation for licensing information.
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows Keras 3 best practices
-- Type hints are included
-- Documentation is comprehensive
-- Tests are provided
-
-## Acknowledgments
-
-- Original DETR authors at Facebook AI Research
-- Keras team for the excellent framework
-- dl_techniques framework contributors
-
----
-
-**Questions or Issues?** Please open an issue on GitHub or refer to the troubleshooting section above.

@@ -1,2541 +1,450 @@
 # ResNet - Deep Residual Networks
 
-[![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
+A Keras 3 implementation of **ResNet** (He, Zhang, Ren & Sun, *Deep Residual Learning for
+Image Recognition*, CVPR 2016, [arXiv:1512.03385](https://arxiv.org/abs/1512.03385)) — the
+architecture that made very deep convolutional networks trainable by adding an identity
+shortcut around every pair or triple of convolutions.
 
-An implementation of **Deep Residual Networks (ResNet)** in **Keras 3**, based on the groundbreaking paper ["Deep Residual Learning for Image Recognition"](https://arxiv.org/abs/1512.03385) by He et al. (2015).
+`ResNet` is a **subclassed** `keras.Model`, not a Functional graph. That one fact explains
+most of the surprises below: no `.input`, no `.output`, no `output_names`, and
+`count_params()` raises until the model is built.
 
-This implementation follows the `dl_techniques` framework standards and modern Keras 3 best practices, featuring pretrained weight support, deep supervision training, and full serialization capabilities that work seamlessly across TensorFlow, PyTorch, and JAX backends.
+> **`pretrained=True` raises `NotImplementedError` — no weights are downloadable.**
+> `_download_weights` raises by design. The working form is a local checkpoint path:
+> `ResNet.from_variant('resnet50', pretrained='/path/to/file.keras')`. See § 9.
 
----
+## 1. Overview: What is ResNet and Why It Matters
 
-## Table of Contents
+A plain deep convolutional stack computes `x -> H(x)`. ResNet reparameterizes each block to
+compute a **residual** instead: `y = F(x, W) + x`, where `F` is 2 or 3 convolutions and `x`
+arrives on a parameter-free identity shortcut. Nothing else changes — same convolutions,
+normalization and activations. What it buys is that "do nothing" becomes a *reachable*
+solution: driving `F` to zero is easy, driving a stack of convolutions to the identity is not.
 
-1. [Overview: What is ResNet and Why It Revolutionized Deep Learning](#1-overview-what-is-resnet-and-why-it-revolutionized-deep-learning)
-2. [The Vanishing Gradient Problem](#2-the-vanishing-gradient-problem)
-3. [How ResNet Works: The Residual Learning Framework](#3-how-resnet-works-the-residual-learning-framework)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Model Variants](#6-model-variants)
-7. [Deep Supervision Feature](#7-deep-supervision-feature)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Pretrained Weights & Transfer Learning](#9-pretrained-weights--transfer-learning)
-10. [Training from Scratch](#10-training-from-scratch)
-11. [Fine-Tuning Strategies](#11-fine-tuning-strategies)
-12. [Advanced Techniques](#12-advanced-techniques)
-13. [Performance Optimization](#13-performance-optimization)
-14. [Serialization & Deployment](#14-serialization--deployment)
-15. [Testing & Validation](#15-testing--validation)
-16. [Troubleshooting & FAQs](#16-troubleshooting--faqs)
-17. [Technical Details](#17-technical-details)
-18. [Citation](#18-citation)
+152 layers trains where a 34-layer plain network does not, and the residual path became the
+backbone of every later vision architecture. Feature maps from a trained ResNet transfer
+well, which is why `include_top=False` is the most common way this class is used.
 
----
+## 2. The Degradation Problem
 
-## 1. Overview: What is ResNet and Why It Revolutionized Deep Learning
+Adding layers to a plain network makes **training** error go up, not just test error. That is
+not overfitting — it is an optimization failure.
 
-### What is ResNet?
-
-**ResNet (Residual Network)** is a deep convolutional neural network architecture that introduced the concept of **residual learning** through **skip connections** (also called shortcut connections). This simple yet powerful innovation enabled training of extremely deep networks—up to 1000+ layers—without suffering from degradation problems.
-
-### The Revolutionary Impact
-
-Before ResNet (2015), the deep learning community faced a fundamental limitation:
-
-```
-The Pre-ResNet Era Problem:
-┌─────────────────────────────────────────────────────────────┐
-│  Adding more layers should make networks better, right?     │
-│  WRONG! Networks actually got WORSE with more layers.       │
-│                                                             │
-│  20-layer network:  91.8% accuracy  ✓                       │
-│  56-layer network:  87.4% accuracy  ✗ (worse!)              │
-│                                                             │
-│  This wasn't overfitting—even TRAINING error was worse!     │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**ResNet's Solution**: By introducing skip connections, ResNet enabled training of networks with 152 layers (and experimentally 1000+ layers) that achieved state-of-the-art results:
-
-```
-The ResNet Revolution (2015):
-┌─────────────────────────────────────────────────────────────┐
-│  ResNet-34:   Better than previous best                     │
-│  ResNet-50:   Significant improvement                       │
-│  ResNet-101:  Even better                                   │
-│  ResNet-152:  3.57% top-5 error on ImageNet (winner!)       │
-│                                                             │
-│  🏆 Won ImageNet 2015 competition                           │
-│  🏆 Won COCO 2015 detection and segmentation                │
-│  🏆 Most cited computer vision paper of all time            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Key Innovations
-
-1. **Residual Learning**: Instead of learning a direct mapping H(x), learn a residual mapping F(x) = H(x) - x
-2. **Identity Shortcuts**: Direct connections that skip layers, allowing gradients to flow unimpeded
-3. **Extreme Depth**: Successfully trained networks with 100+ layers
-4. **Universal Applicability**: The residual learning principle works across various tasks and domains
-
-### Real-World Impact
-
-ResNet became the **backbone architecture** for countless applications:
-
-- **🖼️ Image Classification**: State-of-the-art on ImageNet, CIFAR, etc.
-- **🎯 Object Detection**: Backbone for Faster R-CNN, Mask R-CNN, YOLO, etc.
-- **🎨 Image Segmentation**: Foundation for U-Net variants, DeepLab, etc.
-- **👤 Face Recognition**: Used by major face recognition systems
-- **🏥 Medical Imaging**: X-ray analysis, tumor detection, organ segmentation
-- **🚗 Autonomous Driving**: Object detection and scene understanding
-- **📸 Image Generation**: Part of GANs and diffusion models
-- **🎬 Video Analysis**: Action recognition, video segmentation
-
----
-
-## 2. The Vanishing Gradient Problem
-
-### Understanding the Problem
-
-To appreciate ResNet's innovation, we must first understand why very deep networks were problematic.
-
-#### The Degradation Problem
-
-When networks get deeper, two problems emerge:
-
-```
-Problem 1: Vanishing Gradients
-──────────────────────────────
-During backpropagation, gradients get smaller as they flow backward:
-
-Layer 50 ─ Loss = 0.5
-    ↑     gradient = 0.1
-Layer 49
-    ↑     gradient = 0.01      (10× smaller)
-Layer 48
-    ↑     gradient = 0.001     (100× smaller)
-    ⋮
-Layer 1
-    ↑     gradient ≈ 0         (effectively zero!)
-
-Result: Early layers don't learn because gradients are too small.
-
-
-Problem 2: Network Degradation
-───────────────────────────────
-Counter-intuitively, deeper networks performed WORSE than shallower ones:
-
-┌────────────────────────────────────────────┐
-│         Training Error vs Depth            │
-│                                            │
-│  Error                                     │
-│    ↑                                       │
-│    │         ╱─────  56-layer network      │
-│    │        ╱                              │
-│    │     ╱─────  20-layer network          │
-│    │    ╱                                  │
-│    └────────────────────────→ Iterations   │
-│                                            │
-│  Deeper network should be ≥ shallow network│
-│  (just set extra layers to identity)       │
-│  But optimization struggles to learn this! │
-└────────────────────────────────────────────┘
-```
-
-### Why Plain Networks Fail
-
-Consider learning an identity mapping with multiple layers:
-
-```
-Plain Network Approach:
-┌──────────────────────────────────────┐
-│  Want:  H(x) = x  (identity)         │
-│                                      │
-│  Must learn:                         │
-│    Layer 1 weights: W₁               │
-│    Layer 2 weights: W₂               │
-│    Layer 3 weights: W₃               │
-│    Such that: W₃·W₂·W₁·x = x         │
-│                                      │
-│  This is HARD to optimize!           │
-│  Requires perfect coordination       │
-│  of multiple weight matrices         │
-└──────────────────────────────────────┘
-```
-
-### ResNet's Elegant Solution
-
-```
-Residual Learning Approach:
-┌──────────────────────────────────────┐
-│  Want:  H(x) = x  (identity)         │
-│                                      │
-│  With skip connection:               │
-│    H(x) = F(x) + x                   │
-│                                      │
-│  For identity:                       │
-│    F(x) = 0                          │
-│    H(x) = 0 + x = x  ✓               │
-│                                      │
-│  Learning F(x) = 0 is MUCH EASIER!   │
-│  Just set all weights to zero        │
-│  (happens naturally during init)     │
-└──────────────────────────────────────┘
-```
-
-### Mathematical Insight
-
-**Plain Network**:
-```
-H(x) = layer₃(layer₂(layer₁(x)))
-```
-
-**Residual Network**:
-```
-H(x) = F(x; W) + x
-
-where F(x; W) represents the residual function
-```
-
-The key insight: **It's easier to learn zero (do nothing) than to learn identity through multiple transformations.**
-
----
+Two mechanisms combine. **Vanishing gradients**: backpropagation multiplies Jacobians layer by
+layer, so with a typical per-layer factor `k < 1` the gradient reaching layer 1 of an
+`L`-layer stack scales like `k^L` (at `k = 0.9`, `L = 50`: `~0.005`). **Unreachable
+identity**: if a 20-layer network is already good, a 56-layer one only needs its extra layers
+to compute the identity, and `conv -> BN -> ReLU` cannot easily represent it. Differentiating
+`y = F(x) + x` gives `dy/dx = dF/dx + I` — an ungated path along which the gradient reaches
+every earlier layer undiminished, and `F = 0` gives the identity exactly.
 
 ## 3. How ResNet Works: The Residual Learning Framework
 
-### The Core Concept: Skip Connections
+A block learns the *change* to apply to its input rather than a whole new representation (§ 4.1
+draws one). Three properties follow: every block contributes an additive `I` to the chain rule, so
+the gradient reaches the stem unattenuated; zero weights in `F` give `y = x`, so depth can only
+help; and unrolling the sum over `n` blocks yields `2^n` input-to-output paths of varying depth,
+most of them short.
+
+Full data flow at the ImageNet default (`stem_type='imagenet'`, 224x224 input):
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│              Residual Block (Building Block)                │
-└─────────────────────────────────────────────────────────────┘
-
-Input x
-  │
-  ├──────────────────────────────────────────┐
-  │                                          │
-  │  Main Path (learns residual F(x))        │  Skip Connection
-  │                                          │  (identity)
-  ├─► Conv → BN → ReLU                       │
-  │         ▼                                │
-  ├─► Conv → BN                              │
-  │         ▼                                │
-  └─► Add ←──────────────────────────────────┘
-        ▼
-     ReLU
-        ▼
-   Output H(x) = F(x) + x
+  input (224, 224, 3)
+    stem     conv 7x7 s2 -> norm -> act -> maxpool 3x3 s2  -> (56, 56, 64)
+    stage 1  blocks_per_stage[0] blocks, stride 1          -> (56, 56, 64|256)
+    stage 2  blocks_per_stage[1] blocks, first stride 2    -> (28, 28, 128|512)
+    stage 3  blocks_per_stage[2] blocks, first stride 2    -> (14, 14, 256|1024)
+    stage 4  blocks_per_stage[3] blocks, first stride 2    -> ( 7,  7, 512|2048)
+    head     global average pool -> dense(num_classes)     -> (num_classes,) LOGITS
 ```
 
-### Why This Works: Three Key Insights
-
-**Insight 1: Easier Optimization**
-```
-Traditional: Learn H(x) directly
-  - Must learn complex mapping from scratch
-  - No guarantee of monotonic improvement
-
-Residual: Learn F(x) = H(x) - x
-  - If identity is optimal, just learn F(x) = 0
-  - Any learned features are ADDITIONS to identity
-  - Network can't perform worse than identity
-```
-
-**Insight 2: Gradient Flow**
-```
-Backpropagation through skip connections:
-
-∂L/∂x = ∂L/∂H · (∂F/∂x + 1)
-                          ↑
-                     Always has this component!
-
-The "+1" term ensures gradients can flow directly backward
-without vanishing, regardless of what happens in F(x).
-```
-
-**Insight 3: Ensemble Behavior**
-```
-A ResNet with n residual blocks can be viewed as an
-ensemble of 2ⁿ different network paths!
-
-Example with 3 blocks:
-┌────────────────────────────────────┐
-│ All possible paths:                │
-│  1. x → x → x → x        (skip all)│
-│  2. x → F₁ → x → x                 │
-│  3. x → x → F₂ → x                 │
-│  4. x → F₁ → F₂ → x                │
-│  5. x → x → x → F₃                 │
-│  6. x → F₁ → x → F₃                │
-│  7. x → x → F₂ → F₃                │
-│  8. x → F₁ → F₂ → F₃               │
-└────────────────────────────────────┘
-
-Each path has different depth!
-The network implicitly ensembles these paths.
-```
-
-### Complete Data Flow
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    ResNet Complete Architecture                      │
-└─────────────────────────────────────────────────────────────────────┘
-
-Input Image (H, W, 3)
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Initial Convolution                 │
-│  Conv 7×7, stride 2                  │
-│  → (H/2, W/2, 64)                    │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Max Pooling                         │
-│  Pool 3×3, stride 2                  │
-│  → (H/4, W/4, 64)                    │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Stage 1 (conv2_x)                   │
-│  ┌────────────────────────────┐      │
-│  │ Residual Block 1           │      │
-│  │ • Conv 3×3 → BN → ReLU     │      │
-│  │ • Conv 3×3 → BN            │      │
-│  │ • Add + ReLU               │      │
-│  └────────────────────────────┘      │
-│  (repeated n₁ times)                 │
-│  → (H/4, W/4, 64×k)                  │
-│     k=1 for BasicBlock               │
-│     k=4 for BottleneckBlock          │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Stage 2 (conv3_x)                   │
-│  First block: stride 2 downsample    │
-│  → (H/8, W/8, 128×k)                 │
-│  (repeated n₂ times)                 │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Stage 3 (conv4_x)                   │
-│  First block: stride 2 downsample    │
-│  → (H/16, W/16, 256×k)               │
-│  (repeated n₃ times)                 │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Stage 4 (conv5_x)                   │
-│  First block: stride 2 downsample    │
-│  → (H/32, W/32, 512×k)               │
-│  (repeated n₄ times)                 │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Global Average Pooling              │
-│  → (512×k,)                          │
-└──────────────────────────────────────┘
-  │
-  ▼
-┌──────────────────────────────────────┐
-│  Fully Connected Layer               │
-│  → (num_classes,)                    │
-└──────────────────────────────────────┘
-  │
-  ▼
-Output (Class Probabilities)
-```
-
----
+Channel counts read `basic|bottleneck`: a bottleneck block emits `4x` its nominal filters.
 
 ## 4. Architecture Deep Dive
 
-### 4.1 Residual Blocks: The Building Blocks
-
-ResNet uses two types of residual blocks:
-
-#### BasicBlock (ResNet-18, ResNet-34)
+### 4.1 The two block types
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      BasicBlock                             │
-└─────────────────────────────────────────────────────────────┘
+  BasicBlock  (block_type='basic', ResNet-18/34)     -> F output channels
+   x ─► conv 3x3 (F) ─► norm ─► act ─► conv 3x3 (F) ─► norm ─► (+) ─► act
+   └──────────────────── shortcut ─────────────────────────────┘
 
-Input: (H, W, C_in)
-  │
-  ├────────────────────────────────────┐
-  │                                    │
-  │  Main Path                         │  Skip Path
-  │                                    │
-  ├─► Conv 3×3, filters=C_out          │
-  │         ↓                          │
-  ├─► Batch Normalization              │  If C_in ≠ C_out
-  │         ↓                          │  or stride ≠ 1:
-  ├─► ReLU                             │    Conv 1×1
-  │         ↓                          │    + Batch Norm
-  ├─► Conv 3×3, filters=C_out          │
-  │         ↓                          │
-  ├─► Batch Normalization              │
-  │         ↓                          │
-  └─► Add ←────────────────────────────┘
-        ↓
-     ReLU
-        ↓
-Output: (H', W', C_out)
-
-Parameters per block: 
-  • Main path: 2 × (3×3×C_in×C_out) = ~18C_in×C_out
-  • Skip path: 1×1×C_in×C_out (if needed)
-  
-  Total: O(C_in×C_out)
+  BottleneckBlock  (block_type='bottleneck', ResNet-50/101/152) -> 4F channels
+   x ─► conv 1x1 (F) reduce ─► conv 3x3 (F) ─► conv 1x1 (4F) expand ─► (+) ─► act
+   └──────────────────── shortcut ──────────────────────────────────┘
 ```
 
-#### BottleneckBlock (ResNet-50, ResNet-101, ResNet-152)
+The bottleneck runs the expensive 3x3 at `F` channels instead of `4F`: at `F=64` its three
+convolutions cost `4,096 + 36,864 + 16,384 = 57,344` weights against `589,824` for two 3x3
+convolutions at 256 channels. That is why a 50-layer bottleneck network costs about the same
+as a 34-layer basic one while being much deeper.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    BottleneckBlock                          │
-│  (More efficient for very deep networks)                    │
-└─────────────────────────────────────────────────────────────┘
+### 4.2 Projection shortcuts
 
-Input: (H, W, C_in)
-  │
-  ├────────────────────────────────────┐
-  │                                    │
-  │  Main Path                         │  Skip Path
-  │                                    │
-  ├─► Conv 1×1, filters=C_out/4        │
-  │         ↓   (dimension reduction)  │
-  ├─► Batch Normalization              │  If C_in ≠ C_out×4
-  │         ↓                          │  or stride ≠ 1:
-  ├─► ReLU                             │    Conv 1×1
-  │         ↓                          │    + Batch Norm
-  ├─► Conv 3×3, filters=C_out/4        │
-  │         ↓   (main computation)     │
-  ├─► Batch Normalization              │
-  │         ↓                          │
-  ├─► ReLU                             │
-  │         ↓                          │
-  ├─► Conv 1×1, filters=C_out×4        │
-  │         ↓   (dimension expansion)  │
-  ├─► Batch Normalization              │
-  │         ↓                          │
-  └─► Add ←────────────────────────────┘
-        ↓
-     ReLU
-        ↓
-Output: (H', W', C_out×4)
+The addition needs matching shapes, so a `1x1` convolution carrying the block's stride is
+inserted on the shortcut whenever input and output shapes differ: at the first block of every
+stage, and at the first block of stage 1 for bottlenecks (channels `64 -> 256`). Every other
+block uses a parameter-free identity.
 
-Parameters per block:
-  • 1×1 Conv: C_in × (C_out/4)
-  • 3×3 Conv: (C_out/4) × (C_out/4) × 9
-  • 1×1 Conv: (C_out/4) × (C_out×4)
-  
-  Total: O(C_in×C_out) - Same as BasicBlock!
-  But processes 4× more channels with similar cost.
-```
+### 4.3 Downsampling and the stem
 
-### 4.2 Why Bottleneck is More Efficient
+Resolution halves at the stride-2 convolution in the first block of stages 2, 3 and 4. The
+stem is selected by `stem_type`:
 
-```
-Comparison for C_in = C_out = 256:
+| `stem_type` | Stem | Total downsampling | For |
+|:---|:---|:---:|:---|
+| `'imagenet'` (default) | conv 7x7 s2 + maxpool 3x3 s2 | 32x | 224x224-class inputs |
+| `'cifar'` | conv 3x3 s1, no pool | 8x | 32x32 inputs (He et al. § 4.2) |
 
-BasicBlock:
-  • Conv 3×3, 256→256: 256 × 256 × 9 = 589,824 params
-  • Conv 3×3, 256→256: 256 × 256 × 9 = 589,824 params
-  • Total: 1,179,648 parameters
-  • Effective channels: 256
-
-BottleneckBlock:
-  • Conv 1×1, 256→64:  256 × 64 × 1 = 16,384 params
-  • Conv 3×3, 64→64:   64 × 64 × 9 = 36,864 params
-  • Conv 1×1, 64→256:  64 × 256 × 1 = 16,384 params
-  • Total: 69,632 parameters
-  • Effective channels: 256
-
-Result: 
-  BottleneckBlock uses ~17× fewer parameters!
-  Can go much deeper with similar compute budget.
-```
-
-### 4.3 Projection Shortcuts
-
-When input and output dimensions differ, we need a projection:
-
-```
-Three Types of Shortcuts:
-
-Type A: Zero-padding (original paper, less common)
-┌────────────────────────────────────────┐
-│  x: (H, W, 64)                         │
-│  ↓                                     │
-│  Pad with zeros                        │
-│  ↓                                     │
-│  x': (H/2, W/2, 128)                   │
-└────────────────────────────────────────┘
-
-Type B: Projection shortcuts (most common)
-┌────────────────────────────────────────┐
-│  x: (H, W, 64)                         │
-│  ↓                                     │
-│  Conv 1×1, stride 2, filters=128       │
-│  + Batch Normalization                 │
-│  ↓                                     │
-│  x': (H/2, W/2, 128)                   │
-└────────────────────────────────────────┘
-
-Type C: All shortcuts use projection
-┌────────────────────────────────────────┐
-│  Even when dimensions match            │
-│  Still use 1×1 conv                    │
-│  (More parameters, marginal gain)      │
-└────────────────────────────────────────┘
-
-This implementation uses Type B (standard).
-```
-
-### 4.4 Downsampling Strategy
-
-```
-ResNet's Downsampling Approach:
-┌────────────────────────────────────────────────────────────┐
-│  Location     │  Method              │  Output Size        │
-├───────────────┼──────────────────────┼─────────────────────┤
-│  Initial Conv │  Stride 2            │  H/2 × W/2          │
-│  Max Pool     │  3×3, Stride 2       │  H/4 × W/4          │
-│  Stage 2      │  First block stride 2│  H/8 × W/8          │
-│  Stage 3      │  First block stride 2│  H/16 × W/16        │
-│  Stage 4      │  First block stride 2│  H/32 × W/32        │
-│  Final        │  Global Avg Pool     │  1 × 1              │
-└────────────────────────────────────────────────────────────┘
-
-Total downsampling: 32× (from 224×224 → 7×7 → 1×1)
-
-Benefits:
-• Gradual feature abstraction
-• Maintains spatial information longer
-• Efficient computation (smaller feature maps in deeper layers)
-```
-
----
+**This is the single most common way to get a silently broken ResNet.** Measured on this repo,
+`resnet18` at `(1, 32, 32, 3)` with `include_top=False` reaches the global pool at
+`(1, 1, 1, 512)` under `'imagenet'` and `(1, 4, 4, 512)` under `'cifar'` — under the default
+the last two stages stride a feature map that has already collapsed to one pixel. Use
+`stem_type='cifar'` for small images.
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Install required packages
-pip install keras>=3.8.0 tensorflow>=2.18.0 numpy
-
-# Ensure you have dl_techniques framework
-# (for normalization layers and standard blocks)
-```
-
-### Your First ResNet Model (30 seconds)
-
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision.resnet import ResNet
+from dl_techniques.models.vision.resnet import create_resnet
 
-# 1. Create a ResNet-50 model
-model = ResNet.from_variant('resnet50', num_classes=1000)
-print("✓ ResNet-50 created successfully!")
+model = create_resnet("resnet50", num_classes=1000, input_shape=(224, 224, 3))
+# `count_params()` needs the model BUILT -- ResNet is subclassed, so no weights
+# exist until a shape is known ("ValueError: You tried to call `count_params` on
+# layer 'res_net', but the layer isn't built").
+model.build((None, 224, 224, 3))
+print(f"{model.count_params():,}")          # 25,610,152
 
-# 2. Check model summary. `count_params()` needs the model to be BUILT --
-#    ResNet is subclassed, so no weights exist until a shape is known:
-#       ValueError: You tried to call `count_params` on layer 'res_net', but
-#       the layer isn't built.
-model.build((1, 224, 224, 3))
-print(f"\nModel: {model.name}")
-print(f"Total parameters: {model.count_params():,}")
-# Total parameters: 25,610,152   (see section 17 for the full table)
+logits = model(np.random.rand(2, 224, 224, 3).astype("float32"), training=False)
+print(logits.shape)                         # (2, 1000)
 
-# 3. Test with random input
-test_input = keras.random.normal(shape=(1, 224, 224, 3))
-output = model(test_input, training=False)
-
-print(f"\nInput shape: {test_input.shape}")
-print(f"Output shape: {output.shape}")
-
-# The classifier is a bare Dense with NO activation, so `output` holds LOGITS.
+# The classifier is a bare Dense with NO activation, so this holds LOGITS.
 # Apply softmax before reading anything as a probability.
-probabilities = keras.ops.softmax(output, axis=-1)
-print(f"Output predictions (top-5):")
-top5_indices = np.argsort(np.asarray(output[0]))[-5:][::-1]
-for i, idx in enumerate(top5_indices, 1):
-    print(f"  {i}. Class {idx}: logit {output[0, idx]:.4f}, "
-          f"p={probabilities[0, idx]:.4f}")
+probs = keras.ops.softmax(logits)
 ```
 
-> **The model emits logits.** Every head in this package -- the primary
-> classifier and every deep-supervision head -- is a `Dense` with no
-> activation. Compile with `from_logits=True`, and softmax yourself before
-> displaying a confidence.
-
-### Load Pretrained Model
+CIFAR-scale, with the stem that matches the input size (§ 4.3):
 
 ```python
-import keras
-import numpy as np
-from dl_techniques.models.vision.resnet import ResNet
-
-# Load ResNet-50 with ImageNet pretrained weights
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=1000
+model = create_resnet(
+    "resnet18", num_classes=10, input_shape=(32, 32, 3), stem_type="cifar"
 )
-
-print("✓ Pretrained model loaded!")
-
-# Use for inference
-image = load_and_preprocess_image('elephant.jpg')  # Your image
-predictions = model(image, training=False)
-
-# Get top prediction. `predictions` are LOGITS -- softmax first, or the
-# "confidence" printed below is an unbounded score that can be negative.
-probabilities = keras.ops.softmax(predictions, axis=-1)
-top_class = np.argmax(np.asarray(probabilities[0]))
-confidence = probabilities[0, top_class]
-print(f"Predicted class: {top_class} (confidence: {confidence:.2%})")
-```
-
-### Quick Transfer Learning
-
-```python
-# Load pretrained ResNet as feature extractor
-base_model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    include_top=False  # Remove classification head
-)
-
-# Freeze base model
-base_model.trainable = False
-
-# Add custom head for your task
-inputs = keras.Input(shape=(224, 224, 3))
-x = base_model(inputs, training=False)
-x = keras.layers.GlobalAveragePooling2D()(x)
-x = keras.layers.Dense(256, activation='relu')(x)
-x = keras.layers.Dropout(0.5)(x)
-outputs = keras.layers.Dense(10, activation='softmax')(x)  # 10 classes
-
-# Create model
-model = keras.Model(inputs, outputs)
-
-# Compile and train
 model.compile(
-    optimizer='adam',
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
+    optimizer=keras.optimizers.Adam(1e-3),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
 )
-
-print("✓ Transfer learning model ready!")
+x = np.random.rand(32, 32, 32, 3).astype("float32")
+y = np.random.randint(0, 10, (32,))
+model.fit(x, y, epochs=1, batch_size=8, verbose=0)
 ```
-
----
 
 ## 6. Model Variants
 
-ResNet comes in 5 standard sizes, each optimized for different compute/accuracy tradeoffs.
+`ResNet.MODEL_VARIANTS` holds exactly five keys.
 
-### Variant Comparison Table
+| Variant | `blocks_per_stage` | `block_type` | `count_params()` @ 1000 classes | Notes |
+|---|---|---|---:|---|
+| `resnet18` | `[2, 2, 2, 2]` | basic | 11,699,112 | cheapest |
+| `resnet34` | `[3, 4, 6, 3]` | basic | 21,814,696 | |
+| `resnet50` | `[3, 4, 6, 3]` | bottleneck | 25,610,152 | most common |
+| `resnet101` | `[3, 4, 23, 3]` | bottleneck | 44,654,504 | |
+| `resnet152` | `[3, 8, 36, 3]` | bottleneck | 60,344,232 | deepest |
 
-| Variant | Blocks | Type | `count_params()` | Use Case |
-|---------|--------|------|--------|----------|
-| **ResNet-18** | [2,2,2,2] | Basic | 11.7M | Mobile, embedded |
-| **ResNet-34** | [3,4,6,3] | Basic | 21.8M | Edge devices |
-| **ResNet-50** | [3,4,6,3] | Bottleneck | 25.6M | **Most popular** |
-| **ResNet-101** | [3,4,23,3] | Bottleneck | 44.7M | High accuracy |
-| **ResNet-152** | [3,8,36,3] | Bottleneck | 60.3M | Best accuracy |
+All five use `filters_per_stage = [64, 128, 256, 512]`. § 17 splits the parameter column into
+trainable and non-trainable; it is `count_params()` after `build((None, 224, 224, 3))`, an
+architectural fact rather than a measurement on a checkpoint.
 
-> **No accuracy numbers are quoted anywhere in this README, and that is deliberate.**
-> This table used to carry `Top-1 Acc*` and `Top-5 Acc*` columns footnoted "*ImageNet
-> validation accuracy with single crop", and the per-variant sections below repeated a
-> `Performance (ImageNet)` block each. Those were the figures from He et al. (2015),
-> presented as though they described this implementation. **No pretrained weights exist
-> for any architecture in this repository** — `resnet/model.py`'s `_download_weights`
-> raises `NotImplementedError` by design, as do all nine sibling packages since
-> `5d62167d0` — so nothing here has ever been evaluated on ImageNet and no accuracy
-> claim about it can be true. This package is an **architecture**, like
-> [`mobile_clip/`](../mobile_clip/README.md) §17. For the reference numbers, read the
-> paper (linked at the end of this file); to obtain numbers for *this* code, train it
-> and measure.
->
-> The parameter column is architectural, not measured on a checkpoint. It is
-> `count_params()` at `num_classes=1000`, re-derivable with
-> `m = create_resnet(variant, num_classes=1000); m.build((1, 224, 224, 3));
-> m.count_params()` — the `build` is required, and without it the call raises
-> `ValueError: You tried to call count_params on layer 'res_net', but the layer
-> isn't built`. **Section 17 has the exact figures**, split into trainable and
-> non-trainable; the last two rows here read 44.7M / 60.3M rather than the
-> 44.5M / 60.2M they used to, because those two were the *trainable* subtotals
-> while the first three rows were `count_params()`. One column, one meaning.
+> **No accuracy numbers are quoted anywhere in this README, and that is deliberate.** This
+> table used to carry `Top-1 Acc` / `Top-5 Acc` columns and a per-variant
+> `Performance (ImageNet)` block, all of them He et al.'s published figures presented as
+> though they described this code. **No pretrained weights exist for any architecture in this
+> repository** — `_download_weights` raises `NotImplementedError` by design — so nothing here
+> has ever been evaluated on ImageNet. For reference numbers read the paper; for numbers about
+> *this* code, train it and measure.
 
-### Detailed Variant Specifications
+### Constructor arguments
 
-> The `Initial: Conv 7×7 + MaxPool` line in each block below describes the
-> **default** `stem_type='imagenet'`. With `stem_type='cifar'` the stem is a
-> single 3×3 stride-1 convolution and there is no max pool, so the whole
-> network downsamples by 8× instead of 32×. See section 8 Example 1.
+`ResNet(...)`, `ResNet.from_variant(variant, ...)` and `create_resnet(variant, ...)` all
+accept these.
 
-#### ResNet-18 (Lightweight)
+| Argument | Default | Meaning |
+|:---|:---|:---|
+| `num_classes` | `1000` | head width; ignored when `include_top=False` |
+| `blocks_per_stage` | `[3, 4, 6, 3]` | blocks per stage (set by the variant) |
+| `filters_per_stage` | `[64, 128, 256, 512]` | nominal filters per stage; also sets the stem width |
+| `block_type` | `'bottleneck'` | `'basic'` or `'bottleneck'` |
+| `stem_type` | `'imagenet'` | `'imagenet'` or `'cifar'` — see § 4.3 |
+| `input_shape` | `(224, 224, 3)` | must be a 3-tuple |
+| `include_top` | `True` | `False` returns the `(B, H, W, C)` feature map |
+| `enable_deep_supervision` | `False` | adds per-stage auxiliary heads — § 7 |
+| `normalization_type` | `'batch_norm'` | any key of the normalization factory |
+| `normalization_kwargs` | `None` | forwarded to every norm; `batch_norm` gets `momentum=0.9` unless you override it |
+| `activation_type` | `'relu'` | activation factory key |
+| `kernel_regularizer` | `None` | applied to every convolution |
 
-```python
-Configuration:
-  blocks_per_stage = [2, 2, 2, 2]     # Total: 8 residual blocks
-  filters_per_stage = [64, 128, 256, 512]
-  block_type = "basic"                 # 2 convs per block
-  
-Architecture:
-  Initial: Conv 7×7 + MaxPool
-  Stage 1: 2 BasicBlocks, 64 filters    →  64 channels
-  Stage 2: 2 BasicBlocks, 128 filters   →  128 channels
-  Stage 3: 2 BasicBlocks, 256 filters   →  256 channels
-  Stage 4: 2 BasicBlocks, 512 filters   →  512 channels
-  Final: Global AvgPool + FC
-  
-  Total depth: 18 layers
-  
-Best for:
-  • Real-time applications
-  • Resource-constrained devices
-  • When inference speed is critical
-  • Mobile and embedded systems
-
-```
-
-#### ResNet-34 (Balanced Lightweight)
-
-```python
-Configuration:
-  blocks_per_stage = [3, 4, 6, 3]     # Total: 16 residual blocks
-  filters_per_stage = [64, 128, 256, 512]
-  block_type = "basic"
-  
-Architecture:
-  Initial: Conv 7×7 + MaxPool
-  Stage 1: 3 BasicBlocks, 64 filters    →  64 channels
-  Stage 2: 4 BasicBlocks, 128 filters   →  128 channels
-  Stage 3: 6 BasicBlocks, 256 filters   →  256 channels
-  Stage 4: 3 BasicBlocks, 512 filters   →  512 channels
-  Final: Global AvgPool + FC
-  
-  Total depth: 34 layers
-  
-Best for:
-  • Good balance of speed and accuracy
-  • Edge computing
-  • Video analysis
-  • When you need better than ResNet-18 but can't afford ResNet-50
-
-```
-
-#### ResNet-50 (Most Popular)
-
-```python
-Configuration:
-  blocks_per_stage = [3, 4, 6, 3]     # Total: 16 residual blocks
-  filters_per_stage = [64, 128, 256, 512]
-  block_type = "bottleneck"            # 3 convs per block (1×1, 3×3, 1×1)
-  
-Architecture:
-  Initial: Conv 7×7 + MaxPool
-  Stage 1: 3 BottleneckBlocks, 64 filters   →  256 channels
-  Stage 2: 4 BottleneckBlocks, 128 filters  →  512 channels
-  Stage 3: 6 BottleneckBlocks, 256 filters  →  1024 channels
-  Stage 4: 3 BottleneckBlocks, 512 filters  →  2048 channels
-  Final: Global AvgPool + FC
-  
-  Total depth: 50 layers
-  
-Best for:
-  • DEFAULT CHOICE for most applications
-  • Transfer learning
-  • Object detection backbones
-  • General-purpose image classification
-  • Pretrained weights widely available
-
-Why most popular:
-  • Sweet spot for accuracy vs. efficiency
-  • Extensive pretrained weights
-  • Well-studied and reliable
-  • Works well for transfer learning
-```
-
-#### ResNet-101 (High Accuracy)
-
-```python
-Configuration:
-  blocks_per_stage = [3, 4, 23, 3]    # Total: 33 residual blocks
-  filters_per_stage = [64, 128, 256, 512]
-  block_type = "bottleneck"
-  
-Architecture:
-  Initial: Conv 7×7 + MaxPool
-  Stage 1: 3 BottleneckBlocks    →  256 channels
-  Stage 2: 4 BottleneckBlocks    →  512 channels
-  Stage 3: 23 BottleneckBlocks   →  1024 channels  ← Much deeper!
-  Stage 4: 3 BottleneckBlocks    →  2048 channels
-  Final: Global AvgPool + FC
-  
-  Total depth: 101 layers
-  
-Best for:
-  • When accuracy is more important than speed
-  • Complex visual recognition tasks
-  • Medical imaging (more capacity to learn)
-  • Fine-grained classification
-  • Research and benchmarking
-
-```
-
-#### ResNet-152 (Maximum Accuracy)
-
-```python
-Configuration:
-  blocks_per_stage = [3, 8, 36, 3]    # Total: 50 residual blocks!
-  filters_per_stage = [64, 128, 256, 512]
-  block_type = "bottleneck"
-  
-Architecture:
-  Initial: Conv 7×7 + MaxPool
-  Stage 1: 3 BottleneckBlocks    →  256 channels
-  Stage 2: 8 BottleneckBlocks    →  512 channels
-  Stage 3: 36 BottleneckBlocks   →  1024 channels  ← Very deep!
-  Stage 4: 3 BottleneckBlocks    →  2048 channels
-  Final: Global AvgPool + FC
-  
-  Total depth: 152 layers
-  
-Best for:
-  • Maximum accuracy requirements
-  • Competition and benchmarking
-  • Creating high-quality training data
-  • Offline processing with time budget
-  • Research on very deep networks
-
-Historical note:
-  • Won ImageNet 2015 competition
-  • First to break 80% top-5 accuracy barrier
-```
-
-### Creating Different Variants
-
-```python
-from dl_techniques.models.vision.resnet import ResNet
-
-# Create any variant easily
-resnet18 = ResNet.from_variant('resnet18', num_classes=1000)
-resnet34 = ResNet.from_variant('resnet34', num_classes=1000)
-resnet50 = ResNet.from_variant('resnet50', num_classes=1000)
-resnet101 = ResNet.from_variant('resnet101', num_classes=1000)
-resnet152 = ResNet.from_variant('resnet152', num_classes=1000)
-
-# With pretrained weights
-resnet50_pretrained = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=1000
-)
-
-# Custom configuration (advanced)
-custom_resnet = ResNet(
-    blocks_per_stage=[2, 3, 4, 2],      # Custom block distribution
-    filters_per_stage=[32, 64, 128, 256], # Smaller filters
-    block_type='basic',
-    num_classes=10,
-    input_shape=(32, 32, 3)              # For CIFAR-10
-)
-```
-
-### Choosing the Right Variant
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Decision Tree                            │
-└─────────────────────────────────────────────────────────────┘
-
-Start: Need a ResNet model
-  │
-  ├─ Running on mobile/embedded device?
-  │   YES → ResNet-18 or ResNet-34
-  │
-  ├─ Need real-time inference (>30 FPS)?
-  │   YES → ResNet-18 or ResNet-34
-  │
-  ├─ Standard classification/detection task?
-  │   YES → ResNet-50 (default choice)
-  │
-  ├─ Need maximum accuracy?
-  │   YES → ResNet-101 or ResNet-152
-  │
-  └─ Research/benchmarking?
-      YES → ResNet-101 or ResNet-152
-
-Recommendation by Use Case:
-┌────────────────────────────────┬─────────────────────┐
-│ Use Case                       │ Recommended Variant │
-├────────────────────────────────┼─────────────────────┤
-│ Mobile apps                    │ ResNet-18           │
-│ Edge devices (Jetson, etc.)    │ ResNet-34           │
-│ General classification         │ ResNet-50           │
-│ Object detection backbone      │ ResNet-50/101       │
-│ Semantic segmentation          │ ResNet-50/101       │
-│ Transfer learning              │ ResNet-50           │
-│ Medical imaging                │ ResNet-101          │
-│ Competition/benchmark          │ ResNet-152          │
-│ Fine-grained classification    │ ResNet-101/152      │
-└────────────────────────────────┴─────────────────────┘
-```
-
----
+`from_variant` / `create_resnet` additionally take `pretrained` (§ 9), `weights_dataset`,
+`weights_input_shape` and `cache_dir`. The `momentum=0.9` default is deliberate: Keras and
+PyTorch define BatchNorm momentum oppositely (`keras_momentum = 1 - torch_momentum`), so
+torchvision's `0.1` *is* Keras' `0.9`. Do not "correct" it.
 
 ## 7. Deep Supervision Feature
 
-This implementation includes an advanced training technique called **Deep Supervision**.
+With `enable_deep_supervision=True` (and `include_top=True`) each stage gets its own
+classification head, injecting gradient into the middle of the network. The model returns a
+**list** of logit tensors: primary head first, then the auxiliary heads deepest-first.
 
-### What is Deep Supervision?
-
-Traditional ResNet only has loss at the final layer. Deep supervision adds auxiliary losses at intermediate stages.
-
-```
-Traditional Training:
-┌────────────────────────────────────────────────┐
-│                                                │
-│  Input → Stage1 → Stage2 → Stage3 → Stage4     │
-│                                          ↓     │
-│                                        Loss    │
-│                                                │
-│  Problem: Deep layers get strong gradient      │
-│           Shallow layers get weak gradient     │
-└────────────────────────────────────────────────┘
-
-Deep Supervision:
-┌────────────────────────────────────────────────┐
-│                                                │
-│  Input → Stage1 → Stage2 → Stage3 → Stage4     │
-│            ↓        ↓        ↓          ↓      │
-│          Loss3    Loss2    Loss1     Loss0     │
-│                                                │
-│  Benefit: All stages get direct supervision    │
-│           Better gradient flow                 │
-│           Faster convergence                   │
-└────────────────────────────────────────────────┘
-```
-
-### Why Use Deep Supervision?
-
-**Benefits**:
-
-1. **Better Gradient Flow**: Early layers receive stronger gradients
-2. **Faster Convergence**: Network learns more quickly
-3. **Improved Generalization**: Multi-scale feature learning
-4. **Training Stability**: Less prone to vanishing gradients
-5. **Feature Quality**: Intermediate features become more discriminative
-
-**When to Use**:
-- Training very deep networks (ResNet-101, ResNet-152)
-- Limited training data
-- Fine-tuning on new domains
-- Want faster convergence
-- Need high-quality intermediate features
-
-### Architecture with Deep Supervision
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│              ResNet with Deep Supervision                   │
-└─────────────────────────────────────────────────────────────┘
-
-Input (224, 224, 3)
-  ↓
-Initial Conv + Pool
-  ↓
-Stage 1 (conv2_x) → (56, 56, 256)
-  ↓                          ↓
-  │                    ┌──────────────┐
-  │                    │ Aux Head 3   │
-  │                    │ GAP + Dense  │
-  │                    └──────────────┘
-  │                          ↓
-  │                      Output 3 (aux)
-  ↓
-Stage 2 (conv3_x) → (28, 28, 512)
-  ↓                          ↓
-  │                    ┌──────────────┐
-  │                    │ Aux Head 2   │
-  │                    │ GAP + Dense  │
-  │                    └──────────────┘
-  │                          ↓
-  │                      Output 2 (aux)
-  ↓
-Stage 3 (conv4_x) → (14, 14, 1024)
-  ↓                          ↓
-  │                    ┌──────────────┐
-  │                    │ Aux Head 1   │
-  │                    │ GAP + Dense  │
-  │                    └──────────────┘
-  │                          ↓
-  │                      Output 1 (aux)
-  ↓
-Stage 4 (conv5_x) → (7, 7, 2048)
-  ↓
-GAP + Dense
-  ↓
-Output 0 (primary)
-
-Training: Use all 4 outputs with weighted losses
-Inference: Use only Output 0 (primary)
-```
-
-### Using Deep Supervision
-
-> Every line below was **extracted from this file and executed** before it was committed.
-> Each `# Output:` comment is the program's own stdout, not a description of it.
+Because `ResNet` is subclassed it has **no output names**, so losses, weights and metrics are
+given **positionally, in lists**. A dict keyed by `'output_0'` resolves against `None` and
+raises `TypeError`.
 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision.resnet import ResNet
-from dl_techniques.utils.deep_supervision import get_model_output_info
-
-# 1. Create model with deep supervision
-model = ResNet.from_variant(
-    'resnet18',
-    num_classes=10,
-    input_shape=(32, 32, 3),
-    stem_type='cifar',
-    enable_deep_supervision=True,
+from dl_techniques.models.vision.resnet import create_resnet
+from dl_techniques.utils.deep_supervision import (
+    create_inference_model_from_training_model,
+    get_model_output_info,
 )
 
-# 2. Check outputs.
-#    `model.output` RAISES here. ResNet is a subclassed keras.Model, so Keras
-#    never populates `.output` / `.input` / `.output_names`:
-#       AttributeError: The layer res_net has never been called and thus has
-#                       no defined output.
-#    -- and it says that even after you have called the model. Ask the helper
-#    instead, passing the per-sample input_shape it needs to trace `call()`.
-info = get_model_output_info(model, input_shape=(32, 32, 3))
-num_outputs = info['num_outputs']
-print(f"Number of outputs: {num_outputs}")
-# Output: Number of outputs: 4
+model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
+                      stem_type="cifar", enable_deep_supervision=True)
 
-# 3. Losses: ONE PER OUTPUT, POSITIONALLY, in a LIST.
-#    There are no output names to key a dict on -- see the note under step 7.
-#    The heads emit LOGITS (a bare Dense, no activation), hence from_logits=True.
-losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
+# `model.output` RAISES even after the model has been called. Ask the helper
+# instead; it needs the per-sample input_shape to trace `call()`.
+num_outputs = get_model_output_info(model, input_shape=(32, 32, 3))["num_outputs"]
+print(num_outputs)                              # 4
 
-# 4. Loss weights, same order. Index 0 is the primary (deepest) head; indices
-#    1..n-1 are the auxiliary heads, deepest first.
-loss_weights = [1.0, 0.3, 0.2, 0.1]
-
-# 5. Metrics are per-output too. Give the primary head its metrics and the
-#    auxiliary heads an empty list -- an aux head's accuracy is not a number
-#    anyone acts on, and NAMING the metric is what makes it monitorable below.
-metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
-metrics += [[] for _ in range(num_outputs - 1)]
-
-model.compile(
-    optimizer='adam',
-    loss=losses,
-    loss_weights=loss_weights,
-    metrics=metrics,
-)
-
-# 6. Replicate the labels once per output -- again a LIST, not a dict.
-x_train = np.random.rand(8, 32, 32, 3).astype('float32')
-y_train = np.random.randint(0, 10, (8,)).astype('int32')
-
-# With a tf.data pipeline the same shape applies:
-#     train_dataset.map(lambda x, y: (x, tuple([y] * num_outputs)))
-
-# 7. Train
-history = model.fit(
-    x_train,
-    [y_train] * num_outputs,
-    validation_data=(x_train, [y_train] * num_outputs),
-    epochs=1,
-    verbose=0,
-)
-print(sorted(history.history.keys()))
-# Output: ['loss', 'primary_accuracy', 'sparse_categorical_crossentropy_loss',
-#          'val_loss', 'val_primary_accuracy',
-#          'val_sparse_categorical_crossentropy_loss']
-#
-# Note what is NOT there: no 'output_0_accuracy', and no per-output loss keys.
-# This model has no output names at all, so a ModelCheckpoint has to monitor a
-# metric name YOU chose -- 'val_primary_accuracy' above.
-
-# 8. Convert to inference model (single output). `input_shape` is required for
-#    the same reason as in step 2.
-from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
-
-inference_model = create_inference_model_from_training_model(
-    model, input_shape=(32, 32, 3)
-)
-print(f"Inference model outputs: {inference_model.output.shape}")
-# Output: Inference model outputs: (None, 10)
-
-# 9. Use for inference
-predictions = inference_model(x_train, training=False)
-print(predictions.shape)
-# Output: (8, 10)
-```
-
-> **Why lists and not `{'output_0': ...}`?** The dict-keyed form that used to
-> stand here is not merely unidiomatic -- it cannot run. Keras resolves a
-> dict-keyed `loss`/`fit` spec against `model.output_names`, and on a subclassed
-> model that attribute does not exist. MEASURED, `compile(loss={'output_0': ...})`
-> followed by `fit(x, {'output_0': y, ...})` raises
-> `TypeError: 'NoneType' object is not iterable`.
-> `tests/test_models/test_resnet/test_the_readme_deep_supervision_pattern_runs.py`
-> pins both halves: the list form trains, the dict form raises.
-
-### Loss Weighting Strategies
-
-Every strategy is a LIST in output order: index 0 is the primary (deepest)
-head, the rest are auxiliary heads from deep to shallow.
-
-```python
-# Strategy 1: Equal weights
-loss_weights = [1.0, 1.0, 1.0, 1.0]
-
-# Strategy 2: Decay from deep to shallow
-loss_weights = [1.0, 0.3, 0.1, 0.03]
-#               ^ deepest / primary        ^ shallowest (least important)
-
-# Strategy 3: Curriculum learning (change over time)
-def get_loss_weights(epoch, num_outputs):
-    """Gradually reduce auxiliary loss weights."""
-    aux_weight = max(0.5 - epoch * 0.01, 0.0)
-    return [1.0] + [aux_weight] * (num_outputs - 1)
-
-# Apply in training loop. Re-compiling is what makes the new weights take
-# effect -- mutating the list in place does nothing.
-for epoch in range(num_epochs):
-    model.compile(
-        optimizer=optimizer,
-        loss=losses,
-        loss_weights=get_loss_weights(epoch, num_outputs),
-        metrics=metrics,
-    )
-    model.fit(train_dataset, epochs=1)
-```
-
-### Performance Impact
-
-> An "Empirical Results (ResNet-50 on CIFAR-10)" block used to stand here, quoting
-> 93.5% vs 94.2% final accuracy and 45 vs 48 minutes of training time. **No such run
-> exists.** It was never produced by this code, no result directory or checkpoint
-> backs it, and it was removed for the same reason as the ImageNet table in §6: a
-> number in a README is indistinguishable from a measurement to every reader. The
-> qualitative benefits below are architectural claims about deep supervision and are
-> stated as such.
-
-```
-Benefits (qualitative, from the deep-supervision literature — not measured here):
-  ✓ Faster convergence
-  ✓ More stable training (lower variance)
-  ✓ Better intermediate features
-```
-
----
-
-## 8. Comprehensive Usage Examples
-
-### Example 1: Basic Image Classification
-
-Train ResNet on a custom dataset from scratch.
-
-**`stem_type='cifar'` is load-bearing here, not decoration.** The default
-ImageNet stem (7x7 stride 2, then a 3x3 stride-2 max pool) downsamples by 4x
-before stage 1 begins, so a 32x32 input reaches the global average pool at
-`(1, 1, 512)` -- MEASURED -- and the last two stages stride a feature map that
-has already collapsed to a single pixel. `stem_type='cifar'` is He et al.'s own
-CIFAR configuration (section 4.2: one 3x3 stride-1 convolution, no pooling) and
-leaves a `(4, 4, 512)` map for the head.
-
-```python
-import keras
-import tensorflow as tf
-from dl_techniques.models.vision.resnet import ResNet
-
-# 1. Load and prepare data
-(x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-
-# Normalize
-x_train = x_train.astype('float32') / 255.0
-x_test = x_test.astype('float32') / 255.0
-
-# One-hot encode
-y_train = keras.utils.to_categorical(y_train, 10)
-y_test = keras.utils.to_categorical(y_test, 10)
-
-# 2. Create model (ResNet-18 with the CIFAR stem, for 32x32 images)
-model = ResNet.from_variant(
-    'resnet18',
-    num_classes=10,
-    input_shape=(32, 32, 3),
-    stem_type='cifar'
-)
-
-# 3. Compile
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=0.001),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# 4. Train
-history = model.fit(
-    x_train, y_train,
-    batch_size=128,
-    epochs=100,
-    validation_split=0.1,
-    callbacks=[
-        keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=5),
-        keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True),
-        keras.callbacks.ModelCheckpoint('best_model.keras', save_best_only=True)
-    ]
-)
-
-# 5. Evaluate
-test_loss, test_acc = model.evaluate(x_test, y_test)
-print(f"Test accuracy: {test_acc:.4f}")
-
-# 6. Save
-model.save('cifar10_resnet18.keras')
-```
-
-### Example 2: Transfer Learning (Feature Extraction)
-
-Use pretrained ResNet as a fixed feature extractor.
-
-```python
-import keras
-from dl_techniques.models.vision.resnet import ResNet
-
-# 1. Load pretrained model without top
-base_model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    include_top=False,  # Remove classification head
-    input_shape=(224, 224, 3)
-)
-
-# 2. Freeze all layers
-base_model.trainable = False
-
-# 3. Add custom classification head
-inputs = keras.Input(shape=(224, 224, 3))
-x = base_model(inputs, training=False)  # Extract features
-x = keras.layers.GlobalAveragePooling2D()(x)
-x = keras.layers.BatchNormalization()(x)
-x = keras.layers.Dense(256, activation='relu')(x)
-x = keras.layers.Dropout(0.5)(x)
-outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-model = keras.Model(inputs, outputs)
-
-# 4. Compile
 model.compile(
     optimizer=keras.optimizers.Adam(1e-3),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
+    # One loss per output, positionally. The heads emit LOGITS.
+    loss=[keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs,
+    # Index 0 is the primary (deepest) head.
+    loss_weights=[1.0] + [0.5 / (num_outputs - 1)] * (num_outputs - 1),
+    # NAMING the primary metric is what makes it monitorable: there is no
+    # 'val_output_0_accuracy' on a model with no output names.
+    metrics=(
+        [[keras.metrics.SparseCategoricalAccuracy(name="primary_accuracy")]]
+        + [[]] * (num_outputs - 1)
+    ),
 )
 
-# 5. Train only the new head
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=20
-)
+x = np.random.rand(8, 32, 32, 3).astype("float32")
+y = np.random.randint(0, 10, (8,))
+# Labels replicated once per output -- a list, never a dict. With tf.data:
+#     ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
+history = model.fit(x, [y] * num_outputs, epochs=1, batch_size=4, verbose=0)
+print(sorted(history.history))
+# ['loss', 'primary_accuracy', 'sparse_categorical_crossentropy_loss']
 
-print(f"✓ Feature extraction training complete!")
+# Single-output model for inference. `input_shape` is required for the same reason.
+inference = create_inference_model_from_training_model(model, input_shape=(32, 32, 3))
+print(inference(x).shape)                       # (8, 10)
 ```
 
-### Example 3: Fine-Tuning
+For loss weighting, decay from deep to shallow (`[1.0, 0.3, 0.2, 0.1]`) or ramp the auxiliary
+weights toward zero over training. Changing them needs a **re-`compile()`**; mutating the list
+in place does nothing.
 
-Unfreeze and fine-tune the pretrained model.
+## 8. Usage Examples
 
-> `ResNet` is a **subclassed** `keras.Model`, so the "pop the top layer and
-> re-wire from `model.input`" idiom that used to stand here cannot work.
-> MEASURED: `model.layers` is a freshly computed property, so
-> `model.layers.pop()` mutates a throwaway list -- it raises nothing,
-> `len(model.layers)` is *unchanged* afterwards, and `model(x)` still runs the
-> classifier with `max|delta| == 0.0`. It is a silent no-op, which is worse than
-> an error. `model.input` does raise:
-> `AttributeError: The layer res_net has never been called and thus has no
-> defined input.` Ask for `include_top=False` and wrap, exactly as Example 2 does.
+### Example 1: Feature extraction and a new head
+
+Wrap the backbone in a Functional model, starting from a `keras.Input` you own: a subclassed
+model has no `.input` to re-wire from.
 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.vision.resnet import ResNet
+from dl_techniques.models.vision.resnet import create_resnet
 
-# 1. Start from the pretrained backbone WITHOUT its classification head.
-base_model = ResNet.from_variant(
-    'resnet18',
-    pretrained='/path/to/resnet18_weights.keras',  # pretrained=True raises -- see section 9
-    include_top=False,
-    input_shape=(32, 32, 3),
-    stem_type='cifar',
-)
-
-# 2. Attach the new head by WRAPPING. The Functional graph starts from a
-#    keras.Input you own, because the backbone has no `.input` to borrow.
+base = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
+                     stem_type="cifar", include_top=False)
 inputs = keras.Input(shape=(32, 32, 3))
-x = base_model(inputs)
-x = keras.layers.GlobalAveragePooling2D()(x)
-outputs = keras.layers.Dense(100, activation='softmax', name='new_predictions')(x)
-
+features = keras.layers.GlobalAveragePooling2D()(base(inputs))
+outputs = keras.layers.Dense(10, name="new_predictions")(features)
 model = keras.Model(inputs, outputs)
 
-# 3. Freeze the early layers, train the late ones first.
-#    Slice `base_model.layers` -- NOT `model.layers`, which holds the entire
-#    backbone as ONE layer alongside the wrapper's own:
 print(len(model.layers), [l.name for l in model.layers])
-# Output: 4 ['input_layer', 'res_net', 'global_average_pooling2d', 'new_predictions']
-# (Keras appends a numeric suffix to auto-generated names when other models
-#  were built earlier in the same process -- the LENGTH is the point: 4, not
-#  the backbone's own 13.)
-for layer in base_model.layers[:-4]:
+# 4 ['input_layer', 'res_net', 'global_average_pooling2d', 'new_predictions']
+# (Keras appends a numeric suffix when other models were built earlier in the same
+# process; the LENGTH is the point.) The wrapper holds the whole backbone as ONE
+# layer, so freeze parts of it through `base.layers` -- not `model.layers`.
+for layer in base.layers[:6]:
     layer.trainable = False
 
-# 4. Compile with a lower learning rate
 model.compile(
     optimizer=keras.optimizers.Adam(1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy'],
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
 )
-
-# 5. Stage 1: train with the early layers frozen
-x_train = np.random.rand(8, 32, 32, 3).astype('float32')
-y_train = keras.utils.to_categorical(np.random.randint(0, 100, (8,)), 100)
-history1 = model.fit(x_train, y_train, epochs=1, verbose=0)
-
-# 6. Unfreeze everything. Set the flag on the backbone AND re-set the per-layer
-#    flags -- `base_model.trainable = True` alone does not undo step 3.
-base_model.trainable = True
-for layer in base_model.layers:
-    layer.trainable = True
-
-# 7. Stage 2: continue at a much lower learning rate. Re-compiling is REQUIRED
-#    for the changed trainable flags to take effect.
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-5),
-    loss='categorical_crossentropy',
-    metrics=['accuracy'],
-)
-history2 = model.fit(x_train, y_train, epochs=1, verbose=0)
-print(f"{len(model.trainable_weights)} trainable weight tensors after unfreezing")
-# Output: 62 trainable weight tensors after unfreezing
+x = np.random.rand(8, 32, 32, 3).astype("float32")
+y = np.random.randint(0, 10, (8,))
+model.fit(x, y, epochs=1, verbose=0)
+print(len(model.trainable_weights))             # 38
 ```
 
-### Example 4: Training with Deep Supervision
+Stage two: `base.trainable = True`, re-set the per-layer flags you cleared, drop the learning
+rate 10x, **re-compile** — a `trainable` change has no effect until you do.
 
-Section 7 covers this end to end; this is the same recipe at ImageNet scale.
-Note the list-indexed `loss` / `loss_weights` / `metrics` and the list of
-replicated labels -- the dict-keyed form raises, see the note in section 7.
+### Example 2: Custom architecture
+
+Pass `blocks_per_stage` / `filters_per_stage` instead of a variant name; same length required.
 
 ```python
-import keras
-from dl_techniques.models.vision.resnet import ResNet
-from dl_techniques.utils.deep_supervision import get_model_output_info
-
-# 1. Create model with deep supervision
-model = ResNet.from_variant(
-    'resnet50',
-    num_classes=100,
-    input_shape=(224, 224, 3),
-    enable_deep_supervision=True,
-)
-num_outputs = get_model_output_info(model, input_shape=(224, 224, 3))['num_outputs']
-
-# 2. One loss per output, in order. The heads emit logits.
-losses = [keras.losses.SparseCategoricalCrossentropy(from_logits=True)] * num_outputs
-loss_weights = [1.0, 0.3, 0.2, 0.1]
-
-# 3. Metrics on the primary head only; auxiliary heads get an empty list.
-metrics = [[keras.metrics.SparseCategoricalAccuracy(name='primary_accuracy')]]
-metrics += [[] for _ in range(num_outputs - 1)]
-
-model.compile(
-    optimizer=keras.optimizers.SGD(0.1, momentum=0.9, nesterov=True),
-    loss=losses,
-    loss_weights=loss_weights,
-    metrics=metrics,
-)
-
-# 4. Replicate the labels once per output -- a tuple/list, never a dict.
-train_ds = train_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
-val_ds = val_ds.map(lambda x, y: (x, tuple([y] * num_outputs)))
-
-# 5. Train. The checkpoint monitors the metric NAME chosen above; there is no
-#    'val_output_0_accuracy' because this model has no output names.
-history = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=100,
-    callbacks=[
-        keras.callbacks.LearningRateScheduler(
-            lambda epoch: 0.1 * (0.1 ** (epoch // 30))
-        ),
-        keras.callbacks.ModelCheckpoint(
-            'best_model_ds.keras',
-            save_best_only=True,
-            monitor='val_primary_accuracy',
-        ),
-    ],
-)
-
-# 6. Create inference model (single output)
-from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
-inference_model = create_inference_model_from_training_model(
-    model, input_shape=(224, 224, 3)
-)
-
-# 7. Use for inference
-predictions = inference_model.predict(test_images)
-```
-
-### Example 5: Custom ResNet Architecture
-
-Create a custom ResNet variant for your specific needs.
-
-```python
-import keras
 from dl_techniques.models.vision.resnet import ResNet
 
-# Custom architecture for specific use case
-# Example: Deeper network for medical imaging with high resolution
-
-custom_resnet = ResNet(
-    blocks_per_stage=[4, 6, 12, 4],      # Custom block distribution
-    filters_per_stage=[32, 64, 128, 256], # Smaller filters for memory
-    block_type='bottleneck',
-    num_classes=5,                        # 5 disease categories
-    input_shape=(512, 512, 3),            # High-resolution medical images
-    kernel_regularizer=keras.regularizers.L2(1e-4),
-    normalization_type='batch_norm',
-    activation_type='relu',
-    include_top=True
+model = ResNet(
+    num_classes=5, blocks_per_stage=[2, 3, 4, 2],
+    filters_per_stage=[32, 64, 128, 256], block_type="bottleneck",
+    stem_type="cifar", activation_type="gelu", input_shape=(64, 64, 3),
 )
-
-# Compile and train. The head is a bare Dense, so from_logits=True.
-custom_resnet.compile(
-    optimizer='adam',
-    loss=keras.losses.CategoricalCrossentropy(from_logits=True),
-    metrics=['accuracy']
-)
-
-custom_resnet.build((1, 512, 512, 3))   # required before count_params()
-print(f"Custom ResNet created:")
-print(f"  Total blocks: {sum([4, 6, 12, 4])}")
-print(f"  Parameters: {custom_resnet.count_params():,}")
-# Output: Parameters: 8,894,693
+model.build((None, 64, 64, 3))
 ```
-
-### Example 6: Progressive Resizing
-
-Train with progressively larger image sizes for better performance.
-
-```python
-import keras
-import numpy as np
-from dl_techniques.models.vision.resnet import ResNet
-
-def train_progressive_resize(initial_size=128, final_size=224, num_stages=3):
-    """Train with progressive image size increase."""
-    
-    sizes = np.linspace(initial_size, final_size, num_stages, dtype=int)
-    epochs_per_stage = 30
-    
-    # Create model for final size
-    model = ResNet.from_variant(
-        'resnet50',
-        pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-        num_classes=100,
-        input_shape=(final_size, final_size, 3)
-    )
-    
-    for stage, size in enumerate(sizes):
-        print(f"\n=== Stage {stage + 1}: Training with {size}×{size} images ===")
-        
-        # Prepare dataset with current size
-        train_ds = create_dataset(size, batch_size=128)
-        val_ds = create_dataset(size, batch_size=128, training=False)
-        
-        # Adjust learning rate
-        lr = 0.1 * (0.1 ** stage)
-        model.compile(
-            optimizer=keras.optimizers.SGD(lr, momentum=0.9),
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        # Train
-        model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=epochs_per_stage
-        )
-    
-    return model
-
-# Usage
-model = train_progressive_resize(128, 224, 3)
-print("✓ Progressive resizing training complete!")
-```
-
-### Example 7: Knowledge Distillation
-
-Use a larger ResNet to train a smaller one.
-
-```python
-import keras
-import tensorflow as tf
-from dl_techniques.models.vision.resnet import ResNet
-
-# 1. Load large teacher model
-teacher = ResNet.from_variant(
-    'resnet152',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=1000
-)
-teacher.trainable = False  # Freeze teacher
-
-# 2. Create small student model
-student = ResNet.from_variant(
-    'resnet18',
-    num_classes=1000
-)
-
-# 3. Custom distillation loss
-class DistillationLoss(keras.losses.Loss):
-    def __init__(self, alpha=0.1, temperature=3.0):
-        super().__init__()
-        self.alpha = alpha
-        self.temperature = temperature
-    
-    def call(self, y_true, y_student, y_teacher):
-        # Hard target loss
-        hard_loss = keras.losses.categorical_crossentropy(
-            y_true, y_student
-        )
-        
-        # Soft target loss (distillation)
-        soft_student = keras.ops.softmax(y_student / self.temperature)
-        soft_teacher = keras.ops.softmax(y_teacher / self.temperature)
-        soft_loss = keras.losses.categorical_crossentropy(
-            soft_teacher, soft_student
-        )
-        
-        # Combined loss
-        return (1 - self.alpha) * hard_loss + \
-               self.alpha * (self.temperature ** 2) * soft_loss
-
-# 4. Custom training step
-class DistillationModel(keras.Model):
-    def __init__(self, student, teacher, **kwargs):
-        super().__init__(**kwargs)
-        self.student = student
-        self.teacher = teacher
-        self.distillation_loss = DistillationLoss(alpha=0.1, temperature=3.0)
-    
-    def call(self, inputs, training=False):
-        return self.student(inputs, training=training)
-    
-    def train_step(self, data):
-        x, y = data
-        
-        # Get teacher predictions
-        teacher_predictions = self.teacher(x, training=False)
-        
-        with tf.GradientTape() as tape:
-            # Student predictions
-            student_predictions = self.student(x, training=True)
-            
-            # Compute distillation loss
-            loss = self.distillation_loss(
-                y, student_predictions, teacher_predictions
-            )
-        
-        # Update student
-        gradients = tape.gradient(loss, self.student.trainable_variables)
-        self.optimizer.apply_gradients(
-            zip(gradients, self.student.trainable_variables)
-        )
-        
-        return {'loss': loss}
-
-# 5. Create and train distillation model
-distill_model = DistillationModel(student, teacher)
-distill_model.compile(optimizer='adam')
-
-history = distill_model.fit(
-    train_dataset,
-    epochs=100,
-    validation_data=val_dataset
-)
-
-# 6. Extract trained student
-trained_student = distill_model.student
-trained_student.save('distilled_resnet18.keras')
-print("✓ Knowledge distillation complete!")
-```
-
-### Example 8: Mixed Precision Training
-
-Train faster with mixed precision.
-
-```python
-import keras
-from dl_techniques.models.vision.resnet import ResNet
-
-# 1. Enable mixed precision
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# 2. Create model (automatically uses mixed precision)
-model = ResNet.from_variant('resnet50', num_classes=1000)
-
-# 3. Compile with loss scaling (important for numerical stability)
-optimizer = keras.optimizers.Adam(1e-3)
-optimizer = keras.mixed_precision.LossScaleOptimizer(optimizer)
-
-model.compile(
-    optimizer=optimizer,
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-# 4. Train as normal
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=100
-)
-
-# Benefits:
-# • ~2x faster training on modern GPUs
-# • ~50% less memory usage
-# • Minimal accuracy loss (<0.1% typically)
-
-print("✓ Mixed precision training complete!")
-```
-
----
 
 ## 9. Pretrained Weights & Transfer Learning
 
-> WARNING: **`pretrained=True` raises `NotImplementedError`. There are no ResNet
-> weights to download, from this repository or anywhere else in a format this
-> package loads.** `ResNet._download_weights` raises by design (`model.py`), and
-> that raise replaced an earlier table of placeholder URLs pointing at a
-> non-existent host, whose failure was caught and turned into a warning -- so
-> `pretrained=True` used to hand back a randomly-initialized model that *looked*
-> pretrained. Every runnable example in this README -- 14 of them, across sections
-> 5, 6, 9 and 12 -- has been rewritten to the only form that works, a local
-> checkpoint path:
->
-> ```python
-> model = ResNet.from_variant('resnet50', pretrained='/path/to/your.keras')
-> ```
->
-> The transfer-learning techniques those examples demonstrate are real and
-> correct; what was wrong was the claim that the weights arrive by themselves.
->
-> Verified 2026-08-23: `ResNet.from_variant('resnet50', pretrained=True)` ->
-> `NotImplementedError: No pretrained ResNet weights are distributed with
-> dl_techniques ...`. The same is true of nine sibling packages (`bert`,
-> `distilbert`, `gpt2`, `modern_bert`, `mobilenet`, `tree_transformer`, `vit`,
-> `wave_field`, `bias_free_denoisers`), each of which says so in its own README.
+> **`pretrained=True` raises `NotImplementedError`. There are no ResNet weights to download,
+> from this repository or anywhere else in a format this package loads.** Every model package
+> in this repository that exposes a `pretrained=` argument behaves the same way.
 
-### Why Use Pretrained Weights?
-
-Transfer learning from a checkpoint trained on a large dataset generally needs
-less data, less compute and less tuning than training the same architecture from
-scratch, and converges more stably. That is why the strategies below are worth
-the trouble -- once you have a checkpoint.
-
-> **No accuracy numbers are quoted here, and that is deliberate.** This section
-> used to draw two boxes comparing "Results: 70-80% accuracy" from scratch
-> against "Results: 85-95% accuracy" pretrained, and to conclude "Benefit: 10-25%
-> better accuracy, 100x faster training!". Those figures described neither this
-> implementation nor any measurement taken in this repository -- nothing here has
-> ever been trained or evaluated -- and they advertised the payoff of a path that
-> raises. Same rule as the variant table in section 5: for reference numbers read
-> the paper; for numbers about *this* code, train it and measure.
-
-### Loading Pretrained Models
+The only working form is a local checkpoint path:
 
 ```python
 from dl_techniques.models.vision.resnet import ResNet
 
-# Method 1: from a local checkpoint -- THE ONLY WORKING FORM.
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',
-    num_classes=1000
-)
+CKPT = "/path/to/resnet50.keras"    # something you trained and saved
 
-# Method 2: a local checkpoint with a different number of classes.
-# The incompatible classifier layer is skipped rather than refused.
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',
-    num_classes=100  # Different from the checkpoint's 1000
-)
+model = ResNet.from_variant("resnet50", pretrained=CKPT, num_classes=1000)
 
-# Method 3: as a feature extractor.
-feature_extractor = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',
-    include_top=False  # Remove classification head
-)
+# A different head width is fine: the incompatible classifier layer is SKIPPED,
+# not refused. `include_top=False` gives the bare feature extractor.
+small_head = ResNet.from_variant("resnet50", pretrained=CKPT, num_classes=100)
+backbone = ResNet.from_variant("resnet50", pretrained=CKPT, include_top=False)
 
 # DOES NOT WORK -- raises NotImplementedError, no download exists:
-#   ResNet.from_variant('resnet50', pretrained=True, weights_dataset='imagenet')
+#   ResNet.from_variant("resnet50", pretrained=True, weights_dataset="imagenet")
 ```
 
-### Transfer Learning Strategies
-
-#### Strategy 1: Feature Extraction (Frozen Base)
-
-Best for: Small datasets (< 1000 images per class)
-
-```python
-# Load pretrained model without top
-base_model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    include_top=False
-)
-
-# Freeze all base layers
-base_model.trainable = False
-
-# Add custom head
-inputs = keras.Input(shape=(224, 224, 3))
-x = base_model(inputs, training=False)
-x = keras.layers.GlobalAveragePooling2D()(x)
-x = keras.layers.Dense(256, activation='relu')(x)
-x = keras.layers.Dropout(0.5)(x)
-outputs = keras.layers.Dense(num_classes, activation='softmax')(x)
-
-model = keras.Model(inputs, outputs)
-
-# Fast training with higher learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-3),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-history = model.fit(train_dataset, epochs=20)
-```
-
-#### Strategy 2: Fine-Tuning Top Layers
-
-Best for: Medium datasets (1000-10000 images per class)
-
-```python
-# Load pretrained model
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=num_classes
-)
-
-# Freeze early layers
-for layer in model.layers[:-30]:  # Freeze all but last 30 layers
-    layer.trainable = False
-
-# Train with moderate learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-4),
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-history = model.fit(train_dataset, epochs=50)
-```
-
-#### Strategy 3: Full Fine-Tuning
-
-Best for: Large datasets (> 10000 images per class)
-
-```python
-# Load pretrained model
-model = ResNet.from_variant(
-    'resnet50',
-    pretrained='/path/to/resnet50_weights.keras',  # pretrained=True raises -- see section 9
-    num_classes=num_classes
-)
-
-# All layers trainable
-model.trainable = True
-
-# Train with low learning rate
-model.compile(
-    optimizer=keras.optimizers.Adam(1e-5),  # Very low LR
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
-
-history = model.fit(train_dataset, epochs=100)
-```
-
-#### Strategy 4: Progressive Unfreezing
-
-Best for: When you want the best of both worlds
-
-```python
-def progressive_unfreeze(model, train_dataset, val_dataset):
-    """Progressively unfreeze and train layers."""
-    
-    # Stage 1: Train only head (all base frozen)
-    print("Stage 1: Training classification head")
-    for layer in model.layers[:-5]:
-        layer.trainable = False
-    
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    model.fit(train_dataset, validation_data=val_dataset, epochs=10)
-    
-    # Stage 2: Unfreeze top block
-    print("Stage 2: Unfreezing Stage 4")
-    for layer in model.layers[-50:]:
-        layer.trainable = True
-    
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-4),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    model.fit(train_dataset, validation_data=val_dataset, epochs=20)
-    
-    # Stage 3: Unfreeze all
-    print("Stage 3: Fine-tuning entire network")
-    model.trainable = True
-    
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-5),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    model.fit(train_dataset, validation_data=val_dataset, epochs=30)
-    
-    return model
-
-# Usage
-model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
-model = progressive_unfreeze(model, train_ds, val_ds)
-```
-
-### Transfer Learning Decision Guide
-
-```
-Dataset Size Decision Tree:
-───────────────────────────
-
-< 100 images per class:
-  → Feature extraction only
-  → Freeze entire base model
-  → Train small custom head
-  → Aggressive data augmentation
-
-100-1000 images per class:
-  → Feature extraction + fine-tune top layers
-  → Freeze early layers (first 70%)
-  → Unfreeze late layers (last 30%)
-  → Moderate data augmentation
-
-1000-10000 images per class:
-  → Progressive unfreezing
-  → Start frozen, gradually unfreeze
-  → Use learning rate scheduling
-  → Light data augmentation
-
-> 10000 images per class:
-  → Full fine-tuning
-  → Start with pretrained weights
-  → Train all layers with low LR
-  → Minimal data augmentation
-  → Consider training from scratch
-```
-
-### Domain Adaptation
-
-When source and target domains differ significantly:
-
-```python
-# Example: Pretrained on ImageNet, adapting to medical images
-
-def domain_adaptation_strategy(
-    model,
-    source_dataset,
-    target_dataset,
-    adaptation_layers=20
-):
-    """
-    Adapt pretrained model to new domain.
-    """
-    
-    # Phase 1: Domain confusion (freeze early features)
-    print("Phase 1: Domain-invariant feature learning")
-    for layer in model.layers[:-adaptation_layers]:
-        layer.trainable = False
-    
-    # Train on mixed data
-    mixed_dataset = source_dataset.concatenate(target_dataset)
-    
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-4),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    
-    model.fit(mixed_dataset, epochs=30)
-    
-    # Phase 2: Fine-tune on target domain
-    print("Phase 2: Target domain fine-tuning")
-    model.trainable = True
-    
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-5),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    
-    model.fit(target_dataset, epochs=50)
-    
-    return model
-
-# Usage
-model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=5)
-model = domain_adaptation_strategy(
-    model,
-    imagenet_medical_subset,  # Similar medical images from ImageNet
-    custom_medical_dataset     # Your specific medical images
-)
-```
-
----
+Once you have a checkpoint the three usual strategies apply: freeze everything and train a new
+head; freeze the stem and early stages and fine-tune the rest at `1e-4`; or unfreeze
+everything at `1e-5`. Each needs a re-`compile()`. Section 8 Example 1 runs the first two end
+to end. No accuracy benefit is quoted here, for the same reason as in § 6.
 
 ## 10. Training from Scratch
 
-Training ResNet from scratch requires careful setup and hyperparameters.
-
-### Standard Training Recipe
-
 ```python
 import keras
-from dl_techniques.models.vision.resnet import ResNet
+from dl_techniques.models.vision.resnet import create_resnet
 
-# 1. Create model
-model = ResNet.from_variant(
-    'resnet50',
-    num_classes=1000,
-    input_shape=(224, 224, 3)
+model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
+                      stem_type="cifar",
+                      kernel_regularizer=keras.regularizers.L2(1e-4))
+schedule = keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=1e-3, decay_steps=50_000,
+    warmup_target=1e-2, warmup_steps=2_000,
 )
-
-# 2. Data augmentation (critical for from-scratch training)
-data_augmentation = keras.Sequential([
-    keras.layers.RandomFlip('horizontal'),
-    keras.layers.RandomRotation(0.1),
-    keras.layers.RandomZoom(0.1),
-    keras.layers.RandomContrast(0.1),
-])
-
-def augment(image, label):
-    image = data_augmentation(image, training=True)
-    return image, label
-
-train_dataset = train_dataset.map(augment)
-
-# 3. Optimizer with warm-up and decay
-initial_lr = 0.1
-warmup_epochs = 5
-total_epochs = 120
-
-def lr_schedule(epoch):
-    """Learning rate schedule used in original ResNet paper."""
-    if epoch < warmup_epochs:
-        # Warm-up
-        return initial_lr * (epoch + 1) / warmup_epochs
-    elif epoch < 30:
-        return initial_lr
-    elif epoch < 60:
-        return initial_lr * 0.1
-    elif epoch < 90:
-        return initial_lr * 0.01
-    else:
-        return initial_lr * 0.001
-
-optimizer = keras.optimizers.SGD(
-    learning_rate=initial_lr,
-    momentum=0.9,
-    nesterov=True  # Nesterov momentum
-)
-
-# 4. Compile
 model.compile(
-    optimizer=optimizer,
-    loss='categorical_crossentropy',
-    metrics=['accuracy', 'top_k_categorical_accuracy']
+    optimizer=keras.optimizers.SGD(schedule, momentum=0.9, nesterov=True),
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"],
 )
-
-# 5. Callbacks
-callbacks = [
-    keras.callbacks.LearningRateScheduler(lr_schedule),
-    keras.callbacks.ModelCheckpoint(
-        'best_model.keras',
-        save_best_only=True,
-        monitor='val_accuracy'
-    ),
-    keras.callbacks.TensorBoard(log_dir='logs'),
-    keras.callbacks.ReduceLROnPlateau(
-        factor=0.1,
-        patience=10,
-        min_lr=1e-6
-    )
-]
-
-# 6. Train
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=total_epochs,
-    callbacks=callbacks
-)
-
-print("✓ Training complete!")
 ```
 
-### Advanced Training Techniques
-
-#### Label Smoothing
-
-```python
-# Instead of hard labels [0, 0, 1, 0, 0]
-# Use soft labels [0.025, 0.025, 0.9, 0.025, 0.025]
-
-model.compile(
-    optimizer=optimizer,
-    loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
-    metrics=['accuracy']
-)
-
-# Benefits:
-# • Prevents overconfident predictions
-# • Better calibration
-# • Improved generalization
-```
-
-#### Mixup Data Augmentation
-
-```python
-def mixup(batch_x, batch_y, alpha=0.2):
-    """Mixup data augmentation."""
-    batch_size = len(batch_x)
-    
-    # Sample mixing coefficient
-    lam = np.random.beta(alpha, alpha, batch_size)
-    lam = np.maximum(lam, 1 - lam)
-    
-    # Shuffle indices
-    indices = np.random.permutation(batch_size)
-    
-    # Mix images and labels
-    mixed_x = lam[:, None, None, None] * batch_x + \
-              (1 - lam[:, None, None, None]) * batch_x[indices]
-    
-    mixed_y = lam[:, None] * batch_y + \
-              (1 - lam[:, None]) * batch_y[indices]
-    
-    return mixed_x, mixed_y
-
-# Apply to dataset
-def apply_mixup(x, y):
-    return tf.py_function(
-        mixup,
-        [x, y],
-        [tf.float32, tf.float32]
-    )
-
-train_dataset = train_dataset.batch(128).map(apply_mixup)
-```
-
-#### Cosine Annealing
-
-```python
-def cosine_decay_schedule(epoch, total_epochs, initial_lr):
-    """Cosine annealing learning rate schedule."""
-    cosine_decay = 0.5 * (1 + np.cos(np.pi * epoch / total_epochs))
-    return initial_lr * cosine_decay
-
-# Use in LearningRateScheduler
-callbacks = [
-    keras.callbacks.LearningRateScheduler(
-        lambda epoch: cosine_decay_schedule(epoch, 120, 0.1)
-    )
-]
-```
-
----
+Augmentation matters more than architecture here: random crop with padding, horizontal flip,
+and for long runs mixup or cutout. Weight decay belongs in the optimizer **or** in
+`kernel_regularizer`, never both. Add `ModelCheckpoint` / `EarlyStopping` as usual.
 
 ## 11. Fine-Tuning Strategies
 
-### Discriminative Learning Rates
+**Route 1 (recommended): staged unfreezing.** Layer names are `stem_conv`/`stem_bn`/`stem_act`,
+`stageN_blockM`, `global_avg_pool` and `classifier`, so grouping `model.layers` by prefix is a
+one-liner. Freeze the early groups, train, then unfreeze and re-compile at a lower learning
+rate. Section 8 Example 1 runs this.
 
-> **Measured correction.** The version of this section that used to stand here
-> grouped layers by hard-coded index ranges (`model.layers[10:40]`,
-> `[40:80]`, ... `[180:]`) as if `ResNet` exposed ~180 flat layers. It does
-> not. `ResNet` is subclassed and `model.layers` lists its **direct children**
-> only -- MEASURED, `resnet50` has **22**:
-> `['stem_conv', 'stem_bn', 'stem_act', 'stem_pool', 'stage1_block1', ...,
-> 'stage4_block3', 'global_avg_pool', 'classifier']`.
-> Those index ranges therefore produced `{'stem': 10, 'stage1': 12,
-> 'stage2': 0, 'stage3': 0, 'stage4': 0, 'head': 0}` -- four of the six groups
-> EMPTY, and 'stem' silently swallowing six residual blocks. The old snippet
-> also finished by assigning `layer._custom_lr`, an attribute nothing in this
-> repository reads, under a comment admitting it "requires custom optimizer
-> implementation".
-
-Group by NAME, never by index -- the names are stable and the counts are not:
-
-```python
-from dl_techniques.models.vision.resnet import ResNet
-
-
-def create_layer_groups(model):
-    """Group a ResNet's direct child layers by the stage they belong to."""
-    groups = {'stem': [], 'stage1': [], 'stage2': [],
-              'stage3': [], 'stage4': [], 'head': []}
-    for layer in model.layers:
-        if layer.name.startswith('stem'):
-            groups['stem'].append(layer)
-        elif layer.name.startswith('stage'):
-            groups[layer.name.split('_')[0]].append(layer)
-        else:                                    # global_avg_pool, classifier
-            groups['head'].append(layer)
-    return groups
-
-
-model = ResNet.from_variant('resnet50', num_classes=10, input_shape=(224, 224, 3))
-model.build((1, 224, 224, 3))
-print({name: len(layers) for name, layers in create_layer_groups(model).items()})
-# Output: {'stem': 4, 'stage1': 3, 'stage2': 4, 'stage3': 6, 'stage4': 3, 'head': 2}
-```
-
-**Keras 3 has no per-layer learning rate.** There is no supported attribute to
-set, which is why the old snippet's `layer._custom_lr` did nothing. Two routes
-actually work:
-
-```python
-# Route 1 (recommended): staged unfreezing. Freeze the early groups, train,
-# then unfreeze and re-compile at a lower LR -- see section 8 Example 3, which
-# runs end to end. `trainable` is the flag Keras really honours, and a
-# re-compile is REQUIRED for a change to it to take effect.
-groups = create_layer_groups(model)
-for name in ('stem', 'stage1', 'stage2'):
-    for layer in groups[name]:
-        layer.trainable = False
-
-# Route 2: two optimizers over disjoint variable sets, applied in a custom
-# training loop. Note this repository's convention is to AVOID a custom
-# `train_step`; prefer Route 1 unless you genuinely need per-group LRs.
-```
-
-### Gradual Unfreezing
-
-```python
-def gradual_unfreeze(model, train_dataset, val_dataset, stages=4):
-    """Gradually unfreeze layers from top to bottom."""
-    
-    total_layers = len(model.layers)
-    layers_per_stage = total_layers // stages
-    
-    for stage in range(stages):
-        print(f"\n=== Stage {stage + 1}/{stages} ===")
-        
-        # Calculate which layers to unfreeze
-        unfreeze_from = total_layers - (stage + 1) * layers_per_stage
-        
-        # Freeze/unfreeze layers
-        for i, layer in enumerate(model.layers):
-            layer.trainable = (i >= unfreeze_from)
-        
-        trainable_count = sum([l.trainable for l in model.layers])
-        print(f"Trainable layers: {trainable_count}/{total_layers}")
-        
-        # Compile with decreasing learning rate
-        lr = 1e-4 * (0.5 ** stage)
-        model.compile(
-            optimizer=keras.optimizers.Adam(lr),
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        # Train
-        history = model.fit(
-            train_dataset,
-            validation_data=val_dataset,
-            epochs=10,
-            verbose=1
-        )
-    
-    return model
-
-# Usage
-model = ResNet.from_variant('resnet50', pretrained='/path/to/resnet50_weights.keras', num_classes=10)
-model = gradual_unfreeze(model, train_ds, val_ds, stages=4)
-```
-
----
+**Route 2: two optimizers over disjoint variable sets** in a custom training loop. This
+repository's convention is to avoid a custom `train_step`; prefer route 1.
 
 ## 12. Advanced Techniques
 
-### Technique 1: Stochastic Depth
-
-Randomly drop residual blocks during training to improve regularization.
-
-```python
-class StochasticDepth(keras.layers.Layer):
-    """Stochastic depth layer that randomly drops residual blocks."""
-    
-    def __init__(self, drop_rate=0.1, **kwargs):
-        super().__init__(**kwargs)
-        self.drop_rate = drop_rate
-    
-    def call(self, inputs, training=None):
-        residual, shortcut = inputs
-        
-        if training:
-            # Random survival probability
-            keep_prob = 1 - self.drop_rate
-            random_tensor = keras.random.uniform([]) 
-            
-            if random_tensor > self.drop_rate:
-                return residual + shortcut
-            else:
-                return shortcut  # Skip residual block entirely
-        else:
-            # During inference, scale by survival probability
-            return self.drop_rate * residual + shortcut
-
-# Apply to residual blocks
-# (Requires modifying block implementation)
-```
-
-### Technique 2: Squeeze-and-Excitation
-
-Add channel attention to improve feature reweighting.
-
-```python
-import keras
-from dl_techniques.utils.keras_registration import register_dl_technique
-
-# The package string is the defining module's dotted path -- `my_project.<module>` for your
-# own code, `dl_techniques.<module.path>` for code inside this repo (`ResNet` itself is
-# `dl_techniques.models.resnet.model>ResNet`). Never a bare
-# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no
-# module path, so two same-named classes claim one slot and the last import wins.
-@register_dl_technique("my_project.se_block")
-class SEBlock(keras.layers.Layer):
-    """Squeeze-and-Excitation block."""
-    
-    def __init__(self, ratio=16, **kwargs):
-        super().__init__(**kwargs)
-        self.ratio = ratio
-    
-    def build(self, input_shape):
-        channels = input_shape[-1]
-        
-        self.global_pool = keras.layers.GlobalAveragePooling2D()
-        self.dense1 = keras.layers.Dense(channels // self.ratio, activation='relu')
-        self.dense2 = keras.layers.Dense(channels, activation='sigmoid')
-        self.reshape = keras.layers.Reshape((1, 1, channels))
-    
-    def call(self, inputs):
-        # Squeeze: global information embedding
-        squeeze = self.global_pool(inputs)
-        
-        # Excitation: adaptive recalibration
-        excitation = self.dense1(squeeze)
-        excitation = self.dense2(excitation)
-        excitation = self.reshape(excitation)
-        
-        # Scale input features
-        return inputs * excitation
-
-# Add to residual blocks for SE-ResNet
-```
-
-### Technique 3: Cutout / Random Erasing
-
-Randomly mask out patches of input images.
-
-```python
-def random_cutout(image, size=16):
-    """Apply random cutout augmentation."""
-    h, w, c = image.shape
-    
-    # Random position
-    y = np.random.randint(0, h)
-    x = np.random.randint(0, w)
-    
-    # Cutout region
-    y1 = np.clip(y - size // 2, 0, h)
-    y2 = np.clip(y + size // 2, 0, h)
-    x1 = np.clip(x - size // 2, 0, w)
-    x2 = np.clip(x + size // 2, 0, w)
-    
-    # Apply cutout
-    image[y1:y2, x1:x2, :] = 0
-    
-    return image
-
-# Apply to dataset
-train_dataset = train_dataset.map(
-    lambda x, y: (random_cutout(x), y)
-)
-```
-
----
+- **Stochastic depth and squeeze-and-excitation** are not built into
+  `BasicBlock`/`BottleneckBlock`; both ship as layers you can compose into a custom block.
+  `normalization_type` takes any normalization-factory key and `normalization_kwargs` reaches
+  every site.
+- **Register custom layers** with `@register_dl_technique("dl_techniques.<module.path>")` — a
+  package-qualified key. Never a bare `@keras.saving.register_keras_serializable()`: its
+  `Custom>ClassName` key carries no module path, so two same-named classes claim one slot.
 
 ## 13. Performance Optimization
 
-### Memory Optimization
+| Lever | Effect |
+|:---|:---|
+| `keras.mixed_precision.set_global_policy("mixed_float16")` | roughly halves activation memory |
+| `model.compile(..., jit_compile=True)` | XLA fusion; measure, not always faster |
+| smaller `input_shape` | quadratic in activation memory |
+| `include_top=False` + cached features | frozen-backbone training becomes a linear probe |
 
-```python
-# Technique 1: Gradient Checkpointing
-# Trade compute for memory by recomputing activations
-
-# Technique 2: Mixed Precision
-keras.mixed_precision.set_global_policy('mixed_float16')
-model = ResNet.from_variant('resnet50')
-
-# Technique 3: Reduce batch size
-# Use gradient accumulation to simulate larger batches
-
-class GradientAccumulator:
-    """Accumulate gradients over multiple batches."""
-    
-    def __init__(self, model, accumulation_steps=4):
-        self.model = model
-        self.accumulation_steps = accumulation_steps
-        self.accumulated_gradients = [
-            tf.Variable(tf.zeros_like(var), trainable=False)
-            for var in model.trainable_variables
-        ]
-    
-    def accumulate(self, x, y):
-        with tf.GradientTape() as tape:
-            predictions = self.model(x, training=True)
-            loss = self.model.compiled_loss(y, predictions)
-            loss = loss / self.accumulation_steps
-        
-        gradients = tape.gradient(loss, self.model.trainable_variables)
-        
-        for i, grad in enumerate(gradients):
-            self.accumulated_gradients[i].assign_add(grad)
-        
-        return loss
-    
-    def apply_gradients(self):
-        self.model.optimizer.apply_gradients(
-            zip(self.accumulated_gradients, self.model.trainable_variables)
-        )
-        
-        # Reset accumulated gradients
-        for grad_var in self.accumulated_gradients:
-            grad_var.assign(tf.zeros_like(grad_var))
-
-# Usage: Effective batch size = batch_size * accumulation_steps
-```
-
-### Speed Optimization
-
-```python
-# 1. XLA Compilation
-import tensorflow as tf
-tf.config.optimizer.set_jit(True)
-
-@tf.function(jit_compile=True)
-def train_step(model, x, y):
-    with tf.GradientTape() as tape:
-        predictions = model(x, training=True)
-        loss = compute_loss(y, predictions)
-    
-    gradients = tape.gradient(loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    return loss
-
-# 2. TensorFlow Profiler
-# Identify bottlenecks
-with tf.profiler.experimental.Profile('logdir'):
-    model.fit(dataset, epochs=1)
-
-# 3. Optimize data pipeline
-dataset = dataset.cache()  # Cache dataset in memory
-dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Prefetch batches
-```
-
----
+The input pipeline is usually the bottleneck before the model: `tf.data` with `.cache()`,
+`.prefetch(AUTOTUNE)` and a parallel `map` first.
 
 ## 14. Serialization & Deployment
 
-### Saving and Loading
-
 ```python
-# Full model save
-model.save('resnet50_full.keras')
-loaded = keras.models.load_model('resnet50_full.keras')
+import keras
+import numpy as np
+from dl_techniques.models.vision.resnet import create_resnet
 
-# Weights only
-model.save_weights('resnet50_weights.weights.h5')
-new_model = ResNet.from_variant('resnet50')
-new_model.load_weights('resnet50_weights.weights.h5')
+model = create_resnet("resnet18", num_classes=10, input_shape=(32, 32, 3),
+                      stem_type="cifar")
+model.build((None, 32, 32, 3))
+model.save("resnet18.keras")
 
-# SavedModel format
-model.export('resnet50_savedmodel')
+restored = keras.models.load_model("resnet18.keras")
+
+x = np.random.rand(2, 32, 32, 3).astype("float32")
+assert np.allclose(np.asarray(model(x)), np.asarray(restored(x)), atol=1e-6)
 ```
 
-### TensorFlow Lite Conversion
-
-```python
-import tensorflow as tf
-
-# Convert to TFLite
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-tflite_model = converter.convert()
-
-# Save
-with open('resnet50.tflite', 'wb') as f:
-    f.write(tflite_model)
-
-# Use in mobile app
-interpreter = tf.lite.Interpreter(model_path='resnet50.tflite')
-interpreter.allocate_tensors()
-```
-
-### ONNX Export
-
-```python
-import tf2onnx
-
-# Convert to ONNX
-spec = (tf.TensorSpec((None, 224, 224, 3), tf.float32, name="input"),)
-output_path = "resnet50.onnx"
-
-model_proto, _ = tf2onnx.convert.from_keras(
-    model,
-    input_signature=spec,
-    output_path=output_path
-)
-
-print(f"✓ Model exported to {output_path}")
-```
-
----
+`get_config()` carries every constructor argument, `stem_type` included. `save_weights` requires
+the target model to be built first. `ResNet` and its blocks register under
+`dl_techniques.models.resnet.model>ClassName`, so a `.keras` file loads with no `custom_objects`.
 
 ## 15. Testing & Validation
 
-### Unit Tests
-
-```python
-def test_resnet_creation():
-    """Test all variants can be created."""
-    for variant in ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152']:
-        model = ResNet.from_variant(variant)
-        assert model is not None
-        print(f"✓ {variant} created")
-
-def test_forward_pass():
-    """Test forward pass."""
-    model = ResNet.from_variant('resnet50')
-    x = keras.random.normal((1, 224, 224, 3))
-    y = model(x)
-    assert y.shape == (1, 1000)
-    print("✓ Forward pass successful")
-
-def test_deep_supervision():
-    """Test deep supervision mode."""
-    model = ResNet.from_variant('resnet50', enable_deep_supervision=True)
-    x = keras.random.normal((1, 224, 224, 3))
-    outputs = model(x)
-    assert len(outputs) == 4
-    print("✓ Deep supervision works")
-
-# Run tests
-test_resnet_creation()
-test_forward_pass()
-test_deep_supervision()
-```
-
----
+`pytest tests/test_models/test_resnet/ -q`. Four files pin this README specifically:
+`test_the_readme_flops_table_reproduces.py` (§ 17's numbers),
+`test_the_readme_deep_supervision_pattern_runs.py` (§ 7 and § 8 execute as written),
+`test_stem_type.py` (both stems, against a golden reference) and `test_model.py` (fails if an
+accuracy claim reappears here).
 
 ## 16. Troubleshooting & FAQs
 
-**Q: Why is my model overfitting?**
-
-A: Try:
-- More data augmentation
-- Stronger regularization (L2, dropout)
-- Smaller model variant
-- Early stopping
-- Pretrained weights
-
-**Q: Training is very slow, how to speed up?**
-
-A:
-- Use mixed precision training
-- Enable XLA compilation
-- Optimize data pipeline (prefetch, cache)
-- Use smaller batch size with gradient accumulation
-- Profile to find bottlenecks
-
-**Q: How many epochs should I train?**
-
-A:
-- From scratch: 100-200 epochs
-- Fine-tuning: 20-50 epochs
-- Feature extraction: 10-20 epochs
-
-**Q: What learning rate should I use?**
-
-A:
-- From scratch: 0.1 with decay
-- Fine-tuning (all layers): 1e-5 to 1e-4
-- Fine-tuning (top layers): 1e-4 to 1e-3
-- Feature extraction: 1e-3 to 1e-2
-
----
+- **`You tried to call count_params on layer 'res_net', but the layer isn't built`.**
+  Subclassed model: call `model.build((None, H, W, C))` or run one forward pass first. Same
+  cause for `summary()`.
+- **`The layer res_net has never been called and thus has no defined output`.** There is no
+  `.input`, `.output` or `.output_names`. Use
+  `dl_techniques.utils.deep_supervision.get_model_output_info(model, input_shape=...)`, and
+  wrap the model from a `keras.Input` you create.
+- **Predictions look like unbounded scores, sometimes negative.** They are logits: the
+  classifier is a bare `Dense` with no activation. Compile with `from_logits=True` and apply
+  `keras.ops.softmax` before reading a probability.
+- **Accuracy stuck near chance on 32x32 images.** You are on the default `stem_type='imagenet'`
+  and the feature map collapsed to 1x1 before stage 3. Pass `stem_type='cifar'`.
+- **`NotImplementedError` from `pretrained=True`.** By design. Use a local path (§ 9).
+- **`model.layers.pop()` appears to work and changes nothing.** `layers` is a recomputed
+  property, so `pop()` mutates a throwaway list. Use `include_top=False` instead.
+- **Freezing had no effect.** You must `compile()` again after changing `trainable`.
+- **`Length of blocks_per_stage must equal length of filters_per_stage`.** The two lists
+  define the same stages; give them the same length.
 
 ## 17. Technical Details
 
-### Parameter Counts and FLOPs
+### Parameter counts and FLOPs
 
-**MEASURED on this implementation**, 2026-08-24, `num_classes=1000`,
-`input_shape=(224, 224, 3)`, `include_top=True`, default `stem_type='imagenet'`.
-Not quoted from a paper -- re-derive them with the two snippets below.
+**MEASURED on this implementation**, `num_classes=1000`, `input_shape=(224, 224, 3)`,
+`include_top=True`, default `stem_type='imagenet'`. Not quoted from a paper.
 
 | Variant | Trainable params | Non-trainable (BN stats) | `count_params()` | MACs | FLOPs (2xMACs) |
 |:---|---:|---:|---:|---:|---:|
@@ -2545,20 +454,13 @@ Not quoted from a paper -- re-derive them with the two snippets below.
 | ResNet-101 | 44,549,160 | 105,344 | 44,654,504 |  7.823 G | 15.646 G |
 | ResNet-152 | 60,192,808 | 151,424 | 60,344,232 | 11.544 G | 23.088 G |
 
-**Read the unit before comparing.** "ResNet-50 is 4.1 GFLOPs" in the
-literature is a count of multiply-**accumulates**; the profiler used here
-counts the multiply and the add separately, so it reports 8.208 G for the same
-network. The **MACs** column is the one to compare against a published figure.
-On that column this implementation agrees with the usual quoted values
-(1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding.
-
-**The Trainable column also reconciles exactly** with the widely quoted
-torchvision counts -- all five match to the digit. This README previously
-printed those same figures under the heading "parameters", which is *not* what
-`model.count_params()` returns here: Keras counts BatchNorm's `moving_mean` and
-`moving_variance` and PyTorch does not, and that difference is the entire
-Non-trainable column (e.g. ResNet-18: 11,689,512 + 9,600 = 11,699,112).
-Both numbers are now printed so neither can be mistaken for the other.
+**Read the unit before comparing.** "ResNet-50 is 4.1 GFLOPs" in the literature counts
+multiply-**accumulates**; the profiler here counts the multiply and the add separately, hence
+8.208 G for the same network. Compare the **MACs** column, which matches the usual published
+values (1.8 / 3.6 / 4.1 / 7.8 / 11.6) to within rounding. The Trainable column matches
+torchvision for all five variants to the digit; Keras counts BatchNorm's
+`moving_mean`/`moving_variance` and PyTorch does not, which is the entire Non-trainable
+column.
 
 Re-derive the parameter columns:
 
@@ -2566,68 +468,23 @@ Re-derive the parameter columns:
 import numpy as np
 from dl_techniques.models.vision.resnet import ResNet
 
-for variant in ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]:
-    model = ResNet.from_variant(variant, num_classes=1000, input_shape=(224, 224, 3))
-    model.build((1, 224, 224, 3))
-    trainable = sum(int(np.prod(w.shape)) for w in model.trainable_weights)
-    non_trainable = sum(int(np.prod(w.shape)) for w in model.non_trainable_weights)
-    print(f"{variant}: {trainable:,} + {non_trainable:,} = {model.count_params():,}")
+for variant in ResNet.MODEL_VARIANTS:
+    m = ResNet.from_variant(variant, num_classes=1000, input_shape=(224, 224, 3))
+    m.build((1, 224, 224, 3))
+    tr = sum(int(np.prod(w.shape)) for w in m.trainable_weights)
+    nt = sum(int(np.prod(w.shape)) for w in m.non_trainable_weights)
+    print(f"{variant}: {tr:,} + {nt:,} = {m.count_params():,}")
 ```
 
-Re-derive the FLOPs column:
+The FLOPs column is counted on the **frozen graph**. That matters: a layer-tree walk stops at
+a custom subclassed layer and silently undercounts (this repository has a recorded ~50x
+undercount from exactly that). The profiler and its calibration and descent arms live in
+`tests/test_models/test_resnet/test_the_readme_flops_table_reproduces.py`.
 
-```python
-import tensorflow as tf
-from tensorflow.python.framework.convert_to_constants import (
-    convert_variables_to_constants_v2,
-)
-from dl_techniques.models.vision.resnet import ResNet
+### Authoring rules
 
-
-def profile_flops(model, input_shape):
-    """Total float ops of one forward pass, counted on the FROZEN GRAPH.
-
-    Counting on the frozen graph is what makes this trustworthy for this
-    package: a layer-tree walk stops at a custom subclassed layer and silently
-    undercounts, whereas tracing dissolves ResNet's BasicBlock/BottleneckBlock
-    into primitive ops before anything is counted.
-    """
-    fn = tf.function(lambda x: model(x, training=False))
-    concrete = fn.get_concrete_function(tf.TensorSpec([1, *input_shape], tf.float32))
-    graph_def = convert_variables_to_constants_v2(concrete).graph.as_graph_def()
-
-    opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
-    opts["output"] = "none"
-    with tf.Graph().as_default() as graph:
-        tf.graph_util.import_graph_def(graph_def, name="")
-        result = tf.compat.v1.profiler.profile(
-            graph=graph, run_meta=tf.compat.v1.RunMetadata(), cmd="scope", options=opts
-        )
-    return result.total_float_ops
-
-
-model = ResNet.from_variant("resnet50", num_classes=1000, input_shape=(224, 224, 3))
-flops = profile_flops(model, (224, 224, 3))
-print(f"{flops / 1e9:.3f} GFLOPs = {flops / 2e9:.3f} GMACs")
-# Output: 8.208 GFLOPs = 4.104 GMACs
-```
-
-**Why these numbers are trusted.** Two arms ran before any model was profiled,
-and both are kept as permanent tests in
-`tests/test_models/test_resnet/test_the_readme_flops_table_reproduces.py`:
-
-1. **Calibration.** A single `Conv2D(64, 7, strides=2, use_bias=False)` on a
-   224x224x3 input has an analytically known 112x112x64x3x7x7 = 118,013,952
-   MACs. The profiler returned **236,027,904 = exactly 2x that, 0.0000% error**
-   -- which is also how the unit above was established rather than assumed.
-2. **Descent.** A two-convolution `keras.layers.Layer` subclass profiles to
-   **exactly** the same total as the identical two convolutions written
-   flat in a Functional model, and both equal the analytic value. This repo has
-   a recorded case of a layer-tree MAC walk reaching only 2 convolutions and
-   reporting a **~50x undercount**, so "the instrument descends" is measured
-   here, not assumed.
-
----
+Conventions: [`models/CLAUDE.md`](../../CLAUDE.md). Mandatory guide:
+`research/2026_keras_custom_models_instructions_v2.md`.
 
 ## 18. Citation
 
