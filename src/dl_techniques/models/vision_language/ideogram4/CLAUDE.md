@@ -156,18 +156,21 @@ D-002 (net-new `ScalarSinusoidalEmbedding` +
   | class | key |
   |---|---|
   | `AttnBlock`, `AutoEncoder`, `Decoder`, `Encoder`, `ResnetBlock` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>` |
-  | `Downsample`, `Upsample` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>`, with `legacy_alias=False` |
+  | `Downsample`, `Upsample` (`vae.py`) | `dl_techniques.models.ideogram4.vae><Class>` |
   | `Ideogram4Transformer` (`transformer.py`) | `dl_techniques.models.ideogram4.transformer>Ideogram4Transformer` |
 
   The package string is the defining module's dotted path with the `models/` **family**
   directories (here `vision_language`) and subfamily containers stripped — a family is a filing
   decision, not a namespace.
-- **`Downsample` / `Upsample` have NO legacy alias.** Each name is claimed by a second
-  registered class (`dl_techniques.models.pw_fnet.model`), so aliasing both sides would put them back on one
-  `Custom>X` key and recreate the import-order collision. `Custom>Downsample` and
-  `Custom>Upsample` resolve to **nothing** (measured 2026-08-29). Neither appears in any archive
-  in this repository. Never a bare `@keras.saving.register_keras_serializable()`: its
-  `Custom>ClassName` key is independent of `__module__`, which is exactly that collision.
+- **`Downsample` / `Upsample` DO carry the legacy alias, as of 2026-09-01.** They used to be
+  registered `legacy_alias=False`, because `dl_techniques.models.pw_fnet.model` claimed the same
+  two bare names and the `Custom>` namespace is flat, so aliasing both sides would have put two
+  classes on one key. The duplicate was removed at its source instead: pw_fnet's pair was renamed
+  `PWFNetDownsample` / `PWFNetUpsample`, these two kept their names, and both now take the house
+  default. Measured 2026-09-01: `keras.saving.get_registered_object("Custom>Downsample")` and
+  `("Custom>Upsample")` return **these** classes. Do not rename them, and do not re-add the flag.
+  Never a bare `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key is
+  independent of `__module__`, which is exactly the collision the qualified key avoids.
 - **Config invariant guards** (`config.py` `__post_init__` +
   `get_ideogram4_config`): keep these intact — they prevent silent build-time
   failures downstream:

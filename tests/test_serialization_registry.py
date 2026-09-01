@@ -5,14 +5,22 @@ the module-INDEPENDENT key ``Custom>{ClassName}``. Two classes with the SAME cla
 therefore claim the SAME key, and the one imported LAST silently overwrites the other.
 Nothing warns.
 
-SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 744 of them go
+SINCE 2026-08-29 no site under `src/` is spelled that way any more: all 746 of them
+(731 in `src/dl_techniques`, 15 in `src/train`; AST census re-derived 2026-09-01) go
 through `dl_techniques.utils.keras_registration.register_dl_technique`, which mints a
 package-qualified key and binds the old ``Custom>{ClassName}`` as an ALIAS to the same
 object so pre-migration `.keras` archives keep loading. This guard is
 unchanged in intent and still the right one: an alias is a second key for the SAME object,
-which this checker's identity comparison correctly does not count as a collision, and the
-four duplicate-name pairs the alias is deliberately WITHHELD from are exactly the pairs
-that would otherwise collide in the legacy namespace.
+which this checker's identity comparison correctly does not count as a collision.
+
+SINCE 2026-09-01 the alias is WITHHELD from nothing: **0** sites pass ``legacy_alias=False``
+and **0** bare ``__name__``s are claimed by two registered objects (same census). The last
+three duplicate-name pairs -- ``Downsample``, ``Upsample``, ``MLPBlock`` -- were removed at
+their source by package-prefix renames (``PWFNetDownsample``, ``PWFNetUpsample``,
+``TabMMLPBlock``) rather than by suppressing aliases on both sides. The flag still exists and
+is still the right remedy for a genuine bare-name collision; it simply has no users.
+`tests/test_the_legacy_alias_namespace_has_no_collisions.py` re-derives both counts from the
+tree, so this paragraph reddens rather than rots.
 
 The consequence is a real serialization-correctness bug, not merely a test annoyance:
 saving a model containing the shadowed class and loading it back resolves the key to the
@@ -123,15 +131,18 @@ def test_no_duplicate_keras_serialization_keys():
     #
     # The floor was ``> 100`` against a measured population of 728, i.e. ~7x headroom --
     # so seven of every eight registrations could have vanished without this noticing.
-    # Measured 2026-08-29 after the registration migration: **1452 keys** (each aliased
-    # object holds two, the qualified key and its legacy ``Custom>`` alias). The floor is
-    # re-derived on the same 80%-of-population rule the sibling guard in
-    # `test_models/test_package_api_contract.py` uses: ``int(0.8 * 1452) == 1161``. A
+    # Re-measured 2026-09-01 by re-running THIS walk and printing ``len(registry)``:
+    # **1466 keys** (each aliased object holds two, the qualified key and its legacy
+    # ``Custom>`` alias). The 1452 recorded here on 2026-08-29 was stale by -14: the
+    # 2026-09-01 alias cleanup minted 8 of those (the last 8 ``legacy_alias=False`` sites
+    # took the house default, so each gained a second key) and the other 6 predate it.
+    # The floor is re-derived on the same 80%-of-population rule the sibling guard in
+    # `test_models/test_package_api_contract.py` uses: ``int(0.8 * 1466) == 1172``. A
     # fifth of the tree's registrations may disappear before this guard is allowed to call
     # itself alive; anything tighter would trip on an ordinary refactor and say nothing
     # more about whether the walk still reaches the tree.
-    assert len(registry) > 1161, (
-        f"only {len(registry)} objects registered (measured 1452 on 2026-08-29) -- the "
+    assert len(registry) > 1172, (
+        f"only {len(registry)} objects registered (measured 1466 on 2026-09-01) -- the "
         f"module walk likely failed, so this guard would pass vacuously"
     )
 
@@ -139,8 +150,10 @@ def test_no_duplicate_keras_serialization_keys():
         "Two classes registered under the same Keras serialization key. The one imported "
         "LAST silently wins, so saving/loading the other is broken and depends on import "
         "order. Give each an explicit distinct `package=` via "
-        "`register_dl_technique(...)`, and pass `legacy_alias=False` on BOTH sides if "
-        "they share a bare class name:\n"
+        "`register_dl_technique(...)`. If they share a bare CLASS NAME, prefer renaming "
+        "one of them with a package prefix (`PWFNetDownsample`, not a second "
+        "`Downsample`) so the duplicate goes away at its source; `legacy_alias=False` on "
+        "BOTH sides is the fallback when a rename is not available:\n"
         + "\n".join(
             f"  {key}\n" + "".join(f"       {c}\n" for c in sorted(classes))
             for key, classes in sorted(collisions.items())

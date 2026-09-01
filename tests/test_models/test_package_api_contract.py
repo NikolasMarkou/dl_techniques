@@ -2026,18 +2026,24 @@ def _memo_default_roots(fn):
 
 #: Root set of the registry-key sweep: **every registering path in the repo**.
 #:
-#: NOT ``models/`` (220 decorated classes) and NOT ``src/dl_techniques/`` alone
-#: (726). A bare ``@register_keras_serializable()`` registers under the literal
+#: NOT ``models/`` (217 registering sites) and NOT ``src/dl_techniques/`` alone
+#: (731). A bare ``@register_keras_serializable()`` registers under the literal
 #: key ``Custom><ClassName>``, which is MODULE-INDEPENDENT -- measured on Keras
 #: 3.8.0, see decisions.md D-002 -- so the namespace those classes compete in is
 #: flat and repo-global. Both narrower scopings are structurally blind to the
-#: family this guard exists for: each of the three duplicate class-NAME near
-#: misses in the tree (``MLPBlock``, ``Downsample``, ``Upsample``) has at least
-#: one leg outside ``models/`` -- a fourth, ``ConvBlock``, was one until
-#: 2026-09-01, when ``plan-2026-09-01-e6d380a5`` deleted the
-#: ``layers/yolo12_blocks`` twin and left ``layers/standard_blocks`` the sole
-#: definition -- and 20+ classes under ``src/train/``
-#: register into the same flat namespace as the library's.
+#: family this guard exists for: 15 classes under ``src/train/`` and 42 fixtures
+#: under ``tests/`` register into the same flat namespace as the library's
+#: (counts re-derived 2026-09-01 by AST census).
+#:
+#: The scoping argument used to be carried by four live examples. As of
+#: 2026-09-01 there are **zero** duplicate class NAMES left in the tree: the
+#: ``ConvBlock`` twin was deleted by ``plan-2026-09-01-e6d380a5``, and
+#: ``MLPBlock`` / ``Downsample`` / ``Upsample`` were resolved by package-prefix
+#: renames (``TabMMLPBlock``, ``PWFNetDownsample``, ``PWFNetUpsample``) in
+#: ``plan-2026-09-01-dcc1574a``. Every one of the four had a leg outside
+#: ``models/``, which is why the wide root set stays: this guard exists to catch
+#: the NEXT one, and the next one is likelier to arrive from ``src/train/`` or a
+#: test fixture than from within ``models/``.
 _REGISTRY_KEY_ROOTS = (
     REPO_ROOT / "src" / "dl_techniques",
     REPO_ROOT / "src" / "train",
@@ -2095,9 +2101,12 @@ def _sweep_registry_keys(roots=None, src_root=None):
 
     Only the QUALIFIED key is returned. ``register_dl_technique`` also binds a
     legacy ``Custom>{name}`` alias to the SAME object; counting that alias as a
-    claimant would make every aliased class read as its own collision, and would
-    re-collide all four deliberate duplicate-name pairs that the alias is
-    withheld from precisely so they do not.
+    claimant would make every aliased class read as its own collision. That
+    reasoning is the reason for the scoping, not a description of a current
+    exception list: as of 2026-09-01 the alias is withheld from nothing (0 sites
+    pass ``legacy_alias=False``), and this sweep is deliberately blind to
+    BARE-alias collisions either way -- that question belongs to
+    ``tests/test_the_legacy_alias_namespace_has_no_collisions.py``.
     """
     roots = _REGISTRY_KEY_ROOTS if roots is None else roots
     src_root = REPO_ROOT if src_root is None else src_root
@@ -2169,9 +2178,11 @@ def _sweep_registry_keys(roots=None, src_root=None):
     return keys, counts
 
 
-#: Two classes claiming one registry key, in the exact shape the tree's four
-#: duplicate class-NAME near-misses would take if one of them ever lost its
-#: prefix. Parsed, never imported.
+#: Two classes claiming one registry key. The corpus is synthetic and stays
+#: synthetic: all 4 of the tree's duplicate class-NAME near-misses were resolved
+#: during 2026-09-01 (one deletion, three package-prefix renames), so this is now
+#: the ONLY place that shape exists, and the control would be untestable if it
+#: were sourced from the tree. Parsed, never imported.
 _INJECTED_REGISTRY_DEFECT_SRC = '''
 @keras.saving.register_keras_serializable()
 class Downsample(keras.layers.Layer):
@@ -2246,18 +2257,21 @@ class TestRegistryKeysDoNotCollide:
         # WHAT NOT TO DO: do not narrow this to `models/` (220 classes) or to
         # `src/dl_techniques/` (726). The key a bare decorator claims is
         # module-independent, so `src/train/` and `tests/` compete in the SAME
-        # flat `Custom>` namespace; 20+ src/train classes register there today,
-        # and every one of the four duplicate class-name near-misses in the tree
-        # has a leg outside `models/`. A narrower subject set is structurally
-        # blind to the family this guard exists for.
+        # flat `Custom>` namespace; 15 src/train classes and 42 test fixtures
+        # register there today (AST census, 2026-09-01), and every one of the four
+        # duplicate class-name near-misses this guard was built around had a leg
+        # outside `models/`. All four are gone as of 2026-09-01 -- which is the
+        # point: a narrower subject set would be structurally blind to the NEXT
+        # one, and would not have seen any of the last four either.
         #
         # SUPERSEDED IN PART, 2026-08-29 (plan-2026-08-29T141252-168933da).
         # This comment used to end: "Also do NOT `fix` a future
         # collision by adding `package=`: that moves the key and breaks every
         # existing checkpoint that stored the old registered_name (D-002)." The
         # premise is still true and the conclusion is now wrong. Adding
-        # `package=` does move the key -- which is exactly why all 744 `src/`
-        # sites moved onto `register_dl_technique`, whose legacy `Custom>{name}`
+        # `package=` does move the key -- which is exactly why every `src/`
+        # site (746 today; 744 when this was written) moved onto
+        # `register_dl_technique`, whose legacy `Custom>{name}`
         # alias keeps the OLD key resolving to the SAME object (verified against
         # all 14 class names this repository's `.keras` archives actually
         # contain). A BARE `package=` still breaks checkpoints; going through the

@@ -32,7 +32,6 @@ in § Naming traps below.
 | `physics/` | — | Lagrange layer, approximate Lagrange layer |
 | `fusion/` | — | Multimodal fusion layer |
 | `tokenizers/` | — | BPE tokenizer |
-| `experimental/` | — | Unstable: band RMS OOD, contextual counter FFN, contextual memory, field embeddings, graph MANN, hierarchical evidence LLM, hierarchical memory system, MST correlation filter |
 
 ### Semantics worth knowing before you reuse
 
@@ -105,6 +104,9 @@ samplers plus an inline factory; `vmf` adds `VMFSampling` and the closed-form `v
 | Trap | Detail |
 |---|---|
 | **`RepMixerBlock` is two different architectures** | `fastvit/FastVitRepMixerBlock` (timm FastViT MCi, consumed by `models/vision/fastvit/`) is **NOT** the top-level `repmixer_block.py::RepMixerBlock` (a different architecture sharing the name, consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
+| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabm_blocks.py`'s two-Dense ensemble block was called `MLPBlock` until 2026-09-01 and is now **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` kept the bare name because it is the FFN factory's `'mlp'` key (`ffn/factory.py`), so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
+| **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` used the same two bare names until 2026-09-01 and now spells them **`PWFNetDownsample`** / **`PWFNetUpsample`**. The pw_fnet pair is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. They are NOT interchangeable and must not be merged |
+| **Why prefix instead of `legacy_alias=False`** | Suppressing the legacy alias on both sides of a duplicate name also works, and was what the tree did until 2026-09-01. It leaves the duplicate in place, so it costs both classes their `Custom>` alias forever and the next same-named class re-opens the same hazard. A package prefix removes the duplicate at its source; `research/2026_keras_custom_models_instructions_v2.md` mandates it. As of 2026-09-01 **0** sites under `src/` pass `legacy_alias=False` |
 
 ## Conventions
 
@@ -131,13 +133,6 @@ subpackage with an `__all__`, prefer the package-level import.
 - Subpackages with `factory.py` support config-driven construction.
 - All layers implement `get_config()` for Keras serialization.
 - Layers follow the Keras 3 pattern: `__init__`, `build`, `call`, `get_config`.
-
-> **This does not put `layers/` in opposition to a Google-style `models/`.** `models/` has no
-> package-wide style at all — it is measurably mixed, and its normative exemplar for new packages
-> (`models/language/bert/model.py`) is itself entirely Sphinx/reST. The earlier phrasing here, "this differs
-> from `models/`", rested on a blanket claim that measurement refuted. Where `layers/` genuinely
-> differs is from the Google-majority `losses/`, `metrics/`, `utils/`, `optimization/`, `analyzer/`
-> and `visualization/`.
 
 ## Layer Reuse Policy (factory-first)
 

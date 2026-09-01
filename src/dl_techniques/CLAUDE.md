@@ -93,9 +93,15 @@ anywhere in the tree claim the identical slot and whichever imports last silentl
 deserialization of both.
 
 **Legacy archives still load.** The helper also binds `Custom>ClassName` as an alias to the same
-object, which is what a pre-2026-08-29 `.keras` file reads. Four names carry `legacy_alias=False`
-and therefore have no alias. The `dl_techniques.utils.keras_registration` module docstring
-records the mechanism, the exceptions, and the measured control.
+object, which is what a pre-2026-08-29 `.keras` file reads. **No name under `src/` opts out**:
+re-derived 2026-09-01 by AST census, **0** of the 746 `register_dl_technique` sites pass
+`legacy_alias=False` and **0** bare `__name__`s are claimed by two registered objects. The flag
+remains the correct remedy for a genuine bare-name collision, and it currently has no users --
+the last three collisions (`Downsample`, `Upsample`, `MLPBlock`) were resolved by package-prefix
+renames instead. `tests/test_the_legacy_alias_namespace_has_no_collisions.py` re-derives both
+counts from the tree, so this paragraph cannot drift silently. The
+`dl_techniques.utils.keras_registration` module docstring records the mechanism and the measured
+control.
 
 ### Code Style
 
@@ -150,98 +156,6 @@ grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l              
 > mid-line, inside prose and inside code. Re-running the commands exactly as printed above is
 > what produced 80/81/8/106; a hand-rolled regex over the same tree on the same day produced
 > 81/73/14/102. Do not mix a number from one instrument into a table derived by another.
-
-**This table rots.** It said "248 of 285" for `layers/` until 2026-08-14 (correct on 2026-08-11,
-falsified by the `layers/fastvit/` package landing), and on 2026-08-19 six more figures had drifted:
-`layers/` 255/294 -> 256/296, `models/` Google-only 102 -> 99, Sphinx-only 67 -> 68, both 5 -> 8,
-neither 93 -> 92. Re-derived again on 2026-08-21 (step 19.1): Google-only 99 -> 98, both 8 -> 9, the
-`:param ` total 76 -> 77 — a drift that predates that step's own two new module docstrings, both of
-which moved neither count. Re-derived on **2026-08-25** by re-running the printed commands after the
-`models/` family restructure: `layers/` 256/296 -> 258/298, `models/` 267 -> 270 files, Google-only
-98 -> **82**, Sphinx-only 68 -> **75**, both 9 -> **8**, neither 92 -> **105**, `losses/` `:param `
-7 -> 8, `utils/` 22 of 39/9 -> 22 of 41/11, and `bert.py` back to **81** `:param ` (the "78" recorded
-on 2026-08-19 does not reproduce under the printed command). The restructure was a pure `git mv` and
-moved no docstring, so the `models/` swing is the instrument, not the tree — see the anchor note
-above. Re-derived again on 2026-08-25 (later the same day) by
-`plan-2026-08-25-c71fc3ad/iter-1/step-9` after the `models/language/colbert/` package landed:
-`models/` 270 -> **275** files and `:param ` 85 -> **89**. **Two of the figures recorded in the
-sentence before this one never reproduced**: re-running the printed commands against the commit
-*preceding* that plan (`0222f3044`) returns anchored-`Args:` **88**, not 90, and `:param ` **85**,
-not 83 — so Google-only was 80 and Sphinx-only 77 on 2026-08-25 morning, not 82 and 75. The
-arithmetic in the block was carried forward from mis-transcribed inputs; the `neither` figure
-matching (105) was a coincidence of two compensating errors. That drift is **not** this plan's and
-predates it; it is repaired here only because leaving half a measurement block updated would make
-the file contradict itself. **Re-run the block above before quoting any of it** — a derived number
-is a perishable good, and this table has now been wrong twice in the same week in two different
-ways.
-
-Re-derived a third time on **2026-08-25** by `plan-2026-08-25-704a9bcb/iter-1/step-7`, which
-re-ran the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows) rather than only the
-red ones: `layers/` **258 of 298 -> 259 of 299**. That drift is **not** that plan's either — it was
-already red at its base commit and comes from `4ab68e323` adding
-`src/dl_techniques/layers/activations/common.py` (3 `:param ` lines); it is repaired here because
-`REPO_MAP.md` § Numbers requires a prose digit to move in the SAME edit as the table row that
-sources it. **Every other figure in the table above was re-run in the same edit and reproduces
-exactly** — `layers/attention/` 34 of 35, `models/` 88 anchored-`Args:` / 89 `:param ` / 8 both over
-275 files (so 80 Google-only, 81 Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both,
-`metrics/` 12 of 15 / 2, `utils/` 22 of 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/`
-10 of 24 / 0, `visualization/` 6 of 7 / 0, `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py`
-31 `:param ` with the stray `Args:` still at `:273`. Note that the drift log in
-the paragraph before this one records what was measured *on those dates* and is deliberately left
-as-is: it is a history of readings, not a set of live claims.
-
-Re-derived a **fourth** time on **2026-08-26** by `plan-2026-08-26-fb07cf4e/iter-1/step-5.1`, again
-by re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows, now executed by
-`tests/test_repo_map_numbers.py` rather than by hand) plus every command printed in this section:
-`layers/` **260 of 300 -> 259 of 299**. The mover is `plan-2026-08-26-f3744602/iter-1/step-6`
-(`0e6b2ea5b`), which deleted `src/dl_techniques/layers/moe/integration.py`; that file carried 14
-`:param ` lines, so it belonged to BOTH populations and its deletion decremented the numerator and
-the denominator together. **A ratio whose terms move in lockstep looks unchanged; check both of
-them, never the ratio.** Every other figure in the table
-and the code block above was re-run in the same edit and reproduces EXACTLY: `layers/attention/` 34
-of 35, `models/` 275 files with 88 anchored-`Args:` / 89 `:param ` / 8 both (so 80 Google-only, 81
-Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both, `metrics/` 12 of 15 / 2, `utils/` 22 of
-41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0, `visualization/` 6 of 7 / 0,
-`bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param ` with the stray `Args:` still
-at `:273`. The MoE deletion touched `layers/` and nothing else, and the measurement says so.
-
-Re-derived a **fifth** time on **2026-08-28** by `plan-2026-08-28-6de2095b/iter-1/step-6.1`, again
-by re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 76 enforceable rows, executed by
-`tests/test_repo_map_numbers.py`) plus every command printed in this section: `layers/`
-**259 of 299 -> 264 of 299**. The denominator did not move, and that is the whole story of this
-one — five files changed style without any file being added or deleted. **Only three of the five
-are that plan's**: `class_token.py`, `mask_token.py` and `register_tokens.py` under
-`layers/embedding/`, converted Google -> Sphinx by its first step. The other two were already red at
-its base commit `f43881697`, which measured 261, not the tabulated 259:
-`layers/norms/polar_weight_norm.py` (`4b8dd2559`) and `layers/thera_heat_field.py` (`7648dbc7c`).
-**A red row is the sum of every mover since the last sweep, so a plan cannot read its own
-contribution off the size of the failure** — here the failure was +5 and the plan owned +3. Every
-other figure in the table and the code block above was re-run in the same edit and reproduces
-EXACTLY: `layers/attention/` 34 of 35, `models/` 275 files with 88 anchored-`Args:` / 89 `:param ` /
-8 both (so 80 Google-only, 81 Sphinx-only, 106 neither), `losses/` 32 of 43 / 9 / 1 both, `metrics/`
-12 of 15 / 2, `utils/` 22 of 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0,
-`visualization/` 6 of 7 / 0, `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param `
-with the stray `Args:` still at `:273`, and the unanchored-grep trap still returning 89 against 88.
-
-Re-derived a **sixth** time on **2026-09-01** by `plan-2026-09-01-e6d380a5/iter-1/step-8`, again by
-re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 77 enforceable rows, executed by
-`tests/test_repo_map_numbers.py`) plus every command printed in this section. Two rows of the table
-above moved and are repaired: `layers/` **262 of 297 -> 264 of 299** and `layers/attention/`
-**34 of 35 -> 35 of 36**. Both movers are that plan's own two new files
-(`layers/attention/area_attention.py`, `layers/transformers/area_attention_block.py`), each
-Sphinx-documented, so in `layers/` **both terms moved +2 together** — the ratio again looks
-unchanged and again is not. The `models/` code block reproduces EXACTLY (287 files, 88
-anchored-`Args:`, 95 `:param `, 8 both -> 80 Google-only, 87 Sphinx-only, 112 neither), as does the
-unanchored-grep trap (**89** against 88), `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0 and
-`visualization/` 6 of 7 / 0.
-
-**Four figures in the table above are stale and are deliberately NOT repaired here**, because none
-of them is moved by this plan and absorbing another plan's debt would make the diff lie about what
-changed: `losses/` (tabulated 32 of 44 / 10 / 1 both; re-derives **33 of 45 / 11**), `metrics/`
-(12 of 15 / 2; re-derives **13 of 16 / 2**), `utils/` (22 of 41 / 11 / 3 both; re-derives **17 of
-32 / 12**, moved by `plan-2026-09-01-a13e4ca3` deleting ten unconsumed `utils/` modules), and the
-`test_the_*` count in § Testing (**65**, dated 2026-08-25; its own command now returns **122**).
-They are named so the next reader does not re-diagnose them.
 
 ### Factory Pattern
 

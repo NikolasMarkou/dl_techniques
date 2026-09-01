@@ -13,8 +13,13 @@ no longer resolves. This module therefore registers each object under **both** k
 stable package-qualified one (which new saves write) and, where the bare class name is not
 shared with another registered class, the pre-migration ``Custom>ClassName`` one (which
 existing archives read). See :sec:`6.3` of the same guide for the migration-path rule.
-Four classes get no alias, ``yolov12_losses`` is a further exception, and nine archives
-were already broken before this change by the 2026-08-24 ``models/`` reorg.
+**No class under ``src/`` gets no alias today** -- re-derived 2026-09-01 by AST census over
+``src/dl_techniques``, ``src/train``, ``src/applications`` and ``tests``: **0** of the 746
+``register_dl_technique`` sites pass ``legacy_alias=False``, and **0** bare ``__name__``s are
+shared by two registered objects (the last three, ``Downsample``/``Upsample``/``MLPBlock``,
+were resolved by package-prefix renames, not by refusals). ``yolov12_losses`` remains a
+further exception, and nine archives were already broken before this change by the
+2026-08-24 ``models/`` reorg.
 
 Measured behaviour of the mechanism (2026-08-29, keras 3.x, this repository):
 
@@ -24,7 +29,9 @@ Measured behaviour of the mechanism (2026-08-29, keras 3.x, this repository):
   archive loads with ``max|delta| = 0.0`` against the pre-migration output.
 - **Control**: with ``legacy_alias=False`` the same legacy archive is REFUSED with
   ``TypeError: ... could not be deserialized properly``. The alias is load-bearing, not
-  decorative.
+  decorative. The flag is still supported and still the correct remedy for a genuine
+  bare-name collision (see :class:`AliasCollisionError`), but as of 2026-09-01 it has **no
+  users**: it is a mechanism held in reserve, not a live exception list.
 - Plain functions (not only classes) register and alias identically.
 
 Example:
