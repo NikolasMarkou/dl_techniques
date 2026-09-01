@@ -42,14 +42,68 @@ def test_binary_points_zero_cost(regularizer):
     assert tf.abs(cost) < 1e-6
 
 
-def test_midpoint_maximum_cost(regularizer):
-    """Test that weights at 0.5 produce maximum cost."""
-    # Create tensor with 0.5 values
-    mid_weights = tf.constant([[0.5, 0.5], [0.5, 0.5]], dtype=tf.float32)
-    cost = regularizer(mid_weights)
+@pytest.mark.parametrize(
+    "reduction, expected",
+    [
+        # Derivation (from the module docstring's published formula):
+        #   L(w) = m * (w - low)^2 * (w - high)^2 / h^4,  h = (high - low) / 2
+        # At the midpoint w = (low + high) / 2 each of the two differences is
+        # +/- h, so the numerator is h^2 * h^2 = h^4 and the per-element penalty
+        # is EXACTLY m. The barrier height is the multiplier itself,
+        # independent of low/high.
+        # For the default low=0, high=1: h = 0.5, h^4 = 0.0625; at w = 0.5
+        #   (0.5)^2 * (-0.5)^2 / 0.0625 = 0.25 * 0.25 / 0.0625 = 1.0 per element.
+        # The tensor is 2x2, so N = 4 elements.
+        #   reduction="sum"  -> m * N = 1.0 * 4 = 4.0
+        ("sum", 4.0),
+        #   reduction="mean" -> m       = 1.0   (what the old test really meant;
+        #                                        `mean` was the implicit default)
+        ("mean", 1.0),
+    ],
+)
+def test_midpoint_maximum_cost(reduction, expected):
+    """Pin the midpoint barrier under BOTH reductions.
 
-    # Cost should be close to scale value (1.0 in this case)
-    assert abs(float(cost) - 1.0) < 1e-6
+    The default reduction changed from an implicit `mean` to `sum`, so a
+    "cost at the maximum == 1.0" assertion now scales with the element count.
+    """
+    reg = BinaryPreferenceRegularizer(multiplier=1.0, reduction=reduction)
+    mid_weights = tf.constant([[0.5, 0.5], [0.5, 0.5]], dtype=tf.float32)
+    assert int(tf.size(mid_weights)) == 4
+
+    cost = float(reg(mid_weights))
+    assert abs(cost - expected) < 1e-6
+
+
+@pytest.mark.parametrize(
+    "low, high, multiplier",
+    [
+        # Symmetric kernel targets: h = (1 - (-1)) / 2 = 1, h^4 = 1.
+        # Midpoint w = 0: (0 - (-1))^2 * (0 - 1)^2 / 1 = 1 * 1 / 1 = 1
+        # per element, times m = 2.0 -> 2.0.
+        (-1.0, 1.0, 2.0),
+        # Narrow gate targets: h = (0.75 - 0.25) / 2 = 0.25, h^4 = 0.00390625.
+        # Midpoint w = 0.5: (0.25)^2 * (-0.25)^2 = 0.00390625, and dividing by
+        # h^4 gives exactly 1 per element, times m = 0.5 -> 0.5.
+        (0.25, 0.75, 0.5),
+    ],
+)
+def test_barrier_height_equals_multiplier_for_any_targets(low, high, multiplier):
+    """The barrier height is `multiplier`, independent of `low` and `high`.
+
+    The h^4 divisor exists precisely to cancel the gap width: at the midpoint
+    the numerator is always h^4, so L(midpoint) = m for every (low, high).
+    Checked at two non-default triples so a residual gap-width dependence
+    could not hide behind the canonical low=0, high=1 case. `mean` is used so
+    the value read is the per-element barrier rather than N times it.
+    """
+    reg = BinaryPreferenceRegularizer(
+        multiplier=multiplier, low=low, high=high, reduction="mean"
+    )
+    midpoint = (low + high) / 2.0
+    weights = tf.constant([[midpoint, midpoint]], dtype=tf.float32)
+
+    assert abs(float(reg(weights)) - multiplier) < 1e-6
 
 
 def test_scaling():
