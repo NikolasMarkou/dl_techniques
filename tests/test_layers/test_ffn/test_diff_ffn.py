@@ -157,7 +157,11 @@ class TestDifferentialFFN:
             dropout_rate=0.0,
             kernel_initializer='ones',
             bias_initializer='zeros',
-            kernel_regularizer=None  # Disable default regularizer
+            # None SELECTS the default SoftOrthonormalConstraintRegularizer
+            # (diff_ffn.py: `if kernel_regularizer is None:` installs one) -- it
+            # does NOT disable it. Harmless here: a regularizer only adds losses,
+            # it does not alter the forward output this test asserts on.
+            kernel_regularizer=None
         )
 
         controlled_input = keras.ops.ones([2, 4, 10])
@@ -582,7 +586,11 @@ class TestDifferentialFFNEdgeCases:
             hidden_dim=64,
             output_dim=32,
             use_bias=False,
-            kernel_regularizer=None  # Disable default regularizer
+            # None SELECTS the default SoftOrthonormalConstraintRegularizer
+            # (diff_ffn.py: `if kernel_regularizer is None:` installs one) -- it
+            # does NOT disable it. Harmless here: a regularizer only adds losses,
+            # it does not alter the forward output this test asserts on.
+            kernel_regularizer=None
         )
         test_input = keras.random.normal([2, 4, 16])
 
