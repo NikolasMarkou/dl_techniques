@@ -701,7 +701,6 @@ class Conv2D(BaseConv):
     -   `bounding_box.py`: Functions for IoU calculations (`bbox_iou`) and Non-Maximum Suppression (`bbox_nms`).
     -   `calibration_metrics.py`: Functions to compute ECE, MCE, Brier score, and other calibration metrics.
     -   `tensors.py`: Low-level tensor manipulation functions like `gram_matrix` and `reshape_to_2d`.
-    -   `visualization.py` & `visualization_manager.py`: Tools for creating and managing plots.
 -   **Dataset Utilities**:
     -   `common.py`: Defines a common `Dataset` NamedTuple.
     -   `mnist.py`, `cifar10.py`: Standard functions to load and preprocess these datasets.

@@ -57,9 +57,13 @@ That is asserted mechanically over the whole ``utils/`` tree by
 
 What this module does NOT own: any plotting, any figure lifecycle, any output
 path. Figure creation, saving and ``plt.close`` remain each callback's own
-business, and ``dl_techniques.utils.visualization_manager`` owns the
-where-do-plots-go policy. This module owns only the backend default and the
-import.
+business. This module owns only the backend default and the import.
+(An earlier revision pointed at ``dl_techniques.utils.visualization_manager``
+for the where-do-plots-go policy; that module had zero consumers in any of
+``src/dl_techniques/``, ``src/train/``, ``src/applications/`` or ``tests/`` and
+was deleted. The live class of that name is
+``dl_techniques.visualization.core.VisualizationManager``, which is what the
+two ``src/train/`` users actually import.)
 """
 
 import os

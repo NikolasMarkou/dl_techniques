@@ -398,7 +398,7 @@ def _imported_modules(source: str, package: str) -> List[Tuple[str, bool]]:
 
     :param source: Python source text.
     :param package: dotted package the source lives in, e.g.
-        ``dl_techniques.utils.export``.
+        ``dl_techniques.utils.masking``.
     :return: one entry per imported module name.
     """
     tree = ast.parse(source)

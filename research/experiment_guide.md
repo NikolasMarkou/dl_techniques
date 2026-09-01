@@ -64,12 +64,12 @@ import numpy as np
 
 # DL-Techniques imports (organized by category)
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.datasets import load_and_preprocess_
 
 [dataset]
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+from dl_techniques.visualization import VisualizationManager, PlotConfig
+# TrainingConfig / train_model: define these in your own experiment script -- see the note below.
 
 # Experiment-specific imports
 from dl_techniques.layers.
@@ -140,6 +140,20 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 ```
+
+> **`dl_techniques.utils.train` no longer exists.** It held a `TrainingConfig` dataclass and a
+> `train_model()` helper with zero consumers anywhere in `src/dl_techniques/`, `src/train/`,
+> `src/applications/` or `tests/`, and was deleted. There is no library-provided replacement, and
+> that is deliberate: every pipeline under `src/train/` defines its **own** `TrainingConfig`
+> dataclass and its own `train_model(args)` entry point. The `TrainingConfig` and `train_model`
+> used throughout this guide are therefore **yours to define in the experiment script**, exactly
+> as `src/train/convnext/`, `src/train/capsnet/` and the rest do — copy the shape from any of them.
+>
+> **`dl_techniques.utils.visualization_manager` no longer exists either.** The live
+> `VisualizationManager` is `dl_techniques.visualization.VisualizationManager`, and its config
+> class is `PlotConfig`, not `VisualizationConfig`. Its constructor differs: it takes a required
+> `experiment_name`, and `timestamp=""` replaces the old `timestamp_dirs=False`.
+
 
 ## Documentation Standards
 
@@ -565,9 +579,10 @@ def run_experiment(config: ExperimentConfig) -> Dict[str, Any]:
 
     # Initialize visualization manager
     vis_manager = VisualizationManager(
+        experiment_name=config.experiment_name,
         output_dir=experiment_dir / "visualizations",
-        config=VisualizationConfig(),
-        timestamp_dirs=False
+        config=PlotConfig(),
+        timestamp=""   # "" => write straight into output_dir, no timestamp subdirectory
     )
 
     # Plot training history comparison
@@ -842,9 +857,10 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Callable
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.train import TrainingConfig, train_model
 from dl_techniques.datasets import load_and_preprocess_mnist
-from dl_techniques.utils.visualization_manager import VisualizationManager, VisualizationConfig
+from dl_techniques.visualization import VisualizationManager, PlotConfig
+# TrainingConfig / train_model are defined below in this same script (see the note in the
+# "DL-Techniques imports" section): the library does not provide them.
 
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 

@@ -106,7 +106,7 @@ combined are smaller than either one.
 | **`src/dl_techniques/layers/`** | 297 | **The largest package.** 21 themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, fastvit, …) plus 71 loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see Part B. |
 | **`src/dl_techniques/models/`** | 275 | **The second largest, and the only subpackage that is not flat.** Since the 2026-08-24 restructure (`d0b599ff2`, `452d663d2`) it is **12 family directories** — `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `tabular`, `embeddings_experimental` — holding **85 leaf model packages** between them, with **4 subfamilies** nesting a third level (`src/dl_techniques/models/vision/image_restoration/`, `src/dl_techniques/models/vision/keypoints/`, `src/dl_techniques/models/vision/super_resolution/`, `src/dl_techniques/models/vision_language/sam/`). A *leaf* is a directory that carries an `__init__.py` and has no `__init__.py`-bearing child; a *container* is one that has such children. `vision/` alone holds 35 leaves and `language/` 17. **Listing one level down gives 12, not 85** — so every model-package row in the Numbers table walks to the leaves, and prints that walk in full. Re-derived 2026-08-28: **78 of 85** leaves bind a `create_*` factory in their own package init, **82 of 85** declare a curated `__all__`, **82 of 85** have a non-empty init, and **85 of 85** carry a `README.md`. The 7 that bind no factory are the four `time_series` leaves (`mdn`, `deepar`, `prism`, `tirex` — the curated `src/dl_techniques/models/time_series/__init__.py` re-exports them instead, and it is the one container that does re-export), `src/dl_techniques/models/common/power_sampling/`, and `src/dl_techniques/models/vision_language/sam/sam1/` and `src/dl_techniques/models/vision_language/sam/sam3/`; the 3 with an empty init are `deepar`, `prism` and `tirex`. `sam/` exports nothing on purpose — re-exporting the class `SAM2` there binds the name `SAM2` and shadows the `sam2/` subpackage (its own init docstring carries the reasoning and the exact `ImportError`). **`image_restoration/` is no longer the documentation-only directory this row described until 2026-08-25**: the restructure moved `darkir/`, `pw_fnet/` and `scunet/` underneath it, so it is now a subfamily container that *also* carries `BENCHMARKS.md` and `README.md` — and those tables are still quoted from papers, never measured here, which matters more now that implementations sit beside them. (Before 2026-08-25 this cell read "74 *top-level* model packages ... **71 of 74** bind a `create_*` ... **72 of 74** export a curated `__all__`", and before that "69 of 73" and "70 of 73": four consecutive wrong lists. Every one of them came from quoting a command whose scope had drifted from the question. Re-derive from the Numbers table, never from memory.) The full catalogue is `src/dl_techniques/models/CLAUDE.md`; the family taxonomy is `src/dl_techniques/models/README.md`. See Part C. |
 | `src/dl_techniques/losses/` | 43 | Loss families, one module each; `src/dl_techniques/losses/any_loss.py` holds the single dict-based loss registry. |
-| `src/dl_techniques/utils/` | 41 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, export, alignment and geometry helpers. |
+| `src/dl_techniques/utils/` | 32 | Cross-cutting helpers — `src/dl_techniques/utils/logger.py` (mandatory central logging), `src/dl_techniques/utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. (This cell read `41` while `find src/dl_techniques/utils -name '*.py' \| wc -l` returned **44**; it is re-derived here, not carried. The `export/` subpackage it used to name was deleted — 0 consumers in all four source trees.) |
 | `src/dl_techniques/datasets/` | 37 | Dataset loaders and synthetic generators, with arc, graphs, time_series and vision subtrees. |
 | `src/dl_techniques/analyzer/` | 24 | Post-hoc model analysis — `src/dl_techniques/analyzer/model_analyzer.py` is the entry point; calibration and spectral metrics, plus its own visualizers. |
 | `src/dl_techniques/metrics/` | 15 | Keras metrics (PSNR, SSIM, perplexity, depth, forecasting, Brier). |
@@ -473,9 +473,11 @@ D-001 first.
 Three named places break the `tests/test_<x>/` rule, and each has cost someone a search:
 
 - **`src/dl_techniques/visualization/` has no test directory at all.** It has a
-  `CLAUDE.md`; it has no tests, and no test module anywhere imports it. The trap
-  is that `tests/test_utils/test_visualization.py` exists and is a zero-byte
-  file, so a name-based search finds something and learns nothing.
+  `CLAUDE.md`; it has no tests, and no test module anywhere imports it. A
+  zero-byte `tests/test_utils/test_visualization.py` used to sit here and make a
+  name-based search find something and learn nothing; it was deleted along with
+  its subject, `src/dl_techniques/utils/visualization.py`, so the trap is gone
+  and the gap is now honest.
 - **`tests/test_models/test_lewm.py` is a loose file**, where every other model
   gets a `tests/test_models/test_<name>/` directory — e.g.
   `tests/test_models/test_vit/`. Any directory-to-directory comparison
@@ -535,7 +537,7 @@ the map's job is to route you to the right one, not to paraphrase it.
 | Which loss / metric / optimizer should I use? | the `CLAUDE.md` in `src/dl_techniques/losses/`, `src/dl_techniques/metrics/`, `src/dl_techniques/optimization/` |
 | Which callback should I use — or where is it? | **Part B, "Where the callbacks actually are", first**; only then `src/dl_techniques/callbacks/CLAUDE.md`, which documents that one package and not the callbacks outside it |
 | How do I analyze a trained model? | `src/dl_techniques/analyzer/CLAUDE.md` |
-| What helpers already exist (masking, export, tensors)? | `src/dl_techniques/utils/CLAUDE.md` — check here before writing a helper |
+| What helpers already exist (masking, tensors, geometry)? | `src/dl_techniques/utils/CLAUDE.md` — check here before writing a helper |
 | What datasets can I load? | `src/dl_techniques/datasets/CLAUDE.md` |
 | What is the project about, at a glance? | `README.md` (marketing-style; its self-reported counts are not derived) |
 | Which dependency pin is authoritative? | `pyproject.toml` — but see the ledger below |

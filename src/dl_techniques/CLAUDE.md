@@ -35,7 +35,7 @@ src/dl_techniques/
 ├── initializers/    # Weight initializers (orthonormal, He-orthonormal, hypersphere, Haar wavelet, polar)
 ├── constraints/     # Weight constraints (value range clipping)
 ├── datasets/        # Data loading (time series, vision, ARC, tabular, VQA, HuggingFace)
-└── utils/           # Shared utilities (tensors, geometry, masking, alignment, export, inference)
+└── utils/           # Shared utilities (tensors, geometry, masking, alignment, inference)
 ```
 
 Each package has its own `CLAUDE.md` with detailed documentation.

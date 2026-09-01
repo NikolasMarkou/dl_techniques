@@ -275,9 +275,11 @@ def _per_image_normalizer(
     plus an epsilon floor. It uses ONLY ``mu`` and ``y`` — never the clean image
     — so it is computable identically at calibration and deployment (a test-time
     normalizer must not depend on the unknown clean signal). The ``+eps`` floor
-    mirrors ``conformal_forecaster.py`` and guards a near-flat image whose
-    residual is ~0 from producing a degenerate (near-zero) denominator that
-    would blow up the normalized score.
+    guards a near-flat image whose residual is ~0 from producing a degenerate
+    (near-zero) denominator that would blow up the normalized score. (This
+    floor used to be described as mirroring a sibling ``conformal_forecaster.py``;
+    that module had zero consumers in any of the four source trees and was
+    deleted, so the floor now stands on its own reasoning.)
 
     Args:
         mu: Denoiser point estimates, shape ``(N, ...)`` (clipped by
