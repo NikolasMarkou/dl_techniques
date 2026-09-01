@@ -4,28 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-A Keras 3 implementation of **N-BEATS (Neural Basis Expansion Analysis for Time Series)**, a deep learning architecture for time series forecasting that is often competitive with or superior to statistical and recurrent models. This implementation is designed for interpretability and performance, featuring specialized blocks for trend and seasonality decomposition.
-
----
-
-## Table of Contents
-
-1. [Overview: What is N-BEATS and Why It Matters](#1-overview-what-is-n-beats-and-why-it-matters)
-2. [The Problem N-BEATS Solves](#2-the-problem-n-beats-solves)
-3. [How N-BEATS Works: Core Concepts](#3-how-n-beats-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Model Variants](#7-configuration--model-variants)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+A Keras 3 implementation of **N-BEATS**, a forecasting architecture built entirely from fully-connected layers and basis expansions — no recurrence, no attention. The package ships two models: `NBeatsNet` (the original) and `NBeatsXNet` (the NBEATSx variant, which adds exogenous covariates through a TCN encoder).
 
 ---
 
@@ -33,254 +12,140 @@ A Keras 3 implementation of **N-BEATS (Neural Basis Expansion Analysis for Time 
 
 ### What is N-BEATS?
 
-**N-BEATS** is a deep neural architecture for time series forecasting based on the principle of **basis expansion**. Instead of using recurrent connections (like LSTMs) or self-attention (like Transformers), N-BEATS uses a deep stack of fully-connected layers to learn coefficients (`theta`) for a set of pre-defined or learnable basis functions. These functions then generate the forecast, allowing the model to decompose a time series into interpretable components like trend and seasonality.
+N-BEATS predicts by **basis expansion**. A deep stack of dense layers learns coefficients (`theta`) for a set of basis functions, and those functions generate the output. Choosing the basis — polynomial, Fourier, or learned — decides whether the model is interpretable or a flexible black box.
 
 ### Key Innovations
 
-1.  **Doubly Residual Stacking**: The model is composed of stacks, and each stack contains multiple blocks. Each block models a part of the input signal, produces a forecast, and a "backcast" (a reconstruction of its input). The backcast is subtracted from the input, and the residual is passed to the next block. This allows the model to progressively decompose the time series.
-2.  **Interpretable by Design**: By using specific block types, the model can be forced to learn interpretable components. `TrendBlock`s use polynomial basis functions to model trends, and `SeasonalityBlock`s use Fourier series to model periodic patterns.
-3.  **No Recurrence or Convolution**: The architecture is deliberately simple, using only fully-connected layers. This makes it fast and avoids the complex dependencies of recurrent or attention mechanisms.
-4.  **Integrated RevIN Normalization**: This implementation includes Reversible Instance Normalization (RevIN), which normalizes each time series instance independently. This makes the model robust to distribution shifts—a common and difficult problem in time series—and typically improves accuracy by a significant margin.
+1. **Doubly residual stacking.** Each block produces a *forecast* and a *backcast* (a reconstruction of its own input). The backcast is subtracted, and the residual goes to the next block. The signal is progressively decomposed.
+2. **Interpretable by design.** `TrendBlock` uses polynomials; `SeasonalityBlock` uses a Fourier series. A trend stack followed by a seasonality stack yields a forecast you can read component by component.
+3. **No recurrence, no convolution.** Dense layers only, so training is fast and there are no sequential dependencies to unroll.
+4. **Reversible instance normalization.** Each input window is normalized by its own mean and std and the forecast is denormalized back, which makes the model robust to the distribution shift that dominates real series.
 
 ### Why N-BEATS Matters
 
-**The Time Series Forecasting Challenge**:
 ```
-Problem: Forecast future values of a time series that may have complex trends,
-         multiple seasonalities, and whose statistical properties change over time.
-Traditional Approaches:
-  - ARIMA/ETS: Strong statistical foundations, but struggle with non-linear patterns
-    and multiple seasonalities.
-  - LSTMs/Transformers: Powerful, but can be complex, slow to train, and often
-    act as "black boxes," making their forecasts difficult to interpret or debug.
-```
+ARIMA / ETS:        strong statistics, weak on non-linearity and
+                    multiple seasonalities.
+LSTM / Transformer: powerful, slower, and hard to interrogate when
+                    a forecast goes wrong.
 
-**N-BEATS's Solution**:
-```
-N-BEATS's Approach:
-  1. Decompose the problem: Use residual stacking to break the signal down into
-     simpler components that can be modeled independently.
-  2. Be interpretable: Force stacks to model specific, understandable patterns
-     like trend and seasonality using mathematical basis functions.
-  3. Be robust: Use RevIN to handle shifts in the data's mean and variance,
-     making the model more reliable in production environments.
-  4. Benefit: Achieves state-of-the-art performance with a simpler, faster,
-     and more interpretable architecture than many alternatives.
+N-BEATS:            decompose with residual stacks, constrain each stack
+                    to an interpretable basis, normalize per window.
 ```
 
 ---
 
 ## 2. The Problem N-BEATS Solves
 
-### The Challenge of Non-Stationarity and Distribution Shift
+### Non-stationarity
 
-Real-world time series data is rarely well-behaved. Its statistical properties—mean, variance, and seasonal patterns—can change unexpectedly over time. This is known as **non-stationarity** or **distribution shift**.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  The Dilemma of Time Series Models                          │
-│                                                             │
-│  The Past is Not Always Like the Future:                    │
-│    - A model trained on historical data may fail when the   │
-│      underlying data distribution changes.                  │
-│    - For example, a sales forecasting model trained before  │
-│      a marketing campaign may not work well after it.       │
-│                                                             │
-│  The Black Box Problem:                                     │
-│    - When a complex model like an LSTM makes a bad forecast,│
-│      it can be very difficult to understand why. Was it the │
-│      trend? A seasonal effect? A special event?             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-N-BEATS is explicitly designed to address both of these issues.
-
-### How N-BEATS Changes the Game
-
-It provides a principled framework for decomposition and robustness.
+Real series change their mean, variance, and seasonal shape over time. A model trained before a marketing campaign will not hold after it. And when a black-box model produces a bad forecast, there is no way to ask whether the trend, a seasonal effect, or an event caused it.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  The N-BEATS Decomposition & Normalization Strategy         │
-│                                                             │
-│  1. Handle Distribution Shift with RevIN:                   │
-│     - By normalizing each input window, RevIN makes the main│
-│       model's task stationary. The model can focus purely   │
-│       on learning temporal patterns, not the series' scale. │
-│     - The forecast is then denormalized back to the correct │
-│       scale, making it accurate and robust.                 │
-│                                                             │
-│  2. Decompose the Signal with Residual Stacks:              │
-│     - Stack 1 (Trend): Models the long-term trend, then     │
-│       subtracts it from the signal.                         │
-│     - Stack 2 (Seasonality): Models seasonal patterns in the│
-│       remaining "de-trended" signal.                        │
-│     - This hierarchical decomposition allows the model to   │
-│       produce interpretable and debuggable forecasts.       │
+│  The past is not always like the future                     │
+│    - the training distribution drifts away from serving      │
+│  The black-box problem                                       │
+│    - a bad forecast gives you no component to inspect        │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### How N-BEATS answers both
+
+- **Instance normalization** makes the modelling task stationary: the network sees zero-mean, unit-variance windows and learns temporal shape, not scale. The forecast is scaled back afterwards.
+- **Residual stacks** split the signal: the trend stack models and removes the trend, so the seasonality stack sees a de-trended series and can only explain periodicity. The decomposition is the explanation.
 
 ---
 
 ## 3. How N-BEATS Works: Core Concepts
 
-### The Hierarchical Multi-Stack Architecture
-
-The model processes an input window (`backcast_length`) to predict a future window (`forecast_length`) through a series of stacks.
-
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      N-BEATS Architecture Stages                 │
-│                                                                  │
-│  Input ───► RevIN ───►┌──────────────────┐  (e.g., Trend Stack)  │
-│  (H, D_in)             │      Stack 1     ├─► Forecast₁          │
-│                        └────────┬─────────┘                      │
-│                                 │ (Residual₁ = Input - Backcast₁)│
-│                        ┌────────▼─────────┐  (e.g., Seasonality) │
-│                        │      Stack 2     ├─► Forecast₂          │
-│                        └────────┬─────────┘                      │
-│                                 │ (Residual₂ = Res₁ - Backcast₂) │
-│                                 ...                              │
-│                                 │                                │
-│ Final Forecast = Forecast₁ + Forecast₂ + ... ◄── RevIN Denorm◄───┘
-│  (T, D_out)                                                      │
+│  Input ───► Instance norm ──►┌──────────────────┐ (Trend)        │
+│  (B, backcast, D_in)         │     Stack 1      ├─► Forecast₁    │
+│                              └────────┬─────────┘                │
+│                                       │ residual₁ = x - backcast₁│
+│                              ┌────────▼─────────┐ (Seasonality)  │
+│                              │     Stack 2      ├─► Forecast₂    │
+│                              └────────┬─────────┘                │
+│                                       │ residual₂                │
+│  Final = Forecast₁ + Forecast₂ + ... ◄── denormalize ◄───────────┘
+│  (B, forecast, D_out)  +  final residual (B, backcast * D_in)    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### The Complete Data Flow
+Data flow, step by step:
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                       N-BEATS Complete Data Flow                        │
-└─────────────────────────────────────────────────────────────────────────┘
+1. **Normalize.** Compute per-instance mean and std over the time axis; store them.
+2. **Stack loop.** Within stack *i*, each block *j* receives residual *j-1*, emits `backcast_j` and `forecast_j`, and updates `residual_j = residual_{j-1} - backcast_j`. The stack forecast is the sum over its blocks.
+3. **Aggregate and denormalize.** Sum all stack forecasts, then apply `x * std + mean`. The returned *residual* is scaled by `std` alone — it is a difference of normalized quantities, so re-adding the mean would corrupt it.
+4. **Project.** If `input_dim != output_dim`, a final dense layer maps the forecast to `output_dim`.
 
-STEP 1: NORMALIZATION
-─────────────────────
-Input Time Series (B, H, D_in)
-    │
-    ├─► RevIN Layer (computes & stores instance-wise mean/std)
-    │
-    └─► Normalized Input (B, H, D_in)
-
-
-STEP 2: STACK PROCESSING (Repeated for each stack)
-──────────────────────────────────────────────────
-Input to Stack `i` (initially the Normalized Input)
-    │
-    ├─► Pass through each Block in the Stack `i`
-    │   - Each block `j` takes the residual from block `j-1`
-    │   - It produces a backcast_j and a forecast_j
-    │   - The residual is updated: residual_j = residual_{j-1} - backcast_j
-    │
-    ├─► Stack Forecast = Σ (forecast_j from all blocks in stack)
-    │
-    └─► Update Global Residual = Input to Stack `i` - Σ (backcast_j)
-
-
-STEP 3: AGGREGATION & DENORMALIZATION
-─────────────────────────────────────
-Stack Forecasts (Forecast₁, Forecast₂, ...)
-    │
-    ├─► Final Forecast = Σ (All Stack Forecasts)
-    │
-    ├─► RevIN Denormalize (uses stored mean/std to restore scale)
-    │
-    └─► Denormalized Forecast (B, T, D_in)
-
-
-STEP 4: OUTPUT PROJECTION
-─────────────────────────
-Denormalized Forecast
-    │
-    ├─► [Optional] Dense Layer if D_in != D_out
-    │
-    └─► Final Output (B, T, D_out)
-```
+**`call` returns a tuple**, `(forecast, final_residual)`, not a single tensor. That shapes how you compile and how you read `predict` — see §5 and §11.
 
 ---
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `RevIN` (Reversible Instance Normalization)
+All blocks live in `dl_techniques/layers/time_series/nbeats_blocks.py`.
 
--   **Purpose**: To make the model robust to changes in the time series' mean and variance (distribution shift).
--   **Functionality**:
-    1.  **Forward**: For each time series in a batch, it computes the mean and standard deviation across the time dimension, normalizes the series to have zero mean and unit variance, and *stores* these statistics.
-    2.  **Denormalize**: After the main model makes a forecast in the normalized space, this layer uses the stored statistics to scale the forecast back to the original data distribution.
+### 4.1 Instance normalization (`use_normalization`)
 
-### 4.2 `NBeatsBlock` (Base Class)
+Implemented inline in `NBeatsNet.call`, not as a separate layer. Forward: subtract the per-window mean, divide by the per-window std (floored away from zero). Reverse: multiply by std, add mean. On by default.
 
--   **Purpose**: The core computational unit.
--   **Architecture**:
-    1.  A stack of four fully-connected `Dense` layers with `silu` activation to extract features from the flattened input time series.
-    2.  Two linear "theta" heads that project the features into coefficients for the backcast and forecast.
--   This base class is abstract; the actual signal generation happens in its subclasses.
+### 4.2 `NBeatsBlock` (base class)
+
+Four fully-connected `Dense` layers (default activation `relu`) over the flattened input window, then two linear "theta" heads that project the features into backcast and forecast coefficients. The base class does not generate a signal; its subclasses supply the basis.
 
 ### 4.3 `TrendBlock`
 
--   **Purpose**: To model the long-term trend of the time series.
--   **Basis Functions**: It uses **polynomials** (`t^0, t^1, t^2, ...`). The `thetas_dim` parameter determines the degree of the polynomial (e.g., `thetas_dim=3` fits a quadratic trend). The basis functions are defined over a continuous time index spanning both the backcast and forecast periods to ensure a smooth, continuous trend extrapolation.
+Polynomial basis `t^0, t^1, t^2, ...`. `thetas_dim` is the number of polynomial terms, so `thetas_dim=4` is a cubic. The basis is defined on a continuous time index spanning backcast **and** forecast, which is what makes the extrapolation smooth.
 
 ### 4.4 `SeasonalityBlock`
 
--   **Purpose**: To model periodic patterns (e.g., daily, weekly, yearly cycles).
--   **Basis Functions**: It uses a **Fourier series** (`cos(2πkt), sin(2πkt)`). The `thetas_dim` parameter determines the number of harmonics `k` to use, allowing it to capture seasonalities of different frequencies.
+Fourier basis. The harmonic count is `thetas_dim // 2` — each harmonic contributes one cosine row and one sine row, at frequency `2πk / (backcast_length + forecast_length)`. With `normalize_basis`, both rows of a harmonic are divided by that harmonic's norm over the full sequence.
 
 ### 4.5 `GenericBlock`
 
--   **Purpose**: To model any patterns not captured by the trend and seasonality blocks.
--   **Basis Functions**: It uses a fully **learnable linear basis**, implemented as two `Dense` layers. This gives it the flexibility to approximate any arbitrary signal component.
+A fully learnable linear basis, implemented as two `Dense` layers. Maximum flexibility, zero interpretability.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-# Ensure you have the required dependencies
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First N-BEATS Model (30 seconds)
-
-Let's build an interpretable univariate forecasting model using the factory function.
-
 ```python
 import keras
 import numpy as np
+from dl_techniques.models.time_series.nbeats.nbeats import create_nbeats_model
 
-# Local imports from your project structure
-from dl_techniques.models.time_series.nbeats.model import create_nbeats_model
+BACKCAST, FORECAST = 96, 24     # 4 days of hourly history -> next day
 
-# 1. Define model parameters
-BACKCAST_LENGTH = 96  # How many past steps to look at (e.g., 4 days of hourly data)
-FORECAST_LENGTH = 24  # How many future steps to predict (e.g., 1 day)
-
-# 2. Create and compile an interpretable N-BEATS model
-# The factory handles optimal defaults and compilation.
+# The factory returns an UN-compiled model.
 model = create_nbeats_model(
-    backcast_length=BACKCAST_LENGTH,
-    forecast_length=FORECAST_LENGTH,
-    stack_types=['trend', 'seasonality'] # Interpretable configuration
+    backcast_length=BACKCAST,
+    forecast_length=FORECAST,
+    stack_types=["trend", "seasonality"],   # interpretable configuration
 )
-print("✅ N-BEATS model created and compiled successfully!")
-model.summary()
 
-# 3. Create dummy data for a forward pass
-batch_size = 16
-dummy_input = np.random.randn(batch_size, BACKCAST_LENGTH, 1).astype("float32")
-dummy_target = np.random.randn(batch_size, FORECAST_LENGTH, 1).astype("float32")
+# The model has TWO outputs: (forecast, residual). Compile a loss for the
+# forecast head and None for the residual, or give both a loss (see §11).
+model.compile(
+    optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0),
+    loss=["mae", None],
+)
 
-# 4. Train for one step
-# RevIN is active during training
-loss = model.train_on_batch(dummy_input, dummy_target)
-print(f"\n✅ Training step complete! Loss: {loss:.4f}")
+x = np.random.randn(16, BACKCAST, 1).astype("float32")
+y = np.random.randn(16, FORECAST, 1).astype("float32")
+r = np.zeros((16, BACKCAST), dtype="float32")     # residual target placeholder
 
-# 5. Run inference
-# RevIN's denormalization is active during inference
-predictions = model.predict(dummy_input)
-print(f"Predictions shape: {predictions.shape}") # (batch_size, forecast_length, 1)
+print(model.train_on_batch(x, [y, r]))
+
+forecast, residual = model.predict(x)
+print(forecast.shape, residual.shape)   # (16, 24, 1) (16, 96)
+print(model.count_params())             # 1386336
+
+# Or take the unified contract, which returns the forecast head only.
+print(model.predict_forecast(x).point.shape)   # (16, 24, 1)
 ```
 
 ---
@@ -288,238 +153,232 @@ print(f"Predictions shape: {predictions.shape}") # (batch_size, forecast_length,
 ## 6. Component Reference
 
 | Component | Location | Purpose |
-| :--- | :--- | :--- |
-| **`NBeatsNet`** | `...nbeats.model.NBeatsNet` | The main Keras `Model` that assembles the N-BEATS stacks. |
-| **`create_nbeats_model`** | `...nbeats.model.create_nbeats_model` | Recommended factory function to create and compile models. |
-| **`NBeatsBlock`** | `...layers.time_series.nbeats_blocks.NBeatsBlock` | The abstract base class for all blocks. |
-| **`GenericBlock`** | `...layers.time_series.nbeats_blocks.GenericBlock` | Block with a learnable basis for complex patterns. |
-| **`TrendBlock`** | `...layers.time_series.nbeats_blocks.TrendBlock` | Block with a polynomial basis for trend modeling. |
-| **`SeasonalityBlock`**| `...layers.time_series.nbeats_blocks.SeasonalityBlock`| Block with a Fourier basis for seasonality modeling. |
-| **`RevIN`** | `...layers.time_series.revin.RevIN` | Reversible instance normalization layer for robustness. |
+|:---|:---|:---|
+| `NBeatsNet` | `models.time_series.nbeats.nbeats` | The main model. Also a `ForecastMixin`. |
+| `create_nbeats_model` | `models.time_series.nbeats.nbeats` | Factory with auto theta dims. Returns un-compiled. |
+| `NBeatsXNet` | `models.time_series.nbeats.nbeatsx` | NBEATSx: exogenous covariates via a TCN stack. |
+| `create_nbeatsx_model` | `models.time_series.nbeats.nbeatsx` | NBEATSx factory. |
+| `NBeatsBlock` | `layers.time_series.nbeats_blocks` | Abstract base for all blocks. |
+| `TrendBlock` | `layers.time_series.nbeats_blocks` | Polynomial basis. |
+| `SeasonalityBlock` | `layers.time_series.nbeats_blocks` | Fourier basis. |
+| `GenericBlock` | `layers.time_series.nbeats_blocks` | Learnable basis. |
+
+All four public names are re-exported by `nbeats/__init__.py` and by the family package, so these all work:
+
+```python
+from dl_techniques.models.time_series.nbeats.nbeats import NBeatsNet, create_nbeats_model
+from dl_techniques.models.time_series.nbeats import NBeatsNet, create_nbeats_model
+from dl_techniques.models.time_series import NBeatsNet, create_nbeats_model
+```
 
 ---
 
 ## 7. Configuration & Model Variants
 
-N-BEATS is configured by the `stack_types` list, which determines its behavior.
+`stack_types` decides the character of the model.
 
 | Configuration | `stack_types` | Description |
-|:---:|:---|:---|
-| **Interpretable** | `['trend', 'seasonality']` | The standard configuration for interpretable forecasting. It decomposes the signal into a trend and seasonal component. |
-| **Generic**| `['generic', 'generic']` | A powerful "black-box" configuration that often achieves the highest accuracy but lacks interpretability. |
-| **Hybrid** | `['trend', 'seasonality', 'generic']` | A configuration that first removes trend and seasonality, then models the complex remainder with a generic stack. |
+|:---|:---|:---|
+| **Interpretable** | `['trend', 'seasonality']` | Standard interpretable setup: trend plus seasonal component. |
+| **Generic** | `['generic', 'generic']` | Black box. Usually the most accurate, gives you nothing to read. |
+| **Hybrid** | `['trend', 'seasonality', 'generic']` | Strip trend and seasonality, then let a generic stack absorb the remainder. Package default. |
 
-You can create any combination of these stacks to suit your problem.
+When `thetas_dim` is not given, the factory picks per stack type:
+
+| Stack | Auto `thetas_dim` |
+|:---|:---|
+| `trend` | `4` (cubic polynomial) |
+| `seasonality` | `2 * min(forecast_length // 2, 16)` |
+| `generic` | `max(16, forecast_length * 2)` |
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Standard Interpretable Univariate Model
-
-This is the most common use case, created easily with the factory.
+### Example 1: Interpretable univariate
 
 ```python
-# The factory automatically calculates good theta_dims
 model = create_nbeats_model(
-    backcast_length=168,  # 7 days of hourly data
-    forecast_length=24,   # Predict next day
-    stack_types=['trend', 'seasonality'],
+    backcast_length=168,                     # 7 days of hourly data
+    forecast_length=24,
+    stack_types=["trend", "seasonality"],
     hidden_layer_units=512,
-    learning_rate=1e-4
 )
+model.compile(optimizer=keras.optimizers.Adam(1e-4), loss=["mae", None])
 ```
 
-### Example 2: High-Performance Generic Model
-
-For tasks where accuracy is paramount and interpretability is not needed.
+### Example 2: High-capacity generic
 
 ```python
-# A generic model often benefits from more blocks and hidden units
 model = create_nbeats_model(
     backcast_length=168,
     forecast_length=24,
-    stack_types=['generic', 'generic', 'generic'], # Three generic stacks
+    stack_types=["generic", "generic", "generic"],
     nb_blocks_per_stack=4,
-    hidden_layer_units=1024
+    hidden_layer_units=1024,
 )
+# 41,152,512 parameters -- generic stacks are expensive.
 ```
 
-### Example 3: Multivariate Forecasting
-
-This implementation fully supports multivariate forecasting (multiple input and output features).
+### Example 3: Multivariate
 
 ```python
-# Forecasting 3 target variables using 7 input variables
 model = create_nbeats_model(
     backcast_length=96,
     forecast_length=24,
-    stack_types=['trend', 'seasonality', 'generic'],
+    stack_types=["trend", "seasonality", "generic"],
     input_dim=7,
     output_dim=3,
-    hidden_layer_units=512
+    hidden_layer_units=512,
 )
-# Input shape: (batch, 96, 7)
-# Output shape: (batch, 24, 3)
+forecast, residual = model(np.random.randn(4, 96, 7).astype("float32"))
+# forecast (4, 24, 3), residual (4, 672)   # 672 = 96 * 7
 ```
+
+The window is flattened to `(batch, backcast_length * input_dim)` before the blocks, so cross-variable relationships are learnable. The forecast is produced in `input_dim` space first (so the denormalization statistics line up), then projected to `output_dim`.
+
+### Example 4: NBEATSx with exogenous covariates
+
+`NBeatsXNet` takes a **dict** with three keys and returns a single tensor.
+
+```python
+from dl_techniques.models.time_series.nbeats.nbeatsx import create_nbeatsx_model
+
+model = create_nbeatsx_model(
+    backcast_length=168, forecast_length=24, exogenous_dim=3,
+    stack_types=("trend", "seasonality", "exogenous"),
+)
+out = model({
+    "target_history": np.random.randn(2, 168, 1).astype("float32"),
+    "exog_history":   np.random.randn(2, 168, 3).astype("float32"),
+    "exog_forecast":  np.random.randn(2,  24, 3).astype("float32"),
+})
+print(out.shape)   # (2, 24, 1)
+```
+
+Note the flag asymmetry: in `NBeatsXNet`, `use_normalization` gates *both* the target normalization and the RMSNorm layers inside every block trunk, while in `NBeatsNet` it gates only the target normalization. `use_block_normalization=None` (the default) reproduces the historical coupling.
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Customizing Theta Dimensions
-
-You can manually control the complexity of the trend and seasonality blocks by setting `thetas_dim`.
+### Pattern 1: Hand-tuned theta dimensions
 
 ```python
-# Model a simple linear trend and a detailed seasonality with 10 harmonics
 model = create_nbeats_model(
     backcast_length=96,
     forecast_length=24,
-    stack_types=['trend', 'seasonality'],
-    thetas_dim=[2, 20]  # Trend: degree 1 (t^0, t^1). Seasonality: 10 harmonics (10 cos + 10 sin)
+    stack_types=["trend", "seasonality"],
+    thetas_dim=[2, 20],   # trend: linear (t^0, t^1); seasonality: 10 harmonics
 )
 ```
+
+### Pattern 2: Weight sharing within a stack
+
+`share_weights_in_stack=True` reuses one block object at every position in a stack, as in the original paper's interpretable configuration. It cuts parameters sharply and regularizes small datasets.
 
 ---
 
 ## 10. Performance Optimization
 
-### Mixed Precision Training
-
-N-BEATS is composed of dense layers, which benefit significantly from mixed precision on modern GPUs.
-
-```python
-# Enable mixed precision globally before creating the model
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-# The factory will create a model that uses mixed precision
-model = create_nbeats_model(...)
-```
-
-### Backcast/Forecast Ratio
-
-The performance of N-BEATS is sensitive to the ratio of `backcast_length` to `forecast_length`. A common rule of thumb is to use a ratio between **3 and 7**. The factory function will warn you if your chosen ratio is too low.
+- **Mixed precision.** N-BEATS is dense-layer bound and gains a lot from `keras.mixed_precision.set_global_policy('mixed_float16')` set before construction.
+- **Backcast/forecast ratio.** Use `backcast_length` between 3x and 7x `forecast_length`. Below 3x the blocks have too little context; well above 7x the flattened input inflates the first dense layer for little gain. The factory does not check this for you.
+- **Generic stacks dominate the parameter count.** `max(16, 2 * forecast_length)` thetas plus a learnable basis is far heavier than a polynomial or Fourier basis; prefer interpretable stacks when memory matters.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Optimizer and Loss Function
+### Compiling a two-output model
 
--   **Optimizer**: **Adam** or **AdamW** are excellent choices.
--   **Gradient Clipping**: N-BEATS training can sometimes be unstable. Using gradient clipping is **highly recommended**. The `create_nbeats_model` factory enables it by default (`clipnorm=1.0`).
--   **Loss Function**: **Mean Absolute Error (MAE)** is often preferred over Mean Squared Error (MSE) for N-BEATS, as it is less sensitive to outliers, which are common in time series.
+`NBeatsNet.call` returns `(forecast, residual)`. Keras therefore expects a loss *structure*, not a single loss:
 
-### Learning Rate
+```python
+# Forecast head only -- the residual is ignored.
+model.compile(optimizer="adam", loss=["mae", None])
 
--   A relatively small learning rate (e.g., `1e-4`) combined with a cosine decay schedule often yields the best and most stable results.
+# Or supervise the reconstruction too (what the shipped trainer does when
+# reconstruction_loss_weight > 0):
+model.compile(
+    optimizer="adam",
+    loss=[keras.losses.MeanAbsoluteError(),
+          keras.losses.MeanAbsoluteError(name="residual_loss")],
+    loss_weights=[1.0, 0.1],
+)
+```
+
+Passing a bare `loss='mae'` raises `KeyError: "The path: (0,) in the loss argument ..."`.
+
+### Other notes
+
+- **Optimizer.** Adam or AdamW. Gradient clipping (`clipnorm=1.0`) is strongly recommended — N-BEATS training can be unstable — but nothing sets it for you.
+- **Loss.** MAE is usually preferred over MSE: time series outliers are common and MSE chases them.
+- **Learning rate.** `1e-4` with a cosine decay schedule is a reliable starting point.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The `NBeatsNet` model and all its custom layers (`RevIN`, `TrendBlock`, etc.) are fully serializable using Keras 3's modern `.keras` format.
+Both models register through `register_dl_technique` (`dl_techniques.utils.keras_registration`) — `dl_techniques.models.nbeats.nbeats>NBeatsNet` and `dl_techniques.models.nbeats.nbeatsx>NBeatsXNet` — so `.keras` archives round-trip with no `custom_objects`.
 
 ```python
-# Create and train the model
-model = create_nbeats_model(...)
-# ... model.fit(...)
-
-# Save the entire model to a single file
-model.save('my_nbeats_model.keras')
-
-# Load the model in a new session. All custom layers are automatically handled.
-loaded_model = keras.models.load_model('my_nbeats_model.keras')
-print("✅ N-BEATS model loaded successfully!")
+model.save("my_nbeats_model.keras")
+loaded = keras.models.load_model("my_nbeats_model.keras")
 ```
+
+`build()` explicitly builds every block before weight restore, which is what makes the round trip lossless. Under `share_weights_in_stack` a block is built once even though it appears at several positions.
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Test Example
-
-A simple test to verify the forward pass and shape correctness for a multivariate model.
+`tests/test_models/test_nbeats/` covers configuration validation, serialization, and the forward contract. A minimal multivariate check:
 
 ```python
-def test_multivariate_forward_pass():
-    """Test the output shape for a multivariate model."""
-    model = NBeatsNet(
-        backcast_length=50,
-        forecast_length=20,
-        input_dim=5,
-        output_dim=3
-    )
-    dummy_input = np.random.randn(4, 50, 5).astype("float32")
-    output = model.predict(dummy_input)
-    assert output.shape == (4, 20, 3)
-    print("✓ Multivariate forward pass has correct shape")
+import numpy as np
+from dl_techniques.models.time_series.nbeats.nbeats import NBeatsNet
 
-test_multivariate_forward_pass()
+model = NBeatsNet(backcast_length=50, forecast_length=20,
+                  input_dim=5, output_dim=3)
+forecast, residual = model(np.random.randn(4, 50, 5).astype("float32"))
+assert forecast.shape == (4, 20, 3)
+assert residual.shape == (4, 250)      # 50 * 5
 ```
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Failure Modes
 
-**Issue 1: Training is unstable and the loss becomes `NaN`.**
-
--   **Cause**: This is common in N-BEATS. It's usually due to a learning rate that is too high or exploding gradients.
--   **Solution**:
-    1.  Ensure you are using **gradient clipping**. The factory function sets `clipnorm=1.0` by default. You can try a smaller value like `0.5`.
-    2.  Use a smaller learning rate (e.g., `1e-5` or `5e-5`).
-    3.  Make sure `use_revin=True`, as it significantly improves stability.
-
-### Frequently Asked Questions
-
-**Q: Why is RevIN so important?**
-
-A: Real-world time series often have their mean and variance change over time. RevIN makes the model's job easier by ensuring it always sees data with a consistent distribution (zero mean, unit variance). This decoupling of pattern learning from scale learning makes the model much more robust and accurate.
-
-**Q: How do I choose the `backcast_length`?**
-
-A: It should be long enough to capture at least one full cycle of the longest meaningful seasonality in your data. A common heuristic is to set it to be **3 to 7 times** your `forecast_length`. For example, to predict the next 24 hours, using the past 4-5 days (`96-120` hours) is a good starting point.
-
-**Q: How does this multivariate implementation work?**
-
-A: The input `(batch, backcast_length, input_dim)` is flattened into `(batch, backcast_length * input_dim)` before being processed by the blocks. This allows the model to learn cross-variable relationships. The forecast is first generated in the `input_dim` space to allow for correct RevIN denormalization, and then a final dense layer projects it to the desired `output_dim`.
+- **`KeyError: "The path: (0,) in the loss argument ..."`** — you compiled with a single loss. The model has two outputs; see §11.
+- **`predict` output does not have the shape you expected** — it is a tuple `(forecast, residual)`. Unpack it, or use `predict_forecast`.
+- **Loss goes NaN** — lower the learning rate to `1e-5`-`5e-5`, add `clipnorm=1.0`, and keep `use_normalization=True`.
+- **`count_params()` raises "the layer isn't built"** — the factory does not build the model. Call it once on a dummy batch first.
+- **Poor accuracy with a short backcast** — a backcast shorter than one full cycle of the dominant seasonality cannot see the pattern at all.
 
 ---
 
 ## 15. Technical Details
 
-### Doubly Residual Stacking
+### Doubly residual stacking
 
-The core of N-BEATS is its hierarchical decomposition. Consider two stacks:
+With input `x`:
 
-1.  **Input**: `x`
-2.  **Stack 1 (Trend)**:
-    -   Processes `x` and produces `backcast_1`, `forecast_1`.
-    -   The residual passed to the next stack is `residual_1 = x - backcast_1`.
-3.  **Stack 2 (Seasonality)**:
-    -   Processes `residual_1` and produces `backcast_2`, `forecast_2`.
-4.  **Final Forecast**:
-    -   `forecast = forecast_1 + forecast_2`
+1. Stack 1 (trend) produces `backcast_1`, `forecast_1`; `residual_1 = x - backcast_1`.
+2. Stack 2 (seasonality) processes `residual_1`, produces `backcast_2`, `forecast_2`.
+3. `forecast = forecast_1 + forecast_2`.
 
-This process allows the trend stack to model and remove the trend component, so the seasonality stack can focus on modeling periodicity in the de-trended signal. This is a powerful form of curriculum learning.
+Removing the trend before the seasonality stack sees the signal is what makes the components separable rather than merely additive.
 
-### Basis Functions
+### Basis functions
 
--   **Trend (Polynomial)**:
-    `y = Σ_{i=0}^{p} θ_i * t^i`
-    where `t` is a normalized time vector and `p` is the polynomial degree.
--   **Seasonality (Fourier)**:
-    `y = Σ_{i=1}^{n} [ θ_{i,1}*cos(2πit) + θ_{i,2}*sin(2πit) ]`
-    where `n` is the number of harmonics.
+- **Trend (polynomial):** `y = Σ_{i=0}^{p} θ_i t^i`, with `t` a normalized time vector over backcast + forecast and `p = thetas_dim - 1`.
+- **Seasonality (Fourier):** `y = Σ_{k=1}^{n} [ θ_{k,1} cos(2πkt) + θ_{k,2} sin(2πkt) ]`, with `n = thetas_dim // 2` harmonics.
 
 ---
 
 ## 16. Citation
 
-This implementation is based on the original N-BEATS and RevIN papers. If you use this model in your research, please cite the original works:
-
--   **N-BEATS**:
+- **N-BEATS**:
     ```bibtex
     @inproceedings{oreshkin2020n,
       title={N-BEATS: Neural basis expansion analysis for interpretable time series forecasting},
@@ -528,11 +387,24 @@ This implementation is based on the original N-BEATS and RevIN papers. If you us
       year={2020}
     }
     ```
--   **RevIN**:
+- **NBEATSx**:
+    ```bibtex
+    @article{olivares2023neural,
+      title={Neural basis expansion analysis with exogenous variables:
+             Forecasting electricity prices with NBEATSx},
+      author={Olivares, Kin G and Challu, Cristian and Marcjasz, Grzegorz and
+              Weron, Rafa{\l} and Dubrawski, Artur},
+      journal={International Journal of Forecasting},
+      volume={39}, number={2}, pages={884--900}, year={2023}
+    }
+    ```
+- **RevIN** (the reversible instance normalization idea):
     ```bibtex
     @inproceedings{kim2022reversible,
-      title={Reversible Instance Normalization for Accurate Time-Series Forecasting against Distribution Shift},
-      author={Kim, Taesung and Kim, Jinhee and Tae, Yungi and Park, Cheonbok and Choi, Jang-Ho and Choo, Jaegul},
+      title={Reversible Instance Normalization for Accurate Time-Series
+             Forecasting against Distribution Shift},
+      author={Kim, Taesung and Kim, Jinhee and Tae, Yungi and Park, Cheonbok
+              and Choi, Jang-Ho and Choo, Jaegul},
       booktitle={International Conference on Learning Representations},
       year={2022}
     }

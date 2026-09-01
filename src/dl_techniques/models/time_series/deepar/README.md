@@ -4,30 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
-An implementation of **DeepAR** in **Keras 3**. DeepAR is a methodology for producing accurate probabilistic forecasts based on training an autoregressive recurrent network on multiple related time series.
-
-This implementation provides a unified framework for handling real-valued data (Gaussian likelihood) and count data (Negative Binomial likelihood), solving the "cold start" and scaling problems often found in traditional forecasting.
-
----
-
-## Table of Contents
-
-1. [Overview: What is DeepAR and Why It Matters](#1-overview-what-is-deepar-and-why-it-matters)
-2. [The Problem DeepAR Solves](#2-the-problem-deepar-solves)
-3. [How DeepAR Works: Core Concepts](#3-how-deepar-works-core-concepts)
-4. [Architecture Deep Dive](#4-architecture-deep-dive)
-5. [Quick Start Guide](#5-quick-start-guide)
-6. [Component Reference](#6-component-reference)
-7. [Configuration & Likelihoods](#7-configuration--likelihoods)
-8. [Comprehensive Usage Examples](#8-comprehensive-usage-examples)
-9. [Advanced Usage Patterns](#9-advanced-usage-patterns)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Training and Best Practices](#11-training-and-best-practices)
-12. [Serialization & Deployment](#12-serialization--deployment)
-13. [Testing & Validation](#13-testing--validation)
-14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
-15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+A Keras 3 implementation of **DeepAR**: an autoregressive recurrent network trained across many related time series to produce *probabilistic* forecasts. It supports real-valued data (Gaussian likelihood) and count data (Negative Binomial likelihood), and handles series whose magnitudes differ by orders of magnitude.
 
 ---
 
@@ -35,259 +12,171 @@ This implementation provides a unified framework for handling real-valued data (
 
 ### What is DeepAR?
 
-**DeepAR** is a supervised learning algorithm for forecasting time series that learns a global model from historical data of all time series in the dataset. Unlike traditional methods (like ARIMA or ETS) that fit a separate model for each time series, DeepAR learns a single model across thousands or millions of related series.
-
-It generates **probabilistic forecasts** by using Monte Carlo sampling to simulate multiple future paths, allowing you to compute any quantile (e.g., median, 90th percentile) to assess uncertainty and risk.
+DeepAR learns a **single global model** from the histories of all series in a dataset, rather than fitting one model per series. At inference it does not emit a point value: it runs Monte-Carlo ancestral sampling to draw complete future trajectories, from which any quantile can be read off.
 
 ### Key Innovations
 
-1.  **Global Learning**: Learns complex patterns (seasonality, trends) shared across items, allowing it to forecast new items with little history ("cold start").
-2.  **Scale Handling**: Uses a specialized `ScaleLayer` to normalize inputs and denormalize outputs, enabling the model to learn from data spanning multiple orders of magnitude (e.g., a product selling 5 units vs 5,000 units).
-3.  **Ancestral Sampling**: Produces valid probabilistic paths, not just marginal quantiles, preserving the correlation between time steps in the future.
-4.  **Flexible Likelihoods**: Natively supports Gaussian for continuous data and Negative Binomial for count data (integers).
+1. **Global learning.** Seasonality and trend patterns shared across items are learned once, so a new item with almost no history still gets a sensible forecast ("cold start").
+2. **Scale handling.** A `ScaleLayer` divides each series by its own scale factor ν and multiplies the outputs back, so one set of weights serves an item selling 5 units/day and one selling 5,000.
+3. **Ancestral sampling.** Sampling whole paths preserves the correlation between horizon steps. Marginal quantiles cannot do this, and the quantile of a sum is not the sum of the quantiles.
+4. **Pluggable likelihood.** Gaussian for continuous targets, Negative Binomial for counts.
 
 ### Why DeepAR Matters
 
-**Traditional Forecasting Models**:
 ```
-Model: ARIMA (Statistical)
-  1. Fits one model per time series.
-  2. Does not share information between series.
-  3. Hard to scale to millions of items.
+ARIMA / ETS:   one model per series, no information shared, hard to scale.
+Plain LSTM:    predicts a single value, ignores uncertainty, fights input scale.
 
-Model: Standard LSTM (Point Forecast)
-  1. Often predicts a single value (mean), ignoring uncertainty.
-  2. Struggles with input scaling issues (convergence problems).
-```
-
-**DeepAR's Solution**:
-```
-DeepAR Approach:
-  1. Combines RNNs with probabilistic likelihood heads.
-  2. Scales inputs by their average historical value.
-  3. Outputs distribution parameters (μ, σ) instead of values.
-  4. Benefit: Scalable, calibrated uncertainty, and handles diverse magnitudes.
+DeepAR:        RNN + likelihood head. Scale by mean history, emit distribution
+               parameters, sample trajectories. Scalable, calibrated, and
+               magnitude-agnostic.
 ```
 
 ---
 
 ## 2. The Problem DeepAR Solves
 
-### The Challenge of Diverse Scales
+### Diverse scales
 
-In real-world datasets (e.g., retail sales, server load), time series often differ drastically in magnitude.
+In retail sales or server load, series differ drastically in magnitude:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  The Scale Problem                                          │
+│  Item A: ~100,000 units/day                                 │
+│  Item B: ~5 units/day                                       │
 │                                                             │
-│  Item A: Sales ~ 100,000 units/day                          │
-│  Item B: Sales ~ 5 units/day                                │
-│                                                             │
-│  Neural networks struggle to learn weights that work for    │
-│  both A and B simultaneously without normalization.         │
-│  Standard normalization (z-score) is tricky when predicting │
-│  future values in the original domain.                      │
+│  One weight matrix cannot serve both without normalization, │
+│  and z-scoring is awkward when the forecast must come back  │
+│  in the original domain.                                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### The Need for Uncertainty
+DeepAR's answer is a *reversible* scale: divide by ν = mean(history) + ε on the way in, multiply by ν on the way out.
 
-Knowing that sales will be "50" is less useful than knowing "there is a 90% chance sales will be between 40 and 60". DeepAR provides this distribution, which is critical for:
--   **Inventory Optimization**: Balancing stock-out risk vs. overstock costs.
--   **Capacity Planning**: Preparing for peak loads (99th percentile) rather than average loads.
+### The need for uncertainty
+
+"Sales will be 50" is less useful than "there is a 90% chance sales land between 40 and 60". Inventory optimization needs the stock-out tail; capacity planning needs the 99th percentile, not the mean.
 
 ---
 
 ## 3. How DeepAR Works: Core Concepts
 
-### The High-Level Architecture
-
-DeepAR operates in two modes: **Training** (using Teacher Forcing) and **Prediction** (using Autoregressive Sampling).
+DeepAR has two distinct modes: **training** (teacher forcing) and **prediction** (autoregressive sampling). They are separate code paths — `call` is training only.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                       DeepAR Architecture                        │
-│                                                                  │
-│  Inputs: [Target, Covariates]                                    │
+│  Inputs: [target, covariates]                                    │
 │             │                                                    │
 │    ┌────────▼────────┐     ┌──────────────────────────────────┐  │
-│    │ Scale Layer (ν) │◄────┤ Compute Scale (Mean of History)  │  │
+│    │ ScaleLayer (ν)  │◄────┤ compute_scale (mean of history)  │  │
 │    └────────┬────────┘     └──────────────────────────────────┘  │
-│             │                                                    │
 │    ┌────────▼─────────┐                                          │
-│    │ Stacked LSTMs    │  (Autoregressive Recurrent Network)      │
+│    │ Stacked LSTMs    │                                          │
 │    └────────┬─────────┘                                          │
-│             │                                                    │
 │    ┌────────▼─────────┐                                          │
-│    │ Likelihood Head  │  (Gaussian or Negative Binomial)         │
+│    │ Likelihood head  │  (Gaussian or Negative Binomial)         │
 │    └────────┬─────────┘                                          │
-│             │                                                    │
 │  ┌──────────▼──────────┐                                         │
-│  │ Distribution Params │  (e.g., μ, σ)                           │
+│  │ Distribution params │  {mu, sigma} or {mu, alpha}             │
 │  └─────────────────────┘                                         │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### The Complete Data Flow
+**Training (teacher forcing).** The lagged *true* target `[0, z_1, ..., z_{T-1}]` is scaled, concatenated with the covariates, and run through the LSTM stack. The head emits per-step parameters; the NLL is the loss.
 
-```
-STEP 1: CONDITIONING (History)
-──────────────────────────────
-Input: Previous values z_{t-1} & Covariates x_t
-   ↓
-Scale: z_scaled = z_{t-1} / ν
-   ↓
-LSTM: h_t = LSTM(z_scaled, x_t, h_{t-1})
-   ↓
-Head: μ, σ = Project(h_t)
-   ↓
-Output: Parameters for P(z_t | h_t)
-
-
-STEP 2: PREDICTION (Future)
-───────────────────────────
-Input: Sampled value z_sample_{t-1} & Covariates x_t
-   ↓
-Scale: z_scaled = z_sample_{t-1} / ν
-   ↓
-LSTM: h_t = LSTM(z_scaled, x_t, h_{t-1})
-   ↓
-Head: μ, σ = Project(h_t)
-   ↓
-Sample: z_sample_t ~ Gaussian(μ * ν, σ * √ν)
-   ↓
-Loop: Feed z_sample_t back as input for next step
-```
+**Prediction (ancestral sampling).** For future steps there is no true `z_{t-1}`, so a value is *drawn* from the current predictive distribution and fed back as the next input. Repeat `num_samples` times to get `num_samples` possible futures.
 
 ---
 
 ## 4. Architecture Deep Dive
 
+All three blocks live in `dl_techniques/layers/time_series/deepar_blocks.py`.
+
 ### 4.1 `ScaleLayer`
 
-The most critical component for stability.
--   **Forward**: Divides input by a scale factor $ \nu $ (usually $ 1 + \text{mean}(z_{history}) $).
--   **Inverse**: Multiplies model outputs by the scale factor to restore original magnitude.
--   The layer itself applies exactly one multiplication or division; the choice of scale
-    belongs to the call site. Gaussian $\mu$ **and** $\sigma$ both use $\nu$ — the forward
-    path divides $z$ by $\nu$ exactly once, so $\sigma$ is a first-moment-scale quantity,
-    not a variance. Only the negative-binomial shape $\alpha$ uses $1/\sqrt{\nu}$.
-    This bullet claimed "sqrt scaling" for the standard deviation until 2026-08-15; no call
-    site ever did that, and acting on it would re-introduce an already-fixed defect.
+One multiplication or one division — the *choice* of scale belongs to the call site.
+
+- Forward: `z_scaled = z / ν`, where `ν = mean(z_history) + scale_epsilon`.
+- Inverse: multiply back to the original magnitude.
+- Gaussian `mu` **and** `sigma` both use ν. The forward path divides z by ν exactly once, so sigma is a first-moment-scale quantity, not a variance — no square root. Only the negative-binomial shape `alpha` uses `1/√ν`.
 
 ### 4.2 `GaussianLikelihoodHead`
 
-Projects LSTM hidden states to distribution parameters for real-valued data.
--   **Mean ($\mu$)**: Affine transformation.
--   **Std ($\sigma$)**: Affine transformation followed by Softplus to ensure positivity.
--   Loss is computed as the negative log-likelihood of the observations given these parameters.
+Projects the LSTM state to `mu` (affine) and `sigma` (affine + softplus, so positive). The loss is the Gaussian NLL of the observations under those parameters.
 
 ### 4.3 `NegativeBinomialLikelihoodHead`
 
-Used for **count data** (non-negative integers).
--   Projects to Mean ($\mu$) and Shape ($\alpha$).
--   Models overdispersion (variance > mean), which is common in sales data.
--   Uses a Gamma-Poisson mixture formulation.
+For counts. Projects to mean `mu` and shape `alpha`, a Gamma-Poisson mixture that models overdispersion (variance > mean) — the normal case for sales data.
+
+`DeepARCell` also lives in that module; the model itself uses standard `keras.layers.LSTM` stacks for speed.
 
 ---
 
 ## 5. Quick Start Guide
 
-### Installation
-
-```bash
-pip install keras>=3.0 tensorflow>=2.16 numpy
-```
-
-### Your First DeepAR Model
-
 ```python
-import keras
 import numpy as np
-import matplotlib.pyplot as plt
-from dl_techniques.models.time_series.deepar.model import DeepAR
+import tensorflow as tf
+from dl_techniques.models.time_series.deepar.model import create_deepar
+from train.time_series.deepar.train_deepar import DeepARTrainingWrapper
 
-# 1. Generate synthetic data (Batch=32, Time=100, Dim=1)
-# Sine wave with noise
-t = np.linspace(0, 100, 100)
-target = np.sin(t/10) + np.random.normal(0, 0.1, (32, 100, 1))
-covariates = np.random.normal(0, 1, (32, 100, 5)) # Random covariates
+B, T, COND, D, C = 32, 100, 80, 1, 5
+t = np.linspace(0, 100, T)
+target = (np.sin(t / 10) + np.random.normal(0, 0.1, (B, T, D))).astype("float32")
+covariates = np.random.normal(0, 1, (B, T, C)).astype("float32")
 
-# 2. Create Model
-model = DeepAR(
+# 1. Build. `covariate_dim` only sizes the dummy build pass.
+#    `conditioning_length` is important: without it the scale is computed over
+#    the whole window, leaking the horizon into the normalizer.
+base = create_deepar(
     num_layers=2,
     hidden_dim=40,
-    likelihood='gaussian',
-    num_samples=100
+    likelihood="gaussian",
+    num_samples=100,
+    covariate_dim=C,
+    conditioning_length=COND,
 )
 
-# 3. Compile
-model.compile(optimizer='adam', loss=model.gaussian_loss)
+# 2. Train through the wrapper (see §11 — `compile(loss=...)` cannot work here).
+model = DeepARTrainingWrapper(base=base)
+model.compile(optimizer="adam", loss=None)
 
-# 4. Train
-# Inputs must be a dictionary
-history = model.fit(
-    x={'target': target, 'covariates': covariates},
-    y=None, # y is unused; loss is calculated internally on 'target'
-    epochs=10,
-    batch_size=32
-)
+ds = tf.data.Dataset.from_tensor_slices(
+    {"target": target, "covariates": covariates}
+).batch(8)
+model.fit(ds, epochs=10)
 
-# 5. Predict
-# Condition on first 80 steps, predict next 20
-cond_len = 80
-pred_len = 20
+# 3. Sample futures. Shape: (num_samples, batch, horizon, target_dim)
+samples = base.predict({
+    "conditioning_target": target[:, :COND, :],
+    "full_covariates": covariates,        # must cover history AND horizon
+})
+print(samples.shape)   # (100, 32, 20, 1)
 
-prediction_inputs = {
-    'conditioning_target': target[:, :cond_len, :],
-    'full_covariates': covariates # Uses all 100 steps
-}
-
-# Returns shape: (num_samples, batch, pred_len, target_dim)
-samples = model.predict(prediction_inputs)
-
-# 6. Visualize
-# Calculate median and 90% interval
-p50 = np.median(samples, axis=0)[0, :, 0]
-p90 = np.percentile(samples, 90, axis=0)[0, :, 0]
-p10 = np.percentile(samples, 10, axis=0)[0, :, 0]
-
-plt.plot(np.arange(cond_len), target[0, :cond_len, 0], label='History')
-plt.plot(np.arange(cond_len, 100), target[0, cond_len:, 0], label='True Future')
-plt.plot(np.arange(cond_len, 100), p50, label='Median Pred')
-plt.fill_between(np.arange(cond_len, 100), p10, p90, alpha=0.3, label='80% CI')
-plt.legend()
-plt.show()
+# 4. Or get the unified Forecast object straight away.
+forecast = base.predict_forecast({
+    "conditioning_target": target[:, :COND, :],
+    "full_covariates": covariates,
+})
+print(forecast.point.shape)           # (32, 20, 1)
+print(forecast.quantile_levels)       # [0.1, 0.5, 0.9]
+lo, hi = forecast.interval(0.1, 0.9)
 ```
 
 ---
 
 ## 6. Component Reference
 
-### 6.1 `DeepAR` (Model Class)
+| Component | Location | Purpose |
+|:---|:---|:---|
+| `DeepAR` | `models.time_series.deepar.model` | The `keras.Model`. Also a `ForecastMixin`. |
+| `create_deepar` | `models.time_series.deepar.model` | Factory; returns an already-built model. |
+| `DeepARTrainingWrapper` | `train.time_series.deepar.train_deepar` | Wraps the NLL via `add_loss` so `fit` works. |
+| `ScaleLayer` | `layers.time_series.deepar_blocks` | Reversible per-series normalization. |
+| `GaussianLikelihoodHead` | `layers.time_series.deepar_blocks` | Emits `mu`, `sigma`. |
+| `NegativeBinomialLikelihoodHead` | `layers.time_series.deepar_blocks` | Emits `mu`, `alpha`. |
 
-**Location**: `model.DeepAR`
-
-The main container class. Inherits from `keras.Model`.
-
-```python
-model = DeepAR(
-    num_layers=3,
-    hidden_dim=128,
-    likelihood='gaussian', # or 'negative_binomial'
-    dropout_rate=0.1
-)
-```
-
-### 6.2 Custom Blocks
-
-**Location**: `deepar_blocks.py`
-
-*   `ScaleLayer`: Handles normalization logic.
-*   `GaussianLikelihoodHead`: Generates $\mu, \sigma$.
-*   `NegativeBinomialLikelihoodHead`: Generates $\mu, \alpha$.
-*   `DeepARCell`: Wraps LSTM cell logic (optional usage, the main model uses standard LSTM layers for efficiency).
+The `deepar/` package `__init__.py` is intentionally empty, so import from `.model`. The `time_series` family package does re-export the public names, so `from dl_techniques.models.time_series import DeepAR, create_deepar` also works.
 
 ---
 
@@ -295,215 +184,182 @@ model = DeepAR(
 
 | Parameter | Type | Default | Description |
 |:---|:---|:---|:---|
-| `num_layers` | int | 3 | Number of stacked LSTM layers. |
-| `hidden_dim` | int | 40 | Number of units in each LSTM layer. |
-| `likelihood` | str | 'gaussian' | 'gaussian' for real values, 'negative_binomial' for counts. |
-| `dropout_rate` | float | 0.0 | Dropout rate for LSTM inputs. |
-| `recurrent_dropout_rate` | float | 0.0 | Recurrent dropout rate inside the LSTM cells. |
-| `num_samples`| int | 100 | Number of Monte Carlo samples during prediction. |
-| `scale_epsilon`| float | 1.0 | Added to mean to prevent division by zero. |
+| `num_layers` | int | 3 | Stacked LSTM layers. |
+| `hidden_dim` | int | 40 | Units per LSTM layer. |
+| `likelihood` | str | `'gaussian'` | `'gaussian'` or `'negative_binomial'`. |
+| `target_dim` | int | 1 | Target feature width. |
+| `dropout_rate` | float | 0.0 | LSTM output dropout. |
+| `recurrent_dropout_rate` | float | 0.0 | Recurrent dropout inside the cells. |
+| `num_samples` | int | 100 | Monte-Carlo paths drawn at prediction time. |
+| `scale_epsilon` | float | 1.0 | Added to the mean so ν is never 0. |
+| `conditioning_length` | int or None | None | Steps used to compute ν. `None` warns and uses the full window. |
 
-### Choosing a Likelihood
+### Choosing a likelihood
 
-*   **Gaussian**: Best for continuous data (temperature, voltage, large aggregate sales).
-*   **Negative Binomial**: Best for count data, especially sparse data with many zeros or low integers (e.g., daily sales of a slow-moving product). It naturally outputs integers (approx) and handles zero-inflation better than Gaussian.
+- **Gaussian** — continuous data: temperature, voltage, large aggregate sales.
+- **Negative Binomial** — counts, especially sparse series with many zeros or small integers. It handles overdispersion and zero-inflation that a Gaussian smears over.
 
 ---
 
 ## 8. Comprehensive Usage Examples
 
-### Example 1: Count Data Forecasting
-
-When forecasting low-volume sales, use the Negative Binomial likelihood.
+### Example 1: Count data
 
 ```python
-model = DeepAR(
+base = create_deepar(
     num_layers=2,
     hidden_dim=64,
-    likelihood='negative_binomial'
+    likelihood="negative_binomial",
+    covariate_dim=5,
+    conditioning_length=80,
 )
-
-model.compile(optimizer='adam', loss=model.negative_binomial_loss)
-
-# Target should be non-negative integers (floats are accepted but conceptually treated as counts)
-model.fit({'target': count_data, 'covariates': feats}, epochs=5)
+model = DeepARTrainingWrapper(base=base)
+model.compile(optimizer="adam", loss=None)
+model.fit(count_dataset, epochs=5)
 ```
 
-### Example 2: Prediction Mode Inputs
+The wrapper picks the matching NLL from `base.likelihood`; there is nothing else to switch.
 
-Unlike standard `model.predict(x)`, DeepAR requires specific keys during inference to handle the autoregressive loop.
+### Example 2: The two input dictionaries
 
-*   `conditioning_target`: The history used to initialize the LSTM state and compute the scale.
-*   `full_covariates`: Covariates for **both** the history and the future prediction horizon.
+Training and prediction take **different keys**. This is the most common source of confusion.
 
 ```python
-# Total length = conditioning_len + prediction_len
-# Covariates must cover the entire horizon
-prediction = model.predict({
-    'conditioning_target': history_data,  # Shape: (B, T_cond, D)
-    'full_covariates': all_known_covariates # Shape: (B, T_cond + T_pred, F)
-})
+# Training / call:  teacher-forced window
+{"target": (B, T, D), "covariates": (B, T, C), "scale": optional (B, 1, D)}
+
+# Prediction:       history + covariates that also cover the horizon
+{"conditioning_target": (B, T_cond, D),
+ "full_covariates":     (B, T_cond + T_pred, C),
+ "scale":               optional (B, 1, D)}
 ```
+
+The horizon length is inferred as `full_covariates.shape[1] - conditioning_target.shape[1]`.
 
 ---
 
 ## 9. Advanced Usage Patterns
 
-### Pattern 1: Pre-computed Scales
+### Pattern 1: Pre-computed scales
 
-By default, DeepAR computes the scale as the mean of the input target. If you have domain knowledge or want to fix scales (e.g., based on yearly average), you can pass them explicitly.
+Pass `'scale'` in the input dict to override the computed ν — useful when domain knowledge gives a better normalizer (e.g. a yearly average) than the context window does.
 
 ```python
-# Manually compute scales
 my_scales = np.mean(train_data, axis=1, keepdims=True) + 1.0
-
-# Pass 'scale' in the input dict
-model.fit({'target': train_data, 'covariates': cov, 'scale': my_scales})
+model.fit(tf.data.Dataset.from_tensor_slices(
+    {"target": train_data, "covariates": cov, "scale": my_scales}).batch(8))
 ```
 
-### Pattern 2: Multi-variate Forecasting
+### Pattern 2: Correlated targets
 
-DeepAR is primarily univariate (one target per series), but can model multiple *correlated* targets if `target_dim > 1`.
+`target_dim > 1` predicts several variables per series jointly through one LSTM stack.
 
 ```python
-# target_dim=3 means we predict 3 variables simultaneously
-model = DeepAR(target_dim=3, hidden_dim=64)
-
-# Data shape: (Batch, Time, 3)
-model.fit(...)
+base = create_deepar(target_dim=3, hidden_dim=64, covariate_dim=5)
+# data shape: (batch, time, 3)
 ```
 
 ---
 
 ## 10. Performance Optimization
 
-### Batch Size
-DeepAR benefits from large batch sizes (e.g., 128 or 256) because it learns global patterns. Small batches might lead to noisy gradient updates.
-
-### Covariates
-Including time-based covariates (e.g., "hour of day", "day of week", "is_holiday") is **crucial** for performance. Without them, the LSTM loses track of seasonality in long sequences.
-
-### XLA Compilation
-Using `jit_compile=True` usually works well with the LSTM layers in Keras 3.
-
-```python
-model.compile(optimizer='adam', loss=..., jit_compile=True)
-```
+- **Batch size.** DeepAR learns global patterns, so it likes large batches (128-256). Small batches give noisy gradients.
+- **Covariates.** Time features — hour of day, day of week, `is_holiday` — are close to mandatory. Without them the LSTM loses seasonality over long sequences.
+- **Sampling cost.** Prediction runs a Python-level autoregressive loop `num_samples` times. Drop `num_samples` to 10-20 during development and raise it for the final run.
+- **XLA.** `jit_compile=True` on the training wrapper works well with the LSTM stack.
 
 ---
 
 ## 11. Training and Best Practices
 
-### Teacher Forcing
-During training, the model receives the **true** previous target $z_{t-1}$ as input, not its own prediction. This stabilizes training.
+### `compile(loss=DeepAR.gaussian_loss)` does not work — use the wrapper
 
-### Loss Function Usage
-You must use the specific loss function that matches your likelihood.
+`DeepAR.call` returns a *dict* `{'mu', 'sigma', 'target'}`, and the static NLLs read the ground truth from `y_pred['target']`. Keras' `compile(loss=...)` path tries to match the loss against the dataset labels, so it raises `KeyError: "The path: ('mu',) ... can't be found"`. The supported route is `DeepARTrainingWrapper`, which computes the NLL inside `call` and registers it with `add_loss`:
 
 ```python
-# Correct
-model = DeepAR(likelihood='gaussian')
-model.compile(loss=model.gaussian_loss)
-
-# Incorrect
-model.compile(loss='mse') # Will not learn distribution parameters
+model = DeepARTrainingWrapper(base=base)
+model.compile(optimizer="adam", loss=None)   # loss=None is correct
 ```
 
-### Scaling `epsilon`
-If your data contains many zero-sequences, ensure `scale_epsilon` is large enough (e.g., 1.0) so the scale factor isn't dominated by noise. For very small value data (e.g., 0.001), lower `scale_epsilon`.
+Feed it a `tf.data.Dataset` yielding the input dict. A bare dict-of-arrays as `x=` is mis-structured by Keras and fails.
+
+### Other notes
+
+- **Teacher forcing.** Training feeds the true `z_{t-1}`, never the model's own output. This is why training is fast and prediction is slow.
+- **`conditioning_length`.** Always set it. Left at `None` the model logs a warning and computes ν over the full teacher-forced window, which leaks the horizon into the normalizer and creates train/serve skew.
+- **`scale_epsilon`.** With many zero-runs keep it around 1.0 so ν is not dominated by noise; for data on the order of 0.001, lower it.
 
 ---
 
 ## 12. Serialization & Deployment
 
-The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.deepar.model>DeepAR`, making it compatible with the modern `.keras` format. The legacy `Custom>DeepAR` alias the helper also binds keeps pre-2026-08-29 archives loading.
+The model registers through `register_dl_technique` (`dl_techniques.utils.keras_registration`) as `dl_techniques.models.deepar.model>DeepAR`. The legacy `Custom>DeepAR` alias that helper also binds keeps pre-2026-08-29 archives loading.
 
 ```python
-# Save
-model.save("deepar_model.keras")
-
-# Load
-# Note: You must pass the custom loss if loading for training
-loaded_model = keras.models.load_model(
-    "deepar_model.keras",
-    custom_objects={
-        'gaussian_loss': DeepAR.gaussian_loss,
-        # or 'negative_binomial_loss': DeepAR.negative_binomial_loss
-    }
-)
+base.save("deepar_model.keras")
+loaded = keras.models.load_model("deepar_model.keras")   # no custom_objects needed
 ```
+
+The registration covers the model and its blocks, so nothing has to be passed by hand. `DeepARTrainingWrapper` serializes its base via `get_config`/`from_config` and round-trips the same way.
 
 ---
 
 ## 13. Testing & Validation
 
-### Unit Tests
+`tests/test_models/test_deepar/` covers the `get_config` round trip, the `_forecast` sample-to-quantile contract, and the wrapper's `add_loss` behaviour. A minimal shape check:
 
 ```python
-def test_deepar_shapes():
-    batch, seq, dim = 4, 20, 1
-    model = DeepAR(num_layers=1, hidden_dim=10, likelihood='gaussian')
-    
-    # Fake data
-    x = {
-        'target': np.random.normal(size=(batch, seq, dim)),
-        'covariates': np.random.normal(size=(batch, seq, 5))
-    }
-    
-    # Test Training Forward Pass
-    out = model(x, training=True)
-    assert 'mu' in out and 'sigma' in out
-    assert out['mu'].shape == (batch, seq, dim)
-    
-    # Test Prediction Sampling
-    pred_in = {
-        'conditioning_target': x['target'][:, :10, :],
-        'full_covariates': x['covariates']
-    }
-    # returns samples
-    samples = model(pred_in, return_samples=True) 
-    # Shape: (samples, batch, pred_len, dim)
-    assert samples.shape == (100, batch, 10, dim)
-    print("✅ Shapes Verified")
+import numpy as np
+from dl_techniques.models.time_series.deepar.model import DeepAR
+
+model = DeepAR(num_layers=1, hidden_dim=10, likelihood="gaussian",
+               num_samples=4, conditioning_length=10)
+
+x = {"target": np.random.normal(size=(4, 20, 1)).astype("float32"),
+     "covariates": np.random.normal(size=(4, 20, 5)).astype("float32")}
+
+out = model(x, training=True)                    # training mode -> dict
+assert set(out) == {"mu", "sigma", "target"}
+assert out["mu"].shape == (4, 20, 1)
+
+samples = model.predict({"conditioning_target": x["target"][:, :10, :],
+                         "full_covariates": x["covariates"]})
+assert samples.shape == (4, 4, 10, 1)            # (samples, batch, horizon, dim)
 ```
+
+Note that sampling is reached through `predict` (which routes to `predict_step`), never by passing a flag to `call`.
 
 ---
 
-## 14. Troubleshooting & FAQs
+## 14. Failure Modes
 
-**Issue: Loss is NaN.**
-*   **Cause**: Usually exploding gradients or division by zero in the scale layer.
-*   **Fix**: Clip gradients (`optimizer=keras.optimizers.Adam(clipnorm=1.0)`) or increase `scale_epsilon`.
-
-**Issue: Predictions are flat lines.**
-*   **Cause**: The LSTM hasn't learned the autoregressive connection.
-*   **Fix**: Ensure `covariates` are normalized or embedded properly. Check that `target` isn't entirely noise. Increase `hidden_dim`.
-
-**Q: Can I use this for classification?**
-A: No, DeepAR is specifically for regression (continuous or count time series).
-
-**Q: Why samples instead of just Mean/Variance?**
-A: Non-linear transformations of future predictions (e.g., sum of sales over next week) require full trajectories to calculate correct quantiles. The sum of quantiles is not the quantile of the sum.
+- **`KeyError: "The path: ('mu',) ..."`** — you compiled the base model with a loss. Use `DeepARTrainingWrapper` and `loss=None` (§11).
+- **Loss is NaN** — exploding gradients or a near-zero ν. Clip (`Adam(clipnorm=1.0)`) and raise `scale_epsilon`.
+- **Flat-line predictions** — the LSTM never learned the autoregressive link. Normalize the covariates, check the target is not pure noise, raise `hidden_dim`.
+- **Shape error in the LSTM at `fit` time** — a raw dict was passed as `x=`. Wrap the inputs in a `tf.data.Dataset`.
+- **Mis-calibrated intervals that scale with the series size** — `conditioning_length` is `None`, so ν is computed over the horizon too.
 
 ---
 
 ## 15. Technical Details
 
-### Autoregressive Recurrent Networks
-DeepAR assumes the value at time $t$, $z_t$, depends on the previous value $z_{t-1}$, the previous hidden state $h_{t-1}$, and current covariates $x_t$.
-$$ h_t = \text{LSTM}(h_{t-1}, z_{t-1}, x_t) $$
-$$ P(z_t | h_t) = \theta(h_t) $$
+### Autoregressive recurrent network
 
-### Monte Carlo Sampling
-During inference, we don't know $z_{t-1}$ for future steps. We approximate the distribution by drawing samples:
-$$ \tilde{z}_t \sim P(z | \theta(\tilde{h}_t)) $$
-This sampled value is fed back as input for step $t+1$. We repeat this $N$ times to get $N$ possible futures.
+The value at time t depends on the previous value, the previous hidden state, and the current covariates:
+
+$$ h_t = \text{LSTM}(h_{t-1}, z_{t-1}, x_t), \qquad P(z_t \mid h_t) = \theta(h_t) $$
+
+### Monte-Carlo sampling
+
+At inference `z_{t-1}` is unknown, so it is drawn:
+
+$$ \tilde{z}_t \sim P\big(z \mid \theta(\tilde{h}_t)\big) $$
+
+and fed back as the input for step t+1. Repeating this N times gives N whole futures. `DeepAR` is the only model on the repo's `Forecast` contract that populates `Forecast.samples`, because it is the only sampler.
 
 ---
 
 ## 16. Citation
-
-This implementation is based on the seminal paper by Amazon Research:
 
 ```bibtex
 @article{salinas2017deepar,

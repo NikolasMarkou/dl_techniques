@@ -1,243 +1,161 @@
 # xLSTM: Extended Long Short-Term Memory
 
-An implementation of the **xLSTM** architecture in **Keras 3**, based on the paper ["xLSTM: Extended Long Short-Term Memory"](https://arxiv.org/abs/2405.04517) by Beck et al. (2024).
+[![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.18-orange.svg)](https://www.tensorflow.org/)
 
----
-
-## Table of Contents
-
-1. [What is xLSTM?](#1-what-is-xlstm)
-2. [Key Innovations](#2-key-innovations)
-3. [About This Implementation](#3-about-this-implementation)
-4. [Quick Start](#4-quick-start)
-5. [Architecture Components](#5-architecture-components)
-6. [Configuration Options](#6-configuration-options)
-7. [Usage Examples](#7-usage-examples)
-8. [Serialization](#8-serialization)
-9. [Performance Tips](#9-performance-tips)
-10. [Testing](#10-testing)
-11. [Architecture Details](#11-architecture-details)
-12. [Requirements](#12-requirements)
-13. [Citation](#13-citation)
+A Keras 3 implementation of **xLSTM** (Beck et al., 2024), which revisits the LSTM with exponential gating and a matrix memory. The package ships two models with **distinct contracts**: `xLSTM`, a language model over integer tokens `[B, T]`, and `xLSTMForecaster`, a continuous time-series forecaster over `[B, T, F]`.
 
 ---
 
 ## 1. What is xLSTM?
 
-Long Short-Term Memory (LSTM) networks were foundational to many early successes in deep learning, particularly in sequence modeling. However, they were largely superseded by Transformer-based models due to limitations in storage capacity and parallelizability.
+LSTMs were foundational to sequence modelling and were then largely displaced by Transformers, for two structural reasons: their memory is a vector of limited capacity, and their recurrence blocks parallel training.
 
-**xLSTM** revisits the core ideas of LSTMs and enhances them with modern techniques to create a new architecture that is competitive with state-of-the-art Transformers and State Space Models (SSMs). It introduces two novel LSTM variants that are then combined to form a powerful and scalable sequence model capable of handling long-range dependencies and large-scale datasets.
+xLSTM attacks both. It introduces two new cell variants and stacks them into a hybrid model:
+
+- **sLSTM** keeps scalar memory but adds exponential gating and a normalizer state, which makes it far better at *revising* what it has stored.
+- **mLSTM** replaces the memory vector with a matrix updated by an outer product, which gives it attention-like capacity and, by dropping hidden-to-hidden recurrence, full parallelizability during training.
 
 ### Why xLSTM?
 
-The xLSTM architecture addresses fundamental limitations of classical LSTMs:
-
-- **Limited Storage Capacity**: Traditional LSTMs store information in scalar vectors, limiting their memory capacity
-- **Parallelization Constraints**: Recurrent nature prevents efficient parallelization during training
-- **Scaling Issues**: Difficult to scale to very long sequences or large model sizes
-
-By introducing exponential gating, matrix memory structures, and hybrid architectures, xLSTM achieves:
-
-- ✅ **Enhanced Memory Capacity**: Matrix-based memory for storing richer representations
-- ✅ **Efficient Parallelization**: mLSTM blocks can process sequences in parallel like Transformers
-- ✅ **Competitive Performance**: Matches or exceeds Transformers and SSMs on various benchmarks
-- ✅ **Scalability**: Trains efficiently on modern hardware (GPUs/TPUs)
+| Classical LSTM limitation | xLSTM answer |
+|:---|:---|
+| Scalar memory of limited capacity | Matrix memory `C_t` in the mLSTM |
+| Recurrence blocks parallel training | mLSTM abandons hidden-to-hidden recurrence |
+| Hard to scale to long sequences | Stack mLSTM for reach, sLSTM for state tracking |
 
 ---
 
 ## 2. Key Innovations
 
-The xLSTM architecture is built on two new types of memory structures that work together to create a powerful hybrid model:
-
 ### 2.1 sLSTM (Scalar LSTM)
 
-The **sLSTM** introduces two main modifications to the classic LSTM cell:
+**Exponential gating.** The input gate uses `exp` instead of a sigmoid:
 
-#### 1. **Exponential Gating**
-Instead of sigmoid activation, the input gate uses an **exponential function**:
 ```
-i_t = exp(W_i @ x_t + R_i @ h_{t-1} + b_i)
+i_t = exp(W_i x_t + R_i h_{t-1} + b_i)
 ```
 
-This allows for more flexible and multiplicative updates to the memory, enabling the model to make more dramatic changes to stored information when needed.
+An unbounded multiplicative gate lets the cell make dramatic revisions to what it stores, where a sigmoid caps the update at 1.
 
-#### 2. **Normalizer State**
-A new state `n_t` is added to stabilize the memory updates introduced by exponential gating:
+**Normalizer state.** Exponential gating on its own is numerically hopeless, so a second state `n_t` tracks the accumulated gate mass and divides it back out:
+
 ```
 n_t = f_t * n_{t-1} + i_t
 h_t = o_t * (c_t / n_t)
 ```
 
-This normalization prevents numerical instability and allows the model to maintain stable memory dynamics even with exponential gating.
-
-**Key Capabilities**:
-- ⚡ **Powerful Memory Revision**: Exceptional ability to revise and update stored information
-- 🎯 **State Tracking**: Outstanding performance on tasks requiring long-term state tracking
-- 🔄 **Recurrent Processing**: Processes sequences step-by-step, maintaining explicit recurrence
-- 🧮 **Stabilization**: Numerical stability through the normalizer state and stabilization techniques
+The result is stable memory dynamics with an unbounded gate. What sLSTM buys is **memory revision** and **long-horizon state tracking**; it stays recurrent and processes step by step.
 
 ### 2.2 mLSTM (Matrix LSTM)
 
-The **mLSTM** fundamentally redesigns the LSTM memory structure to overcome storage and parallelization limitations:
+**Matrix memory.** The cell state becomes a matrix `C_t ∈ R^(key_dim × value_dim)` rather than a vector, so it can hold key-value associations the way attention does.
 
-#### 1. **Matrix Memory**
-The cell state is no longer a scalar vector but a full **matrix** `C_t`:
-```
-C_t ∈ R^(key_dim × value_dim)
-```
+**Covariance update.** The update is an outer product:
 
-This dramatically increases the model's storage capacity, allowing it to store rich key-value associations similar to attention mechanisms.
-
-#### 2. **Covariance Update Rule**
-Uses a covariance-based rule for memory updates:
 ```
 C_t = f_t ⊙ C_{t-1} + i_t ⊙ (v_t ⊗ k_t^T)
 ```
 
-This outer-product update creates associations between keys and values, enabling content-based memory retrieval.
+Retrieval is then content-based: query the matrix with `q_t`.
 
-#### 3. **Full Parallelizability**
-The mLSTM **abandons hidden-to-hidden recurrence**, allowing it to process entire sequences in parallel during training, much like a Transformer. This makes it highly efficient on modern hardware (GPUs/TPUs).
+**Full parallelizability.** mLSTM has no hidden-to-hidden recurrence, so an entire sequence can be processed in parallel during training, like a Transformer. That is what makes it efficient on GPUs and TPUs. It is also multi-head.
 
-**Key Capabilities**:
-- 🚀 **High Storage Capacity**: Matrix memory stores complex associations
-- ⚡ **Parallel Training**: Fully parallelizable for efficient GPU utilization
-- 🎯 **Content-Based Retrieval**: Keys and values enable attention-like memory access
-- 📊 **Multi-Head Architecture**: Supports multiple attention heads for diverse representations
-
-### 2.3 The Hybrid xLSTM Architecture
-
-The final **xLSTM model** combines both components in a **hybrid architecture** by stacking residual blocks of `sLSTM` and `mLSTM`:
+### 2.3 The hybrid architecture
 
 ```
-Input → Embedding
-   ↓
-[mLSTM Blocks] × N  (fast, parallel, high-capacity)
-   ↓
-[sLSTM Blocks] × M  (recurrent, state-tracking)
-   ↓
-Final Normalization → Output
+Input → Embedding → [mLSTM blocks] × N → [sLSTM blocks] × M
+      → Final normalization → Output head
 ```
 
-This hybrid approach achieves a unique balance:
-
-- **Scalability and Efficiency** from parallel `mLSTM` blocks
-- **Expressiveness and State Tracking** from recurrent `sLSTM` blocks
-- **Competitive Performance** with Transformers and SSMs
-- **Flexible Architecture** through configurable block ratios
-
-The block composition is controlled by the `mlstm_ratio` parameter, allowing you to tune the architecture for your specific use case:
-- Higher mLSTM ratio → More parallelization, better for long sequences
-- Higher sLSTM ratio → More recurrence, better for complex state tracking
+`mlstm_ratio` sets the split: higher means more parallelism and better reach on long sequences, lower means more recurrence and better complex state tracking.
 
 ---
 
 ## 3. About This Implementation
 
-This implementation provides a complete xLSTM codebase that integrates with the `dl_techniques` framework and follows Keras 3 serialization conventions. It has not been trained or benchmarked here; no performance claim is made for it.
+The code integrates with the `dl_techniques` factories and follows the repo's Keras 3 serialization conventions. It has not been trained or benchmarked here; no performance claim is made for it. No trained weights ship: asking `from_variant` for a pretrained model raises `NotImplementedError` by design.
 
-### 3.1 Features
+### 3.1 Components
 
-#### **Modular Components**
-The code is organized into logical, reusable layers:
+| Name | Location | Role |
+|:---|:---|:---|
+| `sLSTMCell` | `layers.time_series.xlstm_blocks` | Recurrent cell with exponential gating. |
+| `sLSTMLayer` | `layers.time_series.xlstm_blocks` | RNN wrapper for sequence processing. |
+| `mLSTMCell` | `layers.time_series.xlstm_blocks` | Matrix-memory cell. |
+| `mLSTMLayer` | `layers.time_series.xlstm_blocks` | RNN wrapper for the matrix cell. |
+| `sLSTMBlock` | `layers.time_series.xlstm_blocks` | Residual block, post-normalization. |
+| `mLSTMBlock` | `layers.time_series.xlstm_blocks` | Residual block, pre-up-projection. |
+| `xLSTM` | `models.time_series.xlstm.model` | Language model over token ids. |
+| `xLSTMForecaster` | `models.time_series.xlstm.forecaster` | Continuous forecaster; a `ForecastMixin`. |
 
-- **`sLSTMCell`**: Core recurrent cell with exponential gating
-- **`sLSTMLayer`**: Wrapped RNN layer for sequence processing
-- **`mLSTMCell`**: Matrix memory cell with parallel processing
-- **`mLSTMLayer`**: Wrapped RNN layer for matrix LSTM
-- **`sLSTMBlock`**: Residual block with sLSTM (post-normalization architecture)
-- **`mLSTMBlock`**: Residual block with mLSTM (pre-up-projection architecture)
-- **`xLSTM`**: Complete model that stacks blocks to build the full architecture
+### 3.2 Framework integration
 
-#### **Framework Integration**
-- ✅ **Normalization Factory**: Uses `create_normalization_layer()` for all normalization
-  - Supports: layer_norm, rms_norm, batch_norm, band_rms, adaptive_band_rms, dynamic_tanh, etc.
-- ✅ **FFN Factory**: Uses `create_ffn_layer()` for feed-forward networks
-  - Supports: mlp, swiglu, geglu, glu, differential, residual, swin_mlp
-- ✅ **Standard Blocks**: Follows project patterns for consistent architecture
-
-#### **Keras 3 Best Practices**
-- ✅ **Full Serialization**: Every layer implements `get_config()` and registers with
-  `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`. The
-  un-namespaced `package="xLSTM"` string this section used to name is **gone** as of
-  2026-08-29: the keys are now `dl_techniques.models.xlstm.model>xLSTM`,
-  `dl_techniques.models.xlstm.forecaster>xLSTMForecaster`, and
-  `dl_techniques.layers.time_series.xlstm_blocks><ClassName>` for the six cells, layers and
-  blocks in `dl_techniques/layers/time_series/xlstm_blocks.py`. Pre-2026-08-29 archives
-  still load through the legacy `Custom>ClassName` alias the helper also binds
-- ✅ **Correct Build Logic**: Separates layer creation (`__init__`) from weight creation (`build`)
-- ✅ **RNN Cell Pattern**: Proper Keras RNN Cell/Layer infrastructure
-- ✅ **Backend Agnostic**: Built with `keras.ops`, runs on TensorFlow, PyTorch, or JAX
-- ✅ **Type Hints**: Complete Python 3.11 type annotations
-- ✅ **Documentation**: Comprehensive Sphinx-style docstrings with examples
-
-#### **Production Quality**
-- ✅ **Input Validation**: Clear error messages for invalid configurations
-- ✅ **Regularization Support**: Full support for kernel, recurrent, and bias regularizers
-- ✅ **Custom Initializers**: Configurable initializers for all weight matrices
-- ✅ **Masking Support**: Built-in sequence masking capabilities
-- ✅ **State Management**: Proper state handling for recurrent layers
-- ✅ **Comprehensive Testing**: 18 test cases covering all functionality
+- **Normalization factory** `create_normalization_layer()` — see §6.1 for the working values.
+- **FFN factory** `create_ffn_layer()` — the factory offers seven types, but the xLSTM blocks can only construct `swiglu`; see §6.2.
+- **Serialization** — every class implements `get_config()` and registers with `@register_dl_technique`. The keys are `dl_techniques.models.xlstm.model>xLSTM`, `dl_techniques.models.xlstm.forecaster>xLSTMForecaster`, and `dl_techniques.layers.time_series.xlstm_blocks><ClassName>` for the six cells, layers and blocks. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
+- **Keras 3 discipline** — layers created in `__init__`, weights in `build()`, proper RNN Cell/Layer infrastructure, `keras.ops` throughout, full type hints, masking and state handling, and validation that raises on bad configurations.
 
 ---
 
 ## 4. Quick Start
 
-### Basic Usage
+### The language model
 
 ```python
 import keras
-from xlstm_refactored import xLSTM
+import numpy as np
+from dl_techniques.models.time_series.xlstm import xLSTM
 
-# Define model parameters
-VOCAB_SIZE = 10000
-EMBED_DIM = 512
-NUM_LAYERS = 12
-SEQUENCE_LENGTH = 256
-
-# Create xLSTM model
 model = xLSTM(
-    vocab_size=VOCAB_SIZE,
-    embed_dim=EMBED_DIM,
-    num_layers=NUM_LAYERS,
-    mlstm_ratio=0.5,  # 50% mLSTM, 50% sLSTM
+    vocab_size=10000,
+    embed_dim=512,
+    num_layers=12,
+    mlstm_ratio=0.5,        # 6 mLSTM blocks, 6 sLSTM blocks
 )
 
-# Compile the model
 model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+    optimizer=keras.optimizers.Adam(1e-4),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-    metrics=['accuracy'],
+    metrics=["accuracy"],
 )
 
-# Train the model
+tokens = np.random.randint(0, 10000, (4, 256))
+print(model(tokens).shape)     # (4, 256, 10000) -- logits per position
+
 model.fit(train_dataset, validation_data=val_dataset, epochs=10)
-
-# Save the model
-model.save('xlstm_model.keras')
-
-# Load the model
-loaded_model = keras.models.load_model('xlstm_model.keras')
+model.save("xlstm_model.keras")
+loaded = keras.models.load_model("xlstm_model.keras")   # no custom_objects
 ```
 
-### Modern Configuration
+### The forecaster
 
 ```python
-# Use modern components from dl_techniques
+from dl_techniques.models.time_series.xlstm import create_xlstm_forecaster
+
+model = create_xlstm_forecaster(
+    input_length=64, prediction_length=24, num_features=1,
+    embed_dim=64, num_layers=2,
+)
+
+x = np.random.randn(8, 64, 1).astype("float32")
+print(model(x).shape)              # (8, 24, 9) -- 9 default quantile levels
+print(list(model.quantile_levels)) # [0.1, 0.2, ..., 0.9]
+```
+
+Set `use_quantile_head=False` for a plain point forecast of shape `(B, prediction_length, num_features)`.
+
+### A fuller configuration
+
+```python
 model = xLSTM(
-    vocab_size=50000,
-    embed_dim=768,
-    num_layers=24,
-    mlstm_ratio=0.5,
-    mlstm_num_heads=12,
-    mlstm_expansion_factor=2,
-    slstm_forget_gate='exp',  # Exponential gating
-    ffn_type='swiglu',  # SwiGLU FFN (as in LLaMa)
-    ffn_expansion_factor=4,
-    normalization_type='rms_norm',  # RMS normalization
-    normalization_kwargs={'epsilon': 1e-6},
-    dropout_rate=0.1,
-    embedding_dropout_rate=0.1,
+    vocab_size=50000, embed_dim=768, num_layers=24,
+    mlstm_ratio=0.5, mlstm_num_heads=12, mlstm_expansion_factor=2,
+    slstm_forget_gate="exp",                    # 'sigmoid' or 'exp'
+    ffn_type="swiglu", ffn_expansion_factor=4,
+    normalization_type="rms_norm", normalization_kwargs={"epsilon": 1e-6},
+    dropout_rate=0.1, embedding_dropout_rate=0.1,
     kernel_regularizer=keras.regularizers.L2(1e-4),
 )
 ```
@@ -246,821 +164,331 @@ model = xLSTM(
 
 ## 5. Architecture Components
 
-### 5.1 sLSTM Cell and Layer
+All six building blocks import from `dl_techniques.layers.time_series.xlstm_blocks`.
 
-#### **sLSTMCell**
-
-Core recurrent cell with exponential gating and normalizer state:
+### 5.1 sLSTM cell and layer
 
 ```python
-from xlstm_refactored import sLSTMCell
+from dl_techniques.layers.time_series.xlstm_blocks import sLSTMCell, sLSTMLayer
 
-# Create cell
-cell = sLSTMCell(
-    units=128,
-    forget_gate_activation='exp',  # 'sigmoid' or 'exp'
-    kernel_initializer='glorot_uniform',
-    recurrent_initializer='orthogonal',
-)
+cell = sLSTMCell(units=128, forget_gate_activation="exp")   # 'sigmoid' or 'exp'
+state = cell.get_initial_state(batch_size=32)               # [h_0, c_0, n_0, m_0]
+output, new_state = cell(keras.random.normal((32, 64)), state)
 
-# Single timestep forward pass
-batch_size = 32
-input_dim = 64
-x_t = keras.random.normal((batch_size, input_dim))
+outputs = sLSTMLayer(units=128, return_sequences=True)(inputs)   # (B, T, 128)
 
-# Initialize states
-state = cell.get_initial_state(batch_size=batch_size)
-
-# Process timestep
-output, new_state = cell(x_t, state)
+layer = sLSTMLayer(units=128, return_sequences=False, return_state=True)
+output, h, c, n, m = layer(inputs)                          # five tensors
 ```
 
-#### **sLSTMLayer**
+Exponential gating, the normalizer state, stabilization against overflow, and the standard Keras RNN API (masking, stateful mode, `Bidirectional`) all apply.
 
-Wrapped RNN layer for full sequence processing:
-
-```python
-from xlstm_refactored import sLSTMLayer
-
-# Basic usage
-layer = sLSTMLayer(units=128, return_sequences=True)
-outputs = layer(inputs)  # inputs: (batch, seq_len, input_dim)
-
-# With exponential forget gate
-layer = sLSTMLayer(
-    units=128,
-    forget_gate_activation='exp',
-    return_sequences=True,
-    return_state=False,
-)
-
-# With state return
-layer = sLSTMLayer(
-    units=128,
-    return_sequences=False,
-    return_state=True,
-)
-output, h_state, c_state, n_state, m_state = layer(inputs)
-```
-
-**Key Features**:
-- Exponential gating for improved memory dynamics
-- Normalizer state (n_t) for stable memory updates
-- Stabilization technique to prevent numerical overflow
-- Compatible with standard Keras RNN API
-- Support for masking, stateful mode, and bidirectional processing
-
-### 5.2 mLSTM Cell and Layer
-
-#### **mLSTMCell**
-
-Matrix memory cell with covariance-style updates:
+### 5.2 mLSTM cell and layer
 
 ```python
-from xlstm_refactored import mLSTMCell
+from dl_techniques.layers.time_series.xlstm_blocks import mLSTMCell, mLSTMLayer
 
-# Create cell
-cell = mLSTMCell(
-    units=256,
-    num_heads=4,
-    key_dim=64,  # Optional, defaults to units // num_heads
-    value_dim=64,  # Optional, defaults to units // num_heads
-)
-
-# Use with RNN
+cell = mLSTMCell(units=256, num_heads=4)
+# key_dim / value_dim default to units // num_heads
 rnn = keras.layers.RNN(cell, return_sequences=True)
-outputs = rnn(inputs)
+
+layer = mLSTMLayer(units=256, num_heads=8, key_dim=64, return_sequences=True)
 ```
 
-#### **mLSTMLayer**
+Matrix memory, multi-head processing, the covariance update rule, content-based retrieval, and parallel training.
 
-Wrapped RNN layer for matrix LSTM:
+`units` must be divisible by `num_heads`; the constructor raises otherwise. `key_dim` is free — it sizes the query/key space only. **`value_dim` is not**: it must stay at its `units // num_heads` default, and a mismatch is not caught at construction — it surfaces as an `InvalidArgumentError` inside `mLSTMCell.call` on the first forward pass.
 
-```python
-from xlstm_refactored import mLSTMLayer
+### 5.3 sLSTM block
 
-# Basic usage
-layer = mLSTMLayer(
-    units=256,
-    num_heads=4,
-    return_sequences=True,
-)
-
-# Custom key/value dimensions
-layer = mLSTMLayer(
-    units=256,
-    num_heads=8,
-    key_dim=64,
-    value_dim=64,
-)
-```
-
-**Key Features**:
-- Matrix-valued memory C_t for enhanced capacity
-- Multi-head architecture for parallel processing
-- Fully parallelizable during training
-- Covariance-style update rule
-- Content-based memory retrieval
-
-### 5.3 sLSTM Block
-
-Residual block with post-normalization architecture (Transformer-style):
+Residual block with post-normalization, Transformer-style:
+`Input → sLSTMLayer → Normalization → FFN → Add(residual)`.
 
 ```python
-from xlstm_refactored import sLSTMBlock
+from dl_techniques.layers.time_series.xlstm_blocks import sLSTMBlock
 
-# Standard block
 block = sLSTMBlock(
     units=256,
-    ffn_type='swiglu',
-    normalization_type='layer_norm',
-)
-
-# Custom configuration
-block = sLSTMBlock(
-    units=256,
-    ffn_type='geglu',
-    ffn_expansion_factor=4,
-    normalization_type='rms_norm',
-    normalization_kwargs={'epsilon': 1e-6},
-    forget_gate_activation='exp',
+    ffn_type="swiglu",               # the only working value; see 6.2
+    ffn_expansion_factor=4,          # default 2
+    normalization_type="rms_norm",   # default 'layer_norm'
+    normalization_kwargs={"epsilon": 1e-6},
+    forget_gate_activation="exp",
     dropout_rate=0.1,
 )
 ```
 
-**Architecture Flow**:
-```
-Input (residual)
-   ↓
-sLSTMLayer
-   ↓
-Normalization
-   ↓
-Feed-Forward Network
-   ↓
-Add(residual) → Output
-```
+### 5.4 mLSTM block
 
-### 5.4 mLSTM Block
-
-Residual block with pre-up-projection architecture (SSM-style):
+Residual block with pre-up-projection, SSM-style:
+`Input → Dense up-projection → causal depthwise Conv1D → swish → mLSTMLayer → Normalization → Dense down-projection → Add(residual)`.
 
 ```python
-from xlstm_refactored import mLSTMBlock
+from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock
 
-# Standard block
 block = mLSTMBlock(
-    units=256,
-    expansion_factor=2,
-    num_heads=4,
-)
-
-# Custom configuration
-block = mLSTMBlock(
-    units=256,
-    expansion_factor=3,
-    num_heads=8,
-    conv_kernel_size=7,
-    normalization_type='rms_norm',
+    units=256, expansion_factor=2, num_heads=8,
+    conv_kernel_size=4,              # default 4
+    normalization_type="rms_norm",
 )
 ```
 
-**Architecture Flow**:
+### 5.5 The full models
+
 ```
-Input (residual)
-   ↓
-Up-Projection (Dense)
-   ↓
-Depthwise Conv1D (causal)
-   ↓
-Activation (swish)
-   ↓
-mLSTMLayer
-   ↓
-Normalization
-   ↓
-Down-Projection (Dense)
-   ↓
-Add(residual) → Output
+xLSTM                                 xLSTMForecaster
+─────                                 ───────────────
+Token ids (B, T)                      Series (B, T, F)
+   ↓ Embedding + dropout                 ↓ Input projection (+ optional instance norm)
+[mLSTM blocks] × num_layers*ratio     [mLSTM blocks] × num_layers*ratio
+[sLSTM blocks] × the remainder        [sLSTM blocks] × the remainder
+   ↓ Final normalization                 ↓ Final normalization
+   ↓ Dense head → (B, T, vocab)          ↓ quantile head → (B, H, Q)
+                                            or point head → (B, H, F)
 ```
 
-### 5.5 Full xLSTM Model
-
-Complete model with stacked blocks:
-
-```python
-from xlstm_refactored import xLSTM
-
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    mlstm_ratio=0.5,  # 6 mLSTM blocks, 6 sLSTM blocks
-    mlstm_num_heads=8,
-    ffn_type='swiglu',
-    normalization_type='rms_norm',
-)
-```
-
-**Architecture**:
-```
-Tokens
-   ↓
-Embedding
-   ↓
-Optional Dropout
-   ↓
-[mLSTM Blocks] × (num_layers * mlstm_ratio)
-   ↓
-[sLSTM Blocks] × (num_layers * (1 - mlstm_ratio))
-   ↓
-Final Normalization
-   ↓
-Output Head (Dense)
-```
+`xLSTMForecaster` carries the repo's `ForecastMixin`, so `predict_forecast(x)` returns the unified `Forecast` object and `predict_quantiles(x, quantile_levels=[...])` returns `(quantile_preds, point_preds)` with shapes `(B, H, len(levels))` and `(B, H)`.
 
 ---
 
 ## 6. Configuration Options
 
-### 6.1 Normalization Types
+### 6.1 Normalization types
 
-Supported via `dl_techniques.layers.norms` factory:
+| Type | Notes |
+|:---|:---|
+| `'layer_norm'` | Default, general purpose. |
+| `'rms_norm'` | Cheaper than LayerNorm; the usual choice at scale. |
+| `'batch_norm'` | CNN-style; rarely right for sequences. |
+| `'band_rms'` | Band-constrained RMS, for stability-critical training. |
+| `'adaptive_band_rms'` | Dynamic band control. |
+| `'dynamic_tanh'` | Normalization-free Transformer style. |
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `'layer_norm'` | Standard layer normalization | Default, general purpose |
-| `'rms_norm'` | Root Mean Square normalization | Faster than LayerNorm |
-| `'batch_norm'` | Batch normalization | CNN-style architectures |
-| `'band_rms'` | Band-constrained RMS | Stability-critical applications |
-| `'adaptive_band_rms'` | Adaptive Band RMS | Dynamic stability control |
-| `'dynamic_tanh'` | Dynamic Tanh normalization | Normalization-free transformers |
+Pass options through `normalization_kwargs`, e.g. `{'epsilon': 1e-6}`.
 
-**Example**:
-```python
-block = sLSTMBlock(
-    units=256,
-    normalization_type='rms_norm',
-    normalization_kwargs={'epsilon': 1e-6, 'use_scale': True}
-)
-```
+### 6.2 FFN types
 
-### 6.2 FFN Types
+`sLSTMBlock` builds its FFN through `create_ffn_layer(ffn_type=..., output_dim=units, ffn_expansion_factor=..., dropout_rate=...)`. **In practice only `'swiglu'` is usable**, because it is the only factory entry that accepts `ffn_expansion_factor` in place of an explicit `hidden_dim`:
 
-Supported via `dl_techniques.layers.ffn` factory:
+| Type | Status |
+|:---|:---|
+| `'swiglu'` | Works. Gated SwiGLU, as in LLaMA. The block default, and the only supported value. |
+| `'mlp'`, `'geglu'`, `'glu'`, `'differential'`, `'residual'`, `'swin_mlp'` | Raise `ValueError: Required parameters missing ... ['hidden_dim']` at construction. |
 
-| Type | Description | Use Case |
-|------|-------------|----------|
-| `'mlp'` | Standard multi-layer perceptron | General purpose |
-| `'swiglu'` | SwiGLU with gating | Modern LLMs (LLaMa, Qwen) |
-| `'geglu'` | GELU-based gated linear unit | GELU-based architectures |
-| `'glu'` | Standard gated linear unit | Improved gradient flow |
-| `'differential'` | Dual-pathway processing | Enhanced feature processing |
-| `'residual'` | Residual block with skip connections | Very deep networks |
-| `'swin_mlp'` | Swin Transformer MLP | Vision models |
+The same applies to `xLSTM(ffn_type=...)`, which forwards straight to `sLSTMBlock`. Leave `ffn_type` at its default unless you are also widening the factory call.
 
-**Example**:
-```python
-block = sLSTMBlock(
-    units=256,
-    ffn_type='swiglu',
-    ffn_expansion_factor=4,
-    dropout_rate=0.1,
-)
-```
+### 6.3 Regularizers and initializers
 
-### 6.3 Regularization
-
-Full support for regularizers:
-
-```python
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    kernel_regularizer=keras.regularizers.L2(1e-4),
-    recurrent_regularizer=keras.regularizers.L2(1e-4),
-    bias_regularizer=None,
-)
-```
-
-### 6.4 Initializers
-
-Configurable initializers for all weight matrices:
-
-```python
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    kernel_initializer='glorot_uniform',
-    recurrent_initializer='orthogonal',
-    bias_initializer='zeros',
-)
-```
+`kernel_regularizer`, `recurrent_regularizer` and `bias_regularizer` are separately configurable, as are `kernel_initializer` (`'glorot_uniform'`), `recurrent_initializer` (`'orthogonal'`) and `bias_initializer` (`'zeros'`). All round-trip through `get_config`.
 
 ---
 
 ## 7. Usage Examples
 
-### 7.1 Language Modeling
+### 7.1 Language modelling
+
+AdamW with weight decay, plus the usual `EarlyStopping` / `ReduceLROnPlateau` / `ModelCheckpoint` trio, is a solid default; see §4 for the construction call.
 
 ```python
-from xlstm_refactored import xLSTM
-import keras
-
-# Create language model
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=768,
-    num_layers=24,
-    mlstm_ratio=0.5,
-    mlstm_num_heads=12,
-    mlstm_expansion_factor=2,
-    slstm_forget_gate='exp',
-    ffn_type='swiglu',
-    ffn_expansion_factor=4,
-    normalization_type='rms_norm',
-    dropout_rate=0.1,
-    embedding_dropout_rate=0.1,
-)
-
-# Compile with AdamW
 model.compile(
-    optimizer=keras.optimizers.AdamW(
-        learning_rate=1e-4,
-        weight_decay=0.01,
-    ),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy'],
+    optimizer=keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=0.01),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"],
 )
-
-# Train
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=100,
-    callbacks=[
-        keras.callbacks.EarlyStopping(patience=5),
-        keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3),
-        keras.callbacks.ModelCheckpoint('best_model.keras', save_best_only=True),
-    ],
-)
+model.fit(train_dataset, validation_data=val_dataset, epochs=100, callbacks=[...])
 ```
 
-### 7.2 Sequence Classification
+### 7.2 Sequence classification from the layers
 
 ```python
-from xlstm_refactored import sLSTMLayer, mLSTMLayer
-import keras
+from dl_techniques.layers.time_series.xlstm_blocks import sLSTMLayer, mLSTMLayer
 
-# Build classifier
 inputs = keras.Input(shape=(None, 128))
-
-# Stack xLSTM layers
 x = mLSTMLayer(256, num_heads=4, return_sequences=True)(inputs)
 x = sLSTMLayer(256, return_sequences=True)(x)
-x = mLSTMLayer(256, num_heads=4, return_sequences=False)(x)
-
-# Classification head
+x = mLSTMLayer(256, num_heads=4, return_sequences=False)(x)   # pool by not returning sequences
 x = keras.layers.Dropout(0.3)(x)
-outputs = keras.layers.Dense(10, activation='softmax')(x)
-
-model = keras.Model(inputs, outputs)
-
-# Compile
-model.compile(
-    optimizer='adam',
-    loss='categorical_crossentropy',
-    metrics=['accuracy']
-)
+model = keras.Model(inputs, keras.layers.Dense(10, activation="softmax")(x))
 ```
 
-### 7.3 Time Series Prediction
+### 7.3 A custom hybrid from the blocks
+
+Front-load the fast parallel blocks, finish with the recurrent ones.
 
 ```python
-from xlstm_refactored import sLSTMBlock, mLSTMBlock
-import keras
+from dl_techniques.layers.time_series.xlstm_blocks import sLSTMBlock, mLSTMBlock
 
-# Multi-scale temporal model
-inputs = keras.Input(shape=(None, 64))
-
-# Alternate between fast and slow processing
-x = inputs
-for i in range(6):
-    if i % 2 == 0:
-        # Fast: mLSTM for quick patterns
-        x = mLSTMBlock(64, num_heads=4, name=f'mlstm_{i}')(x)
-    else:
-        # Slow: sLSTM for complex dependencies
-        x = sLSTMBlock(64, name=f'slstm_{i}')(x)
-
-# Prediction head
-outputs = keras.layers.Dense(1)(x)
-
-model = keras.Model(inputs, outputs)
-```
-
-### 7.4 Custom Hybrid Architecture
-
-```python
-from xlstm_refactored import sLSTMBlock, mLSTMBlock
-import keras
-
-# Front-end: Fast mLSTM processing
 inputs = keras.Input(shape=(None, 256))
 x = inputs
-
-# Early layers: Fast parallel processing
 for i in range(4):
-    x = mLSTMBlock(
-        256,
-        expansion_factor=2,
-        num_heads=8,
-        name=f'frontend_mlstm_{i}'
-    )(x)
-
-# Late layers: Deep reasoning with sLSTM
+    x = mLSTMBlock(256, expansion_factor=2, num_heads=8, name=f"frontend_mlstm_{i}")(x)
 for i in range(4):
-    x = sLSTMBlock(
-        256,
-        ffn_type='swiglu',
-        ffn_expansion_factor=4,
-        forget_gate_activation='exp',
-        name=f'backend_slstm_{i}'
-    )(x)
-
-# Output
-outputs = keras.layers.Dense(vocab_size)(x)
-
-model = keras.Model(inputs, outputs)
+    x = sLSTMBlock(256, ffn_expansion_factor=4, forget_gate_activation="exp",
+                   name=f"backend_slstm_{i}")(x)
+model = keras.Model(inputs, keras.layers.Dense(vocab_size)(x))
 ```
 
-### 7.5 Complete Training Pipeline
+Alternating `mLSTMBlock` and `sLSTMBlock` in a loop gives a multi-scale temporal model instead — fast blocks for quick patterns, recurrent blocks for long dependencies.
+
+### 7.4 Size variants
+
+Both models ship a `MODEL_VARIANTS` table and a `from_variant` constructor.
+
+| Model | Variants |
+|:---|:---|
+| `xLSTM` | `small` (embed 256, 6 layers, 4 heads), `base` (512, 12, 8), `large` (1024, 24, 16, ffn expansion 4) |
+| `xLSTMForecaster` | `tiny` (embed 64, 2 layers, 4 heads), `small` (128, 4, 8) |
 
 ```python
-import keras
-from xlstm_refactored import xLSTM
-
-# 1. Create model
-model = xLSTM(
-    vocab_size=10000,
-    embed_dim=512,
-    num_layers=12,
-    mlstm_ratio=0.5,
-    ffn_type='swiglu',
-    normalization_type='rms_norm',
-)
-
-# 2. Compile with mixed precision
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-model.compile(
-    optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy'],
-)
-
-# 3. Create datasets
-train_dataset = create_dataset('train.txt', batch_size=32)
-val_dataset = create_dataset('val.txt', batch_size=32)
-
-# 4. Train with callbacks
-history = model.fit(
-    train_dataset,
-    validation_data=val_dataset,
-    epochs=50,
-    callbacks=[
-        keras.callbacks.TensorBoard(log_dir='./logs'),
-        keras.callbacks.ModelCheckpoint(
-            'checkpoints/model_{epoch:02d}.keras',
-            save_freq='epoch'
-        ),
-        keras.callbacks.EarlyStopping(
-            monitor='val_loss',
-            patience=5,
-            restore_best_weights=True
-        ),
-    ],
-)
-
-# 5. Save final model
-model.save('xlstm_final.keras')
+model = xLSTM.from_variant("small", vocab_size=50000)
+fc = xLSTMForecaster.from_variant("tiny", input_length=64, prediction_length=24)
 ```
+
+`vocab_size` is required for `xLSTM` (it is not part of the variant dict), and `input_length` / `prediction_length` must be supplied as overrides for the forecaster. Asking either `from_variant` for pretrained weights raises `NotImplementedError`: no trained weights ship.
 
 ---
 
 ## 8. Serialization
 
-All components support full Keras 3 serialization:
-
-### Save and Load
-
 ```python
-# Save model
-model.save('xlstm_model.keras')
+model.save("xlstm_model.keras")
+loaded = keras.models.load_model("xlstm_model.keras")   # no custom_objects needed
 
-# Load model
-loaded_model = keras.models.load_model('xlstm_model.keras')
+model.save_weights("xlstm_weights.weights.h5")
+fresh = xLSTM(vocab_size=..., embed_dim=..., num_layers=...)
+fresh.load_weights("xlstm_weights.weights.h5")
 
-# Verify loaded model
-predictions = loaded_model(test_inputs)
+config = model.get_config()          # JSON-serializable
+rebuilt = xLSTM.from_config(config)  # architecture only, no weights
 ```
 
-### Export Weights Only
-
-```python
-# Save weights
-model.save_weights('xlstm_weights.weights.h5')
-
-# Create new model with same architecture
-new_model = xLSTM(vocab_size=50000, embed_dim=512, num_layers=12)
-
-# Load weights
-new_model.load_weights('xlstm_weights.weights.h5')
-```
-
-### Configuration Export
-
-```python
-# Get model configuration
-config = model.get_config()
-
-# Save to JSON
-import json
-with open('model_config.json', 'w') as f:
-    json.dump(config, f, indent=2)
-
-# Recreate model from config
-from xlstm_refactored import xLSTM
-new_model = xLSTM.from_config(config)
-```
+Every layer registers itself, so a `.keras` archive is self-describing. `save_weights` requires the receiving model to be built at the same architecture; `get_config`/`from_config` carries the architecture but no weights.
 
 ---
 
 ## 9. Performance Tips
 
-### 9.1 Use mLSTM for Long Sequences
+### 9.1 Use mLSTM for long training sequences
 
-mLSTM is fully parallelizable during training:
+mLSTM processes the whole sequence in parallel, so it dominates wall-clock time on long training sequences: `mlstm_ratio=0.75` or higher.
 
-```python
-# Better for long sequences (training)
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    mlstm_ratio=0.67,  # More mLSTM = more parallelization
-)
-```
+### 9.2 Use sLSTM for state tracking
 
-### 9.2 Use sLSTM for Inference
+Autoregressive generation is step-by-step whatever you choose, and sLSTM's explicit recurrence and memory revision are what pay off on tasks that need long-range state. Lower `mlstm_ratio` there.
 
-sLSTM maintains explicit recurrence for autoregressive generation:
+### 9.3 Balance the block ratio
 
-```python
-# Better for autoregressive generation (inference)
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    mlstm_ratio=0.33,  # More sLSTM = better recurrence
-)
-```
+`0.5` balanced (the default), `0.75` parallelization-heavy for long training sequences, `0.33` recurrence-heavy for complex state tracking.
 
-### 9.3 Balance Block Ratios
+### 9.4 Use RMS normalization
+
+`normalization_type='rms_norm'` is cheaper than LayerNorm in both time and memory and is the usual choice for large stacks.
+
+### 9.5 Enable mixed precision
 
 ```python
-# Balanced (recommended for most tasks)
-mlstm_ratio=0.5  # 50-50 split
+keras.mixed_precision.set_global_policy("mixed_float16")
 
-# Parallelization-heavy (long training sequences)
-mlstm_ratio=0.67  # 67% mLSTM, 33% sLSTM
-
-# Recurrence-heavy (complex state tracking)
-mlstm_ratio=0.33  # 33% mLSTM, 67% sLSTM
+model = xLSTM(vocab_size=50000, embed_dim=512, num_layers=12)
+model.compile(optimizer=keras.optimizers.Adam(1e-4),
+              loss="sparse_categorical_crossentropy")
 ```
 
-### 9.4 Use RMS Normalization
+`mixed_float16` is supported. The four stability floors in `xlstm_blocks.py` — the two `log` guards and the two divide guards inside `sLSTMCell.call` and `mLSTMCell.call` — are sized so that they remain strictly greater than zero once materialized in the compute dtype. A bare `1e-8` literal does not: `float16(1e-8)` is exactly `0.0`, which turns the guard into a no-op and produces `NaN` from the divides and an infinite gradient from the logs. None of that is visible in float32, so `tests/test_layers/test_time_series/test_the_xlstm_floors_survive_fp16.py` drives each gate into saturation deliberately.
 
-RMSNorm is faster and more memory-efficient:
+### 9.6 Batch size
 
-```python
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-    normalization_type='rms_norm',  # Faster than layer_norm
-)
-```
-
-### 9.5 Enable Mixed Precision
-
-```python
-# Enable mixed precision for faster training
-keras.mixed_precision.set_global_policy('mixed_float16')
-
-model = xLSTM(
-    vocab_size=50000,
-    embed_dim=512,
-    num_layers=12,
-)
-
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-    loss='sparse_categorical_crossentropy',
-)
-```
-
-### 9.6 Optimize Batch Size
-
-```python
-# Larger batches for mLSTM (parallel processing)
-if mlstm_ratio > 0.5:
-    batch_size = 64
-else:
-    batch_size = 32
-```
+mLSTM-heavy models parallelize better and tolerate larger batches (64+); recurrence-heavy stacks are usually happier around 32.
 
 ---
 
 ## 10. Testing
 
-Run the comprehensive test suite:
-
 ```bash
-python test_xlstm.py
+MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_xlstm/ -q
+MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_layers/test_time_series/ -q -k xlstm
 ```
 
-### Test Coverage
-
-The test suite includes 18 comprehensive tests:
-
-1. ✅ **Cell Tests**: Basic functionality and variants
-2. ✅ **Layer Tests**: Sequence processing and state return
-3. ✅ **Block Tests**: Residual connections and architectures
-4. ✅ **Model Tests**: Full model instantiation and configurations
-5. ✅ **Serialization Tests**: Save/load for all components
-6. ✅ **Training Tests**: Compile, fit, and gradient flow
-7. ✅ **Configuration Tests**: Different norm/FFN types
-8. ✅ **Error Handling**: Input validation
-
-**Expected Output**:
-```
-======================================================================
-Running xLSTM Implementation Tests
-======================================================================
-
-Testing sLSTMCell basic functionality...
-✓ sLSTMCell basic test passed
-
-[... 17 more tests ...]
-
-======================================================================
-Test Results: 18 passed, 0 failed
-======================================================================
-```
+| Suite | Covers |
+|:---|:---|
+| `tests/test_models/test_xlstm/` | Model construction, config round trips, forecaster contract. |
+| `test_xlstm_blocks.py` | Cells, layers and blocks: shapes, state return, serialization. |
+| `test_the_xlstm_floors_survive_fp16.py` | The four stability floors under `mixed_float16` (§9.5). |
+| `test_multivariate_denorm.py` | Forecaster denormalization on multivariate targets. |
 
 ---
 
 ## 11. Architecture Details
 
-### 11.1 sLSTM Mathematical Formulation
+### 11.1 sLSTM formulation
 
-At each timestep t:
-
-**Gates**:
 ```
-i_t = exp(W_i x_t + R_i h_{t-1} + b_i)        # Input gate (exponential)
-f_t = σ(W_f x_t + R_f h_{t-1} + b_f)          # Forget gate (sigmoid or exp)
-o_t = σ(W_o x_t + R_o h_{t-1} + b_o)          # Output gate
-z_t = tanh(W_z x_t + R_z h_{t-1} + b_z)       # Cell input
+i_t = exp(W_i x_t + R_i h_{t-1} + b_i)        # input gate (exponential)
+f_t = σ(W_f x_t + R_f h_{t-1} + b_f)          # forget gate (sigmoid or exp)
+o_t = σ(W_o x_t + R_o h_{t-1} + b_o)          # output gate
+z_t = tanh(W_z x_t + R_z h_{t-1} + b_z)       # cell input
 ```
 
-**Stabilization** (Equations 15-17 in paper):
+**Stabilization** (paper eqs. 15-17) — the stabilizer state `m_t` keeps the exponentials in range, then the states update and the normalizer divides back out:
+
 ```
-m_t = max(m_{t-1} + log(f_t), log(i_t))       # Stabilizer state
-ĩ_t = exp(log(i_t) - m_t)                     # Stabilized input gate
-f̃_t = exp(log(f_t) + m_{t-1} - m_t)          # Stabilized forget gate
+m_t = max(m_{t-1} + log(f_t), log(i_t))
+ĩ_t = exp(log(i_t) - m_t)
+f̃_t = exp(log(f_t) + m_{t-1} - m_t)
+
+c_t = f̃_t ⊙ c_{t-1} + ĩ_t ⊙ z_t              # cell state
+n_t = f̃_t ⊙ n_{t-1} + ĩ_t                    # normalizer state
+h_t = o_t ⊙ (c_t / (n_t + ε))                 # hidden state
 ```
 
-**State Updates**:
+The `log(f_t)` and the `n_t + ε` divide are two of the four floors §9.5 discusses.
+
+### 11.2 mLSTM formulation
+
 ```
-c_t = f̃_t ⊙ c_{t-1} + ĩ_t ⊙ z_t              # Cell state
-n_t = f̃_t ⊙ n_{t-1} + ĩ_t                    # Normalizer state
+q_t = W_q x_t + R_q h_{t-1}                   # query
+k_t = W_k x_t + R_k h_{t-1}                   # key
+v_t = W_v x_t + R_v h_{t-1}                   # value
+
+i_t = exp(W_i x_t + R_i h_{t-1})              # input gate (exponential)
+f_t = σ(W_f x_t + R_f h_{t-1})                # forget gate
+o_t = σ(W_o x_t + R_o h_{t-1})                # output gate
+
+C_t = f_t ⊙ C_{t-1} + i_t ⊙ (v_t ⊗ k_t^T)     # covariance update
+n_t = f_t ⊙ n_{t-1} + i_t ⊙ k_t               # normalizer
+h_t = o_t ⊙ (C_t q_t / (n_t^T q_t + ε))       # retrieval
 ```
 
-**Output**:
-```
-h_t = o_t ⊙ (c_t / (n_t + ε))                 # Hidden state
-```
-
-### 11.2 mLSTM Mathematical Formulation
-
-**Projections**:
-```
-q_t = W_q x_t + R_q h_{t-1}                   # Query
-k_t = W_k x_t + R_k h_{t-1}                   # Key
-v_t = W_v x_t + R_v h_{t-1}                   # Value
-```
-
-**Gates**:
-```
-i_t = exp(W_i x_t + R_i h_{t-1})              # Input gate (exponential)
-f_t = σ(W_f x_t + R_f h_{t-1})                # Forget gate
-o_t = σ(W_o x_t + R_o h_{t-1})                # Output gate
-```
-
-**Matrix Memory Update**:
-```
-C_t = f_t ⊙ C_{t-1} + i_t ⊙ (v_t ⊗ k_t^T)     # Covariance update
-```
-
-**Normalizer Update**:
-```
-n_t = f_t ⊙ n_{t-1} + i_t ⊙ k_t               # Normalizer
-```
-
-**Output**:
-```
-h_t = o_t ⊙ (C_t q_t / (n_t^T q_t + ε))       # Retrieved hidden state
-```
-
-### 11.3 Comparison with Standard LSTM
+### 11.3 Against a standard LSTM
 
 | Feature | Standard LSTM | sLSTM | mLSTM |
-|---------|--------------|-------|-------|
-| Memory Type | Scalar vector | Scalar vector | Matrix |
-| Gating | Standard (sigmoid) | Exponential | Exponential + Standard |
-| Normalizer | No | Yes | Yes |
-| Stabilization | No | Yes | Yes |
-| Parallelizable | No | No | Yes (training) |
-| Memory Capacity | Limited | Enhanced | High |
-| Computational Cost | Low | Medium | Higher |
-| Storage Revision | Limited | Excellent | Good |
-| Long-Range Dependencies | Moderate | Good | Excellent |
+|---|---|---|---|
+| Memory type | Scalar vector | Scalar vector | Matrix |
+| Gating | Sigmoid | Exponential | Exponential + sigmoid |
+| Normalizer / stabilization | No | Yes | Yes |
+| Parallel training | No | No | Yes |
+| Memory capacity | Limited | Enhanced | High |
+| Compute cost | Low | Medium | Higher |
+| Storage revision | Limited | Excellent | Good |
+| Long-range reach | Moderate | Good | Excellent |
 
 ---
 
 ## 12. Requirements
 
-### Core Dependencies
-
-```
-python>=3.11
-keras>=3.8.0
-tensorflow>=2.18.0  # or torch, or jax
-```
-
-### Framework Integration
-
-This implementation requires the `dl_techniques` framework for:
-- Normalization factory (`dl_techniques.layers.norms`)
-- FFN factory (`dl_techniques.layers.ffn`)
-
-### Installation
-
-```bash
-# Install Keras and backend
-pip install keras tensorflow
-
-# Install dl_techniques (if available)
-pip install dl_techniques
-
-# Or use the standalone implementation
-```
+Python >= 3.11, Keras >= 3.8.0, TensorFlow >= 2.18.0 (or torch, or jax). The implementation depends on the `dl_techniques` normalization factory (`layers.norms`) and FFN factory (`layers.ffn`); it is not standalone.
 
 ---
 
 ## 13. Citation
 
-If you use xLSTM in your research, please cite the original paper:
-
 ```bibtex
 @article{beck2024xlstm,
   title={xLSTM: Extended Long Short-Term Memory},
-  author={Beck, Maximilian and P{\"o}ppel, Korbinian and Spanring, Markus and 
-          Auer, Andreas and Prudnikova, Oleksandra and Kopp, Michael and 
+  author={Beck, Maximilian and P{\"o}ppel, Korbinian and Spanring, Markus and
+          Auer, Andreas and Prudnikova, Oleksandra and Kopp, Michael and
           Klambauer, G{\"u}nter and Brandstetter, Johannes and Hochreiter, Sepp},
   journal={arXiv preprint arXiv:2405.04517},
   year={2024}
 }
 ```
-
----
-
-## License
-
-This implementation is provided for research and educational purposes. See the LICENSE file for details.
-
----
-
-## Acknowledgments
-
-This implementation:
-- Follows the architecture described in Beck et al. (2024)
-- Uses the `dl_techniques` framework for normalization and FFN factories
-- Adheres to Keras 3 best practices for custom layers and models
-- Implements proper serialization according to modern Keras standards
-
----
