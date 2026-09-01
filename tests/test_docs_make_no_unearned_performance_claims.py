@@ -271,15 +271,13 @@ def test_the_pretrained_rule_is_not_vacuous():
 
 
 def test_the_population_the_rule_was_derived_from_is_still_the_population():
-    """MEASURED 2026-08-23 and pinned, so a new offender is a diff, not a surprise.
+    """Pinned, so a new offender arrives as a diff rather than a surprise.
 
     Counts READMEs, not occurrences: an occurrence count would churn on every
     example added. If this fails because a package gained a transfer-learning
-    section, re-derive the numbers here rather than widening the window above.
-
-    `colbert` joined the population on 2026-08-25 (`plan-2026-08-25-c71fc3ad`): its
-    README names `pretrained=True` only to say the call RAISES `NotImplementedError`,
-    which is the disclaimed form the window above already accepts.
+    section, re-derive the set here rather than widening the window above --
+    and check BOTH halves for the newcomer before pinning it (see the comment
+    inside the set).
     """
     readmes = [p for p in _iter_doc_files() if p.name == "README.md"]
     assert len(readmes) >= 20, len(readmes)
@@ -287,17 +285,18 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         p for p in readmes if PRETRAINED_TRUE_RE.search(p.read_text(encoding="utf-8"))
     ]
     assert {p.parent.name for p in with_pretrained_true} == {
-        # The three `ascii_*` packages joined on 2026-08-30
-        # (`plan-2026-08-30T203107-30455f66`), exactly as `colbert` did: each
-        # README names `pretrained=True` only to say the call RAISES, which is
-        # the disclaimed form the window above already accepts. Verified BOTH
-        # halves before pinning -- each README carries the single line
-        # "`pretrained=True` raises `NotImplementedError` -- no weights are
-        # distributed.", and each package's `model.py` genuinely raises it.
+        # Membership is EARNED, not assumed: a package belongs here only when
+        # BOTH halves were checked -- its README names `pretrained=True` solely
+        # to say the call RAISES (the disclaimed form the window above accepts),
+        # AND the package's own model module genuinely raises
+        # `NotImplementedError` on that path. Verified for every name below.
+        # A README that advertises a working `pretrained=True` it does not have
+        # is caught by `test_no_readme_advertises_a_pretrained_path_that_raises`,
+        # not by this pin; this one only tracks WHO is in the conversation.
         "ascii_bert", "ascii_clifford_bert", "ascii_convnext_bert",
-        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "gpt2",
-        "masked_autoencoder", "mobilenet", "modern_bert", "resnet",
-        "tree_transformer", "vit", "wave_field",
+        "bert", "bias_free_denoisers", "colbert", "dino", "distilbert", "fnet",
+        "gpt2", "kan", "masked_autoencoder", "mobile_clip", "mobilenet",
+        "modern_bert", "resnet", "tree_transformer", "vit", "wave_field",
     }, sorted(p.parent.name for p in with_pretrained_true)
 
 
