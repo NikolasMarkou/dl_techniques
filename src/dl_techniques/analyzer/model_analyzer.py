@@ -986,7 +986,9 @@ class ModelAnalyzer:
             layer = all_layers[layer_id]
             layer_type = spectral_utils.infer_layer_type(layer)
 
-            has_weights, old_weights, has_bias, old_bias = spectral_utils.get_layer_weights_and_bias(layer)
+            # The bias slots are deliberately discarded: the write-back below goes
+            # through the layer's own weight list, so no (kernel, bias) rebuild happens.
+            has_weights, old_weights, _, _ = spectral_utils.get_layer_weights_and_bias(layer)
             if not has_weights: continue
 
             if method == SmoothingMethod.DETX:
@@ -1004,7 +1006,14 @@ class ModelAnalyzer:
             W_smoothed = spectral_metrics.smooth_matrix(Wmats[0], num_smooth)
             new_weights = W_smoothed.reshape(old_weights.shape)
 
-            layer.set_weights([new_weights, old_bias] if has_bias else [new_weights])
+            # Write back through the layer's OWN weight list rather than rebuilding it
+            # from (kernel, bias). `has_bias` is False for LSTM/GRU even though those
+            # layers hold three tensors, so the rebuilt list was the wrong length and
+            # `set_weights` raised, aborting the whole call. Replacing element 0 in
+            # place is correct for every layer type.
+            current_weights = layer.get_weights()
+            current_weights[0] = new_weights
+            layer.set_weights(current_weights)
 
         if save_path:
             smoothed_model.save(save_path)

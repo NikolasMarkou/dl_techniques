@@ -237,3 +237,79 @@ class TestDataInputFromObject:
 
         with pytest.raises(AttributeError, match="x_data.*x_test|x_test.*x_data"):
             DataInput.from_object(_Empty())
+
+
+# ---------------------------------------------------------------------
+# C7 -- create_smoothed_model on recurrent layers
+# ---------------------------------------------------------------------
+
+RECURRENT_TIMESTEPS = 5
+RECURRENT_FEATURES = 20
+RECURRENT_UNITS = 16
+
+
+def _build_recurrent_model(name: str = "rnn_model") -> keras.Model:
+    """A model containing an LSTM, which holds THREE weight tensors."""
+    keras.utils.set_random_seed(5)
+    inputs = keras.Input(
+        shape=(RECURRENT_TIMESTEPS, RECURRENT_FEATURES), name=f"{name}_in"
+    )
+    x = keras.layers.LSTM(RECURRENT_UNITS, name=f"{name}_lstm")(inputs)
+    outputs = keras.layers.Dense(N_CLASSES, activation="softmax", name=f"{name}_out")(x)
+    return keras.Model(inputs=inputs, outputs=outputs, name=name)
+
+
+class TestSmoothedModelRecurrent:
+    """``create_smoothed_model`` must not abort on an LSTM/GRU layer.
+
+    Defect guarded (C7): the weight write was
+    ``layer.set_weights([new_weights, old_bias] if has_bias else [new_weights])``.
+    ``get_layer_weights_and_bias`` reports ``has_bias = False`` for LSTM/GRU (the
+    bias branch is reachable only for Dense/Conv/Embedding), so a one-element list
+    was handed to a layer holding three weight tensors and Keras raised
+    ``ValueError``. Nothing caught it, so the whole call aborted.
+    """
+
+    def _analyzer(self, tmp_path):
+        model = _build_recurrent_model()
+        analyzer = ModelAnalyzer(
+            models={"rnn_model": model},
+            config=_quiet_config(analyze_spectral=True),
+            output_dir=str(tmp_path / "c7"),
+        )
+        analyzer.analyze(analysis_types={"spectral"})
+        return model, analyzer
+
+    def test_create_smoothed_model_handles_lstm(self, tmp_path):
+        model, analyzer = self._analyzer(tmp_path)
+
+        # Anti-vacuity: the LSTM must actually be one of the analyzed layers,
+        # otherwise the smoothing loop would never reach the recurrent branch.
+        analyzed = set(analyzer.results.spectral_analysis["name"])
+        assert "rnn_model_lstm" in analyzed, (
+            f"the LSTM was not admitted to spectral analysis: {sorted(analyzed)}"
+        )
+
+        smoothed = analyzer.create_smoothed_model("rnn_model", method="detX")
+
+        assert smoothed is not None
+        lstm = smoothed.get_layer("rnn_model_lstm")
+        assert len(lstm.get_weights()) == 3, (
+            "the LSTM lost weight tensors during smoothing: "
+            f"{len(lstm.get_weights())} instead of 3"
+        )
+
+    def test_smoothing_preserves_the_untouched_recurrent_tensors(self, tmp_path):
+        """Only the input kernel is smoothed; the other two tensors carry over."""
+        model, analyzer = self._analyzer(tmp_path)
+        original = model.get_layer("rnn_model_lstm").get_weights()
+
+        smoothed = analyzer.create_smoothed_model("rnn_model", method="detX")
+        produced = smoothed.get_layer("rnn_model_lstm").get_weights()
+
+        np.testing.assert_array_equal(
+            produced[1], original[1], err_msg="the recurrent kernel was disturbed"
+        )
+        np.testing.assert_array_equal(
+            produced[2], original[2], err_msg="the LSTM bias was disturbed"
+        )
