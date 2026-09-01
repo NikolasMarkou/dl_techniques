@@ -90,13 +90,45 @@ def _repo_root() -> pathlib.Path:
 
 
 def _git_show(ref_path: str) -> str:
-    """Return the blob content at ``ref_path`` (``<commit>:<path>``) as text."""
-    return subprocess.run(
-        ["git", "-C", str(_repo_root()), "show", ref_path],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+    """Return the blob content at ``ref_path`` (``<commit>:<path>``) as text.
+
+    A missing object is a MISSING INSTRUMENT, not a failing invariant. This module is a
+    permanent member of ``tests/test_layers/``, so it runs in environments the plan that
+    wrote it never saw: a ``--depth 1`` clone, an exported source tarball with no ``.git``
+    at all, or a tree whose history was rewritten past ``PINNED_BASE_COMMIT``. In every one
+    of those the reference arm simply cannot be constructed, and reporting that as an ERROR
+    takes all 17 tests in this module down with a ``CalledProcessError`` that says nothing
+    about ``AreaAttention``. It is skipped with a named reason instead.
+
+    Note what is NOT softened: once the blob loads, every equivalence assertion is hard, and
+    ``test_the_pinned_module_is_not_the_live_module`` still fails loudly if the wrong thing
+    was loaded. The skip covers "no reference obtainable", never "reference disagrees".
+
+    :param ref_path: a ``<commit>:<path>`` revision spec.
+    :return: the blob content as text.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(_repo_root()), "show", ref_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError:  # no `git` executable on PATH
+        pytest.skip(
+            f"the pinned pre-move reference {ref_path!r} is unobtainable: no `git` "
+            "executable on PATH. The relocation equivalence harness needs the base "
+            "commit's blob and has no other source for it."
+        )
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(
+            f"the pinned pre-move reference {ref_path!r} is unobtainable "
+            f"(git exited {exc.returncode}: {(exc.stderr or '').strip()!r}). This is "
+            "expected in a shallow clone, an exported tarball, or after a history "
+            "rewrite past PINNED_BASE_COMMIT -- the reference arm cannot be built, so "
+            "the equivalence claim is UNMEASURED here, not violated."
+        )
+    return completed.stdout
 
 
 @pytest.fixture(scope="module")
@@ -258,6 +290,20 @@ PROBES: Sequence[Probe] = (
     # branch. This is a real branch of the pre-move `call`, and a relocation that "fixed"
     # the fallback would be a behaviour change, not a refactor.
     Probe("area4_fallback_h8_5x7", dim=16, num_heads=8, area=4, height=5, width=7, expects_area_branch=False),
+    # ------------------------------------------------------------------
+    # PRODUCTION head_dim. The five probes above all use dim=16, giving head_dim 16 or 2 --
+    # neither of which any real yolo12 ever builds. Every `AreaAttention` in every scale has
+    # head_dim EXACTLY 32 (measured: n `[(32,1,32),(64,2,32),(128,4,32)]` ... x
+    # `[(192,6,32),(384,12,32),(768,24,32)]`), with `area` 4 at the first A2C2f stage and 1
+    # at the rest. This matters because the step-4 scale substitution
+    # (`common.compute_attention_scale`, a Python `math.sqrt`) is NOT bit-identical to the
+    # pre-move `1/ops.sqrt(cast(d,'float32'))` spelling at every head_dim: they differ by
+    # 1 ulp at head_dim 24, 28 and 96. head_dim 32 is one of the bit-identical ones, but
+    # that is a MEASURED fact about 32, not a property of the substitution, and a grid that
+    # never visits 32 cannot claim it. See verification.md § "Step 9.1 -- W4".
+    # ------------------------------------------------------------------
+    Probe("prod_global_h2_8x8_hd32", dim=64, num_heads=2, area=1, height=8, width=8, expects_area_branch=False),
+    Probe("prod_area4_h2_8x8_hd32", dim=64, num_heads=2, area=4, height=8, width=8, expects_area_branch=True),
 )
 
 MLP_RATIO = 1.2
@@ -472,6 +518,21 @@ class TestTheHarnessIsMeasuringWhatItClaims:
         assert {p.num_heads for p in PROBES} >= {1, 8}
         assert any(p.height != p.width for p in PROBES), "no non-square probe"
         assert len({p.label for p in PROBES}) == len(PROBES)
+
+        # PRODUCTION COVERAGE. Every `AreaAttention` yolo12 actually builds, at every
+        # scale, has head_dim 32 -- and the grid spent its first five points at head_dim
+        # 16 and 2. A grid that never visits the shipped shape can only claim equivalence
+        # for shapes nobody runs, which is the "probe design can manufacture the effect"
+        # trap. Both branches must be reachable AT head_dim 32, because the grouped branch
+        # is what the first A2C2f stage (`area=4`) takes.
+        head_dims = {p.dim // p.num_heads for p in PROBES}
+        assert 32 in head_dims, (
+            f"the probe grid visits head_dims {sorted(head_dims)} but production yolo12 "
+            "builds head_dim 32 everywhere -- add a probe at the shipped shape"
+        )
+        prod = [p for p in PROBES if p.dim // p.num_heads == 32]
+        assert any(p.expects_area_branch for p in prod), "no head_dim-32 probe reaches the area branch"
+        assert any(not p.expects_area_branch for p in prod), "no head_dim-32 probe reaches the global branch"
 
 
 class TestAreaAttentionEquivalence:

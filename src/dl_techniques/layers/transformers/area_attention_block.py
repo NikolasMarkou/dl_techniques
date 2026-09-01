@@ -69,6 +69,16 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-01T055648-e6d380a5/D-017
+# The plain house decorator here is DELIBERATE, and the asymmetry with the sibling
+# `AreaAttention` (which is registered `legacy_alias=False`, see its D-014 anchor) is
+# not an oversight. The step-4 collision that forced that flag cannot fire here: D-006
+# RENAMED this class, so the bare alias it claims is `Custom>AreaAttentionBlock`, a
+# name that has never existed in this repository and that no archive can reference.
+# D-002 forbids PRESERVING the relocated classes' old keys; it does not forbid a new
+# class taking its own new alias. Do NOT "make these consistent" by adding
+# `legacy_alias=False` here -- that would make this one module deviate from all 17
+# siblings in `layers/transformers/` for no measurable benefit. See decisions.md D-017.
 @register_dl_technique("dl_techniques.layers.transformers.area_attention_block")
 class AreaAttentionBlock(keras.layers.Layer):
     """
