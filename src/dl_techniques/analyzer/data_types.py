@@ -21,8 +21,31 @@ class DataInput(NamedTuple):
 
     @classmethod
     def from_object(cls, data: Any) -> 'DataInput':
-        """Create from object with x_test and y_test attributes."""
-        return cls(x_data=data.x_test, y_data=data.y_test)
+        """Create from an object carrying either documented attribute spelling.
+
+        Two spellings are documented and both are accepted. ``x_data``/``y_data``
+        is the spelling promised by ``README.md`` and by
+        ``ModelAnalyzer.analyze``'s docstring, and it takes priority; the
+        ``x_test``/``y_test`` spelling promised by this method's own former
+        docstring is kept as a fallback so existing callers keep working.
+
+        Args:
+            data: Any object exposing ``x_data``/``y_data`` or ``x_test``/``y_test``.
+
+        Returns:
+            DataInput: The extracted inputs and targets.
+
+        Raises:
+            AttributeError: If the object carries neither spelling.
+        """
+        if hasattr(data, 'x_data') and hasattr(data, 'y_data'):
+            return cls(x_data=data.x_data, y_data=data.y_data)
+        if hasattr(data, 'x_test') and hasattr(data, 'y_test'):
+            return cls(x_data=data.x_test, y_data=data.y_test)
+        raise AttributeError(
+            f"{type(data).__name__} exposes neither x_data/y_data nor "
+            f"x_test/y_test; DataInput.from_object accepts either spelling."
+        )
 
 
 @dataclass

@@ -175,3 +175,65 @@ class TestMultiInputWarning:
         assert any("mi_model" in message for message in limited), (
             f"the warning fired but does not name the affected model: {limited}"
         )
+
+
+# ---------------------------------------------------------------------
+# C11 -- DataInput.from_object attribute spellings
+# ---------------------------------------------------------------------
+
+class _ReadmeShapedData:
+    """The spelling the README and ``ModelAnalyzer.analyze``'s docstring promise."""
+
+    def __init__(self, x, y):
+        self.x_data = x
+        self.y_data = y
+
+
+class _DocstringShapedData:
+    """The spelling ``from_object``'s own docstring promised."""
+
+    def __init__(self, x, y):
+        self.x_test = x
+        self.y_test = y
+
+
+class TestDataInputFromObject:
+    """``from_object`` must accept both documented attribute spellings.
+
+    Defect guarded (C11): the body was ``cls(x_data=data.x_test, y_data=data.y_test)``,
+    but ``README.md`` and ``model_analyzer.py``'s ``analyze()`` docstring both promise
+    "any object with x_data/y_data attributes". An object shaped the way the README
+    documents raised ``AttributeError``. Both spellings are documented, so the fix keeps
+    both working rather than editing one of the docs.
+    """
+
+    @pytest.mark.parametrize(
+        "carrier", [_ReadmeShapedData, _DocstringShapedData], ids=["x_data", "x_test"]
+    )
+    def test_both_documented_spellings_resolve(self, carrier):
+        x = np.arange(12, dtype="float32").reshape(4, 3)
+        y = np.arange(4)
+
+        resolved = DataInput.from_object(carrier(x, y))
+
+        np.testing.assert_array_equal(resolved.x_data, x)
+        np.testing.assert_array_equal(resolved.y_data, y)
+
+    def test_x_data_wins_when_an_object_carries_both(self):
+        """``x_data``/``y_data`` is the preferred spelling, so it must take priority."""
+        preferred_x = np.zeros((2, 2), dtype="float32")
+        fallback_x = np.ones((2, 2), dtype="float32")
+
+        carrier = _ReadmeShapedData(preferred_x, np.zeros(2))
+        carrier.x_test = fallback_x
+        carrier.y_test = np.ones(2)
+
+        resolved = DataInput.from_object(carrier)
+        np.testing.assert_array_equal(resolved.x_data, preferred_x)
+
+    def test_an_object_with_neither_spelling_raises_a_named_error(self):
+        class _Empty:
+            pass
+
+        with pytest.raises(AttributeError, match="x_data.*x_test|x_test.*x_data"):
+            DataInput.from_object(_Empty())
