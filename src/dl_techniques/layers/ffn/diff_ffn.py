@@ -332,7 +332,11 @@ class DifferentialFFN(keras.layers.Layer):
 
         # Handle regularizer - use default if None provided
         if kernel_regularizer is None:
-            self.kernel_regularizer = SoftOrthonormalConstraintRegularizer()
+            # All four explicit: the l2 default flipped 1e-4 -> 0.0; 0.0 is now the deliberate pin.
+            # DECISION plan-2026-09-01T201957-15d7a40e/D-002
+            self.kernel_regularizer = SoftOrthonormalConstraintRegularizer(
+                lambda_coefficient=1e-3, l1_coefficient=0.0,
+                l2_coefficient=0.0, use_matrix_scaling=True)
         else:
             self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)

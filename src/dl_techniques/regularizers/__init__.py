@@ -17,6 +17,7 @@ Available Regularizers:
     orthogonality and unit-norm columns.
 -   `SRIPRegularizer`: Enforces near-orthonormality using a spectral norm
     penalty (Spectral Restricted Isometry Property).
+-   `BinaryPressureScheduler` / `TriStatePressureScheduler`: Keras callbacks that anneal the paired regularizer's multiplier during training.
 
 Each regularizer is designed to be easily integrated into existing Keras
 models and is fully serializable.
@@ -24,6 +25,7 @@ models and is fully serializable.
 
 from .binary_preference import (
     BinaryPreferenceRegularizer,
+    BinaryPressureScheduler,
     create_binary_preference_regularizer,
 )
 
@@ -43,7 +45,9 @@ from .srip import (
 )
 
 from .tri_state_preference import (
-    TriStatePreferenceRegularizer
+    TriStatePreferenceRegularizer,
+    TriStatePressureScheduler,
+    create_tri_state_preference_regularizer,
 )
 
 
@@ -56,8 +60,12 @@ __all__ = [
     "SoftOrthogonalConstraintRegularizer",
     "SoftOrthonormalConstraintRegularizer",
     "TriStatePreferenceRegularizer",
+    # Callbacks
+    "BinaryPressureScheduler",
+    "TriStatePressureScheduler",
     # Factory Functions
     "create_binary_preference_regularizer",
     "create_entropy_regularizer",
     "create_srip_regularizer",
+    "create_tri_state_preference_regularizer",
 ]

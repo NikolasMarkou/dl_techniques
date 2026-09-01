@@ -544,5 +544,14 @@ def test_constructor_validation_paths(kwargs, exc, match):
         BinaryPreferenceRegularizer(**kwargs)
 
 
+def test_package_reexports_the_orphaned_binary_scheduler():
+    """`BinaryPressureScheduler` is reachable from the package and is the
+    same object as the submodule's, not a shadowing re-definition."""
+    import dl_techniques.regularizers as R
+    import dl_techniques.regularizers.binary_preference as bp
+
+    assert R.BinaryPressureScheduler is bp.BinaryPressureScheduler
+
+
 if __name__ == '__main__':
     pytest.main([__file__])

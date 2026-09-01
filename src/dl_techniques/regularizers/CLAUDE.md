@@ -12,17 +12,20 @@ from dl_techniques.regularizers import (
     SoftOrthogonalConstraintRegularizer,  # Encourages column orthogonality
     SoftOrthonormalConstraintRegularizer, # Orthogonality + unit norm
     SRIPRegularizer,                      # Spectral Restricted Isometry Property
+    BinaryPressureScheduler,              # Callback: anneals the binary multiplier
+    TriStatePressureScheduler,            # Callback: anneals the tri-state multiplier
     # Factory functions
     create_binary_preference_regularizer,
     create_entropy_regularizer,
     create_srip_regularizer,
+    create_tri_state_preference_regularizer,
 )
 ```
 
 ## Modules
 
-- `binary_preference.py` — Binary weight preference regularizer + factory
-- `tri_state_preference.py` — Ternary weight preference regularizer
+- `binary_preference.py` — Binary weight preference regularizer + factory + pressure scheduler
+- `tri_state_preference.py` — Ternary weight preference regularizer + factory + pressure scheduler
 - `entropy_regularizer.py` — Shannon entropy targeting + factory
 - `soft_orthogonal.py` — Soft orthogonal and orthonormal constraint regularizers
 - `srip.py` — SRIP spectral norm regularizer + factory

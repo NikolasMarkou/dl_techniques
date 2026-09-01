@@ -388,5 +388,42 @@ def test_gradient_computation():
     assert not tf.reduce_any(tf.math.is_nan(gradients))
 
 
+def test_package_reexports_the_orphaned_tri_state_names():
+    """The two names the rewrite added must be reachable from the package.
+
+    Identity, not merely reachability: a shadowing re-definition in
+    `__init__.py` would satisfy `hasattr` while being a different object.
+    """
+    import dl_techniques.regularizers as R
+    import dl_techniques.regularizers.tri_state_preference as ts
+
+    assert R.TriStatePressureScheduler is ts.TriStatePressureScheduler
+    assert (R.create_tri_state_preference_regularizer
+            is ts.create_tri_state_preference_regularizer)
+
+
+def test_package_all_matches_the_module_owned_public_surface():
+    """`__all__` and the namespace agree, and `__all__` is complete.
+
+    Derivation of the expected size, from the per-module census of names whose
+    `__module__` is the module itself (i.e. re-imports excluded):
+        binary_preference     3  (regularizer, scheduler, factory)
+        tri_state_preference  3  (regularizer, scheduler, factory)
+        soft_orthogonal       2  (orthogonal, orthonormal; it has NO factory)
+        entropy_regularizer   2  (regularizer, factory)
+        srip                  2  (regularizer, factory)
+                             --
+                             12
+    `l2_custom` and `sigreg` are deliberately NOT re-exported (pre-existing
+    condition), so they are excluded from the count above.
+    """
+    import dl_techniques.regularizers as R
+
+    assert len(R.__all__) == 12
+    assert len(set(R.__all__)) == 12, "duplicate entry in __all__"
+    missing = [n for n in R.__all__ if not hasattr(R, n)]
+    assert missing == [], f"__all__ promises names the namespace lacks: {missing}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__])

@@ -478,6 +478,24 @@ class TestDifferentialFFN:
             assert not keras.ops.any(keras.ops.isinf(output)), "Inf detected"
 
 
+def test_default_kernel_regularizer_coefficients_are_pinned():
+    """The default regularizer's four coefficients are pinned at the call site.
+
+    DECISION plan-2026-09-01T201957-15d7a40e/D-002: `diff_ffn` was the only
+    consumer that constructed `SoftOrthonormalConstraintRegularizer()` bare, so
+    it silently inherited the `DEFAULT_SOFTORTHOGONAL_L2` `1e-4 -> 0.0` flip.
+    The call site now states all four values; this guard fails if a future
+    library-default change is silently inherited again, in either direction.
+    """
+    layer = DifferentialFFN(hidden_dim=8, output_dim=4)
+    cfg = layer.kernel_regularizer.get_config()
+
+    assert cfg["l2_coefficient"] == 0.0
+    assert cfg["l1_coefficient"] == 0.0
+    assert cfg["lambda_coefficient"] == 1e-3
+    assert cfg["use_matrix_scaling"] is True
+
+
 class TestDifferentialFFNEdgeCases:
     """Test edge cases and boundary conditions for DifferentialFFN."""
 
