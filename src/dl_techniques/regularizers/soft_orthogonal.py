@@ -159,7 +159,6 @@ Usage Guidelines
 
 import math
 import keras
-from keras import ops
 from typing import Dict, Any, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -258,15 +257,15 @@ def _kernel_gram(
     fan_in = int(math.prod(kernel_shape[:-1]))
 
     # (fan_in, units): rows are input directions, columns are output channels
-    w2d = ops.reshape(x, (fan_in, units))
+    w2d = keras.ops.reshape(x, (fan_in, units))
 
     if units <= fan_in:
         # Reachable: `units` orthonormal columns in R^fan_in
-        gram = ops.matmul(ops.transpose(w2d), w2d)
+        gram = keras.ops.matmul(keras.ops.transpose(w2d), w2d)
         return gram, units, True
 
     # units > fan_in. W^T W is rank deficient, so constrain the other side.
-    gram = ops.matmul(w2d, ops.transpose(w2d))
+    gram = keras.ops.matmul(w2d, keras.ops.transpose(w2d))
     return gram, fan_in, False
 
 
@@ -405,7 +404,7 @@ class _SoftOrthogonalBaseRegularizer(keras.regularizers.Regularizer):
         Union[keras.KerasTensor, Any]
             Scalar regularization loss value
         """
-        result = ops.cast(0.0, dtype=x.dtype)
+        result = keras.ops.cast(0.0, dtype=x.dtype)
 
         # rank is needed for the size normalization even when the orthogonality
         # term is disabled, so that toggling lambda_coefficient to zero does not
@@ -415,18 +414,18 @@ class _SoftOrthogonalBaseRegularizer(keras.regularizers.Regularizer):
 
         # Add Frobenius norm term if enabled
         if self._use_lambda:
-            eye = ops.eye(rank, dtype=gram.dtype)
+            eye = keras.ops.eye(rank, dtype=gram.dtype)
             deviation = self._compute_deviation(gram, eye)
-            frob_norm_sq = ops.sum(ops.square(deviation))
-            result = ops.add(result, ops.multiply(self._lambda_coefficient, frob_norm_sq))
+            frob_norm_sq = keras.ops.sum(keras.ops.square(deviation))
+            result = keras.ops.add(result, keras.ops.multiply(self._lambda_coefficient, frob_norm_sq))
 
         # Add L1 regularization if enabled
         if self._use_l1 and self._l1 is not None:
-            result = ops.add(result, self._l1(x))
+            result = keras.ops.add(result, self._l1(x))
 
         # Add L2 regularization if enabled
         if self._use_l2 and self._l2 is not None:
-            result = ops.add(result, self._l2(x))
+            result = keras.ops.add(result, self._l2(x))
 
         # Size normalization, applied to the WHOLE value rather than to the
         # orthogonality term alone. This keeps the relative weighting of the
@@ -435,11 +434,11 @@ class _SoftOrthogonalBaseRegularizer(keras.regularizers.Regularizer):
         # docstring. The maximum() only guards rank == 0, which no real kernel
         # produces.
         if self._use_matrix_scaling:
-            scaling_factor = ops.maximum(
-                ops.cast(math.sqrt(float(rank)), dtype=x.dtype),
-                ops.cast(EPSILON, dtype=x.dtype),
+            scaling_factor = keras.ops.maximum(
+                keras.ops.cast(math.sqrt(float(rank)), dtype=x.dtype),
+                keras.ops.cast(EPSILON, dtype=x.dtype),
             )
-            result = ops.divide(result, scaling_factor)
+            result = keras.ops.divide(result, scaling_factor)
 
         return result
 
@@ -520,8 +519,8 @@ class SoftOrthogonalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
 
     def _compute_deviation(self, gram, eye):
         """Mask the diagonal, leaving only the cross-correlation entries."""
-        off_diagonal_mask = ops.subtract(ops.cast(1.0, dtype=gram.dtype), eye)
-        return ops.multiply(gram, off_diagonal_mask)
+        off_diagonal_mask = keras.ops.subtract(keras.ops.cast(1.0, dtype=gram.dtype), eye)
+        return keras.ops.multiply(gram, off_diagonal_mask)
 
 
 # ---------------------------------------------------------------------
@@ -586,7 +585,7 @@ class SoftOrthonormalConstraintRegularizer(_SoftOrthogonalBaseRegularizer):
 
     def _compute_deviation(self, gram, eye):
         """Compute the deviation from identity: G - I."""
-        return ops.subtract(gram, eye)
+        return keras.ops.subtract(gram, eye)
 
 
 # ---------------------------------------------------------------------

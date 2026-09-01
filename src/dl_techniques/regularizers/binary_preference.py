@@ -79,7 +79,6 @@ binarization has direct prior art:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Union
 
 # ---------------------------------------------------------------------
@@ -313,7 +312,7 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
     def multiplier_value(self) -> float:
         """Current penalty strength as a Python float."""
         if self.annealable:
-            return float(ops.convert_to_numpy(self.multiplier))
+            return float(keras.ops.convert_to_numpy(self.multiplier))
         return float(self.multiplier)
 
     @property
@@ -333,39 +332,39 @@ class BinaryPreferenceRegularizer(keras.regularizers.Regularizer):
         floats right at the minima, which is exactly where the weights end up.
         """
         dtype = weights.dtype
-        low = ops.cast(self.low, dtype)
-        high = ops.cast(self.high, dtype)
+        low = keras.ops.cast(self.low, dtype)
+        high = keras.ops.cast(self.high, dtype)
 
         # Clip before forming the quartic so the core term cannot overflow on
         # out-of-range weights (relevant in fp16). Outside [low, high] the
         # clipped core is identically zero and contributes no gradient; the
         # tail branch below supplies the penalty there instead.
-        w_core = ops.clip(weights, low, high) if self.quadratic_tails else weights
+        w_core = keras.ops.clip(weights, low, high) if self.quadratic_tails else weights
 
-        d_low_core = ops.subtract(w_core, low)
-        d_high_core = ops.subtract(w_core, high)
-        unit_cost = ops.divide(
-            ops.square(ops.multiply(d_low_core, d_high_core)),
-            ops.cast(self._h4, dtype),
+        d_low_core = keras.ops.subtract(w_core, low)
+        d_high_core = keras.ops.subtract(w_core, high)
+        unit_cost = keras.ops.divide(
+            keras.ops.square(keras.ops.multiply(d_low_core, d_high_core)),
+            keras.ops.cast(self._h4, dtype),
         )
 
         if self.quadratic_tails:
             # C2-continuous extension: matches the quartic's value (0), slope
             # (0) and curvature (8m/h^2) at each target, so the well is
             # unchanged and only the far tails are softened.
-            inv_h2 = ops.cast(4.0 / self._h2, dtype)
-            below = ops.multiply(inv_h2, ops.square(ops.subtract(weights, low)))
-            above = ops.multiply(inv_h2, ops.square(ops.subtract(weights, high)))
-            unit_cost = ops.where(
-                ops.less(weights, low),
+            inv_h2 = keras.ops.cast(4.0 / self._h2, dtype)
+            below = keras.ops.multiply(inv_h2, keras.ops.square(keras.ops.subtract(weights, low)))
+            above = keras.ops.multiply(inv_h2, keras.ops.square(keras.ops.subtract(weights, high)))
+            unit_cost = keras.ops.where(
+                keras.ops.less(weights, low),
                 below,
-                ops.where(ops.greater(weights, high), above, unit_cost),
+                keras.ops.where(keras.ops.greater(weights, high), above, unit_cost),
             )
 
         reduced = (
-            ops.sum(unit_cost) if self.reduction == "sum" else ops.mean(unit_cost)
+            keras.ops.sum(unit_cost) if self.reduction == "sum" else keras.ops.mean(unit_cost)
         )
-        return ops.multiply(ops.cast(self.multiplier, dtype), reduced)
+        return keras.ops.multiply(keras.ops.cast(self.multiplier, dtype), reduced)
 
     # -- serialization -----------------------------------------------------
 

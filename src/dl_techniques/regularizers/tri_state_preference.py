@@ -92,7 +92,6 @@ first-principles construction. Its use for ternary weights has direct prior art:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------
@@ -335,7 +334,7 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
     def multiplier_value(self) -> float:
         """Current penalty strength as a Python float."""
         if self.annealable:
-            return float(ops.convert_to_numpy(self.multiplier))
+            return float(keras.ops.convert_to_numpy(self.multiplier))
         return float(self.multiplier)
 
     @property
@@ -368,41 +367,41 @@ class TriStatePreferenceRegularizer(keras.regularizers.Regularizer):
         weights end up.
         """
         dtype = weights.dtype
-        target = ops.cast(self.target, dtype)
+        target = keras.ops.cast(self.target, dtype)
 
         # Clip before forming the sextic so the core cannot overflow on
         # out-of-range weights (fp16 overflows around |w| > 4.6 t). Outside
         # [-t, t] the clipped core is identically zero and contributes no
         # gradient; the tail branch supplies the penalty there instead.
-        w_core = ops.clip(weights, -target, target) if self.quadratic_tails else weights
+        w_core = keras.ops.clip(weights, -target, target) if self.quadratic_tails else weights
 
         # (w^2 - t^2) collects the (w-t)(w+t) pair; squaring the product of
         # that with w gives w^2 (w-t)^2 (w+t)^2 in three multiplies.
-        w_sq = ops.square(w_core)
-        gap = ops.subtract(w_sq, ops.cast(self._t2, dtype))
-        unit_cost = ops.divide(
-            ops.multiply(
-                ops.cast(BARRIER_NORMALIZATION, dtype),
-                ops.multiply(w_sq, ops.square(gap)),
+        w_sq = keras.ops.square(w_core)
+        gap = keras.ops.subtract(w_sq, keras.ops.cast(self._t2, dtype))
+        unit_cost = keras.ops.divide(
+            keras.ops.multiply(
+                keras.ops.cast(BARRIER_NORMALIZATION, dtype),
+                keras.ops.multiply(w_sq, keras.ops.square(gap)),
             ),
-            ops.cast(self._t6, dtype),
+            keras.ops.cast(self._t6, dtype),
         )
 
         if self.quadratic_tails:
             # C2-continuous extension: matches the sextic's value (0), slope (0)
             # and curvature (54 m / t^2) at +/- t, so the wells are untouched
             # and only the far tails are softened.
-            overshoot = ops.subtract(ops.abs(weights), target)
-            tail_cost = ops.multiply(
-                ops.cast(TAIL_COEFFICIENT / self._t2, dtype),
-                ops.square(overshoot),
+            overshoot = keras.ops.subtract(keras.ops.abs(weights), target)
+            tail_cost = keras.ops.multiply(
+                keras.ops.cast(TAIL_COEFFICIENT / self._t2, dtype),
+                keras.ops.square(overshoot),
             )
-            unit_cost = ops.where(ops.greater(overshoot, 0.0), tail_cost, unit_cost)
+            unit_cost = keras.ops.where(keras.ops.greater(overshoot, 0.0), tail_cost, unit_cost)
 
         reduced = (
-            ops.sum(unit_cost) if self.reduction == "sum" else ops.mean(unit_cost)
+            keras.ops.sum(unit_cost) if self.reduction == "sum" else keras.ops.mean(unit_cost)
         )
-        return ops.multiply(ops.cast(self.multiplier, dtype), reduced)
+        return keras.ops.multiply(keras.ops.cast(self.multiplier, dtype), reduced)
 
     # -- serialization -----------------------------------------------------
 
