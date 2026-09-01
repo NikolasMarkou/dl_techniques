@@ -319,7 +319,7 @@ To visualize the learned hierarchy, project the output embeddings to the Poincar
 ## 10. Performance Optimization
 
 ### Sparse Tensor Support
-`SHGCNLayer` aggregates with a plain `keras.ops.matmul(adj, h_tangent)` (see the `DECISION plan_2026-06-16_fa3ffc26/D-001` anchor in `layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py`), so a **dense** `[N, N]` (or batched `[B, N, N]`) adjacency is the supported, backend-portable form. It is not an error, and this README instructed the opposite until 2026-08-19.
+`SHGCNLayer` aggregates with a plain `keras.ops.matmul(adj, h_tangent)` (see the decision anchor at that call site in `layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py`), so a **dense** `[N, N]` (or batched `[B, N, N]`) adjacency is the supported, backend-portable form.
 
 A `tf.sparse.SparseTensor` adjacency also works — Keras 3's TensorFlow backend dispatches a sparse operand of `ops.matmul` to `tf.sparse.sparse_dense_matmul` — and it is the right choice when the dense $N^2$ matrix does not fit in memory. Two caveats, both measured: it is **TensorFlow-backend only** (JAX and Torch have no such dispatch, so it contradicts the backend-agnostic claim in section 1), and it is an optimization, not a requirement.
 

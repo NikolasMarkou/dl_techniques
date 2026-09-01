@@ -233,11 +233,9 @@ name RelBench *dataset*-size categories, not model sizes.
 | **`base`** | official defaults | 512 | 4 | 4096 | 1024 | 1 | 8,964,610 | Reproducing the published setup |
 | **`repo_medium`** | repo-original | 256 | 8 | 64 | 512 | 4 | 5,744,642 | Deeper, narrower alternative |
 
-Parameter counts are MEASURED on a `(2, 16, 8)` subgraph batch with `output_dim=2`.
+Parameter counts are measured on a `(2, 16, 8)` subgraph batch with `output_dim=2`.
 `base`'s `ffn_dim` is NOT quoted -- the official argparse defines no FFN width, so
-1024 keeps this table's own 2x-embedding ratio. `repo_medium` was called `large`
-until 2026-08-23; once `base` carried the published 512 channels, a 256-wide row
-could no longer honestly be called "large".
+1024 keeps this table's own 2x-embedding ratio.
 
 ---
 

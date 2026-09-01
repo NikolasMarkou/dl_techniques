@@ -24,10 +24,10 @@ Reference checkpoint: `results/convunext_denoiser_base_20260707_122133/` (ConvUN
 DIV2K-validation (256px patches, 100 images): 40.7 dB @ σ255=5, 35.5 @ σ255=15, 33.3 @
 σ255=25, 30.3 @ σ255=50, 29.1 @ σ255=65 — a single blind model across the whole range.
 
-> **That directory is NOT present in this checkout** (2026-08-10), although it is still
-> the built-in default in `main.py` and `streamlit_app.py` and the path used in the
-> examples below — pass `--model` / `BFDENOISER_MODEL` explicitly. The PSNR row above is
-> kept as the provenance of those numbers, not as a claim about an artifact you can open.
+> **That directory is NOT present in this checkout**, although it is still the built-in
+> default in `main.py` and `streamlit_app.py` and the path used in the examples below —
+> pass `--model` / `BFDENOISER_MODEL` explicitly. The PSNR row above is kept as the
+> provenance of those numbers, not as a claim about an artifact you can open.
 > The app's integration suite runs against `results/20260808_convunext_denoiser/`
 > (ConvUNext v1 base, `data_range="[0,1]"`), which does exist here; two of its
 > annealed-ascent gates currently `xfail` on it (see
@@ -93,19 +93,16 @@ op = MRIUndersamplingOperator((256, 256, 3), acceleration=8)   # Cartesian k-spa
 recon, info = DDNMSolver(prior, steps=100).solve(op, measurements=op.measure(target))
 ```
 
-> ### 🔴 PENDING RE-VALIDATION — these numbers predate the `[0,1]` migration
+> ### Provenance of the table below — a legacy `[-0.5,+0.5]` checkpoint
 >
-> The table below was measured on the **legacy `[-0.5,+0.5]`** checkpoint
-> (`convunext_denoiser_base_20260710_220452`, sha256 `06a44282…`) **before** the pixel-domain
-> migration landed. It is internally consistent (every arm ran end-to-end on a matching domain), but
-> it is **NOT reproducible on current `main`** — `from_pretrained` now refuses that checkpoint via the
-> provenance gate, correctly, because a bias-free net cannot subtract a DC offset and would silently
-> emit plausible-but-wrong output.
->
-> **TODO: re-run once a `[0,1]` checkpoint exists.** `ddnm.py` and `MRIUndersamplingOperator` are
-> domain-agnostic (they take `c0` from the operator and `sigma_start` is a noise *scale*, which is
-> migration-invariant since peak-to-peak width is 1.0 in both domains), so this is a **re-run, not a
-> rewrite**. Harness: `analyses/analysis_2026-07-12_103e465c/` + the scratch script referenced there.
+> These numbers were measured on the legacy `[-0.5,+0.5]` checkpoint
+> (`convunext_denoiser_base_20260710_220452`). They are internally consistent — every arm ran
+> end-to-end on a matching domain — but they are **not reproducible as they stand**:
+> `from_pretrained` refuses that checkpoint via the provenance gate, correctly, because a
+> bias-free net cannot subtract a DC offset and would silently emit plausible-but-wrong output.
+> `ddnm.py` and `MRIUndersamplingOperator` are domain-agnostic (they take `c0` from the operator,
+> and `sigma_start` is a noise *scale*, which is migration-invariant since peak-to-peak width is
+> 1.0 in both domains), so a `[0, 1]` checkpoint reproduces them by re-running, not by rewriting.
 
 Accelerated-MRI k-space undersampling, 6 X-ray angiography (ARCADE) + 6 DIV2K images, 256px:
 
@@ -326,8 +323,6 @@ annealed-Langevin **thermostat** and is load-bearing (a `beta` sweep shows remov
 monotonically, paper setting optimal). Three independent interventions on all three of `sigma_t`'s
 roles yield ≤ ±0.2 dB. See `solver.py`'s module docstring.
 
-**The real structural upgrade is to replace the solver family** — see below.
-
 The `denoise` task takes a single forward pass through the denoiser (no operator, no
 solver). Its `--noise-sigma` flag (default `0.1`) synthesizes in-domain Gaussian test
 noise that is added to the target — and lightly clipped back to `[0, 1]` — before
@@ -350,10 +345,9 @@ tasks; a much shorter budget (e.g. `--iterations 40-200`) stops the ascent well 
 to convergence, so `500` is a sensible default — raise it for the hardest low-measurement
 regimes, or lower it for a fast preview.
 
-Two independent knobs previously starved this loop and are now surfaced with better
-defaults (see the Solver-regime flags above): the `--h-max` step-size cap and the
-`--patience` early stop. If you want the old fast-but-coarse behaviour back, pass
-`--h-max 0.1 --iterations 200`.
+Two knobs can starve the loop and are surfaced with generous defaults (see the
+Solver-regime flags above): the `--h-max` step-size cap and the `--patience` early stop.
+For fast-but-coarse behaviour, pass `--h-max 0.1 --iterations 200`.
 
 For a further quality bump at extra runtime, add `--num-samples 4` (Ours-avg) and/or
 `--final-projection` (see Optional quality levers).

@@ -86,12 +86,12 @@ from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
   classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.factory")`
   (from `dl_techniques.utils.keras_registration`), so
   `keras.saving.get_registered_name(EnhancementHead)` is
-  `dl_techniques.layers.heads.vision.factory>EnhancementHead` (verified 2026-08-29). The
+  `dl_techniques.layers.heads.vision.factory>EnhancementHead`. The
   helper additionally binds the legacy `Custom>ClassName` as an alias to the same object —
   and that alias is keyed on the **bare class name**, which is why the names must stay
   verbatim and why a `git mv` costs nothing. See `CLAUDE.md` in this directory.
 - **NLP pooling reuse.** `BaseNLPHead` delegates `cls`/`mean`/`max` pooling to
   the shared `SequencePooling` layer; the learnable `attention` pooling stays
-  inline (a distinct mechanism + weight set). See `CLAUDE.md` (D-002).
+  inline (a distinct mechanism + weight set). See `CLAUDE.md`.
 - **`VisionTaskType` / `TaskType` alias.** Vision's task enum was renamed to
   `VisionTaskType`; a `TaskType` alias is retained for back-compat.

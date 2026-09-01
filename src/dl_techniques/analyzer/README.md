@@ -117,7 +117,7 @@ Written into `output_dir`:
 
 ### Information flow (`results.information_flow`, per layer)
 
-> **Broken as of 2026-09-01.** `information_flow_analyzer.py` captures activations with
+> **Broken.** `information_flow_analyzer.py` captures activations with
 > `layer.register_forward_hook(...)`, which is a PyTorch API — `keras.layers.Layer` has no such
 > method. Every model raises `AttributeError`, the analyzer catches and logs it, and
 > `results.information_flow` comes back empty with no

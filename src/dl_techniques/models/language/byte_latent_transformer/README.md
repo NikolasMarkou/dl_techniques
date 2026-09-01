@@ -12,9 +12,7 @@ This implementation leverages `dl_techniques` factories to provide modern stabil
 
 > ### Implementation status — patching IS entropy-based; read this for how it differs
 >
-> Verified against `layers/blt_blocks.py` at `DynamicPatcher.call` on 2026-08-15. An
-> earlier revision of this README said patching was not entropy-based; that was true of
-> the code as it stood on 2026-08-14 and is no longer true.
+> The patcher lives in `layers/blt_blocks.py` at `DynamicPatcher.call`.
 >
 > - **Boundaries come from the entropy values.** A byte opens a new patch when its
 >   entropy exceeds `entropy_threshold`, and every row of the batch is segmented
@@ -322,7 +320,7 @@ print(f"Patch Lengths: {patch_lengths[0].numpy()}")
 
 ## 9. Advanced Usage Patterns
 
-> **Accuracy warning (measured 2026-08-24).** The nested configuration keys used
+> **Accuracy warning.** The nested configuration keys used
 > in the examples below and in § 5 / § 6.1 — `global_transformer_args`,
 > `moe_config`, `global_attention_config`, `global_norm_type` — are **not**
 > accepted by `ByteLatentTransformer.__init__`, which takes flat scalar
@@ -332,9 +330,7 @@ print(f"Patch Lengths: {patch_lengths[0].numpy()}")
 > `cross_attention_queries`, `dropout_rate`, `patch_pooling_method`,
 > `entropy_model`). Passing any of them raises
 > `ValueError: Unrecognized keyword arguments passed to ByteLatentTransformer`.
-> Only the flat-parameter forms in this document are executable. This is
-> pre-existing documentation rot, recorded here rather than silently deleted;
-> repairing the examples is not in scope of the path repair that found it.
+> Only the flat-parameter forms in this document are executable.
 
 ### Pattern 1: Using Mixture of Experts (MoE)
 
@@ -399,7 +395,7 @@ keras.mixed_precision.set_global_policy('mixed_float16')
 
 ## 12. Serialization & Deployment
 
-BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.byte_latent_transformer.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. Pre-2026-08-29 archives still load through the legacy `Custom>ClassName` alias the helper also binds.
+BLT models are registered through `register_dl_technique` (`dl_techniques.utils.keras_registration`): `ByteLatentTransformer` resolves to `dl_techniques.models.byte_latent_transformer.model>ByteLatentTransformer`. Sub-layers pulled in from `dl_techniques/layers/` register under their own defining modules. The helper also binds a legacy `Custom>ClassName` alias, so older archives still load.
 
 ```python
 # Save complete model including config

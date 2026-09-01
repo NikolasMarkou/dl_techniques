@@ -21,8 +21,8 @@ Both classes are registered with `@register_dl_technique(...)` from
 `from_config()`. The keys are `dl_techniques.models.ntm.model>NTMModel` and
 `dl_techniques.models.ntm.model_multitask>NTMMultiTask` — the defining module's dotted
 path, with `models/`'s family directory (`neural_computer`) stripped, since a family there
-is a filing decision rather than a namespace. Archives written before 2026-08-29 still load
-through the legacy `Custom>ClassName` alias the helper also binds.
+is a filing decision rather than a namespace. The helper also binds a legacy
+`Custom>ClassName` alias, so older archives still load.
 
 ## Import form
 
@@ -100,9 +100,7 @@ Any `NTMConfig` field passed as a keyword to `create_ntm_variant` /
 
 ## Usage
 
-The snippet below was executed as written
-(`CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg`); the commented shapes are its real
-output.
+The commented shapes are the snippet's real output.
 
 ```python
 import numpy as np
@@ -137,15 +135,13 @@ print(multitask([sequence, task_one_hot]).shape)   # (2, 10, 8)
 `NTMMultiTask.call` requires a two-element list `[sequence, task_id]` and raises
 `ValueError` otherwise; `build` likewise requires a list of two shapes.
 
-## Addressing behaviour changed (read this if you hold an old checkpoint)
+## Addressing direction (read this if you hold an old checkpoint)
 
 The location-addressing circular convolution in
-`layers/memory/ntm_interface.py::circular_convolution` was shifting in the
-mirrored direction relative to Graves eq. 8
-(`w~(i) = sum_j w(j) * s(i - j mod N)`). It now shifts as the paper specifies:
-with all shift mass on offset `+1`, a delta weighting at slot 0 moves to slot 1.
-Weights trained before that fix learned around the old direction, so a pre-fix
-checkpoint will not reproduce its old behaviour under the current code.
+`layers/memory/ntm_interface.py::circular_convolution` shifts as Graves eq. 8
+specifies (`w~(i) = sum_j w(j) * s(i - j mod N)`): with all shift mass on offset
+`+1`, a delta weighting at slot 0 moves to slot 1. It once shifted in the mirrored
+direction, so a checkpoint trained under that behaviour will not reproduce it here.
 
 ## Math and layer internals
 

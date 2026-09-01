@@ -3,7 +3,6 @@
 [![Keras 3](https://img.shields.io/badge/Keras-3.x-red.svg)](https://keras.io/)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![Scikit-learn](https://img.shields.io/badge/scikit--learn-compatible-blue)](https://scikit-learn.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 A Keras 3 implementation of **MothNet**, a computational model of the insect olfactory network designed to excel at machine learning tasks with **limited training data**. Its primary function is to serve as a powerful, automatic feature generator that can be prepended to any standard ML classifier, creating a hybrid "insect cyborg" model with significantly enhanced performance.
 
@@ -239,11 +238,9 @@ print(f"\n✅ Cyborg SVM Accuracy: {accuracy:.4f}")
 > forward pass, and that is the supported contract: the method builds against the
 > feature count of the `x` it is given if the model is not built yet, and is a
 > no-op on an already-built model (so it never discards learned Hebbian weights).
-> Until 2026-08-18 it did not, and every one of those snippets — including the
-> "CRITICAL TEST" in § 11 — raised `TypeError: 'NoneType' object is not callable`
-> on the first mini-batch, because `__init__` leaves the three sublayers `None`
-> and only `build()` creates them. Labels straight from
-> `keras.utils.to_categorical` (float64) are also cast for you.
+> This matters because `__init__` leaves the three sublayers `None` and only
+> `build()` creates them. Labels straight from `keras.utils.to_categorical`
+> (float64) are also cast for you.
 
 ---
 

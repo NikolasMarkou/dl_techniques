@@ -82,7 +82,7 @@ Files:
 
 ## Public Surface
 
-All 26 names below are importable directly from `dl_techniques.layers.memory`,
+All 25 names below are importable directly from `dl_techniques.layers.memory`,
 and are exactly the contents of its `__all__`.
 
 | Name | Kind | Module | Family |
@@ -99,8 +99,7 @@ and are exactly the contents of its `__all__`.
 
 ## Usage
 
-Every example below was run against this package on 2026-08-30. The shapes in
-the comments are measured, not assumed.
+The shapes in the comments are measured, not assumed.
 
 ### NTM (factory)
 

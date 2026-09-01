@@ -67,7 +67,7 @@ hazard for the same reason (a same-padded depthwise convolution), but shows it
 at initialization rather than hiding it, because its LayerScale starts at 1.0.
 
 > **The V2 arm is gone, and this hazard is why.** `ascii_convnext_v2_bert` was
-> withdrawn from the study on 2026-08-30. GRN reduces over the sequence axis, so
+> withdrawn from the study. GRN reduces over the sequence axis, so
 > pad **length** entered every real position -- but only once training moved
 > biases off zero, because GRN's score is an L2 sum and exact zeros contribute
 > nothing. Measured pad-8 vs pad-12: `convnext` 0.000e+00 both at init and with
@@ -83,10 +83,10 @@ two come apart. Each addition buys one comparison that the previous set could
 not make.
 
 A fourth arm, `ascii_convnext_v2_bert`, was added to isolate channel competition
-(it differed from the V1 arm by *exactly* Global Response Normalization) and
-**withdrawn on 2026-08-30**: GRN turned out to mix tokens globally, so the arm
-did not differ from V1 only in channel competition, and the convolutional arms
-no longer shared a fixed span. See caveat 2.
+(it differed from the V1 arm by *exactly* Global Response Normalization) and then
+**withdrawn**: GRN turned out to mix tokens globally, so the arm did not differ
+from V1 only in channel competition, and the convolutional arms no longer shared
+a fixed span. See caveat 2.
 
 **2. Token mixing in both convolutional arms is local — and must stay so.** The geometric product rolls
 along the *channel* axis, so all cross-token mixing comes from the two depthwise
@@ -102,8 +102,8 @@ span is `2 * convnext - 1`. At the Clifford layer's default `K=3` a 4-block
 stack sees **17 characters**. Both arms therefore default to `K=7`, and both
 warn when the span is shorter than `max_position_embeddings`.
 
-> **Why there is no V2 arm.** `ascii_convnext_v2_bert` was withdrawn on
-> 2026-08-30 because these formulas did not bound it. The same GRN that made it
+> **Why there is no V2 arm.** `ascii_convnext_v2_bert` was withdrawn because
+> these formulas did not bound it. The same GRN that made it
 > pad-length-sensitive under caveat 1 also mixes *tokens*: reducing over the
 > sequence axis makes every position a function of every other, so the arm had
 > no finite receptive field. Measured on trained encoders, perturbing position 0
@@ -142,22 +142,18 @@ opposite directions. Any comparison across these arms must state which setting i
 used. The numbers are in
 [`RESULTS.md`](../../../train/embeddings_experimental/RESULTS.md).
 
-**4. The blocks are equally regularized only since 2026-08-30.** Until then
-`CliffordEncoderBlock` had no dropout at all — `build_clifford_block` declared no
-such parameter and `CliffordNetBlock` has none of its own — while the ConvNeXt
-blocks carried `dropout_rate` and `TransformerLayer` carried two dropout sites.
-The fix lives in this package's wrapper rather than in `CliffordNetBlock`, which
-is shared with other packages: dropout is applied to the update before the
+**4. The blocks are equally regularized, and two of the mechanisms live here.**
+`CliffordNetBlock` carries no dropout of its own and `build_clifford_block`
+declares no such parameter, so `CliffordEncoderBlock` applies dropout in this
+package's wrapper rather than in the shared block: to the update before the
 external residual add, the same position the ConvNeXt blocks use, so parameter
-counts are unchanged.
-
-Repairing it exposed a second asymmetry: `AsciiBert.attention_probs_dropout_rate`
-was hard-defaulted to 0.1 and ignored `hidden_dropout_rate`, so the study's
-dropout knob only partly controlled that arm. It now follows `hidden_dropout_rate`
-unless passed explicitly. Both are pinned by
+counts are unchanged. Second, `AsciiBert.attention_probs_dropout_rate` follows
+`hidden_dropout_rate` unless passed explicitly, rather than being hard-defaulted
+to 0.1 — otherwise the study's dropout knob would only partly control that arm.
+Both are pinned by
 `tests/test_models/test_embeddings_shared/test_every_arm_is_equally_regularized.py`.
-**Every run reported in `RESULTS.md` predates this**, so a clifford cell trained
-after the fix is not comparable to one trained before it.
+**The runs reported in `RESULTS.md` predate both**, so a clifford cell trained now
+is not comparable to one from those runs.
 
 ## Usage
 

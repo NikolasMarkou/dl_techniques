@@ -1,7 +1,5 @@
 # NAM — Neural Arithmetic Module
 
-This package had **no README** until 2026-08-18.
-
 ## What it is
 
 A model for *evaluating* arithmetic expressions, assembled from three architectures
@@ -16,7 +14,7 @@ already in this tree:
 
 ## Scope: single-operator, integer-only
 
-MEASURED 2026-08-19 and pinned by
+Pinned by
 `tests/test_models/test_nam/test_operand_derivation_through_call.py`. The two operands
 are assembled **exclusively** from the raw `input_ids`, split at
 `argmax(reduction_weights)`, and `NAM.call` re-reads `batch["input_ids"]` unchanged on
@@ -64,8 +62,7 @@ carry, out = model(carry, batch, training=False)   # one reduction step
 ```
 
 `carry` keys: `cell_carry`, `halted`, `steps`.
-`outputs` keys, measured 2026-08-18 at `variant="tiny"`, batch 1
-(184,334 parameters):
+`outputs` keys at `variant="tiny"`, batch 1 (184,334 parameters):
 
 | key | shape | meaning |
 |:---|:---|:---|
@@ -93,29 +90,20 @@ tok.decode(_)             # '1 + 2 * 3'
 dict**: `tiny`, `small`, `base`. They scale `hidden_size`, `num_heads`,
 `num_tree_layers`, `intermediate_size`, `memory_size`, `max_expression_len` and
 `halt_max_steps` together. They do **not** scale the head counts: all three
-variants pin `num_read_heads=2` (left/right operand), which the previous
-wording claimed otherwise, and `num_write_heads` no longer exists at all (see
-below).
+variants pin `num_read_heads=2` (left/right operand), and there is no
+`num_write_heads` field (see below).
 
 `create_nam(variant="base", **overrides)` applies individual `NAMConfig` field
 overrides on top of a variant and raises `ValueError` for an unknown variant or a
 config that fails `NAMConfig` validation.
 
-## Two knobs that used to do nothing, and are now gone
+## Two config fields that do not exist
 
-`NAMConfig.shift_range` was documented, validated and serialized while configuring
-nothing: `cell.py` builds every NTM read and write head with
-`AddressingMode.CONTENT`, under which `layers/memory/baseline_ntm.py::NTMReadHead`
-creates no circular-shift projection at all. The field was **removed on 2026-08-18**;
-`NAMConfig.from_dict` ignores it, so a config dict serialized before then still
-loads. Do not restore it — `cell.py:254` says so at the site. See `config.py`'s
-class docstring.
-
-`NAMConfig.num_write_heads` was the same defect one field away, and the audit that
-removed `shift_range` missed it. `cell.py` constructs exactly one `NTMWriteHead` as
-a single attribute — not a comprehension over a count, unlike `num_read_heads`
-directly above it — so the field was a default, three identical variant entries
-(all `1`) and a `to_dict()` key that no code read. Removed on **2026-08-19**;
-`NAMConfig.from_dict` ignores it, so a config dict serialized before then still
-loads with byte-identical behaviour, because the value never reached anything.
-`num_read_heads` is live and unaffected.
+`NAMConfig` has no `shift_range` and no `num_write_heads`. Both configured nothing:
+`cell.py` builds every NTM read and write head with `AddressingMode.CONTENT`, under
+which `layers/memory/baseline_ntm.py::NTMReadHead` creates no circular-shift
+projection at all, and it constructs exactly one `NTMWriteHead` as a single
+attribute rather than a comprehension over a count. `NAMConfig.from_dict` ignores
+both keys, so an older config dict still loads with byte-identical behaviour. Do not
+restore them — `cell.py:254` says so at the site, and `config.py`'s class docstring
+records the reasoning. `num_read_heads` is live and unaffected.

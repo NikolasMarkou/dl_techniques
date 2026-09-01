@@ -1,8 +1,5 @@
 # FFTNet — an adaptive spectral-filtering vision encoder
 
-Until 2026-08-18 this file contained a single bare URL
-(`https://github.com/jacobfa/fft/blob/main/spectre.py`, the reference
-implementation this port was read against — kept below under *References*).
 `model.py`'s module docstring is the long-form reference; this README is the
 orientation layer.
 
@@ -38,10 +35,10 @@ untouched.
 1.  **Fixed token count.** `W_base` has shape `(seq_len, embed_dim)` — a gain per
     frequency bin per feature — so a model is tied to the token count it was built
     for, i.e. a fixed image resolution. Attention is not.
-2.  **The FFT axis is load-bearing and was wrong once.** `tf.signal.fft` transforms
-    the INNERMOST axis; the token state is `(B, N, D)`, so a direct call transformed
-    the FEATURE axis and the layer performed no token mixing at all. The sequence
-    axis is transposed to the end for the transform and back afterwards.
+2.  **The FFT axis is load-bearing.** `tf.signal.fft` transforms the INNERMOST
+    axis; the token state is `(B, N, D)`, so a direct call would transform the
+    FEATURE axis and the layer would perform no token mixing at all. The sequence
+    axis is therefore transposed to the end for the transform and back afterwards.
 3.  **Accepted raw-TF exception.** `FFTMixer.call` uses `tf.signal.fft` /
     `tf.signal.ifft` on a complex64 tensor. This cannot migrate to `keras.ops`,
     which exposes only a real/imag-tuple `fft` and **no** `ifft`, so a
@@ -61,8 +58,8 @@ type on a flag:
 | `cls_token` | `(B, embed_dim)` |
 | `patch_features` | `(B, num_patches, embed_dim)` |
 
-Measured 2026-08-18 for `create_fftnet("tiny", image_size=32, patch_size=16)`
-(4 patches + CLS, `embed_dim=384`): `(2, 5, 384)` / `(2, 384)` / `(2, 4, 384)`,
+For `create_fftnet("tiny", image_size=32, patch_size=16)` (4 patches + CLS,
+`embed_dim=384`) these are `(2, 5, 384)` / `(2, 384)` / `(2, 4, 384)`, at
 5,336,832 parameters.
 
 Heads are attached externally, via `create_fftnet_with_head` or
