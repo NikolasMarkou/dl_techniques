@@ -109,8 +109,8 @@ wholesale.** Docstrings carry mathematical formulations where relevant.
 
 | Package | Convention | Measured 2026-08-28 (re-run of the block below) |
 |---|---|---|
-| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 262 of 297 modules carry `:param ` (re-measured 2026-08-31; commit `95ec63218` deleted three top-level modules that all carried `:param `, hence -3 of the numerator and -2 of the denominator; then `layers/grid_sample.py` was merged into `layers/spatial_layer.py` and deleted, and because it carried **0** `:param ` lines only the DENOMINATOR moved, 298 -> 297. Check both terms, never the ratio.) |
-| `layers/attention/` | Sphinx/reST, **mandatory** | 34 of 35 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar |
+| `layers/` | **Sphinx/reST** (`:param:` / `:type:` / `:raises:`) | 264 of 299 modules carry `:param ` (re-measured 2026-09-01: `plan-2026-09-01-e6d380a5` added `layers/attention/area_attention.py` and `layers/transformers/area_attention_block.py`, both Sphinx, so BOTH terms moved +2; re-derive with `grep -rl ":param " src/dl_techniques/layers --include=*.py | wc -l` over `find src/dl_techniques/layers -name '*.py' | wc -l`. Earlier, 2026-08-31: commit `95ec63218` deleted three top-level modules that all carried `:param `, hence -3 of the numerator and -2 of the denominator; then `layers/grid_sample.py` was merged into `layers/spatial_layer.py` and deleted, and because it carried **0** `:param ` lines only the DENOMINATOR moved, 298 -> 297. Check both terms, never the ratio.) |
+| `layers/attention/` | Sphinx/reST, **mandatory** | 35 of 36 (the exception is the package `__init__.py`); `channel_attention.py` is the exemplar. Re-measured 2026-09-01 — `area_attention.py` moved both terms +1 |
 | `models/` | **NO package-wide style — measurably MIXED** | 80 Google-only, 87 Sphinx-only, 8 both, 112 neither, over 287 `.py` files |
 | `losses/` | Google (`Args:`) majority | 32 of 44 carry `Args:`, 10 carry `:param `, 1 both |
 | `metrics/` | Google majority | 12 of 15 / 2 |
@@ -222,6 +222,26 @@ EXACTLY: `layers/attention/` 34 of 35, `models/` 275 files with 88 anchored-`Arg
 12 of 15 / 2, `utils/` 22 of 41 / 11 / 3 both, `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0,
 `visualization/` 6 of 7 / 0, `bert.py` 0 / 81, `gpt2.py` 0 / 27, `wave_field/model.py` 31 `:param `
 with the stray `Args:` still at `:273`, and the unanchored-grep trap still returning 89 against 88.
+
+Re-derived a **sixth** time on **2026-09-01** by `plan-2026-09-01-e6d380a5/iter-1/step-8`, again by
+re-running the WHOLE of `REPO_MAP.md`'s Numbers table (all 77 enforceable rows, executed by
+`tests/test_repo_map_numbers.py`) plus every command printed in this section. Two rows of the table
+above moved and are repaired: `layers/` **262 of 297 -> 264 of 299** and `layers/attention/`
+**34 of 35 -> 35 of 36**. Both movers are that plan's own two new files
+(`layers/attention/area_attention.py`, `layers/transformers/area_attention_block.py`), each
+Sphinx-documented, so in `layers/` **both terms moved +2 together** — the ratio again looks
+unchanged and again is not. The `models/` code block reproduces EXACTLY (287 files, 88
+anchored-`Args:`, 95 `:param `, 8 both -> 80 Google-only, 87 Sphinx-only, 112 neither), as does the
+unanchored-grep trap (**89** against 88), `optimization/` 9 of 14 / 2, `analyzer/` 10 of 24 / 0 and
+`visualization/` 6 of 7 / 0.
+
+**Four figures in the table above are stale and are deliberately NOT repaired here**, because none
+of them is moved by this plan and absorbing another plan's debt would make the diff lie about what
+changed: `losses/` (tabulated 32 of 44 / 10 / 1 both; re-derives **33 of 45 / 11**), `metrics/`
+(12 of 15 / 2; re-derives **13 of 16 / 2**), `utils/` (22 of 41 / 11 / 3 both; re-derives **17 of
+32 / 12**, moved by `plan-2026-09-01-a13e4ca3` deleting ten unconsumed `utils/` modules), and the
+`test_the_*` count in § Testing (**65**, dated 2026-08-25; its own command now returns **122**).
+They are named so the next reader does not re-diagnose them.
 
 ### Factory Pattern
 

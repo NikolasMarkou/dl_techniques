@@ -2031,9 +2031,12 @@ def _memo_default_roots(fn):
 #: key ``Custom><ClassName>``, which is MODULE-INDEPENDENT -- measured on Keras
 #: 3.8.0, see decisions.md D-002 -- so the namespace those classes compete in is
 #: flat and repo-global. Both narrower scopings are structurally blind to the
-#: family this guard exists for: each of the four duplicate class-NAME near
-#: misses in the tree (``ConvBlock``, ``MLPBlock``, ``Downsample``, ``Upsample``)
-#: has at least one leg outside ``models/``, and 20+ classes under ``src/train/``
+#: family this guard exists for: each of the three duplicate class-NAME near
+#: misses in the tree (``MLPBlock``, ``Downsample``, ``Upsample``) has at least
+#: one leg outside ``models/`` -- a fourth, ``ConvBlock``, was one until
+#: 2026-09-01, when ``plan-2026-09-01-e6d380a5`` deleted the
+#: ``layers/yolo12_blocks`` twin and left ``layers/standard_blocks`` the sole
+#: definition -- and 20+ classes under ``src/train/``
 #: register into the same flat namespace as the library's.
 _REGISTRY_KEY_ROOTS = (
     REPO_ROOT / "src" / "dl_techniques",

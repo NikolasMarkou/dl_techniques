@@ -11,7 +11,7 @@ in § Naming traps below.
 
 | Subpackage | F | Contents |
 |---|:-:|---|
-| `attention/` | ✅ | Multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, anchor, channel, spatial, CBAM, progressive focused, wave field, window, mobile MQA, non-local, RPC, shared-weights cross, single-window, tripse, gated, linear (Miyasawa-compliant O(N)), lighthouse, energy, FNet Fourier transform |
+| `attention/` | ✅ | Multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, anchor, channel, spatial, CBAM, progressive focused, wave field, window, mobile MQA, non-local, RPC, shared-weights cross, single-window, tripse, gated, linear (Miyasawa-compliant O(N)), lighthouse, energy, area (YOLOv12 4D spatial), FNet Fourier transform |
 | `ffn/` | ✅ | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting FFN, diff FFN, logic FFN, Swin MLP, residual block |
 | `norms/` | ✅ | RMS, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (`norms/polar_weight_norm.py`, not factory-registered) |
 | `embedding/` | ✅ | Patch (1D/2D), learned positional, fixed 2D sinusoidal, RoPE, dual RoPE, continuous RoPE, continuous sin/cos, scalar/timestep sinusoidal, multi-axis (t/h/w) RoPE, BERT / ModernBERT / ALBERT-factorized token embeddings |
@@ -21,7 +21,7 @@ in § Naming traps below.
 | `memory/` | ✅ | NTM family, SOM family, NeuroGrid (see below) |
 | `mixtures/` | ✅ | `RBFLayer` (`radial_basis_function.py`), `KMeansLayer` (`kmeans.py`, differentiable K-means), `GMMLayer` (`gmm.py`, differentiable GMM with isometric-kernel regularization). `factory.py` exposes `MixtureType` + `create_mixture_layer` / `create_mixture_from_config`. Import via `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer` |
 | `sequence_pooling/` | ✅ | Pool a `(B, T, D)` sequence to `(B, D)`: `SequencePooling` (`sequence_pooling.py` — 18 strategies: positional `cls`/`first`/`last`/`middle`, statistical `mean`/`max`/`min`/`sum`, composite `mean_max`/`mean_std`/`mean_max_min`, learnable `attention`/`multi_head_attention`/`weighted`, `top_k_mean`/`top_k_max`, and `none`/`flatten`; four of them reused by `heads/nlp/`), `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
-| `transformers/` | — | Standard transformer, Swin block, Swin conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork` (`energy_transformer.py`), `GatedLinearAttentionBlock` (`gated_linear_attention_block.py`) |
+| `transformers/` | — | Standard transformer, Swin block, Swin conv block, perceiver, progressive focused, EoMT, free transformer, text encoder/decoder, vision encoder, `EnergyTransformer` + `HopfieldNetwork` (`energy_transformer.py`), `GatedLinearAttentionBlock` (`gated_linear_attention_block.py`), `AreaAttentionBlock` (`area_attention_block.py`) |
 | `fastvit/` | — | Channels-last transcriptions of timm's FastViT **MCi** image-tower primitives, consumed by `models/vision/fastvit/` (which assembles them into the MCi tower): `FastVitConvMlp`, `RepConditionalPosEnc`, `FastVitRepMixer`, `FastVitRepMixerBlock`, `ReparamLargeKernelConv`, `FastVitPatchEmbed`, `FastVitAttentionBlock`, `FastVitStage`. Curated `__init__` re-export, no factory. Train-time multi-branch form only — no reparameterization / fusion path. See `fastvit/README.md` |
 | `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
 | `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
@@ -114,7 +114,7 @@ The `layers/__init__.py` root **is** empty. Most subpackages are **not**.
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** | `activations`, `attention` (43 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers` | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** | `activations`, `attention` (44 names), `embedding`, `fastvit`, `ffn`, `heads`, `logic`, `memory`, `mixtures`, `moe`, `norms`, `sequence_pooling`, `time_series`, `transformers` | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Empty** | `fusion`, `geometric`, `graphs`, `physics`, `reasoning`, `statistics`, `tokenizers`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 | **No `__init__.py` at all** | `experimental/` — a namespace package | submodule imports only |
 
@@ -150,7 +150,7 @@ Check in this precedence order; only proceed to the next step when nothing fits:
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
-   | Attention | `create_attention_layer()` in `attention/factory.py` | 33 |
+   | Attention | `create_attention_layer()` in `attention/factory.py` | 34 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 13 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | 22 |

@@ -469,16 +469,31 @@ class Conv2D(BaseConv):
         2.  If `block_type` is 'transformer' or 'mixed', it processes the (potentially LSTM-modified) input through a `MultiHeadAttention` layer and adds the result as a residual.
         3.  Finally, it passes the result through a standard two-layer feed-forward network, also with a residual connection.
 
--   #### `YOLOv12 Layers` (`ConvBlock`, `AreaAttention`, `AttentionBlock`, `Bottleneck`, etc.)
-    -   **Files**: `src/dl_techniques/layers/yolo12.py`, `src/dl_techniques/layers/yolo12_heads.py`
+-   #### `YOLOv12 Layers` (`Bottleneck`, `C3k2Block`, `A2C2fBlock`, etc.)
+    -   **Files**: `src/dl_techniques/layers/yolo12_blocks.py`, `src/dl_techniques/layers/yolo12_heads.py`
     -   **Type**: Keras Layers
     -   **Description**: A collection of specialized building blocks for the YOLOv12 architecture.
-        -   `ConvBlock`: The standard unit of `Conv2D` -> `BatchNormalization` -> `Activation('silu')`.
-        -   `AreaAttention`: A custom self-attention mechanism that can operate globally or on local "areas" of a feature map by reshaping the input tensor before attention.
-        -   `AttentionBlock`: Combines `AreaAttention` with a small MLP in a residual block.
-        -   `Bottleneck`: A classic residual block with two `ConvBlock`s.
+        **Three of the classes this entry used to list no longer live here.** On 2026-09-01
+        `plan-2026-09-01-e6d380a5` consolidated the module: its `ConvBlock` was deleted in
+        favour of the shared `dl_techniques.layers.standard_blocks.ConvBlock` (now the only
+        `ConvBlock` in the tree), `AreaAttention` moved to
+        `dl_techniques.layers.attention.area_attention` and is reachable as
+        `create_attention_layer('area', ...)`, and `AttentionBlock` moved to
+        `dl_techniques.layers.transformers.area_attention_block` **renamed**
+        `AreaAttentionBlock`. Serialization keys changed with them; pre-2026-09-01 yolo12
+        `.keras` archives no longer deserialize.
+        -   `yolo12_conv_block(...)`: module-level helper returning a `standard_blocks.ConvBlock`
+            configured as the YOLOv12 `Conv2D` -> `BatchNormalization` -> `Activation('silu')`
+            unit. It is the single home of YOLOv12's `epsilon=1e-3, momentum=0.97` pair
+            (`YOLO12_NORM_KWARGS`), which is threaded to the two relocated classes as data.
+        -   `AreaAttention` (now in `layers/attention/`): a self-attention mechanism that can
+            operate globally or on local "areas" of a feature map by reshaping the input tensor
+            before attention.
+        -   `AreaAttentionBlock` (now in `layers/transformers/`): combines `AreaAttention` with a
+            small MLP in a residual block.
+        -   `Bottleneck`: A classic residual block with two `yolo12_conv_block` units.
         -   `C3k2Block`: A CSP-inspired block that splits the input, processes one path through `Bottleneck` layers, and concatenates the result.
-        -   `A2C2fBlock`: An ELAN-inspired block that processes input through sequential `AttentionBlock` pairs and progressively concatenates the outputs.
+        -   `A2C2fBlock`: An ELAN-inspired block that processes input through sequential `AreaAttentionBlock` pairs and progressively concatenates the outputs.
         -   **Heads**: `YOLOv12DetectionHead`, `YOLOv12SegmentationHead`, and `YOLOv12ClassificationHead` are specialized output modules that take multi-scale features and produce predictions for their respective tasks.
 
 -   #### `RoPE (RotaryPositionEmbedding)`

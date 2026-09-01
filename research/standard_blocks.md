@@ -74,6 +74,19 @@ advanced_block = ConvBlock(
 | `use_pooling` | bool | False | Whether to apply pooling |
 | `pool_size` | int/tuple | 2 | Pooling window size |
 | `pool_type` | str | "max" | Pooling type ("max" or "avg") |
+| `groups` | int | 1 | Conv2D group count; `groups == in_channels` gives a depthwise conv. Must be `> 0` and must divide both the input channels and `filters` |
+| `use_bias` | bool | True | Whether the `Conv2D` carries a bias. Set `False` when a normalization layer follows, whose shift subsumes it |
+
+Added 2026-09-01 by `plan-2026-09-01-e6d380a5`, which folded `layers/yolo12_blocks.py`'s
+same-named `ConvBlock` into this one; `standard_blocks.ConvBlock` is now the ONLY `ConvBlock`
+in the tree. Both new parameters default to the previous behaviour, so no existing
+construction site or `get_config()` round trip changes.
+
+`activation_type` also accepts plain Keras activation names that are not
+`ACTIVATION_REGISTRY` keys (`'linear'` gives an exact, weightless identity, i.e. "no
+activation"). Those names route through `resolve_activation_layer`, which **drops**
+`activation_kwargs` silently -- so passing a non-empty `activation_kwargs` alongside a
+non-registry `activation_type` raises `ValueError` rather than becoming a no-op.
 
 ### Common Use Cases
 

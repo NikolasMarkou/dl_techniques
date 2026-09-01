@@ -96,10 +96,17 @@ def assert_package_qualified_registration(
         assert only the SHAPE -- a module move then legitimately changes the key
         without reddening an unrelated test.
     :type expected_package: str or None
-    :param expect_legacy_alias: `False` for the four duplicate-name classes
-        (`ConvBlock`, `Downsample`, `MLPBlock`, `Upsample`) that deliberately get
-        NO alias on either side, because both sides would claim the same one.
-        The `Custom>` key must then resolve to nothing at all.
+    :param expect_legacy_alias: `False` for the classes that deliberately claim
+        NO bare `Custom>` alias. Three of them are still genuine duplicate NAMES
+        with a twin in another package -- `Downsample`, `MLPBlock`, `Upsample` --
+        where aliasing either side recreates the import-order collision. The
+        fourth, `standard_blocks.ConvBlock`, is a SURVIVOR: its twin
+        `yolo12_blocks.ConvBlock` was deleted on 2026-09-01 by
+        `plan-2026-09-01-e6d380a5`, so there is no longer a second claimant --
+        and the flag stays anyway, because re-minting a bare `Custom>ConvBlock`
+        binding is a registry change, not a cleanup. Do not "tidy" it away just
+        because the collision evaporated. The `Custom>` key must resolve to
+        nothing at all in every one of these cases.
     :type expect_legacy_alias: bool
     :return: the package-qualified registry key.
     :rtype: str

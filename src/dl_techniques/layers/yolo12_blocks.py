@@ -173,9 +173,9 @@ class Bottleneck(keras.layers.Layer):
         └──────┬───────────────┬───────┘
                ▼               │ (shortcut if C=filters)
         ┌──────────────┐       │
-        │  ConvBlock3x3│       │
+        │ conv_block3x3│       │
         ├──────────────┤       │
-        │  ConvBlock3x3│       │
+        │ conv_block3x3│       │
         └──────┬───────┘       │
                ▼               ▼
         ┌──────────────────────────────┐
