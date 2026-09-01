@@ -9,7 +9,7 @@ deraining, deblurring, and dehazing.
 **Key Components**:
 - FFTLayer & IFFTLayer: Frequency domain transformations
 - PW_FNet_Block: Core building block with configurable norm and FFN
-- Downsample & Upsample: Spatial resolution scaling layers
+- PWFNetDownsample & PWFNetUpsample: Spatial resolution scaling layers
 - PW_FNet: Complete model with multi-scale supervision
 
 References:
@@ -445,8 +445,13 @@ class PW_FNet_Block(keras.layers.Layer):
 # Scaling Layers
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.pw_fnet.model", legacy_alias=False)
-class Downsample(keras.layers.Layer):
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix is load-bearing. The
+# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
+# already claimed by another registered class must be prefixed with its package rather than
+# registered twice. Do NOT simplify this back to ``Downsample``: ideogram4's VAE owns that
+# bare name, and re-taking it re-creates the collision this rename removed.
+@register_dl_technique("dl_techniques.models.pw_fnet.model")
+class PWFNetDownsample(keras.layers.Layer):
     """
     Trainable downsampling layer using strided convolution.
 
@@ -531,8 +536,13 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-@register_dl_technique("dl_techniques.models.pw_fnet.model", legacy_alias=False)
-class Upsample(keras.layers.Layer):
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix is load-bearing. The
+# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
+# already claimed by another registered class must be prefixed with its package rather than
+# registered twice. Do NOT simplify this back to ``Upsample``: ideogram4's VAE owns that bare
+# name, and re-taking it re-creates the collision this rename removed.
+@register_dl_technique("dl_techniques.models.pw_fnet.model")
+class PWFNetUpsample(keras.layers.Layer):
     """
     Trainable upsampling layer using transposed convolution.
 
@@ -820,13 +830,13 @@ class PW_FNet(keras.Model):
             self._create_block(width, f"enc_l1_blk_{i}")
             for i in range(enc_blk_nums[0])
         ]
-        self.down1 = Downsample(width * 2, name="down1")
+        self.down1 = PWFNetDownsample(width * 2, name="down1")
 
         self.encoder_level2 = [
             self._create_block(width * 2, f"enc_l2_blk_{i}")
             for i in range(enc_blk_nums[1])
         ]
-        self.down2 = Downsample(width * 4, name="down2")
+        self.down2 = PWFNetDownsample(width * 4, name="down2")
 
         # -- Bottleneck --
         self.bottleneck = [
@@ -835,7 +845,7 @@ class PW_FNet(keras.Model):
         ]
 
         # -- Decoder --
-        self.up2 = Upsample(width * 2, name="up2")
+        self.up2 = PWFNetUpsample(width * 2, name="up2")
         self.reduce_conv2 = keras.layers.Conv2D(
             width * 2,
             kernel_size=1,
@@ -849,7 +859,7 @@ class PW_FNet(keras.Model):
             for i in range(dec_blk_nums[0])
         ]
 
-        self.up1 = Upsample(width, name="up1")
+        self.up1 = PWFNetUpsample(width, name="up1")
         self.reduce_conv1 = keras.layers.Conv2D(
             width,
             kernel_size=1,

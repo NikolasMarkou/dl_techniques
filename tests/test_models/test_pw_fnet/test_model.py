@@ -29,8 +29,8 @@ from dl_techniques.models.vision.image_restoration.pw_fnet.model import (
     FFTLayer,
     IFFTLayer,
     PW_FNet_Block,
-    Downsample,
-    Upsample,
+    PWFNetDownsample,
+    PWFNetUpsample,
     PW_FNet
 )
 
@@ -336,15 +336,15 @@ class TestPW_FNet_Block:
 
 
 # =============================================================================
-# Downsample Tests
+# PWFNetDownsample Tests
 # =============================================================================
 
-class TestDownsample:
-    """Test suite for Downsample layer."""
+class TestPWFNetDownsample:
+    """Test suite for PWFNetDownsample layer."""
 
     def test_initialization(self):
-        """Test Downsample initialization."""
-        downsample = Downsample(dim=128)
+        """Test PWFNetDownsample initialization."""
+        downsample = PWFNetDownsample(dim=128)
         assert downsample.dim == 128
         assert not downsample.built
         assert hasattr(downsample, 'conv')
@@ -352,34 +352,34 @@ class TestDownsample:
     def test_invalid_dim(self):
         """Test that invalid dim raises ValueError."""
         with pytest.raises(ValueError, match="dim must be positive"):
-            Downsample(dim=0)
+            PWFNetDownsample(dim=0)
         with pytest.raises(ValueError, match="dim must be positive"):
-            Downsample(dim=-10)
+            PWFNetDownsample(dim=-10)
 
     def test_forward_pass(self):
         """Test forward pass and downsampling."""
-        downsample = Downsample(dim=128)
+        downsample = PWFNetDownsample(dim=128)
         input_data = keras.random.normal((4, 64, 64, 64))
         output = downsample(input_data)
         assert output.shape == (4, 32, 32, 128)
 
     def test_compute_output_shape(self):
         """Test output shape computation."""
-        downsample = Downsample(dim=128)
+        downsample = PWFNetDownsample(dim=128)
         input_shape = (None, 64, 64, 64)
         output_shape = downsample.compute_output_shape(input_shape)
         assert output_shape == (None, 32, 32, 128)
 
     def test_configuration(self):
         """Test get_config method."""
-        downsample = Downsample(dim=128)
+        downsample = PWFNetDownsample(dim=128)
         config = downsample.get_config()
         assert config['dim'] == 128
 
     def test_serialization(self):
         """Test full serialization cycle."""
         inputs = keras.Input(shape=(64, 64, 64))
-        outputs = Downsample(dim=128)(inputs)
+        outputs = PWFNetDownsample(dim=128)(inputs)
         model = keras.Model(inputs, outputs)
 
         test_input = keras.random.normal((2, 64, 64, 64))
@@ -395,20 +395,20 @@ class TestDownsample:
                 keras.ops.convert_to_numpy(original_output),
                 keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
-                err_msg="Downsample outputs should match after serialization"
+                err_msg="PWFNetDownsample outputs should match after serialization"
             )
 
 
 # =============================================================================
-# Upsample Tests
+# PWFNetUpsample Tests
 # =============================================================================
 
 class TestUpsample:
-    """Test suite for Upsample layer."""
+    """Test suite for PWFNetUpsample layer."""
 
     def test_initialization(self):
-        """Test Upsample initialization."""
-        upsample = Upsample(dim=64)
+        """Test PWFNetUpsample initialization."""
+        upsample = PWFNetUpsample(dim=64)
         assert upsample.dim == 64
         assert not upsample.built
         assert hasattr(upsample, 'conv_transpose')
@@ -416,34 +416,34 @@ class TestUpsample:
     def test_invalid_dim(self):
         """Test that invalid dim raises ValueError."""
         with pytest.raises(ValueError, match="dim must be positive"):
-            Upsample(dim=0)
+            PWFNetUpsample(dim=0)
         with pytest.raises(ValueError, match="dim must be positive"):
-            Upsample(dim=-5)
+            PWFNetUpsample(dim=-5)
 
     def test_forward_pass(self):
         """Test forward pass and upsampling."""
-        upsample = Upsample(dim=64)
+        upsample = PWFNetUpsample(dim=64)
         input_data = keras.random.normal((4, 16, 16, 128))
         output = upsample(input_data)
         assert output.shape == (4, 32, 32, 64)
 
     def test_compute_output_shape(self):
         """Test output shape computation."""
-        upsample = Upsample(dim=64)
+        upsample = PWFNetUpsample(dim=64)
         input_shape = (None, 16, 16, 128)
         output_shape = upsample.compute_output_shape(input_shape)
         assert output_shape == (None, 32, 32, 64)
 
     def test_configuration(self):
         """Test get_config method."""
-        upsample = Upsample(dim=64)
+        upsample = PWFNetUpsample(dim=64)
         config = upsample.get_config()
         assert config['dim'] == 64
 
     def test_serialization(self):
         """Test full serialization cycle."""
         inputs = keras.Input(shape=(16, 16, 128))
-        outputs = Upsample(dim=64)(inputs)
+        outputs = PWFNetUpsample(dim=64)(inputs)
         model = keras.Model(inputs, outputs)
 
         test_input = keras.random.normal((2, 16, 16, 128))
@@ -459,7 +459,7 @@ class TestUpsample:
                 keras.ops.convert_to_numpy(original_output),
                 keras.ops.convert_to_numpy(loaded_output),
                 rtol=1e-6, atol=1e-6,
-                err_msg="Upsample outputs should match after serialization"
+                err_msg="PWFNetUpsample outputs should match after serialization"
             )
 
 

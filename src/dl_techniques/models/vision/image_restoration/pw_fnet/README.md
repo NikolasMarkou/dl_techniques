@@ -144,9 +144,9 @@ The model demonstrates that superior performance doesn't have to come at a high 
 ### The U-Net Encoder-Decoder Architecture
 
 PW-FNet is built on a familiar and robust 3-level U-Net architecture.
--   **Encoder**: A series of `PW_FNet_Block`s and `Downsample` layers that progressively reduce the spatial resolution while increasing the feature (channel) dimension.
+-   **Encoder**: A series of `PW_FNet_Block`s and `PWFNetDownsample` layers that progressively reduce the spatial resolution while increasing the feature (channel) dimension.
 -   **Bottleneck**: A set of `PW_FNet_Block`s that process the features at the lowest resolution.
--   **Decoder**: A series of `PW_FNet_Block`s and `Upsample` layers that restore the spatial resolution. Skip connections pass high-frequency details from the encoder to the decoder.
+-   **Decoder**: A series of `PW_FNet_Block`s and `PWFNetUpsample` layers that restore the spatial resolution. Skip connections pass high-frequency details from the encoder to the decoder.
 
 ### The Fourier Token Mixer
 
@@ -190,11 +190,11 @@ Input Image (B, H, W, 3)
     │
     ├─► Encoder Level 1 (PW-FNet Blocks) ───(Skip1)───►
     │
-    ├─► Downsample → (B, H/2, W/2, 2D)
+    ├─► PWFNetDownsample → (B, H/2, W/2, 2D)
     │
     ├─► Encoder Level 2 (PW-FNet Blocks) ───(Skip2)───►
     │
-    └─► Downsample → (B, H/4, W/4, 4D)
+    └─► PWFNetDownsample → (B, H/4, W/4, 4D)
 
 
 STEP 2: BOTTLENECK
@@ -208,13 +208,13 @@ STEP 3: DECODING
 ────────────────
 Bottleneck Features
     │
-    ├─► Upsample → (B, H/2, W/2, 2D) ◄───(Concat Skip2)─┐
+    ├─► PWFNetUpsample → (B, H/2, W/2, 2D) ◄───(Concat Skip2)─┐
     │                                                   │
     ├─► Reduce Conv2D → (B, H/2, W/2, 2D) <─────────────┘
     │
     ├─► Decoder Level 2 (PW-FNet Blocks)
     │
-    ├─► Upsample → (B, H, W, D) ◄──────(Concat Skip1)─┐
+    ├─► PWFNetUpsample → (B, H, W, D) ◄──────(Concat Skip1)─┐
     │                                                 │
     ├─► Reduce Conv2D → (B, H, W, D) <────────────────┘
     │
@@ -242,8 +242,8 @@ Each sub-module is preceded by a `LayerNormalization` layer for stable training.
 
 ### 4.2 Scaling Layers
 
--   **`Downsample`**: A `Conv2D` layer with a kernel size of 4 and a stride of 2 is used to learn an optimal way to halve the spatial dimensions and double the channel dimension.
--   **`Upsample`**: A `Conv2DTranspose` layer with a kernel size of 2 and a stride of 2 is used to double the spatial dimensions and halve the channel dimension.
+-   **`PWFNetDownsample`**: A `Conv2D` layer with a kernel size of 4 and a stride of 2 is used to learn an optimal way to halve the spatial dimensions and double the channel dimension.
+-   **`PWFNetUpsample`**: A `Conv2DTranspose` layer with a kernel size of 2 and a stride of 2 is used to double the spatial dimensions and halve the channel dimension.
 
 ### 4.3 Multi-Scale Outputs
 
@@ -372,8 +372,8 @@ plt.show()
 
 - **`FFTLayer`**: A serializable layer that applies a 2D FFT and concatenates the real and imaginary parts into a real-valued tensor.
 - **`IFFTLayer`**: A serializable layer that performs the inverse operation of `FFTLayer`.
-- **`Downsample`**: A trainable strided `Conv2D` layer for downsampling.
-- **`Upsample`**: A trainable `Conv2DTranspose` layer for upsampling.
+- **`PWFNetDownsample`**: A trainable strided `Conv2D` layer for downsampling.
+- **`PWFNetUpsample`**: A trainable `Conv2DTranspose` layer for upsampling.
 
 ---
 
@@ -452,17 +452,16 @@ Two things about the keys are worth knowing before you rename anything here.
 `dl_techniques.models.pw_fnet.model><ClassName>` — `vision/` and `image_restoration/` are
 stripped because a family directory under `models/` is a filing decision, not a namespace.
 
-`Downsample` and `Upsample` register under the same module path, so their keys are also
-`dl_techniques.models.pw_fnet.model><ClassName>` (normalized 2026-08-29 from the coarse
-`dl_techniques.pw_fnet`). They differ in one way: they **carry `legacy_alias=False`**, so
-`keras.saving.get_registered_object("Custom>Downsample")` and `("Custom>Upsample")` both
-return **`None`** (measured 2026-08-29). That is deliberate: `ideogram4` registers classes
-with the same two bare names, and aliasing either side would put both on one `Custom>X` key
-and recreate exactly the import-order collision the migration removed. Neither name appears
-in any archive in this repository, so nothing was orphaned. Reach them only through their
-package-qualified keys. Note that the module path alone already separates the two pairs --
-`...pw_fnet.model>Downsample` vs `...ideogram4.vae>Downsample` -- so withholding the alias is
-about the `Custom>` namespace only.
+`PWFNetDownsample` and `PWFNetUpsample` register under the same module path, so their keys are
+also `dl_techniques.models.pw_fnet.model><ClassName>` (normalized 2026-08-29 from the coarse
+`dl_techniques.pw_fnet`). They carry no exception: like every other class here they also bind
+the legacy alias, so `keras.saving.get_registered_object("Custom>PWFNetDownsample")` and
+`("Custom>PWFNetUpsample")` resolve to the classes (2026-09-01). They were called `Downsample`
+and `Upsample` until 2026-09-01, and both then carried `legacy_alias=False` because `ideogram4`
+registers classes with those same two bare names and the `Custom>` namespace is flat, so
+aliasing either side would have put two classes on one key. The package prefix removes the
+duplicate at its source, which is why the flag is gone rather than merely relaxed -- do not
+rename these back.
 
 ### Saving and Loading
 
@@ -489,7 +488,7 @@ print(f"Restored image shape: {restored[0].shape}")
 
 **Issue 1: Checkerboard artifacts in the output.**
 
--   **Cause**: This is a common issue with transposed convolutions (`Upsample` layer).
+-   **Cause**: This is a common issue with transposed convolutions (`PWFNetUpsample` layer).
 -   **Solution**: The current implementation uses `kernel_size=2, strides=2`, which is the standard way to mitigate this. If artifacts persist, you can replace the layer with a sequence of `UpSampling2D` followed by a `Conv2D`, which often produces smoother results at a slight computational cost.
 
 ### Frequently Asked Questions

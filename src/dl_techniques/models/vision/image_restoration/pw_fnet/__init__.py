@@ -12,15 +12,15 @@ suite builds it standalone.
 from dl_techniques.models.vision.image_restoration.pw_fnet.model import (
     PW_FNet,
     PW_FNet_Block,
-    Downsample,
-    Upsample,
+    PWFNetDownsample,
+    PWFNetUpsample,
     create_pw_fnet,
 )
 
 __all__ = [
     "PW_FNet",
     "PW_FNet_Block",
-    "Downsample",
-    "Upsample",
+    "PWFNetDownsample",
+    "PWFNetUpsample",
     "create_pw_fnet",
 ]

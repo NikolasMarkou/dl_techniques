@@ -309,7 +309,7 @@ class AttnBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.ideogram4.vae", legacy_alias=False)
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
 
@@ -379,7 +379,7 @@ class Downsample(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.models.ideogram4.vae", legacy_alias=False)
+@register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Upsample(keras.layers.Layer):
     """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
 
