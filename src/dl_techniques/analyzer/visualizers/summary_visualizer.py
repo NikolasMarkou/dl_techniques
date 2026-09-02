@@ -6,10 +6,11 @@ Provides an integrated view of model performance, training dynamics, calibration
 and confidence metrics in a single dashboard layout with centralized legend management.
 """
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from matplotlib.figure import Figure
 
 
@@ -89,6 +90,32 @@ EQUAL_ASPECT_MAX_SPAN_RATIO = 1e3
 
 
 # ---------------------------------------------------------------------
+
+# DECISION plan-2026-09-02T062406-e2aa52ef/D-004
+# The dashboard used to call `find_model_metric(..., 0.0)`, which turned the
+# analyzer's deliberate `None` back into `0.0` and printed `accuracy 0.000 /
+# loss 0.000` for a model that was never evaluated — silently undoing the
+# sentinel removal one layer up, in the artifact a reader trusts most.
+# Do NOT reintroduce a numeric default to keep the column formattable: a real
+# `0.0` must stay printable as `0.000`, which is exactly why the ABSENCE needs a
+# non-numeric rendering. See decisions.md D-004.
+def _format_metric(value: Optional[float], precision: int = 3) -> str:
+    """Render a metric for the performance table, or ``'n/a'`` if unavailable.
+
+    Args:
+        value: The metric, or ``None`` when the analyzer could not compute it.
+        precision: Digits after the decimal point.
+
+    Returns:
+        The formatted number, or ``'n/a'`` for ``None`` and non-finite values.
+    """
+    if value is None:
+        return 'n/a'
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        return 'n/a'
+    return f'{numeric:.{precision}f}'
+
 
 class SummaryVisualizer(BaseVisualizer):
     """
@@ -246,19 +273,19 @@ class SummaryVisualizer(BaseVisualizer):
             'accuracy', 'compile_metrics', 'val_accuracy',
             'categorical_accuracy', 'sparse_categorical_accuracy'
         ]
-        final_acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
-        row_data.append(f'{final_acc:.3f}')
+        final_acc = find_model_metric(model_metrics, accuracy_keys)
+        row_data.append(_format_metric(final_acc))
 
         # Best accuracy from training history
         peak_performance = self.results.training_metrics.peak_performance.get(
             model_name, {}
         )
         best_acc = peak_performance.get('val_accuracy', final_acc)
-        row_data.append(f'{best_acc:.3f}')
+        row_data.append(_format_metric(best_acc))
 
         # Loss value
-        loss = find_model_metric(model_metrics, ['loss'], 0.0)
-        row_data.append(f'{loss:.3f}')
+        loss = find_model_metric(model_metrics, ['loss'])
+        row_data.append(_format_metric(loss))
 
         # Calibration metrics
         calibration_metrics = self.results.calibration_metrics.get(
@@ -296,12 +323,12 @@ class SummaryVisualizer(BaseVisualizer):
             'accuracy', 'compile_metrics', 'val_accuracy',
             'categorical_accuracy', 'sparse_categorical_accuracy'
         ]
-        acc = find_model_metric(model_metrics, accuracy_keys, 0.0)
-        row_data.append(f'{acc:.3f}')
+        acc = find_model_metric(model_metrics, accuracy_keys)
+        row_data.append(_format_metric(acc))
 
         # Loss metric
-        loss = find_model_metric(model_metrics, ['loss'], 0.0)
-        row_data.append(f'{loss:.3f}')
+        loss = find_model_metric(model_metrics, ['loss'])
+        row_data.append(_format_metric(loss))
 
         # Calibration metrics
         calibration_metrics = self.results.calibration_metrics.get(

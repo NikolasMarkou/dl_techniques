@@ -404,17 +404,24 @@ def _fuzzy_metric_match(key: str, pattern: str) -> bool:
 
 def find_model_metric(model_metrics: Dict[str, Any],
                      metric_keys: List[str],
-                     default: float = 0.0) -> float:
+                     default: Optional[float] = None) -> Optional[float]:
     """
     Helper function to find a metric value from model metrics with fallback chain.
+
+    The default is ``None``, NOT ``0.0``. The analyzer reports a metric it could
+    not compute as ``None`` on purpose (a 0.0 loss reads as a perfect model, a
+    0.0 accuracy as a model that got everything wrong), and a numeric default
+    here silently converts that back into a plausible score at the point of
+    display. Callers must render the ``None``, e.g. as ``"n/a"``.
 
     Args:
         model_metrics: Dictionary of model metrics.
         metric_keys: List of metric keys to check in order of preference.
-        default: Default value if no metrics found.
+        default: Value to return when no key holds a usable number. Leave it as
+            ``None`` unless the caller genuinely has a meaningful fallback.
 
     Returns:
-        The first found metric value or default.
+        The first found metric value, or ``default``.
     """
     for key in metric_keys:
         if key in model_metrics and model_metrics[key] is not None:

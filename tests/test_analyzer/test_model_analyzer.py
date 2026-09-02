@@ -1416,3 +1416,57 @@ class TestReportedLossIsNotASentinel:
             "`loss` changed from 0.0 to null for an unevaluated model — an "
             "artifact written before and after this compares silently"
         )
+
+
+class TestTheDashboardDoesNotUndoTheNoneSentinelFix:
+    """`find_model_metric(model_metrics, keys, 0.0)` converted `None` back to `0.0`.
+
+    The analyzer reports an unevaluated model as `accuracy: None` / `loss: None`,
+    and the dashboard then printed `0.000 / 0.000` for it -- silently defeating
+    the fix in the layer above and putting a perfect-looking row in the PNG a
+    reader is most likely to trust. The table must say `n/a`.
+    """
+
+    @staticmethod
+    def _row(model_metrics, training=False):
+        """Build one performance-table row without rendering a figure."""
+        from dl_techniques.analyzer.data_types import (
+            AnalysisResults, TrainingMetrics,
+        )
+        from dl_techniques.analyzer.visualizers.summary_visualizer import (
+            SummaryVisualizer,
+        )
+
+        results = AnalysisResults()
+        results.model_metrics = {"m": model_metrics}
+        results.training_metrics = TrainingMetrics()
+        visualizer = SummaryVisualizer(
+            results=results, config=_quiet_config(), output_dir=None,
+            model_colors={"m": "#1f77b4"})
+        row: list = []
+        if training:
+            visualizer._add_training_metrics_to_row(row, "m", model_metrics)
+        else:
+            visualizer._add_standard_metrics_to_row(row, "m", model_metrics)
+        return row
+
+    def test_an_unevaluated_model_renders_n_a_not_zero(self):
+        row = self._row({"loss": None, "accuracy": None,
+                         "status": "evaluation_failed"})
+        assert row[0] == "n/a", f"accuracy rendered as {row[0]!r}"
+        assert row[1] == "n/a", f"loss rendered as {row[1]!r}"
+
+    def test_the_training_table_variant_renders_n_a_too(self):
+        row = self._row({"loss": None, "accuracy": None,
+                         "status": "evaluation_failed"}, training=True)
+        assert row[0] == "n/a" and row[1] == "n/a" and row[2] == "n/a", row
+
+    def test_anti_vacuity_a_real_score_is_still_formatted_as_a_number(self):
+        row = self._row({"loss": 1.25, "accuracy": 0.5, "status": "success"})
+        assert row[0] == "0.500", row
+        assert row[1] == "1.250", row
+
+    def test_a_genuine_zero_is_still_printed_as_zero(self):
+        """`0.0` from a real evaluation must NOT be laundered into `n/a`."""
+        row = self._row({"loss": 0.0, "accuracy": 0.0, "status": "success"})
+        assert row[0] == "0.000" and row[1] == "0.000", row
