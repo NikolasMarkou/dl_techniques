@@ -954,7 +954,12 @@ class ModelAnalyzer:
                 value = float(obj)
                 return None if not np.isfinite(value) else value
             elif isinstance(obj, np.ndarray):
-                return obj.tolist()
+                # Recurse into the list rather than returning it: `tolist()` keeps
+                # NaN/inf as Python floats, which `allow_nan=False` rejects
+                # MID-WRITE. That left a TRUNCATED, unparseable artifact on disk
+                # (measured 17544 bytes, `Expecting value: line 647 column 27`) —
+                # strictly worse than no file at all, because it looks like one.
+                return convert_numpy(obj.tolist())
             elif isinstance(obj, pd.DataFrame):
                 return obj.to_dict()
             elif isinstance(obj, dict):

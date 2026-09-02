@@ -424,7 +424,8 @@ class WeightAnalyzer(BaseAnalyzer):
 
                 results.weight_pca = {
                     'components': pca_result,
-                    'explained_variance': pca.explained_variance_ratio_,
+                    'explained_variance': self._finite_explained_variance(
+                        pca.explained_variance_ratio_, labels),
                     'labels': labels,
                     'feature_type': 'concatenated_weight_statistics'
                 }
@@ -438,6 +439,46 @@ class WeightAnalyzer(BaseAnalyzer):
                 # text -- catch the type, and let the row-dropping above be what
                 # prevents the condition in the first place.
                 logger.warning(f"Could not perform PCA on weight statistics: {e}")
+
+    @staticmethod
+    def _finite_explained_variance(
+            explained_variance_ratio: np.ndarray,
+            labels: List[str],
+    ) -> Optional[np.ndarray]:
+        """Return the explained-variance ratios, or ``None`` when they are undefined.
+
+        When every model's feature row is IDENTICAL -- the natural
+        self-comparison smoke run, or any two copies of one architecture at one
+        seed -- the standardized total variance is exactly zero and sklearn
+        computes ``0 / 0``, publishing ``[nan, nan]`` WITHOUT raising. Nothing in
+        the surrounding exception handling can see that, and it is fatal one step
+        later: ``save_results`` uses ``json.dump(..., allow_nan=False)``, so the
+        write aborts part-way and leaves a TRUNCATED, unparseable
+        ``analysis_results.json`` behind.
+
+        ``None`` is the package's established "not computed" encoding, and it is
+        honest here: the fraction of variance explained is genuinely undefined
+        when there is no variance to explain.
+
+        Args:
+            explained_variance_ratio: sklearn's ``PCA.explained_variance_ratio_``.
+            labels: The model names in the PCA, used only for the warning.
+
+        Returns:
+            The ratios unchanged when every entry is finite, otherwise ``None``.
+        """
+        ratios = np.asarray(explained_variance_ratio, dtype=np.float64)
+        if bool(np.isfinite(ratios).all()):
+            return explained_variance_ratio
+
+        logger.warning(
+            "Weight-PCA explained variance is undefined and is reported as None: "
+            "the %d models (%s) have identical weight statistics, so the total "
+            "variance in the fingerprint space is exactly zero. The component "
+            "coordinates are still reported.",
+            len(labels), ", ".join(labels),
+        )
+        return None
 
     @staticmethod
     def _drop_non_finite_rows(

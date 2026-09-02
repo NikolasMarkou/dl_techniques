@@ -540,10 +540,17 @@ class SummaryVisualizer(BaseVisualizer):
         ax.scatter(0, 0, c='black', s=SCATTER_SIZE_SMALL, marker='x')
 
         # Configure plot labels and styling
-        ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
-        ax.set_ylabel(
-            f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2'
-        )
+        # `explained_variance` is None when every model's fingerprint is
+        # identical, so the fraction of variance explained is undefined (0/0).
+        # Label the axis honestly rather than formatting a NaN as 'nan%'.
+        if explained_var is None:
+            ax.set_xlabel('PC1 (n/a)')
+            ax.set_ylabel('PC2 (n/a)')
+        else:
+            ax.set_xlabel(f'PC1 ({explained_var[0]:.1%})')
+            ax.set_ylabel(
+                f'PC2 ({explained_var[1]:.1%})' if len(explained_var) > 1 else 'PC2'
+            )
         ax.set_title('Model Similarity (Concatenated Weight Statistics)')
         # REMOVED: Individual legend - using figure-level legend
         ax.grid(True, alpha=ALPHA_LOW)

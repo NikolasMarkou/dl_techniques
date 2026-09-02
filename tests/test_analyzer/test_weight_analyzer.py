@@ -317,3 +317,93 @@ class TestThePcaIsNeverFatal:
 
         assert got.shape == expected.shape
         np.testing.assert_array_equal(got, expected)
+
+
+class TestTheExplainedVarianceIsNeverNaN:
+    """Two identical models yield `explained_variance = [nan, nan]` and raise NOTHING.
+
+    sklearn divides the per-component variance by a TOTAL variance of exactly
+    zero when every feature row is identical, so `explained_variance_ratio_` is
+    `0/0`. No exception is raised, which is why widening the PCA `except` cannot
+    see this. `save_results` then hits `json.dump(..., allow_nan=False)`, logs one
+    error, and leaves a TRUNCATED, unparseable `analysis_results.json` on disk
+    (measured: 17544 bytes, `Expecting value: line 647 column 27`).
+    """
+
+    def test_two_identical_models_still_produce_a_parseable_artifact(self, tmp_path):
+        import json
+
+        output_dir = tmp_path / "identical"
+        analyzer = _weights_only_analyzer(
+            {"same_a": _tiny_model("same"), "same_b": _tiny_model("same")},
+            output_dir,
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+
+        explained = results.weight_pca["explained_variance"]
+        assert explained is None or np.all(np.isfinite(np.asarray(explained, float))), (
+            f"a non-finite explained_variance was published: {explained}"
+        )
+
+        artifact = output_dir / "analysis_results.json"
+        assert artifact.exists(), "no analysis_results.json was written"
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+        assert "weight_pca" in payload
+
+    def test_the_identical_model_probe_really_is_degenerate(self, tmp_path):
+        """Anti-vacuity: the two probe models must have IDENTICAL feature rows."""
+        analyzer = _weights_only_analyzer(
+            {"same_a": _tiny_model("same"), "same_b": _tiny_model("same")},
+            tmp_path / "antivac",
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+        rows = []
+        for name in ("same_a", "same_b"):
+            rows.append([
+                results.weight_stats[name][layer][g][k]
+                for layer in results.weight_stats_layer_order[name]
+                for g, k in PCA_LEAF_PATHS
+            ])
+        np.testing.assert_array_equal(np.asarray(rows[0]), np.asarray(rows[1]))
+
+    def test_a_nan_inside_an_ndarray_cannot_truncate_the_artifact(self, tmp_path):
+        """Backstop: `convert_numpy` sanitized scalars but not ndarray contents."""
+        import json
+
+        output_dir = tmp_path / "ndarray_nan"
+        analyzer = _weights_only_analyzer(
+            {"m1": _tiny_model("m1"), "m2": _tiny_model("m2")}, output_dir)
+        analyzer.analyze(analysis_types={"weights"})
+        analyzer.results.weight_pca["components"] = np.array(
+            [[np.nan, 1.0], [np.inf, 2.0]])
+        analyzer.save_results("probe.json")
+
+        payload = json.loads((output_dir / "probe.json").read_text(encoding="utf-8"))
+        assert payload["weight_pca"]["components"] == [[None, 1.0], [None, 2.0]], (
+            "non-finite ndarray entries were not mapped to null; "
+            f"got {payload['weight_pca']['components']}"
+        )
+
+    def test_the_dashboard_renders_when_the_explained_variance_is_undefined(
+            self, tmp_path):
+        """The `None` must reach a panel that can label an axis without it."""
+        from dl_techniques.analyzer import ModelAnalyzer
+
+        output_dir = tmp_path / "identical_plots"
+        analyzer = ModelAnalyzer(
+            models={"same_a": _tiny_model("same"), "same_b": _tiny_model("same")},
+            config=AnalysisConfig(
+                analyze_weights=True, analyze_calibration=False,
+                analyze_information_flow=False, analyze_training_dynamics=False,
+                analyze_spectral=False, save_plots=True, verbose=False,
+            ),
+            output_dir=str(output_dir),
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+        assert results.weight_pca["explained_variance"] is None, (
+            "anti-vacuity: the probe did not reach the undefined-variance branch"
+        )
+        assert (output_dir / "summary_dashboard.png").exists(), (
+            "summary_dashboard.png was not written. Files present: "
+            f"{sorted(p.name for p in output_dir.iterdir())}"
+        )
