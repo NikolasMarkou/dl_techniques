@@ -49,6 +49,10 @@ class AnalysisConfig:
     spectral_max_evals: int = 15000
     spectral_glorot_fix: bool = False
     spectral_randomize: bool = False
+    # Number of independent element-wise permutations averaged per layer when
+    # `spectral_randomize` is on. A single draw made every correlation-trap verdict
+    # a coin flip; >= 5 is required (plan-2026-09-01T225724-e79ad4bd D-017).
+    spectral_n_randomizations: int = 5
     spectral_concentration_analysis: bool = True
 
     # NEW FLAG: Controls generation of individual layer plot files

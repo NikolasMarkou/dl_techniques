@@ -299,3 +299,87 @@ class TestMpSoftrankIsNotAConstant:
             f"mp_softrank does not separate an isotropic from a strongly "
             f"anisotropic spectrum: {by_model.to_dict()}"
         )
+
+
+# =====================================================================
+# S3 — randomization drew ONCE per layer (plan step 18)
+# =====================================================================
+
+class TestRandomizationAveragesMultipleDraws:
+    """One unseeded permutation per layer made every trap verdict a coin flip."""
+
+    def test_the_draw_count_is_a_config_field_defaulting_to_at_least_five(self):
+        config = AnalysisConfig()
+        assert hasattr(config, "spectral_n_randomizations"), (
+            "the number of randomization draws is not configurable"
+        )
+        assert config.spectral_n_randomizations >= 5, (
+            f"default draw count is {config.spectral_n_randomizations}, "
+            f"below the >= 5 the plan requires"
+        )
+
+    def test_the_analyzer_draws_the_configured_number_of_times(self, monkeypatch):
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers import spectral_analyzer as sa
+
+        calls = []
+        real = sa.spectral_metrics.detect_correlation_trap
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(
+            sa.spectral_metrics, "detect_correlation_trap", counting)
+
+        n_draws = 6
+        config = AnalysisConfig(
+            analyze_spectral=True,
+            spectral_randomize=True,
+            spectral_n_randomizations=n_draws,
+        )
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models=_two_models_with_different_spectra(), config=config).analyze(results)
+
+        frame = results.spectral_analysis
+        n_layers = len(frame)
+        # Anti-vacuity: the randomization branch must actually have run.
+        assert n_layers == 2, f"the probe analyzed {n_layers} layers"
+        assert MetricNames.NUM_RAND_SPIKES in frame.columns, (
+            "the randomization branch did not run at all"
+        )
+
+        assert len(calls) == n_layers * n_draws, (
+            f"detect_correlation_trap ran {len(calls)} times for {n_layers} "
+            f"layers at spectral_n_randomizations={n_draws}"
+        )
+
+    def test_a_single_draw_is_still_honoured(self):
+        """Anti-vacuity: the averaging must be driven by the field, not hardcoded."""
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers import spectral_analyzer as sa
+
+        calls = []
+        real = sa.spectral_metrics.detect_correlation_trap
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        original = sa.spectral_metrics.detect_correlation_trap
+        sa.spectral_metrics.detect_correlation_trap = counting
+        try:
+            results = AnalysisResults()
+            SpectralAnalyzer(
+                models=_two_models_with_different_spectra(),
+                config=AnalysisConfig(
+                    analyze_spectral=True,
+                    spectral_randomize=True,
+                    spectral_n_randomizations=1,
+                ),
+            ).analyze(results)
+        finally:
+            sa.spectral_metrics.detect_correlation_trap = original
+
+        assert len(calls) == 2

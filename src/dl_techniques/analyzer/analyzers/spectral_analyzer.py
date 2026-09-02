@@ -249,32 +249,67 @@ class SpectralAnalyzer(BaseAnalyzer):
 
             randomization_metrics = {}
             if self.config.spectral_randomize and Wmats:
-                rand_Wmats = [np.random.permutation(W.flatten()).reshape(W.shape) for W in Wmats]
-                rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(rand_Wmats, N, M, n_comp)
-                rand_distance = spectral_metrics.jensen_shannon_distance(evals, rand_evals)
-                # Randomization singular-value ratio (NOT WW's mp_softrank, which is
-                # λ_plus/λ_max). Re-keyed off the former softrank name (D-006).
-                rand_sv_ratio = np.max(rand_evals) / np.max(evals) if np.max(evals) > 0 else 0
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-017
+                # Randomization is AVERAGED over `spectral_n_randomizations` independent
+                # draws. Do NOT collapse this back to one permutation per layer: a single
+                # unseeded draw makes every correlation-trap verdict a coin flip, and the
+                # spike count / severity it produces is a sample of size one.
+                # See decisions.md D-017.
+                n_draws = max(1, int(self.config.spectral_n_randomizations))
+                draws = []
+                first_rand_evals = None
+
+                for _ in range(n_draws):
+                    rand_Wmats = [
+                        np.random.permutation(W.flatten()).reshape(W.shape)
+                        for W in Wmats
+                    ]
+                    rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(
+                        rand_Wmats, N, M, n_comp)
+                    if first_rand_evals is None:
+                        first_rand_evals = rand_evals
+
+                    trap_result = spectral_metrics.detect_correlation_trap(rand_evals, N, M)
+                    draws.append({
+                        'rand_sv_max': rand_sv_max,
+                        'rand_distance': spectral_metrics.jensen_shannon_distance(
+                            evals, rand_evals),
+                        # Randomization singular-value ratio (NOT WW's mp_softrank, which
+                        # is λ_plus/λ_max). Re-keyed off the former softrank name (D-006).
+                        'rand_sv_ratio': (
+                            np.max(rand_evals) / np.max(evals)
+                            if np.max(evals) > 0 else 0
+                        ),
+                        'trap': trap_result,
+                    })
+
+                def _mean(key: str) -> float:
+                    return float(np.mean([d[key] for d in draws]))
+
+                def _trap_mean(key: str) -> float:
+                    return float(np.mean([d['trap'][key] for d in draws]))
+
+                # A trap is reported when it is seen in a MAJORITY of draws, not when a
+                # single lucky permutation produced one.
+                trap_fraction = _trap_mean('has_trap')
+                mean_severity = _trap_mean('trap_severity')
+
                 randomization_metrics = {
-                    MetricNames.RAND_SV_MAX: rand_sv_max,
-                    MetricNames.RAND_DISTANCE: rand_distance,
-                    MetricNames.RAND_SV_RATIO: rand_sv_ratio,
+                    MetricNames.RAND_SV_MAX: _mean('rand_sv_max'),
+                    MetricNames.RAND_DISTANCE: _mean('rand_distance'),
+                    MetricNames.RAND_SV_RATIO: _mean('rand_sv_ratio'),
+                    MetricNames.HAS_TRAP: bool(trap_fraction >= 0.5),
+                    MetricNames.NUM_RAND_SPIKES: _trap_mean('num_rand_spikes'),
+                    MetricNames.TRAP_SEVERITY: mean_severity,
+                    MetricNames.TRAP_SEVERITY_LABEL: spectral_metrics.label_trap_severity(
+                        mean_severity),
+                    MetricNames.MP_LAMBDA_PLUS: _trap_mean('mp_lambda_plus'),
+                    MetricNames.MP_LAMBDA_MINUS: _trap_mean('mp_lambda_minus'),
+                    MetricNames.TRAP_THRESHOLD: _trap_mean('trap_threshold'),
                 }
 
-                # Correlation trap detection via MP edge + Tracy-Widom threshold
-                trap_result = spectral_metrics.detect_correlation_trap(rand_evals, N, M)
-                randomization_metrics.update({
-                    MetricNames.HAS_TRAP: trap_result['has_trap'],
-                    MetricNames.NUM_RAND_SPIKES: trap_result['num_rand_spikes'],
-                    MetricNames.TRAP_SEVERITY: trap_result['trap_severity'],
-                    MetricNames.TRAP_SEVERITY_LABEL: trap_result['trap_severity_label'],
-                    MetricNames.MP_LAMBDA_PLUS: trap_result['mp_lambda_plus'],
-                    MetricNames.MP_LAMBDA_MINUS: trap_result['mp_lambda_minus'],
-                    MetricNames.TRAP_THRESHOLD: trap_result['trap_threshold'],
-                })
-
-                # Store randomized eigenvalues for visualization
-                self._rand_esd_cache[layer_id] = rand_evals
+                # Store one representative randomized spectrum for visualization.
+                self._rand_esd_cache[layer_id] = first_rand_evals
 
             metrics = {
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),

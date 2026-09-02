@@ -1067,3 +1067,73 @@ class TestJensenShannonSeesTheTail:
         q = np.linspace(0.1, 10.0, 100)
         d = jensen_shannon_distance(p, q)
         assert np.isfinite(d) and 0.0 <= d <= 1.0
+
+
+# =====================================================================
+# S3 — a spike-inflated sigma_sq made the trap test CONSERVATIVE (step 18)
+# =====================================================================
+
+def _wishart_spectrum(N: int = 200, M: int = 50, seed: int = 3) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    W = rng.normal(size=(N, M))
+    return np.sort(np.linalg.svd(W, compute_uv=False) ** 2)[::-1]
+
+
+class TestBulkVarianceExcludesSpikes:
+    """`sigma_sq = mean(rand_evals)` counted the spike it exists to detect.
+
+    Injecting one 20x spike moved the mean 201.37 -> 381.12 (1.89x), inflating
+    the MP edge by the same factor and making the detector CONSERVATIVE exactly
+    when it should fire hardest.
+    """
+
+    def test_one_spike_does_not_move_the_mp_edge(self):
+        clean = _wishart_spectrum()
+        spiked = clean.copy()
+        spiked[0] = clean[0] * 20.0
+
+        # Anti-vacuity: the naive statistic really is inflated on this probe, so a
+        # green result cannot come from a spike too small to matter.
+        assert float(np.mean(spiked)) / float(np.mean(clean)) > 1.5
+
+        lp_clean = detect_correlation_trap(clean, 200, 50)["mp_lambda_plus"]
+        lp_spiked = detect_correlation_trap(spiked, 200, 50)["mp_lambda_plus"]
+
+        assert lp_spiked == pytest.approx(lp_clean, rel=0.05), (
+            f"one 20x spike moved the MP edge from {lp_clean!r} to {lp_spiked!r} "
+            f"({lp_spiked / lp_clean:.4f}x)"
+        )
+
+    @pytest.mark.parametrize("N,M,seed", [(200, 50, 7), (500, 100, 11)])
+    def test_the_edge_is_stable_across_shapes_and_draws(self, N, M, seed):
+        clean = _wishart_spectrum(N, M, seed)
+        spiked = clean.copy()
+        spiked[0] = clean[0] * 20.0
+
+        lp_clean = detect_correlation_trap(clean, N, M)["mp_lambda_plus"]
+        lp_spiked = detect_correlation_trap(spiked, N, M)["mp_lambda_plus"]
+        assert lp_spiked == pytest.approx(lp_clean, rel=0.05)
+
+    def test_the_spike_is_still_detected(self):
+        """Anti-vacuity: a robust edge must make the detector MORE sensitive."""
+        clean = _wishart_spectrum()
+        spiked = clean.copy()
+        spiked[0] = clean[0] * 20.0
+
+        result = detect_correlation_trap(spiked, 200, 50)
+        assert result["has_trap"] is True
+        assert result["num_rand_spikes"] >= 1
+        assert result["trap_severity"] > 1.0
+
+    def test_a_pure_bulk_reports_a_small_severity(self):
+        """Anti-vacuity control: the estimator must not manufacture traps."""
+        clean = _wishart_spectrum(500, 100, seed=11)
+        result = detect_correlation_trap(clean, 500, 100)
+        assert result["trap_severity"] < 0.1, (
+            f"a clean Wishart spectrum was scored as a trap: {result}"
+        )
+
+    def test_degenerate_inputs_are_unchanged(self):
+        empty = detect_correlation_trap(np.array([1.0]), 10, 5)
+        assert empty["has_trap"] is False and empty["mp_lambda_plus"] == 0.0
+        assert detect_correlation_trap(np.zeros(20), 10, 5)["has_trap"] is False

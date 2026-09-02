@@ -508,6 +508,74 @@ def classify_learning_phase(alpha: float) -> str:
 
 # ---------------------------------------------------------------------
 
+def label_trap_severity(severity: float) -> str:
+    """Map a correlation-trap severity score to its human-readable band.
+
+    Args:
+        severity: Normalized severity score (0 = no trap).
+
+    Returns:
+        One of ``'none'``, ``'mild'``, ``'moderate'``, ``'severe'``, ``'critical'``.
+
+    Notes:
+        Shared by ``detect_correlation_trap`` and by the multi-draw averaging in
+        ``SpectralAnalyzer``, which must label the MEAN severity rather than pick
+        one draw's label.
+    """
+    if severity < SPECTRAL_TRAP_SEVERITY_MILD:
+        return 'none'
+    if severity < SPECTRAL_TRAP_SEVERITY_MODERATE:
+        return 'mild'
+    if severity < SPECTRAL_TRAP_SEVERITY_SEVERE:
+        return 'moderate'
+    if severity < SPECTRAL_TRAP_SEVERITY_CRITICAL:
+        return 'severe'
+    return 'critical'
+
+
+# ---------------------------------------------------------------------
+
+def estimate_bulk_variance(evals: np.ndarray, Q: float, n_iter: int = 3) -> float:
+    """Estimate the MP bulk variance with spike eigenvalues EXCLUDED.
+
+    Starts from the plain mean and iteratively re-estimates it over only the
+    eigenvalues at or below the current MP upper edge, so an outlier spike stops
+    inflating the very edge that is supposed to identify it.
+
+    Args:
+        evals: Eigenvalues to estimate the bulk variance of.
+        Q: Aspect ratio ``N / M`` with ``N`` the LARGER dimension.
+        n_iter: Number of refinement passes. Converges in 2-3 in practice.
+
+    Returns:
+        Bulk variance estimate (sigma^2), or ``0.0`` on empty/degenerate input.
+    """
+    if evals is None or len(evals) == 0 or Q <= 0.0:
+        return 0.0
+
+    evals = np.asarray(evals, dtype=float)
+    sigma_sq = float(np.mean(evals))
+
+    for _ in range(max(0, n_iter)):
+        if sigma_sq < SPECTRAL_EPSILON:
+            return 0.0
+        _, lambda_plus = calc_mp_edges(sigma_sq, Q)
+        bulk = evals[evals <= lambda_plus]
+        if len(bulk) == 0:
+            break
+        refined = float(np.mean(bulk))
+        if refined < SPECTRAL_EPSILON:
+            break
+        converged = abs(refined - sigma_sq) <= 1e-9 * sigma_sq
+        sigma_sq = refined
+        if converged:
+            break
+
+    return sigma_sq
+
+
+# ---------------------------------------------------------------------
+
 def detect_correlation_trap(
         rand_evals: np.ndarray,
         N: int,
@@ -559,14 +627,21 @@ def detect_correlation_trap(
     if rand_evals is None or len(rand_evals) < 2 or N < 1 or M < 1:
         return result
 
-    # Variance estimate from randomized eigenvalues
-    sigma_sq = float(np.mean(rand_evals))
-    if sigma_sq < SPECTRAL_EPSILON:
-        return result
-
     # Aspect ratio (Q = N/M, N the LARGER dim per docstring => Q >= 1)
     Q = N / M
     inv_sqrtQ = 1.0 / np.sqrt(Q)
+
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-017
+    # The bulk variance EXCLUDES spikes. Do NOT go back to `float(np.mean(rand_evals))`
+    # over the whole spectrum: that counts the spike into the very edge that is
+    # supposed to identify it. Measured on a 200x50 Wishart, one 20x spike moved the
+    # mean 201.37 -> 381.12 (1.89x) and the MP edge 453.09 -> 857.52 with it, making
+    # the detector CONSERVATIVE exactly when it should fire hardest. The reference
+    # implementation shipped in CORRELATION_TRAPS.md:997 has the same flaw; this is a
+    # deliberate divergence from that document. See decisions.md D-017.
+    sigma_sq = estimate_bulk_variance(rand_evals, Q)
+    if sigma_sq < SPECTRAL_EPSILON:
+        return result
 
     # Marchenko-Pastur edges — shared with `calc_mp_soft_rank` via `calc_mp_edges`,
     # which carries the D-002 rationale for the (1 +/- 1/sqrt(Q))^2 spelling.
@@ -591,16 +666,7 @@ def detect_correlation_trap(
         severity = float((np.max(rand_evals) - threshold) / mp_lambda_plus)
 
     # Severity label
-    if severity < SPECTRAL_TRAP_SEVERITY_MILD:
-        severity_label = 'none'
-    elif severity < SPECTRAL_TRAP_SEVERITY_MODERATE:
-        severity_label = 'mild'
-    elif severity < SPECTRAL_TRAP_SEVERITY_SEVERE:
-        severity_label = 'moderate'
-    elif severity < SPECTRAL_TRAP_SEVERITY_CRITICAL:
-        severity_label = 'severe'
-    else:
-        severity_label = 'critical'
+    severity_label = label_trap_severity(severity)
 
     result['has_trap'] = has_trap
     result['num_rand_spikes'] = int(num_spikes)
