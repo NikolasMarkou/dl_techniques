@@ -525,3 +525,135 @@ class TestModelWalkDoesNotEvaluateProperties:
             f"clone walk order {cloned} differs from original {original}; "
             f"create_smoothed_model would write the wrong layer's weights"
         )
+
+
+# =====================================================================
+# A6 + C10 - the config surface must be live and must match the README
+# =====================================================================
+
+DEAD_CONFIG_FIELDS = (
+    "n_samples_per_digit",
+    "sample_digits",
+    "show_statistical_tests",
+    "show_confidence_intervals",
+    "catch_specific_exceptions",
+    "enable_parallel_analysis",
+    "activation_layer_name",
+    "activation_layer_index",
+)
+
+
+def _config_field_names() -> set:
+    """Public (non-underscore) field names declared on ``AnalysisConfig``."""
+    import dataclasses
+
+    return {
+        f.name for f in dataclasses.fields(AnalysisConfig)
+        if not f.name.startswith("_")
+    }
+
+
+def _readme_field_names() -> set:
+    """Field names named in the ``AnalysisConfig`` table of the package README."""
+    import re
+    from pathlib import Path
+
+    import dl_techniques.analyzer as analyzer_pkg
+
+    readme = Path(analyzer_pkg.__file__).parent / "README.md"
+    lines = readme.read_text().splitlines()
+
+    start = lines.index("## `AnalysisConfig`")
+    names = set()
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        if not line.startswith("|") or line.startswith("|---"):
+            continue
+        first_cell = line.split("|")[1]
+        names.update(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", first_cell))
+    names.discard("Field")
+    return names
+
+
+class TestTheConfigSurfaceIsLive:
+    """Every `AnalysisConfig` field must have a reader, and the README must agree.
+
+    Defect guarded (A6 + C10): eight fields had ZERO references anywhere outside
+    `config.py` (re-grepped over the whole repo in-step). `catch_specific_exceptions`
+    is the dangerous one - it reads as a live error-handling switch and controls
+    nothing. Separately `json_include_raw_esds` was serialized INTO the artifact and
+    documented in the README as controlling raw eigenvalue arrays, while
+    `save_results` never mentioned `spectral_esds` at all.
+    """
+
+    @pytest.mark.parametrize("name", DEAD_CONFIG_FIELDS)
+    def test_a_dead_field_is_not_advertised(self, name):
+        assert name not in _config_field_names(), (
+            f"AnalysisConfig still declares {name!r}, which has no reader anywhere "
+            "in the repository"
+        )
+
+    def test_the_readme_table_and_the_config_agree(self):
+        config_names = _config_field_names()
+        readme_names = _readme_field_names()
+
+        # Anti-vacuity: the parser really did find the table.
+        assert len(readme_names) > 20, (
+            f"the README AnalysisConfig table parsed to {len(readme_names)} names; "
+            "the parser, not the docs, is what failed"
+        )
+        assert readme_names - config_names == set(), (
+            f"README documents fields AnalysisConfig does not have: "
+            f"{sorted(readme_names - config_names)}"
+        )
+        assert config_names - readme_names == set(), (
+            f"AnalysisConfig declares fields the README does not document: "
+            f"{sorted(config_names - readme_names)}"
+        )
+
+
+class TestJsonIncludeRawEsdsIsHonoured:
+    """`json_include_raw_esds` was serialized but never read.
+
+    MEASURED on unfixed HEAD: with the flag True the artifact carried
+    `config.json_include_raw_esds == True` and NO `spectral_esds` key, so the output
+    advertised a knob that did nothing while `README.md` documented it as controlling
+    raw eigenvalue arrays. The data was already on `AnalysisResults.spectral_esds`.
+    """
+
+    def _artifact(self, tmp_path, include: bool):
+        models = {"good": _build_spectral_probe("good", zeroed=False)}
+        analyzer = ModelAnalyzer(
+            models=models,
+            config=_quiet_config(
+                analyze_spectral=True, json_include_raw_esds=include),
+            output_dir=str(tmp_path / f"esd_{include}"),
+        )
+        analyzer.analyze(analysis_types={"spectral"})
+
+        # Anti-vacuity: there IS a spectrum to include, so an empty artifact key
+        # cannot pass by the analysis having produced nothing.
+        assert analyzer.results.spectral_esds, (
+            "the spectral analysis produced no ESDs; this guard would be vacuous"
+        )
+        return json.loads(
+            (analyzer.output_dir / "analysis_results.json").read_text())
+
+    def test_the_raw_esds_reach_the_artifact_when_the_flag_is_on(self, tmp_path):
+        payload = self._artifact(tmp_path, include=True)
+
+        assert "spectral_esds" in payload, (
+            "json_include_raw_esds=True but the artifact has no 'spectral_esds' "
+            f"key; top-level keys: {sorted(payload)}"
+        )
+        esds = payload["spectral_esds"]
+        assert esds and any(esds.values()), f"'spectral_esds' is empty: {esds}"
+        first_layer = next(iter(next(iter(esds.values())).values()))
+        assert isinstance(first_layer, list) and len(first_layer) > 0
+
+    def test_the_flag_still_excludes_them_when_off(self, tmp_path):
+        """Anti-vacuity: the key must be ABSENT when the flag is off."""
+        payload = self._artifact(tmp_path, include=False)
+        assert "spectral_esds" not in payload
+        assert "spectral_rand_esds" not in payload

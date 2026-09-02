@@ -630,6 +630,18 @@ class ModelAnalyzer:
             'multi_input_models': list(self._multi_input_models),
         }
 
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-028
+        # `json_include_raw_esds` was serialized into the artifact's `config` block
+        # while NOTHING read it, so the output advertised a knob that did nothing and
+        # `README.md` documented behaviour the code never had. Do NOT emit these
+        # unconditionally: one entry per analyzed layer, each a full eigenvalue
+        # spectrum. See decisions.md D-028.
+        if self.config.json_include_raw_esds:
+            if self.results.spectral_esds:
+                results_dict['spectral_esds'] = self.results.spectral_esds
+            if self.results.spectral_rand_esds:
+                results_dict['spectral_rand_esds'] = self.results.spectral_rand_esds
+
         if not self.config.json_include_per_sample_data:
             pruned_confidence = {}
             for model_name, metrics in results_dict.get('confidence_metrics', {}).items():

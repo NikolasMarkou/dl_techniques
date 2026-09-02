@@ -25,12 +25,6 @@ class AnalysisConfig:
 
     # Sampling parameters
     n_samples: int = 1000
-    n_samples_per_digit: int = 3
-    sample_digits: Optional[List[int]] = None
-
-    # Layer selection
-    activation_layer_name: Optional[str] = None
-    activation_layer_index: Optional[int] = None
 
     # Weight analysis options
     weight_layer_types: Optional[List[str]] = None
@@ -69,24 +63,21 @@ class AnalysisConfig:
     save_format: str = 'png'
 
     # Advanced options
-    show_statistical_tests: bool = True
-    show_confidence_intervals: bool = True
     verbose: bool = True
 
     # JSON serialization options
     json_include_per_sample_data: bool = False  # Set to False to exclude bulky per-sample arrays (e.g., confidence, entropy)
-    json_include_raw_esds: bool = False         # Set to False to exclude raw eigenvalue arrays from spectral analysis
+    # When True, `save_results` emits `spectral_esds` (and `spectral_rand_esds`
+    # when randomization ran) into the artifact. Kept False by default: one entry
+    # per analyzed layer, each the full eigenvalue spectrum.
+    json_include_raw_esds: bool = False
 
     # Configurable visualization parameters (addressing hardcoded values)
     max_layers_heatmap: int = 12  # Maximum layers to show in weight health heatmap
     max_layers_info_flow: int = 8  # Maximum layers to show in information flow analysis
     pareto_analysis_threshold: int = 2  # Minimum models needed for Pareto analysis
 
-    # Exception handling specificity
-    catch_specific_exceptions: bool = True  # When True, catch more specific exceptions
-
     # Performance settings
-    enable_parallel_analysis: bool = False  # For future parallel processing
     # DECISION plan-2026-09-01T225724-e79ad4bd/D-022
     # Budget for the activations `InformationFlowAnalyzer` holds in memory at once.
     # This defaults to a real number, NOT None: the analyzer retains every wrapped

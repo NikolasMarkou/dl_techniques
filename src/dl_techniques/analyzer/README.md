@@ -59,7 +59,6 @@ attributes.
 |---|---|---|
 | `analyze_weights` / `analyze_calibration` / `analyze_information_flow` / `analyze_training_dynamics` / `analyze_spectral` | all `True` | master toggles |
 | `n_samples` | `1000` | cap on samples for data-dependent analyses |
-| `activation_layer_name` / `activation_layer_index` | `None` | pin the layer used for activation stats |
 | `weight_layer_types` | `None` (all) | e.g. `['Dense', 'Conv2D']` |
 | `analyze_biases` | `False` | |
 | `compute_weight_pca` | `True` | |
@@ -69,15 +68,17 @@ attributes.
 | `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test (it is ~100× the cost of the alpha fit) |
 | `spectral_concentration_analysis` | `True` | Gini / dominance / participation ratio |
 | `spectral_randomize` | `False` | randomized-weight comparison (slow) |
+| `spectral_n_randomizations` | `5` | independent permutations averaged per layer when `spectral_randomize` is on |
 | `spectral_glorot_fix` | `False` | |
 | `spectral_per_layer_diagnostics` | `False` | one power-law fit plot per layer into `spectral_plots/` |
 | `plot_style` | `'publication'` | also `'presentation'`, `'draft'` |
 | `color_palette` / `fig_width` / `fig_height` / `dpi` | `'deep'` / 12 / 8 / 300 | |
 | `save_plots` / `save_format` | `True` / `'png'` | |
 | `json_include_per_sample_data` | `False` | per-sample confidence/entropy arrays — bulky |
-| `json_include_raw_esds` | `False` | raw eigenvalue arrays — very bulky |
+| `json_include_raw_esds` | `False` | emit `spectral_esds` / `spectral_rand_esds` (the full per-layer eigenvalue spectra) into the artifact — very bulky |
 | `max_layers_heatmap` / `max_layers_info_flow` | `12` / `8` | plot truncation |
 | `pareto_analysis_threshold` | `2` | minimum models for Pareto plots |
+| `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded |
 | `verbose` | `True` | |
 
 `AnalysisConfig.setup_plotting_style()` is called in `ModelAnalyzer.__init__` and forces
