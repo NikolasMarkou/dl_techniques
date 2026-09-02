@@ -648,9 +648,11 @@ class DiTXATimestepEmbedder(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         args = keras.ops.expand_dims(keras.ops.cast(t, "float32"), axis=-1) * self.freqs
-        # COS FIRST. Upstream `dit.py:60`. The 1D positional helper in this same
-        # module is sin-first; they are independently specified and must not be
-        # unified.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-033
+        # COS FIRST (`dit.py:60`). Do NOT swap to sin-first, do NOT unify with
+        # `ScalarSinusoidalEmbedding` or the sin-first 1D helper in this module:
+        # the swap is a column permutation, so shape/norm/round-trip are blind
+        # and the model trains on a basis no checkpoint uses. decisions.md D-033.
         embedding = keras.ops.concatenate(
             [keras.ops.cos(args), keras.ops.sin(args)], axis=-1
         )

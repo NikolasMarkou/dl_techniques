@@ -828,10 +828,12 @@ class DiTXA(keras.Model):
         """
         is_reverse = self._is_reverse(direction)
 
-        # The forward branch scales the RAW pixels; the reverse branch does not.
-        # Selecting between two already-embedded streams keeps that asymmetry
-        # structural: there is no code path on which the reverse embedder sees a
-        # scaled input.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-005
+        # `forward_cond_scale` is FORWARD-ONLY (`dit.py:522-536`). Do NOT hoist
+        # it onto `x_cond` before this split and do NOT fold it into a single
+        # embedder: selecting between two already-embedded streams is what makes
+        # "the reverse embedder never sees a scaled input" structural, not a
+        # convention. decisions.md D-005.
         forward_tokens = self.cond_embedder_forward(
             x_cond * self.forward_cond_scale, training=training
         )
@@ -840,6 +842,11 @@ class DiTXA(keras.Model):
 
         cond_tokens = cond_tokens + keras.ops.cast(self.pos_embed, cond_tokens.dtype)
 
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-034
+        # The mask is applied AFTER the positional add, never before it
+        # (`dit.py:533-542`). Masking first leaves a masked sample carrying the
+        # positional signal instead of the exact zero tensor -- same shape, same
+        # dtype, finite, and it makes CFG's null pass a positions-only pass.
         if cond_mask is not None:
             mask = keras.ops.cast(
                 _as_batch_vector(cond_mask), cond_tokens.dtype
@@ -897,8 +904,11 @@ class DiTXA(keras.Model):
             t_cond * self.time_scale, training=training
         )
         y_emb = self.y_embedder(y, training=training)
-        # The AVERAGE of the two timestep embeddings, not their sum, and not
-        # `t + y` as in plain DiT (dit.py:531).
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-035
+        # The AVERAGE of the two timestep embeddings, not their sum and not
+        # `t + y` as in plain DiT (`dit.py:531`). Do NOT drop the `/ 2` and do
+        # NOT reuse `t_embedder` for `t_cond`: both only rescale/retie what the
+        # zero-init adaLN sees, so nothing raises. decisions.md D-035.
         c = (t_emb + t_cond_emb) / 2.0 + y_emb
 
         cond_tokens = self._embed_conditioning(
