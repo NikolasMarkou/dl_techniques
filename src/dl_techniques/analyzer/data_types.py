@@ -111,6 +111,12 @@ class AnalysisResults:
 
     # Information flow
     information_flow: Dict[str, Any] = field(default_factory=dict)
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-037
+    # The ONE capture batch size used for every model in the run. `effective_rank`
+    # is bounded above by it, so a reader comparing two models' information flow
+    # must be able to see that both were measured at the same batch. None means
+    # information flow was not run. See decisions.md D-037.
+    information_flow_batch_size: Optional[int] = None
 
     # Training history and dynamics
     training_history: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)

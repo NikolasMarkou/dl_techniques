@@ -810,6 +810,11 @@ class ModelAnalyzer:
             'calibration_metrics': self.results.calibration_metrics,
             'confidence_metrics': self.results.confidence_metrics,
             'information_flow': self.results.information_flow,
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-037
+            # Every `effective_rank` in `information_flow` is bounded above by
+            # this batch, so an artifact that omits it cannot be compared with
+            # another run. See decisions.md D-037.
+            'information_flow_batch_size': self.results.information_flow_batch_size,
             'activation_stats': self.results.activation_stats,
             'training_metrics': (self._serialize_training_metrics()
                                if self.results.training_metrics else None),

@@ -79,7 +79,7 @@ attributes.
 | `json_include_raw_esds` | `False` | emit `spectral_esds` / `spectral_rand_esds` (the full per-layer eigenvalue spectra) into the artifact — very bulky |
 | `max_layers_heatmap` / `max_layers_info_flow` | `12` / `8` | plot truncation |
 | `pareto_analysis_threshold` | `2` | minimum models for Pareto plots |
-| `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded |
+| `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded. The resulting batch is shared by every model in the run (the minimum over them) — see the information-flow section for why |
 | `random_state` | `None` | seeds every stochastic site (data subsampling, spectral randomization, the goodness-of-fit bootstrap, power iteration); `None` is unseeded and NOT reproducible |
 | `verbose` | `True` | |
 
@@ -147,6 +147,14 @@ Per layer: `layer_type`, `output_shape`, `mean_activation`, `std_activation`, `s
 - The capture batch is `min(config.n_samples, 200)` samples, further capped so the retained
   activations fit `config.memory_limit_mb` (default 2048; `None` is unbounded). A capped run logs a
   warning naming the old and new batch size.
+- **All models in one run share ONE capture batch size — the minimum over them** — and it is
+  reported as `results.information_flow_batch_size` (also written into the saved JSON).
+  `effective_rank` is the singular-value entropy of a `(batch, features)` matrix and is therefore
+  bounded above by `batch`, so a per-model batch would make the bigger model measure less
+  information for a purely mechanical reason. MEASURED on a 64-filter and a 256-filter conv model
+  at `memory_limit_mb=20`: sized per model they read `effective_rank` **195.05** (batch 200) and
+  **77.38** (batch 79); at the shared batch of 79 they read **77.35** and **77.38**. Two runs are
+  only comparable when this number matches.
 - A weight-shared layer keeps the tensor from its **last** invocation, and its `capture_index` is
   that last position.
 

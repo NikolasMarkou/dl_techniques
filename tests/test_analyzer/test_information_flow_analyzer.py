@@ -488,3 +488,114 @@ class TestActivationCaptureRespectsTheMemoryBudget:
         """Anti-vacuity: the cap is conditional, not a blanket batch reduction."""
         _, flow = _run_budget_analysis(memory_limit_mb=None, n_samples=64)
         assert flow["bud_conv"]["output_shape"][0] == 64
+
+
+# ---------------------------------------------------------------------
+# C-3 (review iteration 1) -- one batch size across ALL models
+# ---------------------------------------------------------------------
+
+#: A budget that the WIDE model cannot meet at 200 samples but the narrow one can,
+#: so a per-model sizing rule and a shared one give measurably different answers.
+#: Retained bytes/sample: small ~65,800, big ~263,176 -> at 20 MB the affordable
+#: batches are ~318 (clipped to 200) and ~79.
+_SHARED_BUDGET_MB = 20
+
+
+def _build_sized_conv_model(name: str, filters: int) -> keras.Model:
+    """A one-conv model whose retained bytes scale with `filters`."""
+    keras.utils.set_random_seed(7)
+    inputs = keras.Input(shape=(_BUDGET_H, _BUDGET_W, _BUDGET_C_IN), name=f"{name}_in")
+    x = keras.layers.Conv2D(
+        filters, 3, padding="same", activation="relu", name=f"{name}_c1")(inputs)
+    x = keras.layers.GlobalAveragePooling2D(name=f"{name}_gap")(x)
+    return keras.Model(inputs, keras.layers.Dense(2, name=f"{name}_out")(x), name=name)
+
+
+def _run_two_model_budget(memory_limit_mb, n_samples=200):
+    """Analyze a small and a 4x-wider model together under one budget."""
+    rng = np.random.default_rng(99)
+    x = rng.standard_normal(
+        (n_samples, _BUDGET_H, _BUDGET_W, _BUDGET_C_IN)).astype("float32")
+    y = np.zeros((n_samples, 2), dtype="float32")
+    models = {
+        "small": _build_sized_conv_model("small", _BUDGET_FILTERS),
+        "big": _build_sized_conv_model("big", _BUDGET_FILTERS * 4),
+    }
+    config = AnalysisConfig(n_samples=n_samples, memory_limit_mb=memory_limit_mb)
+    analyzer = InformationFlowAnalyzer(models, config)
+    results = AnalysisResults()
+    analyzer.analyze(results, DataInput(x_data=x, y_data=y))
+    return analyzer, results
+
+
+class TestEveryModelIsMeasuredAtTheSameBatchSize:
+    """A per-model batch size silently breaks the cross-model comparison.
+
+    `effective_rank` is the singular-value entropy of a `(batch, features)`
+    matrix, so it is bounded above by `batch`. MEASURED against the shipped code
+    at `memory_limit_mb=64`: `small_c1` reported effective_rank **196.74** at
+    batch 200 while `big_c1` reported **61.86** at batch 63 — the bigger model
+    read as carrying LESS information purely because it was handed fewer rows.
+    """
+
+    def test_both_models_are_captured_at_one_batch_size(self):
+        _, results = _run_two_model_budget(memory_limit_mb=_SHARED_BUDGET_MB)
+        small = results.information_flow["small"]["small_c1"]["output_shape"][0]
+        big = results.information_flow["big"]["big_c1"]["output_shape"][0]
+        assert small == big, (
+            f"small captured {small} samples, big captured {big}; "
+            f"effective_rank <= batch, so these two are not comparable"
+        )
+
+    def test_the_shared_batch_is_the_minimum_over_models(self):
+        """Anti-vacuity: the shared size is the BUDGET-honouring one, not just equal.
+
+        A shared batch that simply took the first model's size would satisfy the
+        equality test above while blowing the budget on the wider model.
+        """
+        analyzer, results = _run_two_model_budget(memory_limit_mb=_SHARED_BUDGET_MB)
+        shared = results.information_flow_batch_size
+
+        assert shared == analyzer._batch_size
+        assert shared < 200, (
+            "the probe never hit the budget; it cannot discriminate. "
+            f"shared={shared}"
+        )
+        for model_name, flow in results.information_flow.items():
+            captured = sum(
+                int(np.prod(a["output_shape"])) * 4 for a in flow.values())
+            assert captured <= _SHARED_BUDGET_MB * 1024 * 1024, (
+                f"{model_name} captured {captured} bytes against a "
+                f"{_SHARED_BUDGET_MB} MB budget")
+            for layer_name, analysis in flow.items():
+                assert analysis["output_shape"][0] == shared, (
+                    f"{model_name}/{layer_name} was measured at "
+                    f"{analysis['output_shape'][0]}, not the shared {shared}")
+
+    def test_the_shared_batch_is_recorded_in_the_results(self):
+        """The batch every effective_rank is capped by must be readable."""
+        _, results = _run_two_model_budget(memory_limit_mb=_SHARED_BUDGET_MB)
+        assert isinstance(results.information_flow_batch_size, int)
+        assert results.information_flow_batch_size >= 1
+
+    def test_effective_rank_is_not_ordered_by_model_size_alone(self):
+        """The consequence the fix exists for, stated as a number.
+
+        With a shared batch, `effective_rank` is bounded by the SAME ceiling for
+        both models, so the wider model is no longer mechanically pushed below
+        the narrower one.
+        """
+        _, results = _run_two_model_budget(memory_limit_mb=_SHARED_BUDGET_MB)
+        shared = results.information_flow_batch_size
+        small_rank = results.information_flow["small"]["small_c1"]["effective_rank"]
+        big_rank = results.information_flow["big"]["big_c1"]["effective_rank"]
+        assert small_rank > 0 and big_rank > 0
+        assert small_rank <= shared and big_rank <= shared
+
+    def test_an_unbounded_budget_still_gives_every_model_the_full_sample(self):
+        """Anti-vacuity: `memory_limit_mb=None` is not silently capped."""
+        _, results = _run_two_model_budget(memory_limit_mb=None, n_samples=64)
+        assert results.information_flow_batch_size == 64
+        for flow in results.information_flow.values():
+            for analysis in flow.values():
+                assert analysis["output_shape"][0] == 64

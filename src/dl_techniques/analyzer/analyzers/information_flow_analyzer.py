@@ -134,6 +134,18 @@ class InformationFlowAnalyzer(BaseAnalyzer):
             x_sample = x_sample[:min(max_info_flow_samples, len(x_sample))]
             self._batch_size = len(x_sample)
 
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-037
+        # ONE batch size for EVERY model, computed before the per-model loop.
+        # `effective_rank` is the singular-value entropy of a `(batch, features)`
+        # matrix, so it is BOUNDED ABOVE by `batch`; sizing the batch per model
+        # therefore makes a bigger model measure LOWER information content for a
+        # purely mechanical reason. Measured at `memory_limit_mb=64` on two conv
+        # models: `small_c1` 196.74 (batch 200) against `big_c1` 61.86 (batch 63).
+        # Cross-model comparison is what this analyzer exists for, so the budget
+        # is honoured by the MIN over models, never per model. Do NOT move this
+        # back inside the loop. See decisions.md D-037.
+        shared_batch = self._shared_batch_size(x_sample)
+        results.information_flow_batch_size = shared_batch
 
         for model_name, model in self.models.items():
             if not model.built:
@@ -161,15 +173,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     logger.warning(f"No suitable layers for information flow analysis in '{model_name}'.")
                     continue
 
-                for layer in extraction_layers:
-                    if any(existing is layer for existing, _, _ in wrapped):
-                        # The same layer object can be reached twice by the walk; wrap it once.
-                        continue
-                    had_own_call = 'call' in layer.__dict__
-                    original_call = layer.__dict__.get('call')
-                    wrapped.append((layer, had_own_call, original_call))
-                    layer.call = self._make_recording_call(
-                        layer, captured_outputs, capture_order, call_counter)
+                wrapped = self._wrap_recording_calls(
+                    extraction_layers, captured_outputs, capture_order, call_counter)
 
                 # DECISION plan-2026-09-01T225724-e79ad4bd/D-022
                 # Size the batch to `config.memory_limit_mb` BEFORE the real pass, by
@@ -178,9 +183,9 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 # would then carry different batch sizes, `_safely_flatten_activations`
                 # would reject the short ones against `self._batch_size`, and conv
                 # `effective_rank` would silently return to 0.0 (defect C2).
-                # See decisions.md D-022.
-                batch = self._fit_batch_to_budget(
-                    model, x_sample, captured_outputs, capture_order)
+                # See decisions.md D-022. The sizing itself now happens ONCE for all
+                # models, above the loop (D-037).
+                batch = min(shared_batch, _num_samples(x_sample))
                 self._batch_size = batch
 
                 # The pass MUST be eager. Under `model.predict(...)` Keras traces the
@@ -237,14 +242,117 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 continue
             finally:
                 # Runs on every exit path, including the re-raise and the `continue`.
-                for layer, had_own_call, original_call in wrapped:
-                    if had_own_call:
-                        layer.call = original_call
-                    else:
-                        # Delete the per-instance attribute so the class method is
-                        # reachable again; the model must be bit-identical afterwards.
-                        layer.__dict__.pop('call', None)
-                logger.debug(f"Restored `call` on {len(wrapped)} layers of model '{model_name}'.")
+                self._restore_recording_calls(wrapped)
+
+    @staticmethod
+    def _wrap_recording_calls(
+            extraction_layers: List[keras.layers.Layer],
+            captured_outputs: Dict[str, np.ndarray],
+            capture_order: Dict[str, int],
+            call_counter: 'itertools.count',
+    ) -> List[tuple]:
+        """Replace each layer's `call` with a recording wrapper.
+
+        Args:
+            extraction_layers: Layers to wrap. The same object may appear twice
+                (the walk can reach it by two routes); it is wrapped once.
+            captured_outputs: Dict the wrappers record into, keyed by layer name.
+            capture_order: Dict recording each layer's invocation index.
+            call_counter: Shared invocation counter for the whole forward pass.
+
+        Returns:
+            A list of ``(layer, had_own_call, original_call_attribute)`` triples,
+            which MUST be handed to `_restore_recording_calls` on every exit path.
+        """
+        wrapped: List[tuple] = []
+        for layer in extraction_layers:
+            if any(existing is layer for existing, _, _ in wrapped):
+                # The same layer object can be reached twice by the walk; wrap it once.
+                continue
+            had_own_call = 'call' in layer.__dict__
+            original_call = layer.__dict__.get('call')
+            wrapped.append((layer, had_own_call, original_call))
+            layer.call = InformationFlowAnalyzer._make_recording_call(
+                layer, captured_outputs, capture_order, call_counter)
+        return wrapped
+
+    @staticmethod
+    def _restore_recording_calls(wrapped: List[tuple]) -> None:
+        """Undo `_wrap_recording_calls`, leaving the model bit-identical.
+
+        Args:
+            wrapped: The triples returned by `_wrap_recording_calls`.
+        """
+        for layer, had_own_call, original_call in wrapped:
+            if had_own_call:
+                layer.call = original_call
+            else:
+                # Delete the per-instance attribute so the class method is
+                # reachable again; the model must be bit-identical afterwards.
+                layer.__dict__.pop('call', None)
+        logger.debug(f"Restored `call` on {len(wrapped)} layers.")
+
+    def _shared_batch_size(self, x_sample: Any) -> int:
+        """Return the one capture batch size every model in this run will use.
+
+        Each model is probed at B=1 for its own affordable batch under
+        `config.memory_limit_mb`; the run then uses the MINIMUM, so two models
+        are never compared at two different batch sizes.
+
+        Args:
+            x_sample: The already-subsampled input batch (array or dict of arrays).
+
+        Returns:
+            A batch size in ``[1, len(x_sample)]``. The full length is returned
+            when `config.memory_limit_mb` is None or no model could be probed.
+        """
+        available = _num_samples(x_sample)
+        if self.config.memory_limit_mb is None:
+            return available
+
+        batch = available
+        for model_name, model in self.models.items():
+            if not model.built:
+                try:
+                    model.predict(x_sample, verbose=0)
+                except Exception as e:
+                    # The per-model loop reports and skips this model; the budget
+                    # pre-pass simply does not get a vote for it.
+                    logger.debug(
+                        f"Could not build '{model_name}' for the budget probe: {e}")
+                    continue
+
+            captured_outputs: Dict[str, np.ndarray] = {}
+            capture_order: Dict[str, int] = {}
+            wrapped: List[tuple] = []
+            try:
+                extraction_layers = self._get_extraction_layers(
+                    recursively_get_layers(model))
+                if not extraction_layers:
+                    continue
+                wrapped = self._wrap_recording_calls(
+                    extraction_layers, captured_outputs, capture_order,
+                    itertools.count())
+                batch = min(batch, self._fit_batch_to_budget(
+                    model, x_sample, captured_outputs, capture_order))
+            except (AttributeError, TypeError, NameError, ImportError):
+                raise
+            except Exception as e:
+                logger.debug(
+                    f"Budget probe failed for '{model_name}': {e}; it does not "
+                    f"constrain the shared batch size.")
+            finally:
+                self._restore_recording_calls(wrapped)
+
+        batch = max(1, batch)
+        if batch < available:
+            logger.warning(
+                f"Information-flow capture uses {batch} of {available} samples "
+                f"for EVERY model (the minimum across "
+                f"{len(self.models)} model(s)), so effective_rank stays "
+                f"comparable across them. Raise config.memory_limit_mb to lift it."
+            )
+        return batch
 
     def _fit_batch_to_budget(
             self,
