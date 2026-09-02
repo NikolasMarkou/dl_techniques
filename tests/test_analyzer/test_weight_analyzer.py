@@ -407,3 +407,110 @@ class TestTheExplainedVarianceIsNeverNaN:
             "summary_dashboard.png was not written. Files present: "
             f"{sorted(p.name for p in output_dir.iterdir())}"
         )
+
+
+class TestNoNonFiniteMatrixIsHandedToLapack:
+    """A corrupt weight must never reach LAPACK's SVD.
+
+    `_raw_statistics` computes `np.linalg.norm(weights, 2)` for every rank-2
+    tensor BEFORE the finiteness classification runs, so a genuinely corrupt
+    model drives a NaN matrix into LAPACK. The outcome is benign (`nan` comes
+    back, the classifier catches it, the row is dropped) but LAPACK writes
+
+        ** On entry to DLASCL parameter number  4 had an illegal value
+
+    to RAW STDERR, where no logger can filter, prefix or attribute it. Nothing
+    in `analyze()` names the model, so a user sees Fortran noise from an
+    unknown source in the middle of an otherwise clean run.
+
+    INSTRUMENT NOTE: patching `np.linalg.svd` does NOT intercept this.
+    `np.linalg.norm` resolves `svd` as a module GLOBAL inside
+    `numpy/linalg/_linalg.py` (`norm` -> `_multi_svd_norm` -> `svd`), so a spy
+    installed on the public alias is never consulted and reports a FALSE zero.
+    Patch `numpy.linalg._linalg.svd`, and prove the patch is live before
+    trusting any zero -- that is what `test_the_svd_spy_is_live` is for.
+    """
+
+    @staticmethod
+    def _install_svd_spy(monkeypatch):
+        """Count SVD calls and how many were handed a non-finite matrix."""
+        import numpy.linalg._linalg as _linalg
+
+        tally = {"total": 0, "non_finite": 0, "shapes": []}
+        real_svd = _linalg.svd
+
+        def spy(a, *args, **kwargs):
+            tally["total"] += 1
+            arr = np.asarray(a)
+            if arr.size and not np.isfinite(arr).all():
+                tally["non_finite"] += 1
+                tally["shapes"].append(arr.shape)
+            return real_svd(a, *args, **kwargs)
+
+        monkeypatch.setattr(_linalg, "svd", spy)
+        return tally
+
+    def test_the_svd_spy_is_live(self, monkeypatch):
+        """ANTI-VACUITY: without this, a zero below proves only a dead patch."""
+        tally = self._install_svd_spy(monkeypatch)
+        np.linalg.norm(np.ones((4, 4), dtype=np.float64), 2)
+        assert tally["total"] > 0, (
+            "the spy on numpy.linalg._linalg.svd was not consulted by "
+            "np.linalg.norm(x, 2); every count it reports is meaningless"
+        )
+        tally_nf = self._install_svd_spy(monkeypatch)
+        corrupt = np.full((4, 4), np.nan, dtype=np.float64)
+        try:
+            np.linalg.norm(corrupt, 2)
+        except np.linalg.LinAlgError:
+            # LAPACK may or may not converge on an all-NaN matrix; either way
+            # the spy has already seen the array on the way in, which is the
+            # only thing this arm is asserting.
+            pass
+        assert tally_nf["non_finite"] == 1, (
+            "the spy cannot even see a non-finite matrix it is handed directly"
+        )
+
+    def test_a_corrupt_model_hands_nothing_non_finite_to_lapack(
+            self, tmp_path, monkeypatch):
+        tally = self._install_svd_spy(monkeypatch)
+        analyzer = _weights_only_analyzer(
+            {"corrupt": _tiny_model("corrupt", corrupt=True),
+             "clean_a": _tiny_model("clean_a"),
+             "clean_b": _tiny_model("clean_b")},
+            tmp_path / "lapack",
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+
+        assert tally["total"] > 0, (
+            "no SVD ran at all during the analysis, so this run cannot "
+            "distinguish 'guarded' from 'never exercised'"
+        )
+        assert tally["non_finite"] == 0, (
+            f"{tally['non_finite']} non-finite matrix/matrices "
+            f"{tally['shapes']} were handed to LAPACK, which writes "
+            "unattributable DLASCL noise to raw stderr"
+        )
+        # The published value is unchanged: the spectral norm of a corrupt
+        # matrix stays NaN, and the corrupt row is still dropped from the PCA.
+        assert not np.isfinite(
+            results.weight_stats["corrupt"]["corrupt_d1_w0"]["norms"]["spectral"]
+        ), "skipping the SVD silently invented a finite spectral norm"
+        assert results.weight_pca["labels"] == ["clean_a", "clean_b"]
+
+    def test_the_skipped_spectral_norm_is_still_bit_identical(self):
+        """R3: a healthy rank-2 tensor must keep its exact spectral norm."""
+        weights = _RNG.standard_normal((9, 5)).astype(np.float32)
+        stats = _analyzer()._compute_weight_statistics(weights)
+        assert stats["norms"]["spectral"] == float(np.linalg.norm(weights, 2))
+
+    @pytest.mark.parametrize("name,tensor,mechanism", [
+        c for c in DEGENERATE_CENSUS if len(c[1].shape) == 2 and c[1].size
+    ], ids=lambda v: v if isinstance(v, str) else "")
+    def test_no_census_tensor_reaches_lapack_non_finite(
+            self, name, tensor, mechanism, monkeypatch):
+        tally = self._install_svd_spy(monkeypatch)
+        _analyzer()._compute_weight_statistics(tensor)
+        assert tally["non_finite"] == 0, (
+            f"{name} ({mechanism}) handed a non-finite matrix to LAPACK"
+        )

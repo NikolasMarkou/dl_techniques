@@ -317,14 +317,27 @@ class WeightAnalyzer(BaseAnalyzer):
         }
 
         if len(weights.shape) == 2:
-            try:
-                stats['norms']['spectral'] = float(np.linalg.norm(weights, 2))
-            except (np.linalg.LinAlgError, ValueError, TypeError):
-                # MEASURED: `float16` raises `TypeError: array type float16 is
-                # unsupported in linalg` and a non-finite entry makes LAPACK
-                # return without raising a `LinAlgError` at all, so the original
-                # `except np.linalg.LinAlgError` caught neither.
+            # DECISION plan-2026-09-02T062406-e2aa52ef/D-006
+            # Do NOT drop this pre-check "because LAPACK handles it anyway".
+            # It does -- `np.linalg.norm(x, 2)` returns `nan` for a non-finite
+            # matrix and the classifier picks that up -- but on the way it
+            # writes `** On entry to DLASCL parameter number 4 had an illegal
+            # value` to RAW STDERR from Fortran, where no logger can filter,
+            # prefix or attribute it. The published value is IDENTICAL either
+            # way (`nan`); this branch only suppresses unattributable noise.
+            # An O(n) `isfinite` scan is far cheaper than the SVD it replaces.
+            # See decisions.md D-006.
+            if not bool(np.isfinite(weights).all()):
                 stats['norms']['spectral'] = float('nan')
+            else:
+                try:
+                    stats['norms']['spectral'] = float(
+                        np.linalg.norm(weights, 2))
+                except (np.linalg.LinAlgError, ValueError, TypeError):
+                    # MEASURED: `float16` raises `TypeError: array type float16
+                    # is unsupported in linalg`, which the original
+                    # `except np.linalg.LinAlgError` could not catch.
+                    stats['norms']['spectral'] = float('nan')
 
         return stats
 
