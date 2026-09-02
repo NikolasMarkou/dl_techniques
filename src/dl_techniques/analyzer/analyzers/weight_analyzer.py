@@ -402,6 +402,17 @@ class WeightAnalyzer(BaseAnalyzer):
                 )
                 return  # Exit the method
 
+            model_features, labels = self._drop_non_finite_rows(
+                model_features, labels, results)
+            if len(model_features) < 2:
+                logger.warning(
+                    "Skipping weight PCA: fewer than 2 models have fully finite "
+                    f"weight statistics ({len(model_features)} left after "
+                    "dropping non-finite rows). The per-layer statistics are "
+                    "unaffected; read their `status` field to see why."
+                )
+                return
+
             try:
                 # Standardize features
                 scaler = StandardScaler()
@@ -420,5 +431,66 @@ class WeightAnalyzer(BaseAnalyzer):
 
                 logger.info(f"PCA performed on weight statistics: {len(model_features[0])} features per model")
 
-            except np.linalg.LinAlgError as e:
+            except (np.linalg.LinAlgError, ValueError, TypeError) as e:
+                # MEASURED: sklearn raises a bare `ValueError` for a non-finite
+                # feature matrix, and a DIFFERENT message for `inf` than for
+                # `NaN`, from a different frame. Never key this on the message
+                # text -- catch the type, and let the row-dropping above be what
+                # prevents the condition in the first place.
                 logger.warning(f"Could not perform PCA on weight statistics: {e}")
+
+    @staticmethod
+    def _drop_non_finite_rows(
+            model_features: List[List[float]],
+            labels: List[str],
+            results: AnalysisResults,
+    ) -> Tuple[List[List[float]], List[str]]:
+        """Remove any model whose feature row is not entirely finite.
+
+        A model with a corrupt weight tensor must not be able to take the whole
+        PCA -- and, before the surrounding handler was widened, the whole
+        ``analyze()`` call -- down with it. The dropped models are NAMED in a
+        warning together with the weight tensors responsible, because a silently
+        missing point in the model-similarity panel is indistinguishable from a
+        model that was never analysed.
+
+        Imputation is deliberately NOT offered: replacing a corrupt model's
+        statistics with zeros or column means would place it at a plausible
+        position in the fingerprint space, which is the exact failure this
+        classification exists to prevent.
+
+        Args:
+            model_features: One concatenated feature row per model.
+            labels: The model names, positionally aligned with ``model_features``.
+            results: The results object, read to name the offending weights.
+
+        Returns:
+            The surviving ``(model_features, labels)`` pair, in the original order.
+        """
+        keep_features: List[List[float]] = []
+        keep_labels: List[str] = []
+        dropped: List[str] = []
+
+        for features, label in zip(model_features, labels):
+            if bool(np.isfinite(np.asarray(features, dtype=np.float64)).all()):
+                keep_features.append(features)
+                keep_labels.append(label)
+                continue
+
+            offenders = [
+                name for name, stats in results.weight_stats.get(label, {}).items()
+                if stats.get('status') != StatusCode.SUCCESS.value
+            ]
+            dropped.append(
+                f"{label} (weights: {', '.join(offenders) or 'unidentified'})")
+
+        if dropped:
+            logger.warning(
+                "Dropping %d model(s) from the weight PCA because their "
+                "statistics are not finite: %s. Their per-layer statistics are "
+                "still reported -- read the `status` field of each weight to "
+                "see which mechanism fired.",
+                len(dropped), "; ".join(dropped),
+            )
+
+        return keep_features, keep_labels

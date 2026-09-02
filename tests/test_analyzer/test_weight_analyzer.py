@@ -213,3 +213,107 @@ class TestTheDegenerateWeightCensus:
         assert stats["norms"]["l1"] == float(np.sum(np.abs(weights)))
         assert stats["norms"]["l2"] == float(np.sqrt(np.sum(weights ** 2)))
         assert stats["norms"]["rms"] == float(np.sqrt(np.mean(weights ** 2)))
+
+
+def _tiny_model(name: str, corrupt: bool = False, constant: bool = False):
+    """Build a two-`Dense` classifier, optionally with a corrupt or constant kernel."""
+    keras.utils.set_random_seed(3)
+    inputs = keras.Input(shape=(6,), name=f"{name}_in")
+    x = keras.layers.Dense(8, activation="relu", name=f"{name}_d1")(inputs)
+    outputs = keras.layers.Dense(3, activation="softmax", name=f"{name}_out")(x)
+    model = keras.Model(inputs=inputs, outputs=outputs, name=name)
+    if corrupt or constant:
+        layer = model.get_layer(f"{name}_d1")
+        weights = layer.get_weights()
+        weights[0] = (np.full_like(weights[0], np.nan) if corrupt
+                      else np.zeros_like(weights[0]))
+        layer.set_weights(weights)
+    return model
+
+
+def _weights_only_analyzer(models, output_dir):
+    """A `ModelAnalyzer` running the weight analysis and nothing else."""
+    from dl_techniques.analyzer import ModelAnalyzer
+
+    return ModelAnalyzer(
+        models=models,
+        config=AnalysisConfig(
+            analyze_weights=True, analyze_calibration=False,
+            analyze_information_flow=False, analyze_training_dynamics=False,
+            analyze_spectral=False, save_plots=False, verbose=False,
+        ),
+        output_dir=str(output_dir),
+    )
+
+
+class TestThePcaIsNeverFatal:
+    """`analyze()` must never abort because one model's weights are degenerate."""
+
+    def test_a_corrupt_weight_does_not_abort_the_analysis(self, tmp_path, caplog):
+        analyzer = _weights_only_analyzer(
+            {"corrupt": _tiny_model("corrupt", corrupt=True),
+             "clean_a": _tiny_model("clean_a"),
+             "clean_b": _tiny_model("clean_b")},
+            tmp_path / "corrupt",
+        )
+        with caplog.at_level("WARNING"):
+            results = analyzer.analyze(analysis_types={"weights"})
+
+        assert results.weight_pca is not None, (
+            "the PCA was skipped entirely; a corrupt model must be DROPPED, not "
+            "allowed to take the whole panel down with it"
+        )
+        assert results.weight_pca["labels"] == ["clean_a", "clean_b"], (
+            "the corrupt model's row was not dropped from the PCA "
+            f"(labels: {results.weight_pca['labels']})"
+        )
+        text = caplog.text
+        assert "corrupt" in text and "corrupt_d1_w0" in text, (
+            "the warning does not NAME the dropped model and the offending "
+            f"weight, so a user cannot act on it. Logged: {text!r}"
+        )
+
+    def test_the_analysis_survives_when_too_few_rows_remain(self, tmp_path):
+        """Fewer than two finite rows: warn and skip, never raise."""
+        analyzer = _weights_only_analyzer(
+            {"corrupt_a": _tiny_model("corrupt_a", corrupt=True),
+             "clean": _tiny_model("clean")},
+            tmp_path / "toofew",
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+        assert results.weight_pca is None, (
+            "a PCA was published from a single surviving row"
+        )
+        assert results.weight_stats, "the per-layer statistics were lost too"
+
+    def test_the_pca_coordinates_are_unchanged_for_an_all_finite_case(self, tmp_path):
+        """Bit-identity: dropping rows must not perturb a run with nothing to drop.
+
+        The expected values are computed from the module's own inputs by the
+        reference sklearn pipeline, NOT copied out of a previous run of the code
+        under test, so this cannot pass by agreeing with a broken implementation.
+        """
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+
+        analyzer = _weights_only_analyzer(
+            {"m1": _tiny_model("m1"), "m2": _tiny_model("m2"),
+             "m3": _tiny_model("m3")},
+            tmp_path / "finite",
+        )
+        results = analyzer.analyze(analysis_types={"weights"})
+        got = np.asarray(results.weight_pca["components"], dtype=float)
+
+        features = []
+        for name in results.weight_pca["labels"]:
+            row = []
+            for layer_name in results.weight_stats_layer_order[name]:
+                stats = results.weight_stats[name][layer_name]
+                row.extend([stats[g][k] for g, k in PCA_LEAF_PATHS])
+                row.append(stats["norms"].get("spectral", 0.0))
+            features.append(row)
+        expected = PCA(n_components=min(3, len(features))).fit_transform(
+            StandardScaler().fit_transform(features))
+
+        assert got.shape == expected.shape
+        np.testing.assert_array_equal(got, expected)
