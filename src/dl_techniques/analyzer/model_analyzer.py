@@ -768,56 +768,77 @@ class ModelAnalyzer:
             y_data: Target data for evaluation.
         """
         for model_name, model in self.models.items():
+            # DECISION plan-2026-09-02T062406-e2aa52ef/D-005
+            # ONLY the foreign call is wrapped. The post-processing below used to
+            # sit inside this same `try`, so an analyzer-side
+            # `KeyError`/`AttributeError` in `_flat_metric_results` or
+            # `_resolve_accuracy` was downgraded to one log line and a
+            # `status: 'error'` record that looks exactly like a bad model — the
+            # failure `information_flow_analyzer.py:232-241` re-raises to prevent.
+            # Do NOT re-widen this `try` to cover the post-processing, and do NOT
+            # narrow the inner `(ValueError, TypeError, RuntimeError)` tuple:
+            # those are legitimate per-model conditions (uncompiled model, bad
+            # metric signature, string labels) that must stay isolated so one
+            # model cannot abort `analyze()`. See decisions.md D-005.
             try:
-                try:
-                    metrics = model.evaluate(x_data, y_data, verbose=0)
-                except (ValueError, TypeError, RuntimeError) as eval_error:
-                    logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
-                    self.results.model_metrics[model_name] = {
-                        # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 and
-                        # plan-2026-09-02T062406-e2aa52ef/D-003
-                        # None, not 0.0 — a failed evaluation must not be
-                        # readable as "this model scored zero", nor as a
-                        # flawless loss. See D-036 and D-003.
-                        'loss': LOSS_UNAVAILABLE,
-                        'accuracy': ACCURACY_UNAVAILABLE,
-                        CACHE_KEY_STATUS: STATUS_EVALUATION_FAILED,
-                        CACHE_KEY_ERROR: str(eval_error)
-                    }
-                    continue
-
-                metric_names = getattr(model, 'metrics_names', ['loss'])
-                metric_dict = {CACHE_KEY_STATUS: STATUS_SUCCESS}
-
-                if isinstance(metrics, (list, tuple)):
-                    for i, name in enumerate(metric_names):
-                        if i < len(metrics):
-                            metric_dict[name] = float(metrics[i])
-                else:
-                    metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
-
-                # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
-                # `model.metrics_names` in Keras 3 is `['loss', 'compile_metrics']`
-                # — the compiled metrics are AGGREGATED under one opaque name, so
-                # the per-metric names the caller compiled with are simply absent
-                # from it. `get_metrics_result()` is where those names survive
-                # (measured: `{'accuracy': 0.0625, 'loss': 2.4128}` for a model
-                # compiled with `metrics=["accuracy"]`). Merge it in rather than
-                # replacing `metric_dict`: `compile_metrics` is a published key
-                # that `summary_visualizer.py` reads. See decisions.md D-036.
-                metric_dict.update(_flat_metric_results(model))
-                metric_dict['accuracy'] = _resolve_accuracy(model, metric_dict)
-
-                self.results.model_metrics[model_name] = metric_dict
-
+                metrics = model.evaluate(x_data, y_data, verbose=0)
+            except (ValueError, TypeError, RuntimeError) as eval_error:
+                # `exc_info=True`: the traceback is the ONLY thing that names the
+                # loss or metric that raised. Without it a
+                # `dtype='string' is not a valid dtype for Keras type promotion`
+                # is unattributable.
+                logger.warning(
+                    f"Model evaluation failed for {model_name}: {eval_error}",
+                    exc_info=True)
+                self.results.model_metrics[model_name] = {
+                    # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 and
+                    # plan-2026-09-02T062406-e2aa52ef/D-003
+                    # None, not 0.0 — a failed evaluation must not be
+                    # readable as "this model scored zero", nor as a
+                    # flawless loss. See D-036 and D-003.
+                    'loss': LOSS_UNAVAILABLE,
+                    'accuracy': ACCURACY_UNAVAILABLE,
+                    CACHE_KEY_STATUS: STATUS_EVALUATION_FAILED,
+                    CACHE_KEY_ERROR: str(eval_error)
+                }
+                continue
             except Exception as e:
-                logger.warning(f"Could not evaluate model {model_name}: {e}", exc_info=True)
+                # MEASURED: a multi-output model given a single `y` raises
+                # `KeyError` from Keras `compile_utils.py:553` — inside
+                # `evaluate`, so it is a per-model condition, not an analyzer bug.
+                logger.warning(
+                    f"Could not evaluate model {model_name}: {e}", exc_info=True)
                 self.results.model_metrics[model_name] = {
                     # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 and
                     # plan-2026-09-02T062406-e2aa52ef/D-003 — None, not 0.0.
                     'loss': LOSS_UNAVAILABLE, 'accuracy': ACCURACY_UNAVAILABLE,
                     CACHE_KEY_STATUS: STATUS_ERROR, CACHE_KEY_ERROR: str(e)
                 }
+                continue
+
+            metric_names = getattr(model, 'metrics_names', ['loss'])
+            metric_dict = {CACHE_KEY_STATUS: STATUS_SUCCESS}
+
+            if isinstance(metrics, (list, tuple)):
+                for i, name in enumerate(metric_names):
+                    if i < len(metrics):
+                        metric_dict[name] = float(metrics[i])
+            else:
+                metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
+
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+            # `model.metrics_names` in Keras 3 is `['loss', 'compile_metrics']`
+            # — the compiled metrics are AGGREGATED under one opaque name, so
+            # the per-metric names the caller compiled with are simply absent
+            # from it. `get_metrics_result()` is where those names survive
+            # (measured: `{'accuracy': 0.0625, 'loss': 2.4128}` for a model
+            # compiled with `metrics=["accuracy"]`). Merge it in rather than
+            # replacing `metric_dict`: `compile_metrics` is a published key
+            # that `summary_visualizer.py` reads. See decisions.md D-036.
+            metric_dict.update(_flat_metric_results(model))
+            metric_dict['accuracy'] = _resolve_accuracy(model, metric_dict)
+
+            self.results.model_metrics[model_name] = metric_dict
 
     def _create_visualizations(self, analysis_types: Set[str]) -> None:
         """

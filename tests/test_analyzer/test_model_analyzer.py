@@ -1470,3 +1470,70 @@ class TestTheDashboardDoesNotUndoTheNoneSentinelFix:
         """`0.0` from a real evaluation must NOT be laundered into `n/a`."""
         row = self._row({"loss": 0.0, "accuracy": 0.0, "status": "success"})
         assert row[0] == "0.000" and row[1] == "0.000", row
+
+
+class TestAnAnalyzerSideBugIsNotDowngradedToALogLine:
+    """The outer `except Exception` wrapped `evaluate` AND all post-processing.
+
+    Any `KeyError`/`AttributeError` in the analyzer's OWN post-processing —
+    `metrics_names` handling, `_flat_metric_results`, `_resolve_accuracy`, the
+    `float()` conversions — was downgraded to one warning and a
+    `status: 'error'` record, i.e. exactly the failure mode
+    `information_flow_analyzer.py:232-241` re-raises to prevent (a shipped call
+    to the PyTorch-only `register_forward_hook` looked like a per-model runtime
+    error for months).
+
+    The competing invariant is stronger and must NOT be traded away: one MODEL
+    failing may never abort `analyze()`.
+    """
+
+    def test_a_bug_in_the_post_processing_now_surfaces(
+            self, tmp_path, probe_data, monkeypatch):
+        from dl_techniques.analyzer import model_analyzer as model_analyzer_module
+
+        def _boom(model):
+            raise KeyError("analyzer-side bug")
+
+        monkeypatch.setattr(
+            model_analyzer_module, "_flat_metric_results", _boom)
+        analyzer = ModelAnalyzer(
+            models={"a": _build_compiled_classifier("a", seed=71)},
+            config=_quiet_config(analyze_calibration=True),
+            output_dir=str(tmp_path),
+        )
+        with pytest.raises(KeyError, match="analyzer-side bug"):
+            analyzer.analyze(probe_data, analysis_types={"calibration"})
+
+    def test_a_per_model_evaluation_failure_still_only_skips_that_model(
+            self, tmp_path, probe_data):
+        """INVARIANT: `analyze()` must survive one model failing to evaluate."""
+        models = {
+            "broken": _build_classifier("broken", seed=72),  # never compiled
+            "fine": _build_compiled_classifier("fine", seed=73),
+        }
+        analyzer = ModelAnalyzer(
+            models=models,
+            config=_quiet_config(analyze_calibration=True),
+            output_dir=str(tmp_path),
+        )
+        analyzer.analyze(probe_data, analysis_types={"calibration"})
+
+        assert analyzer.results.model_metrics["broken"]["status"] in (
+            "evaluation_failed", "error")
+        assert analyzer.results.model_metrics["fine"]["status"] == "success"
+
+    def test_the_evaluation_warning_carries_its_traceback(
+            self, tmp_path, probe_data, caplog):
+        """The traceback is the ONLY thing that names the offending metric."""
+        models = {"u": _build_classifier("u3", seed=74)}
+        with caplog.at_level("WARNING"):
+            _performance(tmp_path, probe_data, models)
+
+        record = next(
+            (r for r in caplog.records
+             if "Model evaluation failed for u" in r.getMessage()), None)
+        assert record is not None, [r.getMessage() for r in caplog.records]
+        assert record.exc_info is not None, (
+            "the evaluation warning discards the traceback, so nothing in the "
+            "log identifies which loss or metric raised"
+        )
