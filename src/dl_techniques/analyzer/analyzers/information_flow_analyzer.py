@@ -53,6 +53,7 @@ batch and columns correspond to features (neurons):
 
 import keras
 import functools
+import itertools
 import numpy as np
 from typing import Dict, Any, Optional, List
 
@@ -116,6 +117,10 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     continue
 
             captured_outputs: Dict[str, np.ndarray] = {}
+            # layer name -> index of the forward-pass invocation that produced the
+            # tensor currently held in `captured_outputs`. See D-021.
+            capture_order: Dict[str, int] = {}
+            call_counter = itertools.count()
             # (layer, had_own_call, original_call_attribute) for every layer we wrap.
             wrapped: List[tuple] = []
 
@@ -134,30 +139,48 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     had_own_call = 'call' in layer.__dict__
                     original_call = layer.__dict__.get('call')
                     wrapped.append((layer, had_own_call, original_call))
-                    layer.call = self._make_recording_call(layer, captured_outputs)
+                    layer.call = self._make_recording_call(
+                        layer, captured_outputs, capture_order, call_counter)
 
                 # The pass MUST be eager. Under `model.predict(...)` Keras traces the
                 # forward function and the wrapper is handed a SymbolicTensor, so
                 # nothing concrete is captured.
                 model(x_sample, training=False)
 
-                layer_analysis = {}
-                # Iterate `extraction_layers` in order so that insertion order equals
-                # network depth: `_get_ordered_layer_analysis` in the visualizer reads
-                # the dict order as the forward-pass order.
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-021
+                # Depth order is the order the layers were INVOKED in, recorded by
+                # `recording_call` at forward time. Do NOT iterate `extraction_layers`
+                # here and call the result depth: that list comes from
+                # `recursively_get_layers`, which reaches a custom Layer's sublayers
+                # through a `dir()` sweep and PREPENDS each match, so it is
+                # reverse-alphabetical - measured EXACTLY backwards on a block
+                # declaring `zeta, alpha, mid` and calling `alpha -> mid -> zeta`.
+                # The `capture_index` written into each entry is what the visualizer
+                # sorts on, so the order survives any dict rebuild. See decisions.md
+                # D-021.
+                by_name = {layer.name: layer for layer in extraction_layers}
+                ordered_names = sorted(captured_outputs, key=capture_order.__getitem__)
+
                 for layer in extraction_layers:
-                    if layer.name in captured_outputs:
-                        output_tensor = captured_outputs[layer.name]
-                        layer_info = {'name': layer.name, 'type': layer.__class__.__name__}
-                        analysis = self._analyze_layer_information(output_tensor, layer_info)
-                        layer_analysis[layer.name] = analysis
-                    else:
+                    if layer.name not in captured_outputs:
                         logger.debug(f"No activation captured for layer '{layer.name}' in model '{model_name}'.")
+
+                layer_analysis = {}
+                for depth, name in enumerate(ordered_names):
+                    layer = by_name[name]
+                    layer_info = {'name': name, 'type': layer.__class__.__name__}
+                    analysis = self._analyze_layer_information(
+                        captured_outputs[name], layer_info)
+                    analysis['capture_index'] = depth
+                    layer_analysis[name] = analysis
 
                 results.information_flow[model_name] = layer_analysis
 
-                layer_outputs_list = [captured_outputs.get(l.name) for l in extraction_layers]
-                layer_info_list = [{'name': l.name, 'type': l.__class__.__name__} for l in extraction_layers]
+                layer_outputs_list = [captured_outputs[n] for n in ordered_names]
+                layer_info_list = [
+                    {'name': n, 'type': by_name[n].__class__.__name__}
+                    for n in ordered_names
+                ]
                 self._analyze_key_layer_activations(model_name, layer_outputs_list, layer_info_list, results)
 
             # A programming / API-shape error is never swallowed again: this analyzer
@@ -183,7 +206,12 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 logger.debug(f"Restored `call` on {len(wrapped)} layers of model '{model_name}'.")
 
     @staticmethod
-    def _make_recording_call(layer: keras.layers.Layer, store: Dict[str, np.ndarray]):
+    def _make_recording_call(
+            layer: keras.layers.Layer,
+            store: Dict[str, np.ndarray],
+            order: Dict[str, int],
+            counter: 'itertools.count',
+    ):
         """Build a `call` wrapper that records the layer's output into `store`.
 
         Args:
@@ -192,6 +220,13 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 than once in a forward pass (weight sharing) therefore keeps only
                 its LAST output; this is deliberate — the per-layer analysis and
                 the visualizer are both keyed by layer name.
+            order: Dict recording, per layer name, the invocation index of the call
+                that produced the tensor currently in `store`. It is rewritten on
+                every invocation so it always describes the RETAINED output: a
+                weight-shared layer is placed at the depth of its last use, not of
+                its first, which is the only placement consistent with `store`.
+            counter: Shared monotonically increasing invocation counter for the
+                whole forward pass.
 
         Returns:
             A callable delegating `*args, **kwargs` to the original bound `call`,
@@ -204,6 +239,7 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         def recording_call(*args, **kwargs):
             outputs = original_call(*args, **kwargs)
             store[layer.name] = keras.ops.convert_to_numpy(outputs)
+            order[layer.name] = next(counter)
             return outputs
 
         return recording_call

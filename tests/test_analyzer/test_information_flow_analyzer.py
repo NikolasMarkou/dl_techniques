@@ -2,8 +2,8 @@
 Tests for the InformationFlowAnalyzer.
 
 Covers: activation capture on FUNCTIONAL and SUBCLASSED models, the seven per-layer
-keys the InformationFlowVisualizer reads, depth (insertion) ordering of the
-per-layer dict, and non-mutation of the analyzed model.
+keys the InformationFlowVisualizer reads, forward-pass (invocation) ordering of
+the per-layer dict, and non-mutation of the analyzed model.
 
 These are guards for a real defect: the analyzer used to capture activations with
 the PyTorch-only ``layer.register_forward_hook``, which raises ``AttributeError``
@@ -156,21 +156,39 @@ class TestInformationFlowIsPopulated:
 
 
 class TestDepthOrdering:
-    """SC9: the visualizer reads dict insertion order as network depth."""
+    """SC9: the visualizer reads dict insertion order as network depth.
+
+    This class used to assert that the key order equals the STATIC WALK order
+    (`expected_layer_order`). That is not depth — see `TestDepthAxisIsInvocationOrder`
+    below, where the walk comes back exactly reversed. It is re-pointed at the
+    recorded forward-pass order; for these two probes the walk happens to agree,
+    which is asserted separately and explicitly rather than assumed.
+    """
 
     @pytest.mark.parametrize("kind", sorted(MODEL_BUILDERS))
-    def test_insertion_order_matches_extraction_layer_order(self, kind):
+    def test_key_order_matches_the_recorded_invocation_order(self, kind):
+        model = MODEL_BUILDERS[kind]()
+        _, results = run_analysis(model)
+        flow = results.information_flow.get(model.name, {})
+
+        assert flow, "the probe model captured no activations — test is vacuous"
+        actual = list(flow.keys())
+        by_capture_index = sorted(flow, key=lambda n: flow[n]["capture_index"])
+        assert actual == by_capture_index, (
+            f"{kind}: information_flow key order {actual} does not match the "
+            f"recorded forward-pass order {by_capture_index}"
+        )
+
+    @pytest.mark.parametrize("kind", sorted(MODEL_BUILDERS))
+    def test_these_two_probes_happen_to_walk_in_forward_order(self, kind):
+        """Documents WHY these probes could not have caught the A1 defect."""
         model = MODEL_BUILDERS[kind]()
         analyzer, results = run_analysis(model)
 
-        expected = expected_layer_order(analyzer, model)
+        walk = expected_layer_order(analyzer, model)
         actual = list(results.information_flow.get(model.name, {}).keys())
-
-        assert expected, "the probe model has no extraction layers — test is vacuous"
-        assert actual == expected, (
-            f"{kind}: information_flow key order {actual} does not match the "
-            f"analyzer's extraction-layer order {expected}"
-        )
+        assert walk, "the probe model has no extraction layers — test is vacuous"
+        assert actual == walk
 
 
 class TestModelIsNotMutated:
@@ -300,4 +318,96 @@ class TestSubsamplingPreservesConvRank:
         assert effective_rank > 0.0, (
             "conv effective_rank collapsed to 0 once the sample count exceeded "
             f"the analyzer's internal 200-row cap: effective_rank={effective_rank}"
+        )
+
+
+# =====================================================================
+# A1 - the depth axis must be INVOCATION order, not walk order
+# =====================================================================
+
+class ReorderedBlock(keras.layers.Layer):
+    """Declares `zeta, alpha, mid` but invokes `alpha -> mid -> zeta`.
+
+    `recursively_get_layers` reaches a custom Layer's sublayers through a
+    `dir()` sweep and PREPENDS each match, so the walk returns them
+    reverse-alphabetically (`zeta, mid, alpha`) — the exact reverse of the
+    forward pass. Neither the walk order nor the declaration order is depth.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.zeta = keras.layers.Dense(5, name="ord_zeta")
+        self.alpha = keras.layers.Dense(7, name="ord_alpha")
+        self.mid = keras.layers.Dense(6, name="ord_mid")
+
+    def call(self, inputs):
+        return self.zeta(self.mid(self.alpha(inputs)))
+
+
+# The forward pass of `ReorderedBlock.call`, read off the source above.
+_INVOCATION_ORDER = ["ord_alpha", "ord_mid", "ord_zeta"]
+
+
+def build_reordered_model() -> keras.Model:
+    inputs = keras.Input(shape=(N_FEATURES,), name="ord_in")
+    return keras.Model(
+        inputs, ReorderedBlock(name="ord_blk")(inputs), name="reordered_probe")
+
+
+class TestDepthAxisIsInvocationOrder:
+    """The visualizer plots these entries against a depth axis."""
+
+    def test_the_walk_order_really_disagrees_with_the_forward_pass(self):
+        """Anti-vacuity: without this, the guard below could pass on any model."""
+        model = build_reordered_model()
+        analyzer = InformationFlowAnalyzer({model.name: model}, AnalysisConfig())
+        walk = expected_layer_order(analyzer, model)
+
+        assert sorted(walk) == sorted(_INVOCATION_ORDER)
+        assert walk != _INVOCATION_ORDER, (
+            f"the probe is degenerate: the static walk order {walk} already equals "
+            f"the forward order {_INVOCATION_ORDER}"
+        )
+
+    def test_information_flow_is_keyed_in_invocation_order(self):
+        model = build_reordered_model()
+        _, results = run_analysis(model)
+        actual = list(results.information_flow.get(model.name, {}).keys())
+
+        assert actual == _INVOCATION_ORDER, (
+            f"information_flow key order is {actual}, the forward pass is "
+            f"{_INVOCATION_ORDER}"
+        )
+
+    def test_every_entry_carries_its_capture_index(self):
+        """The visualizer must be able to sort explicitly, not trust dict order."""
+        model = build_reordered_model()
+        _, results = run_analysis(model)
+        flow = results.information_flow.get(model.name, {})
+
+        assert flow
+        indices = [flow[name].get("capture_index") for name in _INVOCATION_ORDER]
+        assert indices == [0, 1, 2], f"capture_index values are {indices}"
+
+    def test_the_visualizer_sorts_by_the_recorded_order(self, tmp_path):
+        """`_get_ordered_layer_analysis` must not merely echo dict order."""
+        from dl_techniques.analyzer.visualizers.information_flow_visualizer import (
+            InformationFlowVisualizer,
+        )
+
+        model = build_reordered_model()
+        _, results = run_analysis(model)
+        flow = results.information_flow[model.name]
+
+        # Hand the visualizer a SHUFFLED dict: if it only echoes iteration order it
+        # returns the shuffle, if it sorts on `capture_index` it returns depth order.
+        shuffled = {name: flow[name] for name in reversed(_INVOCATION_ORDER)}
+        results.information_flow[model.name] = shuffled
+
+        viz = InformationFlowVisualizer(
+            results, AnalysisConfig(), tmp_path, {model.name: "#000000"})
+        ordered = [name for name, _ in viz._get_ordered_layer_analysis(model.name)]
+        assert ordered == _INVOCATION_ORDER, (
+            f"visualizer depth axis is {ordered}, the forward pass is "
+            f"{_INVOCATION_ORDER}"
         )

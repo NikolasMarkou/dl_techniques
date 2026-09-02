@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import List
+from typing import Any, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -123,26 +123,39 @@ class InformationFlowVisualizer(BaseVisualizer):
 
     def _get_ordered_layer_analysis(self, model_name: str) -> list:
         """
-        Get layer analysis in consistent order for reliable visualization.
+        Get layer analysis ordered by forward-pass depth.
 
-        Since information flow analysis preserves the order from the extraction model
-        which is built from model.layers in order, we can rely on the iteration order.
-        However, we make this explicit for robustness.
+        DECISION plan-2026-09-01T225724-e79ad4bd/D-021: sort on the
+        ``capture_index`` that `InformationFlowAnalyzer` records at forward time.
+        Do NOT fall back to returning ``layer_analysis.items()`` unsorted and call
+        it network order: the analyzer used to key that dict from the static layer
+        walk, which is reverse-alphabetical for a custom Layer's sublayers and was
+        measured EXACTLY backwards against the forward pass. Entries without a
+        ``capture_index`` (results loaded from a pre-fix artifact) keep their
+        relative position. See decisions.md D-021.
 
         Args:
             model_name: Name of the model
 
         Returns:
-            List of (layer_name, analysis) tuples in network order
+            List of (layer_name, analysis) tuples in forward-pass order
         """
         if model_name not in self.results.information_flow:
             return []
 
-        layer_analysis = self.results.information_flow[model_name]
+        items = list(self.results.information_flow[model_name].items())
 
-        # The information flow analyzer creates layers in the order they appear in the model
-        # We can rely on this order, but we make it explicit here for clarity
-        return list(layer_analysis.items())
+        def depth_of(position: int, analysis: Any) -> int:
+            if isinstance(analysis, dict):
+                return analysis.get('capture_index', position)
+            return position
+
+        return [
+            item for _, item in sorted(
+                enumerate(items),
+                key=lambda pair: depth_of(pair[0], pair[1][1]),
+            )
+        ]
 
     def _plot_activation_flow_overview(self, ax) -> None:
         """Plot activation statistics evolution through layers."""
