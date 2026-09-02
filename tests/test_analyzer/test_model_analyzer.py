@@ -465,16 +465,66 @@ class TestModelWalkDoesNotEvaluateProperties:
     def setup_method(self):
         _PROPERTY_HITS.clear()
 
-    def test_no_property_is_evaluated(self):
+    def test_no_keras_owned_property_is_evaluated(self):
+        """The P6 contract, narrowed by D-038.
+
+        `dir()` made the walk evaluate all 52 public names of a subclassed Layer,
+        including Keras' own `weights` / `variables` / `input` / `output`. That is
+        still forbidden. USER-declared properties ARE now evaluated, because a
+        sublayer held behind one is otherwise invisible (D-038) — so this test
+        checks the exclusion rule directly rather than counting all hits.
+        """
+        from dl_techniques.analyzer.utils import (
+            recursively_get_layers, _user_property_names)
+
+        model = _build_property_probe_model()
+        block = [l for l in model.layers if l.name == "p6_blk"][0]
+        user_properties = _user_property_names(type(block))
+
+        for keras_property in ("weights", "variables", "trainable_weights",
+                               "non_trainable_weights", "losses", "input",
+                               "output", "metrics", "dtype"):
+            assert keras_property not in user_properties, (
+                f"the walk would evaluate Keras' own '{keras_property}'")
+
+        # Anti-vacuity: the rule is a filter, not a blanket refusal.
+        assert "expensive" in user_properties
+
+        # ...and the walk itself completes on a built model without raising.
+        recursively_get_layers(model)
+
+    def test_a_keras_property_override_is_still_skipped(self):
+        """The exclusion is by NAME, discovered from the Keras bases.
+
+        A subclass that overrides `weights` is still Keras' API surface and
+        still expensive, so it must not be evaluated either.
+        """
+        from dl_techniques.analyzer.utils import _user_property_names
+
+        class OverridingBlock(keras.layers.Layer):
+            @property
+            def weights(self):  # pragma: no cover - must never be called
+                raise AssertionError("the walk evaluated an overridden `weights`")
+
+            @property
+            def blocks(self):
+                return []
+
+        names = _user_property_names(OverridingBlock)
+        assert "weights" not in names
+        assert "blocks" in names
+
+    def test_a_property_that_raises_does_not_break_the_walk(self):
+        """`exploding` IS evaluated now; the walk must survive it."""
         from dl_techniques.analyzer.utils import recursively_get_layers
 
         model = _build_property_probe_model()
         _PROPERTY_HITS.clear()
-        recursively_get_layers(model)
+        names = [l.name for l in recursively_get_layers(model)]
 
-        assert _PROPERTY_HITS == [], (
-            f"the walk evaluated {len(_PROPERTY_HITS)} properties: {_PROPERTY_HITS}"
-        )
+        assert "exploding" in _PROPERTY_HITS, (
+            "the probe's raising property was never reached; this test is vacuous")
+        assert set(_DECLARATION_ORDER).issubset(set(names))
 
     def test_the_hostile_properties_are_reachable(self):
         """Anti-vacuity: the probe's properties really do fire when touched."""
@@ -982,3 +1032,87 @@ class TestReportedAccuracyIsTheRealAccuracy:
             assert value == pytest.approx(
                 float(analyzer.results.model_metrics[model_name]["compile_metrics"]),
                 rel=1e-12)
+
+
+# ---------------------------------------------------------------------
+# W-4 (review iteration 1) -- sublayers behind a @property
+# ---------------------------------------------------------------------
+
+class PropertyExposedBlock(keras.layers.Layer):
+    """Holds its sublayers privately and exposes them through a property.
+
+    A common Keras idiom, and invisible to a `vars()`-only walk: the attribute
+    that holds them is `_inner`, which the walk skips as private, and `blocks`
+    lives on the CLASS, not in the instance `__dict__`.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._inner = [
+            keras.layers.Dense(4, name="prop_d1"),
+            keras.layers.Dense(4, name="prop_d2"),
+        ]
+
+    @property
+    def blocks(self):
+        return self._inner
+
+    def call(self, inputs):
+        x = inputs
+        for block in self._inner:
+            x = block(x)
+        return x
+
+
+class AttributeExposedBlock(keras.layers.Layer):
+    """The control: the same two sublayers on a PUBLIC attribute."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.inner = [
+            keras.layers.Dense(4, name="attr_d1"),
+            keras.layers.Dense(4, name="attr_d2"),
+        ]
+
+    def call(self, inputs):
+        x = inputs
+        for block in self.inner:
+            x = block(x)
+        return x
+
+
+def _walk_names(block_cls) -> list:
+    from dl_techniques.analyzer.utils import recursively_get_layers
+
+    inputs = keras.Input(shape=(3,), name="w4_in")
+    block = block_cls(name="w4_blk")
+    model = keras.Model(inputs, block(inputs), name="w4_model")
+    return [layer.name for layer in recursively_get_layers(model)]
+
+
+class TestSublayersBehindAPropertyAreFound:
+    """`vars()` alone dropped them, silently shrinking analysis coverage.
+
+    MEASURED against the shipped `vars()` walk: a block holding
+    `self._inner = [Dense, Dense]` behind `@property def blocks` walked to
+    `['input_layer', 'blk']` — the two Dense layers were absent from weight,
+    spectral AND information-flow analysis, with no warning.
+    """
+
+    def test_property_exposed_sublayers_are_walked(self):
+        names = _walk_names(PropertyExposedBlock)
+        assert "prop_d1" in names and "prop_d2" in names, (
+            f"the walk returned {names}; the two property-exposed Dense layers "
+            f"are missing"
+        )
+
+    def test_the_attribute_control_is_unchanged(self):
+        """Anti-vacuity: the public-attribute route must still work identically."""
+        names = _walk_names(AttributeExposedBlock)
+        assert "attr_d1" in names and "attr_d2" in names
+
+    def test_the_two_routes_agree(self):
+        """The whole point: how a sublayer is EXPOSED must not change coverage."""
+        prop = [n for n in _walk_names(PropertyExposedBlock) if n.startswith("prop_")]
+        attr = [n for n in _walk_names(AttributeExposedBlock) if n.startswith("attr_")]
+        assert len(prop) == len(attr) == 2

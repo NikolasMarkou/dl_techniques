@@ -535,6 +535,70 @@ def truncate_model_name(name: str, max_len: int = 12, filler: str = "...") -> st
     return f"{name[:start_len]}{filler}{name[-end_len:]}"
 
 
+def _sublayers_in(attr: Any) -> List[keras.layers.Layer]:
+    """Return the Keras layers directly held by one attribute value.
+
+    Args:
+        attr: An attribute value: a layer, or a list/tuple/dict that may hold
+            layers. Anything else yields an empty list.
+
+    Returns:
+        The layers found, in the container's own iteration order.
+    """
+    if isinstance(attr, keras.layers.Layer):
+        return [attr]
+    if isinstance(attr, (list, tuple)):
+        return [item for item in attr if isinstance(item, keras.layers.Layer)]
+    if isinstance(attr, dict):
+        return [v for v in attr.values() if isinstance(v, keras.layers.Layer)]
+    return []
+
+
+def _user_property_names(klass: type) -> List[str]:
+    """Return the public `property` names ``klass`` declares outside Keras.
+
+    A property Keras itself declares on any base of ``klass`` is excluded - by
+    NAME, discovered from those bases, so the exclusion covers a subclass that
+    OVERRIDES one and cannot go stale as Keras grows. Those properties are
+    expensive (`weights`, `variables`, `trainable_weights`) and two of them
+    (`input`, `output`) raise on a built layer.
+
+    Args:
+        klass: The class to inspect, usually ``type(some_layer)``.
+
+    Returns:
+        Property names in MRO order, de-duplicated, most-derived class first.
+    """
+    mro = getattr(klass, '__mro__', ())
+
+    # Names Keras itself declares as properties anywhere in this class's bases.
+    # Derived, never hand-listed, so it cannot go stale as Keras grows - and it
+    # covers a user OVERRIDE of one of them too, which is still Keras' API
+    # surface and still expensive.
+    keras_owned = {
+        attr_name
+        for base in mro
+        if getattr(base, '__module__', '').split('.')[0] == 'keras'
+        for attr_name, descriptor in vars(base).items()
+        if isinstance(descriptor, property)
+    }
+
+    names: List[str] = []
+    seen = set()
+    for base in mro:
+        if getattr(base, '__module__', '').split('.')[0] == 'keras':
+            continue
+        for attr_name, descriptor in vars(base).items():
+            if attr_name.startswith('_') or attr_name in seen:
+                continue
+            if attr_name in keras_owned:
+                continue
+            if isinstance(descriptor, property):
+                seen.add(attr_name)
+                names.append(attr_name)
+    return names
+
+
 def recursively_get_layers(layer_or_model: Any) -> List[keras.layers.Layer]:
     """
     Recursively traverses a Keras model or layer to get a flat list of all layers.
@@ -586,14 +650,33 @@ def recursively_get_layers(layer_or_model: Any) -> List[keras.layers.Layer]:
         for attr_name, attr in list(vars(current_layer).items()):
             if attr_name.startswith("_"):
                 continue
-            if isinstance(attr, keras.layers.Layer):
-                found.append(attr)
-            elif isinstance(attr, (list, tuple)):
-                found.extend(
-                    item for item in attr if isinstance(item, keras.layers.Layer))
-            elif isinstance(attr, dict):
-                found.extend(
-                    v for v in attr.values() if isinstance(v, keras.layers.Layer))
+            found.extend(_sublayers_in(attr))
+
+        # 3. Subclassed layers: USER-DEFINED properties over private attributes.
+        #
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-038
+        # `vars()` alone MISSES `self._inner = [...]` exposed as `@property def
+        # blocks`, a common Keras idiom - measured: the `vars()` walk returned
+        # ['input_layer', 'blk'] where the sublayers `prop_d1`/`prop_d2` exist,
+        # i.e. silent coverage loss in weight, spectral AND information-flow
+        # analysis. The properties are therefore evaluated too, but ONLY those
+        # declared outside Keras itself: a Keras-owned property is skipped by
+        # its DEFINING CLASS's module, never by a hand-written name list, which
+        # would go stale the moment Keras adds one. That is what preserves
+        # D-023's goal - `weights`, `variables`, `trainable_weights`, `losses`,
+        # `input` and `output` are all Keras-owned, expensive, and the last two
+        # RAISE on a built layer. See decisions.md D-038.
+        for attr_name in _user_property_names(type(current_layer)):
+            try:
+                attr = getattr(current_layer, attr_name)
+            except Exception as e:
+                logger.debug(
+                    f"Property '{attr_name}' of "
+                    f"{type(current_layer).__name__} raised; skipped: {e}")
+                continue
+            found.extend(
+                sub for sub in _sublayers_in(attr)
+                if not any(sub is existing for existing in found))
 
         if found:
             queue = found + queue
