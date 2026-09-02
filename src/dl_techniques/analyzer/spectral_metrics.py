@@ -123,6 +123,16 @@ def compute_eigenvalues(
     rank_loss = 0
 
     for W in weight_matrices:
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-003: capture the eps of the
+        # SOURCE dtype before the float64 promotion below and use it for the rank
+        # tolerance. Do NOT read `np.finfo(W.dtype).eps` after the cast: that is
+        # 2.22e-16, six orders below the float32 round-off of the weights Keras
+        # actually stores, so exact rank deficiency reads as full rank. This is a
+        # deliberate divergence from WeightWatcher's RMT_Util.matrix_rank, which
+        # takes the eps of the already-cast float64 singular values.
+        orig_eps = float(np.finfo(W.dtype).eps) if np.issubdtype(
+            W.dtype, np.floating) else float(np.finfo(np.float64).eps)
+
         # Ensure float32/64 to avoid scipy issues with half-precision
         W = W.astype(float)
 
@@ -164,7 +174,7 @@ def compute_eigenvalues(
             min_sv = min(min_sv, np.min(sv))
 
         # Calculate rank loss using current matrix's max singular value
-        tol = current_max_sv * max(W.shape) * np.finfo(W.dtype).eps
+        tol = current_max_sv * max(W.shape) * orig_eps
         rank = np.sum(sv > tol)
         rank_loss += len(sv) - rank
 

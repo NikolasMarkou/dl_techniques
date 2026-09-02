@@ -1242,3 +1242,70 @@ class TestConvEsdIsUnchanged:
         assert float(row["entropy"]) == self._HEAD_ENTROPY
         assert float(row["gini_coefficient"]) == self._HEAD_GINI
         assert row["learning_phase"] == self._HEAD_LEARNING_PHASE
+
+
+# =====================================================================
+# A5 - rank_loss must use the SOURCE dtype's eps, not the post-cast one
+# =====================================================================
+
+class TestRankLossUsesThePreCastEps:
+    """`compute_eigenvalues` promotes ``W`` to float64 before measuring rank.
+
+    Reading ``np.finfo(W.dtype).eps`` after that promotion yields 2.22e-16, which
+    is 6 orders of magnitude below the float32 round-off of the weights actually
+    stored by Keras, so exact rank deficiency is reported as full rank.
+
+    Deliberate divergence from WeightWatcher - see decisions.md D-003.
+    """
+
+    _SEED = 20260902
+
+    @staticmethod
+    def _rank_deficient_float32(deficiency: int = 20):
+        """An 80x60 float32 matrix whose EXACT rank is ``60 - deficiency``."""
+        rng = np.random.default_rng(TestRankLossUsesThePreCastEps._SEED)
+        r = 60 - deficiency
+        a = rng.normal(size=(80, r)).astype("float32")
+        b = rng.normal(size=(r, 60)).astype("float32")
+        return (a @ b).astype("float32")
+
+    def test_an_exact_rank_deficiency_of_20_is_reported(self):
+        w = self._rank_deficient_float32(20)
+        assert w.dtype == np.float32
+
+        # Anti-vacuity: the construction really is rank-40, and the 20 surplus
+        # singular values are float32 round-off of an exact zero, not small
+        # genuine values. Derived from the construction, not from the code.
+        sv = np.linalg.svd(w.astype(np.float64), compute_uv=False)
+        assert sv[39] > 1.0
+        assert sv[40] < 1e-4
+
+        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        assert int(rank_loss) == 20, (
+            f"rank_loss is {rank_loss} for a matrix with exact deficiency 20; "
+            f"float64 tol={sv.max() * 80 * np.finfo(np.float64).eps:.4g} vs "
+            f"float32 tol={sv.max() * 80 * np.finfo(np.float32).eps:.4g}"
+        )
+
+    def test_a_full_rank_float32_matrix_still_reports_zero(self):
+        """Anti-vacuity: the looser tolerance must not manufacture deficiency."""
+        rng = np.random.default_rng(self._SEED + 1)
+        w = rng.normal(size=(80, 60)).astype("float32")
+        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        assert int(rank_loss) == 0
+
+    def test_a_float64_matrix_keeps_the_weightwatcher_tolerance(self):
+        """WW parity is preserved exactly where WW's own dtype assumption holds.
+
+        WeightWatcher casts to float64 and then reads the eps of the CAST array
+        (RMT_Util.matrix_rank), so for a float64 source the two agree bit for bit.
+        """
+        rng = np.random.default_rng(self._SEED + 2)
+        w = (rng.normal(size=(80, 40)) @ rng.normal(size=(40, 60)))
+        assert w.dtype == np.float64
+        sv = np.linalg.svd(w, compute_uv=False)
+        ww_tol = sv.max() * 80 * np.finfo(sv.dtype).eps
+        ww_rank_loss = len(sv) - int(np.count_nonzero(sv > ww_tol))
+
+        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        assert int(rank_loss) == ww_rank_loss
