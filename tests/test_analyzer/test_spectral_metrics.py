@@ -800,6 +800,52 @@ class TestGiniIsNotBiasedByMinusOneOverN:
             )
             assert gini <= 1.0
 
+    def test_no_uniform_spectrum_returns_a_negative_gini(self):
+        """The docstring's contract is `between 0 and (n-1)/n`, EXACTLY 0.0 uniform.
+
+        The `-1/n` bias fix (D-011) is correct and is not what this measures. What
+        remains is float round-off in the Lorenz-cumsum form: over 2000 uniform
+        vectors the verifier measured **960 returning < 0** (e.g.
+        `-8.326672684688674e-17` at n=10), so the stated `between 0 and ...` was
+        literally false for ~48% of uniform inputs.
+
+        Anti-vacuity is `test_gini_matches_the_standard_definition` and
+        `test_maximal_inequality_is_the_population_maximum`, which still pin the
+        VALUE against an independently-derived reference: a clamp that hid a real
+        `-1/n` bias (0.01 to 0.5 over this range of n) would redden them, so this
+        sweep cannot be satisfied by simply returning 0.0.
+        """
+        rng = np.random.default_rng(12)
+        negatives = []
+        for i in range(2000):
+            n = int(rng.integers(2, 200))
+            scale = float(10.0 ** rng.uniform(-6, 6))
+            gini = calculate_gini_coefficient(np.ones(n) * scale)
+            if gini < 0.0:
+                negatives.append((n, scale, gini))
+            assert gini <= (n - 1) / n + 1e-12, (
+                f"gini {gini!r} exceeds the (n-1)/n upper bound at n={n}"
+            )
+        assert not negatives, (
+            f"{len(negatives)} of 2000 uniform spectra returned a NEGATIVE gini; "
+            f"first three: {negatives[:3]}"
+        )
+
+    def test_a_uniform_spectrum_sits_at_zero_within_float_round_off(self):
+        """The residual is round-off ONLY, four orders below any `-1/n` bias.
+
+        The clamp repairs the SIGN, not the magnitude: on the positive side a
+        uniform spectrum still returns ~5.6e-17 (n=3), which is what the
+        docstring's "0.0 up to float round-off" now says. `-1/n` over this range
+        of n is 0.005 to 0.5, so this bound still discriminates.
+        """
+        for n in (2, 3, 10, 47, 199):
+            gini = calculate_gini_coefficient(np.ones(n) * 3.5)
+            assert 0.0 <= gini <= 1e-12, (
+                f"a uniform spectrum of {n} values returned {gini!r}, which is "
+                "outside [0, 1e-12]"
+            )
+
     def test_maximal_inequality_is_the_population_maximum(self):
         """`[0, 0, 0, 1]` is `(n-1)/n = 0.75`, not the biased `0.50`."""
         evals = np.array([0.0, 0.0, 0.0, 1.0])

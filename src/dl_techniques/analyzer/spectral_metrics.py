@@ -1028,9 +1028,12 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
         evals: Array of eigenvalues.
 
     Returns:
-        Gini coefficient between 0 and ``(n - 1) / n``. Exactly ``0.0`` for a
-        perfectly uniform spectrum; approaches ``1.0`` as the spectrum
-        concentrates on a single eigenvalue.
+        Gini coefficient in ``[0, (n - 1) / n]``. A perfectly uniform spectrum
+        returns ``0.0`` up to float round-off (measured ``|g| <= 1.3e-15``);
+        the value approaches ``1.0`` as the spectrum concentrates on a single
+        eigenvalue. The lower end of that interval is enforced by a clamp - see
+        the DECISION note at the return statement for why that is round-off
+        repair and NOT a bias correction.
     """
     if len(evals) < 2:
         return 0.0
@@ -1056,7 +1059,21 @@ def calculate_gini_coefficient(evals: np.ndarray) -> float:
     # uniform spectrum at -1/(n-1) instead of 0.0 and was REFUTED by measurement
     # (n=50: code 0.53155992, correct 0.55155992, `* n/(n-1)` gives 0.54240808).
     # See decisions.md D-011.
-    return (1.0 - (2 * np.sum(cum_evals)) / denominator) + 1.0 / n
+    gini = (1.0 - (2 * np.sum(cum_evals)) / denominator) + 1.0 / n
+
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-042
+    # Float-noise repair ONLY, not a second bias correction. In exact arithmetic
+    # the expression above is identically 0.0 on a uniform spectrum; in float64
+    # the three divisions leave a residue of order 1e-16, and 950 of 2000 uniform
+    # probes landed on the NEGATIVE side (e.g. -1.265e-15 at n=123), making the
+    # documented `[0, (n-1)/n]` range literally false. Do NOT widen this into a
+    # tolerance-based snap-to-zero, and do NOT read it as licence to drop the
+    # `+ 1.0 / n` term above: a real `-1/n` bias is 0.005 to 0.5 over the n range
+    # this function sees - four orders of magnitude above what `max` can absorb -
+    # and is pinned against an independent pairwise reference by
+    # `TestGiniIsNotBiasedByMinusOneOverN::test_gini_matches_the_standard_definition`.
+    # See decisions.md D-042.
+    return max(0.0, float(gini))
 
 
 # ---------------------------------------------------------------------
