@@ -8,18 +8,25 @@ them from a string key.
 What this module exports
 ------------------------
 
-``__all__`` names 6 things, and only TWO of them are layer classes:
+``__all__`` names 10 things, and only THREE of them are layer classes:
 
 * :class:`AxialRoPE2D` - 2D axial rotary position embedding.
 * :class:`ClassLabelEmbedding` - class-label lookup table with a
   classifier-free-guidance dropout row.
+* :class:`TimestepEmbedding` - cos-first sinusoidal timestep basis plus a
+  ``Dense -> SiLU -> Dense`` head, for diffusion transformers.
+* :func:`get_1d_sincos_pos_embed_from_grid`,
+  :func:`get_2d_sincos_pos_embed_from_grid`, :func:`get_2d_sincos_pos_embed` -
+  the three pure-NumPy MAE sin-cos table builders. Not layers: they return
+  NumPy arrays meant to be installed with
+  ``add_weight(trainable=False, initializer=keras.initializers.Constant(...))``.
 * :func:`create_embedding_layer` - build a layer from a type key plus kwargs.
 * :func:`create_embedding_from_config` - build a layer from a config dict.
 * :func:`validate_embedding_config` - check a config without building.
 * ``STRICT_DROPPED_KEY_MARKER`` - the substring the factory puts in its error
   message when strict mode rejects unsupported parameters. Callers match on it.
 
-The package defines 19 layer classes. The other 17 are NOT re-exported here.
+The package defines 20 layer classes. The other 17 are NOT re-exported here.
 Import them from their own module, for example::
 
     from dl_techniques.layers.embedding.patch_embedding import (
@@ -29,7 +36,7 @@ Import them from their own module, for example::
 Getting a layer
 ---------------
 
-The factory in ``factory.py`` registers 14 keys, one per class it can build::
+The factory in ``factory.py`` registers 15 keys, one per class it can build::
 
     from dl_techniques.layers.embedding import create_embedding_layer
 
@@ -52,12 +59,22 @@ from .factory import (
     create_embedding_layer,
     validate_embedding_config,
 )
+from .sincos_pos_embed_2d import (
+    get_1d_sincos_pos_embed_from_grid,
+    get_2d_sincos_pos_embed,
+    get_2d_sincos_pos_embed_from_grid,
+)
+from .timestep_embedding import TimestepEmbedding
 
 __all__ = [
     "AxialRoPE2D",
     "ClassLabelEmbedding",
     "STRICT_DROPPED_KEY_MARKER",
+    "TimestepEmbedding",
     "create_embedding_from_config",
     "create_embedding_layer",
+    "get_1d_sincos_pos_embed_from_grid",
+    "get_2d_sincos_pos_embed",
+    "get_2d_sincos_pos_embed_from_grid",
     "validate_embedding_config",
 ]

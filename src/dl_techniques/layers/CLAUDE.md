@@ -126,7 +126,7 @@ Check in this precedence order; proceed to the next step only when nothing fits.
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
    | Attention | `create_attention_layer()` in `attention/factory.py` | 34 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
-   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 14 |
+   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 15 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | 23 |
    | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
    | Logic | `create_logic_layer()` in `logic/factory.py` | 4 (`logic`, `arithmetic`, `neural_circuit`, `circuit_depth`) |

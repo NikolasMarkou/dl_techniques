@@ -1,15 +1,16 @@
 """
 Factory for the embedding layers in this package.
 
-One entry point, :func:`create_embedding_layer`, builds any of the 14
+One entry point, :func:`create_embedding_layer`, builds any of the 15
 registered embedding types from a type key plus keyword arguments. The type
 key selects a row of ``EMBEDDING_REGISTRY``, which names the class, the
 parameters that must be supplied and the parameters that have defaults.
 
 The registry covers patch embeddings, learned positional embeddings, the
 rotary family (RoPE, dual RoPE, continuous RoPE, multi-axis RoPE), the fixed
-sinusoidal family, the BERT-style token embeddings, and the class-label
-embedding with its classifier-free-guidance dropout row.
+sinusoidal family, the BERT-style token embeddings, the class-label
+embedding with its classifier-free-guidance dropout row, and the diffusion
+timestep embedding.
 
 The registry is public API. Its key set, each entry's key names, and each
 entry's ``required_params`` and ``optional_params`` are consumed by
@@ -74,6 +75,7 @@ Registered types:
     scalar_sinusoidal       ScalarSinusoidalEmbedding           1
     mrope_ideogram4         Ideogram4MRoPE                      0
     class_label             ClassLabelEmbedding                 3
+    timestep                TimestepEmbedding                   3
     ======================  ===========================  ========
 
 Required parameters per type:
@@ -112,6 +114,8 @@ Required parameters per type:
         head_dim, rope_theta, mrope_section
     class_label
         num_classes, hidden_size
+    timestep
+        hidden_size
 
 Two registry facts do not appear in either table:
     - ``bert_embeddings`` needs ``type_vocab_size`` whenever
@@ -155,6 +159,7 @@ from .positional_embedding_sine_2d import PositionEmbeddingSine2D
 from .modern_bert_embeddings import ModernBertEmbeddings
 from .albert_factorized_embedding import AlbertFactorizedEmbedding
 from .class_label_embedding import ClassLabelEmbedding
+from .timestep_embedding import TimestepEmbedding
 
 # ---------------------------------------------------------------------
 # Type definition for Embedding types
@@ -174,7 +179,8 @@ EmbeddingType = Literal[
     'positional_sine_2d',
     'scalar_sinusoidal',
     'mrope_ideogram4',
-    'class_label'
+    'class_label',
+    'timestep'
 ]
 
 # ---------------------------------------------------------------------
@@ -344,6 +350,17 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'seed': None
         },
         'use_case': 'Conditional diffusion transformers (DiT and descendants) that need a learned unconditional token for classifier-free guidance.'
+    },
+    'timestep': {
+        'class': TimestepEmbedding,
+        'description': "Cos-first sinusoidal timestep basis of width frequency_embedding_size, refined by Dense -> SiLU -> Dense. The DiT/GLIDE numerics: the frequency ladder divides by half (NOT half - 1) and the basis is concat([cos, sin]). NOT interchangeable with scalar_sinusoidal, which differs on both plus an input rescale.",
+        'required_params': ['hidden_size'],
+        'optional_params': {
+            'frequency_embedding_size': 256,
+            'max_period': 10000.0,
+            'kernel_stddev': 0.02
+        },
+        'use_case': 'Diffusion transformers (DiT and descendants) conditioning on a scalar timestep, where the sinusoidal basis width is independent of the model width.'
     }
 }
 
@@ -522,6 +539,27 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
         if 'num_classes' in kwargs and kwargs['num_classes'] <= 0:
             raise ValueError(f"num_classes must be positive, got {kwargs['num_classes']}")
 
+    if embedding_type == 'timestep':
+        # `hidden_size` is already range-checked by the shared positive_params
+        # loop above, so it is deliberately absent here -- a second check would
+        # be unreachable. The three below name parameters no other entry
+        # declares, so they are scoped to this entry rather than added to the
+        # shared lists (a name added there silently starts range-checking any
+        # future entry that happens to reuse it).
+        if 'frequency_embedding_size' in kwargs and kwargs['frequency_embedding_size'] < 2:
+            raise ValueError(
+                "frequency_embedding_size must be at least 2, got "
+                f"{kwargs['frequency_embedding_size']}"
+            )
+        if 'max_period' in kwargs and kwargs['max_period'] <= 1.0:
+            raise ValueError(
+                f"max_period must be greater than 1, got {kwargs['max_period']}"
+            )
+        if 'kernel_stddev' in kwargs and kwargs['kernel_stddev'] <= 0.0:
+            raise ValueError(
+                f"kernel_stddev must be positive, got {kwargs['kernel_stddev']}"
+            )
+
 
 #: The stable substring every strict dropped-key ``ValueError`` from
 #: :func:`create_embedding_layer` carries. Guards match on THIS constant rather
@@ -540,7 +578,7 @@ def create_embedding_layer(
     name: Optional[str] = None,
     **kwargs: Any
 ) -> keras.layers.Layer:
-    """Build one of the 14 registered embedding layers.
+    """Build one of the 15 registered embedding layers.
 
     Validates the configuration, fills in that type's defaults, rejects any
     keyword the type does not declare, and constructs the class. See the

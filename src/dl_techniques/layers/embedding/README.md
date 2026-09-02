@@ -1,19 +1,20 @@
 # `dl_techniques.layers.embedding`
 
-Nineteen embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
+Twenty embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
 rotary (RoPE) variants, scalar/timestep sinusoidal embeddings, BERT/ModernBERT/ALBERT token
-embeddings and a class-label table with a classifier-free-guidance dropout row. **Fourteen** are
+embeddings and a class-label table with a classifier-free-guidance dropout row. **Fifteen** are
 reachable through the factory; the other five are direct-import only.
 
 `create_embedding_layer(embedding_type, name=None, **kwargs)` looks the type up in `EMBEDDING_REGISTRY`, rejects any
 keyword the target class does not declare, fills in the registry defaults and constructs. The
 factory contract and the registry sizes are owned by `src/dl_techniques/layers/CLAUDE.md`.
 
-The package `__init__` exports only six names — `AxialRoPE2D`, `ClassLabelEmbedding`, the three
-factory functions and `STRICT_DROPPED_KEY_MARKER`. Every other class is imported from its own
-module.
+The package `__init__` exports ten names — `AxialRoPE2D`, `ClassLabelEmbedding`,
+`TimestepEmbedding`, the three factory functions, `STRICT_DROPPED_KEY_MARKER` and the three
+pure-NumPy sin-cos table builders of `sincos_pos_embed_2d`. Every other class is imported from its
+own module.
 
-## Factory catalogue (14 keys)
+## Factory catalogue (15 keys)
 
 | Key | Class | What it is | Pick it when | Required params |
 |---|---|---|---|---|
@@ -31,6 +32,7 @@ module.
 | `modern_bert_embeddings` | `ModernBertEmbeddings` | Word + token-type only; positions come from RoPE in attention. | ModernBERT-style rotary encoders. | `vocab_size`, `hidden_size`, `type_vocab_size`, `initializer_range`, `layer_norm_eps`, `dropout_rate`, `use_bias` |
 | `albert_factorized` | `AlbertFactorizedEmbedding` | Vocab -> bottleneck -> hidden factorization. | Parameter-efficient token embeddings. | `vocab_size`, `bottleneck_dim`, `output_dim` |
 | `class_label` | `ClassLabelEmbedding` | Categorical label table with one extra "unconditional" row. The table has `num_classes + 1` rows when `dropout_rate > 0` and `num_classes` rows when it is `0`, so an *optional* parameter sizes a weight. | Conditional diffusion transformers (DiT and descendants) needing a learned null token for classifier-free guidance. | `num_classes`, `hidden_size` |
+| `timestep` | `TimestepEmbedding` | Cos-first sinusoidal timestep basis of width `frequency_embedding_size`, refined by `Dense -> SiLU -> Dense`. The DiT/GLIDE numerics: the ladder divides by `half`, **not** `half - 1`, and the basis is `concat([cos, sin])`. **Not** interchangeable with `scalar_sinusoidal`, which differs on both of those plus an input rescale onto `[0, 1e4]`. | Diffusion transformers (DiT and descendants) conditioning on a scalar timestep, where the basis width is independent of the model width. | `hidden_size` |
 
 `modern_bert_embeddings` is the one entry with no optional parameters: everything it takes is
 required. Read all defaults from the registry rather than from prose:
@@ -71,6 +73,36 @@ codebook = HierarchicalCodebookEmbedding(
     epsilon=1e-6,   # the DEFAULT is Keras' 1e-3 — see Gotchas
 )
 ```
+
+## Module-level helpers (not layers)
+
+`sincos_pos_embed_2d.py` holds three **pure-NumPy** functions — no Keras dependency, no factory key,
+no registration — that build the fixed 2-D sin-cos positional table every DiT descendant freezes
+into its patch stream:
+
+| Function | Returns |
+|---|---|
+| `get_1d_sincos_pos_embed_from_grid(embed_dim, pos)` | `(M, embed_dim)` float64, `[sin \| cos]` |
+| `get_2d_sincos_pos_embed_from_grid(embed_dim, grid)` | `(H*W, embed_dim)`; `grid[0]` (the **column** index) fills the first half, `grid[1]` (the row index) the second |
+| `get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0)` | `(grid_size**2, embed_dim)`, optionally with `extra_tokens` leading zero rows |
+
+Install the result as a **non-trainable weight**:
+
+```python
+self.pos_embed = self.add_weight(
+    name='pos_embed', shape=table.shape, trainable=False,
+    initializer=keras.initializers.Constant(table),
+)
+```
+
+Never as a plain tensor attribute (it does not survive a `.keras` round trip), and never
+`add_weight(...)` + `.assign(...)` inside `build()` — `StatelessScope` discards the assign and the
+table stays all zeros in every real model, with no shape symptom.
+
+The grid is built `w`-first (`np.meshgrid(grid_w, grid_h)`), which is upstream's own annotation.
+Swapping the two meshgrid arguments, or the two output halves, is a pure permutation on a square
+grid: shape, dtype and every norm are identical, so only an elementwise check against an
+independently computed destination index sees it.
 
 ## Construction
 
@@ -174,6 +206,14 @@ an x-half and a y-half, and `Ideogram4MRoPE`'s assignment of frequency slots to 
   which is what the layer used before the knob existed). Every other normalization site in this repo
   uses `1e-6`. Pass `epsilon=1e-6` explicitly for a new model.
 - **`positional_sine_2d` output is channels-first** `(B, 2*num_pos_feats, H, W)`.
+- **`timestep` and `scalar_sinusoidal` are NOT interchangeable.** `TimestepEmbedding` (DiT/GLIDE)
+  divides the frequency ladder by `half` and emits `concat([cos, sin])`;
+  `ScalarSinusoidalEmbedding` (Ideogram4) divides by `half - 1`, emits `concat([sin, cos])`, and
+  rescales its input onto `[0, 1e4]` first. Each divergence is a silent numeric change with no
+  shape symptom. `TimestepEmbedding` also decouples `frequency_embedding_size` from `hidden_size`,
+  which `ScalarSinusoidalEmbedding`'s single `dim` does not.
+- **`TimestepEmbedding` is cos-first, `get_1d_sincos_pos_embed_from_grid` is sin-first.** That is
+  not an inconsistency to fix: GLIDE and MAE specify the two bases independently.
 - **BERT embeddings normalization and position types** come from `VALID_NORMALIZATION_TYPES`
   (`layer_norm`, `rms_norm`, `band_rms`, `batch_norm`) and `VALID_POSITION_EMBEDDING_TYPES`
   (`learned`, `sinusoidal`) in `bert_embeddings.py`, which `factory.py` imports. That is their one
