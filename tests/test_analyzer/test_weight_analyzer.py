@@ -21,11 +21,18 @@ Three clean tensors ride along as the ANTI-VACUITY arm: if the classifier flags
 those too, the predicate does not discriminate and the census proves nothing.
 """
 
+import os
+import warnings
+
 import keras
 import numpy as np
 import pytest
+import scipy.stats
 
-from dl_techniques.analyzer.analyzers.weight_analyzer import WeightAnalyzer
+from dl_techniques.analyzer.analyzers.weight_analyzer import (
+    _STAT_LEAVES,
+    WeightAnalyzer,
+)
 from dl_techniques.analyzer.constants import StatusCode
 from dl_techniques.analyzer import AnalysisConfig
 
@@ -514,3 +521,195 @@ class TestNoNonFiniteMatrixIsHandedToLapack:
         assert tally["non_finite"] == 0, (
             f"{name} ({mechanism}) handed a non-finite matrix to LAPACK"
         )
+
+
+def _degenerate_bias_model(name: str):
+    """An ORDINARY Keras model whose rank-1 tables are constant.
+
+    `LayerNormalization` initialises gamma to ones and beta to zeros, and `Dense`
+    initialises its bias to zeros -- no contrivance is needed. With
+    `analyze_biases=True` those tables reach `_compute_weight_statistics`, whose
+    `scipy.stats.skew`/`kurtosis` calls then warn.
+    """
+    keras.utils.set_random_seed(3)
+    inputs = keras.Input(shape=(6,), name=f"{name}_in")
+    x = keras.layers.Dense(8, name=f"{name}_d1")(inputs)
+    x = keras.layers.LayerNormalization(name=f"{name}_ln")(x)
+    outputs = keras.layers.Dense(3, name=f"{name}_out")(x)
+    return keras.Model(inputs=inputs, outputs=outputs, name=name)
+
+
+def _bias_analyzer(models, output_dir):
+    """A weights-only `ModelAnalyzer` that also profiles rank-1 tables."""
+    from dl_techniques.analyzer import ModelAnalyzer
+
+    return ModelAnalyzer(
+        models=models,
+        config=AnalysisConfig(
+            analyze_weights=True, analyze_biases=True, analyze_calibration=False,
+            analyze_information_flow=False, analyze_training_dynamics=False,
+            analyze_spectral=False, save_plots=False, verbose=False,
+        ),
+        output_dir=str(output_dir),
+    )
+
+
+class TestTheDegeneratePathIsSilent:
+    """The degenerate path must not shout at a user who can do nothing about it.
+
+    `_raw_statistics` ran at native precision with no warning scope, so any model
+    with a CONSTANT table -- `LayerNormalization`'s gamma=ones, a `Dense` bias, a
+    constant-initialised rank-2 table -- emitted
+
+        RuntimeWarning: Precision loss occurred in moment calculation due to
+                        catastrophic cancellation   (weight_analyzer.py:303/304)
+        RuntimeWarning: overflow encountered in square      (:308/:310)
+
+    MEASURED on the model below: **17 RuntimeWarnings**, 12 of them attributed to
+    `weight_analyzer.py`. The behaviour is already correct -- the leaf is
+    recomputed or substituted and the substitution is itemised in
+    `degenerate_fields` -- so the warning tells the reader strictly less than the
+    `status` field already does, at much greater volume.
+
+    REFUTED, and recorded here so nobody re-derives it: the residual as written
+    named `BeitAttention`'s zeros-initialised relative-position-bias table as the
+    reproducer. It is NOT one. An all-ZEROS tensor does not trip scipy's
+    catastrophic-cancellation path (measured: `m1_zeros_2d` emits nothing, and
+    the two-model BeitAttention run emits ZERO RuntimeWarnings from
+    `weight_analyzer.py`). A NON-ZERO constant does. The defect is real; the
+    exemplar was wrong.
+
+    The suppression must NOT be a blanket `simplefilter("ignore")`: it is scoped
+    to (a) the `_raw_statistics` call only, (b) `RuntimeWarning` only, and
+    (c) only when the result was actually classified as degenerate/non-finite,
+    so a warning the `status` field does NOT explain is re-emitted. All three
+    scopes are guarded below.
+    """
+
+    @staticmethod
+    def _analyze_capturing_warnings(analyzer):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            results = analyzer.analyze(analysis_types={"weights"})
+        return results, list(caught)
+
+    def test_an_ordinary_model_with_constant_tables_warns_about_nothing(
+            self, tmp_path):
+        analyzer = _bias_analyzer(
+            {"a": _degenerate_bias_model("a"), "b": _degenerate_bias_model("b")},
+            tmp_path / "quiet",
+        )
+        results, caught = self._analyze_capturing_warnings(analyzer)
+
+        ours = [w for w in caught
+                if issubclass(w.category, RuntimeWarning)
+                and os.path.basename(w.filename) == "weight_analyzer.py"]
+        assert not ours, (
+            f"{len(ours)} RuntimeWarning(s) escaped from weight_analyzer.py: "
+            + "; ".join(f"{w.lineno}: {w.message}" for w in ours[:4])
+        )
+
+        # The information is NOT lost -- it moved to `status`/`degenerate_fields`.
+        degenerate = {
+            name: stats["degenerate_fields"]
+            for name, stats in results.weight_stats["a"].items()
+            if stats["status"] == StatusCode.WEIGHT_DEGENERATE.value
+        }
+        assert degenerate, (
+            "no weight was reported as degenerate, so this model does not "
+            "exercise the path the silence is supposed to cover"
+        )
+        assert all(f == ["basic.skewness", "basic.kurtosis"]
+                   for f in degenerate.values()), (
+            f"the substituted leaves are no longer itemised: {degenerate}"
+        )
+
+    def test_the_warning_capture_is_live(self, tmp_path):
+        """ANTI-VACUITY: the recorder must be able to see a RuntimeWarning."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            scipy.stats.skew(np.full((64,), 0.3, dtype=np.float32))
+        assert any(issubclass(w.category, RuntimeWarning) for w in caught), (
+            "scipy no longer warns on a constant tensor, so the silence "
+            "assertion above passes for a reason that has nothing to do with "
+            "the fix under test"
+        )
+
+    def test_the_suppression_is_not_global(self, tmp_path):
+        """Nothing outside `_raw_statistics` may be muffled, and no state leaks."""
+        before = np.geterr()
+        analyzer = _bias_analyzer(
+            {"a": _degenerate_bias_model("a"), "b": _degenerate_bias_model("b")},
+            tmp_path / "notglobal",
+        )
+        analyzer.analyze(analysis_types={"weights"})
+        assert np.geterr() == before, (
+            f"numpy's error state leaked out of the analysis: {before} -> "
+            f"{np.geterr()}"
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warnings.warn("still audible", RuntimeWarning)
+        assert len(caught) == 1, (
+            "a RuntimeWarning raised AFTER the analysis was swallowed; the "
+            "suppression is process-global, not scoped"
+        )
+
+    def test_a_warning_the_status_field_cannot_explain_still_surfaces(
+            self, monkeypatch):
+        """A non-degenerate computation must keep its warning.
+
+        Muffling is justified only because `status`/`degenerate_fields` already
+        carry the information. When the statistics come out clean, nothing
+        records the warning, so it must be re-emitted rather than dropped.
+        """
+        import dl_techniques.analyzer.analyzers.weight_analyzer as module
+
+        real_skew = module.scipy.stats.skew
+
+        def noisy_skew(*args, **kwargs):
+            warnings.warn("an unexplained condition", UserWarning)
+            warnings.warn("an unexplained numeric condition", RuntimeWarning)
+            return real_skew(*args, **kwargs)
+
+        monkeypatch.setattr(module.scipy.stats, "skew", noisy_skew)
+
+        healthy = _RNG.standard_normal((6, 8)).astype(np.float32)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            stats = _analyzer()._compute_weight_statistics(healthy)
+
+        assert stats["status"] == StatusCode.SUCCESS.value
+        messages = {str(w.message) for w in caught}
+        assert "an unexplained condition" in messages, (
+            f"a non-RuntimeWarning was swallowed: {messages}"
+        )
+        assert "an unexplained numeric condition" in messages, (
+            "a RuntimeWarning was swallowed even though the statistics came "
+            f"out clean and nothing in `status` records it: {messages}"
+        )
+
+    def test_the_published_statistics_are_unchanged_by_the_silence(self):
+        """R3: muffling a warning may not move a single published number."""
+        analyzer = _analyzer()
+        for name, tensor, _ in DEGENERATE_CENSUS + [
+                (n, t, "clean") for n, t in CLEAN_CENSUS]:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                stats = analyzer._compute_weight_statistics(tensor)
+            if stats is None:
+                continue
+            raw = analyzer._raw_statistics(
+                tensor if np.issubdtype(tensor.dtype, np.floating)
+                else np.asarray(tensor, dtype=np.float64))
+            for group, key in _STAT_LEAVES:
+                if key not in raw.get(group, {}):
+                    continue
+                got, expected = stats[group][key], raw[group][key]
+                if np.isfinite(expected) and (group, key) not in (
+                        ("basic", "skewness"), ("basic", "kurtosis"),
+                        ("norms", "l1"), ("norms", "l2"), ("norms", "rms"),
+                        ("basic", "std")):
+                    assert got == expected, (
+                        f"{name}: {group}.{key} moved {expected} -> {got}"
+                    )

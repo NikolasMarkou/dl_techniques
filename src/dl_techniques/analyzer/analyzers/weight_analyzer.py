@@ -69,6 +69,8 @@ References
 
 """
 
+import warnings
+
 import numpy as np
 import scipy.stats
 from sklearn.decomposition import PCA
@@ -228,16 +230,24 @@ class WeightAnalyzer(BaseAnalyzer):
         if not np.issubdtype(weights.dtype, np.floating):
             weights = np.asarray(weights, dtype=np.float64)
 
-        stats = self._raw_statistics(weights)
+        stats, muffled = self._raw_statistics_quietly(weights)
 
         # Key on `np.isfinite` of the RESULT. "Is the tensor constant" is the
         # WRONG predicate: mechanism 3 is a non-constant tensor.
         non_finite = [leaf for leaf in _STAT_LEAVES
                       if not self._leaf_is_finite(stats, leaf)]
         if not non_finite:
+            # Nothing was classified, so nothing RECORDS whatever numpy or
+            # scipy just complained about -- it must not be swallowed.
+            self._reemit(muffled, runtime_warnings_too=True)
             stats['status'] = StatusCode.SUCCESS.value
             stats['degenerate_fields'] = []
             return stats
+
+        # From here on the outcome IS recorded, in `status` and
+        # `degenerate_fields`. A `RuntimeWarning` saying the same thing less
+        # precisely is dropped; anything else still gets through.
+        self._reemit(muffled, runtime_warnings_too=False)
 
         if not bool(np.isfinite(weights).all()):
             # Mechanism 4: the corruption is in the model, not in our arithmetic.
@@ -245,7 +255,8 @@ class WeightAnalyzer(BaseAnalyzer):
             stats['degenerate_fields'] = [f'{g}.{k}' for g, k in non_finite]
             return stats
 
-        repaired = self._raw_statistics(np.asarray(weights, dtype=np.float64))
+        repaired, _ = self._raw_statistics_quietly(
+            np.asarray(weights, dtype=np.float64))
         for group, key in non_finite:
             if self._leaf_is_finite(repaired, (group, key)):
                 stats[group][key] = repaired[group][key]
@@ -255,6 +266,65 @@ class WeightAnalyzer(BaseAnalyzer):
         stats['status'] = StatusCode.WEIGHT_DEGENERATE.value
         stats['degenerate_fields'] = [f'{g}.{k}' for g, k in non_finite]
         return stats
+
+    # DECISION plan-2026-09-02T062406-e2aa52ef/D-007
+    # This pair exists so the degenerate path can be QUIET without going deaf.
+    # Do NOT replace it with a blanket `warnings.simplefilter("ignore")` or a
+    # module-level filter: the muffling is only justified because `status` and
+    # `degenerate_fields` already carry the same information, which is true for
+    # a `RuntimeWarning` on a classified-degenerate tensor and for nothing else.
+    # Every other warning, and every warning at all when the statistics come
+    # out clean, is re-emitted at its original location. See decisions.md D-007.
+    @staticmethod
+    def _raw_statistics_quietly(
+            weights: np.ndarray
+    ) -> Tuple[Dict[str, Any], List[warnings.WarningMessage]]:
+        """Run :meth:`_raw_statistics` with its warnings captured, not printed.
+
+        A constant or overflowing tensor makes ``scipy.stats.skew`` emit
+        ``Precision loss occurred in moment calculation`` and ``np.sum(w ** 2)``
+        emit ``overflow encountered in square``. Both are correct and both are
+        already reported through ``status``/``degenerate_fields``, so printing
+        them once per weight tensor of every ordinary model is noise the reader
+        cannot act on.
+
+        The capture is scoped to this one call. ``warnings.catch_warnings`` is
+        process-global while it is open, so this must not be widened to cover
+        anything else, and it is not thread-safe -- the analyzer is
+        single-threaded by construction.
+
+        Args:
+            weights: A non-empty numeric weight tensor.
+
+        Returns:
+            ``(stats, muffled)`` -- the statistics dict, and every warning
+            raised while computing it, for the caller to re-emit or drop.
+        """
+        with warnings.catch_warnings(record=True) as muffled:
+            warnings.simplefilter('always')
+            stats = WeightAnalyzer._raw_statistics(weights)
+        return stats, list(muffled)
+
+    @staticmethod
+    def _reemit(
+            muffled: List[warnings.WarningMessage],
+            runtime_warnings_too: bool,
+    ) -> None:
+        """Re-raise captured warnings at their original location.
+
+        Args:
+            muffled: The records returned by :meth:`_raw_statistics_quietly`.
+            runtime_warnings_too: When ``False``, ``RuntimeWarning`` records are
+                dropped because the statistics were classified and the
+                classification already reports them. Every other category is
+                re-emitted regardless.
+        """
+        for record in muffled:
+            if (not runtime_warnings_too
+                    and issubclass(record.category, RuntimeWarning)):
+                continue
+            warnings.warn_explicit(
+                record.message, record.category, record.filename, record.lineno)
 
     @staticmethod
     def _leaf_is_finite(stats: Dict[str, Any], leaf: Tuple[str, str]) -> bool:
