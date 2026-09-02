@@ -458,6 +458,41 @@ class ModelAnalyzer:
 
         self.model_colors = dict(zip(model_names, color_palette))
 
+    def __enter__(self) -> 'ModelAnalyzer':
+        """Enter a scope whose exit undoes this analyzer's global style mutation.
+
+        Returns:
+            ModelAnalyzer: This analyzer, unchanged.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        """Restore the matplotlib rcParams captured at construction.
+
+        Args:
+            exc_type: Exception class, if the scope is leaving on an exception.
+            exc_value: Exception instance, if any.
+            traceback: Traceback, if any.
+
+        Returns:
+            bool: Always ``False`` — no exception is suppressed.
+        """
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-039
+        # This is the ONLY shipped path that undoes `setup_plotting_style`'s
+        # process-global matplotlib mutation. `ModelAnalyzer.__init__` calls
+        # `setup_plotting_style()` unconditionally, and rcParams outlive the
+        # object, so a plain `ModelAnalyzer(...)` still leaks the style for the
+        # rest of the process BY DESIGN — every visualizer reads the global
+        # state and `create_pareto_analysis` RETURNS a Figure the caller may
+        # save later, so scoping the style with `rc_context` would silently
+        # strip `savefig.dpi` from that figure (D-029). Callers who care use
+        # `with ModelAnalyzer(...) as analyzer:` or call
+        # `config.restore_plotting_style()` themselves. Do NOT move the restore
+        # into `analyze()`: the dashboard and pareto helpers run after it.
+        # See decisions.md D-039.
+        self.config.restore_plotting_style()
+        return False
+
     def _init_analyzers(self) -> None:
         """
         Initialize all analyzer instances.

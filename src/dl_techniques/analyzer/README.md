@@ -37,6 +37,7 @@ print(analyzer.get_summary_statistics())
 | `ModelAnalyzer(models, config=None, output_dir=None, training_history=None)` | `models` must be non-empty (`ValueError` otherwise). `output_dir=None` creates `analysis_<YYYYmmdd_HHMMSS>/` in the cwd. |
 | `.analyze(data=None, analysis_types=None)` | returns `AnalysisResults`; also writes figures and `analysis_results.json` |
 | `.get_summary_statistics()` | dict keyed by analysis **category** — `n_models`, `n_multi_input_models`, `multi_input_models`, `analyses_performed`, `model_performance`, `calibration_summary`, `confidence_summary`, `weight_summary`, `training_summary`, `spectral_summary`, `spectral_summary_per_model` — with per-model sub-dicts one level down. `summary[model_name]` does **not** exist; `summary['calibration_summary'][model_name]` does |
+| `with ModelAnalyzer(...) as analyzer:` | on exit, calls `config.restore_plotting_style()`; the only shipped caller of it. Without the `with`, the global matplotlib style stays applied |
 | `.create_pareto_analysis(save_plot=True)` | needs ≥ `config.pareto_analysis_threshold` (2) models |
 | `.create_smoothed_model(model_name, method='detX', percent=0.8, save_path=None)` | SVD truncation; requires a prior spectral run |
 | `.save_results(filename='analysis_results.json')` | called automatically by `analyze()` |
@@ -84,7 +85,22 @@ attributes.
 | `verbose` | `True` | |
 
 `AnalysisConfig.setup_plotting_style()` is called in `ModelAnalyzer.__init__` and forces
-`matplotlib.use('Agg')` plus global `rcParams`. It mutates process-global matplotlib state.
+`matplotlib.use('Agg')` plus global `rcParams`. It mutates process-global matplotlib state, and
+that mutation **outlives the analyzer**.
+
+`AnalysisConfig.restore_plotting_style()` puts the captured `rcParams` back (the backend is
+deliberately not restored — `Agg` is a repo-wide headless requirement). It runs on exactly one
+shipped path: `ModelAnalyzer.__exit__`. Use the analyzer as a context manager if the surrounding
+process plots afterwards —
+
+```python
+with ModelAnalyzer(models={"m": model}, config=AnalysisConfig()) as analyzer:
+    results = analyzer.analyze(data)
+```
+
+— or call `config.restore_plotting_style()` yourself. A plain `ModelAnalyzer(...)` still leaves the
+style applied for the rest of the process; that is deliberate, because every visualizer reads the
+global state and `create_pareto_analysis` returns a `Figure` the caller may save after the call.
 
 ## Output
 
@@ -258,6 +274,23 @@ correlation traps are in `CORRELATION_TRAPS.md`.
      `n_bootstraps`.
   One exit still returns a decisive `0.0` rather than the sentinel: `alpha <= 1.0` or `xmin <= 0`,
   which is a genuinely unusable fit rather than an uncomputable test.
+- **Two deliberate divergences from WeightWatcher, in metrics this README frames as
+  "WeightWatcher/SETOL".** Neither is a bug and neither will be "restored to parity".
+  1. **`rank_loss` / `matrix_rank` take their tolerance from the weights' SOURCE dtype**, not from
+     the float64 the SVD runs in. WeightWatcher casts `W.astype(float)` before the SVD
+     (`weightwatcher.py:2822`, `:2861`) and so reads `np.finfo(float64).eps = 2.22e-16`; that cast
+     is an artifact of scipy compatibility, not a decision about precision. MEASURED on an 80x60
+     **float32** matrix of exact rank 40: WW's tolerance reports `rank_loss = 0` while the 20
+     surplus singular values sit at 1.3e-6..6.9e-6, i.e. float32 round-off of an exact zero, three
+     orders of magnitude above the float64 tolerance. For a float64 source the two agree
+     bit-for-bit.
+  2. **The Glorot normalization (`spectral_glorot_fix`) is restated in this package's flattened
+     conv dimensions**, because a conv kernel is matricized to ONE `(kh*kw*in_c, out_c)` matrix
+     here while WeightWatcher decomposes it per receptive-field position. `kappa` is
+     `sqrt(2/(fan_in+fan_out))` with Keras' own fans (`fan_in = kh*kw*in_c`,
+     `fan_out = kh*kw*out_c`); WW's `(N+M)*rf` is correct only for ITS per-slice `N`/`M`. Copying
+     WW's spelling here double-counts `kh*kw` — measured 0.0177667 against the true 0.0340207 on a
+     `(3,3,64,128)` kernel.
 - **Do not trust `alpha` when** `pl_pvalue < 0.1` (the ESD probably is not a power law),
   `sigma > alpha / 3` (the CI spans several phases), `num_pl_spikes < 50` (MLE variance too
   high), or the layer exceeded `spectral_max_evals` (truncated SVD biases alpha upward).

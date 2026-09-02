@@ -1116,3 +1116,98 @@ class TestSublayersBehindAPropertyAreFound:
         prop = [n for n in _walk_names(PropertyExposedBlock) if n.startswith("prop_")]
         attr = [n for n in _walk_names(AttributeExposedBlock) if n.startswith("attr_")]
         assert len(prop) == len(attr) == 2
+
+
+# ---------------------------------------------------------------------
+# W-6 (review iteration 1) -- restore_plotting_style had no production caller
+# ---------------------------------------------------------------------
+
+class TestTheAnalyzerCanUndoItsGlobalStyleMutation:
+    """`restore_plotting_style` existed with NO caller outside tests.
+
+    D-029 introduced it as the answer to "`setup_plotting_style` mutates
+    process-global matplotlib state, which outlives the `ModelAnalyzer`", but
+    `grep -rn restore_plotting_style src/ tests/` returned only its definition
+    and one test, so the leak was unsolved on every shipped path.
+    """
+
+    def test_the_context_manager_restores_the_rcparams(self, tmp_path):
+        import matplotlib.pyplot as plt
+
+        # The backend keys are deliberately NOT restored (see the next test).
+        skip = {"backend", "backend_fallback", "interactive"}
+
+        # Force a known NON-analyzer state first: `setup_plotting_style` is
+        # idempotent, so if a previous test left the style applied this guard
+        # would see nothing move and its anti-vacuity check would be the thing
+        # that fails.
+        plt.rcParams["axes.grid"] = False
+        plt.rcParams["savefig.dpi"] = 71
+
+        before = plt.rcParams.copy()
+        with ModelAnalyzer(
+                models={"style": _build_classifier("style", seed=61)},
+                config=_quiet_config(),
+                output_dir=str(tmp_path / "style"),
+        ) as analyzer:
+            inside = plt.rcParams.copy()
+            moved = [k for k in before if k not in skip and inside[k] != before[k]]
+            # Anti-vacuity: the analyzer really did mutate the global state.
+            assert moved, "constructing the analyzer changed no rcParam at all"
+            assert analyzer is not None
+
+        after = plt.rcParams.copy()
+        still_wrong = [k for k in before if k not in skip and after[k] != before[k]]
+        assert not still_wrong, (
+            f"leaving the context left {len(still_wrong)} rcParams changed: "
+            f"{still_wrong[:8]}"
+        )
+
+    def test_the_backend_is_deliberately_not_restored(self, tmp_path):
+        """`Agg` is a repo-wide headless requirement, not part of the styling."""
+        import matplotlib
+
+        with ModelAnalyzer(
+                models={"bk": _build_classifier("bk", seed=62)},
+                config=_quiet_config(),
+                output_dir=str(tmp_path / "bk"),
+        ):
+            pass
+        assert matplotlib.get_backend().lower() == "agg"
+
+    def test_the_context_manager_does_not_swallow_exceptions(self, tmp_path):
+        with pytest.raises(RuntimeError, match="propagate me"):
+            with ModelAnalyzer(
+                    models={"ex": _build_classifier("ex", seed=63)},
+                    config=_quiet_config(),
+                    output_dir=str(tmp_path / "ex"),
+            ):
+                raise RuntimeError("propagate me")
+
+    def test_without_the_context_manager_the_style_still_leaks(self, tmp_path):
+        """PIN, not RED evidence: the leak outside `with` is DELIBERATE.
+
+        Scoping the style with `rc_context` would strip `savefig.dpi` from the
+        `Figure` `create_pareto_analysis` returns to the caller (D-029/D-039).
+        This test records that choice so a future "fix" of it is a decision, not
+        an accident.
+        """
+        import matplotlib.pyplot as plt
+
+        before = plt.rcParams.copy()
+        try:
+            # Force a known NON-analyzer state so this guard does not depend on
+            # what the previous test left in the process-global rcParams.
+            plt.rcParams["axes.grid"] = False
+            plt.rcParams["savefig.dpi"] = 71
+            ModelAnalyzer(
+                models={"lk": _build_classifier("lk", seed=64)},
+                config=_quiet_config(),
+                output_dir=str(tmp_path / "lk"),
+            )
+            assert plt.rcParams["axes.grid"] is True, (
+                "the style no longer leaks without `with`; D-039 needs updating")
+            assert plt.rcParams["savefig.dpi"] != 71, (
+                "the style no longer leaks without `with`; D-039 needs updating")
+        finally:
+            plt.rcParams.update(before)
