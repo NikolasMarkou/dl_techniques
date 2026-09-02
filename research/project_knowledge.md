@@ -225,14 +225,14 @@ class Conv2D(BaseConv):
 -   #### `HaarWaveletInitializer`
     -   **File**: `src/dl_techniques/initializers/haar_wavelet_initializer.py`
     -   **Type**: Keras Initializer
-    -   **Description**: Generates 2D Haar wavelet decomposition filters (LL, LH, HL, HH). These filters are useful for multi-resolution analysis and feature extraction in computer vision, particularly in wavelet-based CNNs. The initializer creates an orthonormal basis that preserves energy.
+    -   **Description**: Generates 2D Haar wavelet decomposition filters (LL, LH, HL, HH). These filters are useful for multi-resolution analysis and feature extraction in computer vision, particularly in wavelet-based CNNs. The initializer creates an orthonormal basis (every tap +/- 0.5, Gram matrix = identity) that preserves energy at `scale=1.0`.
     -   **Key Parameters (`__init__`)**:
         -   `scale` (float): A scaling factor for the wavelet coefficients. Must be positive.
     -   **Core Logic (`call` method)**:
         1.  Defines the four standard 2D Haar wavelet patterns as a `numpy` array.
         2.  Scales these patterns by the `self.scale` factor.
         3.  Initializes a weight kernel of the requested `shape`.
-        4.  Cycles through the four patterns, populating the output channels of the kernel for each input channel. This ensures that a `DepthwiseConv2D` layer with a `channel_multiplier` of 4 will apply the full set of Haar filters to each input channel.
+        4.  Assigns pattern `j % 4` to output slot `j` of every input channel, so the sub-band of a slot does not depend on the input channel. A `DepthwiseConv2D` with `channel_multiplier=4` therefore applies the full set of Haar filters to each input channel, and its output channel `i*4 + j` is sub-band `j` of input channel `i`.
         5.  Converts the final `numpy` kernel to a tensor using `ops.convert_to_tensor`.
 
 -   #### `HeOrthonormalInitializer`

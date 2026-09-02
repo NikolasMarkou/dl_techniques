@@ -13,7 +13,7 @@ This module offers eight specialized initializers that go beyond standard random
 | `orthonormal` | `OrthonormalInitializer` | Generates a set of mutually orthogonal vectors with unit norm (orthonormal) via QR decomposition. | Stabilizing training and mitigating vanishing/exploding gradients in deep networks. |
 | `he_orthonormal` | `HeOrthonormalInitializer`| Combines He normal seeding with QR decomposition to produce an orthonormal matrix. | Orthonormal initialization where the underlying random source is scaled for ReLU-based architectures. |
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
-| `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates fixed 2x2 filters for 2D Haar wavelet decomposition. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
+| `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates the fixed, orthonormal 2x2 filter bank of the 2D Haar wavelet decomposition (every tap +/- 0.5); output slot `j` is sub-band `j % 4` for every input channel. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
 | `polar` | `PolarInitializer` | Sets each weight vector (along a chosen axis) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
 | `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters over a factorized orientation x scale x phase sweep (Ozbulak-Ekenel), DC-removed and energy-normalized to a He-like scale. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
 
@@ -111,37 +111,75 @@ layer_infeasible = keras.layers.Dense(
 
 ## Haar Wavelet Initializer
 
-This is a deterministic initializer that populates a 2x2 convolutional kernel with the four basis filters of the 2D Haar wavelet transform. It is designed to create a non-trainable layer that performs a single level of multi-resolution analysis, separating an input into approximation (LL), horizontal (LH), vertical (HL), and diagonal (HH) details.
+This is a deterministic initializer that populates a 2x2 convolutional kernel with the four basis
+filters of the 2D Haar wavelet transform. It is designed to create a non-trainable layer that
+performs a single level of multi-resolution analysis, separating an input into an approximation
+band and three detail bands.
+
+The 1D orthonormal Haar pair is `(a + b)/sqrt(2)` and `(a - b)/sqrt(2)`; applying it separably on
+both axes gives four 2x2 filters in which **every tap has magnitude 0.5**:
+
+| Slot | Name | Filter | Differences along |
+|---|---|---|---|
+| 0 | `LL` | `[[0.5, 0.5], [0.5, 0.5]]` | nothing (approximation) |
+| 1 | `LH` | `[[0.5, -0.5], [0.5, -0.5]]` | width (responds to vertical edges) |
+| 2 | `HL` | `[[0.5, 0.5], [-0.5, -0.5]]` | height (responds to horizontal edges) |
+| 3 | `HH` | `[[0.5, -0.5], [-0.5, 0.5]]` | both (diagonal detail) |
+
+With `scale=1.0` these are **orthonormal**: the Gram matrix is the identity, so the transform
+preserves energy exactly, every sub-band has the same variance as the input, and it is inverted by
+its own transpose. `scale != 1.0` keeps them orthogonal but multiplies energy by `scale**2`.
+
+**Sub-band labels are library-dependent** — the "differences along" column is the contract, since
+other wavelet libraries attach the words *horizontal* and *vertical* to the opposite band. And
+because Keras convolution is cross-correlation with no kernel flip, the three detail bands carry
+the opposite **sign** to a true convolution against the same filters; this matters only when
+comparing against an external reference.
+
+### Layout
+
+Output slot `j` holds sub-band `j % 4` for **every** input channel, so the sub-band of a slot is a
+property of `j` alone. `DepthwiseConv2D` orders its output channels input-channel-major, so output
+channel `i * channel_multiplier + j` is sub-band `j % 4` of input channel `i`. A
+`channel_multiplier` above 4 cycles the bank and therefore duplicates filters (warned about).
 
 ### Usage
 
-The `HaarWaveletInitializer` is typically used with a `Conv2D` or `DepthwiseConv2D` layer. A builder utility, `create_haar_depthwise_conv2d`, is provided for convenience.
+A builder utility, `create_haar_depthwise_conv2d`, is provided for convenience. It rejects odd
+spatial dimensions: a stride-2 `'valid'` convolution consumes whole 2x2 blocks, so an odd size
+would silently drop the last row/column and break perfect reconstruction.
 
 ```python
 import keras
 from dl_techniques.initializers import HaarWaveletInitializer, create_haar_depthwise_conv2d
 
-# -- Method 1: Direct Initializer Usage --
-haar_conv = keras.layers.Conv2D(
-    filters=12, # 3 input channels * 4 (channel_multiplier)
+# -- Method 1: Using the Builder Utility (Recommended) --
+# A DepthwiseConv2D pre-configured for per-channel wavelet decomposition.
+haar_layer = create_haar_depthwise_conv2d(
+    input_shape=(256, 256, 3),
+    channel_multiplier=4,   # LL, LH, HL, HH per input channel
+    trainable=False,        # wavelet filters are typically fixed
+    name='haar_wavelet_decomposition',
+)
+# Input (B, 256, 256, 3) -> Output (B, 128, 128, 12), channel 4*i + j = sub-band j of input i
+
+# -- Method 2: Direct Initializer Usage --
+# On a DepthwiseConv2D the bank stays per channel. On a Conv2D, output j sums over the
+# input channels, so a Conv2D initialized this way computes the Haar sub-band j % 4 of
+# the unweighted SUM of its input channels -- rarely what you want.
+haar_conv = keras.layers.DepthwiseConv2D(
     kernel_size=2,
     strides=2,
     padding='valid',
-    kernel_initializer=HaarWaveletInitializer(),
-    trainable=False, # Wavelet filters are typically fixed
-    input_shape=(256, 256, 3)
-)
-
-# -- Method 2: Using the Builder Utility (Recommended) --
-# This creates a DepthwiseConv2D layer pre-configured for wavelet decomposition.
-haar_layer = create_haar_depthwise_conv2d(
-    input_shape=(256, 256, 3),
-    channel_multiplier=4, # Create all 4 detail coefficients per input channel
+    depth_multiplier=4,
+    depthwise_initializer=HaarWaveletInitializer(),
     trainable=False,
-    name='haar_wavelet_decomposition'
 )
-# Input shape: (B, 256, 256, 3) -> Output shape: (B, 128, 128, 12)
 ```
+
+Note that a `kernel_regularizer` on a frozen layer is a **silent no-op**: Keras collects no
+regularization loss from a non-trainable weight (measured: 0 loss terms frozen, 1 trainable). The
+builder warns when both are set.
 
 ## Polar Initializer
 

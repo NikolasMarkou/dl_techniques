@@ -16,8 +16,10 @@ Available Initializers:
 -   `OrthogonalHypersphereInitializer`: Creates mutually orthogonal weight
     vectors that lie on a hypersphere of a given radius, maximizing initial
     geometric separation.
--   `HaarWaveletInitializer`: Constructs fixed 2D Haar wavelet filters for
-    use in convolutional layers, enabling multi-resolution feature extraction.
+-   `HaarWaveletInitializer`: Constructs the fixed, orthonormal 2D Haar wavelet
+    filter bank (every tap +/- 0.5) for use in convolutional layers, enabling
+    energy-preserving multi-resolution feature extraction; output slot `j` holds
+    sub-band `j % 4` for every input channel.
 -   `GaborFiltersInitializer`: Deterministic Gabor filter-bank initialization
     over a factorized orientation x scale x phase sweep (Ozbulak & Ekenel),
     DC-removed and energy-normalized to a He-like scale by default; paired with
