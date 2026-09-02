@@ -187,14 +187,6 @@ class MatchChannels(keras.layers.Layer):
             delta = self.target_channels - self._in_channels
             return keras.ops.pad(inputs, [[0, 0], [0, 0], [0, 0], [0, delta]])
 
-        # in_channels > target_channels: slice. A coordinate projection is degree-1
-        # homogeneous and bias-free regardless of which end is kept.
-        # DECISION plan_2026-06-26_0ec1a304/D-002: the 'tail' branch is a real,
-        # registered, serialization-safe primitive (not a Lambda closure) because
-        # the bfconvunext --extra-zero-output-channels output must keep the LAST
-        # `output_channels` channels. Do NOT replace this with a Lambda slice (does
-        # not round-trip across processes) nor add a separate SliceLastChannels
-        # layer (duplicates channel-slice logic MatchChannels already owns).
         if self.slice_side == "tail":
             return inputs[..., -self.target_channels :]
         return inputs[..., : self.target_channels]
