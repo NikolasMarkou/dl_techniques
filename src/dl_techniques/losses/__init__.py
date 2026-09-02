@@ -97,6 +97,8 @@ from .colbert_loss import (
     ColBERTDistillationLoss,
 )
 
+from .ddpm_hybrid_loss import DDPMHybridLoss
+
 from .decoupled_information_loss import (
     DecoupledInformationLoss,
     analyze_decoupled_information_loss,
@@ -252,6 +254,8 @@ __all__ = [
     # colbert_loss
     "ColBERTPairwiseSoftmaxLoss",
     "ColBERTDistillationLoss",
+    # ddpm_hybrid_loss
+    "DDPMHybridLoss",
     # decoupled_information_loss
     "DecoupledInformationLoss",
     "analyze_decoupled_information_loss",
