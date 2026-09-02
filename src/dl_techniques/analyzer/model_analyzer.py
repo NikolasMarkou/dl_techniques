@@ -101,7 +101,7 @@ from .data_types import DataInput, AnalysisResults
 from .utils import (find_pareto_front, normalize_metric, DataSampler, make_rng,
                     recursively_get_layers)
 from . import spectral_metrics, spectral_utils
-from .constants import SmoothingMethod
+from .constants import ACC_PATTERNS, SmoothingMethod
 
 from .analyzers.weight_analyzer import WeightAnalyzer
 from .analyzers.calibration_analyzer import CalibrationAnalyzer
@@ -205,8 +205,132 @@ PARETO_STAR_ALPHA: float = 0.5
 # Default metric values
 DEFAULT_METRIC_VALUE: float = 0.0
 
+# DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+# `accuracy` is reported as None when it is UNKNOWN, never as
+# `DEFAULT_METRIC_VALUE`. 0.0 is a value a real classifier can produce, so a 0.0
+# sentinel is indistinguishable from a model that got every sample wrong — the
+# same failure D-010 fixed for `pl_pvalue` and D-019 for a truncated spectrum.
+# Do NOT "tidy" these Nones back to 0.0 to keep the column float-typed.
+# See decisions.md D-036.
+ACCURACY_UNAVAILABLE: None = None
+
+#: Keras metric classes that measure classification accuracy. Resolution is by
+#: CLASS first because Keras 3 reports the aggregated compiled metric under the
+#: name ``compile_metrics``, which no substring rule over ``'acc'`` can match.
+_ACCURACY_METRIC_CLASSES = tuple(
+    cls for cls in (
+        getattr(keras.metrics, name, None) for name in (
+            "Accuracy", "BinaryAccuracy", "CategoricalAccuracy",
+            "SparseCategoricalAccuracy", "TopKCategoricalAccuracy",
+            "SparseTopKCategoricalAccuracy",
+        )
+    ) if isinstance(cls, type)
+)
+
 # JSON serialization parameters
 JSON_INDENT: int = 2
+
+
+# ---------------------------------------------------------------------
+
+def _iter_leaf_metrics(metric: Any, _depth: int = 0) -> Any:
+    """Yield the leaf ``keras.metrics.Metric`` objects under ``metric``.
+
+    Keras 3 wraps the compiled metrics in a ``CompileMetrics`` container whose
+    own ``.metrics`` holds the user's metric objects, so a flat read of
+    ``model.metrics`` never sees them. Recursion is depth-capped because a
+    ``Metric`` is not required to have an acyclic ``.metrics`` graph.
+
+    Args:
+        metric: A ``keras.metrics.Metric``, a ``keras.Model``, or any object
+            exposing a ``metrics`` list.
+        _depth: Internal recursion depth; not part of the contract.
+
+    Yields:
+        Leaf metric objects, i.e. those with no non-empty ``.metrics`` list.
+    """
+    children = getattr(metric, 'metrics', None)
+    if _depth < 4 and isinstance(children, (list, tuple)) and children:
+        for child in children:
+            yield from _iter_leaf_metrics(child, _depth + 1)
+    elif _depth > 0:
+        yield metric
+
+
+def _flat_metric_results(model: keras.Model) -> Dict[str, float]:
+    """Read the compiled metrics under the names the caller compiled them with.
+
+    Args:
+        model: A compiled Keras model whose metric state is already populated
+            (i.e. immediately after ``evaluate``).
+
+    Returns:
+        Mapping ``metric name -> float``. Empty if the model exposes no
+        ``get_metrics_result`` or if any value refuses to become a float; this
+        is a best-effort enrichment and must never fail an evaluation.
+    """
+    getter = getattr(model, 'get_metrics_result', None)
+    if not callable(getter):
+        return {}
+    try:
+        raw = getter()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"get_metrics_result() failed for {model.name}: {e}")
+        return {}
+    flat: Dict[str, float] = {}
+    for name, value in (raw or {}).items():
+        try:
+            flat[str(name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return flat
+
+
+def _resolve_accuracy(model: keras.Model,
+                      metric_dict: Dict[str, Any]) -> Optional[float]:
+    """Find the accuracy the model was compiled with, or ``None``.
+
+    Resolution order: by metric CLASS (authoritative — it survives any renaming
+    the user or Keras applies), then by name over ``ACC_PATTERNS``.
+
+    Args:
+        model: The evaluated model.
+        metric_dict: Metric name -> value for this evaluation, already flattened.
+
+    Returns:
+        The accuracy as a float, or ``None`` when the model has no accuracy
+        metric. ``None`` and not ``0.0``: see the ``ACCURACY_UNAVAILABLE``
+        anchor.
+    """
+    if _ACCURACY_METRIC_CLASSES:
+        try:
+            for metric in _iter_leaf_metrics(model):
+                if not isinstance(metric, _ACCURACY_METRIC_CLASSES):
+                    continue
+                name = getattr(metric, 'name', None)
+                if name in metric_dict:
+                    try:
+                        return float(metric_dict[name])
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    return float(metric.result())
+                except Exception:  # pragma: no cover - defensive
+                    continue
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"accuracy resolution by class failed: {e}")
+
+    for name, value in metric_dict.items():
+        lowered = str(name).lower()
+        if not any(pattern in lowered for pattern in ACC_PATTERNS):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return ACCURACY_UNAVAILABLE
+
 
 # ---------------------------------------------------------------------
 
@@ -570,7 +694,10 @@ class ModelAnalyzer:
                     logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
                     self.results.model_metrics[model_name] = {
                         'loss': DEFAULT_METRIC_VALUE,
-                        'accuracy': DEFAULT_METRIC_VALUE,
+                        # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+                        # None, not 0.0 — a failed evaluation must not be
+                        # readable as "this model scored zero". See D-036.
+                        'accuracy': ACCURACY_UNAVAILABLE,
                         CACHE_KEY_STATUS: STATUS_EVALUATION_FAILED,
                         CACHE_KEY_ERROR: str(eval_error)
                     }
@@ -586,17 +713,25 @@ class ModelAnalyzer:
                 else:
                     metric_dict[metric_names[0] if metric_names else 'loss'] = float(metrics)
 
-                for name in list(metric_dict.keys()):
-                    if any(p in name for p in ['acc', 'accuracy']):
-                        metric_dict['accuracy'] = metric_dict[name]
-                        break
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+                # `model.metrics_names` in Keras 3 is `['loss', 'compile_metrics']`
+                # — the compiled metrics are AGGREGATED under one opaque name, so
+                # the per-metric names the caller compiled with are simply absent
+                # from it. `get_metrics_result()` is where those names survive
+                # (measured: `{'accuracy': 0.0625, 'loss': 2.4128}` for a model
+                # compiled with `metrics=["accuracy"]`). Merge it in rather than
+                # replacing `metric_dict`: `compile_metrics` is a published key
+                # that `summary_visualizer.py` reads. See decisions.md D-036.
+                metric_dict.update(_flat_metric_results(model))
+                metric_dict['accuracy'] = _resolve_accuracy(model, metric_dict)
 
                 self.results.model_metrics[model_name] = metric_dict
 
             except Exception as e:
                 logger.warning(f"Could not evaluate model {model_name}: {e}", exc_info=True)
                 self.results.model_metrics[model_name] = {
-                    'loss': DEFAULT_METRIC_VALUE, 'accuracy': DEFAULT_METRIC_VALUE,
+                    # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 — None, not 0.0.
+                    'loss': DEFAULT_METRIC_VALUE, 'accuracy': ACCURACY_UNAVAILABLE,
                     CACHE_KEY_STATUS: STATUS_ERROR, CACHE_KEY_ERROR: str(e)
                 }
 
@@ -843,7 +978,12 @@ class ModelAnalyzer:
         # Compile model performance summaries
         for model_name, metrics in self.results.model_metrics.items():
             summary['model_performance'][model_name] = {
-                'accuracy': metrics.get('accuracy', DEFAULT_METRIC_VALUE),
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+                # Default None, not DEFAULT_METRIC_VALUE. Before this fix every
+                # normally-compiled Keras 3 model reported accuracy 0.0 here at
+                # status='success' (measured: 0.0 against a real 0.2750000).
+                # See decisions.md D-036.
+                'accuracy': metrics.get('accuracy', ACCURACY_UNAVAILABLE),
                 'loss': metrics.get('loss', DEFAULT_METRIC_VALUE),
                 CACHE_KEY_STATUS: metrics.get(CACHE_KEY_STATUS, STATUS_UNKNOWN)
             }

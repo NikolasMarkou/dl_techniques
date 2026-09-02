@@ -226,6 +226,14 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 
 ## Gotchas
 
+- **`model_performance[m]['accuracy']` is `None` when the model has no accuracy metric, never
+  `0.0`.** Keras 3 reports the aggregated compiled metrics under the single name
+  `compile_metrics`, so the accuracy is resolved from `get_metrics_result()` and by metric CLASS
+  (`SparseCategoricalAccuracy` and friends), which also finds a metric you renamed. Before this,
+  every normally-compiled model reported `accuracy: 0.0` at `status: 'success'` — a value a real
+  classifier can produce, so it was indistinguishable from a real score. A failed evaluation
+  reports `None` too; read `status` before reading the number. `results.model_metrics[m]` keeps
+  the raw `compile_metrics` key as well.
 - **`training_history` takes the `.history` dict, not the Keras `History` object.** Its keys must
   match the `models` keys exactly, or training dynamics silently produces nothing.
 - **`pl_pvalue` semantics, and two known divergences from Clauset et al. 2009.**

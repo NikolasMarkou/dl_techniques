@@ -847,3 +847,138 @@ class TestASigmoidHeadIsNotSoftmaxed:
         analyzer._cache_predictions(probe_data)
         np.testing.assert_allclose(
             analyzer._prediction_cache["sm"]["predictions"], raw, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------
+# C-2 (review iteration 1) -- reported accuracy was 0.0 at status='success'
+# ---------------------------------------------------------------------
+
+def _build_compiled_classifier(name: str, seed: int, metrics=("accuracy",)) -> keras.Model:
+    """A softmax classifier compiled the ordinary way.
+
+    Args:
+        name: Model name; also prefixes the layer names.
+        seed: Seed for deterministic weights.
+        metrics: Passed straight to ``compile(metrics=...)``. Pass ``()`` for a
+            model with no metric at all.
+
+    Returns:
+        keras.Model: A compiled, deterministic classifier.
+    """
+    model = _build_classifier(name, seed=seed)
+    model.compile(loss="sparse_categorical_crossentropy", metrics=list(metrics))
+    return model
+
+
+def _performance(tmp_path, probe_data, models: dict) -> dict:
+    """Run the analyzer over ``models`` and return its performance summary."""
+    analyzer = ModelAnalyzer(
+        models=models,
+        config=_quiet_config(analyze_calibration=True),
+        output_dir=str(tmp_path),
+    )
+    analyzer.analyze(probe_data, analysis_types={"calibration"})
+    return analyzer.get_summary_statistics()["model_performance"], analyzer
+
+
+class TestReportedAccuracyIsTheRealAccuracy:
+    """`summary['model_performance'][m]['accuracy']` was 0.0 at status='success'.
+
+    MEASURED against the shipped code on two `Dense(3, softmax)` models compiled
+    with `metrics=["accuracy"]`: `results.model_metrics` carried
+    `{'status':'success','loss':1.6421177,'compile_metrics':0.2750000}` while the
+    summary reported `{'accuracy': 0.0, ...}`. The alias was a substring match of
+    `'acc'` against `model.metrics_names`, and Keras 3 names the aggregated
+    compiled metric `compile_metrics` — which contains no `'acc'`.
+    """
+
+    def test_keras_3_really_does_hide_the_metric_name(self):
+        """Anti-vacuity: pin the Keras behaviour the fix exists for.
+
+        If a future Keras restores per-metric names in `metrics_names`, this
+        reddens and the resolution logic should be re-read, not silently kept.
+        """
+        model = _build_compiled_classifier("kn", seed=31)
+        x = np.zeros((4, N_FEATURES), dtype="float32")
+        model.evaluate(x, np.zeros(4, dtype="int64"), verbose=0)
+        assert model.metrics_names == ["loss", "compile_metrics"]
+        assert not any("acc" in n for n in model.metrics_names)
+        # ...while the name the caller compiled with survives here:
+        assert "accuracy" in model.get_metrics_result()
+
+    def test_a_compiled_model_reports_its_real_accuracy(self, tmp_path, probe_data):
+        models = {"a": _build_compiled_classifier("a", seed=41)}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+
+        raw = analyzer.results.model_metrics["a"]
+        assert raw["status"] == "success"
+        truth = float(raw["compile_metrics"])
+
+        assert performance["a"]["accuracy"] is not None
+        assert performance["a"]["accuracy"] == pytest.approx(truth, rel=1e-12), (
+            f"summary accuracy {performance['a']['accuracy']!r} against the "
+            f"model's own compiled metric {truth!r}"
+        )
+        # Anti-vacuity: a model that is merely reported as 0.0 would pass an
+        # `is not None` check, so pin that the value is a live, non-sentinel one.
+        assert truth > 0.0, "the probe model scored exactly 0.0; pick another seed"
+        assert performance["a"]["accuracy"] != 0.0
+
+    def test_accuracy_is_none_when_no_accuracy_metric_was_compiled(
+            self, tmp_path, probe_data):
+        """No accuracy metric must read as UNKNOWN, never as 'scored zero'."""
+        models = {"n": _build_compiled_classifier("n", seed=42, metrics=())}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+
+        assert analyzer.results.model_metrics["n"]["status"] == "success"
+        assert performance["n"]["accuracy"] is None
+        assert performance["n"]["loss"] > 0.0
+
+    def test_accuracy_is_resolved_by_metric_class_not_by_its_name(
+            self, tmp_path, probe_data):
+        """A user-renamed accuracy metric is still found.
+
+        Resolution is by metric CLASS first, so `name='hit_rate'` — which
+        matches no `ACC_PATTERNS` entry — is still reported as the accuracy.
+        """
+        model = _build_classifier("r", seed=43)
+        model.compile(
+            loss="sparse_categorical_crossentropy",
+            metrics=[keras.metrics.SparseCategoricalAccuracy(name="hit_rate")],
+        )
+        performance, analyzer = _performance(tmp_path, probe_data, {"r": model})
+
+        raw = analyzer.results.model_metrics["r"]
+        assert "hit_rate" in raw, f"the renamed metric never landed: {raw!r}"
+        assert performance["r"]["accuracy"] == pytest.approx(
+            float(raw["hit_rate"]), rel=1e-12)
+
+    def test_a_failed_evaluation_reports_none_rather_than_zero(
+            self, tmp_path, probe_data):
+        """An UNCOMPILED model cannot be evaluated; that is not 'accuracy 0.0'."""
+        models = {"u": _build_classifier("u", seed=44)}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+
+        raw = analyzer.results.model_metrics["u"]
+        assert raw["status"] in ("evaluation_failed", "error"), raw
+        assert raw["accuracy"] is None
+        assert performance["u"]["accuracy"] is None
+
+    def test_two_models_are_ranked_by_accuracy_not_flattened_to_zero(
+            self, tmp_path, probe_data):
+        """The cross-model comparison the summary exists for.
+
+        Two DIFFERENT models must produce two distinguishable accuracies; under
+        the shipped defect both read 0.0 and every ranking was a tie.
+        """
+        models = {
+            "m1": _build_compiled_classifier("m1", seed=51),
+            "m2": _build_compiled_classifier("m2", seed=52),
+        }
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+        values = [performance[m]["accuracy"] for m in ("m1", "m2")]
+        assert all(v is not None for v in values), performance
+        for model_name, value in zip(("m1", "m2"), values):
+            assert value == pytest.approx(
+                float(analyzer.results.model_metrics[model_name]["compile_metrics"]),
+                rel=1e-12)
