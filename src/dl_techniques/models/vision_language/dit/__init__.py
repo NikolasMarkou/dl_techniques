@@ -6,8 +6,10 @@ a VAE latent, add a frozen 2-D sin-cos table, condition every block on
 final layer. The twelve published sizes are reachable by name.
 
 Currently exported: the variant registry and the diffusion-side config, the two
-block layers, the model and its factory. The sampler (``diffusion.py``) lands at
-step 7 of the port and is added here with it.
+block layers, the model and its factory, and the sampler -- ``GaussianDiffusion``,
+which owns ``q_sample``, ``p_mean_variance``, the ancestral and DDIM reverse
+steps, their loops, and the timestep respacing that remaps a shortened chain's
+index back to the original one before the model sees it.
 
     from dl_techniques.models.vision_language.dit import DiT, create_dit
 
@@ -29,6 +31,12 @@ from .config import (
     get_variant_config,
     normalize_variant_name,
 )
+from .diffusion import (
+    DEFAULT_CLIP_DENOISED,
+    GaussianDiffusion,
+    MODEL_MEAN_TYPES,
+    MODEL_VAR_TYPES,
+)
 from .model import (
     CFG_GUIDED_CHANNELS,
     MODEL_INPUT_NAMES,
@@ -40,6 +48,7 @@ from .model import (
 
 __all__ = [
     "CFG_GUIDED_CHANNELS",
+    "DEFAULT_CLIP_DENOISED",
     "DIT_ADALN_CHUNK_NAMES",
     "DIT_FINAL_CHUNK_NAMES",
     "DIT_VARIANTS",
@@ -47,7 +56,10 @@ __all__ = [
     "DiTBlock",
     "DiTFinalLayer",
     "DiffusionConfig",
+    "GaussianDiffusion",
     "MODEL_INPUT_NAMES",
+    "MODEL_MEAN_TYPES",
+    "MODEL_VAR_TYPES",
     "VARIANT_FIELDS",
     "create_dit",
     "flattened_linear_xavier",
