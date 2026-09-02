@@ -2112,3 +2112,198 @@ class TestFitPowerlawKsKernel:
             f"the reference loop, so a ratio at or above 1.0 means its KS kernel is "
             f"still an elementwise pow. Expected ~0.5 with the log/exp spelling."
         )
+
+
+# =====================================================================
+# Critical-weight enumeration: cost and the published count
+# =====================================================================
+
+def _critical_weight_fixture(n, m):
+    """Build a square-ish Gaussian layer and its full eigenvalue spectrum.
+
+    Args:
+        n: Number of rows.
+        m: Number of columns.
+
+    Returns:
+        A ``(weight_matrix, evals)`` pair; ``evals`` is the ascending squared
+        singular-value spectrum, matching what the analyzer hands the
+        concentration path.
+    """
+    rng = np.random.default_rng(17)
+    weight_matrix = rng.standard_normal((n, m))
+    sv = np.linalg.svd(weight_matrix, compute_uv=False)
+    return weight_matrix, np.sort(sv * sv)
+
+
+class TestCriticalWeightEnumerationIsNotThePathsHotSpot:
+    """`critical_weight_count` is published; the way it was counted was not.
+
+    At `SPECTRAL_CRITICAL_WEIGHT_THRESHOLD = 0.1` essentially every element of a
+    Gaussian row qualifies, so the enumeration built one Python tuple per matrix
+    element and inserted it into a `set` — 751,140 tuples on a 1024x1024 layer and
+    11,385,666 on a 4096x4096 one. MEASURED at HEAD: 21.73 s of the 24.48 s
+    `calculate_concentration_metrics` spent on a 4096x4096 layer, against 0.31 s
+    for the entire power-law fit.
+
+    The COUNT is a shipped column (`MetricNames.CRITICAL_WEIGHT_COUNT`,
+    `analyzer/README.md:249`), so it cannot simply be dropped — only the truncated
+    top-10 LIST is filtered out by the analyzer (`spectral_analyzer.py:426`).
+    """
+
+    def test_the_concentration_path_does_not_cost_several_svds(self):
+        """Self-calibrating: the reference is the SAME matrix's own full SVD.
+
+        Both sides are timed in one process on one matrix, so the assertion does
+        not depend on the machine or on a wall-clock budget recorded elsewhere.
+        MEASURED at HEAD: 1.2302 s of concentration metrics against 0.2473 s for
+        the full SVD, a ratio of 5.0 — the concentration path, which is handed its
+        spectrum and never factorises anything larger than a rank-3 partial SVD,
+        was costing five times the full factorisation it was meant to avoid.
+        """
+        import time
+
+        weight_matrix, evals = _critical_weight_fixture(1024, 1024)
+
+        np.linalg.svd(weight_matrix, compute_uv=False)  # warm BLAS threads
+        t0 = time.perf_counter()
+        np.linalg.svd(weight_matrix, compute_uv=False)
+        svd_seconds = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        calculate_concentration_metrics(weight_matrix, evals=evals)
+        concentration_seconds = time.perf_counter() - t0
+
+        assert concentration_seconds < 2.0 * svd_seconds, (
+            f"calculate_concentration_metrics took {concentration_seconds:.4f}s "
+            f"against {svd_seconds:.4f}s for a full SVD of the same matrix (ratio "
+            f"{concentration_seconds / svd_seconds:.2f}). It is handed the spectrum "
+            f"and only needs a rank-3 partial SVD, so a ratio above 1 means it is "
+            f"enumerating critical weights element-by-element in Python."
+        )
+
+    # Captured after the ARPACK start vector was pinned (D-003) and before the
+    # enumeration was rewritten. This is a PIN, not a RED-proven guard: the
+    # rewrite is required to leave every one of these untouched, so it could
+    # never have failed beforehand. It could not even be WRITTEN until D-003
+    # made the columns reproducible.
+    _HEAD_COLUMNS = {
+        (256, 128): {
+            "gini_coefficient": 0.3930767949900368,
+            "dominance_ratio": 0.02291230997569063,
+            "participation_ratio": 84.29070051593679,
+            "min_participation_ratio": 61.344088474072535,
+            "critical_weight_count": 24328,
+            "concentration_score": 0.00010684234675382042,
+        },
+        (512, 512): {
+            "gini_coefficient": 0.5413652974958952,
+            "dominance_ratio": 0.008011775881888358,
+            "participation_ratio": 172.30052481656648,
+            "min_participation_ratio": 160.05657386575842,
+            "critical_weight_count": 190216,
+            "concentration_score": 2.5172545749375347e-05,
+        },
+        (1024, 1024): {
+            "gini_coefficient": 0.5413703917985958,
+            "dominance_ratio": 0.003906777674791442,
+            "participation_ratio": 344.66938377223704,
+            "min_participation_ratio": 316.9058967868582,
+            "critical_weight_count": 751140,
+            "concentration_score": 6.136336358374042e-06,
+        },
+    }
+
+    @pytest.mark.parametrize("shape", sorted(_HEAD_COLUMNS))
+    def test_every_published_concentration_column_is_bit_identical(self, shape):
+        got = calculate_concentration_metrics(
+            _critical_weight_fixture(*shape)[0],
+            evals=_critical_weight_fixture(*shape)[1])
+
+        for column, want in self._HEAD_COLUMNS[shape].items():
+            assert float(got[column]) == float(want), (
+                f"{shape} {column}: {got[column]!r} != the HEAD literal {want!r}. "
+                f"Skipping or restating the critical-weight enumeration is only "
+                f"admissible while every published column is untouched; "
+                f"critical_weight_count in particular reaches the analyzer's "
+                f"DataFrame, only the critical_weights LIST is filtered out."
+            )
+
+    def test_the_count_column_is_large_enough_to_discriminate(self):
+        """Anti-vacuity: a count of 0 or 10 would pass a weaker assertion.
+
+        The counts pinned above are the FULL population, not the truncated
+        report, so an implementation that returned only the top ten would be
+        caught by them.
+        """
+        for shape, columns in self._HEAD_COLUMNS.items():
+            n, m = shape
+            assert columns["critical_weight_count"] > 0.5 * n * m, (
+                f"{shape}: pinned count {columns['critical_weight_count']} is not "
+                f"the full population, so it cannot discriminate a truncated one"
+            )
+
+    def test_the_reported_list_is_still_truncated_and_ordered(self):
+        weight_matrix, evals = _critical_weight_fixture(256, 128)
+        got = calculate_concentration_metrics(weight_matrix, evals=evals)
+        reported = got["critical_weights"]
+
+        assert len(reported) == 10, f"reported {len(reported)} critical weights, not 10"
+        magnitudes = [abs(c) for _i, _j, c in reported]
+        assert magnitudes == sorted(magnitudes, reverse=True), (
+            f"the reported critical weights are not in descending |contribution| "
+            f"order: {magnitudes}"
+        )
+        assert magnitudes[0] == pytest.approx(0.43259411404973996, rel=0, abs=0), (
+            f"the largest reported contribution moved to {magnitudes[0]!r} from the "
+            f"HEAD literal 0.43259411404973996"
+        )
+
+
+class TestTheDirectTopEigenvectorMethodIsActuallyDeterministic:
+    """`get_top_eigenvectors`' docstring calls the `direct` method deterministic.
+
+    It was not. `svds` defaults to ARPACK with `v0=None`, which draws its start
+    vector from numpy's unseeded global legacy RNG, so consecutive calls on the
+    SAME matrix in the SAME process converge to slightly different vectors.
+    MEASURED at HEAD, three consecutive calls on one 256x128 Gaussian:
+    participation ratio 92.27590991989491 / ...472 / ...484.
+
+    Three published columns read those vectors — `participation_ratio`,
+    `min_participation_ratio` and `concentration_score` — so this is a shipped
+    metric that could not be pinned to a literal, and `critical_weight_count`
+    inherits it through `row_importance`.
+    """
+
+    def test_repeated_calls_on_one_matrix_agree_bit_for_bit(self):
+        rng = np.random.default_rng(17)
+        weight_matrix = rng.standard_normal((256, 128))
+
+        runs = []
+        for _ in range(5):
+            _evals, eigenvectors = get_top_eigenvectors(weight_matrix, k=3)
+            runs.append(eigenvectors.copy())
+
+        for index, later in enumerate(runs[1:], start=1):
+            assert later.shape == runs[0].shape, (
+                f"call {index} returned shape {later.shape}, not {runs[0].shape}")
+            # Sign is a free choice of any SVD, so compare the magnitudes the
+            # downstream metrics actually consume.
+            assert np.array_equal(np.abs(later), np.abs(runs[0])), (
+                f"call {index} returned different top eigenvectors from call 0 on "
+                f"the same matrix; max |difference| "
+                f"{np.max(np.abs(np.abs(later) - np.abs(runs[0]))):.3e}. The "
+                f"`direct` method must not depend on an unseeded start vector."
+            )
+
+    def test_the_concentration_columns_it_feeds_are_reproducible(self):
+        weight_matrix, evals = _critical_weight_fixture(256, 128)
+        first = calculate_concentration_metrics(weight_matrix, evals=evals)
+        second = calculate_concentration_metrics(weight_matrix, evals=evals)
+
+        for column in ("participation_ratio", "min_participation_ratio",
+                       "concentration_score", "critical_weight_count"):
+            assert float(first[column]) == float(second[column]), (
+                f"{column} is not reproducible across two identical calls: "
+                f"{first[column]!r} then {second[column]!r}"
+            )

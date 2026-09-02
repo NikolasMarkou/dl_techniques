@@ -1176,7 +1176,8 @@ def get_top_eigenvectors(
         k: Number of top eigenvectors to return.
         method: Method to use ('direct' or 'power_iteration').
         rng: Generator for the ``power_iteration`` start vectors. Keyword-only and
-            defaulted; unused by the ``direct`` method, which is deterministic.
+            defaulted; unused by the ``direct`` method, whose ARPACK start vector
+            is pinned to a constant so that it is reproducible (see D-003).
 
     Returns:
         Tuple containing:
@@ -1205,7 +1206,23 @@ def get_top_eigenvectors(
             # when ARPACK does not converge. See decisions.md D-026.
             if k < min_dim:
                 try:
-                    u, s, _ = svds(weight_matrix, k=k)
+                    # DECISION plan-2026-09-02T041737-e85f2027/D-003
+                    # `v0` is pinned. Do NOT drop it back to `svds`'s default of
+                    # `None`: ARPACK then draws its start vector from numpy's
+                    # unseeded GLOBAL legacy RNG, so consecutive calls on the SAME
+                    # matrix in the SAME process converge to different vectors.
+                    # MEASURED at three consecutive calls on one 256x128 Gaussian:
+                    # participation ratio 92.27590991989491 / ...472 / ...484. That
+                    # wobble reaches four published columns (`participation_ratio`,
+                    # `min_participation_ratio`, `concentration_score` and, through
+                    # `row_importance`, `critical_weight_count`) and made this
+                    # function's own docstring claim of determinism false. A
+                    # constant vector is a legitimate ARPACK start; it is not a
+                    # sample, so no seed needs threading through the call chain.
+                    # See decisions.md D-003.
+                    u, s, _ = svds(
+                        weight_matrix, k=k,
+                        v0=np.full(min_dim, 1.0 / np.sqrt(min_dim)))
                     order = np.argsort(s)[::-1]  # svds returns ascending
                     return s[order] ** 2, u[:, order]
                 except Exception as e:
