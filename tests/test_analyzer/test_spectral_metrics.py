@@ -29,6 +29,7 @@ from dl_techniques.analyzer.spectral_metrics import (
     calc_mp_edges,
     calc_mp_soft_rank,
     calculate_glorot_normalization_factor,
+    get_top_eigenvectors,
 )
 
 
@@ -1579,3 +1580,84 @@ class TestFitPowerlawDocstringDoesNotClaimLinearTime:
         assert "quadratic" in doc.lower(), (
             "fit_powerlaw's docstring does not state that the KS sweep is quadratic"
         )
+
+
+# =====================================================================
+# P3 - the top-3 eigenvectors must not cost a second full SVD
+# =====================================================================
+
+class TestOnlyOneFullSvdPerLayer:
+    """`compute_eigenvalues` already runs `np.linalg.svd(..., compute_uv=False)`.
+
+    `calculate_concentration_metrics` (default ON) then reached
+    `get_top_eigenvectors`, which ran a SECOND `np.linalg.svd` WITH `U` purely to
+    keep `u[:, :3]`. MEASURED on a plain Gaussian matrix: a full SVD costs 2.799 s at
+    2048x512 against 0.060 s for `svds(k=3)`.
+
+    Note the review's "second FULL-SPECTRUM recompute" claim is REFUTED - the
+    analyzer passes `evals=evals`, so the recompute at `calculate_concentration_
+    metrics` is skipped. The second SVD is the eigenvector one.
+    """
+
+    @staticmethod
+    def _dense_model():
+        import keras
+        inputs = keras.Input(shape=(48,), name="svd_in")
+        return keras.Model(
+            inputs, keras.layers.Dense(40, name="svd_d")(inputs), name="svdm")
+
+    def test_one_full_svd_per_analysis_pass(self):
+        from unittest import mock
+        import numpy.linalg as npl
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        model = self._dense_model()
+        config = AnalysisConfig(
+            analyze_spectral=True, spectral_concentration_analysis=True)
+
+        real_svd = npl.svd
+        calls = []
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs.get("compute_uv", True))
+            return real_svd(*args, **kwargs)
+
+        with mock.patch.object(npl, "svd", side_effect=spy):
+            SpectralAnalyzer(models={"svdm": model}, config=config).analyze(
+                AnalysisResults())
+
+        # Anti-vacuity: concentration analysis really is on, so the second SVD's
+        # call site was genuinely reached.
+        assert config.spectral_concentration_analysis is True
+        assert len(calls) == 1, (
+            f"np.linalg.svd was called {len(calls)} times for one layer "
+            f"(compute_uv flags: {calls}); the eigenvalue SVD is the only one needed"
+        )
+
+    def test_the_top_eigenvectors_are_unchanged_up_to_sign(self):
+        rng = np.random.default_rng(4242)
+        for shape in [(64, 40), (200, 60), (50, 50)]:
+            w = rng.normal(size=shape)
+            ref_u, ref_s, _ = np.linalg.svd(w, full_matrices=False)
+
+            evs, vecs = get_top_eigenvectors(w, k=3)
+
+            assert vecs.shape == (shape[0], 3)
+            np.testing.assert_allclose(evs, ref_s[:3] ** 2, rtol=1e-9)
+            for i in range(3):
+                cosine = abs(float(ref_u[:, i] @ vecs[:, i]))
+                assert cosine == pytest.approx(1.0, abs=1e-7), (
+                    f"{shape} eigenvector {i}: |cos| with the reference is {cosine}"
+                )
+
+    def test_a_full_rank_request_still_works(self):
+        """Anti-vacuity: `svds` cannot serve k == min(shape); the fallback must."""
+        rng = np.random.default_rng(11)
+        w = rng.normal(size=(12, 8))
+        ref_u, ref_s, _ = np.linalg.svd(w, full_matrices=False)
+
+        evs, vecs = get_top_eigenvectors(w, k=8)
+        assert vecs.shape == (12, 8)
+        np.testing.assert_allclose(evs, ref_s[:8] ** 2, rtol=1e-9)

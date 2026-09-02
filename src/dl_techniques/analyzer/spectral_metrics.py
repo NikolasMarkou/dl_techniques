@@ -1115,8 +1115,27 @@ def get_top_eigenvectors(
 
     try:
         if method == 'direct':
-            # Use SVD for general matrices
-            # For large matrices, consider randomized_svd if available, but standard is safer
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-026
+            # Only the top `k` (default 3) left singular vectors are wanted, so ask
+            # for exactly those. Do NOT restore `np.linalg.svd(..., full_matrices=
+            # False)` here: `compute_eigenvalues` has ALREADY run a full
+            # `compute_uv=False` SVD of this same matrix earlier in the layer's
+            # analysis, and this call made it a SECOND full decomposition, this time
+            # materialising U. MEASURED on a plain Gaussian: 2.799 s full vs 0.060 s
+            # for `svds(k=3)` at 2048x512, agreeing to 1e-15 in the singular values
+            # and |cos| = 1.0 in the vectors. `svds` requires `k < min(shape)`, so the
+            # full path remains for the (rare) full-rank request and as the fallback
+            # when ARPACK does not converge. See decisions.md D-026.
+            if k < min_dim:
+                try:
+                    u, s, _ = svds(weight_matrix, k=k)
+                    order = np.argsort(s)[::-1]  # svds returns ascending
+                    return s[order] ** 2, u[:, order]
+                except Exception as e:
+                    logger.debug(
+                        f"Truncated SVD for top-{k} eigenvectors failed: {e}; "
+                        f"falling back to the full decomposition")
+
             u, s, _ = np.linalg.svd(weight_matrix, full_matrices=False)
             # Return squared singular values and left singular vectors
             return s[:k] ** 2, u[:, :k]
