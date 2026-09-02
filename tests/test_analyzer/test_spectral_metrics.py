@@ -2307,3 +2307,156 @@ class TestTheDirectTopEigenvectorMethodIsActuallyDeterministic:
                 f"{column} is not reproducible across two identical calls: "
                 f"{first[column]!r} then {second[column]!r}"
             )
+
+
+# =====================================================================
+# Correlation-trap threshold: scale equivariance and the M^(-2/3) order
+# =====================================================================
+
+def _clean_wishart(n, m, seed):
+    """Eigenvalues of a clean Gaussian Wishart, descending, with no planted spike.
+
+    Args:
+        n: Larger matrix dimension.
+        m: Smaller matrix dimension.
+        seed: Seed for the draw.
+
+    Returns:
+        The descending eigenvalue spectrum of ``W.T @ W / n``.
+    """
+    weight_matrix = np.random.default_rng(seed).standard_normal((n, m))
+    return np.sort(np.linalg.eigvalsh(weight_matrix.T @ weight_matrix / n))[::-1]
+
+
+class TestTheTrapThresholdIsScaleEquivariant:
+    """A trap verdict must depend on the SHAPE of a spectrum, not on its units.
+
+    Rescaling a layer's weights `W -> s*W` multiplies every eigenvalue by `s**2`,
+    including the Marchenko-Pastur edge. A threshold that sits a FIXED FRACTION
+    above the edge is therefore the only kind that can survive the rescale, so the
+    invariant under test is the RELATIVE headroom `(threshold - lambda_plus) /
+    lambda_plus`.
+
+    The shipped form spelled the offset `c_TW * sqrt((1/sqrt(Q)) * lambda_plus **
+    (2/3) * M ** (-2/3))`, whose headroom carries `lambda_plus ** (-2/3)` and so
+    COLLAPSES as the weights grow: MEASURED 5.262e+01 at `s = 1e-4` down to
+    2.442e-04 at `s = 1e4` on one 200x50 Wishart, five orders of magnitude of
+    verdict drift from a pure change of units. The same spelling also puts the
+    finite-size correction at `M ** (-1/3)`, half the `O(M ** (-2/3))` order the
+    repo's own theory document states.
+
+    Note what is NOT asserted: the VERDICT. The previously reported verdict flip
+    reproduces only on the `W.T @ W / rows` probe one shipped test uses and was
+    0/10 on raw-scale Gaussian draws, so a verdict-only guard would be
+    probe-dependent. Headroom is the robust symptom.
+    """
+
+    # Exact powers of two. `evals * s * s` is then a pure exponent shift with the
+    # mantissas untouched, so a scale-equivariant threshold can be asserted
+    # BIT-IDENTICAL rather than merely close. 2**-14 to 2**14 spans 6.1e-5 to
+    # 1.6e4, i.e. the whole 1e-4..1e4 range, and the decimal scales are checked
+    # separately below at a tolerance, since 1e-4 is not representable in binary
+    # and so is not a pure rescale at all.
+    _EXACT_SCALES = (2.0 ** -14, 2.0 ** -7, 1.0, 2.0 ** 7, 2.0 ** 14)
+    _DECIMAL_SCALES = (1e-4, 1e-2, 1.0, 1e2, 1e4)
+
+    @staticmethod
+    def _relative_headroom(evals, n, m, c_TW=None):
+        kwargs = {} if c_TW is None else {"c_TW": c_TW}
+        result = detect_correlation_trap(evals, n, m, **kwargs)
+        lambda_plus = result["mp_lambda_plus"]
+        assert lambda_plus > 0.0, "the MP edge collapsed; the probe is degenerate"
+        return (result["trap_threshold"] - lambda_plus) / lambda_plus
+
+    @pytest.mark.parametrize("seed", [3, 7, 0, 11])
+    def test_relative_headroom_is_bit_identical_under_a_pure_rescale(self, seed):
+        evals = _clean_wishart(200, 50, seed)
+        headrooms = [
+            self._relative_headroom(evals * s * s, 200, 50)
+            for s in self._EXACT_SCALES
+        ]
+
+        for scale, headroom in zip(self._EXACT_SCALES[1:], headrooms[1:]):
+            assert headroom == headrooms[0], (
+                f"seed {seed}: relative headroom moved from {headrooms[0]!r} at "
+                f"s=2**-14 to {headroom!r} at s={scale:g}. Rescaling the weights "
+                f"changes no shape and must change no verdict; a threshold offset "
+                f"that is not proportional to lambda_plus makes the detector a "
+                f"function of the units the weights happen to be stored in."
+            )
+
+    @pytest.mark.parametrize("seed", [3, 7, 0, 11])
+    def test_relative_headroom_survives_decimal_rescales_too(self, seed):
+        """The same invariance over the 1e-4..1e4 range, at a tolerance.
+
+        Decimal scales are not exactly representable, so `evals * s * s` perturbs
+        the mantissas and the last bit of `lambda_plus` with them; the residual
+        1e-15 wobble is the probe's, not the threshold's. MEASURED under the
+        shipped square-root spelling this same assertion saw 2.4e+04 against
+        5.3e+01 between two adjacent scales, so a 1e-12 tolerance is six orders
+        clear of the defect it exists to catch.
+        """
+        evals = _clean_wishart(200, 50, seed)
+        headrooms = [
+            self._relative_headroom(evals * s * s, 200, 50)
+            for s in self._DECIMAL_SCALES
+        ]
+
+        for scale, headroom in zip(self._DECIMAL_SCALES[1:], headrooms[1:]):
+            assert headroom == pytest.approx(headrooms[0], rel=1e-12), (
+                f"seed {seed}: relative headroom moved from {headrooms[0]!r} at "
+                f"s=1e-4 to {headroom!r} at s={scale:g}"
+            )
+
+    def test_the_headroom_carries_the_documented_M_to_the_minus_two_thirds(self):
+        """SETOL.md:116 states the fluctuations are of order O(M^(-2/3)).
+
+        Held at fixed Q = 4, the relative headroom must fall by exactly
+        `(M2/M1) ** (2/3)`. The shipped `sqrt` spelling delivers `M ** (-1/3)`,
+        which is off by a square root at every shape.
+        """
+        shapes = [(200, 50), (400, 100), (800, 200), (1600, 400)]
+        headrooms = [
+            self._relative_headroom(_clean_wishart(n, m, 5), n, m) for n, m in shapes
+        ]
+
+        for (n1, m1), h1, (n2, m2), h2 in zip(
+                shapes[:-1], headrooms[:-1], shapes[1:], headrooms[1:]):
+            expected = (m1 / m2) ** (2.0 / 3.0)
+            observed = h2 / h1
+            assert observed == pytest.approx(expected, rel=1e-12), (
+                f"({n1}x{m1}) -> ({n2}x{m2}): headroom ratio {observed!r}, expected "
+                f"{expected!r} for the documented M^(-2/3) order. An observed ratio "
+                f"near {(m1 / m2) ** (1.0 / 3.0):.6f} means the offset is still "
+                f"being square-rooted, leaving the correction at M^(-1/3)."
+            )
+
+    def test_the_headroom_matches_the_johnstone_tracy_widom_scale(self):
+        """Anti-vacuity: the invariant is the RIGHT constant, not merely constant.
+
+        Johnstone (2001), as stated in Ma arXiv:0810.1329 Eq. (2)-(3), gives
+        `sigma_p = (sqrt(n-1) + sqrt(p)) * (1/sqrt(n-1) + 1/sqrt(p)) ** (1/3)`.
+        In the repo's variables and the same normalisation as `lambda_plus`, that
+        is `lambda_plus * M ** (-2/3) * Q ** (-1/6) * (1 + sqrt(Q)) ** (-2/3)` —
+        verified against the literature spelling to <= 4.4e-16 relative at six
+        shapes. A headroom that were invariant but, say, twice this would satisfy
+        the two tests above and still be miscalibrated.
+        """
+        from dl_techniques.analyzer.constants import SPECTRAL_TW_SAFETY_FACTOR
+
+        for n, m in [(200, 50), (100, 100), (400, 50), (2000, 500)]:
+            Q = n / m
+            johnstone = (
+                (np.sqrt(n) + np.sqrt(m))
+                * (1.0 / np.sqrt(n) + 1.0 / np.sqrt(m)) ** (1.0 / 3.0) / n
+            )
+            lambda_plus_unit = (1.0 + 1.0 / np.sqrt(Q)) ** 2
+            expected = SPECTRAL_TW_SAFETY_FACTOR * johnstone / lambda_plus_unit
+
+            observed = self._relative_headroom(_clean_wishart(n, m, 5), n, m)
+
+            assert observed == pytest.approx(expected, rel=1e-12), (
+                f"({n}x{m}): relative headroom {observed!r} against Johnstone's "
+                f"Tracy-Widom scale {expected!r} at c_TW="
+                f"{SPECTRAL_TW_SAFETY_FACTOR}"
+            )

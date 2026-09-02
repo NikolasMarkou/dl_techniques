@@ -699,15 +699,23 @@ def detect_correlation_trap(
 
     The detection protocol follows Martin & Mahoney (2021) and uses:
     1. MP edges:  λ± = σ²(1 ± 1/√Q)²   (Q=N/M, N=larger; WeightWatcher RMT_Util)
-    2. TW scale:  TW = (1/√Q)·λ+^(2/3)·M^(-2/3)   (WeightWatcher identify_trap_mode_indices)
-    3. Threshold: λ+ + c_TW·√TW   (c_TW multiplier, default 1.0 = WW-exact)
+    2. TW offset: Δ_TW = c_TW·λ+·M^(-2/3)·f(Q),  f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)
+       — Johnstone's (2001) Tracy-Widom scale in this module's variables, and the
+       O(M^(-2/3)) order SETOL.md:116 documents.
+    3. Threshold: λ+ + Δ_TW   (c_TW = how many Tracy-Widom units of headroom)
     4. Severity:      (λ_max - threshold) / λ+
+
+    The offset is PROPORTIONAL to λ+, so the relative headroom
+    ``(threshold - λ+)/λ+`` is ``c_TW·M^(-2/3)·f(Q)`` and the verdict is invariant
+    under ``W -> s·W``. This is a deliberate numeric divergence from
+    WeightWatcher's constant; see the DECISION appendix in the body.
 
     Args:
         rand_evals: Eigenvalues of the randomized weight matrix (sorted descending).
         N: Maximum dimension of the weight matrix.
         M: Minimum dimension of the weight matrix.
-        c_TW: Tracy-Widom multiplier on √TW (default 1.0 = WeightWatcher-exact).
+        c_TW: How many Tracy-Widom units of headroom to allow above the MP edge.
+            Defaults to ``SPECTRAL_TW_SAFETY_FACTOR``.
 
     Returns:
         Dictionary with trap detection results:
@@ -734,7 +742,6 @@ def detect_correlation_trap(
 
     # Aspect ratio (Q = N/M, N the LARGER dim per docstring => Q >= 1)
     Q = N / M
-    inv_sqrtQ = 1.0 / np.sqrt(Q)
 
     # DECISION plan-2026-09-01T225724-e79ad4bd/D-017
     # The bulk variance EXCLUDES spikes. Do NOT go back to `float(np.mean(rand_evals))`
@@ -757,8 +764,57 @@ def detect_correlation_trap(
     # remove_traps.identify_trap_mode_indices: TW = (1/sqrt(Q))*bulk_max^(2/3)*M^(-2/3); the edge
     # is raised to TW via + sqrt(TW) (NOT + TW). c_TW retained as a tunable multiplier on sqrt(TW)
     # (default 1.0 = WW-exact); do NOT reintroduce the old c_TW*sigma^2*M^(-2/3) linear form.
-    TW = inv_sqrtQ * np.power(mp_lambda_plus, 2.0 / 3.0) * np.power(M, -2.0 / 3.0)
-    threshold = mp_lambda_plus + c_TW * np.sqrt(TW)
+    #
+    # SUPERSEDED by plan-2026-09-02T041737-e85f2027/D-005 (2026-09-02), with the
+    # user's explicit authorization. This appendix is kept because
+    # `plans/plan_2026-06-03_bc986e52/` no longer exists and `plans/ANCHORS.md`
+    # carries no line for `bc986e52`, so the paragraph above is the SOLE surviving
+    # record of that decision and must not be deleted.
+    #
+    # Why it was wrong. Its premise was parity: "default 1.0 = WW-exact". The
+    # upstream symbol is real - `weightwatcher/remove_traps.py:105-116`, retrieved
+    # 2026-09-02, does read
+    #     bulk_max = (sigma_mp * (1 + 1 / np.sqrt(Q))) ** 2
+    #     TW = 1 / np.sqrt(Q) * np.power(bulk_max, 2 / 3) * np.power(M, -2 / 3)
+    #     bulk_max_TW = bulk_max + np.sqrt(TW)
+    #     threshold = bulk_max_TW / (Wscale * Wscale)
+    # but `sigma_mp` and `W_scale` come from `weightwatcher.py::mp_fit`, which
+    # NORMALIZES the spectrum first:
+    #     Wnorm = np.sqrt(np.sum(evals))
+    #     Wscale = np.sqrt(to_plot.shape[0])/Wnorm
+    #     to_plot = (Wscale*Wscale)*to_plot
+    # The mean rescaled eigenvalue is 1 by construction, so upstream evaluates
+    # `sqrt(TW)` at sigma^2 ~ 1 - where the exponent error is invisible - and the
+    # trailing `/(Wscale*Wscale)` restores raw units. Upstream's threshold is
+    # therefore proportional to s^2 and ITS verdict IS scale-invariant. This port
+    # copied the two formula lines and dropped BOTH the normalization and the
+    # un-rescale, so the claim of WW-exactness was false and the resulting offset
+    # was not proportional to lambda_plus. MEASURED on one 200x50 Wishart, the
+    # relative headroom (threshold - lambda_plus)/lambda_plus ran 2.442e+04 at
+    # s=1e-4 down to 5.262e-03 at s=1e2: seven orders of drift from a pure change
+    # of units. The prohibition's own target, a c_TW*sigma^2*M^(-2/3) linear form,
+    # is STILL not what replaced it.
+
+    # DECISION plan-2026-09-02T041737-e85f2027/D-005
+    # The offset is Johnstone's (2001) Tracy-Widom scale, rewritten in this repo's
+    # variables. Do NOT restore `c_TW * sqrt(inv_sqrtQ * lambda_plus**(2/3) *
+    # M**(-2/3))`: that spelling is not proportional to lambda_plus, so the verdict
+    # depends on the units the weights are stored in, and it leaves the finite-size
+    # correction at M^(-1/3) where SETOL.md:116 states O(M^(-2/3)). Do NOT drop the
+    # `f(Q) = Q**(-1/6) * (1 + sqrt(Q))**(-2/3)` factor either - it is Johnstone's
+    # sigma_p, not a fudge (verified against the literature spelling to <= 4.4e-16
+    # relative at six shapes), and without it the false-positive rate spreads ~10x
+    # across matrix shapes at a fixed c_TW instead of 2.5x. This is a deliberate
+    # numeric DIVERGENCE from WeightWatcher, not parity with it: upstream's offset
+    # is ~0.112*lambda_plus at 200x50 against Johnstone's 0.0281 per TW unit.
+    # See decisions.md D-005.
+    delta_TW = (
+        c_TW * mp_lambda_plus
+        * np.power(M, -2.0 / 3.0)
+        * np.power(Q, -1.0 / 6.0)
+        * np.power(1.0 + np.sqrt(Q), -2.0 / 3.0)
+    )
+    threshold = mp_lambda_plus + delta_TW
 
     # Detect spikes above threshold
     spikes = rand_evals[rand_evals > threshold]

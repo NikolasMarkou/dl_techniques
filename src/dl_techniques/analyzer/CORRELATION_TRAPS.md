@@ -31,25 +31,55 @@ matrix (`X = WᵀW / 200`, seed 3, σ² over all eigenvalues = `1.006857`), and 
 | Quantity | This document | Shipped code | Status |
 |---|---|---|---|
 | MP edges | `λ± = σ²(1 ± √Q)²`, `Q = N/M` with `N` the **column** count (§9.1 does `M, N = W.shape`; the §5.2 example has `Q = 256/512 = 0.5`) | `λ± = σ²(1 ± 1/√Q)²`, `Q = N/M` with `N` the **larger** dimension, so `Q ≥ 1` (`calc_mp_edges`) | **Not a divergence — the same formula under opposite `Q` conventions.** Measured identical: doc `λ₊ = 2.265427` at `Q = 0.25`, code `λ₊ = 2.265427` at `Q = 4` on the same σ². Substituting the code's `Q ≥ 1` into this document's spelling inflates `λ₊` by exactly a factor of `Q` (`9.061710` vs `2.265427`), which is a reading error, not a code defect. Read each formula with its own `Q`. |
-| Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `TW = (1/√Q) · λ₊^(2/3) · M^(-2/3)`; `threshold = λ₊ + c_TW·√TW` (WeightWatcher `remove_traps.identify_trap_mode_indices`) | **Real divergence.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.452807`. |
-| `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 1.0`, which is WeightWatcher-exact, and it multiplies `√TW`, not `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. |
+| Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `Δ_TW = c_TW · λ₊ · M^(-2/3) · f(Q)`, `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`; `threshold = λ₊ + Δ_TW` (Johnstone 2001's Tracy-Widom scale) | **Real divergence, and ALSO a divergence from WeightWatcher — see below.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.264996` (`Δ_TW = 0.061938`). |
+| `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 1.0`, and it counts Tracy-Widom UNITS of headroom above `λ₊`, not multiples of `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. |
 | Bulk variance σ² | `sigma_sq = np.mean(eigenvalues)` over the **whole** spectrum (§9.1 Step 4, Appendix B.1) | `estimate_bulk_variance`: the mean is re-estimated over only the eigenvalues at or below the current MP edge, iterated to convergence | **Real divergence, deliberate (`D-017`).** The document's estimator counts a spike into the very edge meant to identify it: one 20× spike moved the mean `201.37 → 381.12` (1.89×) and the edge `453.09 → 857.52` with it, making the detector *conservative* exactly when it should fire hardest. On a clean probe the two differ mildly: `1.006857` (doc) vs `0.979137` (shipped). |
 | Number of draws | one randomization (§4 Step 4) | `config.spectral_n_randomizations` independent permutations (default 5); `has_trap` is a **majority vote** and every other trap quantity is the **mean** over the draws, so `num_rand_spikes` can be fractional | **Real divergence, deliberate (`D-017`).** |
 
-### Known-open behaviour (recorded, not fixed)
+### Divergence from WeightWatcher, stated as one
 
-- **The threshold is not scale-equivariant.** `λ₊ ∝ s` while `√TW ∝ s^(1/3)`, and
-  `compute_eigenvalues` is called with `normalize=False`, so the verdict depends on the absolute
-  weight scale. Measured on the IDENTICAL clean 200×50 Wishart spectrum, rescaled by `s`, the
-  relative headroom `(threshold − λ₊)/λ₊` reads `52.02` at `s = 1e-4`, `0.1121` at `s = 1` and
-  `0.00520` at `s = 100` (seed 0). For seeds 3 and 7 the rescale **flips the verdict**:
-  `has_trap = False, spikes = 0` at `s = 1` becomes `has_trap = True, spikes = 1` at `s = 100` on the
-  same eigenvalues. Fixing this means normalizing before the Tracy-Widom comparison (reusing
-  `rescale_eigenvalues`), which moves `mp_lambda_plus` / `trap_threshold` into normalized units and
-  needs its own boundary-case guard; it was out of scope for the step that fixed the σ² estimator.
-- A clean Wishart spectrum at `s = 1` reports `num_rand_spikes = 0` for seeds 0, 3 and 7 after the
-  `estimate_bulk_variance` change, so the false-positive-at-unit-scale behaviour recorded during
-  review no longer reproduces at that scale — only under the rescale above.
+The offset above is **not** WeightWatcher's. `weightwatcher/remove_traps.py::identify_trap_mode_indices`
+(retrieved 2026-09-02) genuinely reads
+
+```python
+bulk_max = (sigma_mp * (1 + 1 / np.sqrt(Q))) ** 2
+TW = 1 / np.sqrt(Q) * np.power(bulk_max, 2 / 3) * np.power(M, -2 / 3)
+bulk_max_TW = bulk_max + np.sqrt(TW)
+threshold = bulk_max_TW / (Wscale * Wscale)
+```
+
+but `sigma_mp` and `W_scale` come from `weightwatcher.py::mp_fit`, which normalizes the spectrum
+before fitting:
+
+```python
+Wnorm = np.sqrt(np.sum(evals))
+Wscale = np.sqrt(to_plot.shape[0])/Wnorm
+to_plot = (Wscale*Wscale)*to_plot
+```
+
+The mean rescaled eigenvalue is `1` by construction, so upstream evaluates `√TW` at `σ² ≈ 1`, where
+the exponent error is invisible, and the trailing `/(Wscale·Wscale)` restores raw units. **Upstream's
+threshold is therefore ∝ s² and upstream's verdict IS scale-invariant.** This package's port copied
+the two formula lines and dropped both the normalization and the un-rescale, which is why the shipped
+threshold was not scale-equivariant and why the docstring claim `default 1.0 = WW-exact` was false.
+
+Adopting Johnstone's scale is a **bug fix** relative to `SETOL.md:116` ("TW fluctuations on `λ₊`, of
+order `O(M^(-2/3))`") and relative to the literature, and simultaneously a **deliberate numeric
+divergence from WeightWatcher's constant**: upstream's offset is `≈ 0.112·λ₊` at 200×50 against
+Johnstone's `0.0281·λ₊` per Tracy-Widom unit. Both labels apply; neither is parity.
+
+### Fixed behaviour (was recorded here as known-open)
+
+- **The threshold is now scale-equivariant.** `Δ_TW ∝ λ₊`, so the relative headroom
+  `(threshold − λ₊)/λ₊` is exactly `c_TW · M^(-2/3) · f(Q)` and carries no dependence on the weight
+  scale at all. Measured on the IDENTICAL clean 200×50 Wishart spectrum (seed 0), rescaled by `s`,
+  it now reads `0.028114` at every one of `s = 1e-4`, `1`, `100`, `1e4`, and is bit-identical across
+  exact powers of two. Before the fix the same probe read `52.02` at `s = 1e-4`, `0.1121` at `s = 1`
+  and `0.00520` at `s = 100`, and for seeds 3 and 7 the rescale flipped `has_trap` from `False` to
+  `True` on unchanged eigenvalues. The normalize-before-comparing route this section previously
+  proposed was NOT taken: it would have moved `mp_lambda_plus` and `trap_threshold` into normalized
+  units, changing three published columns' meaning. Guarded by
+  `tests/test_analyzer/test_spectral_metrics.py -k TestTheTrapThresholdIsScaleEquivariant`.
 
 ---
 

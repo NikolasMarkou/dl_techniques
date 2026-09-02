@@ -1056,8 +1056,14 @@ class TestCorrelationTrapsDocMatchesTheImplementation:
             sigma_all * (1.0 + np.sqrt(50 / 200)) ** 2
             + 2.5 * sigma_all * (50 ** (-1.0 / 3.0))
         )
-
         text = TRAPS_PATH.read_text(encoding="utf-8")
+
+        # The shipped offset, quoted in the table beside the doc's own.
+        shipped_delta = result["trap_threshold"] - result["mp_lambda_plus"]
+        assert f"{shipped_delta:.6f}" in text, (
+            f"CORRELATION_TRAPS.md §0 no longer quotes the shipped Tracy-Widom "
+            f"offset ({shipped_delta:.6f})"
+        )
         for label, value in (
             ("sigma over all eigenvalues", sigma_all),
             ("bulk sigma", sigma_bulk),
@@ -1096,37 +1102,93 @@ class TestCorrelationTrapsDocMatchesTheImplementation:
             "the document's divergence entry describes a fix that is no longer there"
         )
 
-    def test_the_scale_dependence_recorded_in_the_doc_still_reproduces(self):
-        """The known-open item §0 records, kept honest by measurement.
+    def test_the_scale_equivariance_the_doc_now_claims_actually_holds(self):
+        """§0 used to record the scale dependence as known-open; it now claims a fix.
 
-        If someone normalizes before the Tracy-Widom comparison, this reddens and the
-        document's "known-open behaviour" bullet must be rewritten -- which is exactly
-        the point of recording it as an executable claim rather than as prose.
+        The claim is executed rather than trusted. This replaces the guard that
+        pinned the DEFECT: that guard asserted `headroom[1.0] > 10 *
+        headroom[100.0]` and a `False -> True` verdict flip, both of which were
+        descriptions of the bug, so it necessarily reddened when the bug was fixed.
         """
         from dl_techniques.analyzer.spectral_metrics import detect_correlation_trap
 
-        evals = _wishart_spectrum(seed=3)
-        verdicts = {}
-        headroom = {}
-        for scale in (1.0, 100.0):
-            result = detect_correlation_trap(evals * scale, 200, 50)
-            verdicts[scale] = result["has_trap"]
-            headroom[scale] = (
-                result["trap_threshold"] - result["mp_lambda_plus"]
-            ) / result["mp_lambda_plus"]
+        for seed in (3, 7, 0):
+            evals = _wishart_spectrum(seed=seed)
+            verdicts = {}
+            headroom = {}
+            for scale in (1e-4, 1.0, 100.0, 1e4):
+                result = detect_correlation_trap(evals * scale, 200, 50)
+                verdicts[scale] = result["has_trap"]
+                headroom[scale] = (
+                    result["trap_threshold"] - result["mp_lambda_plus"]
+                ) / result["mp_lambda_plus"]
 
-        assert headroom[1.0] > 10 * headroom[100.0], (
-            "the relative Tracy-Widom headroom no longer collapses under a rescale: "
-            f"{headroom}"
-        )
-        assert verdicts[1.0] is False and verdicts[100.0] is True, (
-            "the documented verdict flip under a pure rescale no longer reproduces: "
-            f"{verdicts}"
-        )
+            assert len(set(verdicts.values())) == 1, (
+                f"seed {seed}: a pure rescale still moves the verdict: {verdicts}")
+            for scale, value in headroom.items():
+                assert value == pytest.approx(headroom[1.0], rel=1e-12), (
+                    f"seed {seed}: relative headroom {value!r} at s={scale:g} against "
+                    f"{headroom[1.0]!r} at s=1"
+                )
+
         text = TRAPS_PATH.read_text(encoding="utf-8")
-        assert "not scale-equivariant" in text, (
-            "CORRELATION_TRAPS.md no longer records the scale-dependence as a "
-            "known-open item"
+        assert "The threshold is now scale-equivariant" in text, (
+            "CORRELATION_TRAPS.md no longer records the scale-equivariance fix"
+        )
+        assert "### Known-open behaviour (recorded, not fixed)" not in text, (
+            "CORRELATION_TRAPS.md still files the scale dependence under "
+            "known-open behaviour; that section described the pre-fix threshold"
+        )
+
+    def test_the_divergence_from_weightwatcher_is_labelled_as_one(self):
+        """The offset is a bug fix vs SETOL AND a numeric divergence from upstream.
+
+        A previous plan established that mislabelling a divergence as parity is
+        itself a defect; the in-code claim `default 1.0 = WW-exact` was exactly
+        that. The document must now carry the upstream source that explains why.
+        """
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+
+        assert "Divergence from WeightWatcher, stated as one" in text, (
+            "CORRELATION_TRAPS.md does not label the Tracy-Widom offset as a "
+            "divergence from WeightWatcher"
+        )
+        for fragment in (
+            "identify_trap_mode_indices",
+            "Wscale = np.sqrt(to_plot.shape[0])/Wnorm",
+            "to_plot = (Wscale*Wscale)*to_plot",
+            "threshold = bulk_max_TW / (Wscale * Wscale)",
+        ):
+            assert fragment in text, (
+                f"CORRELATION_TRAPS.md no longer quotes {fragment!r} from the "
+                f"upstream source; the divergence claim becomes unverifiable prose"
+            )
+
+        from dl_techniques.analyzer.spectral_metrics import detect_correlation_trap
+
+        # The live docstring must not repeat the refuted parity claim.
+        assert "WW-exact" not in (detect_correlation_trap.__doc__ or ""), (
+            "detect_correlation_trap's docstring still claims WeightWatcher-"
+            "exactness for the Tracy-Widom threshold; the port dropped upstream's "
+            "normalization, so the claim is false"
+        )
+
+        # The legacy anchor that carried the claim is SUPERSEDED IN PLACE, never
+        # deleted: `plans/plan_2026-06-03_bc986e52/` no longer exists, so that
+        # comment is the sole surviving record of the decision being overturned.
+        source = (PACKAGE_ROOT / "spectral_metrics.py").read_text(encoding="utf-8")
+        assert "DECISION plan_2026-06-03_bc986e52/D-003" in source, (
+            "the legacy D-003 anchor was deleted rather than superseded; its plan "
+            "directory is gone, so deleting the comment destroys the only record"
+        )
+        legacy = source.index("DECISION plan_2026-06-03_bc986e52/D-003")
+        appendix = source.index("SUPERSEDED by plan-2026-09-02T041737-e85f2027/D-005")
+        assert appendix > legacy, (
+            "the supersession appendix does not follow the decision it supersedes"
+        )
+        assert "DECISION plan_2026-06-03_bc986e52/D-008" in source, (
+            "D-008 (the N>=20 KS-argmin selection rule) was superseded too; only "
+            "D-003 was authorized"
         )
 
 
