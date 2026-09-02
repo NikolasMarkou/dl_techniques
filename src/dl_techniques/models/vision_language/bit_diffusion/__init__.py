@@ -6,8 +6,9 @@ base processes and their direction-specific score-matching targets, the sampler,
 and a decoder that reads text back out of a sampled bridge tensor.
 
 Currently exported: the bridge geometry, the packing bijection, the four SDE
-base processes and the `DiTXA` model. The token decoder lands in a later step of
-the port.
+base processes, the `DiTXA` model and the `SharedTokenDecoder` that reads text
+back out of a sampled bridge tensor. `blocks.py` is deliberately NOT exported --
+its layers are implementation detail of `DiTXA`, not a public surface.
 
     from dl_techniques.models.vision_language.bit_diffusion import (
         BRIDGE_PRESETS, PeriodicVolatilitySDE, token_flat_to_bridge,
@@ -46,6 +47,10 @@ from .token_bridge import (
     prepare_bridge_batch,
     token_flat_to_bridge,
 )
+from .token_decoder import (
+    SharedTokenDecoder,
+    create_shared_token_decoder,
+)
 
 __all__ = [
     "BRIDGE_PRESETS",
@@ -58,6 +63,7 @@ __all__ = [
     "PeriodicVolatilitySDE",
     "PROMPT_KIND_TO_LABEL",
     "PROMPT_NUM_CLASSES",
+    "SharedTokenDecoder",
     "TIME_EPS",
     "SDE_TYPES",
     "TOKEN_LAYOUTS",
@@ -67,6 +73,7 @@ __all__ = [
     "compute_token_norms",
     "create_bridge_sde",
     "create_ditxa",
+    "create_shared_token_decoder",
     "get_bridge_config",
     "norm_based_token_stops",
     "pad_id_token_stops",
