@@ -297,6 +297,10 @@ def fit_powerlaw(
         # tail_sums[i] == sum(log_data[i:])
         # We use cumsum on the reversed array, then reverse back.
         tail_sums = np.cumsum(log_data[::-1])[::-1]
+        # The empirical CDF's numerator is the same 0..n_tail-1 ramp for every
+        # candidate, so allocate it ONCE and slice it, per the same
+        # precompute-and-slice idiom as `tail_sums` above.
+        ecdf_numerators = np.arange(float(N))
         # --- OPTIMIZATION END ---
 
         xmins = data[:-1]
@@ -305,7 +309,7 @@ def fit_powerlaw(
 
         # Loop through possible xmins
         # Although we iterate, the heavy summation is now O(1) lookup
-        for i, current_xmin in enumerate(xmins):
+        for i in range(N - 1):
             n_tail = float(N - i)
 
             # Retrieve pre-computed sum
@@ -324,12 +328,24 @@ def fit_powerlaw(
 
             # Calculate KS Distance (D) only if alpha is valid
             if current_alpha > 1.0:
-                # Theoretical CDF: P(x) = 1 - (x/xmin)^(-alpha+1)
-                # Note: data[i:] contains the tail elements
-                theoretical_cdf = 1 - (data[i:] / current_xmin) ** (-current_alpha + 1.0)
+                # DECISION plan-2026-09-02T041737-e85f2027/D-001
+                # The theoretical CDF is evaluated in the LOG domain, reusing the
+                # `log_data` array already built above. Do NOT restore the literal
+                # `(data[i:] / current_xmin) ** (1.0 - alpha)`: `pow` measured
+                # 21.81 ns/element against `exp`'s 7.92, ~85% of this loop body and
+                # 2.20-2.23x of the whole fit at n=15000, and it is also the LESS
+                # accurate spelling (it rounds the ratio, then amplifies that
+                # rounding by the exponent). `np.expm1` is marginally more accurate
+                # still but only 1.75x, so it was rejected. The returned `D` moves
+                # by ~1e-15 relative TOWARD the exact value; `alpha`,
+                # `optimal_xmin`, `sigma`, `num_pl_spikes` and `status` do not move.
+                # The identical kernel in the small-N branch below MUST be kept in
+                # the same spelling. See decisions.md D-001.
+                theoretical_cdf = 1.0 - np.exp(
+                    (1.0 - current_alpha) * (log_data[i:] - log_data[i]))
 
                 # Empirical CDF: 0 to 1 over n_tail steps
-                empirical_cdf = np.arange(n_tail) / n_tail
+                empirical_cdf = ecdf_numerators[:N - i] / n_tail
 
                 # KS distance is max absolute difference
                 Ds[i] = np.max(np.abs(theoretical_cdf - empirical_cdf))
@@ -347,7 +363,7 @@ def fit_powerlaw(
             # UNCHANGED. Do NOT apply the penalty or the (n-1) correction for N>=20.
             Js = np.full(N - 1, np.inf, dtype=np.float64)
             alphas_bc = np.zeros(N - 1, dtype=np.float64)
-            for i, current_xmin in enumerate(xmins):
+            for i in range(N - 1):
                 n_tail = N - i
                 if n_tail < SPECTRAL_SMALL_N_KMIN:
                     continue
@@ -358,9 +374,9 @@ def fit_powerlaw(
                 alphas_bc[i] = a_bc
                 if a_bc <= 1.0:
                     continue
-                tail = data[i:]
-                theoretical_cdf = 1.0 - (tail / current_xmin) ** (1.0 - a_bc)
-                empirical_cdf = np.arange(n_tail, dtype=np.float64) / n_tail
+                theoretical_cdf = 1.0 - np.exp(
+                    (1.0 - a_bc) * (log_data[i:] - log_data[i]))
+                empirical_cdf = ecdf_numerators[:n_tail] / n_tail
                 dks = float(np.max(np.abs(theoretical_cdf - empirical_cdf)))
                 Ds[i] = dks
                 Js[i] = dks - 0.868 / np.sqrt(n_tail)

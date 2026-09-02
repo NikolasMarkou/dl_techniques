@@ -1716,6 +1716,17 @@ class TestFitPowerlawIsBitIdentical:
     _FIELDS = ("alpha", "optimal_xmin", "ks_distance", "sigma",
                "num_pl_spikes", "status", "warning")
 
+    # `ks_distance` is the ONE field allowed to drift, and only by float round-off.
+    # See `plan-2026-09-02T041737-e85f2027/D-001`: moving the theoretical CDF into
+    # the log domain changes the last bit or two of `D` (measured: 403 of 800
+    # spectra move, at most 1.1e-14 relative on realistic families) in the
+    # direction of the exact answer. The HEAD literals below are DELIBERATELY not
+    # re-baselined onto the post-hoist values, so this test still measures the
+    # total drift away from the pre-hoist answer rather than the code's agreement
+    # with itself. Every other field is still exact-equality.
+    _DRIFT_TOLERATED = "ks_distance"
+    _DRIFT_MAX_RELATIVE = 1e-8
+
     @pytest.mark.parametrize("name", sorted(_HEAD))
     def test_all_seven_fields_are_unchanged(self, name):
         got = fit_powerlaw(_powerlaw_corpus()[name])
@@ -1725,8 +1736,39 @@ class TestFitPowerlawIsBitIdentical:
         for field, g, w in zip(self._FIELDS, got, want):
             if isinstance(w, str):
                 assert g == w, f"{name}.{field}: {g!r} != {w!r}"
+            elif field == self._DRIFT_TOLERATED:
+                relative = abs(float(g) - float(w)) / abs(float(w))
+                assert relative <= self._DRIFT_MAX_RELATIVE, (
+                    f"{name}.{field}: {g!r} vs the HEAD literal {w!r} "
+                    f"(relative {relative:.4e}). Round-off drift from the log-domain "
+                    f"KS kernel is bounded by {self._DRIFT_MAX_RELATIVE:.0e}; a larger "
+                    f"move means the fit selected a DIFFERENT candidate, not that it "
+                    f"rounded differently."
+                )
             else:
                 assert float(g) == float(w), f"{name}.{field}: {g!r} != {w!r}"
+
+    def test_the_ks_distance_tolerance_is_not_a_blanket_exemption(self):
+        """Anti-vacuity: only `ks_distance` is exempt, and only by a hair.
+
+        A tolerance wide enough to hide a changed argmin would defeat the whole
+        class. MEASURED post-hoist: every literal above still agrees to <= 2e-16
+        relative, four orders tighter than the tolerance actually granted.
+        """
+        assert self._DRIFT_TOLERATED == "ks_distance"
+        assert sum(f == self._DRIFT_TOLERATED for f in self._FIELDS) == 1
+
+        worst = 0.0
+        for name, want in self._HEAD.items():
+            got = fit_powerlaw(_powerlaw_corpus()[name])
+            index = self._FIELDS.index(self._DRIFT_TOLERATED)
+            worst = max(worst, abs(float(got[index]) - float(want[index]))
+                        / abs(float(want[index])))
+        assert worst <= 1e-13, (
+            f"the worst ks_distance drift over the corpus is {worst:.4e}; that is "
+            f"far above pure round-off, so the {self._DRIFT_MAX_RELATIVE:.0e} "
+            f"tolerance is now hiding a real behaviour change"
+        )
 
     def test_the_corpus_exercises_both_selection_paths(self):
         """Anti-vacuity: the literals must not all come from one code path."""
@@ -1931,4 +1973,142 @@ class TestConfigEvalBoundsReachTheKernels:
         assert seen, "compute_eigenvalues was never called"
         assert set(seen) == {12345}, (
             f"compute_eigenvalues saw max_evals={seen}, not the configured 12345"
+        )
+
+
+# =====================================================================
+# fit_powerlaw KS-distance kernel: accuracy and cost
+# =====================================================================
+
+class TestFitPowerlawKsKernel:
+    """Guards on the kernel that evaluates the theoretical CDF in the xmin sweep.
+
+    The sweep evaluates ``1 - (tail / xmin) ** (1 - alpha)`` for every candidate
+    ``xmin``. Written as a literal ``pow`` of a ratio it is both the dominant cost
+    of the whole fit and the least accurate spelling available: the division
+    rounds, and ``pow`` then amplifies that rounding by the exponent. Writing it
+    as ``1 - exp((1 - alpha) * (log(tail) - log(xmin)))`` reuses the ``log_data``
+    array the function already computes, is measurably cheaper, and is measurably
+    closer to the exact value.
+
+    Both tests below discriminate the two spellings.
+    """
+
+    @staticmethod
+    def _reference_ks_distance(evals, alpha, xmin):
+        """Recompute the winning candidate's KS distance in extended precision.
+
+        ``np.longdouble`` carries ~18-19 significant decimal digits on x86 against
+        float64's ~15-16, so it resolves a float64 kernel's error by ~3 orders of
+        magnitude - enough to separate a 1e-10 error from a 1e-15 one.
+
+        The tail is selected by INDEX (``searchsorted`` on the same sorted float64
+        array the fit built), never by re-thresholding in extended precision: a
+        value-based reselection can pick a different number of elements and would
+        measure tail membership rather than kernel accuracy.
+
+        Args:
+            evals: The eigenvalue spectrum handed to ``fit_powerlaw``.
+            alpha: The returned power-law exponent.
+            xmin: The returned optimal xmin.
+
+        Returns:
+            The KS distance at ``(alpha, xmin)``, as a float, computed in
+            extended precision.
+        """
+        from dl_techniques.analyzer.spectral_metrics import SPECTRAL_EVALS_THRESH
+
+        data = np.sort(np.asarray(evals, dtype=np.float64))
+        data = data[data > SPECTRAL_EVALS_THRESH]
+        i = int(np.searchsorted(data, np.float64(xmin), side="left"))
+        tail = data[i:].astype(np.longdouble)
+        n_tail = len(tail)
+        exponent = np.longdouble(1.0) - np.longdouble(alpha)
+        theoretical = 1.0 - np.exp(
+            exponent * (np.log(tail) - np.log(np.longdouble(data[i]))))
+        empirical = np.arange(n_tail, dtype=np.longdouble) / np.longdouble(n_tail)
+        return float(np.max(np.abs(theoretical - empirical)))
+
+    @pytest.mark.parametrize(
+        "name,evals",
+        [
+            # Narrow dynamic range: (x/xmin) sits at 1 + O(1e-6), where the
+            # ratio-then-pow spelling loses the most digits. MEASURED at the
+            # ratio spelling: 1.7e-10, 9.4e-10, 8.2e-10 relative.
+            ("narrow_300", 1.0 + np.random.default_rng(0).standard_normal(300) * 1e-6),
+            ("narrow_400", 1.0 + np.random.default_rng(5).standard_normal(400) * 1e-6),
+            ("narrow_250", 1.0 + np.random.default_rng(9).standard_normal(250) * 1e-6),
+            # N < 20 takes the small-N branch, which carries its own SECOND copy
+            # of the same kernel. Without this arm a fix to the standard path
+            # alone would pass while leaving the two paths mutually inconsistent.
+            ("small_n_18", 1.0 + np.random.default_rng(3).standard_normal(18) * 1e-6),
+            ("small_n_19", 1.0 + np.random.default_rng(11).standard_normal(19) * 1e-6),
+            # Anti-vacuity: wide-range families where BOTH spellings are already
+            # accurate to ~1e-15. These prove the reference itself is sound and
+            # that the assertion is not simply unreachable.
+            ("pareto", np.random.default_rng(1).pareto(1.5, 300) + 1.0),
+            ("lognorm", np.random.default_rng(2).lognormal(0.0, 1.0, 300)),
+        ],
+    )
+    def test_the_returned_ks_distance_matches_an_extended_precision_reference(
+            self, name, evals):
+        alpha, xmin, D, _sigma, _spikes, status, _warning = fit_powerlaw(
+            evals, min_evals=5)
+
+        assert status == "success", f"{name}: fit did not succeed"
+
+        reference = self._reference_ks_distance(evals, alpha, xmin)
+        relative = abs(D - reference) / abs(reference)
+
+        assert relative <= 1e-12, (
+            f"{name}: fit_powerlaw returned D={D!r} against an extended-precision "
+            f"reference of {reference!r} (relative error {relative:.4e}). A float64 "
+            f"kernel written as exp((1-alpha)*(log(x)-log(xmin))) lands within "
+            f"~1e-15; a relative error near 1e-10 means the KS distance is still "
+            f"being computed as (x/xmin)**(1-alpha), which rounds the ratio and "
+            f"then amplifies that rounding by the exponent."
+        )
+
+    def test_the_xmin_sweep_costs_less_than_an_equivalent_pow_kernel(self):
+        """The sweep must not pay for an elementwise ``pow`` per candidate.
+
+        Self-calibrating: the reference loop is timed in the SAME process, on the
+        SAME data, immediately before the fit, so the comparison does not depend
+        on the machine, the load, or an absolute wall-clock budget recorded
+        elsewhere. MEASURED: ~1.0x with the ratio-and-pow spelling (the reference
+        loop IS the shipped loop body), ~0.5x once the kernel is an ``exp``.
+        """
+        import time
+
+        rng = np.random.default_rng(4)
+        evals = np.sort(rng.pareto(1.5, 4000) + 1.0)
+        n = len(evals)
+        exponent = -1.5
+
+        def _pow_kernel_sweep():
+            worst = 0.0
+            for i in range(n - 1):
+                tail = evals[i:]
+                theoretical = 1.0 - (tail / evals[i]) ** exponent
+                empirical = np.arange(float(n - i)) / float(n - i)
+                worst = max(worst, float(np.max(np.abs(theoretical - empirical))))
+            return worst
+
+        _pow_kernel_sweep()  # warm caches so neither side pays the first-touch cost
+        fit_powerlaw(evals)
+
+        t0 = time.perf_counter()
+        _pow_kernel_sweep()
+        pow_seconds = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        fit_powerlaw(evals)
+        fit_seconds = time.perf_counter() - t0
+
+        assert fit_seconds < 0.75 * pow_seconds, (
+            f"the whole fit took {fit_seconds:.4f}s against {pow_seconds:.4f}s for a "
+            f"bare pow-based sweep of the same shape (ratio "
+            f"{fit_seconds / pow_seconds:.3f}). The fit does strictly more work than "
+            f"the reference loop, so a ratio at or above 1.0 means its KS kernel is "
+            f"still an elementwise pow. Expected ~0.5 with the log/exp spelling."
         )
