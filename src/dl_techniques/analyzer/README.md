@@ -36,7 +36,7 @@ print(analyzer.get_summary_statistics())
 |---|---|
 | `ModelAnalyzer(models, config=None, output_dir=None, training_history=None)` | `models` must be non-empty (`ValueError` otherwise). `output_dir=None` creates `analysis_<YYYYmmdd_HHMMSS>/` in the cwd. |
 | `.analyze(data=None, analysis_types=None)` | returns `AnalysisResults`; also writes figures and `analysis_results.json` |
-| `.get_summary_statistics()` | dict of headline numbers per model |
+| `.get_summary_statistics()` | dict keyed by analysis **category** — `n_models`, `n_multi_input_models`, `multi_input_models`, `analyses_performed`, `model_performance`, `calibration_summary`, `confidence_summary`, `weight_summary`, `training_summary`, `spectral_summary`, `spectral_summary_per_model` — with per-model sub-dicts one level down. `summary[model_name]` does **not** exist; `summary['calibration_summary'][model_name]` does |
 | `.create_pareto_analysis(save_plot=True)` | needs ≥ `config.pareto_analysis_threshold` (2) models |
 | `.create_smoothed_model(model_name, method='detX', percent=0.8, save_path=None)` | SVD truncation; requires a prior spectral run |
 | `.save_results(filename='analysis_results.json')` | called automatically by `analyze()` |
@@ -102,6 +102,15 @@ Written into `output_dir`:
 | `spectral_plots/*.png` | `spectral_per_layer_diagnostics=True` |
 | `trap_plots/*.png` | correlation-trap detection (needs `spectral_randomize=True`) |
 | `pareto_analysis.png` | `create_pareto_analysis()` |
+
+Everything above is written only when `config.save_plots` is `True`. A figure that fails to render
+is **not** an exception: `_save_figure` catches it and logs
+`ERROR ... Could not save figure <name>: <reason>`, so the run completes with that one file
+missing. Check the log, not the exit status, before concluding a figure is unsupported. One such
+failure was real and is fixed: with exactly two models the weight-PCA similarity panel had a zero
+second-component spread, `set_aspect('equal', adjustable='box')` collapsed the axes box to zero
+height, and `savefig` raised `LinAlgError: Singular matrix` — losing the whole dashboard, not just
+that panel (see `D-033`).
 
 ## Metrics
 
@@ -176,16 +185,30 @@ Fit-dependent columns (verify before trusting — see below):
 | `learning_phase` | categorical from alpha (see the phase table) |
 | `dominance_ratio` | `λ_max / sum(rest)`; > 1.0 = rank-1 spike |
 | `xmin`, `D`, `sigma`, `num_pl_spikes` | fit threshold, KS distance, alpha standard error, tail size |
-| `pl_pvalue` | bootstrap goodness-of-fit; `-1.0` means the test did not run |
+| `pl_pvalue` | bootstrap goodness-of-fit (Clauset et al. 2009); `-1.0` means the test did not run — read the caveats below before treating a low value as a rejection |
+| `mp_softrank` | `λ_plus / λ_max`, where `λ_plus = σ²(1 + 1/√Q)²` is the **theoretical** Marchenko-Pastur edge computed by `calc_mp_edges` from the layer's own bulk variance. Values near 1 mean the whole spectrum sits inside its MP bulk (i.e. it looks random); small values mean the spectrum has grown well past the bulk. It is **not clamped**: a value above 1.0 means the entire spectrum lies inside its own theoretical edge. Measured on a two-model probe: `1.141264` and `0.708324` |
 
 Contextual / expensive columns: `participation_ratio`, `min_participation_ratio`,
-`concentration_score`, `erg_log_det`, `erg_delta_lambda_min`, `erg_satisfied`, `mp_softrank`,
+`concentration_score`, `erg_log_det`, `erg_delta_lambda_min`, `erg_satisfied`,
 `rank_loss`, `weak_rank_loss`, `lambda_max`, `sv_max`, `sv_min`, `norm`, `spectral_norm`,
 `log_norm`, `log_spectral_norm`, `log_alpha_norm`, `matrix_rank`, `num_evals`, `status`,
-`warning`, `has_esd`. Identity columns: `model_name`, `layer_id`, `name`, `layer_type`,
-`num_params`, `N`, `M`, `Q`, `rf`. With `spectral_randomize=True` you also get `has_trap`,
-`num_rand_spikes`, `trap_severity`; with `spectral_concentration_analysis=True`,
-`critical_weight_count`.
+`warning`, `has_esd`, `alpha_unreliable`, `spectrum_truncated`. Identity columns: `model_name`,
+`layer_id`, `name`, `layer_type`, `num_params`, `N`, `M`, `Q`, `rf`.
+
+- `alpha_unreliable` is `True` when the fitted `alpha` exceeds `SPECTRAL_ALPHA_SANITY_MAX = 8.0`
+  (WeightWatcher's unreliable-fit bound). The value is **flagged, never clamped** — a runaway alpha
+  stays visible instead of being rewritten into a plausible "under-trained" label.
+- `spectrum_truncated` is `True` when the SVD returned fewer singular values than `min(N, M)`. On
+  that path `sv_min`, `rank_loss`, `weak_rank_loss`, `entropy` and `matrix_rank` are `NaN`, not `0` —
+  a complete healthy spectrum also produces zeros, so zeros could not be told apart from truncation.
+- `gini_coefficient`, `dominance_ratio`, `participation_ratio`, `min_participation_ratio`,
+  `concentration_score` and `critical_weight_count` require `spectral_concentration_analysis=True`
+  (the default), and are absent from the frame when it is off.
+- `spectral_randomize=True` adds `has_trap`, `num_rand_spikes`, `trap_severity`,
+  `trap_severity_label`, `trap_threshold`, `mp_lambda_minus`, `mp_lambda_plus`, `rand_sv_max`,
+  `rand_sv_ratio` and `rand_distance`. Each is the mean over `spectral_n_randomizations`
+  independent permutations, so `num_rand_spikes` can be fractional; `has_trap` is a majority vote
+  over those draws, not an `any()`.
 
 Alpha phases:
 
@@ -205,6 +228,20 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 
 - **`training_history` takes the `.history` dict, not the Keras `History` object.** Its keys must
   match the `models` keys exactly, or training dynamics silently produces nothing.
+- **`pl_pvalue` semantics, and two known divergences from Clauset et al. 2009.**
+  `-1.0` (`SPECTRAL_PVALUE_NOT_COMPUTED`) means the test **did not run** and is not a rejection:
+  it is returned when the tail above `xmin` has fewer than 5 points, when the observed KS distance
+  is unavailable, and when no bootstrap draw produced a successful fit. Before the sentinel was
+  wired through, a tail shorter than the fitter's 10-point floor was reported as exactly `0.0` —
+  indistinguishable from "certainly not a power law" — on a measured 30% of layers. Two
+  asymmetries remain, both of which push the p-value **downward**, i.e. towards falsely rejecting
+  the power law:
+  1. the observed KS distance is the one from the reported fit (fixed `xmin`), while each synthetic
+     bootstrap sample is refitted with a **free** `xmin` search, which minimises `D_syn`;
+  2. bootstrap draws whose own fit fails are dropped from the numerator while the denominator stays
+     `n_bootstraps`.
+  One exit still returns a decisive `0.0` rather than the sentinel: `alpha <= 1.0` or `xmin <= 0`,
+  which is a genuinely unusable fit rather than an uncomputable test.
 - **Do not trust `alpha` when** `pl_pvalue < 0.1` (the ESD probably is not a power law),
   `sigma > alpha / 3` (the CI spans several phases), `num_pl_spikes < 50` (MLE variance too
   high), or the layer exceeded `spectral_max_evals` (truncated SVD biases alpha upward).

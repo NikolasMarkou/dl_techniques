@@ -799,9 +799,15 @@ class ModelAnalyzer:
         a structured summary format for easy programmatic access and reporting.
 
         Returns:
-            Dictionary containing summary statistics organized by analysis type,
-            including model performance, calibration metrics, confidence metrics,
-            weight statistics, and training dynamics summaries.
+            Dictionary keyed by analysis CATEGORY, never by model name. The keys are
+            ``n_models``, ``n_multi_input_models``, ``multi_input_models``,
+            ``analyses_performed``, ``model_performance``, ``calibration_summary``,
+            ``confidence_summary``, ``weight_summary``, ``training_summary``,
+            ``spectral_summary`` (the cross-model aggregate) and
+            ``spectral_summary_per_model``. Per-model numbers live one level down, so
+            the address of a model's ECE is
+            ``summary['calibration_summary'][model_name]['ece']`` and
+            ``summary[model_name]`` does not exist.
         """
         summary = {
             'n_models': len(self.models),

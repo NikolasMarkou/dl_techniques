@@ -12,6 +12,10 @@ Scope, one class per documented claim:
 * ``TestInformationFlowIsProduced`` -- README "Information flow" section (plan step 35).
 * ``TestAlphaWeightedIsTheCanonicalName`` -- the ``alpha_weighted`` / ``alpha_hat`` rows and
   the cross-architecture comparability caveat (plan step 36).
+* ``TestTheSummaryDashboardSurvivesADegenerateWeightPca``,
+  ``TestGetSummaryStatisticsIsKeyedByCategory``, ``TestMpSoftrankIsDocumentedAsARealMetric``,
+  ``TestPlPvalueSemanticsAreDocumented``, ``TestTheDocumentedSpectralColumnsMatchTheFrame``
+  -- the output table, the API table and the spectral column census (plan step 37).
 """
 
 import ast
@@ -337,4 +341,366 @@ class TestAlphaWeightedIsTheCanonicalName:
         )
         assert "SETOL-paper notation" in source, (
             "spectral_metrics.py no longer records alpha_hat as the SETOL alias"
+        )
+
+
+# ---------------------------------------------------------------------
+# D-A -- "summary_dashboard.png | always" was false for two models
+# ---------------------------------------------------------------------
+
+def _build_sequential(name: str) -> keras.Model:
+    """A tiny Sequential classifier, the shape the review's smoke run used."""
+    return keras.Sequential(
+        [
+            keras.Input(shape=(6,)),
+            keras.layers.Dense(8, activation="relu", name=f"{name}_d1"),
+            keras.layers.Dense(3, activation="softmax", name=f"{name}_out"),
+        ],
+        name=name,
+    )
+
+
+class TestTheSummaryDashboardSurvivesADegenerateWeightPca:
+    """`summary_dashboard.png` must be written for a two-model comparison.
+
+    Defect guarded (D-A): the README's output table said this file is produced
+    "always". A two-model run produced everything else and logged
+    ``ERROR base.py:_save_figure:205] Could not save figure summary_dashboard:
+    Singular matrix``. Root cause, measured: the weight-PCA of exactly two models spans
+    rank 1, so the model-similarity panel's PC2 values are `+/-5.09e-16`;
+    `set_aspect('equal', adjustable='box')` then collapsed that axes box to height
+    EXACTLY 0.0, `transAxes.inverted()` raised `LinAlgError: Singular matrix` inside
+    `_update_title_position`, and `savefig` lost the WHOLE figure -- not just the panel.
+    """
+
+    def test_the_two_model_dashboard_is_written(self, tmp_path):
+        keras.utils.set_random_seed(3)
+        models = {"A": _build_sequential("A"), "B": _build_sequential("B")}
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal((60, 6)).astype("float32")
+        y = rng.integers(0, 3, size=60)
+
+        output_dir = tmp_path / "dashboard"
+        analyzer = ModelAnalyzer(
+            models=models,
+            config=AnalysisConfig(
+                analyze_information_flow=False,
+                analyze_spectral=False,
+                analyze_training_dynamics=False,
+                n_samples=60,
+                save_plots=True,
+                verbose=False,
+            ),
+            output_dir=str(output_dir),
+        )
+        results = analyzer.analyze(DataInput(x_data=x, y_data=y))
+
+        # Anti-vacuity: the probe must actually hit the degenerate branch, otherwise a
+        # pass proves nothing about the defect. Two models => rank-1 PCA => zero PC2.
+        components = np.asarray(results.weight_pca["components"], dtype=float)
+        assert components.shape[0] == 2, "the probe did not produce a two-model PCA"
+        pc1_span = float(np.ptp(components[:, 0]))
+        pc2_span = float(np.ptp(components[:, 1]))
+        assert pc1_span > 0.0 and pc2_span / pc1_span < 1e-9, (
+            "anti-vacuity: the probe's PC2 spread is not degenerate "
+            f"(PC1 span {pc1_span}, PC2 span {pc2_span}), so the equal-aspect collapse "
+            "this guard exists for was never reached"
+        )
+
+        dashboard = output_dir / "summary_dashboard.png"
+        assert dashboard.exists(), (
+            "summary_dashboard.png was not written for a two-model run. Files present: "
+            f"{sorted(p.name for p in output_dir.iterdir())}"
+        )
+
+    def test_a_failed_figure_is_logged_and_not_raised(self):
+        """PIN, not RED evidence: documents WHY a missing figure is silent.
+
+        `_save_figure` swallows every exception into an ERROR log line, which is why
+        the dashboard could go missing for months without a single failing run. The
+        README now tells readers to check the log rather than the exit status; this
+        arm keeps that sentence true.
+        """
+        source = (PACKAGE_ROOT / "visualizers" / "base.py").read_text(encoding="utf-8")
+        assert "Could not save figure" in source, (
+            "base.py no longer logs 'Could not save figure'; the README tells readers "
+            "to grep the log for exactly that string"
+        )
+
+    def test_the_readme_states_the_save_failure_behaviour(self):
+        text = _read_readme()
+        assert "Could not save figure" in text, (
+            "the README's output section does not tell the reader that a figure "
+            "failure is logged rather than raised"
+        )
+
+
+# ---------------------------------------------------------------------
+# D-B -- get_summary_statistics is keyed by analysis category
+# ---------------------------------------------------------------------
+
+class TestGetSummaryStatisticsIsKeyedByCategory:
+    """`get_summary_statistics()` is not "headline numbers per model".
+
+    Defect guarded (D-B): the README's API table called it a "dict of headline numbers
+    per model". It is keyed by analysis CATEGORY, with per-model sub-dicts one level
+    down; `summary['A']` measured `{}` (i.e. `KeyError`-adjacent absence), while
+    `summary['calibration_summary']['A']` is the real address.
+    """
+
+    def test_the_summary_is_not_keyed_by_model_name(self, tmp_path, probe_data):
+        model = _build_probe_model("cat_model")
+        analyzer = ModelAnalyzer(
+            models={"cat_model": model},
+            config=AnalysisConfig(
+                analyze_weights=False,
+                analyze_information_flow=False,
+                analyze_training_dynamics=False,
+                analyze_spectral=False,
+                n_samples=N_SAMPLES,
+                save_plots=False,
+                verbose=False,
+            ),
+            output_dir=str(tmp_path / "summary"),
+        )
+        analyzer.analyze(probe_data, analysis_types={"calibration"})
+        summary = analyzer.get_summary_statistics()
+
+        assert "cat_model" not in summary, (
+            "get_summary_statistics is keyed by model name after all; the README's "
+            "category description would then be the wrong correction"
+        )
+        assert summary["calibration_summary"]["cat_model"], (
+            "the per-model numbers are not one level down under their category either"
+        )
+
+    def test_the_readme_lists_exactly_the_categories_returned(self, tmp_path, probe_data):
+        """Both directions: no undocumented key, no documented key that is absent."""
+        model = _build_probe_model("cat_model2")
+        analyzer = ModelAnalyzer(
+            models={"cat_model2": model},
+            config=AnalysisConfig(
+                analyze_weights=False,
+                analyze_information_flow=False,
+                analyze_training_dynamics=False,
+                analyze_spectral=False,
+                n_samples=N_SAMPLES,
+                save_plots=False,
+                verbose=False,
+            ),
+            output_dir=str(tmp_path / "summary2"),
+        )
+        analyzer.analyze(probe_data, analysis_types={"calibration"})
+        returned = set(analyzer.get_summary_statistics())
+
+        row = next(
+            line
+            for line in _read_readme().splitlines()
+            if line.startswith("| `.get_summary_statistics()`")
+        )
+        documented = set(re.findall(r"`([a-z_]+)`", row))
+
+        assert len(documented) > 5, (
+            f"the README row parsed to {len(documented)} category names; the parser, "
+            "not the docs, is what failed"
+        )
+        assert returned - documented == set(), (
+            f"get_summary_statistics returns undocumented keys: {sorted(returned - documented)}"
+        )
+        assert documented - returned == set(), (
+            f"the README documents keys the summary does not return: "
+            f"{sorted(documented - returned)}"
+        )
+
+
+# ---------------------------------------------------------------------
+# D4 -- mp_softrank and pl_pvalue caveats
+# ---------------------------------------------------------------------
+
+class TestMpSoftrankIsDocumentedAsARealMetric:
+    """`mp_softrank` is a theoretical-MP-edge ratio, not the constant 1.0.
+
+    Defect guarded (D4a): the README listed `mp_softrank` in a bare run-on list with no
+    definition and no caveat, at a time when the column measured `[1.0] * 6` at shipped
+    defaults. Plan step 14 rewired it to `calc_lambda_plus / lambda_max`; the probe
+    values moved `1.0 -> 1.141264` and `1.0 -> 0.708324`.
+    """
+
+    def test_the_column_is_documented_with_its_definition(self):
+        row = next(
+            line
+            for line in _read_readme().splitlines()
+            if line.startswith("| `mp_softrank` |")
+        )
+        for required in ("Marchenko-Pastur", "not clamped"):
+            assert required in row, (
+                f"the mp_softrank row does not mention {required!r}: {row}"
+            )
+
+    def test_the_column_is_not_the_constant_one(self, tmp_path):
+        frame = _spectral_frame(tmp_path)
+        values = frame["mp_softrank"].to_numpy(dtype=float)
+        assert not np.allclose(values, 1.0), (
+            f"mp_softrank is back to a constant masquerading as a metric: {values.tolist()}"
+        )
+
+
+class TestPlPvalueSemanticsAreDocumented:
+    """The README's `pl_pvalue` caveats must describe the shipped function.
+
+    Defect guarded (D4b): the README documented only "`-1.0` means the test did not
+    run" and carried no bias caveat, while `powerlaw_goodness_of_fit` diverges from
+    Clauset et al. 2009 in two measurable ways, both of which push the p-value down.
+    """
+
+    def test_the_sentinel_is_the_value_the_readme_names(self):
+        from dl_techniques.analyzer.constants import SPECTRAL_PVALUE_NOT_COMPUTED
+
+        assert SPECTRAL_PVALUE_NOT_COMPUTED == -1.0, (
+            "the not-computed sentinel is no longer -1.0, which is the value the "
+            f"README documents: {SPECTRAL_PVALUE_NOT_COMPUTED}"
+        )
+        assert "`-1.0` (`SPECTRAL_PVALUE_NOT_COMPUTED`) means the test **did not run**" in _read_readme(), (
+            "the README no longer explains the -1.0 sentinel"
+        )
+
+    def test_a_short_tail_returns_the_sentinel_not_zero(self):
+        """Executed: the case the README calls out, run rather than asserted in prose."""
+        from dl_techniques.analyzer.constants import SPECTRAL_PVALUE_NOT_COMPUTED
+        from dl_techniques.analyzer.spectral_metrics import powerlaw_goodness_of_fit
+
+        evals = np.concatenate([np.linspace(0.01, 1.0, 40), np.linspace(2.0, 6.0, 6)])
+        tail = evals[evals >= 2.0]
+        assert 5 <= len(tail) < 10, (
+            f"anti-vacuity: the probe tail holds {len(tail)} points, so it does not "
+            "exercise the short-tail exit"
+        )
+        pvalue = powerlaw_goodness_of_fit(
+            evals, alpha=2.5, xmin=2.0, n_bootstraps=5,
+            rng=np.random.default_rng(0),
+        )
+        assert pvalue == SPECTRAL_PVALUE_NOT_COMPUTED, (
+            f"a tail too short to fit was reported as p={pvalue}, not the sentinel"
+        )
+
+    def test_the_decisive_zero_exit_the_readme_names_is_real(self):
+        """The one exit that still returns a decisive 0.0, documented as such."""
+        from dl_techniques.analyzer.spectral_metrics import powerlaw_goodness_of_fit
+
+        evals = np.linspace(1.0, 10.0, 100)
+        assert powerlaw_goodness_of_fit(evals, alpha=1.0, xmin=1.0, n_bootstraps=5) == 0.0, (
+            "alpha <= 1.0 no longer returns 0.0; the README's caveat about the one "
+            "remaining decisive-zero exit is now wrong"
+        )
+        assert "`alpha <= 1.0` or `xmin <= 0`" in _read_readme(), (
+            "the README no longer names the remaining decisive-zero exit"
+        )
+
+    def test_the_two_documented_asymmetries_are_still_in_the_code(self):
+        """The README calls these divergences; if they are ever fixed, this reddens."""
+        import inspect
+
+        from dl_techniques.analyzer import spectral_metrics
+
+        source = inspect.getsource(spectral_metrics.powerlaw_goodness_of_fit)
+        assert "fit_powerlaw(synthetic)" in source, (
+            "the synthetic bootstrap fits no longer use a free xmin search; the "
+            "README's first documented asymmetry is stale"
+        )
+        assert "return count_ge / n_bootstraps" in source, (
+            "the p-value denominator is no longer n_bootstraps; the README's second "
+            "documented asymmetry is stale"
+        )
+        assert "n_valid" in source, (
+            "the function no longer counts valid draws, so the numerator/denominator "
+            "asymmetry the README documents cannot be what it describes"
+        )
+
+    def test_the_readme_states_the_direction_of_the_bias(self):
+        text = _read_readme()
+        assert "push the p-value **downward**" in text, (
+            "the README documents the two asymmetries without saying which way they "
+            "bias the result, which is the part a reader needs"
+        )
+
+
+# ---------------------------------------------------------------------
+# The spectral column census -- README vs the frame, both directions
+# ---------------------------------------------------------------------
+
+class TestTheDocumentedSpectralColumnsMatchTheFrame:
+    """Every produced column is documented, and every documented column is produced.
+
+    This is the mechanical half of plan step 37(e): the config table already has a
+    two-directional guard (`test_model_analyzer.py -k readme`), and the spectral column
+    census needs the same, because steps 13, 19, 21 and 18 all added columns
+    (`alpha_unreliable`, `spectrum_truncated`, `trap_severity_label`, ...) that the
+    README's run-on list never learned about.
+    """
+
+    @staticmethod
+    def _produced_columns(tmp_path, **config_overrides) -> set:
+        keras.utils.set_random_seed(3)
+        inputs = keras.Input(shape=(20,), name="census_in")
+        hidden = keras.layers.Dense(32, activation="relu", name="census_d1")(inputs)
+        outputs = keras.layers.Dense(16, activation="softmax", name="census_out")(hidden)
+        model = keras.Model(inputs=inputs, outputs=outputs, name="census")
+        defaults = dict(
+            analyze_weights=False,
+            analyze_calibration=False,
+            analyze_information_flow=False,
+            analyze_training_dynamics=False,
+            analyze_spectral=True,
+            save_plots=False,
+            verbose=False,
+        )
+        defaults.update(config_overrides)
+        analyzer = ModelAnalyzer(
+            models={"census": model},
+            config=AnalysisConfig(**defaults),
+            output_dir=str(tmp_path),
+        )
+        frame = analyzer.analyze(analysis_types={"spectral"}).spectral_analysis
+        assert frame is not None and not frame.empty, "the census probe admitted no layer"
+        return set(frame.columns)
+
+    def test_every_produced_column_is_named_in_the_readme(self, tmp_path):
+        produced = self._produced_columns(tmp_path / "default")
+        produced |= self._produced_columns(
+            tmp_path / "randomized",
+            spectral_randomize=True,
+            spectral_n_randomizations=2,
+        )
+        assert len(produced) > 40, (
+            f"anti-vacuity: the census produced only {len(produced)} columns"
+        )
+        text = _read_readme()
+        undocumented = sorted(name for name in produced if f"`{name}`" not in text)
+        assert not undocumented, (
+            f"the spectral frame carries columns the README never names: {undocumented}"
+        )
+
+    def test_every_column_the_readme_tabulates_exists(self, tmp_path):
+        produced = self._produced_columns(tmp_path / "default2")
+        produced |= self._produced_columns(
+            tmp_path / "randomized2",
+            spectral_randomize=True,
+            spectral_n_randomizations=2,
+        )
+        section = _readme_section(
+            "Spectral (`results.spectral_analysis`, a `pandas.DataFrame`, one row per layer)"
+        )
+        tabulated = {
+            match.group(1)
+            for line in section.splitlines()
+            for match in [re.match(r"^\| `([a-z_0-9]+)` \|", line)]
+            if match
+        }
+        assert len(tabulated) > 8, (
+            f"anti-vacuity: only {len(tabulated)} table rows parsed out of the spectral "
+            "section; the parser, not the docs, is what failed"
+        )
+        missing = sorted(tabulated - produced)
+        assert not missing, (
+            f"the README tabulates spectral columns the frame does not carry: {missing}"
         )

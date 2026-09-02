@@ -82,6 +82,11 @@ ANNOTATION_Y_TOP = 0.98
 VIOLIN_ALPHA = 0.6
 VIOLIN_EDGE_ALPHA = 0.8
 
+# Largest ratio between the two principal-component spans for which an equal-aspect
+# box is still meaningful. Above it the axes box would be squashed towards zero
+# height, which is both unreadable and (at the limit) fatal to `savefig`. See D-033.
+EQUAL_ASPECT_MAX_SPAN_RATIO = 1e3
+
 
 # ---------------------------------------------------------------------
 
@@ -542,7 +547,31 @@ class SummaryVisualizer(BaseVisualizer):
         ax.set_title('Model Similarity (Concatenated Weight Statistics)')
         # REMOVED: Individual legend - using figure-level legend
         ax.grid(True, alpha=ALPHA_LOW)
-        ax.set_aspect('equal', adjustable='box')
+
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-033
+        # Equal aspect is requested ONLY when both principal components actually span
+        # a range. Do NOT restore the unconditional
+        # `ax.set_aspect('equal', adjustable='box')`: with `adjustable='box'` a zero
+        # PC2 span collapses the AXES BOX to zero height, `transAxes` becomes singular,
+        # and matplotlib raises `LinAlgError: Singular matrix` from
+        # `_update_title_position` during `savefig` — losing the WHOLE dashboard, not
+        # just this panel. A PCA over exactly two models always has zero PC2 spread
+        # (two points span rank 1), so the two-model case — the commonest comparison
+        # this package exists for — lost `summary_dashboard.png` on every run.
+        # See decisions.md D-033.
+        xs = [0.0] + [float(components[idx][0]) for idx in sorted_indices]
+        ys = [0.0] + [float(components[idx][1]) for idx in sorted_indices]
+        pc1_span = max(xs) - min(xs)
+        pc2_span = max(ys) - min(ys)
+        spans = sorted((pc1_span, pc2_span))
+        if spans[0] > 0.0 and spans[1] / spans[0] <= EQUAL_ASPECT_MAX_SPAN_RATIO:
+            ax.set_aspect('equal', adjustable='box')
+        else:
+            logger.debug(
+                "Model similarity plot: the principal components are not commensurate "
+                f"(PC1 span {pc1_span:g}, PC2 span {pc2_span:g}); leaving the default "
+                "aspect so the axes box keeps a usable height."
+            )
 
     def _plot_confidence_profile_summary(self, ax: Axes) -> None:
         """
