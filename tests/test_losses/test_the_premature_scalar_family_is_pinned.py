@@ -192,7 +192,21 @@ KNOWN_GOOD = [
     ("siglip_contrastive_loss", "SigLIPContrastiveLoss", {}, _siglip_pair),
     ("siglip_contrastive_loss", "AdaptiveSigLIPLoss", {}, _siglip_pair),
     ("siglip_contrastive_loss", "HybridContrastiveLoss", {}, _siglip_pair),
-    # correct all along -- the siblings whose shape discipline was copied
+    # correct all along -- the siblings whose shape discipline was copied.
+    # GoodhartAwareLoss stays here, but READ THIS BEFORE TREATING THE ROW AS
+    # COVERAGE: the shared predicate below is `weighted == unweighted * mean(w)`,
+    # which is a statement about the SHAPE of what `call()` returns. It is
+    # structurally BLIND to a batch-level term riding on a correctly-shaped
+    # `(batch,)` cross-entropy vector -- the row passed on 2026-09-02 while the
+    # class was adding two rank-0 regularizers into every row, and it kept
+    # passing after they were fixed (measured residual 2.94e-03 before, 3.97e-08
+    # after; the predicate's own margin was 6.16e-02 in BOTH cases). The
+    # goodhart-specific arm that CAN see the batch coupling lives in
+    # tests/test_losses/test_goodhart_loss.py -- it asserts the identity
+    # loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:3]) at prior_weight=0.0 and
+    # pins the deliberate batch-level residual at prior_weight>0. Do NOT add a
+    # family-wide batch-coupling arm here: batch coupling is a deliberate
+    # per-loss property (DINOLoss, KoLeoLoss), not a family invariant.
     ("goodhart_loss", "GoodhartAwareLoss", {}, _logit_pair),
     ("focal_uncertainty_loss", "FocalUncertaintyLoss", {}, _logit_pair),
     # fixed by plan-2026-08-31T045723-c0d5ffa9 step 2 (Tranche A batch 1). Each was
