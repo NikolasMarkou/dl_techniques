@@ -170,9 +170,9 @@ Fit-dependent columns (verify before trusting — see below):
 | Column | Meaning |
 |---|---|
 | `alpha` | power-law exponent of the ESD tail; the primary training-quality indicator |
-| `alpha_hat` | `alpha * log10(λ_max)`; lower is better, for **within-model** layer ranking only |
-| `alpha_hat_normalized` | `alpha * log10(λ_max / N)`; comparable across differing layer widths |
-| `alpha_weighted` | deprecated alias of `alpha_hat` |
+| `alpha_weighted` | `alpha * log10(λ_max)` on un-normalized eigenvalues — the **canonical** WeightWatcher name for this quantity (`METRICS.ALPHA_WEIGHTED`, "also called AlphaHat"); lower is better |
+| `alpha_hat` | the SETOL papers' notation `α̂` for the same quantity. It is an **alias of `alpha_weighted`, not the other way round**, and it is not a WeightWatcher column name; the two columns are bit-identical (`(df['alpha_weighted'] == df['alpha_hat']).all()` is `True`, guarded by `test_analyzer_docs.py -k alpha_weighted`) |
+| `alpha_hat_normalized` | `alpha * log10(λ_max / N)`; a SETOL extra, not part of the WW metric set; comparable across differing layer widths |
 | `learning_phase` | categorical from alpha (see the phase table) |
 | `dominance_ratio` | `λ_max / sum(rest)`; > 1.0 = rank-1 spike |
 | `xmin`, `D`, `sigma`, `num_pl_spikes` | fit threshold, KS distance, alpha standard error, tail size |
@@ -208,8 +208,13 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 - **Do not trust `alpha` when** `pl_pvalue < 0.1` (the ESD probably is not a power law),
   `sigma > alpha / 3` (the CI spans several phases), `num_pl_spikes < 50` (MLE variance too
   high), or the layer exceeded `spectral_max_evals` (truncated SVD biases alpha upward).
-- `alpha_hat`, `lambda_max` and every norm-based column are **not comparable across
-  architectures**. Only `alpha` is roughly scale-invariant.
+- `lambda_max` and every norm-based column (`norm`, `spectral_norm`, `log_norm`,
+  `log_spectral_norm`, `log_alpha_norm`) are **not comparable across architectures**; `alpha` is
+  roughly scale-invariant. `alpha_weighted` / `alpha_hat` are the exception WeightWatcher makes:
+  it reports α̂ as "suitable for DNNs of differing hyperparameters and depths simultaneously" —
+  but that claim is for the **layer-averaged** α̂, `(1/L) Σ_l α_l log10 λ_l^max`, while this
+  DataFrame carries the **per-layer** term. Average the column over a model's layers before
+  comparing two architectures; a single row is a within-model ranking quantity.
 - Conv2D kernels are matricized `(kh, kw, in_c, out_c) -> (kh*kw*in_c, out_c)`, which destroys
   spatial structure. Spectral metrics describe the linear map, not the convolution.
 - `concentration_score` has no absolute scale — use it only to rank layers within one model.

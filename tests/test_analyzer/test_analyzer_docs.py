@@ -10,6 +10,8 @@ twice. A grep proves a line exists; only execution proves it is true.
 Scope, one class per documented claim:
 
 * ``TestInformationFlowIsProduced`` -- README "Information flow" section (plan step 35).
+* ``TestAlphaWeightedIsTheCanonicalName`` -- the ``alpha_weighted`` / ``alpha_hat`` rows and
+  the cross-architecture comparability caveat (plan step 36).
 """
 
 import ast
@@ -218,4 +220,121 @@ class TestInformationFlowIsProduced:
         assert hits, (
             "no source file mentions register_forward_hook even as prose; the AST guard "
             "above can no longer distinguish 'clean code' from 'nothing to scan'"
+        )
+
+
+# ---------------------------------------------------------------------
+# D2 -- the alpha_weighted / alpha_hat alias direction
+# ---------------------------------------------------------------------
+
+def _spectral_frame(tmp_path):
+    """Run one real spectral analysis and return its details DataFrame.
+
+    Args:
+        tmp_path: pytest temporary directory for the analyzer's output.
+
+    Returns:
+        pandas.DataFrame: ``results.spectral_analysis``, one row per admitted layer.
+    """
+    keras.utils.set_random_seed(3)
+    inputs = keras.Input(shape=(20,), name="alpha_in")
+    hidden = keras.layers.Dense(32, activation="relu", name="alpha_d1")(inputs)
+    outputs = keras.layers.Dense(16, activation="softmax", name="alpha_out")(hidden)
+    model = keras.Model(inputs=inputs, outputs=outputs, name="alpha_model")
+
+    analyzer = ModelAnalyzer(
+        models={"alpha_model": model},
+        config=AnalysisConfig(
+            analyze_weights=False,
+            analyze_calibration=False,
+            analyze_information_flow=False,
+            analyze_training_dynamics=False,
+            analyze_spectral=True,
+            save_plots=False,
+            verbose=False,
+        ),
+        output_dir=str(tmp_path / "spectral"),
+    )
+    results = analyzer.analyze(analysis_types={"spectral"})
+    frame = results.spectral_analysis
+    assert frame is not None and not frame.empty, "the spectral probe admitted no layer"
+    return frame
+
+
+class TestAlphaWeightedIsTheCanonicalName:
+    """`alpha_weighted` is the WeightWatcher name; `alpha_hat` is the SETOL alias.
+
+    Defect guarded (D2): the README said "``alpha_weighted`` | deprecated alias of
+    ``alpha_hat``", inverting the direction stated by ``spectral_metrics.py:974-994``
+    and by WeightWatcher's own documentation ("alpha_weighted metric, also called
+    AlphaHat"). A second, larger defect sat in the same rows: the README called
+    ``alpha_hat`` a "within-model layer ranking only" quantity and listed it among the
+    columns "not comparable across architectures", which contradicts both.
+    """
+
+    def test_the_two_columns_are_bit_identical(self, tmp_path):
+        """Measured, not asserted from the source: the alias carries the same value."""
+        frame = _spectral_frame(tmp_path)
+        assert len(frame) >= 2, (
+            f"anti-vacuity: only {len(frame)} layer(s) admitted, so an equality over the "
+            "column could hold trivially"
+        )
+        # The values must be non-degenerate, otherwise two all-zero columns would agree.
+        assert frame["alpha_weighted"].nunique() > 1, (
+            f"anti-vacuity: alpha_weighted is constant at {frame['alpha_weighted'].tolist()}"
+        )
+        assert (frame["alpha_weighted"] == frame["alpha_hat"]).all(), (
+            "alpha_hat is documented as an alias of alpha_weighted but the columns "
+            f"differ: {frame[['alpha_weighted', 'alpha_hat']].to_dict('list')}"
+        )
+
+    def test_alpha_hat_normalized_is_a_different_quantity(self, tmp_path):
+        """Anti-vacuity for the arm above: not every alpha column is the same column."""
+        frame = _spectral_frame(tmp_path)
+        assert not (frame["alpha_weighted"] == frame["alpha_hat_normalized"]).all(), (
+            "alpha_hat_normalized equals alpha_weighted, so the identity test above "
+            "would pass for any pair of columns in this frame"
+        )
+
+    def test_the_readme_does_not_invert_the_alias_direction(self):
+        """The README must not call the canonical WeightWatcher name a deprecated alias."""
+        text = _read_readme()
+        assert "deprecated alias of `alpha_hat`" not in text, (
+            "README still calls alpha_weighted a deprecated alias of alpha_hat; "
+            "WeightWatcher's own name for this quantity IS alpha_weighted"
+        )
+        row = next(
+            line for line in text.splitlines() if line.startswith("| `alpha_weighted` |")
+        )
+        assert "canonical" in row, (
+            f"the alpha_weighted row does not identify it as the canonical WW name: {row}"
+        )
+        alias_row = next(
+            line for line in text.splitlines() if line.startswith("| `alpha_hat` |")
+        )
+        assert "alias of `alpha_weighted`" in alias_row, (
+            f"the alpha_hat row does not state which way the alias runs: {alias_row}"
+        )
+
+    def test_the_readme_does_not_claim_alpha_hat_is_within_model_only(self):
+        """The comparability caveat must be the real one, not a blanket prohibition."""
+        text = _read_readme()
+        assert "for **within-model** layer ranking only" not in text, (
+            "README still restricts alpha_hat to within-model ranking, contradicting "
+            "both spectral_metrics.py and the WeightWatcher literature"
+        )
+        assert "layer-averaged" in text, (
+            "README does not state the real caveat: WeightWatcher's cross-model claim "
+            "is for the layer-AVERAGED alpha-hat, while this column is per-layer"
+        )
+
+    def test_the_source_comment_and_the_readme_agree(self):
+        """The README's direction must match the citation-grade comment it summarises."""
+        source = (PACKAGE_ROOT / "spectral_metrics.py").read_text(encoding="utf-8")
+        assert "CANONICAL WeightWatcher AlphaHat" in source, (
+            "spectral_metrics.py no longer states which name is canonical; the README "
+            "row this guard mirrors has lost its source"
+        )
+        assert "SETOL-paper notation" in source, (
+            "spectral_metrics.py no longer records alpha_hat as the SETOL alias"
         )
