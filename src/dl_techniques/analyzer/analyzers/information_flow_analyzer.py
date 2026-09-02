@@ -69,6 +69,35 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+def _num_samples(x: Any) -> int:
+    """Return the batch length of an array or of a dict of arrays.
+
+    Args:
+        x: A numpy array, or a dict whose values share a leading batch axis.
+
+    Returns:
+        The number of samples along the leading axis.
+    """
+    if isinstance(x, dict):
+        return len(x[next(iter(x))])
+    return len(x)
+
+
+def _take_samples(x: Any, n: int) -> Any:
+    """Return the first ``n`` samples of an array or of a dict of arrays.
+
+    Args:
+        x: A numpy array, or a dict whose values share a leading batch axis.
+        n: Number of leading samples to keep.
+
+    Returns:
+        The same container type, sliced along the leading axis.
+    """
+    if isinstance(x, dict):
+        return {k: v[:n] for k, v in x.items()}
+    return x[:n]
+
+
 class InformationFlowAnalyzer(BaseAnalyzer):
     """Analyzes information flow through network layers."""
 
@@ -142,10 +171,22 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                     layer.call = self._make_recording_call(
                         layer, captured_outputs, capture_order, call_counter)
 
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-022
+                # Size the batch to `config.memory_limit_mb` BEFORE the real pass, by
+                # measuring one sample's retained bytes with a throwaway B=1 pass.
+                # Do NOT instead subsample individual tensors as they arrive: layers
+                # would then carry different batch sizes, `_safely_flatten_activations`
+                # would reject the short ones against `self._batch_size`, and conv
+                # `effective_rank` would silently return to 0.0 (defect C2).
+                # See decisions.md D-022.
+                batch = self._fit_batch_to_budget(
+                    model, x_sample, captured_outputs, capture_order)
+                self._batch_size = batch
+
                 # The pass MUST be eager. Under `model.predict(...)` Keras traces the
                 # forward function and the wrapper is handed a SymbolicTensor, so
                 # nothing concrete is captured.
-                model(x_sample, training=False)
+                model(_take_samples(x_sample, batch), training=False)
 
                 # DECISION plan-2026-09-01T225724-e79ad4bd/D-021
                 # Depth order is the order the layers were INVOKED in, recorded by
@@ -204,6 +245,54 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                         # reachable again; the model must be bit-identical afterwards.
                         layer.__dict__.pop('call', None)
                 logger.debug(f"Restored `call` on {len(wrapped)} layers of model '{model_name}'.")
+
+    def _fit_batch_to_budget(
+            self,
+            model: keras.Model,
+            x_sample: Any,
+            captured_outputs: Dict[str, np.ndarray],
+            capture_order: Dict[str, int],
+    ) -> int:
+        """Return the largest batch size whose capture fits `memory_limit_mb`.
+
+        Runs one throwaway eager pass at B=1 through the already-wrapped layers to
+        measure the bytes retained per sample, then divides the budget by it. The
+        probe's captures are discarded before returning, so the caller's dicts are
+        empty on exit.
+
+        Args:
+            model: The model whose layers are currently wrapped.
+            x_sample: The full sample batch (array or dict of arrays).
+            captured_outputs: The capture dict, cleared before returning.
+            capture_order: The invocation-order dict, cleared before returning.
+
+        Returns:
+            A batch size in ``[1, len(x_sample)]``. The full length is returned when
+            ``config.memory_limit_mb`` is None or the probe captured nothing.
+        """
+        available = _num_samples(x_sample)
+        budget_mb = self.config.memory_limit_mb
+        if budget_mb is None:
+            return available
+
+        model(_take_samples(x_sample, 1), training=False)
+        bytes_per_sample = sum(a.nbytes for a in captured_outputs.values())
+        captured_outputs.clear()
+        capture_order.clear()
+
+        if bytes_per_sample <= 0:
+            return available
+
+        affordable = int((int(budget_mb) * 1024 * 1024) // bytes_per_sample)
+        batch = max(1, min(available, affordable))
+        if batch < available:
+            logger.warning(
+                f"Information-flow capture for '{model.name}' reduced from "
+                f"{available} to {batch} samples to stay within "
+                f"config.memory_limit_mb={budget_mb} "
+                f"({bytes_per_sample / 1024 ** 2:.2f} MB retained per sample)."
+            )
+        return batch
 
     @staticmethod
     def _make_recording_call(

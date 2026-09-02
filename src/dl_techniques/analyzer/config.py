@@ -87,7 +87,13 @@ class AnalysisConfig:
 
     # Performance settings
     enable_parallel_analysis: bool = False  # For future parallel processing
-    memory_limit_mb: Optional[int] = None  # For memory-constrained environments
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-022
+    # Budget for the activations `InformationFlowAnalyzer` holds in memory at once.
+    # This defaults to a real number, NOT None: the analyzer retains every wrapped
+    # layer's output simultaneously, which is an analytic 16.94 GB for ResNet50 at
+    # B=200. `None` means explicitly unbounded and is honoured as such.
+    # See decisions.md D-022.
+    memory_limit_mb: Optional[int] = 2048
 
     def get_figure_size(self, scale: float = 1.0) -> Tuple[float, float]:
         """Get figure size with optional scaling."""

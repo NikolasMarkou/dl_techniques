@@ -411,3 +411,80 @@ class TestDepthAxisIsInvocationOrder:
             f"visualizer depth axis is {ordered}, the forward pass is "
             f"{_INVOCATION_ORDER}"
         )
+
+
+# =====================================================================
+# P5 - activation capture must respect a memory budget
+# =====================================================================
+
+_BUDGET_H = _BUDGET_W = 16
+_BUDGET_C_IN = 3
+_BUDGET_FILTERS = 64
+# float32 elements retained per sample by the single Conv2D below.
+_BYTES_PER_SAMPLE = _BUDGET_H * _BUDGET_W * _BUDGET_FILTERS * 4
+
+
+def build_budget_model() -> keras.Model:
+    inputs = keras.Input(
+        shape=(_BUDGET_H, _BUDGET_W, _BUDGET_C_IN), name="bud_in")
+    x = keras.layers.Conv2D(
+        _BUDGET_FILTERS, 3, padding="same", activation="relu", name="bud_conv")(inputs)
+    x = keras.layers.GlobalAveragePooling2D(name="bud_gap")(x)
+    return keras.Model(inputs, keras.layers.Dense(2, name="bud_out")(x),
+                       name="budget_probe")
+
+
+def _run_budget_analysis(memory_limit_mb, n_samples=200):
+    rng = np.random.default_rng(99)
+    x = rng.standard_normal(
+        (n_samples, _BUDGET_H, _BUDGET_W, _BUDGET_C_IN)).astype("float32")
+    y = np.zeros((n_samples, 2), dtype="float32")
+    model = build_budget_model()
+    config = AnalysisConfig(n_samples=n_samples, memory_limit_mb=memory_limit_mb)
+    analyzer = InformationFlowAnalyzer({model.name: model}, config)
+    results = AnalysisResults()
+    analyzer.analyze(results, DataInput(x_data=x, y_data=y))
+    return analyzer, results.information_flow[model.name]
+
+
+def _captured_bytes(flow) -> int:
+    """Bytes retained in `captured_outputs`, derived from the reported shapes."""
+    return sum(int(np.prod(a["output_shape"])) * 4 for a in flow.values())
+
+
+class TestActivationCaptureRespectsTheMemoryBudget:
+    """`captured_outputs` holds every wrapped layer's activations at once.
+
+    MEASURED analytically in `findings/performance-architecture.md`: ResNet50 at
+    B=200 accumulates 16.94 GB. `config.memory_limit_mb` existed and was dead.
+    """
+
+    def test_the_default_config_declares_a_budget(self):
+        assert AnalysisConfig().memory_limit_mb is not None, (
+            "memory_limit_mb defaults to None, so the default analysis path is "
+            "unbounded"
+        )
+
+    def test_the_batch_is_capped_by_the_budget(self):
+        budget_mb = 1
+        analyzer, flow = _run_budget_analysis(memory_limit_mb=budget_mb)
+
+        # Anti-vacuity: the UNCAPPED capture would genuinely have blown this budget.
+        assert 200 * _BYTES_PER_SAMPLE > budget_mb * 1024 * 1024
+
+        assert _captured_bytes(flow) <= budget_mb * 1024 * 1024, (
+            f"captured {_captured_bytes(flow)} bytes against a "
+            f"{budget_mb} MB budget"
+        )
+        assert flow["bud_conv"]["output_shape"][0] < 200
+        assert analyzer._batch_size == flow["bud_conv"]["output_shape"][0]
+
+    def test_a_capped_capture_is_still_analysable(self):
+        """The budget must not regress C2: effective_rank stays computable."""
+        _, flow = _run_budget_analysis(memory_limit_mb=1)
+        assert flow["bud_conv"]["effective_rank"] > 0
+
+    def test_an_explicit_none_budget_is_unbounded(self):
+        """Anti-vacuity: the cap is conditional, not a blanket batch reduction."""
+        _, flow = _run_budget_analysis(memory_limit_mb=None, n_samples=64)
+        assert flow["bud_conv"]["output_shape"][0] == 64
