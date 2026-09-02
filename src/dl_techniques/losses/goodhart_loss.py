@@ -116,6 +116,15 @@ class GoodhartAwareLoss(keras.losses.Loss):
         self,
         label_smoothing: float = 0.0,
         entropy_weight: float = 0.1,
+        # DECISION plan-2026-09-02T081011-9b26b501/D-009
+        # Everything from `prior_weight` on is KEYWORD-ONLY on purpose. The
+        # removed `mi_weight` used to sit third; without this `*` the legacy
+        # positional call GoodhartAwareLoss(0.0, 0.1, 0.01) silently lands on
+        # `prior_weight` and the loud removal message never fires -- exactly
+        # the call shape a legacy caller writes. Do NOT delete the `*` to
+        # "restore positional convenience": it converts a designed ValueError
+        # back into a silent objective change.
+        *,
         prior_weight: float = 0.0,
         class_prior: Optional[Sequence[float]] = None,
         from_logits: bool = True,
@@ -146,8 +155,13 @@ class GoodhartAwareLoss(keras.losses.Loss):
         :param class_prior: Target marginal distribution over the classes for
             the anti-collapse term. Entries must be finite and strictly
             positive; the sequence is normalized to sum to one if it does not
-            already. Its length must equal the number of classes. Defaults to
-            ``None``, meaning the uniform prior ``1 / num_classes``.
+            already. Its length must equal the number of classes, but that is
+            checked LAZILY -- inside the anti-collapse term, on the first call,
+            and therefore only when ``prior_weight > 0``. At the default
+            ``prior_weight = 0.0`` the term never runs, so a wrong-length
+            prior is carried in the config and round-tripped without ever
+            raising. Defaults to ``None``, meaning the uniform prior
+            ``1 / num_classes``.
         :type class_prior: Optional[Sequence[float]]
         :param from_logits: Whether `y_pred` is a tensor of logits or
             probabilities. Set to ``True`` (default) if your model does not have
@@ -172,7 +186,11 @@ class GoodhartAwareLoss(keras.losses.Loss):
             computation. ``None`` (default) follows the global Keras policy.
         :type dtype: Optional[str]
         :param mi_weight: **Removed.** Passing anything other than ``None``
-            raises. See the ``:raises:`` entry below.
+            raises. It used to be the THIRD positional parameter; every
+            parameter from ``prior_weight`` on is now keyword-only, so the
+            legacy positional call ``GoodhartAwareLoss(0.0, 0.1, 0.01)``
+            raises ``TypeError`` instead of quietly setting ``prior_weight``.
+            See the ``:raises:`` entry below.
         :type mi_weight: Optional[float]
         :raises ValueError: If any parameter is outside its valid range, or if
             ``mi_weight`` is passed at all -- the term it weighted was added
@@ -243,7 +261,16 @@ class GoodhartAwareLoss(keras.losses.Loss):
         self.label_smoothing = float(label_smoothing)
         self.entropy_weight = float(entropy_weight)
         self.prior_weight = float(prior_weight)
-        self.class_prior = None if class_prior is None else list(class_prior)
+        # DECISION plan-2026-09-02T081011-9b26b501/D-010
+        # Coerce to plain Python floats, not `list(class_prior)`. A numpy
+        # array survives `list()` as np.float32 SCALARS, which `.keras` saving
+        # tolerates (Keras brings its own encoder) but plain
+        # `json.dumps(loss.get_config())` rejects with "Object of type float32
+        # is not JSON serializable". Do not restore the bare `list()`.
+        self.class_prior = (
+            None if class_prior is None
+            else [float(v) for v in np.asarray(class_prior).reshape(-1)]
+        )
         self.from_logits = bool(from_logits)
         self.epsilon = float(epsilon)
 
@@ -454,8 +481,11 @@ def analyze_loss_components(
     :return: A dictionary containing, for each component, its unweighted value,
         its weighted value, the absolute magnitude of that weighted value
         (``*_magnitude``) and its bounded share of the total magnitude
-        (``*_share``, in [0, 1], summing to one). ``total_loss`` is the same
-        number the live loss returns for the same inputs.
+        (``*_share``, in [0, 1], summing to one -- except in the degenerate
+        case where every magnitude is exactly zero, reachable with an all-zero
+        ``y_true`` row at ``entropy_weight = prior_weight = 0``, where all
+        three shares are ``0.0``). ``total_loss`` is the same number the live
+        loss returns for the same inputs.
     :rtype: Dict[str, float]
     """
     y_true = keras.ops.cast(y_true, dtype=y_pred.dtype)
@@ -514,8 +544,10 @@ def analyze_loss_components(
             'prior_share': magnitudes['prior_magnitude'] / total_magnitude,
         })
     else:
-        # Every component is exactly zero; no component has a share of the
-        # total, and 0/0 is not 1/3.
+        # Reachable, not defensive: an all-zero ``y_true`` row -- the ordinary
+        # masked / ignore-index encoding -- gives a cross-entropy of exactly
+        # 0.0, and at ``entropy_weight = prior_weight = 0`` every magnitude is
+        # then 0.0. No component has a share of the total, and 0/0 is not 1/3.
         results.update({
             'ce_share': 0.0,
             'entropy_share': 0.0,

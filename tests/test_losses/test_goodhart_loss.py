@@ -25,6 +25,7 @@ oracle recomputed here in float64 -- never an observation.
 fixture actually reaches the branch its sibling arm grades.
 """
 
+import json
 import os
 import tempfile
 import warnings
@@ -256,9 +257,10 @@ def test_a_class_prior_whose_length_disagrees_with_y_pred_raises():
 
 def test_passing_mi_weight_by_keyword_raises_and_names_prior_weight():
     """A silent drop would let an archived config deserialize into a DIFFERENT
-    objective. NOTE: ``mi_weight`` now sits LAST in the signature, so a legacy
-    POSITIONAL third argument sets ``prior_weight`` and does not raise -- see
-    the twin below."""
+    objective. ``mi_weight`` now sits LAST in the signature, and every
+    parameter from ``prior_weight`` on is keyword-only, so the legacy
+    POSITIONAL third argument can no longer land on another knob -- see the
+    twin below."""
     with pytest.raises(ValueError, match="prior_weight"):
         GoodhartAwareLoss(mi_weight=0.01)
 
@@ -272,13 +274,48 @@ def test_the_mi_weight_message_says_the_old_term_had_the_wrong_sign():
     assert "H(mean_p) - mean H(p_i)" in message
 
 
-def test_the_legacy_positional_third_argument_is_prior_weight_not_a_raise():
-    """Recorded, not asserted as desirable: the signature reorder means an old
-    positional call silently becomes a small CORRECTLY-signed prior term. Zero
-    callers of any kind were measured, and this arm exists so the behaviour is
-    pinned rather than discovered."""
-    loss = GoodhartAwareLoss(0.0, 0.1, 0.01)
-    assert loss.prior_weight == pytest.approx(0.01)
+def test_the_legacy_positional_third_argument_raises_instead_of_setting_a_knob():
+    """The whole point of the loud ``mi_weight`` removal is to catch a caller
+    we cannot see, and a legacy caller writes POSITIONALLY. Before the
+    keyword-only ``*``, ``GoodhartAwareLoss(0.0, 0.1, 0.01)`` silently set
+    ``prior_weight = 0.01`` -- a different objective, no message. It must now
+    raise."""
+    with pytest.raises(TypeError, match="positional argument"):
+        GoodhartAwareLoss(0.0, 0.1, 0.01)
+
+
+def test_the_four_positional_legacy_form_also_raises_a_typeerror():
+    """The 4-positional legacy shape used to reach ``list(class_prior)`` and
+    die with ``'bool' object is not iterable`` -- a message naming neither
+    ``mi_weight`` nor ``prior_weight``."""
+    with pytest.raises(TypeError, match="positional argument"):
+        GoodhartAwareLoss(0.0, 0.1, 0.01, True)
+
+
+def test_the_two_historical_positional_arguments_still_work():
+    """ANTI-VACUITY: the ``*`` must be placed so that the two knobs that were
+    ALWAYS first stay positional. A ``*`` in front of ``label_smoothing``
+    would make every arm above pass for the wrong reason."""
+    loss = GoodhartAwareLoss(0.3, 0.25)
+    assert loss.label_smoothing == pytest.approx(0.3)
+    assert loss.entropy_weight == pytest.approx(0.25)
+    assert loss.prior_weight == pytest.approx(0.0)
+
+
+def test_from_config_still_reconstructs_under_the_keyword_only_signature():
+    """``from_config`` splats the config dict, so it is keyword-only-safe by
+    construction -- but that is an assumption about Keras, and this file's job
+    is to measure rather than assume."""
+    original = GoodhartAwareLoss(
+        label_smoothing=0.1,
+        entropy_weight=0.2,
+        prior_weight=0.3,
+        class_prior=[1.0, 2.0, 3.0, 4.0],
+        from_logits=False,
+        epsilon=1e-6,
+    )
+    restored = GoodhartAwareLoss.from_config(original.get_config())
+    assert restored.get_config() == original.get_config()
 
 
 # ---------------------------------------------------------------------
@@ -1107,3 +1144,133 @@ def test_the_float16_clip_floor_is_the_dtype_tiny_not_the_configured_epsilon():
         "the float16 floor is not above the configured epsilon, so this arm "
         "is not observing the D-005 substitution"
     )
+
+
+# ---------------------------------------------------------------------
+# 15. the four items the iteration-1 review deliberately left open
+# ---------------------------------------------------------------------
+
+
+def test_a_wrong_length_class_prior_is_inert_at_the_default_prior_weight():
+    """The ``:param class_prior:`` length rule is enforced LAZILY, inside the
+    anti-collapse term, so it never runs at ``prior_weight = 0.0``. The
+    docstring now says so; this arm is what makes that sentence checkable.
+    Its anti-vacuity twin is
+    ``test_a_class_prior_whose_length_disagrees_with_y_pred_raises``, which
+    proves the same prior DOES raise once the term is switched on."""
+    loss = GoodhartAwareLoss(prior_weight=0.0, class_prior=[0.5, 0.5])
+    value = _f(loss(Y_TRUE_4, LOGITS_4))
+    assert np.isfinite(value)
+    # ... and the wrong-length prior is carried through serialization intact,
+    # so a reload does not launder it into something valid either.
+    assert loss.get_config()["class_prior"] == [0.5, 0.5]
+    assert GoodhartAwareLoss.from_config(loss.get_config()).class_prior == [0.5, 0.5]
+
+
+def test_an_all_zero_y_true_row_reaches_the_zero_magnitude_branch():
+    """The degenerate ``total_magnitude == 0.0`` branch is REACHABLE, not
+    defensive: an all-zero ``y_true`` row -- the ordinary masked /
+    ignore-index encoding -- gives a cross-entropy of exactly 0.0. It is NOT
+    reachable via a perfect prediction: Keras's own CE epsilon floors that at
+    1.19e-07 in float32."""
+    zeros = np.zeros((1, 4), dtype="float32")
+    result = analyze_loss_components(
+        GoodhartAwareLoss(entropy_weight=0.0, prior_weight=0.0), zeros, zeros
+    )
+    assert result["total_magnitude"] == 0.0
+    assert result["ce_share"] == 0.0
+    assert result["entropy_share"] == 0.0
+    assert result["prior_share"] == 0.0
+
+
+def test_a_perfect_prediction_does_not_reach_the_zero_magnitude_branch():
+    """ANTI-VACUITY twin: names the input that does NOT reach the branch, so
+    the arm above is known to be observing the masked-row path and not some
+    general property of a zero-ish loss."""
+    one_hot = np.eye(4, dtype="float32")
+    result = analyze_loss_components(
+        GoodhartAwareLoss(
+            entropy_weight=0.0, prior_weight=0.0, from_logits=False
+        ),
+        one_hot,
+        one_hot,
+    )
+    assert result["total_magnitude"] > 0.0
+    assert result["ce_share"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "class_prior,expected",
+    [
+        (None, None),
+        ([0.2, 0.3, 0.5], [0.2, 0.3, 0.5]),
+        (np.array([0.2, 0.3, 0.5], dtype="float32"), None),
+    ],
+    ids=["none", "list", "ndarray"],
+)
+def test_get_config_is_plain_json_serializable(class_prior, expected):
+    """``.keras`` saving works either way -- Keras brings its own encoder --
+    but a consumer calling ``json.dumps`` on the config directly used to crash
+    with ``Object of type float32 is not JSON serializable``, because
+    ``list(ndarray)`` keeps ``np.float32`` SCALARS."""
+    loss = GoodhartAwareLoss(prior_weight=0.5, class_prior=class_prior)
+    encoded = json.dumps(loss.get_config())
+    decoded = json.loads(encoded)["class_prior"]
+    if class_prior is None:
+        assert decoded is None
+    else:
+        assert all(type(v) is float for v in loss.get_config()["class_prior"])
+        np.testing.assert_allclose(
+            decoded, np.asarray(class_prior, dtype="float64"), rtol=1e-6
+        )
+    if expected is not None:
+        assert loss.get_config()["class_prior"] == expected
+
+
+@pytest.mark.parametrize(
+    "class_prior",
+    [None, [0.2, 0.3, 0.5], np.array([0.2, 0.3, 0.5], dtype="float32")],
+    ids=["none", "list", "ndarray"],
+)
+def test_from_config_round_trips_every_class_prior_form(class_prior):
+    original = GoodhartAwareLoss(prior_weight=0.5, class_prior=class_prior)
+    restored = GoodhartAwareLoss.from_config(original.get_config())
+    assert restored.get_config() == original.get_config()
+    if class_prior is None:
+        assert restored._normalized_prior is None
+    else:
+        np.testing.assert_allclose(
+            restored._normalized_prior, original._normalized_prior, rtol=1e-6
+        )
+
+
+def test_a_numpy_class_prior_survives_a_keras_save_load_round_trip():
+    """The JSON coercion must not break the path that already worked."""
+    model = keras.Sequential(
+        [keras.Input(shape=(3,)), keras.layers.Dense(3)]
+    )
+    model.compile(
+        optimizer="adam",
+        loss=GoodhartAwareLoss(
+            prior_weight=0.4,
+            class_prior=np.array([0.2, 0.3, 0.5], dtype="float32"),
+        ),
+    )
+    rng = np.random.default_rng(31)
+    # One step so the optimizer's variables exist; a never-fit optimizer fails
+    # to reload for reasons that have nothing to do with this loss.
+    model.fit(
+        rng.random((4, 3)).astype("float32"),
+        np.eye(3, dtype="float32")[[0, 1, 2, 0]],
+        epochs=1,
+        verbose=0,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "goodhart_numpy_prior.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+    assert isinstance(loaded.loss, GoodhartAwareLoss)
+    np.testing.assert_allclose(
+        loaded.loss.class_prior, [0.2, 0.3, 0.5], rtol=1e-6
+    )
+    json.dumps(loaded.loss.get_config())
