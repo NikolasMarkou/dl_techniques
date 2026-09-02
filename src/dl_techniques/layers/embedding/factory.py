@@ -1,14 +1,15 @@
 """
 Factory for the embedding layers in this package.
 
-One entry point, :func:`create_embedding_layer`, builds any of the 13
+One entry point, :func:`create_embedding_layer`, builds any of the 14
 registered embedding types from a type key plus keyword arguments. The type
 key selects a row of ``EMBEDDING_REGISTRY``, which names the class, the
 parameters that must be supplied and the parameters that have defaults.
 
 The registry covers patch embeddings, learned positional embeddings, the
 rotary family (RoPE, dual RoPE, continuous RoPE, multi-axis RoPE), the fixed
-sinusoidal family, and the BERT-style token embeddings.
+sinusoidal family, the BERT-style token embeddings, and the class-label
+embedding with its classifier-free-guidance dropout row.
 
 The registry is public API. Its key set, each entry's key names, and each
 entry's ``required_params`` and ``optional_params`` are consumed by
@@ -72,6 +73,7 @@ Registered types:
     positional_sine_2d      PositionEmbeddingSine2D             4
     scalar_sinusoidal       ScalarSinusoidalEmbedding           1
     mrope_ideogram4         Ideogram4MRoPE                      0
+    class_label             ClassLabelEmbedding                 3
     ======================  ===========================  ========
 
 Required parameters per type:
@@ -108,6 +110,8 @@ Required parameters per type:
         dim
     mrope_ideogram4
         head_dim, rope_theta, mrope_section
+    class_label
+        num_classes, hidden_size
 
 Two registry facts do not appear in either table:
     - ``bert_embeddings`` needs ``type_vocab_size`` whenever
@@ -117,6 +121,10 @@ Two registry facts do not appear in either table:
     - ``positional_sine_2d`` emits channels-FIRST,
       ``(B, 2*num_pos_feats, H, W)``. Callers that work channels-last must
       transpose.
+    - ``class_label``'s table has ``num_classes + 1`` rows when
+      ``dropout_rate > 0`` and ``num_classes`` rows when it is ``0``. The size
+      of a weight is therefore a function of an ``optional_params`` default,
+      which no other entry does.
 """
 
 import copy
@@ -146,6 +154,7 @@ from .scalar_sinusoidal_embedding import ScalarSinusoidalEmbedding
 from .positional_embedding_sine_2d import PositionEmbeddingSine2D
 from .modern_bert_embeddings import ModernBertEmbeddings
 from .albert_factorized_embedding import AlbertFactorizedEmbedding
+from .class_label_embedding import ClassLabelEmbedding
 
 # ---------------------------------------------------------------------
 # Type definition for Embedding types
@@ -164,7 +173,8 @@ EmbeddingType = Literal[
     'albert_factorized',
     'positional_sine_2d',
     'scalar_sinusoidal',
-    'mrope_ideogram4'
+    'mrope_ideogram4',
+    'class_label'
 ]
 
 # ---------------------------------------------------------------------
@@ -323,6 +333,17 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': ['head_dim', 'rope_theta', 'mrope_section'],
         'optional_params': {},
         'use_case': 'Packed-sequence DiT (Ideogram4) where position ids carry (t, h, w) per token.'
+    },
+    'class_label': {
+        'class': ClassLabelEmbedding,
+        'description': 'Categorical class-label lookup table with a classifier-free-guidance dropout row. The table holds num_classes + 1 rows when dropout_rate > 0 and num_classes rows when it is 0.',
+        'required_params': ['num_classes', 'hidden_size'],
+        'optional_params': {
+            'dropout_rate': 0.0,
+            'embeddings_initializer': 'uniform',
+            'seed': None
+        },
+        'use_case': 'Conditional diffusion transformers (DiT and descendants) that need a learned unconditional token for classifier-free guidance.'
     }
 }
 
@@ -485,6 +506,22 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
         if 'temperature' in kwargs and kwargs['temperature'] <= 0:
             raise ValueError(f"temperature must be positive, got {kwargs['temperature']}")
 
+    if embedding_type == 'class_label':
+        # `num_classes` is deliberately NOT added to the shared positive_params
+        # list above: that list is applied to EVERY type, so a name added there
+        # silently starts range-checking any future entry that happens to reuse
+        # it. This rule is scoped to the one entry that declares the parameter.
+        #
+        # There is deliberately NO `dropout_rate` check here. The shared
+        # `dropout_params` loop above already range-checks that exact name for
+        # every type, so a second check would be unreachable -- a line that
+        # looks like a guard, is counted as one by a reviewer, and guards
+        # nothing. (Upstream spells this parameter `dropout_prob`, which the
+        # shared loop would NOT have seen; the port renamed it to the house
+        # convention, which is what makes the shared check apply.)
+        if 'num_classes' in kwargs and kwargs['num_classes'] <= 0:
+            raise ValueError(f"num_classes must be positive, got {kwargs['num_classes']}")
+
 
 #: The stable substring every strict dropped-key ``ValueError`` from
 #: :func:`create_embedding_layer` carries. Guards match on THIS constant rather
@@ -503,7 +540,7 @@ def create_embedding_layer(
     name: Optional[str] = None,
     **kwargs: Any
 ) -> keras.layers.Layer:
-    """Build one of the 13 registered embedding layers.
+    """Build one of the 14 registered embedding layers.
 
     Validates the configuration, fills in that type's defaults, rejects any
     keyword the type does not declare, and constructs the class. See the
@@ -561,7 +598,9 @@ def create_embedding_layer(
         #   `required_params`. That narrowing is the tempting "simplification"
         #   and it turns every legitimately passed optional parameter into an
         #   error. MEASURED: the all-optional control then fires for 11 of the
-        #   13 registered types and 22 tests go red. The two survivors,
+        #   13 registered types and 22 tests go red (MEASURED 2026-08, when
+        #   the registry held 13 entries; `class_label` arrived later and is not
+        #   a survivor -- it declares three optional params). The two survivors,
         #   `modern_bert_embeddings` and `mrope_ideogram4`, declare no optional
         #   params and so have nothing to break. The FFN side measured 21/21.
         # * read `kwargs`, what the CALLER supplied, not the merged `params`.

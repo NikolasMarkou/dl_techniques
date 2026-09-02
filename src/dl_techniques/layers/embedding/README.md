@@ -1,17 +1,19 @@
 # `dl_techniques.layers.embedding`
 
-Eighteen embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
-rotary (RoPE) variants, scalar/timestep sinusoidal embeddings and BERT/ModernBERT/ALBERT token
-embeddings. **Thirteen** are reachable through the factory; the other five are direct-import only.
+Nineteen embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
+rotary (RoPE) variants, scalar/timestep sinusoidal embeddings, BERT/ModernBERT/ALBERT token
+embeddings and a class-label table with a classifier-free-guidance dropout row. **Fourteen** are
+reachable through the factory; the other five are direct-import only.
 
 `create_embedding_layer(embedding_type, name=None, **kwargs)` looks the type up in `EMBEDDING_REGISTRY`, rejects any
 keyword the target class does not declare, fills in the registry defaults and constructs. The
 factory contract and the registry sizes are owned by `src/dl_techniques/layers/CLAUDE.md`.
 
-The package `__init__` exports only five names — `AxialRoPE2D`, the three factory functions and
-`STRICT_DROPPED_KEY_MARKER`. Every other class is imported from its own module.
+The package `__init__` exports only six names — `AxialRoPE2D`, `ClassLabelEmbedding`, the three
+factory functions and `STRICT_DROPPED_KEY_MARKER`. Every other class is imported from its own
+module.
 
-## Factory catalogue (13 keys)
+## Factory catalogue (14 keys)
 
 | Key | Class | What it is | Pick it when | Required params |
 |---|---|---|---|---|
@@ -28,6 +30,7 @@ The package `__init__` exports only five names — `AxialRoPE2D`, the three fact
 | `bert_embeddings` | `BertEmbeddings` | Word + position + token-type embeddings, normalized. | BERT-style encoders. | `vocab_size`, `hidden_size`, `max_position_embeddings` |
 | `modern_bert_embeddings` | `ModernBertEmbeddings` | Word + token-type only; positions come from RoPE in attention. | ModernBERT-style rotary encoders. | `vocab_size`, `hidden_size`, `type_vocab_size`, `initializer_range`, `layer_norm_eps`, `dropout_rate`, `use_bias` |
 | `albert_factorized` | `AlbertFactorizedEmbedding` | Vocab -> bottleneck -> hidden factorization. | Parameter-efficient token embeddings. | `vocab_size`, `bottleneck_dim`, `output_dim` |
+| `class_label` | `ClassLabelEmbedding` | Categorical label table with one extra "unconditional" row. The table has `num_classes + 1` rows when `dropout_rate > 0` and `num_classes` rows when it is `0`, so an *optional* parameter sizes a weight. | Conditional diffusion transformers (DiT and descendants) needing a learned null token for classifier-free guidance. | `num_classes`, `hidden_size` |
 
 `modern_bert_embeddings` is the one entry with no optional parameters: everything it takes is
 required. Read all defaults from the registry rather than from prose:

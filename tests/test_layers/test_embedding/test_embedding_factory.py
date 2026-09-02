@@ -36,6 +36,7 @@ VALID_CFGS = {
     "positional_sine_2d": dict(num_pos_feats=8),
     "scalar_sinusoidal": dict(dim=64),
     "mrope_ideogram4": dict(head_dim=64, rope_theta=10000.0, mrope_section=(2, 3, 3)),
+    "class_label": dict(num_classes=3, hidden_size=16),
 }
 
 

@@ -17,7 +17,7 @@ see § Naming traps.
 | `attention/` | Y | 34 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more |
 | `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block |
 | `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
-| `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings. `HierarchicalCodebookEmbedding` is direct-import-only |
+| `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row. `HierarchicalCodebookEmbedding` is direct-import-only |
 | `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function |
 | `heads/` | Y | Task heads in `nlp/`, `vision/`, `vlm/` — see below |
 | `logic/` | Y | Arithmetic operators, logic operators, neural circuit |
@@ -126,7 +126,7 @@ Check in this precedence order; proceed to the next step only when nothing fits.
    | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
    | Attention | `create_attention_layer()` in `attention/factory.py` | 34 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 21 |
-   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 13 |
+   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 14 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | 23 |
    | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
    | Logic | `create_logic_layer()` in `logic/factory.py` | 4 (`logic`, `arithmetic`, `neural_circuit`, `circuit_depth`) |
