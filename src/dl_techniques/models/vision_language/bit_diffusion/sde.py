@@ -304,9 +304,15 @@ class BridgeSDE:
         reverse: bool,
         cfg_scale: float,
         training: Optional[bool],
+        cond_mask: Optional[Any] = None,
     ) -> Any:
         """Call the network for the score, routing through CFG only when asked.
 
+        :param cond_mask: Optional ``(B,)`` conditioning mask forwarded to the
+            network. ``None`` (the default) omits the key entirely, which the
+            network reads as all-ones. Only :class:`FlowMatchingODE` passes one,
+            and only to force the unconditional branch.
+        :type cond_mask: Optional[Any]
         :return: The predicted score, cast to ``x_t``'s dtype.
         """
         direction = keras.ops.ones_like(t) if reverse else keras.ops.zeros_like(t)
@@ -317,6 +323,8 @@ class BridgeSDE:
             "x_cond": x_cond,
             "direction": direction,
         }
+        if cond_mask is not None:
+            inputs["cond_mask"] = cond_mask
         # DECISION plan-2026-09-02T094601-77d4a04e/D-018
         # Do NOT "simplify" this to always calling `forward_with_cfg` and letting
         # `cfg_scale = 0` be a no-op. Upstream gates on `if cfg_scale > 0`
@@ -813,8 +821,9 @@ class FlowMatchingODE(BridgeSDE):
     in scope at all (see D-002).
 
     :param force_unconditional: Sample with the conditioning stream masked off.
-        Consumed by the sampler in a later step; carried here so the object's
-        config is complete.
+        Read by :meth:`dX_t`, which then feeds the network an all-false
+        ``cond_mask``, pins ``direction`` to forward, and rejects any non-zero
+        ``cfg_scale``.
     :type force_unconditional: bool
     """
 
@@ -842,6 +851,117 @@ class FlowMatchingODE(BridgeSDE):
     def C(self, start: Any, t_a: Any, t_b: Any) -> Any:
         """:raises NotImplementedError: Always."""
         self._unsupported("base-process covariance C")
+
+    def dX_t(
+        self,
+        x_t: Any,
+        t: Any,
+        x_cond: Any,
+        y: Any,
+        dt: float,
+        score_network: Optional[Any] = None,
+        reverse: bool = False,
+        cfg_scale: float = 0.0,
+        ode: bool = False,
+        x_start: Optional[Any] = None,
+        seed: Optional[Any] = None,
+        training: Optional[bool] = False,
+    ) -> Any:
+        """One Euler increment of the deterministic flow::
+
+            signed_dt = -dt if reverse else dt
+            dX_t      = velocity * signed_dt
+
+        There is no Brownian term, no drift term and **no call to** ``sigma``,
+        ``phi`` or ``C`` anywhere on this path -- which is exactly what lets
+        those three keep raising while the variant remains sampleable. The
+        inherited :meth:`BridgeSDE.dX_t` cannot serve here: its very first step
+        after the network call is ``self.sigma(t)``.
+
+        ``ode`` and ``x_start`` are **accepted and ignored**, matching upstream
+        (``reference/sde_utils_sde.py:69-82``, whose override takes both and
+        references neither). A deterministic flow has no separate
+        probability-flow branch to switch into: the transport already *is* the
+        ODE, and the ``ode=True`` branch of the base class exists only to
+        subtract an analytic base score that needs ``C``. ``seed`` is ignored
+        for the same reason -- nothing here is stochastic.
+
+        :param x_t: Current state, ``(B, ...)``.
+        :type x_t: Any
+        :param t: Per-sample time, ``(B,)``.
+        :type t: Any
+        :param x_cond: Conditioning tensor, shaped like ``x_t``.
+        :type x_cond: Any
+        :param y: Prompt-kind labels, ``(B,)``.
+        :type y: Any
+        :param dt: Positive step size. The sign is applied here, not by the
+            caller: :meth:`BridgeSDE.simulate` always passes ``|t[i+1]-t[i]|``.
+        :type dt: float
+        :param score_network: The trained network. Required (D-009: this port
+            does not store it on the SDE).
+        :type score_network: Optional[Any]
+        :param reverse: Integrate image -> text rather than text -> image. Under
+            ``force_unconditional`` it flips ``dt`` only -- see the anchor below.
+        :type reverse: bool
+        :param cfg_scale: Guidance strength. Must be ``0`` under
+            ``force_unconditional``.
+        :type cfg_scale: float
+        :param ode: Accepted and ignored; see above.
+        :type ode: bool
+        :param x_start: Accepted and ignored; see above.
+        :type x_start: Optional[Any]
+        :param seed: Accepted and ignored; the flow is deterministic.
+        :type seed: Optional[Any]
+        :param training: Forwarded to the network.
+        :type training: Optional[bool]
+        :return: The increment, shaped like and dtyped like ``x_t``.
+        :rtype: Any
+        :raises ValueError: If ``score_network`` is ``None``, if ``dt`` is not
+            positive, or if ``cfg_scale != 0`` under ``force_unconditional``.
+        """
+        _require_network(score_network, "dX_t")
+        if not dt > 0:
+            raise ValueError(f"dt must be positive, got {dt}")
+
+        x_t = keras.ops.convert_to_tensor(x_t)
+        t = keras.ops.convert_to_tensor(t)
+
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-029
+        # Do NOT pass the outer `reverse` to the network on this branch, and do
+        # NOT drop the all-false `cond_mask` as "what `cfg_scale=0` already
+        # does". Upstream (reference/sde_utils_sde.py:71-76) hard-codes
+        # `reverse=False` here because a forced-unconditional flow is ONE shared
+        # velocity field for both directions; the outer `reverse` then only
+        # flips the sign of `dt`. Threading `reverse` through instead calls the
+        # reverse conditioning embedder and the reverse `t_cond`, which is a
+        # different field -- finite, same shape, plausible trajectories, and
+        # invisible to every shape/finiteness arm. See decisions.md D-029.
+        if self.force_unconditional:
+            if cfg_scale != 0:
+                raise ValueError(
+                    "force_unconditional=True is incompatible with CFG: there "
+                    "is no conditional pass to guide towards. Got cfg_scale = "
+                    f"{cfg_scale}; pass cfg_scale=0 or build the SDE with "
+                    "force_unconditional=False."
+                )
+            velocity = self._evaluate_score(
+                score_network,
+                x_t,
+                t,
+                x_cond,
+                y,
+                reverse=False,
+                cfg_scale=0.0,
+                training=training,
+                cond_mask=keras.ops.zeros_like(t),
+            )
+        else:
+            velocity = self._evaluate_score(
+                score_network, x_t, t, x_cond, y, reverse, cfg_scale, training
+            )
+
+        signed_dt = -dt if reverse else dt
+        return velocity * keras.ops.cast(signed_dt, velocity.dtype)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

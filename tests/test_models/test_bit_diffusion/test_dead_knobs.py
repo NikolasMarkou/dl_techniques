@@ -39,11 +39,14 @@ where the weights are not merely identical but the same objects.
 
 **Findings, stated rather than waived** (see the report and decisions.md):
 
-* ``FlowMatchingODE.force_unconditional`` is **INERT**. It is stored, it is
-  serialized, and nothing reads it: upstream honours it inside a
-  ``FlowMatchingODE.dX_t`` override that this port does not have. Pinned below
-  by an ``xfail(strict=True)``, so wiring it turns the arm red and forces the
-  marker off.
+* ``FlowMatchingODE.force_unconditional`` was measured **INERT** here at step 11
+  -- stored, serialized, read by nothing, because upstream honours it inside a
+  ``FlowMatchingODE.dX_t`` override the port had never written, which also meant
+  the variant could not be SAMPLED at all. It was pinned by an
+  ``xfail(strict=True)``; step 8.1 wrote the override, the arm XPASSed, and the
+  marker came off. **The census below now finds ZERO dead knobs.** The static
+  scan that remains is a rot alarm only; the behavioural guard is
+  ``test_the_flow_matching_ode_is_sampleable.py``.
 * ``drop_path_rate`` measures ``9.5e-07`` at inference rather than exactly 0.
   That is not the knob: it is float32 re-association between ``block(x)`` and
   ``x + (block(x) - x)``. The training-mode arm measures ``3.47``.
@@ -685,23 +688,25 @@ class TestTheSDEKnobs:
             CosineDecayingVolatilitySDE(k=2.0)
         assert "k" not in CosineDecayingVolatilitySDE().get_config()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "MEASURED DEAD KNOB. FlowMatchingODE.force_unconditional is stored "
-            "and serialized and read by nothing: upstream honours it inside a "
-            "FlowMatchingODE.dX_t override (reference/sde_utils_sde.py:71-76) "
-            "that passes an all-zero cond_mask and rejects cfg_scale != 0, and "
-            "this port has no such override -- the inherited BridgeSDE.dX_t "
-            "calls self.sigma(t), which FlowMatchingODE raises on, so the "
-            "variant cannot be SAMPLED at all. strict=True on purpose: the "
-            "moment someone wires the knob, this arm XPASSes and turns the "
-            "suite red, which is the prompt to delete this marker and write a "
-            "real guard."
-        ),
-    )
-    def test_force_unconditional_changes_sampling_behaviour(self):
+    def test_force_unconditional_is_read_somewhere_in_the_package(self):
         """Is the knob READ anywhere in the package outside store/serialize?
+
+        **This arm carried an ``xfail(strict=True)`` until step 8.1.** The knob
+        was measured DEAD: stored, serialized, read by nothing, because upstream
+        honours it inside a ``FlowMatchingODE.dX_t`` override
+        (``reference/sde_utils_sde.py:71-76``) that this port had never written,
+        so the class fell through to ``BridgeSDE.dX_t`` -- whose first act after
+        the network call is ``self.sigma(t)``, which ``FlowMatchingODE`` raises
+        on. The variant could be trained and could not be SAMPLED at all. Step
+        8.1 wrote the override; the arm XPASSed, exactly as the strict marker
+        was there to force, and the marker came off with a real guard behind it.
+
+        **The marker was removed, the arm was not.** This static scan is a cheap
+        rot alarm -- it reddens if the override is ever deleted or refactored
+        into something that stops reading the attribute -- but it makes no
+        behavioural claim whatsoever. The behavioural guard is
+        ``test_the_flow_matching_ode_is_sampleable.py``, which records what the
+        network actually received; see decisions.md D-027 and D-029.
 
         Scanned over the whole package directory rather than over
         ``FlowMatchingODE``'s own methods: the honouring code could legitimately
@@ -764,8 +769,13 @@ class TestTheSDEKnobs:
         ]
         assert readers == ["dX_t"], readers
 
-    def test_force_unconditional_is_at_least_carried_through_the_config(self):
-        """What the knob DOES do today, pinned so the gap is documented."""
+    def test_force_unconditional_survives_the_config_round_trip(self):
+        """Serialization, pinned separately from behaviour.
+
+        Both halves matter and they are independent failures: a knob that is
+        honoured but dropped from ``get_config`` produces a reloaded SDE that
+        samples the wrong field, silently.
+        """
         assert FlowMatchingODE(force_unconditional=True).get_config()[
             "force_unconditional"
         ] is True
