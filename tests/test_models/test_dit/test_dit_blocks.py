@@ -19,6 +19,14 @@ and each gets a dedicated arm here.
    block's own formula; every assertion is a changed / bit-identical comparison
    between two runs of the block itself.
 
+   That probe answers "did the msa path move", which is true for chunk 0 and
+   chunk 1 alike, so it cannot separate ``shift_msa`` from ``scale_msa`` -- a
+   swap of those two survived it, and the whole 485-test suite, at the
+   iteration-1 review. ``TestShiftMsaAndScaleMsaAreNotInterchangeable`` adds the
+   missing arm: additive versus multiplicative is read off the modulated
+   ``x_norm`` directly, and again at the block level on an exactly zero input,
+   where ``norm(0) == 0`` leaves a multiplicative chunk with nothing to scale.
+
 2. **The attention is non-causal.** A causal mask changes no shape, no
    parameter count and no config; it only makes a later patch invisible to an
    earlier one. Pinned by a three-arm probe: perturbing a LATER token must move
@@ -249,6 +257,130 @@ class TestTheSixWayModulationIsWired:
         assert not np.array_equal(sequential(["mlp", "msa"]), joint), (
             "the msa and mlp branches commuted, so the residual-order claim is "
             "vacuous -- this test would pass under either order"
+        )
+
+
+class TestShiftMsaAndScaleMsaAreNotInterchangeable:
+    """``shift_msa`` adds; ``scale_msa`` multiplies. Chunks 0 and 1 are not a pair.
+
+    The attribution probe above cannot separate these two. It reads the BLOCK
+    output, and every chunk-0/chunk-1 observation there is made with a gate
+    open -- but ``EXPECTED_SENSITIVITY`` only records *whether* the msa path
+    moved, which is true for either role. Swapping the two names in
+    ``AdaLayerNormZero.call``'s 6-way split therefore leaves the whole DiT
+    suite green (measured) while training a different, wrong model: it feeds
+    the additive term into ``1 + scale`` and the multiplicative one into the
+    offset.
+
+    Both arms here read ``block.adaln([x, c])[0]`` -- the modulated
+    ``x_norm`` itself -- and compare two runs of the layer against each other:
+
+    * an ADDITIVE chunk moves every position by the SAME number, so
+      ``delta`` is constant and equal to the value written into the bias;
+    * a MULTIPLICATIVE chunk moves each position in proportion to its own
+      normalised activation, so ``delta == value * base``.
+
+    On a non-degenerate input those two deltas are far apart, and each arm
+    asserts the spread that makes the other's claim false -- so neither arm
+    can pass under the swapped order.
+
+    The third arm is the same statement at the block level, where the msa gate
+    must be forced open by hand: on an EXACTLY ZERO input ``norm(x)`` is zero,
+    so a multiplicative chunk cannot do anything at all (``0 * (1 + s) == 0``)
+    while an additive one still injects ``s``.
+    """
+
+    #: An arbitrary non-zero modulation magnitude. Nothing depends on the value.
+    VALUE = 0.7
+
+    @staticmethod
+    def _x_norm(block: DiTBlock, bias: np.ndarray, x, c) -> np.ndarray:
+        """Set the modulation bias and return the adaLN's modulated ``x_norm``."""
+        block.adaln.linear.bias.assign(keras.ops.convert_to_tensor(bias))
+        return np.asarray(
+            keras.ops.convert_to_numpy(block.adaln([x, c])[0])
+        )
+
+    def test_shift_msa_moves_every_position_by_the_same_amount(self):
+        block = _make_block()
+        x, c = _inputs()
+
+        base = self._x_norm(block, _bias_with(), x, c)
+        moved = self._x_norm(block, _bias_with(shift_msa=self.VALUE), x, c)
+        delta = moved - base
+
+        # Anti-vacuity: on this input a multiplicative chunk would produce
+        # `VALUE * base`, whose spread is far above the tolerance below -- so
+        # the constant-delta assertion really does exclude the other role.
+        spread = float(np.std(self.VALUE * base))
+        assert spread > 1e-2, (
+            "the normalised activation is nearly constant on this input, so an "
+            f"additive and a multiplicative chunk look alike (std = {spread})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            np.full_like(delta, self.VALUE),
+            rtol=0,
+            atol=1e-6,
+            err_msg=(
+                "chunk 0 (shift_msa) did not act additively: its delta is not "
+                "the constant written into the bias, so it is being consumed "
+                "as the multiplicative `scale` -- the 6-way chunk order in "
+                "AdaLayerNormZero.call is wrong"
+            ),
+        )
+
+    def test_scale_msa_moves_each_position_in_proportion_to_itself(self):
+        block = _make_block()
+        x, c = _inputs()
+
+        base = self._x_norm(block, _bias_with(), x, c)
+        moved = self._x_norm(block, _bias_with(scale_msa=self.VALUE), x, c)
+        delta = moved - base
+
+        # Anti-vacuity: an additive chunk gives a CONSTANT delta; this one must
+        # vary, otherwise the proportionality claim below is unobservable.
+        assert float(np.std(delta)) > 1e-2, (
+            "chunk 1 (scale_msa) moved every position by the same amount, i.e. "
+            "it acted as an additive shift -- the 6-way chunk order in "
+            f"AdaLayerNormZero.call is wrong (std = {float(np.std(delta))})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            self.VALUE * base,
+            rtol=0,
+            atol=1e-6,
+            err_msg=(
+                "chunk 1 (scale_msa) is not multiplying the normalised "
+                "activation -- the 6-way chunk order is wrong"
+            ),
+        )
+
+    def test_on_a_zero_input_only_the_shift_chunk_can_act(self):
+        """Block level, msa gate forced open: ``norm(0) == 0`` kills any scale."""
+        block = _make_block()
+        _, c = _inputs()
+        x = np.zeros((BATCH, SEQ, HIDDEN), dtype="float32")
+
+        base = _run(block, _bias_with(gate_msa=1.0), x, c)
+        scaled = _run(block, _bias_with(gate_msa=1.0, scale_msa=self.VALUE), x, c)
+        shifted = _run(block, _bias_with(gate_msa=1.0, shift_msa=self.VALUE), x, c)
+
+        # atol=0: `0 * (1 + scale)` is exactly `0`, so this is exact.
+        np.testing.assert_array_equal(
+            scaled,
+            base,
+            err_msg=(
+                "chunk 1 (scale_msa) changed the output of a ZERO input, so it "
+                "is being added rather than multiplied"
+            ),
+        )
+        delta_shift = float(np.max(np.abs(shifted - base)))
+        assert delta_shift > 1e-5, (
+            "chunk 0 (shift_msa) could not move a ZERO input, so it is being "
+            f"multiplied rather than added (max |delta| = {delta_shift})"
         )
 
 

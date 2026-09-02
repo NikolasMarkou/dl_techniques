@@ -395,10 +395,20 @@ class DDPMHybridLoss(keras.losses.Loss):
         :return: ``'float32'`` or ``'float64'``.
         :rtype: str
         """
-        dtype = keras.backend.standardize_dtype(y_pred.dtype)
-        if dtype == "float64":
-            return "float64"
-        return "float32"
+        # DECISION plan-2026-09-02T170923-1285ed83/D-018
+        # `getattr(dtype, "name", None) or str(dtype)` rather than
+        # `keras.backend.standardize_dtype`. WHAT NOT TO DO: do not "simplify"
+        # this back to the standardize_dtype call. It is a Keras-2 residue that
+        # `tests/test_models/test_package_api_contract.py::TestNoKeras2Residues`
+        # bans -- that sweep is scoped to `models/` and cannot see this file, so
+        # the ban would not catch a regression here, but the same rule applies
+        # and the sibling `dit/diffusion.py:449-460` spells it this way. `str`
+        # alone is not enough either: a `tf.DType` stringifies as
+        # "<dtype: 'float64'>". Same call as `bit_diffusion/sde.py:123`.
+        # See decisions.md D-018.
+        raw = y_pred.dtype
+        name = getattr(raw, "name", None) or str(raw)
+        return "float64" if name == "float64" else "float32"
 
     def _unpack(
         self,

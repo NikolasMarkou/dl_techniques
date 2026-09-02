@@ -340,10 +340,13 @@ The port uses `getattr(dtype, "name", None) or str(dtype)` — the same call `bi
 makes — plus `keras.config.floatx()` in place of `keras.backend.floatx()`. `str` alone is
 insufficient: a `tf.DType` stringifies as `"<dtype: 'float64'>"`.
 
-**Open, and deliberately not hidden:** the guard is scoped to `models/`, so this plan's own
-`losses/ddpm_hybrid_loss.py` still uses the banned call and is *unguarded* rather than approved. Two
-spellings of one question now ship in one plan. That is the "a scoped gate cannot see an outside
-consumer" shape, and it is flagged for adjudication rather than silently reconciled.
+**Resolved at REFLECT (completion fix 14.1):** the guard is scoped to `models/`, so this plan's own
+`losses/ddpm_hybrid_loss.py:398` was *unguarded* rather than approved and shipped the banned call —
+the "a scoped gate cannot see an outside consumer" shape. The loss now uses the same idiom, so one
+question has one spelling across this plan's output. The loss's value is unchanged: measured
+bit-identical at `atol=0` before and after on the float32, the float64-input and the
+`dtype="float64"` paths (`2.87980366` / `2.87980366` / `2.8798074`). The `models/`-scoped sweep still
+cannot see `losses/`, so this remains a convention there, not a gate.
 
 ### 4.14 Sampling is seeded explicitly, because `set_random_seed` does not reproduce here
 
@@ -412,3 +415,22 @@ Not a divergence but a limitation, stated where it cannot be missed:
   layout difference.
 - **Only `DiT-S/2` at reduced geometry has ever been run.** The other eleven variants have been
   *built* and measured (`README.md`), and nothing more. None has been trained for a single step.
+
+### 4.18 The frozen `pos_embed` follows the dtype policy, floored at float32 — **D-028**
+
+`get_2d_sincos_pos_embed` computes in float64. The table was installed with a hard-coded
+`dtype="float32"`, which was an accident rather than a choice: under a `float64` policy the frozen
+table carried float32 precision into a float64 forward pass, and nothing raised because `DiT.call`
+casts at the point of use. `build` now selects
+`"float64" if self.variable_dtype == "float64" else "float32"`.
+
+Measured across the three policies the suite exercises: the `float32` and `mixed_float16` tables are
+**bit-identical** to the hard-coded ones (`max |delta| = 0.0`, and the `float32` forward pass is
+bit-identical too at `atol=0`), and the `float64` table gains `2.96e-08` of precision it had been
+discarding. `mixed_float16` is unaffected by construction — its variable dtype is already float32.
+
+The floor is deliberate: a bare `dtype=self.variable_dtype` would store sin/cos values in float16
+under a *pure* (non-"mixed") float16 policy, and the frozen positional code is the same never-narrow
+quantity `diffusion.py::_compute_dtype` protects under D-018. Pinned by
+`test_dit.py::TestPrecisionPolicies::test_the_frozen_table_follows_the_policy_without_narrowing`,
+which is parametrized over all three policies and asserts they do not all expect the same dtype.

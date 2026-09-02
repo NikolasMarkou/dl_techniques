@@ -38,12 +38,14 @@ anything else. See ``_dit_helpers.py`` for the full statement of the trap.
   outputs differ by ``2.2e-03``. That difference is the evidence the policy
   reaches the arithmetic; without it "finite under three policies" would be one
   claim stated three times.
-* ``pos_embed`` is created with an explicit ``dtype="float32"`` and therefore
-  stays float32 under EVERY policy, including ``float64``. ``DiT.call`` casts it
-  at the point of use. This is recorded as a positive assertion below, not
-  fixed: under a float64 policy the frozen table carries float32 precision, and
-  changing that is a behaviour change to shipped code, out of scope for a test
-  step.
+* ``pos_embed`` FOLLOWS the variable dtype policy but never narrows below
+  float32 (D-028): float32 under ``float32`` and ``mixed_float16`` (whose
+  variable dtype is float32 anyway), float64 under ``float64``. It was
+  hard-coded ``float32`` until the iteration-1 review, which is why this arm
+  exists: the float32 and ``mixed_float16`` tables are BIT-IDENTICAL to the
+  hard-coded ones (measured at ``atol=0``, as is the float32 forward pass),
+  while the float64 table gained ``2.96e-08`` of precision it was silently
+  throwing away. ``DiT.call`` still casts at the point of use.
 * XLA (``jit_compile=True``) and eager agree on ``predict`` to ``1.43e-06`` at
   an output scale of ``6.50``, i.e. 1.8 ``eps_f32`` -- float32 re-association
   noise and nothing more. The bound is DERIVED from the contraction lengths via
@@ -363,21 +365,31 @@ class TestUnderEveryDtypePolicy:
         assert {str(w.dtype) for w in trainable} == {"float32"}
 
     @pytest.mark.parametrize("policy", POLICIES, indirect=True)
-    def test_the_frozen_table_stays_float32_under_every_policy(
+    def test_the_frozen_table_follows_the_policy_without_narrowing(
         self, policy: str
     ) -> None:
-        """A measured FACT about this port, asserted rather than assumed.
+        """D-028: the table tracks the variable dtype, floored at float32.
 
-        ``DiT.build`` creates ``pos_embed`` with an explicit ``dtype="float32"``
-        and ``DiT.call`` casts it to the token dtype at the point of use. So the
-        table is float32 even under a ``float64`` policy, where it carries
-        float32 precision into a float64 computation. This arm exists so that
-        fact is written down and any change to it is deliberate; the cast in
-        ``call`` is what keeps the forward pass legal in the meantime.
+        ``DiT.build`` creates ``pos_embed`` with
+        ``"float64" if self.variable_dtype == "float64" else "float32"``, so a
+        float64 policy keeps the full precision ``get_2d_sincos_pos_embed``
+        computed in, and no policy can push the frozen table BELOW float32.
+        ``mixed_float16``'s variable dtype is already float32, so its table is
+        unchanged. ``DiT.call`` still casts to the token dtype at the point of
+        use, which is what keeps every policy legal.
         """
         model = built_model(seed=0)
         table = [w for w in model.weights if w.path.endswith("pos_embed")][0]
-        assert str(table.dtype) == "float32"
+        expected = "float64" if policy == "float64" else "float32"
+        assert str(table.dtype) == expected, (
+            f"under the {policy} policy the frozen table is {table.dtype}, "
+            f"expected {expected} (D-028)"
+        )
+        # Anti-vacuity: the three policies must not all expect the same dtype,
+        # or this arm is one claim stated three times.
+        assert {"float32", "float64"} == {
+            "float64" if p == "float64" else "float32" for p in POLICIES
+        }
         inputs = cast_inputs(list(tiny_inputs(seed=7)), input_dtype_for(policy))
         assert_finite_and_shaped(model(inputs, training=False), TINY, BATCH)
 

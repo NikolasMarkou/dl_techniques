@@ -598,17 +598,33 @@ class DiT(keras.Model):
         # `add_weight(zeros) + .assign()` inside build(): StatelessScope
         # DISCARDS the assign, leaving the table all zeros in every real model
         # with no shape symptom and no error. Both are measured repo failures.
+        # DECISION plan-2026-09-02T170923-1285ed83/D-028
+        # The table FOLLOWS the variable dtype policy but NEVER NARROWS below
+        # float32. `get_2d_sincos_pos_embed` computes in float64, so a
+        # hard-coded `dtype="float32"` would silently down-cast the table under
+        # a float64 policy while `call` casts it back up at the point of use --
+        # float32 precision inside a float64 forward pass, with nothing to
+        # raise. WHAT NOT TO DO: do not replace this with a bare
+        # `dtype=self.variable_dtype`; under a pure (non-"mixed") float16 policy
+        # that stores sin/cos values with ~3 decimal digits, and the frozen
+        # positional code is exactly the kind of never-narrow quantity the rest
+        # of this port protects (see `diffusion.py::_compute_dtype`, D-018).
+        # `mixed_float16` is unaffected either way -- its variable dtype is
+        # already float32. See decisions.md D-028; pinned by
+        # `tests/test_models/test_dit/test_dit.py::
+        # TestPrecisionPolicies::test_the_frozen_table_follows_the_policy_without_narrowing`.
+        table_dtype = "float64" if self.variable_dtype == "float64" else "float32"
         table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         self.pos_embed = self.add_weight(
             name="pos_embed",
             shape=(1, self.num_patches, self.hidden_size),
             initializer=keras.initializers.Constant(
-                np.asarray(table, dtype="float32").reshape(
+                np.asarray(table, dtype=table_dtype).reshape(
                     1, self.num_patches, self.hidden_size
                 )
             ),
             trainable=False,
-            dtype="float32",
+            dtype=table_dtype,
         )
 
         self.x_embedder.build(x_shape)
