@@ -3,6 +3,8 @@ stream, plus the promptable segmenters that grew out of them.
 
 - `bit_diffusion/` — BiT/BiB bidirectional text<->image diffusion bridge (DiTXA)
 - `clip/` — CLIP
+- `dit/` — DiT, the class-conditional latent Diffusion Transformer (Peebles & Xie),
+  plus the DDPM sampler it needs
 - `fastvlm/` — a vision-only hybrid backbone (MobileOne stem + RepMixer + attention
   stages). The name misattributes; see `models/CLAUDE.md`
 - `ideogram4/` — Ideogram4 text-to-image flow-matching DiT

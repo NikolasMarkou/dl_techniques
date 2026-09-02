@@ -5,13 +5,30 @@ a VAE latent, add a frozen 2-D sin-cos table, condition every block on
 ``c = t_emb + y_emb`` through adaLN-Zero, and read out through a zero-initialised
 final layer. The twelve published sizes are reachable by name.
 
-Currently exported: the variant registry and the diffusion-side config, the two
-block layers, the model and its factory, and the sampler -- ``GaussianDiffusion``,
-which owns ``q_sample``, ``p_mean_variance``, the ancestral and DDIM reverse
-steps, their loops, and the timestep respacing that remaps a shortened chain's
-index back to the original one before the model sees it.
+**Exported** (:data:`__all__`, alphabetized): the variant registry
+(``DIT_VARIANTS``, ``VARIANT_FIELDS``, ``get_variant_config``,
+``normalize_variant_name``) and the diffusion-side ``DiffusionConfig``; the two
+block layers ``DiTBlock`` and ``DiTFinalLayer`` with the two chunk-name tuples
+that pin their modulation order; the model ``DiT``, its factory ``create_dit``
+and the two pure helpers a caller may legitimately need to reason about the
+port (``flattened_linear_xavier``, ``unpatchify_tokens``); the named constants
+``CFG_GUIDED_CHANNELS``, ``MODEL_INPUT_NAMES``, ``DEFAULT_CLIP_DENOISED``,
+``MODEL_MEAN_TYPES``, ``MODEL_VAR_TYPES``; and the sampler
+``GaussianDiffusion``, which owns ``q_sample``, ``p_mean_variance``, the
+ancestral and DDIM reverse steps, their loops, and the timestep respacing that
+remaps a shortened chain's index back to the original one before the model sees
+it.
+
+**Deliberately NOT exported.** Block internals and module-private arithmetic stay
+behind their submodule: the chunk counts ``NUM_DIT_ADALN_CHUNKS`` /
+``NUM_DIT_FINAL_CHUNKS`` (derived from the exported name tuples, so exporting
+them would be a second thing to keep in lockstep), ``LABEL_TABLE_INIT_STDDEV``,
+and every leading-underscore helper. Nothing here binds a name equal to a
+submodule (``blocks``, ``config``, ``diffusion``, ``model``), so
+``from ... import model`` still reaches the module and not a symbol.
 
     from dl_techniques.models.vision_language.dit import DiT, create_dit
+    from dl_techniques.models.vision_language.dit.blocks import NUM_DIT_ADALN_CHUNKS
 
 References:
     - Peebles, W. and Xie, S. "Scalable Diffusion Models with Transformers."

@@ -216,8 +216,45 @@ class DiTBlock(keras.layers.Layer):
 
     Two gated residual adds in the order ``msa -> mlp``, each gated by its own
     chunk of a single zero-initialised ``SiLU -> Dense(6 * hidden_size)``
-    projection of the conditioning vector. See the module docstring for the
-    diagram and the exact chunk order.
+    projection of the conditioning vector.
+
+    .. code-block:: text
+
+        x [B, T, D]                        c [B, D]
+             │                                │
+             │                                ▼
+             │                   ┌──────────────────────────┐
+             │                   │ AdaLayerNormZero         │
+             ├──────────────────►│  SiLU → Dense(6*D, zeros)│
+             │                   │  chunks 0..5, in order:  │
+             │                   │  shift/scale/gate _msa,  │
+             │                   │  shift/scale/gate _mlp   │
+             │                   └──────────────────────────┘
+             │                                │ x_norm [B, T, D]
+             │                                ▼
+             │                   ┌──────────────────────────┐
+             │                   │ MultiHeadAttention       │
+             │                   │  NON-causal, use_bias    │
+             │                   └──────────────────────────┘
+             │                                │ × gate_msa (chunk 2)
+             ▼                                ▼
+             ├──────────────────────────────► ⊕  residual 1
+             │                                │ [B, T, D]
+             │                   ┌────────────┴─────────────┐
+             │                   │ norm2 (affine-free) then │
+             │                   │ modulate(shift/scale_mlp)│
+             │                   │ → GELUMLPFFN 'gelu_tanh' │
+             │                   └──────────────────────────┘
+             │                                │ × gate_mlp (chunk 5)
+             ▼                                ▼
+             └──────────────────────────────► ⊕  residual 2
+                                              │
+                                              ▼
+                                        out [B, T, D]
+
+    The module docstring carries the wider version of this diagram, the exact
+    upstream lines it reproduces, and why a chunk permutation is invisible to
+    every shape, count and round-trip assertion.
 
     The conditioning vector ``c`` is **not** carried forward: it is consumed
     per block and never updated, so block ``n + 1`` receives the same ``c``
