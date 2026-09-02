@@ -214,6 +214,15 @@ DEFAULT_METRIC_VALUE: float = 0.0
 # See decisions.md D-036.
 ACCURACY_UNAVAILABLE: None = None
 
+# DECISION plan-2026-09-02T062406-e2aa52ef/D-003
+# The SAME argument, for `loss`. D-036 removed the 0.0 sentinel for `accuracy`
+# and left it in place here, so one record reported the accuracy honestly as
+# `None` and the loss as `0.0` — a PERFECT score — for a model that was never
+# evaluated at all. Do NOT restore `DEFAULT_METRIC_VALUE` on a failure branch to
+# keep the column float-typed; read `status` before reading the number.
+# See decisions.md D-003.
+LOSS_UNAVAILABLE: None = None
+
 #: Keras metric classes that measure classification accuracy. Resolution is by
 #: CLASS first because Keras 3 reports the aggregated compiled metric under the
 #: name ``compile_metrics``, which no substring rule over ``'acc'`` can match.
@@ -243,7 +252,12 @@ JSON_INDENT: int = 2
 # different function of the same spectrum, not a rescaling of the old one, and
 # `has_trap`, `num_rand_spikes`, `trap_severity` and `trap_severity_label` move
 # with it.
-RESULTS_SCHEMA_VERSION: int = 3
+# Bumped 3 -> 4 by plan-2026-09-02T062406-e2aa52ef/D-003: `loss` is now `null`
+# rather than `0.0` for a model whose evaluation failed, and `weight_stats[m][w]`
+# carries `status`/`degenerate_fields` with substituted rather than NaN moments.
+# An artifact written before the bump reports an unevaluated model's loss as a
+# perfect 0.0, so the two cannot be compared without reading this stamp.
+RESULTS_SCHEMA_VERSION: int = 4
 
 
 # ---------------------------------------------------------------------
@@ -760,10 +774,12 @@ class ModelAnalyzer:
                 except (ValueError, TypeError, RuntimeError) as eval_error:
                     logger.warning(f"Model evaluation failed for {model_name}: {eval_error}")
                     self.results.model_metrics[model_name] = {
-                        'loss': DEFAULT_METRIC_VALUE,
-                        # DECISION plan-2026-09-01T225724-e79ad4bd/D-036
+                        # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 and
+                        # plan-2026-09-02T062406-e2aa52ef/D-003
                         # None, not 0.0 — a failed evaluation must not be
-                        # readable as "this model scored zero". See D-036.
+                        # readable as "this model scored zero", nor as a
+                        # flawless loss. See D-036 and D-003.
+                        'loss': LOSS_UNAVAILABLE,
                         'accuracy': ACCURACY_UNAVAILABLE,
                         CACHE_KEY_STATUS: STATUS_EVALUATION_FAILED,
                         CACHE_KEY_ERROR: str(eval_error)
@@ -797,8 +813,9 @@ class ModelAnalyzer:
             except Exception as e:
                 logger.warning(f"Could not evaluate model {model_name}: {e}", exc_info=True)
                 self.results.model_metrics[model_name] = {
-                    # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 — None, not 0.0.
-                    'loss': DEFAULT_METRIC_VALUE, 'accuracy': ACCURACY_UNAVAILABLE,
+                    # DECISION plan-2026-09-01T225724-e79ad4bd/D-036 and
+                    # plan-2026-09-02T062406-e2aa52ef/D-003 — None, not 0.0.
+                    'loss': LOSS_UNAVAILABLE, 'accuracy': ACCURACY_UNAVAILABLE,
                     CACHE_KEY_STATUS: STATUS_ERROR, CACHE_KEY_ERROR: str(e)
                 }
 
@@ -1063,7 +1080,8 @@ class ModelAnalyzer:
                 # status='success' (measured: 0.0 against a real 0.2750000).
                 # See decisions.md D-036.
                 'accuracy': metrics.get('accuracy', ACCURACY_UNAVAILABLE),
-                'loss': metrics.get('loss', DEFAULT_METRIC_VALUE),
+                # DECISION plan-2026-09-02T062406-e2aa52ef/D-003 — None, not 0.0.
+                'loss': metrics.get('loss', LOSS_UNAVAILABLE),
                 CACHE_KEY_STATUS: metrics.get(CACHE_KEY_STATUS, STATUS_UNKNOWN)
             }
 

@@ -1318,3 +1318,101 @@ class TestSavedResultsCarryASchemaStamp:
         # reader of an old artifact can reconstruct what they used to have.
         assert "per_class_conditional_top1_ece" in calibration
         assert len(calibration["per_class_ece"]) == N_CLASSES
+
+
+# ---------------------------------------------------------------------
+# A failed evaluation must not report `loss: 0.0` -- a perfect model
+# ---------------------------------------------------------------------
+
+class TestReportedLossIsNotASentinel:
+    """`loss = 0.0` for a model that was never evaluated reads as PERFECT.
+
+    This is the same sentinel class D-036 removed for `accuracy`, left in place
+    for `loss`: `model_analyzer.py` wrote `DEFAULT_METRIC_VALUE` (0.0) on both
+    failure branches. MEASURED at HEAD with a model whose compiled metric
+    promotes a Python `str` (`keras.ops.divide(y_pred, "mean")`, which raises
+    `dtype='string' is not a valid dtype for Keras type promotion`):
+    `{'loss': 0.0, 'accuracy': None, 'status': 'evaluation_failed'}` -- so the
+    same record reported the accuracy honestly and the loss as a flawless score.
+    """
+
+    @staticmethod
+    def _string_promoting_model(name: str) -> keras.Model:
+        """A model whose METRIC (not its data) reaches a promoting op with a str.
+
+        Data-borne string routes are all pre-empted by Keras 3.8 with a different
+        error, because the array adapter standardizes dtypes and `Loss.__call__`
+        casts before any metric op runs. The string can only arrive from
+        model-side code that runs under `evaluate` and not under `predict`.
+        """
+
+        class _StrPromoMetric(keras.metrics.Metric):
+            def __init__(self, **kwargs):
+                super().__init__(name="str_promo", **kwargs)
+                self.mode = "mean"  # a bare Python str
+                self.total = self.add_weight(name="total", initializer="zeros")
+
+            def update_state(self, y_true, y_pred, sample_weight=None):
+                self.total.assign_add(
+                    keras.ops.mean(keras.ops.divide(y_pred, self.mode)))
+
+            def result(self):
+                return self.total
+
+        model = _build_classifier(name, seed=61)
+        model.compile(loss="sparse_categorical_crossentropy",
+                      metrics=[_StrPromoMetric()])
+        return model
+
+    def test_the_probe_really_hits_the_string_promotion_branch(
+            self, tmp_path, probe_data):
+        """Anti-vacuity: pin the mechanism, and that `predict` still succeeds."""
+        models = {"s": self._string_promoting_model("s")}
+        _, analyzer = _performance(tmp_path, probe_data, models)
+
+        raw = analyzer.results.model_metrics["s"]
+        assert raw["status"] == "evaluation_failed", raw
+        assert "dtype='string'" in raw["error"], raw["error"]
+        # The diagnostic signature: predict works, evaluate does not.
+        assert analyzer._prediction_cache["s"]["predictions"] is not None
+
+    def test_a_failed_evaluation_reports_loss_none_not_zero(
+            self, tmp_path, probe_data):
+        models = {"s": self._string_promoting_model("s")}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+
+        raw = analyzer.results.model_metrics["s"]
+        assert raw["loss"] is None, (
+            f"loss reported as {raw['loss']!r} for a model that never evaluated; "
+            "0.0 is a perfect score, not an absence"
+        )
+        assert performance["s"]["loss"] is None, performance["s"]
+
+    def test_an_uncompiled_model_also_reports_loss_none(self, tmp_path, probe_data):
+        """The OUTER failure branch, and the invariant that `analyze()` survives."""
+        models = {"u": _build_classifier("u2", seed=62),
+                  "ok": _build_compiled_classifier("ok", seed=63)}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+
+        assert analyzer.results.model_metrics["u"]["loss"] is None
+        assert performance["u"]["loss"] is None
+        # Invariant: one model failing must not cost the other its results.
+        assert performance["ok"]["loss"] is not None
+        assert performance["ok"]["loss"] > 0.0
+
+    def test_a_successful_model_still_reports_a_real_loss(
+            self, tmp_path, probe_data):
+        """Anti-vacuity: the fix must not turn every loss into None."""
+        models = {"g": _build_compiled_classifier("g", seed=64)}
+        performance, analyzer = _performance(tmp_path, probe_data, models)
+        assert analyzer.results.model_metrics["g"]["status"] == "success"
+        assert performance["g"]["loss"] > 0.0
+
+    def test_the_schema_version_was_bumped_for_the_loss_change(self):
+        """A published VALUE changed meaning, so the stamp must move with it."""
+        from dl_techniques.analyzer.model_analyzer import RESULTS_SCHEMA_VERSION
+
+        assert RESULTS_SCHEMA_VERSION >= 4, (
+            "`loss` changed from 0.0 to null for an unevaluated model — an "
+            "artifact written before and after this compares silently"
+        )
