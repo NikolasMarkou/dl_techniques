@@ -292,13 +292,23 @@ in-code anchor stating that the obvious "fix" is wrong. At the published `in_cha
 leaves one epsilon channel unguided. The alternative is not more correct; it is a *different* model
 at sampling time, and one that reproduces none of the published `cfg_scale` numbers.
 
-**Honest status of the guard.** As of step 8 this divergence is **NOT YET PINNED**: injecting
-`model_out[..., :self.in_channels]` was measured **INERT against the whole package suite — 0 failed /
-44 passed** at step 6. It is reported as inert rather than credited. The dedicated guard,
-`test_the_cfg_guidance_covers_only_three_channels.py`, is step 10 of the plan and must be proven RED
-there. Until it lands, the only thing exercising this path is
-`test_dit_diffusion.py::TestClassifierFreeGuidanceEndToEnd`, which proves the guided loop *runs* and
-nothing about the split.
+**Status of the guard: PINNED as of step 10.**
+`tests/test_models/test_dit/test_the_cfg_guidance_covers_only_three_channels.py` reads **6 failed /
+9 passed** against the injection `model_out[..., :self.in_channels]`.
+
+That took a redesign, and the reason is worth recording. At step 6 the same injection measured
+**INERT — 0 failed / 44 passed** against the whole package suite, because the obvious probe compares
+the two output *halves* in the guided channels, and both slicings make those halves equal. The
+discriminator is the **ungoverned remainder**: at `in_channels = 4`, channel 3 is passed through
+untouched, so its first half is the raw *conditional* prediction and its second half the raw
+*unconditional* one — and under the `in_channels` slicing those two become bit-identical. The guard
+therefore asserts that channel 3's halves DIFFER and that `out[..., 3:]` is bit-identical to the raw
+model output at `atol=0`, on a model whose zero-initialised weights have been replaced (a fresh DiT
+emits exactly `0.0`, which collapses the whole discriminator). One arm,
+`test_at_in_channels_three_the_two_slicings_coincide`, stays green by design: at `in_channels = 3`
+the two slicings *are* the same slicing, and stating that stops a future reader from
+"simplifying" the guard onto a 3-channel model and silently losing the claim. See decisions.md
+D-020.
 
 ### 4.12 `DiffusionConfig` delegates the schedule's legality instead of encoding a threshold — **D-010**
 

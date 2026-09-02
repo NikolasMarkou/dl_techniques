@@ -94,6 +94,33 @@ README_PARAMETER_TABLE = {
 }
 
 
+#: The plan directory whose ``decisions.md`` is the source of truth for which
+#: ``D-NNN`` ids exist. Derived from the repo root, so the test does not care
+#: where pytest was invoked from.
+PLAN_DECISIONS = (
+    PACKAGE_DIR.parents[4]
+    / "plans"
+    / "plan-2026-09-02T170923-1285ed83"
+    / "decisions.md"
+)
+
+
+def _recorded_decision_ids() -> set:
+    """The ``D-NNN`` ids the plan's ``decisions.md`` actually records.
+
+    Interface contract: reads the file, matches only headings (``## D-NNN``), and
+    drops the schema example's placeholder. Returns a set of ``"D-NNN"`` strings.
+    Raises if the file is missing -- a silently empty set would make every
+    consumer vacuous.
+    """
+    if not PLAN_DECISIONS.is_file():
+        raise AssertionError(f"plan decisions.md not found at {PLAN_DECISIONS}")
+    text = PLAN_DECISIONS.read_text()
+    ids = set(re.findall(r"^## (D-\d{3})\b", text, flags=re.MULTILINE))
+    assert ids, "decisions.md records no D-NNN headings -- the probe is broken"
+    return ids
+
+
 def _module_source_paths() -> List[Path]:
     return sorted(
         p for p in PACKAGE_DIR.glob("*.py") if p.name != "__pycache__"
@@ -390,14 +417,28 @@ class TestThePortNotesExist:
             assert heading in text, f"PORT_NOTES.md is missing '{heading}'"
 
     def test_every_cited_decision_exists_in_the_plan(self) -> None:
-        """A ``D-NNN`` reference that points at nothing is worse than none."""
+        """A ``D-NNN`` reference that points at nothing is worse than none.
+
+        The recorded set is READ from the plan's ``decisions.md``, never pasted.
+        Step 8's first version hard-coded ``D-001..D-018`` and went false the
+        moment step 10 appended ``D-020`` -- a pinned population with no source
+        of truth is a defect waiting for its own commit.
+        """
+        recorded = _recorded_decision_ids()
+        assert len(recorded) >= 18, recorded
+
         text = (PACKAGE_DIR / "PORT_NOTES.md").read_text()
-        cited = sorted(set(re.findall(r"\bD-(\d{3})\b", text)))
+        cited = sorted(set(re.findall(r"\bD-\d{3}\b", text)))
         assert cited, "PORT_NOTES.md §4 cites no decisions at all"
-        # The plan recorded D-001..D-018.
-        assert all(1 <= int(n) <= 18 for n in cited), (
-            f"PORT_NOTES.md cites a decision outside D-001..D-018: {cited}"
+        dangling = sorted(set(cited) - recorded)
+        assert not dangling, (
+            f"PORT_NOTES.md cites decisions the plan never recorded: {dangling}"
         )
+
+    def test_the_recorded_decision_probe_can_fail(self) -> None:
+        """Anti-vacuity: an id the plan does not have must be reported."""
+        recorded = _recorded_decision_ids()
+        assert "D-999" not in recorded
 
     def test_every_anchor_in_the_source_is_discussed(self) -> None:
         """Each ``# DECISION <plan-id>/D-NNN`` anchor under ``dit/`` must have
