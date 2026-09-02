@@ -1008,3 +1008,62 @@ class TestCalcMpSoftRankNeedsNoRandomization:
         evals = np.array([100.0, 10.0, 5.0, 1.0])
         assert compute_mp_softrank(evals, 0) == 1.0
         assert compute_mp_softrank(evals, 1) == pytest.approx(10.0 / 100.0)
+
+
+# =====================================================================
+# S5 — jensen_shannon_distance binned linearly over a heavy tail (step 17)
+# =====================================================================
+
+def _heavy_tailed_triple():
+    """A bulk plus three tails at increasing distance from a common base.
+
+    The bulk is IDENTICAL in all three spectra, so every difference the distance
+    can see lives in the tail.
+    """
+    rng = np.random.default_rng(0)
+    bulk = rng.uniform(0.001, 1.0, 500)
+    base = np.concatenate([bulk, np.array([1e3, 5e3, 2e4])])
+    near = np.concatenate([bulk, np.array([1e3, 1.2e3, 1.5e3])])
+    far = np.concatenate([bulk, np.array([1e5, 5e5, 2e6])])
+    return base, near, far
+
+
+class TestJensenShannonSeesTheTail:
+    """100 equal-width LINEAR bins put ~all mass in bin 0 and inverted the order."""
+
+    def test_a_more_distant_tail_scores_further(self):
+        base, near, far = _heavy_tailed_triple()
+
+        d_near = jensen_shannon_distance(base, near)
+        d_far = jensen_shannon_distance(base, far)
+
+        # Anti-vacuity: both distances must be real, non-degenerate numbers, so an
+        # all-zero or saturated metric cannot satisfy the ordering by accident.
+        assert 0.0 < d_near < 1.0 and 0.0 < d_far < 1.0
+
+        assert d_far > d_near, (
+            f"a tail 100x further away scored CLOSER: "
+            f"far={d_far!r} near={d_near!r}"
+        )
+
+    def test_the_bulk_is_not_the_only_thing_measured(self):
+        """Two spectra sharing a bulk but differing 1000x in the tail must differ."""
+        base, _, far = _heavy_tailed_triple()
+        assert jensen_shannon_distance(base, far) > 0.01
+
+    def test_identical_spectra_score_zero(self):
+        base, _, _ = _heavy_tailed_triple()
+        assert jensen_shannon_distance(base, base) == pytest.approx(0.0, abs=1e-12)
+
+    def test_degenerate_inputs_are_unchanged(self):
+        """The empty and single-value early exits keep their documented values."""
+        assert jensen_shannon_distance(np.array([]), np.array([1.0])) == 1.0
+        assert jensen_shannon_distance(np.array([1.0]), np.array([]))  == 1.0
+        assert jensen_shannon_distance(np.full(5, 2.0), np.full(5, 2.0)) == 0.0
+
+    def test_zero_and_negative_eigenvalues_do_not_produce_nan(self):
+        """`log10` of a zero eigenvalue is floored, not propagated as -inf."""
+        p = np.concatenate([np.zeros(10), np.linspace(0.1, 10.0, 90)])
+        q = np.linspace(0.1, 10.0, 100)
+        d = jensen_shannon_distance(p, q)
+        assert np.isfinite(d) and 0.0 <= d <= 1.0

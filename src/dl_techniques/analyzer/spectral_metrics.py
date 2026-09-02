@@ -1196,19 +1196,40 @@ def calculate_concentration_metrics(
 
 def jensen_shannon_distance(p: np.ndarray, q: np.ndarray) -> float:
     """
-    Calculate Jensen-Shannon distance between two distributions.
+    Calculate the Jensen-Shannon distance between two eigenvalue spectra.
+
+    The two spectra are histogrammed over a shared grid of LOG10-SPACED bins,
+    matching the log-log ESD plots the rest of this module produces.
+
+    Args:
+        p: First eigenvalue spectrum.
+        q: Second eigenvalue spectrum.
+
+    Returns:
+        Jensen-Shannon distance in [0, 1]. ``1.0`` for an empty input, ``0.0``
+        when both spectra collapse to a single shared value.
     """
     if len(p) == 0 or len(q) == 0:
         return 1.0
 
-    min_val = min(np.min(p), np.min(q))
-    max_val = max(np.max(p), np.max(q))
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-016
+    # Binning is in LOG10 space. Do NOT go back to equal-width LINEAR bins over
+    # [min, max]: an ESD's range is set by lambda_max, so ~all mass lands in bin 0
+    # and the tail — the only informative part — occupies near-empty bins. Measured
+    # ORDERING INVERSION under linear bins: a spectrum whose tail sits 100x further
+    # away scored CLOSER (0.045514) than a near-identical one (0.052498).
+    # See decisions.md D-016.
+    log_p = np.log10(np.maximum(np.asarray(p, dtype=float), SPECTRAL_EPSILON))
+    log_q = np.log10(np.maximum(np.asarray(q, dtype=float), SPECTRAL_EPSILON))
+
+    min_val = min(np.min(log_p), np.min(log_q))
+    max_val = max(np.max(log_p), np.max(log_q))
 
     if min_val == max_val:
         return 0.0
 
-    p_hist, _ = np.histogram(p, bins=SPECTRAL_DEFAULT_BINS, range=(min_val, max_val), density=True)
-    q_hist, _ = np.histogram(q, bins=SPECTRAL_DEFAULT_BINS, range=(min_val, max_val), density=True)
+    p_hist, _ = np.histogram(log_p, bins=SPECTRAL_DEFAULT_BINS, range=(min_val, max_val), density=True)
+    q_hist, _ = np.histogram(log_q, bins=SPECTRAL_DEFAULT_BINS, range=(min_val, max_val), density=True)
 
     # Normalize histograms to probability distributions
     p_prob = p_hist / (np.sum(p_hist) + SPECTRAL_EPSILON)
