@@ -1,62 +1,69 @@
 """
-An information-theoretic loss to promote robust generalization.
+Cross-entropy plus a per-sample confidence penalty, with an optional
+anti-collapse term.
 
-This loss function is designed to address the ML equivalent of Goodhart's Law,
-where a model, in optimizing a simple metric like cross-entropy, learns to
-exploit statistical shortcuts or "spurious correlations" in the training
-data rather than learning the underlying causal features. The objective is to
-create a more holistic training signal that encourages robustness and better
-generalization by combining the standard task loss with information-theoretic
-regularizers.
+This loss addresses the ML equivalent of Goodhart's Law: once a proxy metric
+becomes the training target, a model can drive that metric down by becoming
+confidently certain on flimsy evidence rather than by becoming right. A
+confident wrong prediction is cheap to produce and expensive to correct.
+Penalizing overconfidence in the proxy objective is the Goodhart concern this
+class is named for, and it is the whole of what the class does.
 
-Conceptual Overview:
-    The core idea is that a robust model should not only be accurate but also
-    well-calibrated (not overconfident) and information-efficient (it should
-    compress the input, retaining only the information essential for the task).
-    By explicitly penalizing overconfidence and information redundancy, this
-    loss function guides the model away from brittle, shortcut-based solutions
-    towards more generalizable representations.
+Scope, stated plainly:
+    `call(y_true, y_pred)` receives only the labels and the model's output.
+    It never sees the input `X`, and nothing here inspects, constrains or
+    measures the model's internal representation. No claim is made about
+    which input features the model relies on.
 
 Architectural Design:
-    The total loss is a weighted composite of three distinct components:
-    1.  Categorical Cross-Entropy: The standard supervised loss that drives
+    The total loss is a weighted composite of two components plus an optional
+    third:
+    1.  Categorical Cross-Entropy: the standard supervised loss that drives
         the model to make accurate predictions. This is the primary "task"
         component.
-    2.  Entropy Regularization: This term penalizes overconfident predictions
-        by maximizing the Shannon entropy of the model's output distribution for
-        each sample. A higher entropy corresponds to a less confident, more
-        uniform prediction. This discourages the model from collapsing its
-        predictions based on flimsy evidence from a single spurious feature.
-    3.  Mutual Information Regularization: Based on the Information Bottleneck
-        principle, this term penalizes the mutual information between the raw
-        input `X` and the model's prediction `Ŷ`. It encourages the model to
-        learn a compressed internal representation, forcing it to "forget"
-        information from the input that is not strictly necessary for the
-        prediction task. This compression is hypothesized to discard noisy or
-        spurious features, retaining only the robust, generalizable ones.
+    2.  Confidence penalty: penalizes overconfident predictions by maximizing
+        the Shannon entropy of the model's output distribution for each
+        sample. A higher entropy corresponds to a less confident, more uniform
+        prediction. This term is computed PER SAMPLE and rides inside the
+        returned `(batch_size,)` vector, so `sample_weight` weights it row by
+        row.
+    3.  Prior matching (optional, off by default): penalizes the batch-marginal
+        prediction distribution for drifting away from a class prior. This term
+        is a single batch-level scalar; see below and `get_config`.
 
 Mathematical Formulation:
-    The total loss is a linear combination of the three components:
-
-    L = L_CE - λ * H(p(Ŷ|X)) + β * I(X; Ŷ)
+    L = L_CE - lambda * H(p(Yhat|x)) + beta * KL(q || mean_p)
 
     Where:
     -   `L_CE` is the standard categorical cross-entropy loss.
-    -   `H(p(Ŷ|X))` is the conditional entropy of the prediction `Ŷ` given the
-        input `X`, averaged over the batch. The loss *maximizes* this entropy
-        (by minimizing its negative) to penalize confidence. `λ` is its weight.
-    -   `I(X; Ŷ)` is the mutual information between the input and the prediction.
-        The loss *minimizes* this term to encourage compression. `β` is its
-        weight. The mutual information is practically approximated over a
-        batch using the identity `I(X; Ŷ) = H(Ŷ) - H(Ŷ|X)`, where `H(Ŷ)` is the
-        entropy of the marginal prediction distribution (the average prediction
-        across the batch).
+    -   `H(p(Yhat|x))` is the entropy of the prediction for one sample. The
+        loss *maximizes* this entropy (by minimizing its negative) to penalize
+        confidence. `lambda` is `entropy_weight`.
+    -   `q` is `class_prior` (uniform when unset), `mean_p` is the mean
+        prediction over the batch, and `beta` is `prior_weight`. The term is
+        zero when the marginal matches the prior and grows without bound as
+        the marginal collapses onto a subset of the classes, so a collapsed
+        marginal scores strictly higher.
+
+    The confidence penalty is a uniform-divergence penalty up to an additive
+    constant. Writing `u` for the uniform distribution over `K` classes,
+    `KL(p || u) = -H(p) + log K`, so subtracting `lambda * H(p)` is the same
+    objective as adding `lambda * KL(p || u)` shifted by the constant
+    `lambda * log K`. Label smoothing, by contrast, adds `eps * KL(u || p)` up
+    to a constant, because cross-entropy against the smoothed target
+    `(1 - eps) * y + eps * u` contributes `eps * H(u, p)`. The two regularizers
+    therefore use the SAME divergence in OPPOSITE directions -- the
+    observation made in section 3 of Pereyra et al. (2017), and re-derived
+    here rather than transcribed.
+
+    Note that `KL(q || mean_p)` in component 3 is a divergence between
+    BATCH-MARGINAL distributions and is unrelated to the per-sample
+    `KL(p || u)` above.
 
 References:
-    -   Pereyra, G., et al. (2017). "Regularizing Neural Networks by Penalizing
-        Confident Output Distributions." (For the entropy regularization term).
-    -   Tishby, N., Pereira, F. C., & Bialek, W. (2000). "The Information
-        Bottleneck Method." (For the mutual information term).
+    -   Pereyra, G., Tucker, G., Chorowski, J., Kaiser, L., & Hinton, G.
+        (2017). "Regularizing Neural Networks by Penalizing Confident Output
+        Distributions." arXiv:1701.06548. (For the confidence penalty.)
 """
 
 import keras
@@ -70,14 +77,39 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.losses.goodhart_loss")
 class GoodhartAwareLoss(keras.losses.Loss):
     """
-    An information-theoretic loss combining cross-entropy with regularization.
+    Cross-entropy with a per-sample confidence penalty and an optional
+    anti-collapse term.
 
-    This loss function augments standard cross-entropy with a per-sample
-    confidence penalty and an optional, off-by-default anti-collapse term that
-    keeps the batch-marginal prediction distribution close to a class prior.
+    This loss augments standard categorical cross-entropy with a per-sample
+    confidence penalty in the sense of Pereyra et al. (2017), and with an
+    optional, off-by-default anti-collapse term that keeps the batch-marginal
+    prediction distribution close to a class prior.
 
     The total loss is calculated as:
     ``L = CE(y, y_pred) - entropy_weight * H(y_pred) + prior_weight * KL(prior || mean_p)``
+
+    **What this loss does NOT do.** ``call(y_true, y_pred)`` never receives the
+    input ``X``. Nothing here measures or constrains the model's internal
+    representation, and no claim is made about which input features the model
+    relies on. The name refers to the Goodhart failure this loss does address:
+    a model driving a proxy metric down by becoming confidently certain on
+    flimsy evidence.
+
+    **Targets must be one-hot** (or smoothed one-hot), shape
+    ``(batch_size, num_classes)`` and matching ``y_pred``. Integer class indices
+    of shape ``(batch_size,)`` or ``(batch_size, 1)`` are rejected by Keras with
+    a ``ValueError``; they are not silently broadcast. Use
+    ``keras.ops.one_hot`` first.
+
+    **The prior term is irreducibly batch-level.** At the default
+    ``prior_weight = 0.0`` the loss decomposes EXACTLY per row, so zeroing a
+    row's ``sample_weight`` is equivalent to dropping that row. At
+    ``prior_weight > 0`` it does NOT: ``mean_p`` is the mean prediction over
+    ALL rows in the batch regardless of ``sample_weight``, and the resulting
+    scalar is added to every entry of the returned vector. A ``w = 0`` row
+    still shifts the loss of every other row through the marginal, so zeroing a
+    weight is NOT the same as dropping the sample. This is a property of the
+    term, not a defect to be patched; see :meth:`get_config`.
     """
 
     def __init__(
@@ -145,7 +177,8 @@ class GoodhartAwareLoss(keras.losses.Loss):
         # DECISION plan-2026-09-02T081011-9b26b501/D-001
         # Do NOT silently drop or silently accept mi_weight: an archived config
         # would then deserialize into a DIFFERENT objective. Do not flip its
-        # sign and keep it either -- the term is not I(X;Y-hat) under any sign.
+        # sign and keep it either: the term is a function of the predictions
+        # alone, so it is not an input-prediction mutual information at any sign.
         if mi_weight is not None:
             raise ValueError(
                 "mi_weight has been removed from GoodhartAwareLoss "
