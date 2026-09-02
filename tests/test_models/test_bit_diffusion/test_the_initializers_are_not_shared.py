@@ -33,6 +33,10 @@ from dl_techniques.models.vision_language.bit_diffusion.model import (
     flattened_linear_xavier,
 )
 
+from dl_techniques.models.vision_language.bit_diffusion.token_decoder import (
+    SharedTokenDecoder,
+)
+
 from ._ditxa_helpers import batch, np_
 
 #: The one epsilon this package uses, everywhere, on purpose.
@@ -201,6 +205,63 @@ class TestEveryNormEpsilonIsOneEMinusSix:
                 f"RMSNorm('{layer.name}') carries a learnable gain; upstream is "
                 "elementwise_affine=False"
             )
+
+
+class TestTheCensusReachesTheClassesAddedAfterIt:
+    """The census above walks ``DiTXA``. ``SharedTokenDecoder`` is not in it.
+
+    Step 10 added a second ``keras.Model`` to this package, and a census whose
+    population is one model silently stops being a census the moment a second
+    one appears. This class closes that: the decoder is enumerated by the same
+    walk, and its result -- **zero normalization sub-layers** -- is asserted as
+    a positive fact rather than left as an absence nobody looked for.
+
+    The decoder does normalize, but with ``keras.ops.normalize``, a functional
+    op with no layer and no ``epsilon`` attribute to census. Its
+    ``normalize_epsilon`` is a DIFFERENT quantity from a norm layer's epsilon:
+    it is a lower bound on a token's L2 norm (D-025), not a variance floor, and
+    its shipped value is ``1e-12``. Asserting it were ``1e-6`` would be a
+    category error, so the claim made here is that it is not confusable with
+    one.
+    """
+
+    def test_the_decoder_contains_no_normalization_sub_layer(self):
+        decoder = SharedTokenDecoder(
+            vocab_size=11, hidden_dim=8, token_seq_len=4, token_emb_dim=4
+        )
+        decoder(np.zeros((2, 16), dtype="float32"))
+        norms = [
+            layer
+            for layer in _walk(decoder)
+            if hasattr(layer, "epsilon") and "Norm" in type(layer).__name__
+        ]
+        assert not norms, (
+            "SharedTokenDecoder grew a normalization sub-layer; it now belongs "
+            f"in the 1e-6 epsilon census above: {[l.name for l in norms]}"
+        )
+        # Anti-vacuity: the walk must actually be reaching the decoder's tree.
+        assert len(list(_walk(decoder))) > 1, "the walk found no sub-layers"
+        assert sum(1 for _ in _walk(decoder) if type(_).__name__ == "Dense") == 3
+
+    def test_the_decoder_normalize_epsilon_is_the_token_norm_floor(self):
+        """1e-12, and deliberately NOT the 1e-6 the census pins."""
+        decoder = SharedTokenDecoder(vocab_size=11)
+        assert decoder.normalize_epsilon == 1e-12
+        assert decoder.normalize_epsilon != EPSILON
+
+    def test_the_two_model_classes_are_the_whole_population(self):
+        """A third ``keras.Model`` in this package must redden this arm."""
+        import inspect
+
+        import dl_techniques.models.vision_language.bit_diffusion as package
+
+        model_classes = sorted(
+            name
+            for name in dir(package)
+            if inspect.isclass(getattr(package, name))
+            and issubclass(getattr(package, name), keras.Model)
+        )
+        assert model_classes == ["DiTXA", "SharedTokenDecoder"], model_classes
 
 
 class TestThePatchEmbedInitIsTheFlattenedLinearOne:
