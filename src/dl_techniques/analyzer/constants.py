@@ -89,6 +89,13 @@ class SmoothingMethod(str, Enum):
     DETX = 'detX'
     LAMBDA_MIN = 'lambda_min'
 
+# DECISION plan-2026-09-02T062406-e2aa52ef/D-002
+# WEIGHT_DEGENERATE and WEIGHT_NON_FINITE are two members on purpose. Do NOT
+# merge them into one "bad weights" flag and do NOT sanitize a non-finite weight
+# tensor into a plausible number: a zeros-initialised table is legal input whose
+# standardized moments are merely undefined, whereas a NaN in the tensor is a
+# corrupt model, and collapsing the two launders the corruption into a number a
+# reader will trust. See decisions.md D-002.
 class StatusCode(str, Enum):
     """Per-metric status codes shared by the spectral and weight analyzers.
 
