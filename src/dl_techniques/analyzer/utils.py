@@ -525,24 +525,36 @@ def recursively_get_layers(layer_or_model: Any) -> List[keras.layers.Layer]:
             queue = current_layer.layers + queue
             continue
 
-        # 2. Subclassed models: Check attributes
-        for attr_name in dir(current_layer):
+        # 2. Subclassed layers: check the INSTANCE ATTRIBUTES.
+        #
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-023
+        # Iterate `vars()`, never `dir()`. `dir()` returns 52 public names for a
+        # subclassed Layer and 96 for a subclassed Model, most of them PROPERTIES
+        # (`weights`, `variables`, `trainable_weights`, `losses`, `input`, `output`),
+        # so a `getattr` sweep over it evaluates every one of them - and `input` /
+        # `output` RAISE on a built layer, which the old blanket
+        # `except Exception: continue` silently swallowed. `vars()` reads the
+        # instance `__dict__` only: no property is touched, and the order is the
+        # attribute assignment order from `__init__`, which is deterministic across
+        # `keras.models.clone_model` (pinned by
+        # `test_the_walk_order_is_stable_across_clone_model`). That determinism is
+        # load-bearing: `model_analyzer.py` indexes `all_layers[layer_id]` on a
+        # CLONED model in `create_smoothed_model`. See decisions.md D-023.
+        found: List[keras.layers.Layer] = []
+        for attr_name, attr in list(vars(current_layer).items()):
             if attr_name.startswith("_"):
                 continue
-            try:
-                attr = getattr(current_layer, attr_name)
-                if isinstance(attr, (list, tuple)):
-                    layer_items = [item for item in attr if isinstance(item, keras.layers.Layer)]
-                    if layer_items:
-                        queue = layer_items + queue
-                elif isinstance(attr, dict):
-                    layer_items = [v for v in attr.values() if isinstance(v, keras.layers.Layer)]
-                    if layer_items:
-                        queue = layer_items + queue
-                elif isinstance(attr, keras.layers.Layer):
-                    queue.insert(0, attr)
-            except Exception:
-                continue
+            if isinstance(attr, keras.layers.Layer):
+                found.append(attr)
+            elif isinstance(attr, (list, tuple)):
+                found.extend(
+                    item for item in attr if isinstance(item, keras.layers.Layer))
+            elif isinstance(attr, dict):
+                found.extend(
+                    v for v in attr.values() if isinstance(v, keras.layers.Layer))
+
+        if found:
+            queue = found + queue
 
     # Filter for "leaf" layers
     primitive_layers = [

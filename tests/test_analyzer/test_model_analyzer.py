@@ -406,3 +406,122 @@ class TestJsonArtifactParseability:
         assert not offenders, (
             f"analysis_results.json contains bare non-JSON tokens: {offenders}"
         )
+
+
+# =====================================================================
+# P6 - the model walk must read attributes, not evaluate properties
+# =====================================================================
+
+_PROPERTY_HITS = []
+
+
+class PropertyProbeBlock(keras.layers.Layer):
+    """Declares `zeta, alpha, mid` and carries two hostile properties.
+
+    `recursively_get_layers` used to sweep `dir(current_layer)` and `getattr` every
+    public name inside a blanket `except Exception: continue`. A subclassed Layer
+    exposes 52 such names — including `weights`, `variables`, `trainable_weights`,
+    `losses`, `input` and `output`, all of which are properties — so the walk paid a
+    property evaluation per name and swallowed whatever raised.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.zeta = keras.layers.Dense(5, name="p6_zeta")
+        self.alpha = keras.layers.Dense(7, name="p6_alpha")
+        self.mid = keras.layers.Dense(6, name="p6_mid")
+
+    @property
+    def expensive(self):
+        _PROPERTY_HITS.append("expensive")
+        return 42
+
+    @property
+    def exploding(self):
+        _PROPERTY_HITS.append("exploding")
+        raise RuntimeError("this property must never be evaluated by the walk")
+
+    def call(self, inputs):
+        return self.zeta(self.mid(self.alpha(inputs)))
+
+
+# Declaration order, read off `PropertyProbeBlock.__init__` above.
+_DECLARATION_ORDER = ["p6_zeta", "p6_alpha", "p6_mid"]
+
+
+def _build_property_probe_model(name: str = "p6_model") -> keras.Model:
+    inputs = keras.Input(shape=(N_FEATURES,), name=f"{name}_in")
+    return keras.Model(inputs, PropertyProbeBlock(name="p6_blk")(inputs), name=name)
+
+
+class TestModelWalkDoesNotEvaluateProperties:
+    """Guards for `dl_techniques.analyzer.utils.recursively_get_layers`.
+
+    They live in this module because `ModelAnalyzer.create_smoothed_model` indexes
+    `all_layers[layer_id]` on a CLONED model, which is what makes the walk's order
+    load-bearing.
+    """
+
+    def setup_method(self):
+        _PROPERTY_HITS.clear()
+
+    def test_no_property_is_evaluated(self):
+        from dl_techniques.analyzer.utils import recursively_get_layers
+
+        model = _build_property_probe_model()
+        _PROPERTY_HITS.clear()
+        recursively_get_layers(model)
+
+        assert _PROPERTY_HITS == [], (
+            f"the walk evaluated {len(_PROPERTY_HITS)} properties: {_PROPERTY_HITS}"
+        )
+
+    def test_the_hostile_properties_are_reachable(self):
+        """Anti-vacuity: the probe's properties really do fire when touched."""
+        model = _build_property_probe_model()
+        block = [l for l in model.layers if l.name == "p6_blk"][0]
+        _PROPERTY_HITS.clear()
+
+        assert block.expensive == 42
+        with pytest.raises(RuntimeError):
+            _ = block.exploding
+        assert _PROPERTY_HITS == ["expensive", "exploding"]
+
+    def test_sublayers_come_back_in_declaration_order(self):
+        from dl_techniques.analyzer.utils import recursively_get_layers
+
+        model = _build_property_probe_model()
+        names = [l.name for l in recursively_get_layers(model)]
+        got = [n for n in names if n in _DECLARATION_ORDER]
+
+        # Anti-vacuity: the probe is non-degenerate — reverse-alphabetical (what the
+        # `dir()` sweep produced) is a DIFFERENT order from declaration order.
+        assert sorted(_DECLARATION_ORDER, reverse=True) != _DECLARATION_ORDER
+        assert got == _DECLARATION_ORDER, (
+            f"walk order for the sublayers is {got}, declaration order is "
+            f"{_DECLARATION_ORDER}"
+        )
+
+    def test_the_walk_order_is_stable_across_clone_model(self):
+        """MEASURED, not assumed: `create_smoothed_model` indexes a clone by position.
+
+        This is a PIN, not RED evidence — it passed before the fix too. It exists
+        because `model_analyzer.py:1004-1005` does `all_layers[layer_id]` on a model
+        produced by `keras.models.clone_model`, so a walk whose order differed
+        between original and clone would rewrite the wrong layer's weights.
+        """
+        from dl_techniques.analyzer.utils import recursively_get_layers
+
+        model = _build_property_probe_model()
+        clone = keras.models.clone_model(model)
+
+        original = [l.name for l in recursively_get_layers(model)
+                    if l.name in _DECLARATION_ORDER]
+        cloned = [l.name for l in recursively_get_layers(clone)
+                  if l.name in _DECLARATION_ORDER]
+
+        assert original, "the probe produced no walkable sublayers"
+        assert cloned == original, (
+            f"clone walk order {cloned} differs from original {original}; "
+            f"create_smoothed_model would write the wrong layer's weights"
+        )
