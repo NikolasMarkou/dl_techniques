@@ -96,7 +96,7 @@ Written into `output_dir`:
 | `summary_dashboard.png` | always |
 | `weight_learning_journey.png` | `analyze_weights` |
 | `confidence_calibration_analysis.png` | `analyze_calibration` |
-| `information_flow_analysis.png` | `analyze_information_flow` — **currently never produced, see below** |
+| `information_flow_analysis.png` | `analyze_information_flow` |
 | `training_dynamics.png` | `analyze_training_dynamics` (needs `training_history`) |
 | `spectral_summary.png`, `spectral_funnel_diagram.png` | `analyze_spectral` |
 | `spectral_plots/*.png` | `spectral_per_layer_diagnostics=True` |
@@ -120,14 +120,30 @@ Written into `output_dir`:
 
 ### Information flow (`results.information_flow`, per layer)
 
-> **Broken.** `information_flow_analyzer.py` captures activations with
-> `layer.register_forward_hook(...)`, which is a PyTorch API — `keras.layers.Layer` has no such
-> method. Every model raises `AttributeError`, the analyzer catches and logs it, and
-> `results.information_flow` comes back empty with no
-> `information_flow_analysis.png`. Set `analyze_information_flow=False` until it is fixed.
+Activations are captured by temporarily assigning a recording wrapper to `layer.call` on each
+selected layer *instance*, running one eager `model(x_sample, training=False)` pass, and restoring
+every wrapper in a `finally` block, so the model is left exactly as it was handed in
+(`analyzers/information_flow_analyzer.py`). Two properties of that mechanism are load-bearing: the
+pass must be **eager** (under `model.predict(...)` Keras traces the forward function and the wrapper
+is handed a `SymbolicTensor`, so nothing concrete is captured), and no functional feature-extractor
+sub-model is sliced (that needs `model.input` / `layer.output`, which a subclassed model does not
+have).
 
-The metrics it is meant to produce, per layer: `mean_activation`, `std_activation`, `sparsity`,
-`positive_ratio`, `effective_rank`.
+Per layer: `layer_type`, `output_shape`, `mean_activation`, `std_activation`, `sparsity`,
+`positive_ratio`, `effective_rank`, `capture_index`.
+
+- `results.information_flow[model][layer]` is keyed in **forward-pass invocation order**, recorded
+  at capture time; `capture_index` carries that position so the order survives a dict rebuild. The
+  static layer walk is *not* depth order — sort on `capture_index`, never on iteration order.
+- The capture batch is `min(config.n_samples, 200)` samples, further capped so the retained
+  activations fit `config.memory_limit_mb` (default 2048; `None` is unbounded). A capped run logs a
+  warning naming the old and new batch size.
+- A weight-shared layer keeps the tensor from its **last** invocation, and its `capture_index` is
+  that last position.
+
+Reference command: `pytest tests/test_analyzer/test_analyzer_docs.py -k information_flow` runs the
+analysis end to end and asserts both the populated dict and the written PNG, so this section cannot
+go stale silently.
 
 ### Training dynamics (`results.training_metrics`)
 
