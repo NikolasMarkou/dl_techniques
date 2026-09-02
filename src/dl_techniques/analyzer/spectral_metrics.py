@@ -98,7 +98,9 @@ def compute_eigenvalues(
         N: int,
         M: int,
         n_comp: int,
-        normalize: bool = False
+        normalize: bool = False,
+        *,
+        max_evals: Optional[int] = None
 ) -> Tuple[np.ndarray, float, float, float, bool]:
     """
     Compute the eigenvalues for all weight matrices combined.
@@ -109,6 +111,11 @@ def compute_eigenvalues(
         M: Minimum dimension of matrices.
         n_comp: Number of components to consider.
         normalize: Whether to normalize eigenvalues by N.
+        max_evals: Dimension above which the truncated (``svds``) path is taken.
+            Keyword-only and defaulted to ``SPECTRAL_DEFAULT_MAX_EVALS`` so the
+            positional signature is unchanged; the analyzer passes
+            ``config.spectral_max_evals`` so raising the documented knob really
+            does raise the truncation point.
 
     Returns:
         Tuple containing:
@@ -120,6 +127,14 @@ def compute_eigenvalues(
             - ``spectrum_truncated``: True when at least one matrix returned
               fewer singular values than ``min(W.shape)``.
     """
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-027: the truncation point is a
+    # PARAMETER, not the module constant. `config.spectral_max_evals` is documented
+    # as controlling it, but this function read `SPECTRAL_DEFAULT_MAX_EVALS`
+    # directly, so raising the config value could not raise the truncation point.
+    # Do NOT re-inline the constant here. See decisions.md D-027.
+    if max_evals is None:
+        max_evals = SPECTRAL_DEFAULT_MAX_EVALS
+
     all_evals = []
     max_sv = 0.0
     min_sv = float('inf')
@@ -141,7 +156,7 @@ def compute_eigenvalues(
         W = W.astype(float)
 
         # For large matrices, use truncated SVD
-        if (n_comp < M) or (M > SPECTRAL_DEFAULT_MAX_EVALS):
+        if (n_comp < M) or (M > max_evals):
             try:
                 # Use scipy's sparse SVD for large matrices
                 # k must be strictly less than min(W.shape) for svds
@@ -214,7 +229,9 @@ def compute_eigenvalues(
 
 def fit_powerlaw(
         evals: np.ndarray,
-        xmin: Optional[float] = None
+        xmin: Optional[float] = None,
+        *,
+        min_evals: Optional[int] = None
 ) -> Tuple[float, float, float, float, int, str, str]:
     """
     Fit eigenvalues to a power-law distribution using a robust xmin search.
@@ -241,6 +258,11 @@ def fit_powerlaw(
     Args:
         evals: Array of eigenvalues to fit.
         xmin: Not used for fitting, as the optimal xmin is found automatically.
+        min_evals: Minimum spectrum length below which the fit is refused.
+            Keyword-only and defaulted to ``SPECTRAL_DEFAULT_MIN_EVALS`` so the
+            three POSITIONAL production call sites in ``ww_pgd_optimizer`` are
+            untouched; the analyzer passes ``config.spectral_min_evals`` so a
+            layer its own admission gate accepts is not then refused here.
 
     Returns:
         Tuple containing (alpha, xmin, D, sigma, num_pl_spikes, status, warning).
@@ -249,7 +271,14 @@ def fit_powerlaw(
     alpha, D, sigma, optimal_xmin, num_pl_spikes = -1.0, -1.0, -1.0, -1.0, -1
     status, warning = "failed", ""
 
-    if evals is None or len(evals) < SPECTRAL_DEFAULT_MIN_EVALS:
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-027: this floor is a PARAMETER.
+    # `spectral_analyzer.py` admits a layer on `config.spectral_min_evals`, so with
+    # the constant hard-coded here a lowered config value admitted layers that this
+    # function then refused with status='failed'. See decisions.md D-027.
+    if min_evals is None:
+        min_evals = SPECTRAL_DEFAULT_MIN_EVALS
+
+    if evals is None or len(evals) < min_evals:
         logger.debug("Not enough eigenvalues for power-law fitting")
         return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, warning
 

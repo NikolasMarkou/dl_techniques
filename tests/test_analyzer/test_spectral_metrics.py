@@ -1661,3 +1661,97 @@ class TestOnlyOneFullSvdPerLayer:
         evs, vecs = get_top_eigenvectors(w, k=8)
         assert vecs.shape == (12, 8)
         np.testing.assert_allclose(evs, ref_s[:8] ** 2, rtol=1e-9)
+
+
+class TestConfigEvalBoundsReachTheKernels:
+    """The two eval-count bounds are documented as config, but were module constants.
+
+    `spectral_analyzer.py` gated layer admission on `config.spectral_min_evals` /
+    `config.spectral_max_evals`, while the kernels read `SPECTRAL_DEFAULT_MIN_EVALS`
+    (=10) and `SPECTRAL_DEFAULT_MAX_EVALS` (=15000) from `constants.py`. MEASURED on
+    unfixed HEAD: with `spectral_min_evals=5` a Dense(20 -> 9) layer IS admitted to
+    the details frame and then comes back `alpha = -1.0, status = 'failed'`; and
+    `compute_eigenvalues([12x12], 12, 12, 12)` returns 12 eigenvalues with
+    `spectrum_truncated = False` no matter what the config says.
+    """
+
+    def test_fit_powerlaw_honours_an_explicit_min_evals(self):
+        rng = np.random.default_rng(29)
+        evals = np.sort(rng.pareto(2.5, size=9) + 1.0)[::-1]
+
+        # Default floor (10) rejects a 9-eigenvalue spectrum outright.
+        assert fit_powerlaw(evals)[5] == "failed"
+
+        alpha, xmin, D, sigma, n_spikes, status, _ = fit_powerlaw(
+            evals, min_evals=5)
+        assert status == "success", (
+            f"fit_powerlaw(min_evals=5) on {len(evals)} eigenvalues returned "
+            f"status={status!r}, alpha={alpha}"
+        )
+        assert alpha > 1.0
+
+    def test_a_layer_admitted_by_the_config_floor_is_actually_fitted(self):
+        import keras
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        inputs = keras.Input(shape=(20,), name="mn_in")
+        model = keras.Model(
+            inputs, keras.layers.Dense(9, name="mn_d9")(inputs), name="mnm")
+        config = AnalysisConfig(spectral_min_evals=5)
+
+        analyzer = SpectralAnalyzer(models={"mnm": model}, config=config)
+        details, _, _, _, _ = analyzer._analyze_single_model(model)
+
+        row = details[details["name"] == "mn_d9"].iloc[0]
+        # Anti-vacuity: the layer really was admitted by the config gate, so the
+        # assertion below cannot pass by the row being absent.
+        assert int(row["M"]) == 9 and 9 < 10
+        assert row["status"] == "success", (
+            f"layer admitted at spectral_min_evals=5 (M={row['M']}) came back "
+            f"status={row['status']!r}, alpha={row['alpha']}"
+        )
+
+    def test_compute_eigenvalues_honours_an_explicit_max_evals(self):
+        rng = np.random.default_rng(292)
+        w = rng.normal(size=(12, 12)).astype(np.float32)
+
+        # Default cap (15000): the full spectrum comes back.
+        full = compute_eigenvalues([w], 12, 12, 12)
+        assert len(full[0]) == 12 and full[4] is False
+
+        evals, _sv_max, _sv_min, _rank_loss, truncated = compute_eigenvalues(
+            [w], 12, 12, 12, max_evals=8)
+        assert truncated is True, (
+            f"max_evals=8 on a 12x12 matrix returned {len(evals)} eigenvalues "
+            f"with spectrum_truncated={truncated}"
+        )
+        assert len(evals) < 12
+
+    def test_the_analyzer_threads_the_configured_max_evals(self):
+        from unittest import mock
+        import keras
+        from dl_techniques.analyzer import spectral_metrics as sm
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        inputs = keras.Input(shape=(48,), name="mx_in")
+        model = keras.Model(
+            inputs, keras.layers.Dense(40, name="mx_d")(inputs), name="mxm")
+        config = AnalysisConfig(spectral_max_evals=12345)
+
+        seen = []
+        real = sm.compute_eigenvalues
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("max_evals"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(sm, "compute_eigenvalues", side_effect=spy):
+            SpectralAnalyzer(
+                models={"mxm": model}, config=config)._analyze_single_model(model)
+
+        assert seen, "compute_eigenvalues was never called"
+        assert set(seen) == {12345}, (
+            f"compute_eigenvalues saw max_evals={seen}, not the configured 12345"
+        )

@@ -257,10 +257,19 @@ class SpectralAnalyzer(BaseAnalyzer):
             n_comp = M
             (evals, sv_max, sv_min, rank_loss,
              spectrum_truncated) = spectral_metrics.compute_eigenvalues(
-                Wmats, N, M, n_comp)
+                Wmats, N, M, n_comp, max_evals=self.config.spectral_max_evals)
             esds[layer_id] = evals
 
-            alpha, xmin, D, sigma, num_pl_spikes, status, warning = spectral_metrics.fit_powerlaw(evals)
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-027
+            # The eval-count bounds this analyzer admits layers on (`_get_layer_
+            # details` gates M against `spectral_min_evals` / `spectral_max_evals`)
+            # are the SAME bounds the kernels must apply. Do NOT drop these keyword
+            # arguments: without them the kernels fall back to `SPECTRAL_DEFAULT_
+            # MIN_EVALS` (10) and `SPECTRAL_DEFAULT_MAX_EVALS` (15000), and a
+            # lowered `spectral_min_evals` admits layers that `fit_powerlaw` then
+            # refuses with status='failed'. See decisions.md D-027.
+            alpha, xmin, D, sigma, num_pl_spikes, status, warning = spectral_metrics.fit_powerlaw(
+                evals, min_evals=self.config.spectral_min_evals)
 
             # DECISION plan-2026-09-01T225724-e79ad4bd/D-019
             # On a truncated spectrum the small singular values were never computed,
@@ -320,7 +329,8 @@ class SpectralAnalyzer(BaseAnalyzer):
                         for W in Wmats
                     ]
                     rand_evals, rand_sv_max, _, _, _ = spectral_metrics.compute_eigenvalues(
-                        rand_Wmats, N, M, n_comp)
+                        rand_Wmats, N, M, n_comp,
+                        max_evals=self.config.spectral_max_evals)
                     if first_rand_evals is None:
                         first_rand_evals = rand_evals
 
