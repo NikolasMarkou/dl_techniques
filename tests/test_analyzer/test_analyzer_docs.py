@@ -16,6 +16,8 @@ Scope, one class per documented claim:
   ``TestGetSummaryStatisticsIsKeyedByCategory``, ``TestMpSoftrankIsDocumentedAsARealMetric``,
   ``TestPlPvalueSemanticsAreDocumented``, ``TestTheDocumentedSpectralColumnsMatchTheFrame``
   -- the output table, the API table and the spectral column census (plan step 37).
+* ``TestTheModuleDocstringResolves`` -- every import path, attribute and call keyword the
+  ``__init__`` docstring and the README quick start demonstrate (plan step 38).
 """
 
 import ast
@@ -703,4 +705,241 @@ class TestTheDocumentedSpectralColumnsMatchTheFrame:
         missing = sorted(tabulated - produced)
         assert not missing, (
             f"the README tabulates spectral columns the frame does not carry: {missing}"
+        )
+
+
+# ---------------------------------------------------------------------
+# D3 -- the __init__ docstring advertised two nonexistent names
+# ---------------------------------------------------------------------
+
+def _fenced_python_blocks(text: str) -> list[str]:
+    """Return every fenced ```python block in ``text``.
+
+    Args:
+        text: Markdown or a docstring containing fenced code blocks.
+
+    Returns:
+        list[str]: The block bodies, in order of appearance.
+    """
+    import textwrap
+
+    return [
+        textwrap.dedent(block)
+        for block in re.findall(r"```python\n(.*?)```", text, flags=re.DOTALL)
+    ]
+
+
+def _check_example_block(block: str, seeds: dict) -> list[str]:
+    """Resolve every import, attribute and call signature used in one example.
+
+    This is the executable half of "the docs are true": a grep proves a line exists,
+    while importing the module, ``hasattr``-ing the attribute and binding the call's
+    keywords against ``inspect.signature`` proves the line would run. It is shared by
+    the ``__init__`` docstring guard and the README quick-start guard, so the two
+    cannot drift into checking different things.
+
+    Args:
+        block: One example's source text. Undefined free names are ignored, since an
+            example legitimately refers to the reader's own ``models`` / ``x_test``.
+        seeds: Names already known to the caller (e.g. classes it imported itself),
+            mapped to the object they denote.
+
+    Returns:
+        list[str]: Human-readable problems found; empty means the example resolves.
+    """
+    import importlib
+    import inspect
+
+    problems: list[str] = []
+    known = dict(seeds)
+
+    tree = ast.parse(block)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            try:
+                module = importlib.import_module(node.module)
+            except ImportError as exc:
+                problems.append(f"`from {node.module} import ...` fails: {exc}")
+                continue
+            for alias in node.names:
+                if not hasattr(module, alias.name):
+                    problems.append(f"{node.module} has no attribute {alias.name!r}")
+                else:
+                    known[alias.asname or alias.name] = getattr(module, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                try:
+                    known[alias.asname or alias.name] = importlib.import_module(alias.name)
+                except ImportError as exc:
+                    problems.append(f"`import {alias.name}` fails: {exc}")
+
+    # Bind simple `name = Known(...)` / `name = Known.method(...)` assignments so that
+    # later attribute use on the result is checkable.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            value = node.value
+            if isinstance(target, ast.Name) and isinstance(value, ast.Call):
+                func = value.func
+                if isinstance(func, ast.Name) and func.id in known:
+                    # `data = DataInput(...)` -- the value IS an instance of the class.
+                    known[target.id] = known[func.id]
+                elif (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id in known
+                ):
+                    # `results = analyzer.analyze(...)` -- bind the RETURN type, not the
+                    # owner. Binding the owner made `results.spectral_analysis` resolve
+                    # against ModelAnalyzer and produced a false positive.
+                    method = getattr(known[func.value.id], func.attr, None)
+                    returned = getattr(
+                        inspect.signature(method).return_annotation, "__name__", None
+                    ) if callable(method) else None
+                    if returned:
+                        resolved = getattr(
+                            importlib.import_module("dl_techniques.analyzer.data_types"),
+                            returned,
+                            None,
+                        )
+                        if resolved is not None:
+                            known[target.id] = resolved
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            owner = known.get(node.value.id)
+            if owner is not None and not hasattr(owner, node.attr):
+                problems.append(
+                    f"{node.value.id} ({owner!r}) has no attribute {node.attr!r}"
+                )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        target = None
+        if isinstance(func, ast.Name):
+            target = known.get(func.id)
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            owner = known.get(func.value.id)
+            if owner is not None:
+                target = getattr(owner, func.attr, None)
+        if target is None or not callable(target):
+            continue
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            continue
+        keywords = [kw.arg for kw in node.keywords if kw.arg is not None]
+        try:
+            signature.bind_partial(**{name: None for name in keywords})
+        except TypeError as exc:
+            problems.append(f"{target!r} does not accept {keywords}: {exc}")
+
+    return problems
+
+
+class TestTheModuleDocstringResolves:
+    """Every name the package docstring shows must exist at runtime.
+
+    Defect guarded (D3): the docstring's multi-input example read
+    ``from dl_techniques.utils.analyzer import DataInput`` (a module that does not
+    exist: measured ``ModuleNotFoundError``) and called
+    ``DataInput.from_multi_input([input1, input2], targets)``
+    (``hasattr`` measured ``False``). Both sat above the real imports, so
+    ``import dl_techniques.analyzer`` succeeded and nothing ever reddened. The repo has
+    a matching lesson: a doc-repair pass documented four unexported names as importable
+    and only a mechanical ``hasattr`` sweep caught it -- eyeballing passed twice.
+    """
+
+    def test_every_init_docstring_example_resolves(self):
+        blocks = _fenced_python_blocks(analyzer_pkg.__doc__ or "")
+        assert blocks, "the package docstring no longer carries a python example"
+
+        problems: list[str] = []
+        for block in blocks:
+            problems.extend(_check_example_block(block, seeds={}))
+        assert not problems, (
+            "the dl_techniques.analyzer module docstring shows names that do not "
+            f"resolve: {problems}"
+        )
+
+    def test_the_docstring_no_longer_names_the_phantom_module(self):
+        doc = analyzer_pkg.__doc__ or ""
+        example_text = "\n".join(_fenced_python_blocks(doc))
+        assert "dl_techniques.utils.analyzer import" not in example_text, (
+            "the docstring example still imports from dl_techniques.utils.analyzer, "
+            "which does not exist"
+        )
+        assert "DataInput.from_multi_input" not in example_text, (
+            "the docstring example still calls DataInput.from_multi_input, which "
+            "DataInput does not define"
+        )
+
+    def test_the_two_phantoms_really_are_phantoms(self):
+        """Anti-vacuity: the resolver above must be able to see these two failures."""
+        import importlib
+
+        from dl_techniques.analyzer.data_types import DataInput
+
+        assert not hasattr(DataInput, "from_multi_input"), (
+            "DataInput now HAS from_multi_input, so the docstring's old example was "
+            "not a phantom after all and this guard is measuring nothing"
+        )
+        with pytest.raises(ImportError):
+            importlib.import_module("dl_techniques.utils.analyzer")
+
+    def test_the_resolver_catches_the_original_defect(self):
+        """Anti-vacuity: feed the resolver the ORIGINAL example and require it to red.
+
+        A checker that reports "no problems" on everything would pass
+        `test_every_init_docstring_example_resolves` for the wrong reason.
+        """
+        original = (
+            "from dl_techniques.utils.analyzer import DataInput\n"
+            "data = DataInput.from_multi_input([input1, input2], targets)\n"
+        )
+        problems = _check_example_block(original, seeds={})
+        assert problems, "the example resolver did not flag the known-bad example"
+
+        # And it must see through one level of indirection, which is where a naive
+        # resolver goes vacuous: `results` is the RETURN of a method, not the analyzer.
+        indirect = (
+            "from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput\n"
+            "analyzer = ModelAnalyzer(models=models, config=AnalysisConfig(no_such_knob=1))\n"
+            "results = analyzer.analyze(DataInput(x_data=x, y_data=y))\n"
+            "print(results.no_such_field)\n"
+        )
+        found = _check_example_block(indirect, seeds={})
+        assert any("no_such_field" in problem for problem in found), (
+            f"the resolver did not follow analyze()'s return type: {found}"
+        )
+        assert any("no_such_knob" in problem for problem in found), (
+            f"the resolver did not check call keywords against the signature: {found}"
+        )
+
+    def test_the_docstring_shows_the_real_constructors(self):
+        doc = analyzer_pkg.__doc__ or ""
+        for constructor in ("DataInput.from_tuple", "DataInput.from_object"):
+            assert constructor in doc, (
+                f"the docstring does not show {constructor}, which is one of the two "
+                "helpers DataInput actually defines"
+            )
+
+    def test_every_exported_name_resolves(self):
+        """The ``__all__`` sweep: every advertised export must be importable."""
+        missing = [name for name in analyzer_pkg.__all__ if not hasattr(analyzer_pkg, name)]
+        assert not missing, f"__all__ advertises names the package does not expose: {missing}"
+
+    def test_every_readme_quick_start_example_resolves(self):
+        """The same machinery over the README's own demonstrated API."""
+        blocks = _fenced_python_blocks(_read_readme())
+        assert blocks, "the README no longer carries a python example"
+
+        problems: list[str] = []
+        for block in blocks:
+            problems.extend(_check_example_block(block, seeds={}))
+        assert not problems, (
+            f"the README shows API usage that does not resolve: {problems}"
         )
