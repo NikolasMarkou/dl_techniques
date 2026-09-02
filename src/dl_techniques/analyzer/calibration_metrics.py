@@ -191,6 +191,45 @@ def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> flo
 
 # ------------------------------------------------------------------------------
 
+def compute_ece_binary(
+    outcomes: np.ndarray, scores: np.ndarray, n_bins: int = 15
+) -> float:
+    """
+    Compute Expected Calibration Error for a binary outcome and a scalar score.
+
+    The general form of :func:`compute_ece`: ECE = Σ (n_i/n) * |score_i - rate_i|
+    over equal-width bins of ``scores``. ``compute_ece`` is the special case where
+    the outcome is top-1 correctness and the score is top-1 confidence; classwise
+    ECE (Kull et al. 2019) is the case where the outcome is the indicator
+    ``y_true == c`` and the score is the class-``c`` probability column.
+
+    Args:
+        outcomes (np.ndarray): Binary outcome per sample, values in {0, 1}.
+            Shape: (n_samples,)
+        scores (np.ndarray): Forecast score per sample, values in [0, 1].
+            Shape: (n_samples,)
+        n_bins (int, optional): Number of equal-width bins. Defaults to 15.
+
+    Returns:
+        float: Expected Calibration Error for this (outcome, score) pair.
+
+    Example:
+        >>> outcomes = np.array([0, 0, 1, 1])
+        >>> scores = np.array([0.5, 0.5, 0.5, 0.5])
+        >>> float(compute_ece_binary(outcomes, scores, n_bins=10))
+        0.0
+    """
+    bin_info = _get_binary_bin_info(outcomes, scores, n_bins)
+
+    ece = 0.0
+    for bin_data in bin_info:
+        if bin_data["prop_in_bin"] > 0:
+            ece += np.abs(bin_data["confidence"] - bin_data["accuracy"]) * bin_data["prop_in_bin"]
+
+    return ece
+
+# ------------------------------------------------------------------------------
+
 def compute_adaptive_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 15) -> float:
     """
     Compute Adaptive Expected Calibration Error (AECE) using equal-mass bins.

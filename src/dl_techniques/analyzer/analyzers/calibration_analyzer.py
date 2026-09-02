@@ -81,6 +81,7 @@ from .base import BaseAnalyzer
 from ..data_types import AnalysisResults, DataInput
 from ..calibration_metrics import (
     compute_ece,
+    compute_ece_binary,
     compute_brier_score,
     compute_reliability_data,
     compute_prediction_entropy_stats
@@ -157,22 +158,41 @@ class CalibrationAnalyzer(BaseAnalyzer):
             # Compute per-class ECE
             n_classes = y_pred_proba.shape[1]
             per_class_ece = []
+            per_class_conditional_top1_ece = []
             per_class_bins = max(2, self.config.calibration_bins // 2)
 
             for c in range(n_classes):
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-015
+                # `per_class_ece` is CLASSWISE ECE (Kull et al. 2019): the class-c
+                # PROBABILITY COLUMN over ALL samples, against the indicator
+                # `y_true == c`. Do NOT go back to masking samples by true label and
+                # re-running the top-1 ECE on them — that quantity is blind to the
+                # entire off-diagonal and reports 0.0 for a class the model never
+                # predicts, however wrong its column is. See decisions.md D-015.
+                per_class_ece.append(
+                    compute_ece_binary(
+                        (y_true_idx == c).astype(float),
+                        y_pred_proba[:, c],
+                        per_class_bins,
+                    )
+                )
+
+                # The legacy quantity, kept under an honest name.
                 class_mask = y_true_idx == c
                 if np.any(class_mask):
-                    class_ece = compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
-                                          per_class_bins)
-                    per_class_ece.append(class_ece)
+                    per_class_conditional_top1_ece.append(
+                        compute_ece(y_true_idx[class_mask], y_pred_proba[class_mask],
+                                    per_class_bins)
+                    )
                 else:
-                    per_class_ece.append(0.0)
+                    per_class_conditional_top1_ece.append(0.0)
 
             # Store only calibration-specific metrics (no entropy here)
             results.calibration_metrics[model_name] = {
                 'ece': ece,
                 'brier_score': brier_score,
                 'per_class_ece': per_class_ece,
+                'per_class_conditional_top1_ece': per_class_conditional_top1_ece,
             }
 
             # Store reliability data separately (for plotting)

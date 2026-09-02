@@ -13,6 +13,7 @@ from dl_techniques.analyzer.calibration_metrics import (
     compute_mce,
     compute_brier_score,
     compute_brier_score_decomposition,
+    compute_ece_binary,
     compute_reliability_data,
     compute_prediction_entropy_stats,
 )
@@ -260,3 +261,120 @@ class TestBrierDecompositionIdentity:
         assert decomp['reliability'] == pytest.approx(0.0, abs=1e-12)
         assert decomp['resolution'] == pytest.approx(0.0, abs=1e-12)
         assert decomp['uncertainty'] == pytest.approx(0.0, abs=1e-12)
+
+
+# =====================================================================
+# S8 — per-class ECE conditioned on the wrong variable (plan step 16)
+# =====================================================================
+
+def _perfectly_classwise_calibrated(n_classes: int = 3, n: int = 20000, seed: int = 4):
+    """Draw labels FROM the predicted distribution, so every column is calibrated."""
+    rng = np.random.default_rng(seed)
+    y_prob = rng.dirichlet(np.ones(n_classes) * 0.6, n)
+    y_true = np.array([rng.choice(n_classes, p=row) for row in y_prob])
+    return y_true, y_prob
+
+
+def _off_diagonal_probe(n: int = 8000, seed: int = 9):
+    """A model whose class-2 column is badly wrong but never wins the argmax.
+
+    Class 2 carries a constant probability of 0.30 and NEVER occurs, so its
+    classwise ECE is exactly 0.30. No sample has ``y_true == 2``, so the
+    class-conditional top-1 quantity has nothing to condition on and reports 0.0
+    — the entire off-diagonal is invisible to it.
+    """
+    rng = np.random.default_rng(seed)
+    p0 = rng.uniform(0.05, 0.65, n)
+    y_prob = np.stack([p0, 0.70 - p0, np.full(n, 0.30)], axis=1)
+    y_true = (rng.uniform(size=n) > p0 / 0.70).astype(int)
+    return y_true, y_prob
+
+
+class TestComputeEceBinary:
+    """The shared binary binner's second call site (step 15 was the first)."""
+
+    def test_a_calibrated_column_scores_zero(self):
+        outcomes = np.array([0.0, 0.0, 1.0, 1.0])
+        scores = np.array([0.5, 0.5, 0.5, 0.5])
+        assert compute_ece_binary(outcomes, scores, n_bins=10) == pytest.approx(0.0)
+
+    def test_a_constant_wrong_column_scores_its_full_gap(self):
+        outcomes = np.zeros(1000)
+        scores = np.full(1000, 0.30)
+        assert compute_ece_binary(outcomes, scores, n_bins=7) == pytest.approx(0.30)
+
+    def test_a_score_of_exactly_zero_is_not_dropped(self):
+        """The first-bin-inclusive edge rule lives in one place and still holds."""
+        outcomes = np.array([1.0, 1.0])
+        scores = np.array([0.0, 0.0])
+        assert compute_ece_binary(outcomes, scores, n_bins=10) == pytest.approx(1.0)
+
+
+class TestPerClassEceIsClasswiseEce:
+    """`per_class_ece` must bin the class-c COLUMN, not mask by the true label."""
+
+    @staticmethod
+    def _run(y_true, y_prob, bins: int = 14):
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers.calibration_analyzer import (
+            CalibrationAnalyzer,
+        )
+
+        results = AnalysisResults()
+        CalibrationAnalyzer(
+            models={"m": None}, config=AnalysisConfig(calibration_bins=bins)
+        ).analyze(
+            results,
+            cache={"m": {"predictions": y_prob, "y_data": y_true}},
+        )
+        return results.calibration_metrics["m"]
+
+    def test_a_perfectly_classwise_calibrated_model_scores_near_zero(self):
+        y_true, y_prob = _perfectly_classwise_calibrated()
+        metrics = self._run(y_true, y_prob)
+
+        per_class = np.asarray(metrics["per_class_ece"], dtype=float)
+        assert len(per_class) == 3, "the probe did not reach the per-class loop"
+        assert per_class.max() < 0.02, (
+            f"a perfectly classwise-calibrated model scored {per_class.tolist()}"
+        )
+
+    def test_a_wrong_column_is_not_invisible(self):
+        """The off-diagonal case: classwise 0.30, class-conditional top-1 0.0."""
+        y_true, y_prob = _off_diagonal_probe()
+        metrics = self._run(y_true, y_prob, bins=14)
+
+        # Anti-vacuity: the probe must genuinely contain no class-2 sample, which
+        # is what makes the class-conditional quantity blind here.
+        assert not np.any(y_true == 2)
+
+        assert metrics["per_class_ece"][2] == pytest.approx(0.30, abs=1e-9), (
+            f"the class-2 column is off by 0.30 everywhere and was scored "
+            f"{metrics['per_class_ece'][2]!r}"
+        )
+
+    def test_the_legacy_quantity_is_kept_under_an_honest_name(self):
+        y_true, y_prob = _off_diagonal_probe()
+        metrics = self._run(y_true, y_prob, bins=14)
+
+        legacy = metrics["per_class_conditional_top1_ece"]
+        assert len(legacy) == 3
+        assert legacy[2] == 0.0, (
+            "the legacy class-conditional top-1 quantity should still report 0.0 "
+            "here; that is precisely why it must not be published as 'per_class_ece'"
+        )
+        # Anti-vacuity: the two quantities must not be the same list, or the
+        # rename would be cosmetic.
+        assert not np.allclose(metrics["per_class_ece"], legacy)
+
+    def test_the_reported_value_matches_the_kull_definition(self):
+        """Re-derived independently from `compute_ece_binary` on the column."""
+        y_true, y_prob = _perfectly_classwise_calibrated(n=5000, seed=11)
+        metrics = self._run(y_true, y_prob, bins=14)
+
+        per_class_bins = max(2, 14 // 2)
+        for c in range(3):
+            expected = compute_ece_binary(
+                (y_true == c).astype(float), y_prob[:, c], per_class_bins)
+            assert metrics["per_class_ece"][c] == pytest.approx(expected, abs=1e-12)
