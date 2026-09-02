@@ -1583,3 +1583,39 @@ class TestTheDocumentedSpectralCostsAreNotTheOldOnes:
                 f"analyzer/README.md does not mention {fragment!r}; the trap "
                 f"threshold changed and the README is where a user looks first"
             )
+
+
+class TestTheLossSentinelRemovalIsDocumented:
+    """The README is where a user looks before diffing two `analysis_results.json`.
+
+    `loss` changed from `0.0` to `null` for a model that failed to evaluate, and
+    `weight_stats` gained `status`/`degenerate_fields` with substituted rather
+    than NaN moments. Both are value changes under unchanged keys, which is
+    exactly the class of change `schema_version` exists to stamp.
+    """
+
+    def test_the_readme_records_the_schema_bump_to_four(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+        assert "`schema_version` went 3 -> 4" in readme, (
+            "analyzer/README.md does not tell a reader that an older artifact "
+            "reports an unevaluated model's loss as a perfect 0.0"
+        )
+
+    def test_the_shipped_schema_version_matches_the_readme(self):
+        from dl_techniques.analyzer.model_analyzer import RESULTS_SCHEMA_VERSION
+
+        readme = README_PATH.read_text(encoding="utf-8")
+        assert f"went 3 -> {RESULTS_SCHEMA_VERSION}" in readme, (
+            f"the code stamps schema_version {RESULTS_SCHEMA_VERSION} but the "
+            "README still documents a different latest bump"
+        )
+
+    def test_the_readme_does_not_blame_string_labels(self):
+        """A label-coercion 'fix' was refuted by ~35 measured cases; don't teach it."""
+        readme = README_PATH.read_text(encoding="utf-8")
+        block = readme[readme.index("dtype='string'"):][:1200]
+        for needle in ("never from string\n  labels", "predict", "evaluate"):
+            assert needle in block, (
+                f"the dtype='string' note does not mention {needle!r}, so a "
+                "reader is left with the refuted label-coercion theory"
+            )

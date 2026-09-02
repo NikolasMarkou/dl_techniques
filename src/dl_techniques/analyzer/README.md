@@ -287,6 +287,24 @@ correlation traps are in `CORRELATION_TRAPS.md`.
   classifier can produce, so it was indistinguishable from a real score. A failed evaluation
   reports `None` too; read `status` before reading the number. `results.model_metrics[m]` keeps
   the raw `compile_metrics` key as well.
+- **`loss` is `None` for a model that failed to evaluate, and `schema_version` went 3 -> 4 with
+  it.** Until 2026-09-02 both failure branches wrote `0.0`, so the same record reported the
+  accuracy honestly as `None` and the loss as a PERFECT `0.0` — the third instance in this package
+  of a failure sentinel that is a legal success value. A stored `analysis_results.json` written
+  before the bump reports an unevaluated model's loss as a flawless score, so the two cannot be
+  compared without reading the stamp. The `summary_dashboard.png` performance table now prints
+  `n/a` rather than `0.000` for an unavailable metric; a genuine `0.0` still prints as `0.000`.
+  The evaluation warning also carries its traceback (`exc_info=True`) — for a failure such as
+  `dtype='string' is not a valid dtype for Keras type promotion` the traceback is the only thing
+  that names the offending loss or metric. That message comes from a bare Python `str` reaching a
+  promoting `keras.ops` op inside the MODEL's own compiled loss or metric, never from string
+  labels in `y`: Keras standardizes the data dtypes and casts in `Loss.__call__` before any metric
+  op runs, so every data-borne route raises something else. The diagnostic signature is that
+  `predict` succeeds on the same model while `evaluate` fails.
+- **An analyzer-side bug in the evaluation post-processing now RAISES.** The `try` around
+  `model.evaluate` no longer covers the post-processing, so a `KeyError`/`AttributeError` in the
+  analyzer's own code surfaces instead of being logged as a per-model `status: 'error'`. One MODEL
+  failing to evaluate still only skips that model — that invariant is unchanged and guarded.
 - **`weight_stats[m][w]` carries a `status` and a `degenerate_fields` list; read them before
   reading the numbers.** A freshly-initialised model is legal input, and its zeros-initialised
   tables make several statistics undefined or unrepresentable. Five mechanisms were measured:
