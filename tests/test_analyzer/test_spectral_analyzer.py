@@ -383,3 +383,71 @@ class TestRandomizationAveragesMultipleDraws:
             sa.spectral_metrics.detect_correlation_trap = original
 
         assert len(calls) == 2
+
+
+# =====================================================================
+# A2 - analysis artifacts must be RETURNED, not parked on `self`
+# =====================================================================
+
+def _two_layer_model(name: str):
+    import keras
+    inputs = keras.Input(shape=(16,), name=f"{name}_in")
+    h = keras.layers.Dense(12, name=f"{name}_h")(inputs)
+    return keras.Model(inputs, keras.layers.Dense(8, name=f"{name}_o")(h), name=name)
+
+
+class TestSingleModelAnalysisReturnsItsArtifacts:
+    """`_analyze_single_model` set `self._esd_cache` / `self._rand_esd_cache` /
+    `self._recommendations` / `self._model_summary` unconditionally at the top of the
+    method, and `analyze` recovered them through `hasattr` guards that therefore could
+    never fire. The artifacts belong in the return value.
+    """
+
+    _PARKED = ("_esd_cache", "_rand_esd_cache", "_recommendations", "_model_summary")
+
+    def test_the_artifacts_come_back_from_the_call(self):
+        model = _two_layer_model("ret")
+        analyzer = SpectralAnalyzer(
+            models={"ret": model}, config=AnalysisConfig(analyze_spectral=True))
+
+        details, esds, rand_esds, recommendations, summary = (
+            analyzer._analyze_single_model(model))
+
+        # Anti-vacuity: the model really did produce analyzable layers, so an empty
+        # artifact set cannot pass this test by accident.
+        assert not details.empty
+        assert len(esds) == len(details)
+        assert all(isinstance(v, np.ndarray) and len(v) > 0 for v in esds.values())
+        assert isinstance(rand_esds, dict)
+        assert isinstance(recommendations, list)
+        assert isinstance(summary, dict) and summary
+
+    def test_no_analysis_state_is_parked_on_the_instance(self):
+        model = _two_layer_model("parked")
+        analyzer = SpectralAnalyzer(
+            models={"parked": model}, config=AnalysisConfig(analyze_spectral=True))
+        analyzer._analyze_single_model(model)
+
+        parked = [a for a in self._PARKED if hasattr(analyzer, a)]
+        assert parked == [], (
+            f"analysis state is still parked on the analyzer instance: {parked}"
+        )
+
+    def test_two_models_get_their_own_artifacts(self):
+        """Behavioural PIN (passes before and after): no cross-model aliasing.
+
+        This is NOT red evidence - it exists so the refactor cannot silently start
+        sharing one artifact dict between models.
+        """
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models={"a": _two_layer_model("a"), "b": _two_layer_model("b")},
+            config=AnalysisConfig(analyze_spectral=True),
+        ).analyze(results)
+
+        assert set(results.spectral_esds) == {"a", "b"}
+        assert results.spectral_esds["a"] is not results.spectral_esds["b"]
+        assert set(results.spectral_recommendations) == {"a", "b"}
+        assert set(results.spectral_summary_per_model) == {"a", "b"}

@@ -131,21 +131,24 @@ class SpectralAnalyzer(BaseAnalyzer):
 
         for model_name, model in self.models.items():
             logger.info(f"Starting spectral analysis for model: {model.name}")
-            details_df = self._analyze_single_model(model)
+            (details_df, esds, rand_esds,
+             recommendations, model_summary) = self._analyze_single_model(model)
 
             if not details_df.empty:
                 details_df['model_name'] = model_name
                 all_model_details.append(details_df)
 
-                # Store ESDs and recommendations
-                if hasattr(self, '_esd_cache'):
-                    results.spectral_esds[model_name] = self._esd_cache
-                if hasattr(self, '_rand_esd_cache') and self._rand_esd_cache:
-                    results.spectral_rand_esds[model_name] = self._rand_esd_cache
-                if hasattr(self, '_recommendations'):
-                    results.spectral_recommendations[model_name] = self._recommendations
-                if hasattr(self, '_model_summary'):
-                    results.spectral_summary_per_model[model_name] = self._model_summary
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-020
+                # These artifacts arrive in the RETURN VALUE. Do NOT park them on
+                # `self` and recover them with `hasattr`: the previous shape set the
+                # attributes unconditionally at the top of `_analyze_single_model`, so
+                # every `hasattr` guard here was true by construction and could never
+                # fire. See decisions.md D-020.
+                results.spectral_esds[model_name] = esds
+                if rand_esds:
+                    results.spectral_rand_esds[model_name] = rand_esds
+                results.spectral_recommendations[model_name] = recommendations
+                results.spectral_summary_per_model[model_name] = model_summary
 
         if all_model_details:
             # Consolidate results into a single DataFrame
@@ -157,19 +160,31 @@ class SpectralAnalyzer(BaseAnalyzer):
         else:
             logger.warning("Spectral analysis did not produce any results for any model.")
 
-    def _analyze_single_model(self, model: keras.Model) -> pd.DataFrame:
+    def _analyze_single_model(
+            self, model: keras.Model
+    ) -> Tuple[pd.DataFrame, Dict[int, np.ndarray], Dict[int, np.ndarray],
+               List[str], Dict[str, float]]:
         """
         Perform spectral analysis on a single Keras model.
+
+        Args:
+            model: The Keras model to analyze.
+
+        Returns:
+            Tuple of ``(details, esds, rand_esds, recommendations, summary)``. On a
+            model with no analyzable layers ``details`` is empty and the remaining
+            artifacts are empty containers.
         """
         # Create basic description of the model to find analyzable layers
         # This now returns both the details DataFrame and the flattened list of layers.
         details, all_layers = self._describe_model(model)
-        self._esd_cache: Dict[int, np.ndarray] = {}
-        self._rand_esd_cache: Dict[int, np.ndarray] = {}
+        esds: Dict[int, np.ndarray] = {}
+        rand_esds: Dict[int, np.ndarray] = {}
 
         if details.empty:
             logger.warning(f"No layers found in model '{model.name}' that meet the criteria for spectral analysis.")
-            return details.reset_index()  # Return empty but correctly formatted DataFrame
+            # Return empty but correctly formatted DataFrame
+            return details.reset_index(), esds, rand_esds, [], {}
 
         # Perform detailed analysis on each qualifying layer.
         #
@@ -187,19 +202,34 @@ class SpectralAnalyzer(BaseAnalyzer):
             warnings.filterwarnings(
                 "ignore", message="invalid value encountered",
                 category=RuntimeWarning)
-            self._analyze_layers(details, all_layers)
+            self._analyze_layers(details, all_layers, esds, rand_esds)
 
-        # Generate and store the per-model summary and recommendations. The summary is
-        # kept (not discarded after the recommendations) so callers can read a per-model
-        # figure instead of only the cross-model aggregate.
-        self._model_summary = self._get_summary(details)
-        self._recommendations = self._generate_recommendations(details, self._model_summary)
+        # Generate the per-model summary and recommendations. The summary is kept (not
+        # discarded after the recommendations) so callers can read a per-model figure
+        # instead of only the cross-model aggregate.
+        model_summary = self._get_summary(details)
+        recommendations = self._generate_recommendations(details, model_summary)
 
         # Convert layer_id index to a column for robust concatenation
-        return details.reset_index()
+        return (details.reset_index(), esds, rand_esds, recommendations,
+                model_summary)
 
-    def _analyze_layers(self, details: pd.DataFrame, all_layers: List[keras.layers.Layer]) -> None:
-        """Perform spectral analysis on each qualifying layer."""
+    def _analyze_layers(
+            self,
+            details: pd.DataFrame,
+            all_layers: List[keras.layers.Layer],
+            esds: Dict[int, np.ndarray],
+            rand_esds: Dict[int, np.ndarray],
+    ) -> None:
+        """Perform spectral analysis on each qualifying layer.
+
+        Args:
+            details: Per-layer frame, mutated in place with the computed metrics.
+            all_layers: Flattened layer list, indexed by ``details``' index.
+            esds: Output mapping ``layer_id -> eigenvalue spectrum``, filled in place.
+            rand_esds: Output mapping ``layer_id -> randomized spectrum``, filled in
+                place; left empty unless ``config.spectral_randomize`` is set.
+        """
         for layer_id in details.index:
             layer = all_layers[layer_id]
 
@@ -228,7 +258,7 @@ class SpectralAnalyzer(BaseAnalyzer):
             (evals, sv_max, sv_min, rank_loss,
              spectrum_truncated) = spectral_metrics.compute_eigenvalues(
                 Wmats, N, M, n_comp)
-            self._esd_cache[layer_id] = evals
+            esds[layer_id] = evals
 
             alpha, xmin, D, sigma, num_pl_spikes, status, warning = spectral_metrics.fit_powerlaw(evals)
 
@@ -334,7 +364,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                 }
 
                 # Store one representative randomized spectrum for visualization.
-                self._rand_esd_cache[layer_id] = first_rand_evals
+                rand_esds[layer_id] = first_rand_evals
 
             metrics = {
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
