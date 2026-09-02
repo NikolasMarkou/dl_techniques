@@ -2097,13 +2097,20 @@ class TestFitPowerlawKsKernel:
         _pow_kernel_sweep()  # warm caches so neither side pays the first-touch cost
         fit_powerlaw(evals)
 
-        t0 = time.perf_counter()
-        _pow_kernel_sweep()
-        pow_seconds = time.perf_counter() - t0
+        # Best-of-N, not a single sample: scheduler noise only ever ADDS time, so
+        # the minimum is the robust estimator of the true cost. A single-shot
+        # comparison flakes when the machine is loaded (observed once in CI-style
+        # back-to-back runs) even though the ratio it measures is stable.
+        def _best_of(fn, reps=5):
+            best = float("inf")
+            for _ in range(reps):
+                t0 = time.perf_counter()
+                fn()
+                best = min(best, time.perf_counter() - t0)
+            return best
 
-        t0 = time.perf_counter()
-        fit_powerlaw(evals)
-        fit_seconds = time.perf_counter() - t0
+        pow_seconds = _best_of(_pow_kernel_sweep)
+        fit_seconds = _best_of(lambda: fit_powerlaw(evals))
 
         assert fit_seconds < 0.75 * pow_seconds, (
             f"the whole fit took {fit_seconds:.4f}s against {pow_seconds:.4f}s for a "
