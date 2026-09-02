@@ -1164,20 +1164,45 @@ class TestEveryQuotedPytestSelectorMatchesSomething:
             if isinstance(node, (ast.ClassDef, ast.FunctionDef))
         }
 
-    def test_every_documented_selector_selects_at_least_one_test(self):
+    @classmethod
+    def audit_citations(cls, text: str, label: str) -> tuple:
+        """Report every dead `test_*.py ... -k <selector>` citation in one text.
+
+        Shared by the doc guard below and by
+        `TestThePlansOwnPytestSelectorsAreAlive`, so the parse rule and the
+        "matches nothing" rule exist ONCE. Writing a second copy for the plan
+        would be the lockstep-invariant smell this package keeps recording.
+
+        Args:
+            text: The full text of one document to scan.
+            label: How to name that document in a failure message.
+
+        Returns:
+            tuple: ``(dead, checked)`` - a list of human-readable failures and the
+            number of citations whose named module existed and was therefore
+            actually checked. ``checked`` is the anti-vacuity counter: a citation
+            regex that stopped matching reports zero dead AND zero checked.
+        """
         test_dir = Path(__file__).parent
+        dead, checked = [], 0
+        for module_name, selector in cls.CITATION.findall(text):
+            module_path = test_dir / module_name
+            if not module_path.exists():
+                dead.append(f"{label}: cites missing module {module_name}")
+                continue
+            checked += 1
+            if not any(selector in name for name in cls._names_in(module_path)):
+                dead.append(f"{label}: `{module_name} -k {selector}` matches nothing")
+        return dead, checked
+
+    def test_every_documented_selector_selects_at_least_one_test(self):
         dead = []
         checked = 0
         for source in self.DOC_SOURCES:
             text = (PACKAGE_ROOT / source).read_text(encoding="utf-8")
-            for module_name, selector in self.CITATION.findall(text):
-                module_path = test_dir / module_name
-                if not module_path.exists():
-                    dead.append(f"{source}: cites missing module {module_name}")
-                    continue
-                checked += 1
-                if not any(selector in name for name in self._names_in(module_path)):
-                    dead.append(f"{source}: `{module_name} -k {selector}` matches nothing")
+            source_dead, source_checked = self.audit_citations(text, source)
+            dead.extend(source_dead)
+            checked += source_checked
         assert checked >= 3, (
             f"only {checked} documented pytest citations were parsed; the citation "
             "regex, not the docs, is what failed"
@@ -1199,3 +1224,66 @@ class TestEveryQuotedPytestSelectorMatchesSomething:
         ) == [("test_analyzer_docs.py", "CorrelationTraps")], (
             "the citation regex no longer parses the form the docs actually use"
         )
+
+
+class TestThePlansOwnPytestSelectorsAreAlive:
+    """A plan's Verification Strategy is a GATE; a dead `-k` runs nothing and reads green.
+
+    MEASURED on `plan-2026-09-01T225724-e79ad4bd` before this guard existed: three of
+    the seventeen per-criterion commands selected ZERO tests -
+    `test_spectral_metrics.py -k identity` (126 deselected, 0 run),
+    `test_analyzer_config.py -k readme` (that module was never created), and
+    `test_analyzer_docs.py -k correlation_traps` (39 deselected, 0 run; `-k` is CASE
+    SENSITIVE and the class is `TestCorrelationTrapsDocMatchesTheImplementation`).
+    Running the gate verbatim would have reported success while executing nothing.
+
+    Scope: only plan files that name `tests/test_analyzer` are read, and the parse /
+    dead-selector rules are `TestEveryQuotedPytestSelectorMatchesSomething`'s -
+    reused via `audit_citations`, not re-implemented. `plans/` is gitignored and its
+    directories are deleted when a plan closes, so this guard SKIPS when no such plan
+    is present: it is live exactly while the artifact it points at exists.
+    """
+
+    @staticmethod
+    def _plan_files() -> list:
+        repo_root = Path(__file__).resolve().parents[2]
+        plans = sorted((repo_root / "plans").glob("plan-*/plan.md"))
+        return [
+            p for p in plans
+            if "tests/test_analyzer" in p.read_text(encoding="utf-8", errors="replace")
+        ]
+
+    def test_every_plan_cited_selector_selects_at_least_one_test(self):
+        plan_files = self._plan_files()
+        if not plan_files:
+            pytest.skip("no open plan references tests/test_analyzer")
+
+        dead, checked = [], 0
+        for plan_path in plan_files:
+            text = plan_path.read_text(encoding="utf-8", errors="replace")
+            plan_dead, plan_checked = (
+                TestEveryQuotedPytestSelectorMatchesSomething.audit_citations(
+                    text, plan_path.parent.name)
+            )
+            dead.extend(plan_dead)
+            checked += plan_checked
+        assert checked >= 3, (
+            f"only {checked} pytest citations were parsed out of "
+            f"{[p.parent.name for p in plan_files]}; the citation regex, not the "
+            "plan, is what failed"
+        )
+        assert not dead, (
+            f"these Verification-Strategy commands select NOTHING: {dead}"
+        )
+
+    def test_the_plan_scan_uses_the_shared_audit_and_would_see_a_dead_selector(self):
+        """Anti-vacuity: one helper, and it still reports a dead pointer."""
+        dead, checked = (
+            TestEveryQuotedPytestSelectorMatchesSomething.audit_citations(
+                "`tests/test_analyzer/test_analyzer_docs.py -k correlation_traps`",
+                "probe")
+        )
+        assert checked == 1, f"the probe citation was not parsed at all ({checked})"
+        assert dead == [
+            "probe: `test_analyzer_docs.py -k correlation_traps` matches nothing"
+        ], f"the shared audit no longer detects the measured dead selector: {dead}"
