@@ -257,10 +257,12 @@ class ConvBlock(keras.layers.Layer):
                 self.pool = keras.layers.MaxPooling2D(
                     pool_size=pool_size, name=f"{self.name}_pool"
                 )
-            else:  # avg
+            elif pool_type == "avg":
                 self.pool = keras.layers.AveragePooling2D(
                     pool_size=pool_size, name=f"{self.name}_pool"
                 )
+            else:
+                raise ValueError("Not valid pooling type [{}]".format(pool_type))
         else:
             self.pool = None
 

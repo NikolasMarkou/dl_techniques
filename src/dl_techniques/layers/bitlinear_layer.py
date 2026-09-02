@@ -83,7 +83,7 @@ References:
 """
 
 import keras
-from typing import Optional, Dict, Any, Union, Tuple, Sequence
+from typing import Optional, Dict, Any, Callable, Union, Tuple, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -136,6 +136,7 @@ class BitLinear(keras.layers.Layer):
                       │  matmul(x_q, W_q)            │
                       │  / (alpha_x * alpha_w)       │
                       │  + bias (optional)           │
+                      │  activation (optional)       │
                       └──────────────┬───────────────┘
                                      ▼
                       ┌──────────────────────────────┐
@@ -168,6 +169,11 @@ class BitLinear(keras.layers.Layer):
         training-time regulariser and falls back to deterministic rounding
         whenever ``training`` is not true, so inference stays deterministic.
     :type quantization_method: str
+    :param activation: Activation applied to the de-quantized output, after
+        the bias. Accepts anything ``keras.activations.get`` accepts. Defaults
+        to ``None``, which ``keras.activations.get`` resolves to the identity,
+        matching ``keras.layers.Dense``.
+    :type activation: Optional[Union[str, Callable]]
     :param use_bias: Whether the layer uses a bias vector. Note that BitNet
         drops the bias in its quantized projections; the Keras ``Dense``
         default of ``True`` is kept here.
@@ -228,6 +234,7 @@ class BitLinear(keras.layers.Layer):
         activation_scale_method: str = "abs_max",
         weight_per_channel: bool = False,
         quantization_method: str = "round_clip",
+        activation: Optional[Union[str, Callable]] = None,
         use_bias: bool = True,
         use_input_norm: bool = False,
         ste_lambda: float = 1.0,
@@ -284,6 +291,7 @@ class BitLinear(keras.layers.Layer):
         self.activation_scale_method = activation_scale_method
         self.weight_per_channel = weight_per_channel
         self.quantization_method = quantization_method
+        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.use_input_norm = use_input_norm
         self.ste_lambda = ste_lambda
@@ -611,6 +619,9 @@ class BitLinear(keras.layers.Layer):
         if self.use_bias and self.bias is not None:
             output = output + keras.ops.cast(self.bias, output.dtype)
 
+        if self.activation is not None:
+            output = self.activation(output)
+
         return output
 
     def compute_output_shape(
@@ -641,6 +652,7 @@ class BitLinear(keras.layers.Layer):
             "activation_scale_method": self.activation_scale_method,
             "weight_per_channel": self.weight_per_channel,
             "quantization_method": self.quantization_method,
+            "activation": keras.activations.serialize(self.activation),
             "use_bias": self.use_bias,
             "use_input_norm": self.use_input_norm,
             "ste_lambda": self.ste_lambda,

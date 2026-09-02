@@ -35,19 +35,20 @@ reading the injected defect produced.
      ``magnitude=1.0`` arm is the control: there both forms are finite.
 
 RED proofs, 2026-09-02. Each historical defect was re-injected over the shipped class
-and the whole file re-run; the head run is 79 passed. Every injection reddens at least
+and the whole file re-run; the head run is 81 passed. Every injection reddens at least
 one guard, and no injection leaves the file green:
 
   | injected defect                                          | tests reddened |
   |----------------------------------------------------------|----------------|
   | STE written as ``stop_gradient(q - t) + t * lambda``       | 5 |
-  | gamma reduced over the batch axis, rescale before matmul   | 2 |
+  | gamma reduced over the batch axis, rescale before matmul   | 3 |
   | ``stop_gradient`` dropped from the gamma statistic         | 3 |
   | binary ``sign`` path removed (bits=1 falls back to round)  | 1 |
   | ``training`` ignored by stochastic rounding                | 1 |
   | pre-fix ``_bits_to_range`` (no validation, no list form)   | 12 |
   | ``weight_per_channel`` read then discarded in ``call``     | 2 |
-  | scale materialized as ``Q_max / gamma``                    | 1 |
+  | scale materialized as ``Q_max / gamma``                    | 2 |
+  | ``activation`` stored but never applied in ``call``        | 1 |
 """
 
 import os
@@ -424,6 +425,30 @@ class TestBitLinearKnobsAreLive:
             - keras.ops.convert_to_numpy(without(sample_input))
         ).max() > 1e-3
 
+    def test_the_activation_is_applied_to_the_output(self, sample_input):
+        """`activation` is the last step, so it must equal applying it by hand."""
+        linear = _layer()
+        activated = _layer(activation="relu")
+        activated.kernel.assign(keras.ops.convert_to_numpy(linear.kernel))
+        activated.bias.assign(keras.ops.convert_to_numpy(linear.bias))
+        y_linear = keras.ops.convert_to_numpy(linear(sample_input))
+        y_relu = keras.ops.convert_to_numpy(activated(sample_input))
+        assert (y_linear < 0).any(), "vacuous: nothing for relu to clip"
+        assert np.abs(y_linear - y_relu).max() > 1e-3
+        np.testing.assert_allclose(np.maximum(y_linear, 0.0), y_relu, atol=EXACT, rtol=0)
+
+    def test_the_default_activation_is_the_identity(self, sample_input):
+        """`keras.activations.get(None)` resolves to `linear`, not to `None`."""
+        default = _layer()
+        explicit = _layer(activation="linear")
+        explicit.kernel.assign(keras.ops.convert_to_numpy(default.kernel))
+        explicit.bias.assign(keras.ops.convert_to_numpy(default.bias))
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(default(sample_input)),
+            keras.ops.convert_to_numpy(explicit(sample_input)),
+            atol=EXACT, rtol=0,
+        )
+
     def test_activation_bits_change_the_output(self, sample_input):
         coarse = _layer(activation_bits=2)
         fine = _layer(activation_bits=8)
@@ -465,6 +490,7 @@ class TestBitLinearSerialization:
             activation_scale_method="abs_mean",
             weight_per_channel=True,
             quantization_method="stochastic",
+            activation="gelu",
             use_input_norm=True,
             ste_lambda=2.0,
             ste_clip_gradient=False,
@@ -488,6 +514,7 @@ class TestBitLinearSerialization:
         restored = loaded.get_layer("bl")
         assert restored.weight_range == (-3.0, 3.0)
         assert restored.weight_per_channel is True
+        assert keras.activations.serialize(restored.activation) == "gelu"
         assert restored.ste_clip_gradient is False
         assert restored.seed == 11
         assert restored.norm_epsilon == pytest.approx(1e-5)
