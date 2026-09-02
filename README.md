@@ -85,7 +85,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <p>
 
 - **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy, Matthews Correlation Coefficient) into a differentiable loss function for direct optimization on imbalanced data.
-- **Information-Theoretic & Robust Losses**: Train more robust models with `GoodhartAwareLoss` to combat spurious correlations, calibration-focused losses like `BrierScoreLoss`, the uncertainty-aware `FocalUncertaintyLoss`, and `DINO`'s self-distillation loss.
+- **Calibration & Robust Losses**: Train better-calibrated models with `GoodhartAwareLoss` (cross-entropy plus a per-sample confidence penalty, with an optional anti-collapse term), calibration-focused losses like `BrierScoreLoss`, the uncertainty-aware `FocalUncertaintyLoss`, and `DINO`'s self-distillation loss.
 - **Domain-Specific Loss Functions**: Specialized losses for vision-language (`CLIPContrastiveLoss`, `SigLIPLoss`), segmentation (`Dice`, `Focal`, `Tversky`), time series (`MASELoss`, `SMAPELoss`), and generative modeling (`WassersteinLoss` with gradient penalty).
 - **Advanced Optimization Suite**: Leverage smart learning rate schedulers like `WarmupSchedule`, utilities for `DeepSupervision` in multi-scale architectures, and a suite of advanced regularizers (`SoftOrthogonal`, `SRIP`).
 </p>
@@ -406,7 +406,7 @@ dl_techniques/
 │   │   ├── statistics/        # Statistical and probabilistic layers (MDN, Flows)
 │   │   └── ...                # fusion, geometric, logic, mixtures, physics,
 │   │                          # reasoning, sequence_pooling, tokenizers
-│   ├── losses/                # 42 specialized loss modules (AnyLoss, Goodhart, etc.)
+│   ├── losses/                # 44 specialized loss modules (AnyLoss, Goodhart, etc.)
 │   ├── metrics/               # Custom Keras metrics (PSNR, SSIM, perplexity, Brier)
 │   ├── optimization/          # Optimizers (Muon, VSGD, SGLD, Gefen, WW-PGD), LR schedules
 │   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers

@@ -22,8 +22,8 @@ from dl_techniques.losses import (
     WassersteinLoss,
     # Specialized
     CapsuleMarginLoss, SegmentationLosses, SegmentationWrapperLoss,
-    # Information-theoretic
-    GoodhartAwareLoss, DecoupledInformationLoss,
+    # Confidence-penalty / information-theoretic regularizers
+    GoodhartAwareLoss, analyze_loss_components, DecoupledInformationLoss,
 )
 ```
 
@@ -49,7 +49,7 @@ from dl_techniques.losses import (
 - `flow_matching_velocity_loss.py` — Rectified-flow / flow-matching velocity-regression loss
 - `focal_causal_lm_loss.py` — Focal loss variant for causal LM training
 - `focal_uncertainty_loss.py` — Focal loss with uncertainty estimation
-- `goodhart_loss.py` — Goodhart's law-aware loss
+- `goodhart_loss.py` — Cross-entropy plus a per-sample confidence penalty (Pereyra et al. 2017), with an optional off-by-default `prior_weight * KL(class_prior || mean_p)` anti-collapse term. Also exports `analyze_loss_components`. The `prior_weight` term is irreducibly BATCH-LEVEL: at `prior_weight > 0` the loss no longer decomposes per row. It does NOT compute `I(X; Y_hat)` — `call(y_true, y_pred)` never sees `X`
 - `hrm_loss.py` — Hierarchical reasoning model loss
 - `huber_loss.py` — Robust Huber loss
 - `image_restoration_loss.py` — Multi-component image restoration loss
@@ -95,7 +95,15 @@ has gone stale before.
   return does not *ignore* `sample_weight` — it BROADCASTS against it and yields
   `whole_batch_loss * mean(sample_weight)`, charging every row the batch aggregate and discarding
   which rows were weighted. It also makes `reduction=` a dead knob. A plausible wrong number, not
-  an error. `goodhart_loss.py` and `focal_uncertainty_loss.py` are correct exemplars.
+  an error. `goodhart_loss.py` and `focal_uncertainty_loss.py` are correct exemplars **of the SHAPE
+  rule only**. Correct shape is necessary, not sufficient: the pinned predicate is
+  `weighted == unweighted * mean(w)`, and it is structurally BLIND to a batch-level term added into
+  an already-correctly-shaped `(batch,)` vector. `goodhart_loss.py` passed that predicate on
+  2026-09-02 while two rank-0 regularizers were broadcast into every row, so a `w=0` row still
+  charged its entropy and its probabilities to the batch. If your loss carries a term that is a
+  function of the WHOLE batch, the family predicate will not catch it — write a per-loss arm that
+  asserts `loss(w=[1,..,1,0]) * B/(B-1) == loss(batch[:-1])`, as
+  `tests/test_losses/test_goodhart_loss.py` does.
   **Which modules still violate this is recorded executably, not in prose:**
   `tests/test_losses/test_the_premature_scalar_family_is_pinned.py` MEASURES the defect per class
   and goes red the day one is fixed. Do not duplicate that list here — a prose list rots; the test

@@ -59,8 +59,12 @@ Practical Considerations & Tuning Guide
      This is a finer-grained control, so start with smaller values like `[0.001, 0.1]`.
 - **Grid Search**: For best results, perform a 2D grid search over a range of
   :math:`\\gamma` and :math:`\\delta` values.
-- **Monitor Components**: Use the `analyze_loss_components` function to track the
-  unweighted values of `H(p(Y|X))` and `H(p(Y))` to ensure they behave as expected.
+- **Monitor Components**: Use the `analyze_decoupled_information_loss` function in
+  this module to track the unweighted values of `H(p(Y|X))` and `H(p(Y))` and confirm
+  they behave as expected. Do NOT use `analyze_loss_components` from
+  ``dl_techniques.losses.goodhart_loss``: it is written against
+  :class:`GoodhartAwareLoss` and raises ``AttributeError`` on a
+  :class:`DecoupledInformationLoss` instance.
 
 Example:
     >>> import keras
