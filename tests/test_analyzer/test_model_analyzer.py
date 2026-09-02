@@ -21,6 +21,22 @@ N_SAMPLES = 40
 N_FEATURES = 6
 N_CLASSES = 3
 
+# The rcParams `restore_plotting_style` deliberately does NOT put back. Shared by
+# every rcParams guard in this module so the exclusion cannot drift between them.
+#
+# `setup_plotting_style` calls `matplotlib.use('Agg')`, which is a repo-wide
+# HEADLESS requirement (pinned by
+# `tests/test_callbacks/test_the_matplotlib_backend_is_headless.py`), not part of
+# this configuration's styling: restoring an interactive backend such as `tkagg`
+# inside a test session would re-introduce the X11 crash that pin exists to
+# prevent. `matplotlib.use` sets `backend`, and additionally clears
+# `backend_fallback` and `interactive`, so all three are excluded. Asserting on
+# them made `test_the_saved_rcparams_can_be_restored` ORDER-DEPENDENT: it passed
+# in the full suite only because an earlier test had already forced `Agg`, and
+# failed standalone with
+# `{'backend': ('tkagg', 'Agg'), 'backend_fallback': (True, False)}`.
+_RCPARAMS_NOT_RESTORED = {"backend", "backend_fallback", "interactive"}
+
 
 def _quiet_config(**overrides) -> AnalysisConfig:
     """Build an AnalysisConfig with every analysis off and plotting disabled.
@@ -740,14 +756,24 @@ class TestTheConfigsPrivateStateIsDeclared:
         import matplotlib.pyplot as plt
 
         config = _quiet_config(plot_style="presentation", dpi=137)
+
+        # Force a known NON-analyzer state first: `setup_plotting_style` is
+        # idempotent, so if a previous test left the style applied the
+        # anti-vacuity check below would be the thing that fails.
+        plt.rcParams["axes.grid"] = False
+        plt.rcParams["savefig.dpi"] = 71
+
         before = dict(plt.rcParams)
 
         config.setup_plotting_style()
-        moved = [k for k, v in before.items() if plt.rcParams[k] != v]
+        moved = [
+            k for k, v in before.items()
+            if k not in _RCPARAMS_NOT_RESTORED and plt.rcParams[k] != v
+        ]
         # Anti-vacuity: the style really did mutate process-global state, so the
         # restore below has something to undo. `font.size` is NOT usable here -
         # `sns.set_theme` resets it to the seaborn default at the end of setup.
-        assert moved, "setup_plotting_style changed no rcParam at all"
+        assert moved, "setup_plotting_style changed no restorable rcParam at all"
 
         config.restore_plotting_style()
         still_wrong = {
@@ -757,6 +783,35 @@ class TestTheConfigsPrivateStateIsDeclared:
         assert not still_wrong, (
             f"restore_plotting_style left {len(still_wrong)} rcParams changed: "
             f"{dict(list(still_wrong.items())[:5])}"
+        )
+
+    def test_the_backend_is_deliberately_not_restored(self):
+        """The exclusion above is a CONTRACT, not a convenience.
+
+        The mechanism is the ORDER inside ``setup_plotting_style``: it calls
+        ``matplotlib.use('Agg')`` BEFORE snapshotting ``plt.rcParams``, so the
+        snapshot already carries ``Agg`` and the restore cannot put an
+        interactive backend back. Reordering those two lines - the obvious
+        "snapshot the true pre-state" edit - would silently un-headless the
+        session, so it is pinned here.
+        """
+        import matplotlib.pyplot as plt
+
+        # A pre-existing interactive backend, set WITHOUT switching to it (the
+        # value is what `restore` would put back; no GUI toolkit is loaded).
+        plt.rcParams["backend"] = "tkagg"
+        assert plt.rcParams["backend"] == "tkagg", (
+            "anti-vacuity: the pre-state is not interactive, so 'Agg' afterwards "
+            "would prove nothing"
+        )
+
+        config = _quiet_config()
+        config.setup_plotting_style()
+        config.restore_plotting_style()
+
+        assert plt.rcParams["backend"] == "Agg", (
+            "restore_plotting_style put the interactive backend back; the headless "
+            f"requirement is broken (backend={plt.rcParams['backend']!r})"
         )
 
     def test_an_arbitrary_private_attribute_does_not_reach_the_artifact(
@@ -1134,8 +1189,8 @@ class TestTheAnalyzerCanUndoItsGlobalStyleMutation:
     def test_the_context_manager_restores_the_rcparams(self, tmp_path):
         import matplotlib.pyplot as plt
 
-        # The backend keys are deliberately NOT restored (see the next test).
-        skip = {"backend", "backend_fallback", "interactive"}
+        # The backend keys are deliberately NOT restored.
+        skip = _RCPARAMS_NOT_RESTORED
 
         # Force a known NON-analyzer state first: `setup_plotting_style` is
         # idempotent, so if a previous test left the style applied this guard

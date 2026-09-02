@@ -113,7 +113,9 @@ class AnalysisConfig:
 
     def setup_plotting_style(self) -> None:
         """Set up matplotlib style based on configuration."""
-        # Use non-interactive backend for file-based rendering
+        # Use non-interactive backend for file-based rendering.
+        # This MUST stay above the snapshot below - see
+        # `restore_plotting_style` for why the ordering is load-bearing.
         matplotlib.use('Agg')
 
         # Save current rcParams to restore later if needed
@@ -184,9 +186,18 @@ class AnalysisConfig:
         """Restore the rcParams captured by the last ``setup_plotting_style`` call.
 
         ``setup_plotting_style`` mutates process-global matplotlib state, which
-        outlives the ``ModelAnalyzer`` that triggered it. This puts it back. The
-        backend is deliberately NOT restored: ``Agg`` is a repo-wide headless
-        requirement, not part of this configuration's styling.
+        outlives the ``ModelAnalyzer`` that triggered it. This puts it back.
+
+        The BACKEND is deliberately not restored: ``Agg`` is a repo-wide headless
+        requirement (pinned by
+        ``tests/test_callbacks/test_the_matplotlib_backend_is_headless.py``), not
+        part of this configuration's styling. The mechanism is the statement ORDER
+        in :meth:`setup_plotting_style`, which calls ``matplotlib.use('Agg')``
+        BEFORE snapshotting ``plt.rcParams`` - so the snapshot already carries
+        ``Agg`` and this blanket ``update`` cannot put an interactive backend back.
+        Do NOT "fix" that order to capture the true pre-state: it would silently
+        un-headless the session. Pinned by
+        ``TestTheConfigsPrivateStateIsDeclared::test_the_backend_is_deliberately_not_restored``.
 
         Does nothing if no style has been applied yet.
         """
