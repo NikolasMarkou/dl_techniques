@@ -1353,3 +1353,73 @@ class TestTheBrierRedefinitionIsDocumentedWhereAReaderLooks:
             "the docstring does not name the quantity it used to be, nor where "
             "to get it now"
         )
+
+
+class TestTheConstantWeightPcaAbortIsPinnedAndDocumented:
+    """PIN, not a fix: a constant weight tensor aborts the WHOLE `analyze()` call.
+
+    `scipy.stats.skew`/`kurtosis` return `NaN` on a constant vector
+    (`analyzers/weight_analyzer.py:149`); the `NaN` reaches the concatenated PCA
+    feature matrix; and `_compute_weight_pca`'s `try` catches only
+    `np.linalg.LinAlgError`, so sklearn's `ValueError: Input X contains NaN`
+    escapes and every other analysis is lost with it.
+
+    PRE-EXISTING: `weight_analyzer.py` has no commit in the 2026-09-02 analyzer
+    repair plan's range, so this is not a regression that plan introduced. It is
+    pinned here so that (a) the behaviour is executable rather than a prose
+    memory, and (b) whoever fixes it is TOLD by a red test to update the README
+    caveat in the same commit.
+    """
+
+    @staticmethod
+    def _model(name: str, zero_kernel: bool):
+        keras.utils.set_random_seed(3)
+        inputs = keras.Input(shape=(6,), name=f"{name}_in")
+        x = keras.layers.Dense(8, activation="relu", name=f"{name}_d1")(inputs)
+        outputs = keras.layers.Dense(
+            3, activation="softmax", name=f"{name}_out")(x)
+        model = keras.Model(inputs=inputs, outputs=outputs, name=name)
+        if zero_kernel:
+            layer = model.get_layer(f"{name}_d1")
+            weights = layer.get_weights()
+            weights[0] = np.zeros_like(weights[0])
+            layer.set_weights(weights)
+        return model
+
+    def _run(self, tmp_path, tag, zero_kernel):
+        rng = np.random.default_rng(0)
+        data = DataInput(
+            x_data=rng.standard_normal((40, 6)).astype("float32"),
+            y_data=rng.integers(0, 3, 40),
+        )
+        config = AnalysisConfig(
+            analyze_weights=True, analyze_calibration=False,
+            analyze_information_flow=False, analyze_training_dynamics=False,
+            analyze_spectral=False, n_samples=40, save_plots=False, verbose=False,
+        )
+        # Two models: `_compute_weight_pca` needs >= 2 feature rows to run at all.
+        analyzer = ModelAnalyzer(
+            models={
+                "z": self._model("z", zero_kernel),
+                "z2": self._model("z2", False),
+            },
+            config=config,
+            output_dir=str(tmp_path / tag),
+        )
+        return analyzer.analyze(data, analysis_types={"weights"})
+
+    def test_a_healthy_pair_completes(self, tmp_path):
+        """Anti-vacuity: the same call SUCCEEDS without the constant kernel."""
+        results = self._run(tmp_path, "healthy", zero_kernel=False)
+        assert results.weight_stats, "the control run produced no weight stats"
+
+    def test_a_constant_kernel_still_aborts_the_whole_analysis(self, tmp_path):
+        with pytest.raises(ValueError, match="Input X contains NaN"):
+            self._run(tmp_path, "zeroed", zero_kernel=True)
+
+    def test_the_readme_records_the_open_defect(self):
+        text = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
+        assert "Input X contains NaN" in text, (
+            "the README no longer records the constant-weight PCA abort; if it "
+            "was FIXED, delete this pin in the same commit"
+        )

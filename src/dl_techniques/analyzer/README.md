@@ -278,6 +278,16 @@ correlation traps are in `CORRELATION_TRAPS.md`.
   classifier can produce, so it was indistinguishable from a real score. A failed evaluation
   reports `None` too; read `status` before reading the number. `results.model_metrics[m]` keeps
   the raw `compile_metrics` key as well.
+- **KNOWN OPEN (pre-existing, NOT fixed here): a constant weight tensor aborts the whole
+  `analyze()` call.** `scipy.stats.skew` / `kurtosis` return `NaN` on a constant vector
+  (`analyzers/weight_analyzer.py:149`), that `NaN` reaches the concatenated PCA feature matrix, and
+  `_compute_weight_pca`'s `try` catches only `np.linalg.LinAlgError` — so sklearn's
+  `ValueError: Input X contains NaN` propagates out of `analyze()` and you lose every other
+  analysis too, not just the PCA panel. REPRODUCED at HEAD by zeroing one `Dense` kernel with
+  `analyze_weights=True` and two models (the PCA needs >= 2). This predates the 2026-09-02 analyzer
+  repair plan — `weight_analyzer.py` has no commit in that plan's range — and is recorded rather
+  than fixed because it is outside its charter. Workaround: `analyze_weights=False`, or avoid
+  exactly-constant weight tensors.
 - **`training_history` takes the `.history` dict, not the Keras `History` object.** Its keys must
   match the `models` keys exactly, or training dynamics silently produces nothing.
 - **`pl_pvalue` semantics, and two known divergences from Clauset et al. 2009.**
