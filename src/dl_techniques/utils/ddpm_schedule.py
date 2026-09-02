@@ -139,11 +139,18 @@ def get_named_beta_schedule(
     applied to both endpoints. The rescale keeps the total amount of noise
     injected over the whole chain roughly constant as the chain is shortened; at
     exactly 1000 steps ``scale`` is ``1.0`` and the factor is inert. The rescale
-    also bounds how short a ``"linear"`` chain may be: ``beta_end`` reaches
-    ``1.0`` at ``num_diffusion_timesteps == 50`` and exceeds it below that, so a
-    shorter linear chain is rejected by :meth:`DDPMSchedule.from_betas` (upstream
-    asserts in the same place). Use ``"squaredcos_cap_v2"``, which is capped by
-    construction, for very short chains.
+    also bounds how short a ``"linear"`` chain may be: ``beta_end`` is
+    ``scale * 0.02 == 20 / num_diffusion_timesteps``, so it reaches exactly
+    ``1.0`` at ``num_diffusion_timesteps == 20`` and exceeds it below that, and
+    such a chain is rejected by :meth:`DDPMSchedule.from_betas` (upstream
+    asserts in the same place). This is a boundary, not a floor: at
+    ``num_diffusion_timesteps == 1`` ``np.linspace`` returns ``[beta_start]``
+    and drops the endpoint entirely, so ``1`` is accepted while ``2`` through
+    ``19`` are not. At exactly ``20`` the final ``alphas_cumprod`` is ``0``,
+    which makes ``sqrt_recipm1_alphas_cumprod`` infinite, so ``20`` is the last
+    accepted value rather than a usable one. Use ``"squaredcos_cap_v2"``, which
+    is capped by construction, for short chains. The measured accepted set is
+    pinned by ``tests/test_models/test_dit/test_dit_config.py``.
 
     ``"squaredcos_cap_v2"`` is Nichol & Dhariwal's cosine schedule, obtained by
     discretizing ``alpha_bar(t) = cos((t + 0.008) / 1.008 * pi / 2) ** 2`` with
