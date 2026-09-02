@@ -1387,10 +1387,35 @@ def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
 
 def calculate_glorot_normalization_factor(N: int, M: int, rf: int) -> float:
     """
-    Calculate the Glorot normalization factor for weight initialization.
+    Calculate the Glorot normalization factor for a matricized layer.
+
+    ``sqrt(2 / (fan_in + fan_out))``, expressed in the dimensions this package's
+    matricization produces. ``get_weight_matrices`` flattens a conv kernel
+    ``(kh, kw, in_c, out_c)`` to ``(kh*kw*in_c, out_c)``, so ``N`` IS ``fan_in``
+    already and ``fan_out`` is ``M * rf``. For a Dense layer ``rf == 1`` and this
+    reduces to the familiar ``sqrt(2 / (N + M))``.
+
+    Args:
+        N: Larger dimension of the matricized weight (``fan_in`` for CONV).
+        M: Smaller dimension of the matricized weight (output channels for CONV).
+        rf: Receptive field size (``kh*kw``; 1 for Dense/Embedding/RNN).
+
+    Returns:
+        The Glorot standard deviation, or ``1.0`` on degenerate dimensions.
     """
-    if (N + M) * rf == 0:
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-002
+    # The denominator is `N + M*rf`, NOT `(N + M)*rf`. After the flat CONV reshape
+    # `N = kh*kw*in_c` ALREADY CONTAINS rf, so the old spelling multiplied it in
+    # twice — measured 0.0177667 for a (3,3,64,128) kernel where the true Glorot
+    # scale is 0.0340207 (1.915x). WeightWatcher's `(N+M)*rf` is correct only for
+    # ITS per-slice dimensions (N=128, M=64); this package deliberately keeps ONE
+    # flattened matrix instead (D-002), so the formula must be restated in the
+    # flattened dimensions rather than copied across. Do NOT "restore WW parity"
+    # by reverting this line without also switching to the per-slice
+    # decomposition. See decisions.md D-002.
+    denominator = N + M * rf
+    if denominator == 0:
         return 1.0
-    return np.sqrt(2 / ((N + M) * rf))
+    return np.sqrt(2 / denominator)
 
 # ---------------------------------------------------------------------

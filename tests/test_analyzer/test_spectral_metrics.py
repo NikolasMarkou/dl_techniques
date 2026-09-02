@@ -28,6 +28,7 @@ from dl_techniques.analyzer.spectral_metrics import (
     compute_mp_softrank,
     calc_mp_edges,
     calc_mp_soft_rank,
+    calculate_glorot_normalization_factor,
 )
 
 
@@ -1137,3 +1138,107 @@ class TestBulkVarianceExcludesSpikes:
         empty = detect_correlation_trap(np.array([1.0]), 10, 5)
         assert empty["has_trap"] is False and empty["mp_lambda_plus"] == 0.0
         assert detect_correlation_trap(np.zeros(20), 10, 5)["has_trap"] is False
+
+
+# =====================================================================
+# S1 — the Glorot factor double-counted rf after the flat CONV reshape
+# (plan step 19, decisions.md D-002)
+# =====================================================================
+
+_CONV_KERNEL_SHAPE = (3, 3, 64, 128)
+
+
+def _keras_glorot_scale(kernel_shape) -> float:
+    """Glorot scale for a conv kernel, derived from the DEFINITION.
+
+    ``sqrt(2 / (fan_in + fan_out))`` with ``fan_in = kh*kw*in_c`` and
+    ``fan_out = kh*kw*out_c`` — Keras' own convolutional fan computation,
+    written out here so the guard does not re-run the implementation's algebra.
+    """
+    kh, kw, in_c, out_c = kernel_shape
+    fan_in = kh * kw * in_c
+    fan_out = kh * kw * out_c
+    return float(np.sqrt(2.0 / (fan_in + fan_out)))
+
+
+class TestGlorotFactorDoesNotDoubleCountRf:
+    """After the flat reshape ``N`` already contains ``rf``."""
+
+    def test_the_conv_factor_is_the_true_glorot_scale(self):
+        from dl_techniques.analyzer import spectral_utils
+        from dl_techniques.analyzer.constants import LayerType
+
+        rng = np.random.default_rng(20260902)
+        kernel = rng.normal(size=_CONV_KERNEL_SHAPE).astype("float32")
+        _, N, M, rf = spectral_utils.get_weight_matrices(kernel, LayerType.CONV2D)
+
+        # Anti-vacuity: pin the matricization this guard is written against, so a
+        # change of reshape convention reddens here rather than silently passing.
+        assert (N, M, rf) == (576, 128, 9)
+
+        expected = _keras_glorot_scale(_CONV_KERNEL_SHAPE)
+        assert expected == pytest.approx(0.0340207, abs=1e-7)
+
+        got = calculate_glorot_normalization_factor(N, M, rf)
+        assert got == pytest.approx(expected, rel=1e-12), (
+            f"glorot factor is {got!r}, the true scale is {expected!r} "
+            f"({expected / got:.4f}x)"
+        )
+
+    def test_a_dense_layer_is_unaffected(self):
+        """rf == 1 for Dense, so the fix must be an exact no-op there."""
+        assert calculate_glorot_normalization_factor(64, 32, 1) == pytest.approx(
+            float(np.sqrt(2.0 / 96.0)), rel=1e-15)
+
+    def test_the_zero_guard_is_retained(self):
+        assert calculate_glorot_normalization_factor(0, 0, 1) == 1.0
+
+
+class TestConvEsdIsUnchanged:
+    """The `n_comp` bookkeeping fix must NOT move any conv spectral metric.
+
+    The four values below were captured from the analyzer at HEAD, BEFORE the
+    change, at default config (`spectral_glorot_fix=False`). They are literals on
+    purpose: a bit-identity claim that recomputes the code's own current answer
+    proves nothing.
+    """
+
+    # Measured at HEAD on a (3,3,64,128) kernel seeded with default_rng(20260902).
+    _HEAD_NUM_EVALS = 128
+    _HEAD_ALPHA = 8.78225472793353
+    _HEAD_ENTROPY = 0.9774616842420808
+    _HEAD_GINI = 0.26600774254032966
+    _HEAD_LEARNING_PHASE = "under-trained"
+
+    @staticmethod
+    def _analyze_conv_layer():
+        import keras
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        rng = np.random.default_rng(20260902)
+        kernel = rng.normal(size=_CONV_KERNEL_SHAPE).astype("float32")
+
+        inputs = keras.Input(shape=(8, 8, 64), name="conv_in")
+        conv = keras.layers.Conv2D(
+            128, 3, padding="same", use_bias=False, name="conv")
+        model = keras.Model(inputs, conv(inputs), name="cm")
+        conv.set_weights([kernel])
+
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models={"cm": model}, config=AnalysisConfig(analyze_spectral=True)
+        ).analyze(results)
+        return results.spectral_analysis.iloc[0]
+
+    def test_num_evals_stays_at_the_matrix_rank_bound(self):
+        row = self._analyze_conv_layer()
+        assert int(row["num_evals"]) == self._HEAD_NUM_EVALS
+
+    def test_alpha_entropy_gini_and_phase_are_bit_identical(self):
+        row = self._analyze_conv_layer()
+        assert float(row["alpha"]) == self._HEAD_ALPHA
+        assert float(row["entropy"]) == self._HEAD_ENTROPY
+        assert float(row["gini_coefficient"]) == self._HEAD_GINI
+        assert row["learning_phase"] == self._HEAD_LEARNING_PHASE

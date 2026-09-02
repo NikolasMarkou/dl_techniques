@@ -216,7 +216,15 @@ class SpectralAnalyzer(BaseAnalyzer):
                 kappa = spectral_metrics.calculate_glorot_normalization_factor(N, M, rf)
                 Wmats = [W / kappa for W in Wmats]
 
-            n_comp = M * rf
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-002
+            # `n_comp` is M, NOT `M * rf`. `get_weight_matrices` returns ONE flattened
+            # matrix per conv layer, which has exactly M singular values; `M * rf` is
+            # WeightWatcher's count for ITS per-slice decomposition, which this package
+            # deliberately does not use. The old spelling made `n_comp >= M` always
+            # true, so the truncated `svds` branch in `compute_eigenvalues` was
+            # structurally unreachable and the `sv[:n_comp]` slices were no-ops.
+            # See decisions.md D-002.
+            n_comp = M
             evals, sv_max, sv_min, rank_loss = spectral_metrics.compute_eigenvalues(Wmats, N, M, n_comp)
             self._esd_cache[layer_id] = evals
 
@@ -364,7 +372,9 @@ class SpectralAnalyzer(BaseAnalyzer):
                 'layer_id': layer_id, 'name': layer.name, 'layer_type': layer_type.value,
                 'N': N, 'M': M, 'rf': rf, 'Q': N / M if M > 0 else -1,
                 'num_params': int(np.prod(weights.shape)),
-                MetricNames.NUM_EVALS: M * rf
+                # M, not M*rf — see the D-002 anchor above. This value is overwritten
+                # by len(evals) in _analyze_layers; it is a placeholder label only.
+                MetricNames.NUM_EVALS: M
             })
 
         details = pd.DataFrame(rows)
