@@ -67,8 +67,8 @@ attributes.
 | `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
 | `smooth_training_curves` / `smoothing_window` | `True` / `5` | |
 | `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | layers outside this eigenvalue range are skipped; above the cap the analyzer switches to truncated SVD |
-| `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test. It is ~100x the cost of the alpha fit, and **that fit is QUADRATIC in the number of eigenvalues** — measured 0.028 / 0.424 / 3.505 s at n = 1000 / 5000 / 15000 (3x the data, 8.3x the time). At the defaults (`spectral_bootstraps=50`, `spectral_max_evals=15000`, ~51 fits at 3.5 s) the worst case is **~178 s for a single layer** |
-| `spectral_concentration_analysis` | `True` | Gini / dominance / participation ratio |
+| `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test. **Its cost depends entirely on how much of the spectrum the fit selects as tail**, because each bootstrap refits a synthetic sample of length `n_tail`. Measured at n = 15000: on a genuine power law (`n_tail` = 100%) 50 bootstraps cost **117 s against a 1.57 s alpha fit**, ~75x; on a log-normal spectrum (`n_tail` = 6.7%) 1.3 s, ~0.9x; on a real Marchenko-Pastur weight spectrum (`n_tail` = 1.1%) **0.16 s, about a TENTH of the fit**. A flat "~100x" figure is wrong by roughly 700x in that last case. The alpha fit itself is **quadratic in the number of eigenvalues** — measured 0.018 / 0.213 / 1.61 s at n = 1000 / 5000 / 15000 (3x the data, 7.6x the time). Worst case for one layer at the defaults: **~119 s**, and it needs a spectrum that is power-law all the way down |
+| `spectral_concentration_analysis` | `True` | Gini / dominance / participation ratio / `critical_weight_count`. Measured on a square Gaussian Dense layer: 0.70 s at 2048x2048 and 2.88 s at 4096x4096, against 18.0 s for that layer's SVD |
 | `spectral_randomize` | `False` | randomized-weight comparison (slow). Now **~5x** what it used to cost: `spectral_n_randomizations` defaults to 5 and each draw runs a fresh full `compute_eigenvalues`, so the SVD is repeated per draw rather than the permutation being averaged over one decomposition |
 | `spectral_n_randomizations` | `5` | independent permutations averaged per layer when `spectral_randomize` is on; each one is a full extra `compute_eigenvalues`, so this is a direct multiplier on the randomized-comparison cost |
 | `spectral_glorot_fix` | `False` | |
@@ -253,6 +253,15 @@ Contextual / expensive columns: `participation_ratio`, `min_participation_ratio`
   `rand_sv_ratio` and `rand_distance`. Each is the mean over `spectral_n_randomizations`
   independent permutations, so `num_rand_spikes` can be fractional; `has_trap` is a majority vote
   over those draws, not an `any()`.
+- **The trap threshold changed on 2026-09-02, and `schema_version` went 2 -> 3 with it.**
+  `trap_threshold` is now `λ₊ + c_TW·λ₊·M^(-2/3)·f(Q)` with `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`,
+  Johnstone's (2001) Tracy-Widom scale, and `SPECTRAL_TW_SAFETY_FACTOR` is `3.0` rather than `1.0`.
+  The previous offset was not proportional to `λ₊`, so the verdict depended on the absolute scale of
+  the weights: on identical clean spectra the false-positive rate ran from `0.000` at `s = 1e-2` to
+  `0.107-0.128` at `s = 1e2` and above. It is now flat at `0.005-0.010` across four decades of
+  scale, with detection power `1.000` against a planted element trap at amplitude ≥ 20. Values from
+  an older `analysis_results.json` are NOT comparable. `CORRELATION_TRAPS.md` §0 has the derivation
+  and the divergence from WeightWatcher.
 
 Alpha phases:
 
@@ -340,7 +349,7 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 - Spectral analysis is the expensive part: an SVD per layer, x`spectral_bootstraps` if
   `pl_pvalue` is on, and x`spectral_n_randomizations` (default 5, not 2) if `spectral_randomize`
   is on. The alpha fit itself is quadratic in the eigenvalue count, so cost grows with layer width
-  faster than layer count — see the `spectral_bootstraps` row for the measured ~178 s/layer worst
+  faster than layer count — see the `spectral_bootstraps` row for the measured ~119 s/layer worst
   case at defaults. Turn `analyze_spectral` off for quick runs.
 - `AnalysisResults` holds numpy arrays and a DataFrame; JSON serialization drops them unless the
   `json_include_*` flags are set.

@@ -1488,3 +1488,79 @@ class TestTheConstantWeightPcaAbortIsPinnedAndDocumented:
             "the README no longer records the constant-weight PCA abort; if it "
             "was FIXED, delete this pin in the same commit"
         )
+
+
+class TestTheDocumentedSpectralCostsAreNotTheOldOnes:
+    """Six documented numbers went false at once when the KS sweep got faster.
+
+    A speedup that leaves the README quoting the pre-speedup cost is a
+    documentation defect shipped by the same commit that fixed the code, and
+    nothing else in this module gates on these figures: a grep for `178`,
+    `3.505` and `quadratic` over `test_analyzer_docs.py` returned nothing before
+    this class existed.
+    """
+
+    # Every one of these was true before 2026-09-02 and is false after.
+    _SUPERSEDED = (
+        "3.505",              # the old n=15000 alpha-fit cost, seconds
+        "~178 s",             # the old single-layer worst case
+        "178.14",             # the same figure in the fit_powerlaw docstring
+        "~100x the cost of the alpha fit",   # true for pareto only, unconditioned
+        "8.3x the time",      # the old quadratic slope
+        "8.0x the time",
+    )
+
+    @pytest.mark.parametrize("stale", _SUPERSEDED)
+    def test_no_superseded_cost_number_survives(self, stale):
+        readme = README_PATH.read_text(encoding="utf-8")
+        source = (PACKAGE_ROOT / "spectral_metrics.py").read_text(encoding="utf-8")
+
+        assert stale not in readme, (
+            f"analyzer/README.md still quotes {stale!r}; that figure was measured "
+            f"against the pre-2026-09-02 KS sweep and is now wrong"
+        )
+        assert stale not in source, (
+            f"spectral_metrics.py still quotes {stale!r} in a docstring; that figure "
+            f"was measured against the pre-2026-09-02 KS sweep and is now wrong"
+        )
+
+    def test_the_bootstrap_row_states_the_regime_its_ratio_depends_on(self):
+        """The cost ratio is not a constant, and the row must say what it tracks.
+
+        MEASURED at n=15000: 50 bootstraps cost 117 s against a 1.57 s fit on a
+        pure power law (`n_tail` = 100%) but 0.16 s — a TENTH of the fit — on a
+        real Marchenko-Pastur weight spectrum (`n_tail` = 1.1%), because each
+        bootstrap refits a sample of length `n_tail`. An unconditioned "~100x" is
+        off by ~700x in the second case, which is the case a weight matrix
+        actually produces.
+        """
+        readme = README_PATH.read_text(encoding="utf-8")
+        row = next(
+            (line for line in readme.splitlines()
+             if line.startswith("| `spectral_bootstraps` |")),
+            None,
+        )
+        assert row is not None, "the spectral_bootstraps row is gone from README.md"
+
+        assert "n_tail" in row, (
+            "the spectral_bootstraps row does not name `n_tail`, so it states a "
+            "cost ratio without the quantity that ratio depends on"
+        )
+        for regime in ("100%", "1.1%"):
+            assert regime in row, (
+                f"the spectral_bootstraps row does not quote the {regime} tail case; "
+                f"without both ends the reader cannot see that the ratio is a range"
+            )
+
+    def test_the_readme_records_the_trap_threshold_change(self):
+        readme = README_PATH.read_text(encoding="utf-8")
+
+        assert "schema_version` went 2 -> 3" in readme, (
+            "analyzer/README.md does not tell a reader that saved trap columns from "
+            "an older run are no longer comparable"
+        )
+        for fragment in ("Johnstone", "SPECTRAL_TW_SAFETY_FACTOR` is `3.0`"):
+            assert fragment in readme, (
+                f"analyzer/README.md does not mention {fragment!r}; the trap "
+                f"threshold changed and the README is where a user looks first"
+            )

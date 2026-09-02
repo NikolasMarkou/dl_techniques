@@ -240,19 +240,28 @@ def fit_powerlaw(
     cumulative sum on the reversed log array) give each candidate's
     `sum(log(x))` in O(1). The KS distance is NOT: it is evaluated over the whole
     tail for every candidate xmin, so the sweep as a whole is quadratic in the
-    number of eigenvalues. MEASURED: n=1000 -> 0.038 s, n=5000 -> 0.433 s,
-    n=15000 -> 3.46 s (3x the data, 8.0x the time). The worst real case observed
-    was 178.14 s for one layer at n_tail=14863 with 50 bootstraps.
+    number of eigenvalues. MEASURED: n=1000 -> 0.018 s, n=5000 -> 0.213 s,
+    n=15000 -> 1.61 s (3x the data, 7.6x the time), medians of 5 over four
+    spectrum families. The worst case for one layer, on a spectrum that is
+    power-law all the way down so that 50 bootstraps each refit the full length,
+    is ~119 s.
 
-    The quadratic term cannot be removed without changing the answer: the
-    candidate set is every eigenvalue, and the O(N^2) work is the elementwise
-    power `(tail / xmin) ** (1 - alpha)`. A blocked, fully vectorised rewrite was
-    implemented and MEASURED bit-identical but 0.89-0.91x the speed (the cost is
-    the power, not the Python loop), and an exact branch-and-bound prune measured
-    2.0x on Pareto tails but 0.6-0.9x on log-normal and Marchenko-Pastur spectra.
-    Neither shipped. Restricting the xmin grid WOULD be asymptotically better and
-    is what WeightWatcher does, but it changes the argmin and this function's
-    `N>=20` path is anchored — see `plan_2026-06-03_bc986e52/D-008` below and
+    Those figures are 2.13-2.18x better than the sweep that shipped before
+    2026-09-02, which spelled the theoretical CDF as an elementwise
+    `(tail / xmin) ** (1 - alpha)` and measured 3.45-3.51 s at n=15000. See the
+    D-001 anchor in the loop below for why the log-domain spelling is both faster
+    and more accurate.
+
+    The quadratic term itself cannot be removed without changing the answer: the
+    candidate set is every eigenvalue. A blocked, fully vectorised rewrite was
+    implemented and MEASURED bit-identical but 0.89-0.91x the speed, and an exact
+    branch-and-bound prune measured 2.0x on Pareto tails but 0.6-0.9x on
+    log-normal and Marchenko-Pastur spectra. Neither shipped. Restricting the xmin
+    grid WOULD be asymptotically better and is what WeightWatcher does, but it
+    changes the argmin — re-measured at up to 147 alpha units of movement on MP
+    bulks and a p95 of 1.03 on log-normal, which crosses the
+    `classify_learning_phase` bands — and this function's `N>=20` path is anchored:
+    see `plan_2026-06-03_bc986e52/D-008` below and
     `plan-2026-09-01T225724-e79ad4bd` D-025.
 
     Args:
