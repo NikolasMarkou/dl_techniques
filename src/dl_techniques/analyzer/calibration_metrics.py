@@ -416,6 +416,21 @@ def compute_brier_score_decomposition(
     and binned top-1 Brier scores, so the raw score is
     ``brier_score + binning_residual``. It shrinks as ``n_bins`` grows.
 
+    Warning:
+        The returned ``brier_score`` key CHANGED MEANING under
+        ``plan-2026-09-01T225724-e79ad4bd`` (D-014) and kept its name. It used to
+        be the MULTICLASS Brier score (the quantity
+        :func:`compute_brier_score` still returns); it is now the BINARY Brier
+        score of the top-1 correctness forecast, which is the only outcome space
+        in which Murphy's identity can hold against these bin statistics. On this
+        function's own docstring example the two differ by 2x: the binned top-1
+        score is ``0.0725`` (raw top-1 ``0.075``) where
+        ``compute_brier_score(one_hot(y_true), y_prob)`` is ``0.15``. A caller who
+        reads this key expecting the multiclass score gets a different quantity -
+        call :func:`compute_brier_score` for that one. Note that
+        ``results.calibration_metrics['brier_score']`` is produced by
+        :func:`compute_brier_score` and is UNAFFECTED.
+
     Note:
         This function has no caller inside the library — ``CalibrationAnalyzer``
         imports only ``compute_ece``, ``compute_brier_score``,
@@ -430,8 +445,9 @@ def compute_brier_score_decomposition(
 
     Returns:
         Dict[str, float]: Dictionary with 'reliability', 'resolution',
-        'uncertainty', 'brier_score' (the exactly-decomposed binned top-1 Brier
-        score) and 'binning_residual'.
+        'uncertainty', 'brier_score' (the exactly-decomposed binned TOP-1 BINARY
+        Brier score — NOT the multiclass one; see the Warning above) and
+        'binning_residual'.
 
     Example:
         >>> y_true = np.array([0, 1, 1, 0, 1, 0, 1, 0])

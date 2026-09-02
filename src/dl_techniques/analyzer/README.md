@@ -152,6 +152,17 @@ that panel (see `D-033`).
 > the same key. Every artifact now stamps `schema_version` and `analyzer_version` at its top level;
 > compare those before diffing two runs. Artifacts with no `schema_version` predate the change.
 
+> **`compute_brier_score_decomposition`'s `brier_score` ALSO changed meaning and kept its name.**
+> This is the public diagnostic function, not the `brier_score` in the table above — that one comes
+> from `compute_brier_score` and is UNCHANGED (multiclass, `mean(sum_c (p_c - o_c)^2)`). The
+> decomposition's returned `brier_score` used to be that same multiclass score; it is now the
+> BINARY Brier score of the top-1 correctness forecast, because Murphy's
+> `BS = Reliability - Resolution + Uncertainty` identity can only hold in ONE outcome space and the
+> bin statistics are top-1 (see `calibration_metrics.compute_brier_score_decomposition`'s D-014
+> anchor). On that function's own docstring example the two differ by 2x: binned top-1 `0.0725`
+> (raw top-1 `0.075`) against multiclass `0.15`. If you were reading the decomposition's
+> `brier_score` as the multiclass score, call `compute_brier_score` instead.
+
 ### Information flow (`results.information_flow`, per layer)
 
 Activations are captured by temporarily assigning a recording wrapper to `layer.call` on each

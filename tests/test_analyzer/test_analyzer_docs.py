@@ -1287,3 +1287,69 @@ class TestThePlansOwnPytestSelectorsAreAlive:
         assert dead == [
             "probe: `test_analyzer_docs.py -k correlation_traps` matches nothing"
         ], f"the shared audit no longer detects the measured dead selector: {dead}"
+
+
+class TestTheBrierRedefinitionIsDocumentedWhereAReaderLooks:
+    """`compute_brier_score_decomposition`'s `brier_score` key changed MEANING.
+
+    D-014 moved every term of the Murphy decomposition into the top-1 correctness
+    outcome space, which silently redefined the returned `brier_score` from the
+    MULTICLASS Brier score to the BINARY top-1 one. The function has no in-library
+    caller, so no other guard here can see the change, and a user diffing two runs
+    reads the same key name for a different quantity.
+
+    This guard checks that the redefinition is stated where a reader will find it
+    AND that the statement is TRUE, by re-deriving both quantities.
+    """
+
+    def test_the_two_brier_scores_really_are_different_quantities(self):
+        """Anti-vacuity FIRST: if they agreed, the doc note would be noise."""
+        from dl_techniques.analyzer.calibration_metrics import (
+            compute_brier_score,
+            compute_brier_score_decomposition,
+        )
+
+        y_true = np.array([0, 1, 1, 0, 1, 0, 1, 0])
+        y_prob = np.array([
+            [0.8, 0.2], [0.3, 0.7], [0.1, 0.9], [0.9, 0.1],
+            [0.4, 0.6], [0.7, 0.3], [0.2, 0.8], [0.6, 0.4],
+        ])
+        decomp = compute_brier_score_decomposition(y_true, y_prob, n_bins=4)
+        multiclass = float(compute_brier_score(np.eye(2)[y_true], y_prob))
+        raw_top1 = decomp["brier_score"] + decomp["binning_residual"]
+
+        assert multiclass == pytest.approx(0.15, abs=1e-12), multiclass
+        assert raw_top1 == pytest.approx(0.075, abs=1e-12), raw_top1
+        assert abs(multiclass - raw_top1) > 0.05, (
+            "the two Brier scores agree on this probe, so the documented "
+            f"redefinition would be unobservable ({multiclass} vs {raw_top1})"
+        )
+        # And the identity the redefinition bought must actually hold.
+        assert (decomp["reliability"] - decomp["resolution"]
+                + decomp["uncertainty"]) == pytest.approx(
+                    decomp["brier_score"], abs=1e-12)
+
+    def test_the_readme_states_the_decomposition_brier_redefinition(self):
+        text = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
+        assert "compute_brier_score_decomposition" in text, (
+            "the README never names the function whose key changed meaning"
+        )
+        block = text[text.index("compute_brier_score_decomposition"):][:1400]
+        for needle in ("changed meaning", "top-1", "compute_brier_score"):
+            assert needle in block, (
+                f"the README's brier redefinition note does not mention {needle!r}"
+            )
+
+    def test_the_docstring_says_which_brier_score_it_returns(self):
+        from dl_techniques.analyzer.calibration_metrics import (
+            compute_brier_score_decomposition,
+        )
+
+        doc = compute_brier_score_decomposition.__doc__ or ""
+        assert "CHANGED MEANING" in doc, (
+            "the docstring does not tell a caller that the key was redefined"
+        )
+        assert "MULTICLASS" in doc and "compute_brier_score" in doc, (
+            "the docstring does not name the quantity it used to be, nor where "
+            "to get it now"
+        )
