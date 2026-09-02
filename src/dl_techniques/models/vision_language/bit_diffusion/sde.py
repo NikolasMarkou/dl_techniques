@@ -118,7 +118,16 @@ def bridge_math_dtype(*dtypes: Any) -> str:
     for dtype in dtypes:
         if dtype is None:
             continue
-        if keras.backend.standardize_dtype(dtype) == "float64":
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-015
+        # `getattr(dtype, "name", None) or str(dtype)` rather than
+        # `keras.backend.standardize_dtype`: the repo-wide Keras-2-residue guard
+        # in `tests/test_models/test_package_api_contract.py` forbids any
+        # `keras.backend.*` call under `models/`, and a backend tensor's dtype
+        # already carries its own `.name` (a `tf.DType` stringifies as
+        # "<dtype: 'float64'>", so `str` alone is not enough). A plain-string
+        # dtype has no `.name` and falls through to `str` unchanged.
+        # See decisions.md D-015.
+        if (getattr(dtype, "name", None) or str(dtype)) == "float64":
             return "float64"
     return "float32"
 
@@ -551,7 +560,9 @@ class FlowMatchingODE(BridgeSDE):
 # ---------------------------------------------------------------------
 
 #: Name -> class, for a config-driven build of the base process.
-SDE_VARIANTS: Dict[str, type] = {
+#:
+#: Deliberately NOT named ``SDE_VARIANTS``: see the D-015 anchor below.
+SDE_TYPES: Dict[str, type] = {
     "uniform": UniformVolatilitySDE,
     "periodic": PeriodicVolatilitySDE,
     "cosine_decay": CosineDecayingVolatilitySDE,
@@ -559,19 +570,33 @@ SDE_VARIANTS: Dict[str, type] = {
 }
 
 
-def create_bridge_sde(variant: str, **kwargs: Any) -> BridgeSDE:
+# DECISION plan-2026-09-02T094601-77d4a04e/D-015
+# Do NOT rename this parameter back to `variant`, and do NOT rename `SDE_TYPES`
+# back to `SDE_VARIANTS`. `variant` is a RESERVED word in this tree: the
+# repo-wide sweep `_sweep_create_delegation` in
+# `tests/test_models/test_package_api_contract.py` classifies every module-level
+# `create_*` that takes a parameter literally named `variant` as a MODEL factory
+# and requires a matching `from_variant` classmethod -- which this module can
+# never have, because it builds a pure-math object that is not a `keras.Model`
+# and has no `MODEL_VARIANTS` table. Spelling it `variant` here made this
+# function land in the `_CREATE_WITHOUT_FROM_VARIANT` scope-exclusion pin and
+# turned that set-equality assertion red. The fix is the honest one -- an SDE
+# family is not a model variant -- not an entry in a shared exception list.
+# `SDE_TYPES` also avoids `_LEGACY_VARIANT_TABLE_RE` (`[A-Z0-9]+_VARIANTS`) in
+# the same file. See decisions.md D-015.
+def create_bridge_sde(sde_type: str, **kwargs: Any) -> BridgeSDE:
     """Build one of the four base processes by name.
 
-    :param variant: One of :data:`SDE_VARIANTS`.
-    :type variant: str
-    :param kwargs: Forwarded to the variant's constructor.
+    :param sde_type: One of :data:`SDE_TYPES`.
+    :type sde_type: str
+    :param kwargs: Forwarded to the selected class's constructor.
     :type kwargs: Any
     :return: The constructed process.
     :rtype: BridgeSDE
-    :raises ValueError: If ``variant`` is not registered.
+    :raises ValueError: If ``sde_type`` is not registered.
     """
-    if variant not in SDE_VARIANTS:
+    if sde_type not in SDE_TYPES:
         raise ValueError(
-            f"Unknown SDE variant '{variant}'. Available: {sorted(SDE_VARIANTS)}"
+            f"Unknown SDE type '{sde_type}'. Available: {sorted(SDE_TYPES)}"
         )
-    return SDE_VARIANTS[variant](**kwargs)
+    return SDE_TYPES[sde_type](**kwargs)

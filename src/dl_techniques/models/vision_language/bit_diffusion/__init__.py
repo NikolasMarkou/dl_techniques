@@ -23,7 +23,7 @@ from .config import (
     get_bridge_config,
 )
 from .sde import (
-    SDE_VARIANTS,
+    SDE_TYPES,
     BridgeSDE,
     CosineDecayingVolatilitySDE,
     FlowMatchingODE,
@@ -51,7 +51,7 @@ __all__ = [
     "PROMPT_KIND_TO_LABEL",
     "PROMPT_NUM_CLASSES",
     "TIME_EPS",
-    "SDE_VARIANTS",
+    "SDE_TYPES",
     "TOKEN_LAYOUTS",
     "UniformVolatilitySDE",
     "bridge_math_dtype",
