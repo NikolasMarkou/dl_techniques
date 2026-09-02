@@ -287,16 +287,28 @@ correlation traps are in `CORRELATION_TRAPS.md`.
   classifier can produce, so it was indistinguishable from a real score. A failed evaluation
   reports `None` too; read `status` before reading the number. `results.model_metrics[m]` keeps
   the raw `compile_metrics` key as well.
-- **KNOWN OPEN (pre-existing, NOT fixed here): a constant weight tensor aborts the whole
-  `analyze()` call.** `scipy.stats.skew` / `kurtosis` return `NaN` on a constant vector
-  (`analyzers/weight_analyzer.py:149`), that `NaN` reaches the concatenated PCA feature matrix, and
-  `_compute_weight_pca`'s `try` catches only `np.linalg.LinAlgError` — so sklearn's
-  `ValueError: Input X contains NaN` propagates out of `analyze()` and you lose every other
-  analysis too, not just the PCA panel. REPRODUCED at HEAD by zeroing one `Dense` kernel with
-  `analyze_weights=True` and two models (the PCA needs >= 2). This predates the 2026-09-02 analyzer
-  repair plan — `weight_analyzer.py` has no commit in that plan's range — and is recorded rather
-  than fixed because it is outside its charter. Workaround: `analyze_weights=False`, or avoid
-  exactly-constant weight tensors.
+- **`weight_stats[m][w]` carries a `status` and a `degenerate_fields` list; read them before
+  reading the numbers.** A freshly-initialised model is legal input, and its zeros-initialised
+  tables make several statistics undefined or unrepresentable. Five mechanisms were measured:
+  zero-variance moments (`scipy.stats.skew` / `kurtosis` return `NaN` on a constant, all-zero,
+  length-1 or length-2-equal vector); `float32` reduction OVERFLOW (`np.full((1000,1000), 1e20,
+  'float32')` gives `l2 = inf` although every element is representable); `float32` UNDERFLOW of the
+  second moment on a **non-constant** tensor (`randn * 1e-30` gives `skewness = NaN`, which is why
+  the classifier keys on `np.isfinite` of the RESULT and never on "is the tensor constant"); an
+  already-corrupt tensor; and raises from the statistics themselves (a zero-size tensor, a
+  `float16` tensor — neither is a `LinAlgError`). The three statuses:
+
+  | `status` | meaning |
+  |---|---|
+  | `success` | every statistic is finite as computed |
+  | `degenerate` | the tensor is finite and legal, but a statistic was recomputed at `float64` (overflow/underflow/`float16`) or SUBSTITUTED with `0.0` (`skewness`, `kurtosis`, `spectral` — undefined for a zero-variance distribution). `degenerate_fields` names every affected leaf |
+  | `non-finite` | the WEIGHTS themselves contain `NaN`/`inf`. Statistics are published as computed, never repaired, so a corrupt model stays distinguishable from a merely degenerate one |
+
+  An empty weight tensor is skipped entirely (with a warning) rather than given statistics.
+  Until 2026-09-02 the `NaN` from the first mechanism reached the concatenated PCA feature matrix
+  and sklearn's missing-value `ValueError` propagated out of `analyze()`, losing every other
+  analysis and writing nothing to disk — a stock `BeitAttention(use_relative_position_bias=True)`,
+  `KMeansLayer` or `VectorQuantizer(use_ema=True)` triggered it under the default config.
 - **`training_history` takes the `.history` dict, not the Keras `History` object.** Its keys must
   match the `models` keys exactly, or training dynamics silently produces nothing.
 - **`pl_pvalue` semantics, and two known divergences from Clauset et al. 2009.**

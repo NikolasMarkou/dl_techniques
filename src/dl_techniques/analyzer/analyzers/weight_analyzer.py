@@ -72,7 +72,7 @@ References
 import numpy as np
 import scipy.stats
 from sklearn.decomposition import PCA
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from sklearn.preprocessing import StandardScaler
 
 # ---------------------------------------------------------------------
@@ -81,8 +81,33 @@ from sklearn.preprocessing import StandardScaler
 
 from dl_techniques.utils.logger import logger
 from .base import BaseAnalyzer
+from ..constants import StatusCode
 from ..data_types import AnalysisResults, DataInput
 from ..utils import recursively_get_layers
+
+# ---------------------------------------------------------------------
+
+#: Every scalar leaf of a weight-statistics dict, as ``(group, key)``. The
+#: classifier walks exactly this list, so a statistic added to
+#: :meth:`WeightAnalyzer._raw_statistics` must be added here too or it will be
+#: allowed to carry a NaN into the PCA feature matrix unflagged.
+_STAT_LEAVES: Tuple[Tuple[str, str], ...] = (
+    ('basic', 'mean'), ('basic', 'std'), ('basic', 'median'),
+    ('basic', 'min'), ('basic', 'max'),
+    ('basic', 'skewness'), ('basic', 'kurtosis'),
+    ('norms', 'l1'), ('norms', 'l2'), ('norms', 'max'), ('norms', 'rms'),
+    ('norms', 'spectral'),
+    ('distribution', 'zero_fraction'),
+    ('distribution', 'positive_fraction'),
+    ('distribution', 'negative_fraction'),
+)
+
+#: Leaves for which ``0.0`` is a defensible SUBSTITUTION when the quantity is
+#: undefined rather than merely unrepresentable. See
+#: :meth:`WeightAnalyzer._compute_weight_statistics` for the justification.
+_SUBSTITUTABLE_LEAVES: Tuple[Tuple[str, str], ...] = (
+    ('basic', 'skewness'), ('basic', 'kurtosis'), ('norms', 'spectral'),
+)
 
 # ---------------------------------------------------------------------
 
@@ -121,6 +146,13 @@ class WeightAnalyzer(BaseAnalyzer):
 
                     weight_name = f"{layer.name}_w{idx}"
                     stats = self._compute_weight_statistics(w)
+                    if stats is None:
+                        logger.warning(
+                            f"Skipping weight {model_name}/{weight_name}: "
+                            f"the tensor is empty (shape {w.shape}), so no "
+                            "statistic is defined for it."
+                        )
+                        continue
                     results.weight_stats[model_name][weight_name] = stats
 
                     # Track layer order for robust visualization
@@ -134,8 +166,130 @@ class WeightAnalyzer(BaseAnalyzer):
         if self.config.compute_weight_pca:
             self._compute_weight_pca(results)
 
-    def _compute_weight_statistics(self, weights: np.ndarray) -> Dict[str, Any]:
-        """Compute comprehensive statistics for a weight tensor."""
+    def _compute_weight_statistics(
+            self, weights: np.ndarray) -> Optional[Dict[str, Any]]:
+        """Compute comprehensive statistics for a weight tensor, and classify them.
+
+        A freshly-initialised model is legal input, and its zeros-initialised
+        tables make several of these statistics undefined or unrepresentable.
+        Five mechanisms were measured, and all five used to put a ``NaN``/``inf``
+        into the PCA feature matrix (or raise), which aborted the entire
+        analysis:
+
+        1. **zero variance** -- ``scipy.stats.skew``/``kurtosis`` return ``NaN``
+           for a constant, all-zero, length-1 or length-2-equal input;
+        2. **float32 reduction overflow** -- ``np.sum(w ** 2)`` overflows to
+           ``inf`` even when every element is perfectly representable;
+        3. **float32 underflow of the 2nd moment** -- a NON-constant tensor such
+           as ``randn * 1e-30`` still yields ``skewness = NaN``, which is why the
+           classification below keys on ``np.isfinite`` of the RESULT and never
+           on whether the tensor is constant;
+        4. **an already-corrupt tensor** -- a real ``NaN``/``inf`` in the weights;
+        5. **raises** -- a zero-size tensor (``np.min``) and a ``float16`` tensor
+           (``np.linalg.norm``), neither of which is a ``LinAlgError``.
+
+        Mechanisms 2, 3 and 5 are computation artifacts: the quantity exists, the
+        working precision could not hold it, so it is RECOMPUTED in ``float64``
+        and the true value is published. Mechanism 1 is different -- for a
+        zero-variance (Dirac) distribution the standardized third and fourth
+        moments are :math:`0/0`, i.e. **undefined, not zero**. Publishing ``0.0``
+        is a SUBSTITUTION CONVENTION chosen so a model's fingerprint stays
+        comparable across layers; the ``status`` and ``degenerate_fields`` keys
+        are what carry "this number was substituted". Mechanism 4 is never
+        repaired: a corrupt weight must stay distinguishable from a merely
+        degenerate one, so its statistics are published non-finite and the PCA
+        drops that model's row instead.
+
+        Args:
+            weights: One weight tensor, exactly as returned by
+                ``keras.layers.Layer.get_weights()``. Any numeric dtype is
+                accepted; non-floating dtypes are analysed as ``float64``.
+
+        Returns:
+            The statistics dict, additionally carrying ``'status'`` (a
+            :class:`~dl_techniques.analyzer.constants.StatusCode` value) and
+            ``'degenerate_fields'`` (the dotted names of the leaves that were
+            recomputed or substituted). ``None`` when the tensor is empty, in
+            which case the caller must skip it entirely -- no statistic of an
+            empty tensor is defined.
+        """
+        if weights.size == 0:
+            return None
+
+        # DECISION plan-2026-09-02T062406-e2aa52ef/D-001
+        # Statistics are computed in the tensor's OWN dtype first and float64 is
+        # used only to repair a leaf that came out non-finite. Do NOT "simplify"
+        # this by upcasting unconditionally: that moves `l1`/`l2`/`rms`/`mean`/
+        # `std` in the last ULPs for every ordinary float32 kernel, which shifts
+        # the published PCA coordinates of models that have nothing wrong with
+        # them. Non-floating dtypes (int/bool masks and counters) are the one
+        # exception -- `scipy.stats.skew` raises on them -- and their float64
+        # promotion is exact. See decisions.md D-001.
+        if not np.issubdtype(weights.dtype, np.floating):
+            weights = np.asarray(weights, dtype=np.float64)
+
+        stats = self._raw_statistics(weights)
+
+        # Key on `np.isfinite` of the RESULT. "Is the tensor constant" is the
+        # WRONG predicate: mechanism 3 is a non-constant tensor.
+        non_finite = [leaf for leaf in _STAT_LEAVES
+                      if not self._leaf_is_finite(stats, leaf)]
+        if not non_finite:
+            stats['status'] = StatusCode.SUCCESS.value
+            stats['degenerate_fields'] = []
+            return stats
+
+        if not bool(np.isfinite(weights).all()):
+            # Mechanism 4: the corruption is in the model, not in our arithmetic.
+            stats['status'] = StatusCode.WEIGHT_NON_FINITE.value
+            stats['degenerate_fields'] = [f'{g}.{k}' for g, k in non_finite]
+            return stats
+
+        repaired = self._raw_statistics(np.asarray(weights, dtype=np.float64))
+        for group, key in non_finite:
+            if self._leaf_is_finite(repaired, (group, key)):
+                stats[group][key] = repaired[group][key]
+            elif (group, key) in _SUBSTITUTABLE_LEAVES:
+                stats[group][key] = 0.0
+
+        stats['status'] = StatusCode.WEIGHT_DEGENERATE.value
+        stats['degenerate_fields'] = [f'{g}.{k}' for g, k in non_finite]
+        return stats
+
+    @staticmethod
+    def _leaf_is_finite(stats: Dict[str, Any], leaf: Tuple[str, str]) -> bool:
+        """Return whether ``stats[group][key]`` exists and is finite.
+
+        A missing leaf counts as finite: ``norms.spectral`` is only computed for
+        rank-2 tensors, and its absence is not a defect.
+
+        Args:
+            stats: A statistics dict from :meth:`_raw_statistics`.
+            leaf: The ``(group, key)`` pair to inspect.
+
+        Returns:
+            ``True`` when the leaf is absent or holds a finite float.
+        """
+        group, key = leaf
+        if key not in stats.get(group, {}):
+            return True
+        return bool(np.isfinite(stats[group][key]))
+
+    @staticmethod
+    def _raw_statistics(weights: np.ndarray) -> Dict[str, Any]:
+        """Compute the statistics in the dtype of ``weights``, without classifying.
+
+        This is the arithmetic half of :meth:`_compute_weight_statistics`, split
+        out so the caller can run it twice -- once at native precision, once at
+        ``float64`` -- and repair only the leaves that need it. It never raises
+        for a non-empty numeric tensor.
+
+        Args:
+            weights: A non-empty numeric weight tensor.
+
+        Returns:
+            The statistics dict, whose leaves may be non-finite.
+        """
         flat_weights = weights.flatten()
 
         stats = {
@@ -165,8 +319,12 @@ class WeightAnalyzer(BaseAnalyzer):
         if len(weights.shape) == 2:
             try:
                 stats['norms']['spectral'] = float(np.linalg.norm(weights, 2))
-            except np.linalg.LinAlgError:
-                stats['norms']['spectral'] = 0.0
+            except (np.linalg.LinAlgError, ValueError, TypeError):
+                # MEASURED: `float16` raises `TypeError: array type float16 is
+                # unsupported in linalg` and a non-finite entry makes LAPACK
+                # return without raising a `LinAlgError` at all, so the original
+                # `except np.linalg.LinAlgError` caught neither.
+                stats['norms']['spectral'] = float('nan')
 
         return stats
 

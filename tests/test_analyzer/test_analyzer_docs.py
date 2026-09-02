@@ -1421,19 +1421,20 @@ class TestTheBrierRedefinitionIsDocumentedWhereAReaderLooks:
 
 
 class TestTheConstantWeightPcaAbortIsPinnedAndDocumented:
-    """PIN, not a fix: a constant weight tensor aborts the WHOLE `analyze()` call.
+    """FIXED (was a PIN): a constant weight tensor no longer aborts `analyze()`.
 
-    `scipy.stats.skew`/`kurtosis` return `NaN` on a constant vector
-    (`analyzers/weight_analyzer.py:149`); the `NaN` reaches the concatenated PCA
-    feature matrix; and `_compute_weight_pca`'s `try` catches only
-    `np.linalg.LinAlgError`, so sklearn's `ValueError: Input X contains NaN`
-    escapes and every other analysis is lost with it.
+    Until 2026-09-02 this class asserted the DEFECT. `scipy.stats.skew`/`kurtosis`
+    return `NaN` on a constant vector, the `NaN` reached the concatenated PCA
+    feature matrix, and `_compute_weight_pca`'s `try` caught only
+    `np.linalg.LinAlgError` -- so sklearn's `ValueError: Input X contains NaN`
+    escaped and every other analysis was lost with it, with nothing written to
+    disk at all.
 
-    PRE-EXISTING: `weight_analyzer.py` has no commit in the 2026-09-02 analyzer
-    repair plan's range, so this is not a regression that plan introduced. It is
-    pinned here so that (a) the behaviour is executable rather than a prose
-    memory, and (b) whoever fixes it is TOLD by a red test to update the README
-    caveat in the same commit.
+    `_compute_weight_statistics` now CLASSIFIES a degenerate tensor
+    (`status: 'degenerate'`, plus `degenerate_fields`) instead of emitting a
+    silent NaN, so the assertion is inverted: the same call must COMPLETE. The
+    README caveat moved from "KNOWN OPEN" to a description of the classification
+    in the same commit.
     """
 
     @staticmethod
@@ -1478,15 +1479,33 @@ class TestTheConstantWeightPcaAbortIsPinnedAndDocumented:
         results = self._run(tmp_path, "healthy", zero_kernel=False)
         assert results.weight_stats, "the control run produced no weight stats"
 
-    def test_a_constant_kernel_still_aborts_the_whole_analysis(self, tmp_path):
-        with pytest.raises(ValueError, match="Input X contains NaN"):
-            self._run(tmp_path, "zeroed", zero_kernel=True)
+    def test_a_constant_kernel_no_longer_aborts_the_whole_analysis(self, tmp_path):
+        results = self._run(tmp_path, "zeroed", zero_kernel=True)
+        assert results.weight_stats, (
+            "the zeroed-kernel run produced no weight stats at all"
+        )
+        # Anti-vacuity: the probe must actually reach the degenerate branch,
+        # otherwise a pass says nothing about the abort this guard replaced.
+        flagged = [
+            (model, name, stats["status"])
+            for model, per_model in results.weight_stats.items()
+            for name, stats in per_model.items()
+            if stats["status"] != "success"
+        ]
+        assert flagged, (
+            "no weight tensor was flagged degenerate, so the zeroed kernel never "
+            "produced the NaN statistics this guard exists for"
+        )
 
-    def test_the_readme_records_the_open_defect(self):
+    def test_the_readme_describes_the_degenerate_classification(self):
         text = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
-        assert "Input X contains NaN" in text, (
-            "the README no longer records the constant-weight PCA abort; if it "
-            "was FIXED, delete this pin in the same commit"
+        assert "Input X contains NaN" not in text, (
+            "the README still records the constant-weight PCA abort as an open "
+            "defect, but `analyze()` now completes -- the caveat went stale"
+        )
+        assert "degenerate_fields" in text, (
+            "the README does not document the `degenerate_fields` key that "
+            "carries which statistics were substituted"
         )
 
 

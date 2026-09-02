@@ -90,11 +90,26 @@ class SmoothingMethod(str, Enum):
     LAMBDA_MIN = 'lambda_min'
 
 class StatusCode(str, Enum):
-    """Enum for spectral analysis status codes"""
+    """Per-metric status codes shared by the spectral and weight analyzers.
+
+    The two ``WEIGHT_*`` members classify a weight tensor whose statistics could
+    not all be computed as finite numbers. They are deliberately DISTINCT: a
+    zeros-initialised table is legal input whose standardized moments are merely
+    undefined, whereas a tensor that already contains ``NaN``/``inf`` is a
+    corrupt model. Collapsing them would launder a corruption into a plausible
+    number.
+    """
     SUCCESS = 'success'
     FAILED = 'failed'
     WARN_OVER_TRAINED = 'over-trained'
     WARN_UNDER_TRAINED = 'under-trained'
+    #: The tensor is finite and legal, but at least one statistic was undefined
+    #: or unrepresentable and was recomputed at higher precision or substituted.
+    #: ``degenerate_fields`` names every affected leaf.
+    WEIGHT_DEGENERATE = 'degenerate'
+    #: The tensor ITSELF contains ``NaN``/``inf``. Statistics are published as
+    #: computed (non-finite), never repaired -- see D-001.
+    WEIGHT_NON_FINITE = 'non-finite'
 
 class MetricNames:
     """Class holding the standard names of metrics used in spectral analysis"""
