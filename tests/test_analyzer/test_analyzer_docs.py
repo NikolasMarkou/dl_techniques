@@ -999,13 +999,16 @@ class TestCorrelationTrapsDocMatchesTheImplementation:
     def test_the_documented_c_tw_matches_the_constant(self):
         from dl_techniques.analyzer.constants import SPECTRAL_TW_SAFETY_FACTOR
 
-        assert SPECTRAL_TW_SAFETY_FACTOR == 1.0, (
+        assert SPECTRAL_TW_SAFETY_FACTOR == 3.0, (
             f"the shipped Tracy-Widom factor moved to {SPECTRAL_TW_SAFETY_FACTOR}; the "
-            "document's divergence table quotes 1.0"
+            "document's divergence table quotes 3.0"
         )
         text = TRAPS_PATH.read_text(encoding="utf-8")
-        assert "`SPECTRAL_TW_SAFETY_FACTOR = 1.0`" in text, (
+        assert f"`SPECTRAL_TW_SAFETY_FACTOR = {SPECTRAL_TW_SAFETY_FACTOR}`" in text, (
             "the divergence table no longer names the shipped c_TW value"
+        )
+        assert "`SPECTRAL_TW_SAFETY_FACTOR = 1.0`" not in text, (
+            "the divergence table still quotes the superseded c_TW of 1.0"
         )
 
     def test_the_two_mp_edge_spellings_agree_under_their_own_conventions(self):

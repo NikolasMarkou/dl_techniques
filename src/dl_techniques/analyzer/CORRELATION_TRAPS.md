@@ -31,8 +31,8 @@ matrix (`X = WᵀW / 200`, seed 3, σ² over all eigenvalues = `1.006857`), and 
 | Quantity | This document | Shipped code | Status |
 |---|---|---|---|
 | MP edges | `λ± = σ²(1 ± √Q)²`, `Q = N/M` with `N` the **column** count (§9.1 does `M, N = W.shape`; the §5.2 example has `Q = 256/512 = 0.5`) | `λ± = σ²(1 ± 1/√Q)²`, `Q = N/M` with `N` the **larger** dimension, so `Q ≥ 1` (`calc_mp_edges`) | **Not a divergence — the same formula under opposite `Q` conventions.** Measured identical: doc `λ₊ = 2.265427` at `Q = 0.25`, code `λ₊ = 2.265427` at `Q = 4` on the same σ². Substituting the code's `Q ≥ 1` into this document's spelling inflates `λ₊` by exactly a factor of `Q` (`9.061710` vs `2.265427`), which is a reading error, not a code defect. Read each formula with its own `Q`. |
-| Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `Δ_TW = c_TW · λ₊ · M^(-2/3) · f(Q)`, `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`; `threshold = λ₊ + Δ_TW` (Johnstone 2001's Tracy-Widom scale) | **Real divergence, and ALSO a divergence from WeightWatcher — see below.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.264996` (`Δ_TW = 0.061938`). |
-| `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 1.0`, and it counts Tracy-Widom UNITS of headroom above `λ₊`, not multiples of `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. |
+| Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `Δ_TW = c_TW · λ₊ · M^(-2/3) · f(Q)`, `f(Q) = Q^(-1/6)·(1+√Q)^(-2/3)`; `threshold = λ₊ + Δ_TW` (Johnstone 2001's Tracy-Widom scale) | **Real divergence, and ALSO a divergence from WeightWatcher — see below.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.388871` (`Δ_TW = 0.185813`) at the shipped `c_TW = 3.0`. |
+| `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 3.0`, and it counts Tracy-Widom UNITS of headroom above `λ₊`, not multiples of `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. The shipped `3.0` is calibrated, not inherited: on 300 clean Gaussian Wisharts per shape the per-draw false-positive rate is `0.0900 / 0.1300 / 0.0967` at `c_TW = 1.0` for 200×50 / 100×100 / 500×100, against `0.0067 / 0.0100 / 0.0133` at `3.0`, while detection power against the §7.1 element-trap geometry stays `1.000` for amplitude ≥ 20. |
 | Bulk variance σ² | `sigma_sq = np.mean(eigenvalues)` over the **whole** spectrum (§9.1 Step 4, Appendix B.1) | `estimate_bulk_variance`: the mean is re-estimated over only the eigenvalues at or below the current MP edge, iterated to convergence | **Real divergence, deliberate (`D-017`).** The document's estimator counts a spike into the very edge meant to identify it: one 20× spike moved the mean `201.37 → 381.12` (1.89×) and the edge `453.09 → 857.52` with it, making the detector *conservative* exactly when it should fire hardest. On a clean probe the two differ mildly: `1.006857` (doc) vs `0.979137` (shipped). |
 | Number of draws | one randomization (§4 Step 4) | `config.spectral_n_randomizations` independent permutations (default 5); `has_trap` is a **majority vote** and every other trap quantity is the **mean** over the draws, so `num_rand_spikes` can be fractional | **Real divergence, deliberate (`D-017`).** |
 
@@ -73,13 +73,21 @@ Johnstone's `0.0281·λ₊` per Tracy-Widom unit. Both labels apply; neither is 
 - **The threshold is now scale-equivariant.** `Δ_TW ∝ λ₊`, so the relative headroom
   `(threshold − λ₊)/λ₊` is exactly `c_TW · M^(-2/3) · f(Q)` and carries no dependence on the weight
   scale at all. Measured on the IDENTICAL clean 200×50 Wishart spectrum (seed 0), rescaled by `s`,
-  it now reads `0.028114` at every one of `s = 1e-4`, `1`, `100`, `1e4`, and is bit-identical across
+  it now reads `0.084343` at every one of `s = 1e-4`, `1`, `100`, `1e4`, and is bit-identical across
   exact powers of two. Before the fix the same probe read `52.02` at `s = 1e-4`, `0.1121` at `s = 1`
   and `0.00520` at `s = 100`, and for seeds 3 and 7 the rescale flipped `has_trap` from `False` to
   `True` on unchanged eigenvalues. The normalize-before-comparing route this section previously
   proposed was NOT taken: it would have moved `mp_lambda_plus` and `trap_threshold` into normalized
   units, changing three published columns' meaning. Guarded by
   `tests/test_analyzer/test_spectral_metrics.py -k TestTheTrapThresholdIsScaleEquivariant`.
+- **The false-positive rate no longer depends on the weight scale either.** On the SAME 400 clean
+  draws rescaled by `s`, the pre-fix detector flagged `0.000 / 0.003 / 0.107 / 0.107` of them at
+  `s = 1e-2 / 1 / 1e2 / 1e4` (200×50), `0.000 / 0.013 / 0.122 / 0.122` at 100×100 and
+  `0.000 / 0.000 / 0.128 / 0.128` at 500×100. The shipped detector reads a flat
+  `0.005 / 0.010 / 0.010` at every one of those four scales. Any single false-positive figure quoted
+  for the pre-fix detector is meaningless without its scale.
+- **A clean 200×50 Wishart no longer reports `num_rand_spikes = 1`.** Seeds 3 and 7, the two
+  borderline probes this document quotes, now report `has_trap = False, spikes = 0` at every scale.
 
 ---
 

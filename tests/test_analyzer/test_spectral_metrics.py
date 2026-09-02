@@ -2460,3 +2460,110 @@ class TestTheTrapThresholdIsScaleEquivariant:
                 f"Tracy-Widom scale {expected!r} at c_TW="
                 f"{SPECTRAL_TW_SAFETY_FACTOR}"
             )
+
+
+class TestTheTrapSafetyFactorIsCalibratedAndLive:
+    """`SPECTRAL_TW_SAFETY_FACTOR` is how many Tracy-Widom units of headroom.
+
+    Under the pre-fix square-root spelling the knob carried no information: the
+    offset was ~0.3% of `lambda_plus` at unit scale while the Tracy-Widom standard
+    deviation is ~2.8% of it, so almost nothing sat between `c_TW = 1` and
+    `c_TW = 3` and the two gave the same verdict on essentially every draw
+    (MEASURED false-positive rate at 200x50, unit scale: 0.003 against 0.000).
+    Now that the offset is a genuine Tracy-Widom scale the knob is live, and its
+    value has to be earned rather than inherited.
+
+    Every draw below is seeded, so these rates are fixed numbers, not samples.
+    """
+
+    _TRIALS = 300
+    _SHAPES = [(200, 50), (100, 100), (500, 100)]
+
+    @staticmethod
+    def _clean_draws(n, m, trials):
+        for t in range(trials):
+            weight_matrix = np.random.default_rng(10_000 + t).standard_normal((n, m))
+            yield np.sort(np.linalg.eigvalsh(weight_matrix.T @ weight_matrix / n))[::-1]
+
+    @pytest.mark.parametrize("shape", _SHAPES)
+    def test_the_shipped_default_holds_false_positives_under_five_percent(self, shape):
+        """At the shipped default, a clean Wishart must almost never be flagged.
+
+        MEASURED at the previous default of 1.0: 0.0900 / 0.1300 / 0.0967 across
+        these three shapes, which tracks the Tracy-Widom law's own P(W1 > 1) of
+        about 8% — the constant was right for what it multiplies, and one TW unit
+        of headroom is simply not enough margin. At 3.0: 0.0067 / 0.0100 / 0.0133.
+        """
+        n, m = shape
+        flagged = sum(
+            detect_correlation_trap(evals, n, m)["has_trap"]
+            for evals in self._clean_draws(n, m, self._TRIALS)
+        )
+        rate = flagged / self._TRIALS
+
+        assert rate < 0.05, (
+            f"{n}x{m}: {flagged} of {self._TRIALS} CLEAN Gaussian Wisharts were "
+            f"flagged as correlation traps (rate {rate:.4f}) at the shipped "
+            f"SPECTRAL_TW_SAFETY_FACTOR. A rate near 0.08-0.13 is one Tracy-Widom "
+            f"unit of headroom, which is the width of the fluctuation itself."
+        )
+
+    def test_the_shipped_default_still_detects_the_setol_element_trap(self):
+        """A pin, not a RED-proven guard: power was already 1.0 before the bump.
+
+        SETOL §7.1 defines the trap geometry as an unusually large matrix ELEMENT,
+        so that is what is planted. At amplitude 20 the largest eigenvalue sits at
+        1.51x the MP edge; power is 1.000 at every safety factor from 1.0 to 4.0,
+        so raising the default buys the false-positive reduction above for nothing.
+        """
+        detected = 0
+        for t in range(100):
+            weight_matrix = np.random.default_rng(20_000 + t).standard_normal((200, 50))
+            weight_matrix[0, 0] = 20.0
+            evals = np.sort(
+                np.linalg.eigvalsh(weight_matrix.T @ weight_matrix / 200))[::-1]
+            detected += detect_correlation_trap(evals, 200, 50)["has_trap"]
+
+        assert detected == 100, (
+            f"the shipped default detected only {detected} of 100 planted element "
+            f"traps at amplitude 20"
+        )
+
+    @pytest.mark.parametrize("shape", _SHAPES)
+    def test_the_safety_factor_is_a_live_knob(self, shape):
+        """Anti-vacuity: the constant must actually change verdicts.
+
+        A calibration argument is worthless for a knob nothing responds to, and
+        this one WAS inert — under the pre-fix spelling `c_TW = 1.0` and
+        `c_TW = 3.0` disagreed on roughly one clean draw in 300. They now disagree
+        on 25 / 36 / 25 of 300.
+        """
+        n, m = shape
+        disagreements = 0
+        for evals in self._clean_draws(n, m, self._TRIALS):
+            low = detect_correlation_trap(evals, n, m, c_TW=1.0)["has_trap"]
+            high = detect_correlation_trap(evals, n, m, c_TW=3.0)["has_trap"]
+            disagreements += low != high
+
+        assert disagreements >= 10, (
+            f"{n}x{m}: c_TW=1.0 and c_TW=3.0 gave the same verdict on all but "
+            f"{disagreements} of {self._TRIALS} clean draws. The safety factor is "
+            f"documented as a tunable; a knob that changes nothing is a constant "
+            f"wearing a parameter's name."
+        )
+
+    def test_a_clean_two_hundred_by_fifty_wishart_reports_no_spikes(self):
+        """The `num_rand_spikes = 1` observation on a clean probe, at the default.
+
+        Recorded as calibration rather than as a separate defect: it is the same
+        one TW unit of headroom, seen on the two documented borderline seeds.
+        """
+        for seed in (3, 7, 0, 11):
+            weight_matrix = np.random.default_rng(seed).standard_normal((200, 50))
+            evals = np.sort(
+                np.linalg.eigvalsh(weight_matrix.T @ weight_matrix / 200))[::-1]
+            result = detect_correlation_trap(evals, 200, 50)
+            assert result["num_rand_spikes"] == 0, (
+                f"seed {seed}: a clean 200x50 Wishart reported "
+                f"{result['num_rand_spikes']} spike(s) above the trap threshold"
+            )

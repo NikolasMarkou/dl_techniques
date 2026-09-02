@@ -237,7 +237,13 @@ JSON_INDENT: int = 2
 # quantity. BUMP this whenever a published key changes meaning or is removed —
 # an added key alone does not need a bump. An artifact with no `schema_version`
 # predates the stamp. See decisions.md D-040.
-RESULTS_SCHEMA_VERSION: int = 2
+# Bumped 2 -> 3 by plan-2026-09-02T041737-e85f2027/D-005: `trap_threshold` is now
+# `lambda_plus + c_TW*lambda_plus*M^(-2/3)*f(Q)` rather than
+# `lambda_plus + c_TW*sqrt((1/sqrt(Q))*lambda_plus^(2/3)*M^(-2/3))`. It is a
+# different function of the same spectrum, not a rescaling of the old one, and
+# `has_trap`, `num_rand_spikes`, `trap_severity` and `trap_severity_label` move
+# with it.
+RESULTS_SCHEMA_VERSION: int = 3
 
 
 # ---------------------------------------------------------------------

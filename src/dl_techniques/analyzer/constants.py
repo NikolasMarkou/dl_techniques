@@ -54,7 +54,18 @@ SPECTRAL_SMALL_N_CUTOFF = 20             # WeightWatcher SMALL_N_CUTOFF: tails w
 SPECTRAL_SMALL_N_KMIN = 8                # WeightWatcher k_min: minimum tail size considered in small-N xmin search
 
 # Correlation Trap Detection (Marchenko-Pastur + Tracy-Widom)
-SPECTRAL_TW_SAFETY_FACTOR = 1.0          # Tracy-Widom multiplier on sqrt(TW); 1.0 = WeightWatcher-exact
+# DECISION plan-2026-09-02T041737-e85f2027/D-006
+# How many Tracy-Widom units of headroom the trap threshold allows above the MP
+# edge. Do NOT put this back to 1.0: at one TW unit the margin is the width of
+# the fluctuation itself, and MEASURED on 300 clean Gaussian Wisharts per shape
+# the false-positive rate was 0.0900 (200x50), 0.1300 (100x100) and 0.0967
+# (500x100) - which tracks the Tracy-Widom law's own P(W1 > 1) of about 8%, so
+# the constant was right for what it multiplies and simply too small. At 3.0 the
+# same draws give 0.0067 / 0.0100 / 0.0133 while detection power against the
+# SETOL 7.1 element-trap geometry stays at 1.000 for amplitude >= 20. The value
+# was NOT inherited: under the pre-fix square-root offset this knob was inert,
+# so its old setting carried no information. See decisions.md D-006.
+SPECTRAL_TW_SAFETY_FACTOR = 3.0          # Tracy-Widom units of headroom above lambda_plus
 SPECTRAL_TRAP_SEVERITY_MILD = 0.1        # severity < 0.1 = no trap
 SPECTRAL_TRAP_SEVERITY_MODERATE = 0.3    # 0.1-0.3 = mild, 0.3-0.5 = moderate
 SPECTRAL_TRAP_SEVERITY_SEVERE = 0.5      # 0.5-1.0 = severe
