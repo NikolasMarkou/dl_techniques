@@ -180,6 +180,14 @@ STATUS_UNKNOWN: str = 'unknown'
 
 # Cache entry keys
 CACHE_KEY_LOGITS: str = 'logits'
+OUTPUT_ACTIVATION_SOFTMAX: str = 'softmax'
+OUTPUT_ACTIVATION_SIGMOID: str = 'sigmoid'
+OUTPUT_ACTIVATION_LOGITS: str = 'logits'
+# Slack on the [0, 1] membership test and on the "rows sum to 1" test. Both are
+# read only by `_infer_output_activation`.
+PROBABILITY_RANGE_TOLERANCE: float = 1e-5
+PROBABILITY_SUM_TOLERANCE: float = 1e-3
+
 CACHE_KEY_PREDICTIONS: str = 'predictions'
 CACHE_KEY_X_DATA: str = 'x_data'
 CACHE_KEY_Y_DATA: str = 'y_data'
@@ -434,6 +442,50 @@ class ModelAnalyzer:
 
         return self.results
 
+    def _infer_output_activation(
+            self, model_name: str, predictions: np.ndarray) -> str:
+        """Decide what a model's final layer emits.
+
+        Args:
+            model_name: Name of the model, used only for the log line.
+            predictions: The model's raw output array.
+
+        Returns:
+            One of ``'softmax'``, ``'sigmoid'`` or ``'logits'``. Only ``'logits'``
+            is softmaxed by the caller.
+        """
+        if self.config.output_activation is not None:
+            return self.config.output_activation
+
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-032
+        # A SIGMOID multi-label head emits values in [0, 1] whose rows do NOT sum to
+        # 1. The former test was `np.any(predictions < 0) or not
+        # np.allclose(row_sums, 1.0)`, which called that logits and softmaxed
+        # already-normalized probabilities - MEASURED max absolute error 0.47886595
+        # on a 3-class head, after which ECE and Brier are meaningless. Do NOT
+        # collapse the three cases back to a boolean: "not a softmax distribution"
+        # is not the same claim as "unbounded real numbers".
+        # See decisions.md D-032.
+        low = float(np.min(predictions))
+        high = float(np.max(predictions))
+        in_unit_range = low >= 0.0 and high <= 1.0 + PROBABILITY_RANGE_TOLERANCE
+
+        if predictions.ndim >= 2 and in_unit_range and np.allclose(
+                predictions.sum(axis=-1), 1.0, atol=PROBABILITY_SUM_TOLERANCE):
+            activation = OUTPUT_ACTIVATION_SOFTMAX
+            reason = "rows are non-negative and sum to 1"
+        elif in_unit_range:
+            activation = OUTPUT_ACTIVATION_SIGMOID
+            reason = f"values lie in [{low:.4g}, {high:.4g}] but rows do not sum to 1"
+        else:
+            activation = OUTPUT_ACTIVATION_LOGITS
+            reason = f"values lie outside [0, 1] ([{low:.4g}, {high:.4g}])"
+
+        logger.info(
+            f"{model_name}: inferred output activation '{activation}' "
+            f"({reason}). Set config.output_activation to override.")
+        return activation
+
     def _cache_predictions(self, data: DataInput) -> None:
         """
         Cache model predictions to avoid redundant computation.
@@ -467,27 +519,19 @@ class ModelAnalyzer:
                 # Run prediction
                 predictions = model.predict(x_data, verbose=0)
 
-                # Handle Logits vs Probabilities
-                # The output of a fine-tuned model might be logits.
-                # We need probabilities for calibration.
-                # Check if outputs are valid probability distributions (non-negative, sum to ~1).
-                is_logits = False
-                if predictions.ndim >= 2:
-                    row_sums = predictions.sum(axis=-1)
-                    is_logits = (
-                        np.any(predictions < 0) or
-                        not np.allclose(row_sums, 1.0, atol=1e-3)
-                    )
-                elif np.min(predictions) < 0 or np.max(predictions) > 1.00001:
-                    is_logits = True
+                # Calibration needs probabilities, so a logit head must be
+                # softmaxed. Which head this is comes from the config when the user
+                # pinned it, and is inferred otherwise.
+                activation = self._infer_output_activation(model_name, predictions)
 
-                if is_logits:
+                if activation == OUTPUT_ACTIVATION_LOGITS:
                     probabilities = keras.ops.softmax(predictions, axis=-1)
                     logits = predictions
                 else:
+                    # Already-normalized outputs, softmax or sigmoid alike, are used
+                    # as they are. We do not hold logits for them: inverting the
+                    # activation would invent a scale the model never had.
                     probabilities = predictions
-                    # We don't necessarily have logits if the model output softmax directly,
-                    # but we can store None or inverse-transform if really needed.
                     logits = None
 
                 self._prediction_cache[model_name] = {

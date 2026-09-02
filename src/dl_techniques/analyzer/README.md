@@ -63,6 +63,7 @@ attributes.
 | `analyze_biases` | `False` | |
 | `compute_weight_pca` | `True` | |
 | `calibration_bins` | `10` | ECE bin count |
+| `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
 | `smooth_training_curves` / `smoothing_window` | `True` / `5` | |
 | `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | layers outside this eigenvalue range are skipped; above the cap the analyzer switches to truncated SVD |
 | `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test (it is ~100× the cost of the alpha fit) |

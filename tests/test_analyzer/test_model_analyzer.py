@@ -741,3 +741,109 @@ class TestTheConfigsPrivateStateIsDeclared:
         payload = json.loads(
             (analyzer.output_dir / "analysis_results.json").read_text())
         assert set(payload["config"]) == _config_field_names()
+
+
+# =====================================================================
+# S11 - a sigmoid multi-label head must not be softmaxed
+# =====================================================================
+
+def _build_sigmoid_multilabel(name: str) -> keras.Model:
+    """A multi-label head: values in [0, 1] whose rows do NOT sum to 1."""
+    keras.utils.set_random_seed(11)
+    inputs = keras.Input(shape=(N_FEATURES,), name=f"{name}_in")
+    x = keras.layers.Dense(8, activation="relu", name=f"{name}_d1")(inputs)
+    outputs = keras.layers.Dense(
+        N_CLASSES, activation="sigmoid", name=f"{name}_out")(x)
+    return keras.Model(inputs=inputs, outputs=outputs, name=name)
+
+
+class TestASigmoidHeadIsNotSoftmaxed:
+    """`is_logits` flagged a sigmoid multi-label head as logits and softmaxed it.
+
+    `model_analyzer.py:472-483` computed
+    `is_logits = np.any(predictions < 0) or not np.allclose(row_sums, 1.0)`. A
+    sigmoid head emits values in [0, 1] whose rows do not sum to 1, so the second
+    clause is True, `keras.ops.softmax` was applied to ALREADY-normalized
+    probabilities, and every downstream ECE / Brier number was computed on the
+    wrong array. Nothing was logged on that branch.
+    """
+
+    def _cached(self, tmp_path, probe_data, tag, **config_overrides):
+        model = _build_sigmoid_multilabel("ml")
+        analyzer = ModelAnalyzer(
+            models={"ml": model},
+            config=_quiet_config(**config_overrides),
+            output_dir=str(tmp_path / tag),
+        )
+        raw = model.predict(probe_data.x_data, verbose=0)
+        analyzer._cache_predictions(probe_data)
+        cached = analyzer._prediction_cache["ml"]["predictions"]
+        return raw, cached, analyzer
+
+    def test_the_probe_really_is_a_sigmoid_head(self, tmp_path, probe_data):
+        """Anti-vacuity: the probe must trip the old heuristic's second clause."""
+        raw, _, _ = self._cached(tmp_path, probe_data, "s0")
+        assert raw.min() >= 0.0 and raw.max() <= 1.0
+        row_sums = raw.sum(axis=-1)
+        assert not np.allclose(row_sums, 1.0, atol=1e-3), (
+            f"the probe's rows sum to ~1 ({row_sums[:3]}); it would not have been "
+            "misclassified either way"
+        )
+
+    def test_the_probabilities_survive_the_heuristic(self, tmp_path, probe_data):
+        raw, cached, _ = self._cached(tmp_path, probe_data, "s1")
+        np.testing.assert_allclose(cached, raw, rtol=0, atol=0)
+
+    def test_the_inference_is_logged(self, tmp_path, probe_data, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            self._cached(tmp_path, probe_data, "s2")
+        assert any("sigmoid" in record.message.lower()
+                   for record in caplog.records), (
+            "no INFO line reports the inferred output activation; the branch was "
+            f"silent. messages: {[r.message for r in caplog.records][:10]}"
+        )
+
+    def test_an_explicit_output_activation_is_obeyed(self, tmp_path, probe_data):
+        """`output_activation='logits'` must override the heuristic."""
+        raw, cached, _ = self._cached(
+            tmp_path, probe_data, "s3", output_activation="logits")
+        expected = np.array(keras.ops.softmax(raw, axis=-1))
+        np.testing.assert_allclose(cached, expected, rtol=1e-6, atol=1e-7)
+        assert not np.allclose(cached, raw), (
+            "output_activation='logits' left the predictions untouched"
+        )
+
+    def test_a_real_logit_head_is_still_softmaxed(self, tmp_path, probe_data):
+        """Anti-vacuity: the fix must not disable logit detection."""
+        keras.utils.set_random_seed(12)
+        inputs = keras.Input(shape=(N_FEATURES,), name="lg_in")
+        outputs = keras.layers.Dense(N_CLASSES, name="lg_out")(inputs)
+        model = keras.Model(inputs, outputs, name="lg")
+
+        analyzer = ModelAnalyzer(
+            models={"lg": model},
+            config=_quiet_config(),
+            output_dir=str(tmp_path / "s4"),
+        )
+        raw = model.predict(probe_data.x_data, verbose=0)
+        assert raw.min() < 0.0, "the probe emitted no negative value; not logits"
+
+        analyzer._cache_predictions(probe_data)
+        cached = analyzer._prediction_cache["lg"]["predictions"]
+        expected = np.array(keras.ops.softmax(raw, axis=-1))
+        np.testing.assert_allclose(cached, expected, rtol=1e-6, atol=1e-7)
+
+    def test_a_softmax_head_is_still_left_alone(self, tmp_path, probe_data):
+        """Anti-vacuity: the ordinary single-label path is unchanged."""
+        model = _build_classifier("sm", seed=13)
+        analyzer = ModelAnalyzer(
+            models={"sm": model},
+            config=_quiet_config(),
+            output_dir=str(tmp_path / "s5"),
+        )
+        raw = model.predict(probe_data.x_data, verbose=0)
+        analyzer._cache_predictions(probe_data)
+        np.testing.assert_allclose(
+            analyzer._prediction_cache["sm"]["predictions"], raw, rtol=0, atol=0)

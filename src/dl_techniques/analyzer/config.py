@@ -8,7 +8,7 @@ import matplotlib
 import seaborn as sns
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Literal, Optional, List, Tuple
 
 # ---------------------------------------------------------------------
 
@@ -33,6 +33,12 @@ class AnalysisConfig:
 
     # Calibration options
     calibration_bins: int = 10
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-032
+    # What the models' final layer emits. `None` infers it per model. Set it when
+    # the inference is wrong or when you want the artifact to record the choice.
+    # 'logits' is softmaxed before calibration; 'softmax' and 'sigmoid' are used
+    # as-is. See decisions.md D-032.
+    output_activation: Optional[Literal['softmax', 'sigmoid', 'logits']] = None
 
     # Training analysis options
     smooth_training_curves: bool = True
