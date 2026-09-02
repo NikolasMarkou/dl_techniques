@@ -199,6 +199,29 @@ The channel layout of `y_true` is `[0:C] = noise`, `[C:2C] = x_start`, `[2C:2C+1
 over `(H, W)`. It is a hand-maintained contract between whoever builds the batch and the loss;
 `PORT_NOTES.md` §4.2 says why it exists and what it costs.
 
+### Running the trainer
+
+`src/train/dit/` trains the model end-to-end on synthetic class-correlated latents, with no
+external dataset and no VAE:
+
+```bash
+# wiring proof on CPU, ~70 s, writes <repo>/results/dit/
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES="" python -m train.dit.train_dit --smoke
+
+# a real (still synthetic-latent) run
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.dit.train_dit \
+    --variant DiT-S/2 --input-size 32 --num-classes 10 --epochs 100
+
+# real, pre-encoded latents (the contract is in train/dit/synthetic_data.py)
+... --train-npz /data/dit/train-00000.npz --val-npz /data/dit/val-00000.npz
+```
+
+`--smoke` shrinks the run to a wiring proof and, deliberately, also changes the model *size* and the
+latent *geometry* (`DiT-S/2` at an 8x8x4 grid over a 50-step chain) — the carve-out is anchored at
+`train_dit.py`'s `SMOKE_PRESET`. Any flag you type explicitly wins over the preset. The defaults
+otherwise reproduce upstream's recipe: `AdamW(lr=1e-4, weight_decay=0)` with **no** LR schedule, an
+EMA of the trainable weights at decay `0.9999`, and stock `compile()`/`fit()`.
+
 ## Modules
 
 | File | Holds |
