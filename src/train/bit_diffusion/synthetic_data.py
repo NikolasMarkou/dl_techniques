@@ -67,6 +67,17 @@ Two honest limitations, stated rather than hidden:
   so a run on synthetic data proves the loop wires up and the loss descends --
   never that the model learns the correspondence. Do not report a synthetic
   number as a result.
+
+CONDITIONING DROPOUT
+--------------------
+:func:`prepare_training_batch` draws ``cond_mask`` per sample from
+``Bernoulli(1 - unconditional_percent)``, defaulting to
+:data:`DEFAULT_UNCONDITIONAL_PERCENT`. It is NOT all-ones, and the reason is that
+``DiTXA.forward_with_cfg`` builds its unconditional pass by zeroing exactly this
+tensor: without training-time dropout the guided branch queries a regime the
+model never saw. Upstream calls the same knob ``--unconditional-percent`` and
+passes ``0.3`` on every launch script staged in this plan's ``reference/``.
+See D-031.
 """
 
 from __future__ import annotations
@@ -104,6 +115,7 @@ from dl_techniques.utils.logger import logger
 
 __all__ = [
     "CONTRACT_KEYS",
+    "DEFAULT_UNCONDITIONAL_PERCENT",
     "DIRECTION_MODES",
     "TIME_SAMPLERS",
     "build_bridge_dataset",
@@ -132,6 +144,16 @@ TIME_SAMPLERS: Tuple[str, ...] = ("logit_normal", "uniform")
 #: ``direction`` encoding, matching ``DiTXA._is_reverse`` (``> 0.5`` is reverse).
 FORWARD: float = 0.0
 REVERSE: float = 1.0
+
+#: Per-sample probability that a training example is made UNCONDITIONAL, i.e.
+#: gets ``cond_mask = 0``. Upstream's ``--unconditional-percent``, whose value on
+#: every production launch staged in this plan's ``reference/`` is ``0.3``
+#: (``FULL_INGEST.py:1572`` and ``:1806``).
+#:
+#: THE SINGLE SOURCE. ``TrainingConfig.unconditional_percent`` defaults to this
+#: name, not to a second literal, so the pipeline default and the run default
+#: cannot drift apart.
+DEFAULT_UNCONDITIONAL_PERCENT: float = 0.3
 
 
 # ---------------------------------------------------------------------
@@ -339,6 +361,24 @@ def _to_numpy(value: Any) -> np.ndarray:
     return np.asarray(keras.ops.convert_to_numpy(value), dtype="float32")
 
 
+def _check_unconditional_percent(value: float) -> None:
+    """Range-check the conditioning-dropout probability.
+
+    Interface contract: raises, returns nothing. Shared by
+    :func:`prepare_training_batch` and :func:`build_bridge_dataset` so the two
+    cannot disagree about what a legal probability is.
+
+    :param value: The candidate probability.
+    :type value: float
+    :raises ValueError: If ``value`` is outside ``[0, 1]`` or is not finite.
+    """
+    if not np.isfinite(value) or not 0.0 <= float(value) <= 1.0:
+        raise ValueError(
+            "unconditional_percent must be a probability in [0, 1], got "
+            f"{value!r}"
+        )
+
+
 def _draw_directions(
     count: int, mode: str, rng: np.random.Generator
 ) -> np.ndarray:
@@ -395,6 +435,7 @@ def prepare_training_batch(
     sde: BridgeSDE,
     direction_mode: str = "both",
     time_sampler: str = "logit_normal",
+    unconditional_percent: float = DEFAULT_UNCONDITIONAL_PERCENT,
     seed: int = 0,
 ) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]:
     """Turn one record batch into the ``(inputs, target, sample_weight)`` triple.
@@ -431,13 +472,20 @@ def prepare_training_batch(
     :type direction_mode: str
     :param time_sampler: One of :data:`TIME_SAMPLERS`.
     :type time_sampler: str
+    :param unconditional_percent: Per-sample probability of ``cond_mask = 0``,
+        i.e. of training the example with its whole conditioning stream zeroed.
+        ``0.0`` reproduces the all-conditional behaviour this function shipped
+        with before step 9.1. See :data:`DEFAULT_UNCONDITIONAL_PERCENT`.
+    :type unconditional_percent: float
     :param seed: Batch seed. Must differ per batch.
     :type seed: int
     :return: ``(inputs, target, sample_weight)`` with ``inputs`` carrying
         ``x_t``/``t``/``y``/``x_cond``/``direction``/``cond_mask``.
     :rtype: Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]
+    :raises ValueError: If ``unconditional_percent`` is outside ``[0, 1]``.
     """
     count = validate_records(records, config)
+    _check_unconditional_percent(unconditional_percent)
     rng = np.random.default_rng(seed)
     is_flow_matching = isinstance(sde, FlowMatchingODE)
 
@@ -467,6 +515,23 @@ def prepare_training_batch(
         reverse_weight = dsm_weight_reverse(sde, t)
 
     direction = _draw_directions(count, direction_mode, rng)
+    # DECISION plan-2026-09-02T094601-77d4a04e/D-031
+    # `cond_mask` is drawn PER SAMPLE, PER BATCH, and it is NOT all-ones. Do NOT
+    # restore the all-ones constant: `forward_with_cfg` builds its unconditional
+    # pass by zeroing exactly this tensor, so an all-ones training regime asks
+    # the model at inference for an input it never saw. Upstream's own knob is
+    # `--unconditional-percent 0.3`, on every launch script staged in this plan's
+    # reference/ (`FULL_INGEST.py:1572`, `:1806`); `cond_mask` is a parameter of
+    # its TRAINING losses (`dsm_loss` `:829` -> model `:859`, `flow_matching_loss`
+    # `:883`/`:901`, `edm_dsm_loss` `:920`/`:944`), which an inference-only mask
+    # could never be. `class_dropout_prob` is a DIFFERENT knob, fed from
+    # `prompt_kind_dropout` (`:2459`), and no `--class-dropout-*` flag exists in
+    # the ingest at all. See decisions.md D-031.
+    #
+    # `>=` not `>`: `Generator.random` draws from [0, 1), so `p = 0.0` keeps
+    # every sample conditional and `p = 1.0` drops every one -- the two endpoints
+    # are exact, not merely probable.
+    cond_mask = (rng.random(count) >= unconditional_percent).astype("float32")
     is_reverse = direction > 0.5
     pick_map = is_reverse[:, None, None, None]
     pick_scalar = is_reverse
@@ -497,14 +562,7 @@ def prepare_training_batch(
         "y": np.asarray(keras.ops.convert_to_numpy(y), dtype="int32"),
         "x_cond": x_cond.astype("float32"),
         "direction": direction.astype("float32"),
-        # All-ones: upstream applies NO conditioning dropout during training
-        # (its classifier-free branch comes from the class-label embedder's own
-        # `class_dropout_rate`, and `forward_with_cfg` zeroes `cond_mask` at
-        # INFERENCE time). The key is emitted anyway so the element shape is the
-        # model's full input surface rather than a subset a later change could
-        # silently drift from. Do NOT add a training-time cond-dropout knob here
-        # without a reference for it.
-        "cond_mask": np.ones((count,), dtype="float32"),
+        "cond_mask": cond_mask,
     }
     return inputs, target.astype("float32"), weight
 
@@ -521,6 +579,7 @@ def build_bridge_dataset(
     batch_size: int,
     direction_mode: str = "both",
     time_sampler: str = "logit_normal",
+    unconditional_percent: float = DEFAULT_UNCONDITIONAL_PERCENT,
     seed: int = 0,
     shuffle: bool = True,
     steps: Optional[int] = None,
@@ -555,6 +614,11 @@ def build_bridge_dataset(
     :type direction_mode: str
     :param time_sampler: One of :data:`TIME_SAMPLERS`.
     :type time_sampler: str
+    :param unconditional_percent: Per-sample ``cond_mask = 0`` probability. A
+        FRESH mask is drawn for every batch, because each batch gets its own
+        seed from the generator's own ``numpy`` stream -- see the paragraph
+        above on why a graph-mode ``Dataset.map`` cannot do this (D-019).
+    :type unconditional_percent: float
     :param seed: Seed for the batch-index shuffle and the per-batch seeds.
     :type seed: int
     :param shuffle: Re-shuffle the record order each pass.
@@ -565,9 +629,11 @@ def build_bridge_dataset(
     :return: The dataset.
     :rtype: tf.data.Dataset
     :raises ValueError: If ``batch_size`` is not positive or exceeds the record
-        count, or if ``steps`` is not positive.
+        count, if ``steps`` is not positive, or if ``unconditional_percent`` is
+        outside ``[0, 1]``.
     """
     count = validate_records(records, config)
+    _check_unconditional_percent(unconditional_percent)
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
     if batch_size > count:
@@ -614,6 +680,7 @@ def build_bridge_dataset(
                 sde,
                 direction_mode=direction_mode,
                 time_sampler=time_sampler,
+                unconditional_percent=unconditional_percent,
                 seed=int(rng.integers(1, 2**31 - 1)),
             )
             emitted += 1

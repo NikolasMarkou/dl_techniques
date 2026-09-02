@@ -17,6 +17,11 @@ Usage::
     ... --image-as-noise              # replace the image endpoint with noise
     ... --sde-type flow_matching      # the rectified-flow baseline
 
+    # classifier-free guidance needs a TRAINED unconditional branch (D-031)
+    ... --unconditional-percent 0.3   # upstream's value, and the default here
+    ... --unconditional-percent 0.0   # disable it; forward_with_cfg then asks
+                                      #   the model for a regime it never saw
+
     # real, pre-encoded data (see synthetic_data.py for the contract)
     ... --train-npz /data/bib/train-00000.npz --val-npz /data/bib/val-00000.npz
 
@@ -78,6 +83,7 @@ from train.common import (
     setup_gpu,
 )
 from train.bit_diffusion.synthetic_data import (
+    DEFAULT_UNCONDITIONAL_PERCENT,
     DIRECTION_MODES,
     TIME_SAMPLERS,
     build_bridge_dataset,
@@ -136,6 +142,12 @@ class TrainingConfig:
     :param sde_drift: ``A``, the Ornstein-Uhlenbeck drift of the uniform variant.
     :param time_sampler: One of ``TIME_SAMPLERS``.
     :param direction: One of ``DIRECTION_MODES`` (D-002 ablation).
+    :param unconditional_percent: Per-sample probability that a training example
+        is made UNCONDITIONAL (``cond_mask = 0``). Upstream's
+        ``--unconditional-percent``; ``0.3`` on every reference launch script.
+        This is what makes ``DiTXA.forward_with_cfg``'s unconditional branch a
+        regime the model has actually seen. NOT the same knob as
+        ``class_dropout_rate``, which drops only the prompt-kind LABEL.
     :param text_as_noise: Replace the text endpoint with noise (D-002 ablation).
     :param image_as_noise: Replace the image endpoint with noise (D-002).
     :param variant: Key of ``DiTXA.MODEL_VARIANTS`` -- capacity only.
@@ -181,6 +193,7 @@ class TrainingConfig:
     sde_drift: float = 0.0
     time_sampler: str = "logit_normal"
     direction: str = "both"
+    unconditional_percent: float = DEFAULT_UNCONDITIONAL_PERCENT
     text_as_noise: bool = False
     image_as_noise: bool = False
 
@@ -234,6 +247,11 @@ class TrainingConfig:
             raise ValueError(
                 f"Unknown time sampler '{self.time_sampler}'. Available: "
                 f"{list(TIME_SAMPLERS)}"
+            )
+        if not 0.0 <= self.unconditional_percent <= 1.0:
+            raise ValueError(
+                "unconditional_percent must be a probability in [0, 1], got "
+                f"{self.unconditional_percent!r}"
             )
         for name in ("batch_size", "epochs", "steps_per_epoch",
                      "validation_steps", "num_train_samples",
@@ -291,6 +309,7 @@ CLI_TO_CONFIG: Dict[str, str] = {
     "sde_drift": "sde_drift",
     "time_sampler": "time_sampler",
     "direction": "direction",
+    "unconditional_percent": "unconditional_percent",
     "text_as_noise": "text_as_noise",
     "image_as_noise": "image_as_noise",
     "variant": "variant",
@@ -409,6 +428,12 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--direction", type=str, default=defaults.direction,
                          choices=list(DIRECTION_MODES),
                          help="Ablation: train both directions, or only one.")
+    process.add_argument("--unconditional-percent", type=float,
+                         default=defaults.unconditional_percent,
+                         help="Per-sample probability of zeroing cond_mask "
+                              "during training, so classifier-free guidance "
+                              "has a trained unconditional branch. Upstream "
+                              "runs 0.3; 0.0 disables it.")
     process.add_argument("--text-as-noise",
                          action=argparse.BooleanOptionalAction,
                          default=defaults.text_as_noise)
@@ -641,6 +666,7 @@ def create_datasets(
         batch_size=config.batch_size,
         direction_mode=config.direction,
         time_sampler=config.time_sampler,
+        unconditional_percent=config.unconditional_percent,
     )
     train = build_bridge_dataset(
         load_or_draw_records(config, "train"),

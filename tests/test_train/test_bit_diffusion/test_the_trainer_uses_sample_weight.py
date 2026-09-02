@@ -71,7 +71,12 @@ from train.bit_diffusion.synthetic_data import (
     prepare_training_batch,
     synthetic_records,
 )
+from train.bit_diffusion.synthetic_data import (
+    DIRECTION_MODES,
+    TIME_SAMPLERS,
+)
 from train.bit_diffusion.train_bit_diffusion import (
+    SDE_TYPES,
     TrainingConfig,
     build_sde,
     create_model,
@@ -81,6 +86,11 @@ from train.bit_diffusion.train_bit_diffusion import (
 BATCH = 4
 RECORDS = 16
 SEED = 7
+
+#: Independent batch seeds the direction arm collects over. At BATCH=4 a correct
+#: `both` draw is single-valued with probability 2**-3, so one batch is not an
+#: instrument for "both directions appear".
+BATCHES = 8
 
 
 def _config(**overrides: Any) -> TrainingConfig:
@@ -102,8 +112,15 @@ def _config(**overrides: Any) -> TrainingConfig:
     return TrainingConfig(**base)
 
 
-def _element(**overrides: Any) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]:
-    """One ``(inputs, target, sample_weight)`` triple from the real pipeline."""
+def _element(
+    draw_seed: int = SEED, **overrides: Any
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """One ``(inputs, target, sample_weight)`` triple from the real pipeline.
+
+    ``draw_seed`` is the BATCH seed (what ``build_bridge_dataset`` advances per
+    step), not ``TrainingConfig.seed``; it exists so a caller can collect several
+    independent batches without rebuilding the config.
+    """
     config = _config(**overrides)
     bridge = config.bridge_config
     records = synthetic_records(BATCH, bridge, seed=SEED)
@@ -113,7 +130,8 @@ def _element(**overrides: Any) -> Tuple[Dict[str, np.ndarray], np.ndarray, np.nd
         build_sde(config),
         direction_mode=config.direction,
         time_sampler=config.time_sampler,
-        seed=SEED,
+        unconditional_percent=config.unconditional_percent,
+        seed=draw_seed,
     )
 
 
@@ -373,3 +391,147 @@ def test_one_synthetic_epoch_pair_falls_with_zero_nan(tmp_path):
         "exits 0. (train loss for reference, deliberately not asserted on: "
         f"{losses})"
     )
+
+
+# ---------------------------------------------------------------------
+# 5. The advertised process surface, all of it
+# ---------------------------------------------------------------------
+#
+# Reviewer finding W-5. Every config above is built from ONE base dict that
+# never overrides `sde_type`, `direction` or `time_sampler`, so the advertised
+# `--sde-type flow_matching`, `--direction forward|reverse` and
+# `--time-sampler uniform` branches had no guard at all: the `is_flow_matching`
+# branch of `prepare_training_batch` was never entered by a test, while
+# `--help` exits 0 listing all four SDE choices. The reviewer ran the whole
+# 4x3x2 product by hand and every combination was finite -- alive, unguarded,
+# which is exactly the "an advertised branch was DEAD under a green suite"
+# shape this repo has already recorded once.
+#
+# The product is taken from the PARSER'S OWN choice lists, not from literals, so
+# adding a fifth SDE type or a third time sampler extends the guard rather than
+# silently escaping it.
+
+PROCESS_PRODUCT = [
+    (sde_type, direction, time_sampler)
+    for sde_type in sorted(SDE_TYPES)
+    for direction in DIRECTION_MODES
+    for time_sampler in TIME_SAMPLERS
+]
+
+
+@pytest.fixture(scope="module")
+def product_model() -> keras.Model:
+    """ONE compiled ``tiny`` model, reused across the whole product.
+
+    The model does not depend on ``sde_type`` / ``direction`` / ``time_sampler``
+    -- all three are DATA settings (D-005) -- so rebuilding it 24 times would
+    buy nothing and cost most of the runtime.
+    """
+    return _compiled_model(_config())
+
+
+@pytest.mark.parametrize("sde_type,direction,time_sampler", PROCESS_PRODUCT)
+def test_every_advertised_process_combination_produces_a_usable_element(
+    product_model, sde_type, direction, time_sampler
+):
+    """The real pipeline, the real model, the real loss -- for all 24.
+
+    Asserts the properties the rest of this file pins only at the defaults:
+    the rank-3 weight, agreement with the loss's own reduction shape, and a
+    finite loss. A branch that raises, emits the wrong rank, or produces NaN
+    goes red here by name instead of the first time somebody types the flag.
+    """
+    inputs, target, weight = _element(
+        sde_type=sde_type, direction=direction, time_sampler=time_sampler
+    )
+    assert weight.ndim == 3 and weight.shape == target.shape[:3]
+    assert np.all(np.isfinite(weight)), f"non-finite w(t): {weight}"
+    assert np.all(np.isfinite(target)), "non-finite target"
+
+    per_sample = FlowMatchingVelocityLoss().call(
+        keras.ops.convert_to_tensor(target),
+        keras.ops.convert_to_tensor(target * 0.5),
+    )
+    assert tuple(per_sample.shape) == weight.shape
+
+    reported = float(
+        np.reshape(
+            product_model.evaluate(
+                x=inputs, y=target, sample_weight=weight, batch_size=BATCH,
+                verbose=0,
+            ),
+            (-1,),
+        )[0]
+    )
+    assert math.isfinite(reported), (
+        f"loss is {reported!r} for sde_type={sde_type} direction={direction} "
+        f"time_sampler={time_sampler}"
+    )
+
+
+@pytest.mark.parametrize("direction", DIRECTION_MODES)
+def test_the_direction_flag_selects_the_direction_the_model_reads(direction):
+    """``--direction`` must reach the ``direction`` INPUT, not merely be stored.
+
+    ``DiTXA._is_reverse`` thresholds at ``0.5``, so the encoding is pinned to
+    the exact values rather than to "some variation". ``both`` is asserted to
+    contain BOTH -- a `both` that silently degenerated to one direction would
+    pass every finiteness arm above.
+
+    Collected over ``BATCHES`` independent batch seeds, not one. At ``BATCH=4``
+    a single correct ``both`` draw is all-reverse with probability ``2**-3``;
+    the first seed tried here WAS such a draw, so a one-batch form would have
+    been a guard that fails on correct code roughly one seed in eight.
+    """
+    values = set()
+    for step in range(BATCHES):
+        inputs, _, _ = _element(draw_seed=SEED + step, direction=direction)
+        values |= set(np.unique(inputs["direction"]).tolist())
+    if direction == "forward":
+        assert values == {0.0}, f"forward emitted {values}"
+    elif direction == "reverse":
+        assert values == {1.0}, f"reverse emitted {values}"
+    else:
+        assert values == {0.0, 1.0}, (
+            f"direction='both' emitted only {values} over {BATCH} samples; "
+            "raise the batch size or fix the draw"
+        )
+
+
+@pytest.mark.parametrize("sde_type", sorted(SDE_TYPES))
+def test_the_flow_matching_branch_is_the_only_unweighted_one(sde_type):
+    """The ``is_flow_matching`` branch of the pipeline, entered and identified.
+
+    ``FlowMatchingODE`` RAISES on ``sigma``/``phi``/``C``, so it takes a wholly
+    separate path that emits an UNWEIGHTED (all-ones) w(t). Pinning that the
+    weight is all-ones there and NOT all-ones anywhere else is what proves the
+    branch was actually entered, rather than that some code ran without error.
+    """
+    _, _, weight = _element(sde_type=sde_type)
+    per_sample = weight[:, 0, 0]
+    if sde_type == "flow_matching":
+        assert np.all(weight == 1.0), (
+            f"flow matching emitted a weighted objective: {per_sample}"
+        )
+    else:
+        assert float(per_sample.std()) > 1e-8, (
+            f"sde_type={sde_type} emitted a constant w(t) {per_sample}; the "
+            "score-matching weighting is direction- and time-dependent"
+        )
+
+
+@pytest.mark.parametrize("time_sampler", TIME_SAMPLERS)
+def test_both_time_samplers_stay_inside_the_endpoint_clamp(time_sampler):
+    """``--time-sampler uniform`` had no guard at all.
+
+    ``C(0,t,t)`` and ``C(t,1,1)`` are exactly zero at the endpoints, so a
+    sampler that emitted 0 or 1 would divide by zero in the score target. Both
+    samplers clamp to ``[TIME_EPS, 1 - TIME_EPS]``; that is asserted here rather
+    than assumed, and the drawn times are required to VARY so a sampler stuck at
+    one value cannot pass.
+    """
+    inputs, _, _ = _element(time_sampler=time_sampler)
+    t = np.asarray(inputs["t"])
+    assert np.all(t > 0.0) and np.all(t < 1.0), f"t escaped (0,1): {t}"
+    assert np.all(np.isfinite(t))
+    assert float(t.std()) > 1e-8, f"{time_sampler} emitted a constant t: {t}"

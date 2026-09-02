@@ -433,6 +433,36 @@ Every registered class uses `@register_dl_technique(package="dl_techniques.model
 `CosineDecayingVolatilitySDE`, `FlowMatchingODE`) are defined in exactly one file each, and the
 bare-name legacy-alias namespace stays collision-free.
 
+### 4.19 Conditioning dropout: the trainer HAS the knob, and it is not the label one — **D-031**
+
+Two upstream knobs look interchangeable and are not, and the port got it wrong once. Recording
+the distinction because it is the kind of thing a reader re-derives incorrectly.
+
+| upstream name | what it drops | this port |
+|---|---|---|
+| `--unconditional-percent` | the whole conditioning STREAM, via `cond_mask` | `TrainingConfig.unconditional_percent`, default **0.3** |
+| `class_dropout_prob` (fed by `prompt_kind_dropout`) | the prompt-kind LABEL only | `TrainingConfig.class_dropout_rate`, default 0.1 |
+
+`DiTXA.forward_with_cfg` builds its unconditional pass by zeroing `cond_mask` (§4.1), so it is the
+FIRST row that decides whether CFG is meaningful. Until step 9.1 the trainer emitted
+`cond_mask = np.ones(...)` with a comment asserting that upstream applied no conditioning dropout
+during training; both halves of that claim were false. The evidence, all from the staged ingest:
+
+* `FULL_INGEST.py:1572` and `:1806` — both production launchers pass `--unconditional-percent 0.3`.
+* `cond_mask` is a parameter of upstream's TRAINING losses, not only of its sampler: `dsm_loss`
+  (`:829`, threaded to the model at `:859`), `flow_matching_loss` (`:883`/`:901`) and
+  `edm_dsm_loss` (`:920`/`:944`). An inference-only mask could not be a training-loss parameter.
+* `class_dropout_prob` is fed from `prompt_kind_dropout` at `:2459`, and no `--class-dropout-*`
+  flag exists anywhere in the ingest — so the `0.3` is definitely not that knob.
+
+The consequence had the port shipped as it was: a correct, anchored, well-guarded CFG
+implementation on top of a training recipe under which the unconditional branch is out of
+distribution and `cond + s * (cond - uncond)` is guided by noise. The mask is now drawn per
+sample and per batch in `prepare_training_batch`, and
+`tests/test_train/test_bit_diffusion/test_the_cfg_unconditional_branch_is_trained.py` pins the
+two exact endpoints, the empirical rate against a derived binomial tolerance, and the
+across-batch variation (the D-019 stateless-seed trap in a new place).
+
 ---
 
 ## 5. Reuse vs Build Summary
@@ -456,24 +486,35 @@ bare-name legacy-alias namespace stays collision-free.
 ## 6. Follow-ups / Not-Yet-Done
 
 1. **The line cap was exceeded and not renegotiated.** The plan's `≤5,500 new non-test src/
-   lines` cap is a declared STOP-and-renegotiate trigger; the port landed **6,355**. The file and
+   lines` cap is a declared STOP-and-renegotiate trigger; the port landed **6,355**, and step 9.1's
+   completion fixes took it to **6,443**. The file and
    class caps — the ones the plan chose as the real binding discipline (D-007) — were all met
    exactly. Recorded here rather than quietly absorbed.
 2. **A real encoder path.** A VAE for the image endpoint and a token-embedding source for the text
    endpoint. Until both exist, every number in this package is a number about synthetic data.
-3. **Generation metrics.** FID / CLIPScore / CIDEr, none of which exist anywhere in `src/`.
+3. **Generation metrics.** FID / CLIPScore / CIDEr. FID and CIDEr exist nowhere in `src/`;
+   CLIPScore does exist, but only as a dataset FILTER for another model
+   (`src/train/cliffordnet/filter_cc3m_clipscore.py`), not as an evaluation metric anything
+   here could call. Re-measured at step 9.1 — the earlier "none of which exist anywhere" was
+   wrong about CLIPScore.
 4. **Train something.** Only `tiny` has ever been run, for 3 CPU epochs. S/B/L/XL are defined and
    construct; their parameter counts are measured and nothing else about them is.
 5. **REPA heads and EDM preconditioning** (§4.3), if the dependency ban is ever relaxed.
 6. **The `bridge_math_dtype` duplication** (§4.17) — four copies of one predicate in this tree,
    deliberately not centralized in this port.
-7. **A flaky guard, found during step 12's final verification.**
+7. **RESOLVED (commit `6239beadc`, step 8.2) — the flaky guard.**
    `test_the_flow_matching_ode_is_sampleable.py::TestTheSignFlipIsObservable::
-   test_reverse_and_forward_move_oppositely[False]` asserts that `> 0.9` of the entries of the
+   test_reverse_and_forward_move_oppositely[False]` asserted that `> 0.9` of the entries of the
    forward and reverse increments disagree in sign, at the `simulate` level with
-   `force_unconditional=False`. Re-measured across independent processes the statistic reads
-   **0.883 / 0.938 / 0.875** — its threshold sits *inside* its own noise band, and it fails
-   roughly half the time. The `[True]` arm reads 0.988-0.996 and is fine, and the *exact*
-   negation is already guarded elsewhere by calling `dX_t` directly at a fixed `t`, so this arm
-   is a redundant marginal statistic rather than the load-bearing guard. It needs its predicate
-   fixed (or the arm dropped as duplicative) — **not** its threshold lowered.
+   `force_unconditional=False`. Its threshold sat *inside* its own noise band (measured
+   0.883 / 0.938 / 0.875 across independent processes) and it failed roughly half the time.
+   Fixed by replacing the marginal statistic with the exact identity it was approximating, NOT
+   by lowering the threshold: 5 consecutive full-directory runs went `525 passed, 1 skipped`
+   with zero flakes, and the injection's blast radius GREW from 22-of-25 to 24-of-27 arms.
+   Measured across 24 seeds afterwards, the old predicate read min 0.8555 / mean 0.9204, with
+   20.8% of draws at or below its own 0.9 bound — so any surviving statistical form would have
+   had to sit near 0.8, weaker than the identity that replaced it. Kept in this list as a
+   RESOLVED entry rather than deleted, because "the threshold was inside the noise band" is the
+   reusable part.
+8. **RESOLVED (step 9.1) — CFG had no trained unconditional branch.** See §4.19. The trainer
+   now carries `--unconditional-percent`, defaulting to upstream's 0.3.
