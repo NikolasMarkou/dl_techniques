@@ -13,6 +13,7 @@ from dl_techniques.initializers import (
     create_haar_depthwise_conv2d,
     PolarInitializer,
     GaborFiltersInitializer,
+    create_gabor_conv2d,
     create_gabor_depthwise_conv2d,
     LinearUpInitializer,
     IdentityPlusNoise,
@@ -29,7 +30,7 @@ from dl_techniques.initializers import (
 - `hypersphere_orthogonal_initializer.py` — `OrthogonalHypersphereInitializer`: orthogonal vectors on a hypersphere
 - `haar_wavelet_initializer.py` — `HaarWaveletInitializer`: fixed 2D Haar wavelet filters for conv layers; also provides `create_haar_depthwise_conv2d` factory
 - `polar_initializer.py` — `PolarInitializer`: exact per-vector L2 norm with a uniform-on-sphere direction ("equinorm" init); polar-coordinate sampling (PolarQuant Lemma 2)
-- `gabor_filters_initializer.py` — `GaborFiltersInitializer`: deterministic Gabor filter-bank initialization (Ozbulak & Ekenel); also provides `create_gabor_depthwise_conv2d` factory (per-channel/depthwise, no cross-channel mixing; output = `in_channels * filters`; follow with a 1x1 Conv2D for a specific output count)
+- `gabor_filters_initializer.py` — `GaborFiltersInitializer`: deterministic Gabor filter-bank initialization (Ozbulak & Ekenel) over a factorized orientation x scale x phase sweep (`sweep="diagonal"` recovers the paper's joint-`linspace` construction), DC-removed and energy-normalized to `sqrt(2/fan_in)` by default. Two factories: `create_gabor_conv2d` (cross-channel, `trainable=True` — the paper's warm start) and `create_gabor_depthwise_conv2d` (per-channel/depthwise, no cross-channel mixing, `trainable=False`; output = `in_channels * filters_per_channel`; follow with a 1x1 Conv2D for a specific output count)
 - `linear_up_initializer.py` — `LinearUpInitializer`: THERA heat-field frequency init; 2D frequency vectors uniform over a disk of radius `pi*scale`, producing a `(2, N)` x/y-row matrix
 - `identity_plus_noise.py` — `IdentityPlusNoise`: `eye(H) + RandomNormal(stddev, seed)` for SQUARE 2-D shapes only (raises `ValueError` otherwise); `stddev=0` gives the exact identity. A near-identity start for a mixing/coupling matrix meant to begin as a no-op; used by `WaveFieldAttention.field_coupling`
 - `clone.py` — `clone_initializer`: returns an INDEPENDENT initializer. A single *seedless* Keras 3 initializer INSTANCE self-assigns a seed and replays it, so reusing one instance across several weights emits the SAME tensor at every matching shape (measured: two `Dense(4)` sharing one instance are bit-identical; two built from the STRING `"glorot_uniform"` are not). Clone per site only where the two weights play DIFFERENT architectural roles. A *seeded* initializer still yields identical clones, deliberately

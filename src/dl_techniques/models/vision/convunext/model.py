@@ -1168,7 +1168,7 @@ def create_convunext(
     # do not rebuild. With use_gabor_stem=False this is a no-op rename (stem_input=inputs).
     if use_gabor_stem:
         gabor = create_gabor_depthwise_conv2d(
-            filters=gabor_filters,
+            filters_per_channel=gabor_filters,
             kernel_size=gabor_kernel_size,
             activation=gabor_activation,
             strides=1,

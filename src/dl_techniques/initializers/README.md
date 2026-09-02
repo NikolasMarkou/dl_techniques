@@ -15,7 +15,7 @@ This module offers eight specialized initializers that go beyond standard random
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates fixed 2x2 filters for 2D Haar wavelet decomposition. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
 | `polar` | `PolarInitializer` | Sets each weight vector (along a chosen axis) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
-| `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters whose orientation, frequency, scale, aspect, and phase are swept uniformly across the Ozbulak-Ekenel Table I intervals. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
+| `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters over a factorized orientation x scale x phase sweep (Ozbulak-Ekenel), DC-removed and energy-normalized to a He-like scale. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
 
 ## Orthonormal Initializer
 
@@ -174,7 +174,7 @@ It is the companion of `PolarWeightNorm` (see the module docstring of
 ## Gabor Filters Initializer
 
 This is a deterministic initializer that fills a convolutional kernel with a bank
-of 2D Gabor filters, implementing the CNN initialization scheme of Ozbulak &
+of 2D Gabor filters, following the CNN initialization scheme of Ozbulak &
 Ekenel, "Initialization of Convolutional Neural Networks by Gabor Filters". The
 idea is to seed the **first convolutional layer** with biologically-motivated,
 edge- and texture-selective features instead of random noise. Because a Gabor
@@ -183,8 +183,8 @@ the early layers of a trained network learn anyway, this provides much of the
 benefit of transfer learning *without* requiring a pretrained network — the
 filters are a strong starting point that is then fine-tuned by ordinary training.
 
-Each output channel `j` holds a distinct 2D Gabor filter evaluated on a grid
-centered at the origin (paper Eq. 2):
+Each output channel `j` holds a 2D Gabor filter evaluated on a grid centered at
+`((kw - 1) / 2, (kh - 1) / 2)` (paper Eq. 2):
 
 ```
 x_theta =  x*cos(theta) + y*sin(theta)
@@ -193,41 +193,103 @@ g(x, y) = exp(-(x_theta**2 + (gamma**2) * y_theta**2) / (2 * sigma**2))
           * cos(2*pi*x_theta/lambda + psi)
 ```
 
-The number of distinct filters equals the number of output channels
-(`n_filters = out_channels`). For each of the five parameters, `out_channels`
-values are drawn with `np.linspace(min, max, out_channels)` across its Table I
-interval, and channel `j` uses the `j`-th value of every parameter. The same 2D
-Gabor filter is replicated identically across all input channels.
+The same 2D Gabor filter is replicated identically across all input channels, so
+a `Conv2D` initialized this way responds to the unweighted **sum** of its input
+channels (colour-blind at initialization, with a gain that grows with `in_ch`).
+Use `create_gabor_depthwise_conv2d` when you want the bank applied per channel.
 
-**Arguments:** all five arguments are `(min, max)` ranges swept uniformly across
-the output channels:
+### Sweep strategy
 
-- `sigma_range` — Gaussian envelope standard deviation (scale). Table I default
-  `(2.0, 21.0)`. The minimum must be `> 0`.
-- `theta_range` — filter orientation **in degrees**. Table I default
-  `(0.0, 360.0)`.
-- `lambda_range` — sinusoidal wavelength (frequency). Table I default
-  `(8.0, 100.0)`.
-- `gamma_range` — spatial aspect ratio (ellipticity of the envelope). Table I
-  default `(0.0, 300.0)`.
-- `psi_range` — phase offset **in degrees**. Table I default `(0.0, 360.0)`.
+`sweep="product"` (the default) builds a **factorized** bank: `n_theta`
+orientations x `n_scale` scales x `n_psi` phases, with `sigma`, `lambda` and
+`gamma` all riding the scale axis so the envelope width tracks the carrier
+wavelength. `theta` and `psi` are periodic, so their upper endpoint is exclusive;
+`theta` sweeps `[0, 180)` because `g(theta + 180, psi) == g(theta, -psi)`. From 4
+filters the phase axis holds `{0, 180}` and from 16 it holds `{0, 90, 180, 270}`,
+so every filter has a **phase-reversed sibling** — which is what makes a
+rectifying activation on a frozen signed bank lossless — and, in larger banks, a
+quadrature partner as well.
 
-Note that `theta` and `psi` are specified in degrees and converted internally.
-For the degenerate `out_channels == 1` case, every `np.linspace(min, max, 1)`
-returns `[min]`, so the single filter uses the minimum endpoint of each range.
+`sweep="diagonal"` is the original construction: all five parameters swept
+jointly by one `np.linspace` with inclusive endpoints, channel `j` taking the
+`j`-th sample of each. That is a 1D curve through a 5D space. Measured on a
+96-filter bank it gives a maximum off-diagonal cosine similarity of **0.9999**,
+29 pairs above 0.95, and an effective rank (99% spectral energy) of **52/96**. It
+is retained only for reproducing the paper's exact construction.
+
+### Normalization
+
+With `normalize=True` (the default) each 2D filter has its DC component removed
+and is scaled to a per-element RMS of `sqrt(2 / fan_in)`, `fan_in = kh*kw*in_ch`.
+This is what makes the bank usable as an initializer. Measured on
+`(11, 11, 3, 96)` with the old un-normalized defaults, per-filter L2 norms spanned
+**0.12 to 4.60** (38x) and per-output-channel gain `sum |w|` spanned **0.54 to
+100.3** — two orders of magnitude of activation scale at initialization, with the
+DC component left in so many filters acted as biased blob detectors.
+
+### Arguments
+
+- `sigma_range` — Gaussian envelope standard deviation (scale). `None` (default)
+  resolves at call time to `(0.30*k, 0.60*k)` with `k = min(kh, kw)`. If given,
+  the minimum must be `> 0`.
+- `theta_range` — filter orientation **in degrees**. Default `(0.0, 180.0)`,
+  upper endpoint exclusive in `product` mode.
+- `lambda_range` — sinusoidal wavelength (frequency). `None` (default) resolves to
+  `(0.30*k, 1.00*k)`. If given, the minimum must be `> 0` — it divides
+  `2*pi*x_theta`, and a `0` minimum used to yield a **silent all-NaN kernel**.
+- `gamma_range` — spatial aspect ratio (ellipticity). Default `(0.5, 1.5)`; the
+  minimum must be `>= 0`.
+- `psi_range` — phase offset **in degrees**. Default `(0.0, 360.0)`, upper
+  endpoint exclusive in `product` mode.
+- `sweep` — `"product"` (default) or `"diagonal"`.
+- `n_filters` — number of **distinct** filters; `None` (default) means `out_ch`.
+  A smaller value tiles the bank cyclically across the output channels.
+- `normalize` — DC-remove and energy-normalize each filter. Default `True`.
+
+All bounds must be finite: a `nan` bound passes every naive comparison
+(`nan > hi` and `nan <= 0` are both `False`) and is rejected up front. The
+signature is closed — there is no `**kwargs`, because `keras.initializers.
+Initializer` has no `__init__` to forward to. A one-filter bank takes the
+**midpoint** of every range, not the minimum, since the endpoints are exactly the
+degenerate extremes.
+
+### Relationship to the reference implementation
+
+The authors' reference code (`gabor_init.py` in
+`github.com/gokhanozbulak/Gabor-Initialized-CNN`) calls `cv2.getGaborKernel` with,
+for a kernel of size `k` and `n` filters:
+
+| parameter | reference |
+|---|---|
+| `sigma` | `[5, k/2 + 1)` — kernel-size dependent |
+| `lambda` | `== k` (constant) |
+| `theta` | `[0, 360)` degrees |
+| `gamma` | `[1.0, 3.0)` — a 0..300 slider **divided by 100** |
+| `psi` | `[-90, 180)` degrees — a 90..360 slider minus 180 |
+
+That is the arbiter for the parameter semantics, and it is why `gamma` defaults to
+`(0.5, 1.5)` here and **not** to `(0.0, 300.0)`: an aspect ratio of 300 collapses
+the `y_theta` envelope to sub-pixel width, leaving a single line of pixels through
+the origin. Three divergences from the reference are deliberate and documented:
+the scale parameters default to kernel-relative ranges, `lambda` is swept rather
+than held constant, and the sweep is factorized rather than diagonal. Pass explicit
+ranges with `sweep="diagonal"` to recover the reference behaviour.
 
 ### Usage
 
-A builder utility, `create_gabor_depthwise_conv2d`, is provided for convenience.
-It applies the Gabor bank **per channel** (depthwise, no cross-channel mixing):
-each of `filters` Gabor filters is applied independently to every input channel,
-so the output has `in_channels * filters` channels. For a specific output width,
-follow it with a `1x1` `Conv2D` projection.
+Two builders are provided. `create_gabor_conv2d` is the paper's own use case — a
+**trainable** cross-channel warm start. `create_gabor_depthwise_conv2d` applies the
+bank **per channel** (depthwise, no cross-channel mixing): each of
+`filters_per_channel` Gabor filters is applied independently to every input
+channel, so the output has `in_channels * filters_per_channel` channels; follow it
+with a `1x1` `Conv2D` projection for a specific output width. It defaults to
+`trainable=False` (a frozen front-end).
 
 ```python
 import keras
 from dl_techniques.initializers import (
     GaborFiltersInitializer,
+    create_gabor_conv2d,
     create_gabor_depthwise_conv2d,
 )
 
@@ -243,10 +305,13 @@ gabor_conv = keras.layers.DepthwiseConv2D(
 )
 # Input (32, 32, 3) -> Output (32, 32, 3 * 96 = 288)
 
-# -- Method 2: Using the Builder Utility --
-# Frozen per-channel Gabor front-end (DepthwiseConv2D, output = in * filters).
+# -- Method 2: Trainable Conv2D warm start (the paper's use case) --
+warm_start = create_gabor_conv2d(filters=96, kernel_size=11)
+# Input (32, 32, 3) -> Output (32, 32, 96), trainable=True
+
+# -- Method 3: Frozen per-channel front-end (output = in * filters) --
 gabor_layer = create_gabor_depthwise_conv2d(
-    filters=96,
+    filters_per_channel=96,        # `filters` is a deprecated alias
     kernel_size=11,
     name='gabor_front_end',
 )

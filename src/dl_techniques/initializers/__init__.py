@@ -19,9 +19,12 @@ Available Initializers:
 -   `HaarWaveletInitializer`: Constructs fixed 2D Haar wavelet filters for
     use in convolutional layers, enabling multi-resolution feature extraction.
 -   `GaborFiltersInitializer`: Deterministic Gabor filter-bank initialization
-    sweeping Table I parameters (Ozbulak & Ekenel); paired with
+    over a factorized orientation x scale x phase sweep (Ozbulak & Ekenel),
+    DC-removed and energy-normalized to a He-like scale by default; paired with
+    `create_gabor_conv2d` (cross-channel warm start, trainable) and
     `create_gabor_depthwise_conv2d`, which applies the bank PER CHANNEL
-    (depthwise, no cross-channel mixing; output = `in_channels * filters`).
+    (depthwise, no cross-channel mixing; output =
+    `in_channels * filters_per_channel`).
 -   `PolarInitializer`: Samples in polar coordinates -- exact per-vector L2 norm
     with a uniform-on-sphere direction (PolarQuant Lemma 2), enabling equinorm
     initialization.
@@ -50,6 +53,7 @@ from .haar_wavelet_initializer import (
 )
 from .gabor_filters_initializer import (
     GaborFiltersInitializer,
+    create_gabor_conv2d,
     create_gabor_depthwise_conv2d,
 )
 from .he_orthonormal_initializer import HeOrthonormalInitializer
@@ -69,6 +73,7 @@ __all__ = [
     "HaarWaveletInitializer",
     "create_haar_depthwise_conv2d",
     "GaborFiltersInitializer",
+    "create_gabor_conv2d",
     "create_gabor_depthwise_conv2d",
     "HeOrthonormalInitializer",
     "OrthonormalInitializer",

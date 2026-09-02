@@ -269,7 +269,7 @@ def _build_gabor_stem(
     # shared bias-free gabor bank + mandatory 1x1 projection (mirrors bfconvunext).
     if use_gabor_stem:
         gabor = create_gabor_depthwise_conv2d(
-            filters=gabor_filters,
+            filters_per_channel=gabor_filters,
             kernel_size=gabor_kernel_size,
             activation=gabor_activation,
             strides=1,
