@@ -156,7 +156,13 @@ class GoodhartAwareLoss(keras.losses.Loss):
         :param epsilon: A small constant for numerical stability on the
             ``from_logits=False`` path, where probabilities are clipped and
             renormalized. Should be much smaller than 1/num_classes.
-            Defaults to 1e-8.
+            Defaults to 1e-8. **The effective clip floor is
+            ``max(epsilon, finfo(y_pred.dtype).tiny)``, not ``epsilon``
+            itself**: 1e-8 is below float16's smallest normal (6.104e-05), so
+            on a float16 ``y_pred`` the floor is raised to that value and the
+            configured ``epsilon`` is not what bites. On float32 and float64
+            (smallest normals 1.18e-38 and 2.23e-308) any admissible
+            ``epsilon`` dominates and the floor is exactly ``epsilon``.
         :type epsilon: float
         :param name: String name for the loss function.
         :type name: str
@@ -323,9 +329,10 @@ class GoodhartAwareLoss(keras.losses.Loss):
             return keras.ops.log_softmax(y_pred, axis=-1)
 
         # DECISION plan-2026-09-02T081011-9b26b501/D-005
-        # `epsilon` defaults to 1e-8, BELOW float16's smallest normal (6.1e-5),
-        # so a bare clip(y, self.epsilon, ...) floors to 0.0 under
-        # mixed_float16 and log() returns -inf. Do not restore the literal.
+        # `epsilon` (1e-8) is BELOW float16's smallest normal (6.1e-5), so a
+        # bare clip(y, self.epsilon, ...) floors to 0.0 and log() gives -inf on
+        # any float16 y_pred -- reached via dtype= ON THIS LOSS or a direct
+        # call, NOT via the global policy. Do not restore the literal.
         dtype = keras.backend.standardize_dtype(y_pred.dtype)
         floor = max(self.epsilon, float(np.finfo(dtype).tiny))
         probs = keras.ops.clip(y_pred, floor, 1.0)

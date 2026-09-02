@@ -722,3 +722,388 @@ def test_the_from_logits_false_rows_renormalize_to_one():
         keras.ops.convert_to_numpy(loss._log_probabilities(probs))
     ).sum(axis=-1)
     np.testing.assert_allclose(row_sum, 1.0, atol=1e-6, rtol=0)
+
+
+# ---------------------------------------------------------------------
+# 11. the anti-collapse term's KL DIRECTION
+#
+# The shipped term is ``KL(q || mean_p)``. The plausible wrong direction is
+# ``KL(mean_p || q)``. Both are positive on a collapsed marginal, so an
+# ORDERING arm cannot separate them -- and the first suite's ordering arm did
+# not. The separator is BOUNDEDNESS, re-derived here and not transcribed:
+#
+#     KL(mean_p || u) = sum_k mp_k log(mp_k * K) = log K - H(mean_p)
+#
+# and ``H >= 0``, so the reverse direction is bounded ABOVE by ``log K`` for
+# EVERY marginal, with equality only in the limit of total collapse. The
+# shipped direction with a uniform ``q`` is
+#
+#     KL(u || mean_p) = -log K - mean_k log(mp_k)
+#
+# which grows like ``(K-1)/K * gap`` as the collapse deepens and is unbounded.
+# Measured on the K=4 fixture below: shipped 1.667 / 4.615 / 10.614 at
+# gap 4 / 8 / 16, against a reverse-direction oracle of 1.124 / 1.377 / 1.386
+# which never crosses ``log 4 = 1.3863``.
+# ---------------------------------------------------------------------
+
+
+def _collapsed_batch(gap, rows=12, num_classes=4):
+    """One batch whose every row is confidently class 0, at a chosen ``gap``."""
+    logits = np.zeros((rows, num_classes), dtype="float32")
+    logits[:, 0] = gap
+    y = np.zeros((rows, num_classes), dtype="float32")
+    y[:, 0] = 1.0
+    return y, logits
+
+
+def _prior_term(loss, logits):
+    return _f(loss._prior_matching_regularization(loss._log_probabilities(logits)))
+
+
+def test_the_uniform_anti_collapse_term_exceeds_log_k_which_the_reverse_kl_cannot():
+    """The DIRECTION guard. ``KL(mean_p || u) = log K - H(mean_p) <= log K`` for
+    every marginal that exists, so a value above ``log K`` is reachable only by
+    ``KL(u || mean_p)`` -- the direction this loss ships."""
+    _, logits = _collapsed_batch(gap=8.0)
+    num_classes = logits.shape[-1]
+    log_k = float(np.log(num_classes))
+
+    measured = _prior_term(GoodhartAwareLoss(prior_weight=1.0), logits)
+    assert measured > log_k, (
+        "the anti-collapse term is at most log K on a hard-collapsed marginal "
+        f"({measured} <= {log_k}), which is the signature of the REVERSED "
+        "direction KL(mean_p || q); the shipped direction KL(q || mean_p) is "
+        "unbounded above"
+    )
+
+
+def test_the_uniform_anti_collapse_penalty_is_unbounded_as_the_collapse_deepens():
+    """Second half of the direction guard: the shipped direction GROWS without
+    bound as the collapse deepens, while the reverse saturates at ``log K``.
+    Doubling the logit gap must add at least another ``log K``."""
+    num_classes = 4
+    log_k = float(np.log(num_classes))
+    loss = GoodhartAwareLoss(prior_weight=1.0)
+
+    shallow = _prior_term(loss, _collapsed_batch(gap=8.0, num_classes=num_classes)[1])
+    deep = _prior_term(loss, _collapsed_batch(gap=16.0, num_classes=num_classes)[1])
+
+    assert deep - shallow > log_k, (
+        "deepening the collapse barely moved the anti-collapse term "
+        f"({shallow} -> {deep}); a term that saturates is the reverse KL, "
+        "which is capped at log K = {0}".format(log_k)
+    )
+
+
+def test_the_uniform_branch_agrees_with_the_explicit_uniform_prior_branch():
+    """ANTI-VACUITY for the two arms above: the ``class_prior is None``
+    shortcut must compute the same number as passing the uniform prior
+    explicitly, so the direction guard grades the same expression both ways."""
+    _, logits = _collapsed_batch(gap=8.0)
+    implicit = _prior_term(GoodhartAwareLoss(prior_weight=1.0), logits)
+    explicit = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=[0.25] * 4), logits
+    )
+    np.testing.assert_allclose(implicit, explicit, atol=1e-5, rtol=0)
+
+
+# ---------------------------------------------------------------------
+# 12. class_prior: the per-class WEIGHTING and the NORMALIZATION
+# ---------------------------------------------------------------------
+
+
+def _marginal_log_oracle(logits):
+    """``log`` of the batch-marginal prediction, computed in float64 from the
+    definition ``mean_i softmax(z_i)`` -- not from the implementation's
+    logsumexp form."""
+    z = np.asarray(logits, dtype="float64")
+    z = z - z.max(axis=-1, keepdims=True)
+    p = np.exp(z)
+    p = p / p.sum(axis=-1, keepdims=True)
+    return np.log(p.mean(axis=0))
+
+
+def _kl_oracle(prior, logits):
+    """``KL(q || mean_p) = sum_k q_k (log q_k - log mp_k)`` in float64, with
+    ``q`` normalized here."""
+    q = np.asarray(prior, dtype="float64")
+    q = q / q.sum()
+    return float(np.sum(q * (np.log(q) - _marginal_log_oracle(logits))))
+
+
+#: A batch whose marginal is skewed but NOT collapsed, so every class keeps a
+#: non-negligible mass and a skewed prior is a meaningful alternative.
+_SKEWED_LOGITS = np.tile(
+    np.array([[2.0, 1.0, 0.0, 0.0]], dtype="float32"), (12, 1)
+)
+
+
+@pytest.mark.parametrize(
+    "prior", [[0.25] * 4, [0.1, 0.2, 0.3, 0.4], [0.85, 0.05, 0.05, 0.05]]
+)
+def test_the_prior_term_agrees_with_a_float64_weighted_kl_oracle(prior):
+    """The per-class WEIGHTING guard: ``sum_k q_k log(q_k / mp_k)``, not the
+    unweighted ``mean_k log(q_k / mp_k)``. The two agree for a uniform ``q``
+    and disagree everywhere else, which is why a uniform-prior arm alone cannot
+    see the weights being dropped."""
+    loss = GoodhartAwareLoss(prior_weight=1.0, class_prior=prior)
+    measured = _prior_term(loss, _SKEWED_LOGITS)
+    np.testing.assert_allclose(
+        measured, _kl_oracle(prior, _SKEWED_LOGITS), atol=1e-5, rtol=0
+    )
+
+
+def test_a_skewed_prior_gives_a_different_penalty_than_the_uniform_default():
+    """ANTI-VACUITY for the oracle arm: the prior must actually be read. If it
+    were ignored, every row of the parametrization above would grade the same
+    number."""
+    uniform = _prior_term(GoodhartAwareLoss(prior_weight=1.0), _SKEWED_LOGITS)
+    skewed = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=[0.1, 0.2, 0.3, 0.4]),
+        _SKEWED_LOGITS,
+    )
+    assert abs(skewed - uniform) > 1e-3, (
+        f"a skewed class_prior scored the same as the uniform default "
+        f"({skewed} vs {uniform}); the prior is not reaching the computation"
+    )
+
+
+@pytest.mark.parametrize(
+    "prior", [[0.25] * 4, [0.1, 0.2, 0.3, 0.4], [0.85, 0.05, 0.05, 0.05]]
+)
+def test_the_prior_term_is_non_negative_for_every_prior(prior):
+    """A KL is non-negative by Gibbs' inequality. The unweighted
+    ``mean_k log(q_k / mp_k)`` is NOT: on this batch it reads -0.543 for the
+    prior skewed toward the dominant class, which is not a divergence."""
+    measured = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=prior), _SKEWED_LOGITS
+    )
+    assert measured >= -1e-6, (
+        f"the anti-collapse term is negative ({measured}) for prior {prior}; "
+        "no divergence can be, so the term is not the KL it claims to be"
+    )
+
+
+def test_the_penalty_is_minimized_by_the_prior_that_matches_the_batch_marginal():
+    """The prior-MATCHING property: among candidate priors, the batch's own
+    marginal is the unique minimizer, and it drives the term to zero."""
+    matching = np.exp(_marginal_log_oracle(_SKEWED_LOGITS))
+    at_match = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=list(matching)),
+        _SKEWED_LOGITS,
+    )
+    np.testing.assert_allclose(at_match, 0.0, atol=1e-5, rtol=0)
+
+    for other in ([0.25] * 4, [0.1, 0.2, 0.3, 0.4], [0.85, 0.05, 0.05, 0.05]):
+        assert _prior_term(
+            GoodhartAwareLoss(prior_weight=1.0, class_prior=other), _SKEWED_LOGITS
+        ) > at_match, f"prior {other} did not score above the matching prior"
+
+
+@pytest.mark.parametrize(
+    "raw, normalized",
+    [
+        ([2.0, 2.0, 2.0, 2.0], [0.25] * 4),
+        ([1.0, 2.0, 3.0, 4.0], [0.1, 0.2, 0.3, 0.4]),
+        ([7.0, 21.0, 14.0, 28.0], [0.1, 0.3, 0.2, 0.4]),
+    ],
+)
+def test_an_unnormalized_class_prior_equals_its_normalized_twin(raw, normalized):
+    """The NORMALIZATION guard. The docstring promises ``the sequence is
+    normalized to sum to one if it does not already``; without the division the
+    term is ``sum_k c*q_k (log(c*q_k) - log mp_k)``, which is neither the same
+    number nor a divergence."""
+    raw_term = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=raw), _SKEWED_LOGITS
+    )
+    normalized_term = _prior_term(
+        GoodhartAwareLoss(prior_weight=1.0, class_prior=normalized), _SKEWED_LOGITS
+    )
+    np.testing.assert_allclose(raw_term, normalized_term, atol=1e-5, rtol=0)
+
+
+def test_the_unnormalized_prior_is_round_tripped_verbatim_not_pre_normalized():
+    """ANTI-VACUITY twin: the equality above is produced by normalizing at USE
+    time, not by the constructor having quietly rewritten the caller's list."""
+    loss = GoodhartAwareLoss(prior_weight=1.0, class_prior=[1.0, 2.0, 3.0, 4.0])
+    assert loss.get_config()["class_prior"] == [1.0, 2.0, 3.0, 4.0]
+
+
+# ---------------------------------------------------------------------
+# 13. label_smoothing and epsilon actually reach the computation
+# ---------------------------------------------------------------------
+
+
+def _smoothed_ce_oracle(y_true, logits, label_smoothing):
+    """Mean cross-entropy against the smoothed target, float64, from the
+    definition: ``y' = (1 - eps) y + eps / K`` then ``-sum y' log softmax(z)``.
+    Written from Szegedy et al.'s formula, not read off the implementation."""
+    y = np.asarray(y_true, dtype="float64")
+    z = np.asarray(logits, dtype="float64")
+    num_classes = y.shape[-1]
+    smoothed = y * (1.0 - label_smoothing) + label_smoothing / num_classes
+    z = z - z.max(axis=-1, keepdims=True)
+    log_probs = z - np.log(np.exp(z).sum(axis=-1, keepdims=True))
+    return float(np.mean(-np.sum(smoothed * log_probs, axis=-1)))
+
+
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1, 0.3])
+def test_label_smoothing_reaches_the_cross_entropy_and_matches_the_oracle(
+    label_smoothing,
+):
+    """``label_smoothing`` was a live constructor knob with no behavioural
+    coverage: disconnecting it from ``call()`` left the whole suite green.
+    ``entropy_weight=0`` isolates the cross-entropy so the oracle is exact."""
+    loss = GoodhartAwareLoss(
+        label_smoothing=label_smoothing, entropy_weight=0.0
+    )
+    np.testing.assert_allclose(
+        _f(loss(Y_TRUE_4, LOGITS_4)),
+        _smoothed_ce_oracle(Y_TRUE_4, LOGITS_4, label_smoothing),
+        atol=1e-5,
+        rtol=0,
+    )
+
+
+def test_moving_label_smoothing_moves_the_loss():
+    """ANTI-VACUITY for the oracle arm: the three parametrized values must be
+    three different numbers, or the oracle could be agreeing by accident."""
+    values = [
+        _f(GoodhartAwareLoss(label_smoothing=ls, entropy_weight=0.0)(
+            Y_TRUE_4, LOGITS_4
+        ))
+        for ls in (0.0, 0.1, 0.3)
+    ]
+    assert len(set(values)) == 3, (
+        f"label_smoothing does not change the loss: {values}"
+    )
+    # On a one-hot target the smoothed target moves mass onto classes the model
+    # scores lower, so the cross-entropy can only rise.
+    assert values[0] < values[1] < values[2], (
+        f"label smoothing did not increase the cross-entropy: {values}"
+    )
+
+
+#: A probability row containing an exact zero: the only fixture on which the
+#: ``from_logits=False`` clip floor is observable at all.
+_ZERO_PROBS = np.array([[1.0, 0.0, 0.0, 0.0]], dtype="float32")
+
+
+@pytest.mark.parametrize("epsilon", [1e-3, 1e-6])
+def test_the_users_epsilon_is_the_clip_floor_on_the_probability_path(epsilon):
+    """``epsilon`` was validated in four ``raises`` rows and read once as an
+    ATTRIBUTE, but its effect was never graded: hard-coding the floor at 1e-7
+    left the suite green. Above float32's smallest normal the effective floor is
+    ``epsilon`` itself, so the oracle clips at exactly that."""
+    loss = GoodhartAwareLoss(from_logits=False, epsilon=epsilon)
+    measured = keras.ops.convert_to_numpy(loss._log_probabilities(_ZERO_PROBS))
+
+    floor = max(epsilon, float(np.finfo("float32").tiny))
+    expected = np.clip(_ZERO_PROBS.astype("float64"), floor, 1.0)
+    expected = expected / expected.sum(axis=-1, keepdims=True)
+    np.testing.assert_allclose(measured, np.log(expected), atol=1e-4, rtol=0)
+
+
+def test_two_different_epsilons_give_two_different_log_probabilities():
+    """ANTI-VACUITY twin: the fixture must actually reach the floor, or the two
+    oracle rows above would be graded against the same clipped array."""
+    coarse = keras.ops.convert_to_numpy(
+        GoodhartAwareLoss(from_logits=False, epsilon=1e-3)._log_probabilities(
+            _ZERO_PROBS
+        )
+    )
+    fine = keras.ops.convert_to_numpy(
+        GoodhartAwareLoss(from_logits=False, epsilon=1e-6)._log_probabilities(
+            _ZERO_PROBS
+        )
+    )
+    assert np.max(np.abs(coarse - fine)) > 1.0, (
+        "epsilon=1e-3 and epsilon=1e-6 produced the same log-probabilities "
+        f"({coarse} vs {fine}); the user's epsilon is being ignored"
+    )
+
+
+# ---------------------------------------------------------------------
+# 14. the dtype-aware clip floor, on a dtype that actually reaches it
+#
+# MEASURED 2026-09-02: ``keras.losses.Loss.__init__(dtype=None)`` resolves to
+# ``backend.floatx()``, NOT to the global policy -- ``GoodhartAwareLoss().dtype``
+# reads ``'float32'`` under a ``float32``, ``mixed_float16`` AND ``float64``
+# global policy. So the global-policy fixture alone cannot vary the arithmetic,
+# and in a real ``mixed_float16`` ``fit()`` the loss receives ``y_pred`` already
+# cast to ``self.dtype``. The reachable float16 regimes are an EXPLICIT
+# ``dtype=`` on the loss and a direct call with float16 tensors; both are
+# exercised below.
+# ---------------------------------------------------------------------
+
+
+def test_the_global_dtype_policy_does_not_change_the_losss_compute_dtype(
+    dtype_policy,
+):
+    """Documents WHY the policy-parametrized arms need an explicit ``dtype=``:
+    Keras resolves ``dtype=None`` through ``floatx()``, so the global policy is
+    invisible here. This arm exists so a future reader does not mistake those
+    arms for float16 coverage."""
+    assert GoodhartAwareLoss().dtype == keras.backend.floatx()
+
+
+@pytest.mark.parametrize("loss_dtype", ["float32", "mixed_float16", "float64"])
+def test_an_explicit_dtype_argument_does_reach_the_computation(loss_dtype):
+    """ANTI-VACUITY for the float16 arms: the explicit path must genuinely
+    change the compute dtype, unlike the global policy."""
+    expected = keras.mixed_precision.Policy(loss_dtype).compute_dtype
+    assert GoodhartAwareLoss(dtype=loss_dtype).dtype == expected
+
+
+@pytest.mark.parametrize("loss_dtype", ["float32", "mixed_float16", "float64"])
+def test_the_probability_path_is_finite_at_every_explicit_loss_dtype(loss_dtype):
+    """The ``from_logits=False`` path under a REAL float16 compute dtype, on a
+    row containing an exact zero -- the case a dtype-blind
+    ``clip(y_pred, 1e-8, 1.0)`` floors to 0.0, making ``log`` return ``-inf``."""
+    loss = GoodhartAwareLoss(
+        from_logits=False, prior_weight=0.5, dtype=loss_dtype
+    )
+    out = keras.ops.convert_to_numpy(
+        loss(np.eye(4, dtype="float32")[:1], _ZERO_PROBS)
+    )
+    assert np.all(np.isfinite(out)), (
+        f"non-finite loss at dtype={loss_dtype} on a row containing an exact "
+        "zero probability"
+    )
+
+
+def test_a_genuinely_float16_probability_row_gives_finite_log_probabilities():
+    """The direct-call float16 regime, which is the one the D-005 anchor names.
+    ``epsilon = 1e-8`` is below float16's smallest normal, so a dtype-blind clip
+    returns ``[0, -inf, -inf, -inf]`` here."""
+    probs16 = tf.constant([[1.0, 0.0, 0.0, 0.0]], dtype=tf.float16)
+    log_probs = keras.ops.convert_to_numpy(
+        GoodhartAwareLoss(from_logits=False)._log_probabilities(probs16)
+    )
+    assert np.all(np.isfinite(log_probs)), (
+        f"float16 probabilities produced non-finite log-probabilities: "
+        f"{log_probs}"
+    )
+
+
+def test_the_float16_clip_floor_is_the_dtype_tiny_not_the_configured_epsilon():
+    """ANTI-VACUITY twin, and the honest statement of what D-005 trades away:
+    under float16 the effective floor is ``finfo(float16).tiny`` (6.104e-05),
+    NOT the configured ``epsilon`` (1e-8). The finiteness arm above must be
+    passing because of THAT substitution and not for some other reason."""
+    probs16 = tf.constant([[1.0, 0.0, 0.0, 0.0]], dtype=tf.float16)
+    log_probs = keras.ops.convert_to_numpy(
+        GoodhartAwareLoss(from_logits=False, epsilon=1e-8)._log_probabilities(
+            probs16
+        )
+    )
+    tiny16 = float(np.finfo("float16").tiny)
+    # The clipped entries renormalize by ~1, so their log is log(tiny16) to
+    # within float16 resolution (~1e-3 relative at magnitude 9.7).
+    np.testing.assert_allclose(
+        log_probs[0, 1:], np.log(tiny16), atol=1e-2, rtol=0
+    )
+    assert np.log(tiny16) > np.log(1e-8), (
+        "the float16 floor is not above the configured epsilon, so this arm "
+        "is not observing the D-005 substitution"
+    )
