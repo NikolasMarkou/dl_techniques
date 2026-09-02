@@ -1483,3 +1483,99 @@ class TestDetXConstraintIsUnchangedAndLinear:
                 f"{name}: np.sum called {len(calls)} times for a spectrum of "
                 f"2000 eigenvalues - the tail sum is being recomputed per iteration"
             )
+
+
+# =====================================================================
+# P1 - fit_powerlaw: the KS sweep and the false O(N) docstring
+# =====================================================================
+
+def _powerlaw_corpus():
+    """Random, heavy-tailed, MP-bulk, spiked and small-N spectra."""
+    rng = np.random.default_rng(20260902)
+    out = {}
+    out["pareto_200"] = np.sort(rng.pareto(1.5, 200) + 1.0)
+    out["pareto_1200"] = np.sort(rng.pareto(2.5, 1200) + 1.0)
+    out["lognormal_400"] = np.sort(np.exp(rng.normal(0.0, 2.0, 400)))
+    w = rng.normal(size=(500, 120)) / np.sqrt(500)
+    out["wishart_120"] = np.sort(np.linalg.svd(w, compute_uv=False) ** 2)[::-1]
+    out["smalln_15"] = np.sort(rng.pareto(1.8, 15) + 1.0)
+    out["spiked_300"] = np.sort(
+        np.concatenate([rng.uniform(0.1, 1.0, 297), [50.0, 80.0, 120.0]]))
+    return out
+
+
+class TestFitPowerlawIsBitIdentical:
+    """`fit_powerlaw`'s 7-tuple is unpacked POSITIONALLY in production.
+
+    `ww_pgd_optimizer.py:342,427` thresholds on `ks_distance` and `:361` truncates a
+    projection rank, and the `N>=20` path is anchored by `plan_2026-06-03_bc986e52/
+    D-008`. These literals were captured from the analyzer at HEAD before any Phase D
+    edit to this function; a bit-identity claim that recomputes the code's own
+    current answer proves nothing, so they are written out.
+    """
+
+    _HEAD = {
+        "pareto_200": (2.424895704305033, 1.0050857806670277,
+                       0.028197921157122163, 0.10100817838789534,
+                       199, "success", ""),
+        "pareto_1200": (3.5972879169452505, 1.000068592286889,
+                        0.016139378095687773, 0.07497724390056514,
+                        1200, "success", ""),
+        "lognormal_400": (1.627114644391847, 1.0013244328595678,
+                          0.07969516895280582, 0.0446800684171361,
+                          197, "success", "over-trained"),
+        "wishart_120": (4.2063720469286725, 1.0858145685564,
+                        0.14349713800268143, 0.4627999411040901,
+                        48, "success", ""),
+        "smalln_15": (3.819706944918515, 1.3782320345008379,
+                      0.1408077062920703, 0.9969169508553424,
+                      8, "success", ""),
+        "spiked_300": (3.0573069830264954, 0.4726379644311377,
+                       0.194445505475901, 0.15044518646514587,
+                       187, "success", ""),
+    }
+
+    _FIELDS = ("alpha", "optimal_xmin", "ks_distance", "sigma",
+               "num_pl_spikes", "status", "warning")
+
+    @pytest.mark.parametrize("name", sorted(_HEAD))
+    def test_all_seven_fields_are_unchanged(self, name):
+        got = fit_powerlaw(_powerlaw_corpus()[name])
+        want = self._HEAD[name]
+
+        assert len(got) == 7, f"the 7-tuple shape changed: got {len(got)} fields"
+        for field, g, w in zip(self._FIELDS, got, want):
+            if isinstance(w, str):
+                assert g == w, f"{name}.{field}: {g!r} != {w!r}"
+            else:
+                assert float(g) == float(w), f"{name}.{field}: {g!r} != {w!r}"
+
+    def test_the_corpus_exercises_both_selection_paths(self):
+        """Anti-vacuity: the literals must not all come from one code path."""
+        corpus = _powerlaw_corpus()
+        assert len(corpus["smalln_15"]) < 20      # small-N penalized objective
+        assert len(corpus["pareto_1200"]) >= 20   # standard KS-argmin path
+        assert len({self._HEAD[k][4] for k in self._HEAD}) > 4
+
+
+class TestFitPowerlawDocstringDoesNotClaimLinearTime:
+    """The docstring claimed "O(N) total time"; the KS sweep is O(N^2).
+
+    MEASURED: n=1000 -> 0.038 s, n=5000 -> 0.433 s, n=15000 -> 3.46 s (3x the data,
+    8.0x the time). Only the alpha term was linearised by the `tail_sums` suffix sum.
+    """
+
+    def test_the_docstring_does_not_claim_linear_total_time(self):
+        doc = fit_powerlaw.__doc__ or ""
+        assert "O(N) total time" not in doc, (
+            "fit_powerlaw's docstring still claims O(N) total time; the KS sweep at "
+            "the heart of the xmin loop is O(n_tail) per candidate"
+        )
+
+    def test_the_docstring_states_the_real_cost(self):
+        """The word "O(N^2)" already appeared at HEAD, inside the false claim to be
+        AVOIDING it, so this asserts on the honest word instead."""
+        doc = fit_powerlaw.__doc__ or ""
+        assert "quadratic" in doc.lower(), (
+            "fit_powerlaw's docstring does not state that the KS sweep is quadratic"
+        )
