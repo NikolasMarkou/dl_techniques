@@ -657,3 +657,87 @@ class TestJsonIncludeRawEsdsIsHonoured:
         payload = self._artifact(tmp_path, include=False)
         assert "spectral_esds" not in payload
         assert "spectral_rand_esds" not in payload
+
+
+# =====================================================================
+# A7 - the config's private matplotlib state must be declared, not filtered
+# =====================================================================
+
+class TestTheConfigsPrivateStateIsDeclared:
+    """`_original_rcParams` was an undeclared attribute filtered by string name.
+
+    `setup_plotting_style` assigned `self._original_rcParams = plt.rcParams.copy()`
+    on a dataclass that never declared it, so it was absent from `fields()` and
+    `asdict()`, nothing ever read it back, and `save_results` had to exclude it
+    with a literal `if k != '_original_rcParams'` over `self.config.__dict__`. That
+    filter is name-specific: ANY other private attribute reaches the artifact.
+
+    `matplotlib.use('Agg')` at `config.py` is deliberately NOT in scope - it is a
+    repo-wide headless requirement pinned by
+    `tests/test_callbacks/test_the_matplotlib_backend_is_headless.py`.
+    """
+
+    def test_the_saved_rcparams_are_a_declared_field(self):
+        import dataclasses
+
+        names = {f.name for f in dataclasses.fields(AnalysisConfig)}
+        assert "_original_rcParams" in names, (
+            "_original_rcParams is assigned by setup_plotting_style but is not a "
+            f"declared field; fields() reports {sorted(names)}"
+        )
+
+    def test_the_saved_rcparams_can_be_restored(self):
+        import matplotlib.pyplot as plt
+
+        config = _quiet_config(plot_style="presentation", dpi=137)
+        before = dict(plt.rcParams)
+
+        config.setup_plotting_style()
+        moved = [k for k, v in before.items() if plt.rcParams[k] != v]
+        # Anti-vacuity: the style really did mutate process-global state, so the
+        # restore below has something to undo. `font.size` is NOT usable here -
+        # `sns.set_theme` resets it to the seaborn default at the end of setup.
+        assert moved, "setup_plotting_style changed no rcParam at all"
+
+        config.restore_plotting_style()
+        still_wrong = {
+            k: (before[k], plt.rcParams[k]) for k in moved
+            if plt.rcParams[k] != before[k]
+        }
+        assert not still_wrong, (
+            f"restore_plotting_style left {len(still_wrong)} rcParams changed: "
+            f"{dict(list(still_wrong.items())[:5])}"
+        )
+
+    def test_an_arbitrary_private_attribute_does_not_reach_the_artifact(
+            self, tmp_path, probe_data):
+        """The string-name filter is what this proves wrong."""
+        config = _quiet_config()
+        analyzer = ModelAnalyzer(
+            models={"m": _build_classifier("m", seed=1)},
+            config=config,
+            output_dir=str(tmp_path / "a7"),
+        )
+        analyzer.config._probe_private_state = {"leaked": True}
+        analyzer.analyze(data=probe_data, analysis_types=set())
+
+        payload = json.loads(
+            (analyzer.output_dir / "analysis_results.json").read_text())
+        private = [k for k in payload["config"] if k.startswith("_")]
+        assert not private, (
+            f"the serialized config carries private keys: {private}"
+        )
+
+    def test_the_serialized_config_is_exactly_the_declared_public_fields(
+            self, tmp_path, probe_data):
+        """PIN: the artifact's config block must track `fields()`, not `__dict__`."""
+        analyzer = ModelAnalyzer(
+            models={"m": _build_classifier("m", seed=2)},
+            config=_quiet_config(),
+            output_dir=str(tmp_path / "a7b"),
+        )
+        analyzer.analyze(data=probe_data, analysis_types=set())
+
+        payload = json.loads(
+            (analyzer.output_dir / "analysis_results.json").read_text())
+        assert set(payload["config"]) == _config_field_names()

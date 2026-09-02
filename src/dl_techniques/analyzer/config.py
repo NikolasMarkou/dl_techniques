@@ -7,8 +7,8 @@ Configuration classes and plotting setup utilities.
 import matplotlib
 import seaborn as sns
 import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, List, Tuple
 
 # ---------------------------------------------------------------------
 
@@ -86,6 +86,15 @@ class AnalysisConfig:
     # See decisions.md D-022.
     memory_limit_mb: Optional[int] = 2048
 
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-029
+    # `setup_plotting_style` mutates process-global matplotlib state and stashes the
+    # pre-existing rcParams here. It is a DECLARED field, not an attribute conjured
+    # by that method: an undeclared attribute is absent from `fields()`/`asdict()`
+    # and forced `save_results` to filter it out BY STRING NAME. Do NOT un-declare
+    # it, and do NOT serialize it - it is private and holds an unJSONable RcParams.
+    # See decisions.md D-029.
+    _original_rcParams: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
     def get_figure_size(self, scale: float = 1.0) -> Tuple[float, float]:
         """Get figure size with optional scaling."""
         return (self.fig_width * scale, self.fig_height * scale)
@@ -158,5 +167,19 @@ class AnalysisConfig:
         })
 
         sns.set_theme(style='whitegrid', palette=self.color_palette)
+
+    def restore_plotting_style(self) -> None:
+        """Restore the rcParams captured by the last ``setup_plotting_style`` call.
+
+        ``setup_plotting_style`` mutates process-global matplotlib state, which
+        outlives the ``ModelAnalyzer`` that triggered it. This puts it back. The
+        backend is deliberately NOT restored: ``Agg`` is a repo-wide headless
+        requirement, not part of this configuration's styling.
+
+        Does nothing if no style has been applied yet.
+        """
+        if self._original_rcParams is None:
+            return
+        plt.rcParams.update(self._original_rcParams)
 
 # ---------------------------------------------------------------------

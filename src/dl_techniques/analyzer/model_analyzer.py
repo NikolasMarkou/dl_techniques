@@ -80,6 +80,7 @@ References
 
 """
 
+import dataclasses
 import json
 import keras
 import numpy as np
@@ -605,10 +606,17 @@ class ModelAnalyzer:
         Args:
             filename: Name of the output JSON file. Defaults to "analysis_results.json".
         """
-        # Create serializable version of config (exclude matplotlib state)
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-029
+        # Serialize the DECLARED public fields. Do NOT go back to
+        # `self.config.__dict__` minus a literal `'_original_rcParams'`: that filter
+        # is name-specific, so every other private attribute (and every attribute a
+        # caller happens to set) leaked into the artifact. MEASURED: a
+        # `config._probe_private_state` assignment reached the published `config`
+        # block. See decisions.md D-029.
         serializable_config = {
-            k: v for k, v in self.config.__dict__.items()
-            if k != '_original_rcParams'
+            f.name: getattr(self.config, f.name)
+            for f in dataclasses.fields(self.config)
+            if not f.name.startswith('_')
         }
 
         # Compile all results into a single dictionary structure
