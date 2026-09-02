@@ -919,7 +919,13 @@ class ModelAnalyzer:
                         xytext=(5, 5), textcoords='offset points', fontsize=8,
                         bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=PARETO_ALPHA))
 
-        ax1.set_xlabel('Overfitting Index (lower is better)')
+        # The axis is RAW loss units. The RANKING is safe - `find_pareto_front` and
+        # `normalize_metric` are monotone / min-max - but the POSITIONS are only
+        # comparable within a sweep sharing one loss function. See D-030; the
+        # scale-free `relative_overfitting_index` is on `TrainingMetrics`.
+        ax1.set_xlabel(
+            'Overfitting Index (raw loss units; lower is better)\n'
+            'comparable only across models sharing a loss function')
         ax1.set_ylabel('Peak Validation Accuracy')
         ax1.set_title('Pareto Front: Accuracy vs Overfitting')
         ax1.grid(True, alpha=0.3)

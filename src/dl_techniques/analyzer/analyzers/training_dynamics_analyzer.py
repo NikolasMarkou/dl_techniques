@@ -119,14 +119,37 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
             history: Dict[str, List[float]],
             metrics: TrainingMetrics
     ) -> None:
-        """Compute quantitative metrics from training history with robust length handling."""
+        """Compute quantitative metrics from training history.
+
+        Two families of metric are emitted for the same quantity. The RAW ones
+        (``overfitting_index``, ``training_stability_score``) are in loss units and
+        are only comparable within a sweep sharing one loss function. The RELATIVE
+        ones (``relative_overfitting_index``, ``stability_cv``) divide by the
+        corresponding level and are therefore comparable across models with
+        different loss functions - the multi-architecture case this package
+        advertises. Both are published; neither replaces the other.
+
+        Note on ``epochs_to_convergence``: its threshold is
+        ``CONVERGENCE_THRESHOLD`` (0.95) of EACH model's own peak validation
+        accuracy, so it measures speed-to-own-plateau, not quality. Two models that
+        plateau at the same epoch score identically even if one plateaus at half the
+        accuracy of the other. The definition is deliberately unchanged - it is a
+        training-efficiency heuristic, not a quality metric - but it must not be read
+        as one.
+
+        Args:
+            model_name: Key under which the computed metrics are stored.
+            history: Keras-shaped history mapping metric name to per-epoch values.
+            metrics: Container mutated in place with the computed metrics.
+        """
         # Extract metrics using flexible pattern matching
         train_loss = find_metric_in_history(history, LOSS_PATTERNS)
         val_loss = find_metric_in_history(history, VAL_LOSS_PATTERNS)
         train_acc = find_metric_in_history(history, ACC_PATTERNS)
         val_acc = find_metric_in_history(history, VAL_ACC_PATTERNS)
 
-        # Epochs to convergence (95% of max validation accuracy)
+        # Epochs to convergence (95% of this model's OWN peak validation accuracy;
+        # see the note in the docstring on why that makes it weakly discriminative)
         if val_acc is not None and len(val_acc) > 0:
             max_val_acc = max(val_acc)
             threshold = CONVERGENCE_THRESHOLD * max_val_acc
@@ -138,6 +161,20 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
             recent_losses = val_loss[-TRAINING_STABILITY_WINDOW:]
             stability_score = np.std(recent_losses)
             metrics.training_stability_score[model_name] = stability_score
+
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-030
+            # The coefficient of variation, published ALONGSIDE the raw sigma. The
+            # raw one is in loss units: MEASURED 0.04704 vs 4.70403 for two models
+            # with identical dynamics whose losses differ by 100x. Do NOT drop the
+            # raw key. See decisions.md D-030.
+            recent_mean = float(np.mean(recent_losses))
+            if recent_mean != 0.0:
+                metrics.stability_cv[model_name] = float(
+                    stability_score / abs(recent_mean))
+            else:
+                logger.debug(
+                    f"{model_name}: mean recent validation loss is 0, so no "
+                    "stability_cv is reported")
 
         # Overfitting index with robust length handling
         if train_loss and val_loss:
@@ -162,6 +199,21 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
                 overfitting_index = val_final - train_final
 
                 metrics.overfitting_index[model_name] = overfitting_index
+
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-030
+                # The gap as a FRACTION of the final training loss, published
+                # alongside the raw gap. MEASURED: the raw index reads 0.21110 and
+                # 21.10979 for two models with identical dynamics whose losses differ
+                # by 100x. Emitting nothing (rather than inf/nan) when
+                # `train_final == 0` keeps the key's absence meaningful.
+                # See decisions.md D-030.
+                if train_final != 0:
+                    metrics.relative_overfitting_index[model_name] = float(
+                        overfitting_index / abs(train_final))
+                else:
+                    logger.debug(
+                        f"{model_name}: final training loss is 0, so no "
+                        "relative_overfitting_index is reported")
 
                 # Final gap using aligned losses
                 metrics.final_gap[model_name] = val_loss_aligned[-1] - train_loss_aligned[-1]

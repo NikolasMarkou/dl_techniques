@@ -54,16 +54,31 @@ class TrainingMetrics:
 
     Attributes:
         epochs_to_convergence: Number of epochs to reach 95% of peak performance
-        training_stability_score: Standard deviation of recent validation losses (lower = more stable)
+        training_stability_score: Standard deviation of recent validation losses (lower = more stable).
+                          RAW LOSS UNITS - not comparable across models with different loss functions.
+        stability_cv: `training_stability_score / mean(recent validation losses)`, the coefficient of
+                          variation. Scale-free, so it IS comparable across loss functions. Absent
+                          when the mean recent loss is zero.
         overfitting_index: Average gap between validation and training loss in final third of training
-                          Positive values indicate overfitting, negative indicate underfitting
+                          Positive values indicate overfitting, negative indicate underfitting.
+                          RAW LOSS UNITS - not comparable across models with different loss functions.
+        relative_overfitting_index: `overfitting_index / train_final`, the gap as a fraction of the
+                          final training loss. Scale-free, so it IS comparable across loss functions.
+                          Absent when the final training loss is zero.
         peak_performance: Best validation metrics achieved during training with epoch info
         final_gap: Difference between validation and training loss at end of training
         smoothed_curves: Smoothed versions of training curves for cleaner visualization
     """
     epochs_to_convergence: Dict[str, int] = field(default_factory=dict)
     training_stability_score: Dict[str, float] = field(default_factory=dict)
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-030
+    # The scale-free companions are ADDITIVE. Do NOT replace the raw keys with them:
+    # the raw numbers are what a single-loss sweep wants, and `find_pareto_front` /
+    # `normalize_metric` are monotone, so the raw ranking is already correct there.
+    # See decisions.md D-030.
+    stability_cv: Dict[str, float] = field(default_factory=dict)
     overfitting_index: Dict[str, float] = field(default_factory=dict)
+    relative_overfitting_index: Dict[str, float] = field(default_factory=dict)
     peak_performance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     final_gap: Dict[str, float] = field(default_factory=dict)
     smoothed_curves: Dict[str, Dict[str, np.ndarray]] = field(default_factory=dict)
