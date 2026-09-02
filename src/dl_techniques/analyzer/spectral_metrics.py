@@ -1367,6 +1367,13 @@ def rescale_eigenvalues(evals: np.ndarray) -> Tuple[np.ndarray, float]:
 def compute_detX_constraint(evals: np.ndarray) -> int:
     """
     Identify the number of eigenvalues necessary to satisfy det(X) = 1.
+
+    Args:
+        evals: Eigenvalue array; rescaled internally by `rescale_eigenvalues`.
+
+    Returns:
+        The size of the SMALLEST top-of-spectrum tail whose log-determinant is
+        negative, or the full eigenvalue count when no such tail exists.
     """
     if evals is None or len(evals) < 2:
         return 0
@@ -1379,11 +1386,21 @@ def compute_detX_constraint(evals: np.ndarray) -> int:
     if len(log_sorted) == 0:
         return 0
 
-    for idx in range(len(log_sorted) - 1, 0, -1):
-        log_detX = np.sum(log_sorted[idx:])
-        if log_detX < 0.0:  # equivalent to detX < 1.0
-            num_evals_in_tail = len(log_sorted) - idx
-            return num_evals_in_tail
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-024
+    # Reversed cumulative sum: `tail_log_det[idx] == sum(log_sorted[idx:])`, the same
+    # idiom already used for `tail_sums` in `fit_powerlaw`. Do NOT reach for
+    # `np.argmax(tail_log_det < 0.0)`: that finds the FIRST (smallest) qualifying
+    # index, i.e. the LARGEST tail, while the loop this replaces scanned DOWNWARD
+    # from the top of the spectrum and returned the SMALLEST negative tail. The two
+    # differ on almost every real spectrum. `compute_detX_constraint` is production
+    # code at `ww_pgd_optimizer.py:361`, where the result feeds an `int()` that
+    # selects a projection rank, so the direction is load-bearing.
+    # See decisions.md D-024.
+    tail_log_det = np.cumsum(log_sorted[::-1])[::-1]
+    negative_tails = np.flatnonzero(tail_log_det[1:] < 0.0)  # idx in [1, len-1]
+    if negative_tails.size > 0:
+        idx = int(negative_tails[-1]) + 1
+        return len(log_sorted) - idx
 
     return len(sorted_evals)
 

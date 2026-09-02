@@ -1384,3 +1384,102 @@ class TestTruncatedSpectrumIsFlagged:
         frame = results.spectral_analysis
         assert MetricNames.SPECTRUM_TRUNCATED in frame.columns
         assert not bool(frame.iloc[0][MetricNames.SPECTRUM_TRUNCATED])
+
+
+# =====================================================================
+# P2 - compute_detX_constraint's quadratic tail sum
+# =====================================================================
+
+def _detx_reference(evals: np.ndarray) -> int:
+    """The SHIPPED pre-optimisation loop, transcribed verbatim.
+
+    This is the arbiter for the bit-identity proof; it must never be "tidied".
+    """
+    from dl_techniques.analyzer.constants import SPECTRAL_EPSILON
+
+    if evals is None or len(evals) < 2:
+        return 0
+
+    rescaled_evals, _ = rescale_eigenvalues(evals)
+    sorted_evals = np.sort(rescaled_evals)
+
+    log_sorted = np.log(sorted_evals[sorted_evals > SPECTRAL_EPSILON])
+    if len(log_sorted) == 0:
+        return 0
+
+    for idx in range(len(log_sorted) - 1, 0, -1):
+        log_detX = np.sum(log_sorted[idx:])
+        if log_detX < 0.0:
+            return len(log_sorted) - idx
+
+    return len(sorted_evals)
+
+
+def _detx_corpus():
+    """Random and heavy-tailed spectra, plus the degenerate shapes."""
+    rng = np.random.default_rng(20260902)
+    corpus = [
+        np.array([]),
+        np.array([1.0]),
+        np.full(2000, 3.0),
+        np.full(50, 1e-30),
+        np.concatenate([np.full(40, 1e-30), rng.uniform(1.0, 2.0, 10)]),
+    ]
+    for n in (10, 61, 250, 2000):
+        corpus.append(rng.uniform(0.5, 2.0, n))
+        corpus.append(rng.pareto(1.5, n) + 1.0)
+        corpus.append(np.exp(rng.normal(0.0, 4.0, n)))
+        w = rng.normal(size=(max(n, 20), max(n // 4, 5))) / np.sqrt(max(n, 20))
+        corpus.append(np.linalg.svd(w, compute_uv=False) ** 2)
+        corpus.append(np.concatenate([rng.uniform(0.5, 2.0, n), [1e4]]))
+    return [np.asarray(c, dtype=np.float64) for c in corpus]
+
+
+class TestDetXConstraintIsUnchangedAndLinear:
+    """`compute_detX_constraint` feeds `ww_pgd_optimizer.py:361`'s `int()`.
+
+    A 1-ULP drift there flips a discrete projection decision, so the reversed-cumsum
+    rewrite is gated on exact equality with the transcribed original loop.
+    """
+
+    def test_the_returned_count_is_bit_identical(self):
+        """BIT-IDENTITY PIN - must hold before AND after the rewrite."""
+        for i, evals in enumerate(_detx_corpus()):
+            got = compute_detX_constraint(evals)
+            want = _detx_reference(evals)
+            assert got == want, (
+                f"corpus[{i}] (n={len(evals)}): compute_detX_constraint returned "
+                f"{got}, the transcribed original loop returns {want}"
+            )
+
+    def test_the_reference_is_not_a_constant(self):
+        """Anti-vacuity: the corpus exercises a spread of answers, not one value."""
+        answers = {_detx_reference(e) for e in _detx_corpus()}
+        assert len(answers) > 5, f"the corpus only produces {answers}"
+
+    def test_the_tail_sum_is_not_recomputed_per_iteration(self):
+        """The cost oracle: count `np.sum` calls, not wall-clock seconds."""
+        from unittest import mock
+        import dl_techniques.analyzer.spectral_metrics as sm
+
+        rng = np.random.default_rng(3)
+        probes = {
+            "uniform": rng.uniform(0.5, 2.0, 2000),
+            "heavy": np.sort(rng.pareto(1.5, 2000) + 1.0),
+            "identical": np.full(2000, 3.0),
+        }
+        for name, evals in probes.items():
+            real_sum = np.sum
+            calls = []
+
+            def spy(*args, **kwargs):
+                calls.append(1)
+                return real_sum(*args, **kwargs)
+
+            with mock.patch.object(sm.np, "sum", side_effect=spy):
+                sm.compute_detX_constraint(np.asarray(evals, dtype=np.float64))
+
+            assert len(calls) <= 4, (
+                f"{name}: np.sum called {len(calls)} times for a spectrum of "
+                f"2000 eigenvalues - the tail sum is being recomputed per iteration"
+            )
