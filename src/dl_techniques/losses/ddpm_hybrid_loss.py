@@ -270,8 +270,12 @@ class DDPMHybridLoss(keras.losses.Loss):
 
     :param schedule_name: Beta-schedule name handed to
         :meth:`~dl_techniques.utils.ddpm_schedule.DDPMSchedule.from_name`;
-        ``'linear'`` or ``'squaredcos_cap_v2'``. Note ``'linear'`` is only
-        defined for ``num_timesteps >= 50``.
+        ``'linear'`` or ``'squaredcos_cap_v2'``. ``'linear'`` is NOT defined at
+        every chain length: its ``beta_end = 20 / num_timesteps`` leaves ``(0, 1]``
+        below ``T = 20``, and the measured accepted set is ``{1}`` union
+        ``[20, inf)`` -- ``np.linspace(a, b, 1)`` drops the illegal endpoint. It
+        is not a floor and no threshold expression states it, so the schedule is
+        BUILT and its own ValueError is the arbiter (D-010).
     :type schedule_name: str
     :param num_timesteps: Length of the diffusion chain, ``T``.
     :type num_timesteps: int
