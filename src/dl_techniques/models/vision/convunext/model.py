@@ -115,17 +115,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ConvUNext Stem Block
 # ---------------------------------------------------------------------
 
-# HISTORY (supersedes plan-2026-08-14T092357-0e3d792d/D-010). This `package=` string used to
-# say `dl_techniques.bias_free_denoisers` -- the module this class was defined in before it
-# was merged here -- deliberately, to hold the registry key
-# `dl_techniques.bias_free_denoisers>ConvUNextStem` byte-stable for `.keras` artifacts
-# written before the move. Keras keys a registered serializable on `package` + class name and
-# NEVER on the defining module (measured on Keras 3.8.0, D-008), so that worked. On
-# 2026-08-29 the user confirmed there are no checkpoints, which was the entire basis for the
-# exemption, and this became one of the last 34 ad-hoc strings in `src/`; it now follows the
-# same module-path rule as the other 710. The `Custom>ConvUNextStem`
-# alias the helper binds is unaffected. Do NOT restore the old string: it is not what the
-# tree registers any more and the tests pin the new key.
+
 @register_dl_technique("dl_techniques.models.convunext.model")
 class ConvUNextStem(keras.layers.Layer):
     """ConvUNext stem block for initial feature extraction.
@@ -281,10 +271,6 @@ class ConvUNextStem(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
-            # activation so LeakyReLU(alpha) round-trips through .keras; the string path
-            # stays raw for backward-compat. Mirrors the block fix (D-001). Do NOT emit a
-            # dict for a plain string activation — that would break existing 'gelu' configs.
             'activation': serialize_activation(self.activation_name),
             'use_bias': self.use_bias,
             'stem_normalization': self.stem_normalization,
@@ -305,15 +291,13 @@ class ConvUNextStem(keras.layers.Layer):
         config = dict(config)
         if isinstance(config.get('activation'), dict):
             config['activation'] = keras.layers.deserialize(config['activation'])
-        # kernel_initializer/kernel_regularizer dicts are passed straight to __init__,
-        # where keras.*.get(...) accepts a serialized dict (Keras 3).
         return cls(**config)
 
 # ---------------------------------------------------------------------
 # Spatial wrapper around bias-free LinearAttention (4D <-> 3D)
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.models.convunext.model")  # DECISION plan_2026-07-11_bb4b38b5/D-002
+@register_dl_technique("dl_techniques.models.convunext.model")
 class SpatialLinearAttention(keras.layers.Layer):
     """Apply a bias-free LinearAttention over a 4D spatial feature map.
 
@@ -350,11 +334,6 @@ class SpatialLinearAttention(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
 
-        # DECISION plan_2026-07-11_bb4b38b5/D-001: construct the bias-free attention via the
-        # factory with a HARDCODED 'linear' type (the only degree-1-homogeneity-safe attention),
-        # keeping use_bias=False + default feature_map='relu'. Do NOT import LinearAttention
-        # directly (factory-first policy) and do NOT expose a type knob (any softmax type
-        # silently breaks the Miyasawa property the denoiser depends on).
         self.attn = create_attention_layer(
             'linear', dim=self.dim, num_heads=self.num_heads,
             use_bias=False, name=f'{self.name}_linear'
@@ -505,27 +484,7 @@ def _apply_residual_convnext_block(
     caused (the full denoiser is init-stable across gamma in [1e-6, 1.0], verified by sweep).
     """
     residual = x
-    # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: ConvNextV1Block /
-    # ConvNextV2Block are the residual BRANCH ONLY (they end at gamma(x), no add), so the
-    # CALLER must supply the residual and the drop-path — which is what this helper is.
-    # The drop-path schedule goes to StochasticDepth (drop-path on the residual BRANCH),
-    # NEVER to the block's `dropout_rate=` kwarg: that kwarg is ordinary elementwise
-    # dropout INSIDE the inverted-bottleneck MLP (convnext_v1_block.py:103-121) and has
-    # nothing to do with stochastic depth. Do NOT collapse this to `x = block(x)` — that
-    # silently drops the skip connection and makes stochastic depth meaningless. (These
-    # anchors were carried here when the subclassed `ConvUNextModel`, whose inline encoder
-    # loop originally held them, was deleted; this helper is now the ONE place the
-    # invariant lives.) See that plan's decisions.md D-002, D-004.
-    # DECISION plan_2026-06-21_eb7fd829/D-002: block activation is threaded via this single
-    # choke-point (mirrors the kernel_regularizer / depthwise_* precedent) so one factory arg
-    # reaches every encoder/bottleneck/decoder block at once. Factory default stays 'gelu' so
-    # non-bfunet callers are byte-identical. (That claim was originally justified against two
-    # named callers, `convnext` and `convnext_patch_vae`; the latter package has since been
-    # deleted, so only the `convnext` half is still checkable.) NOTE (iter-2,
-    # D-005/D-006 superseded the original iter-1 scope): the stem (ConvUNextStem, D-005) and the
-    # deep-supervision head (_make_supervision_activation, D-006) are now ALSO configurable via
-    # the factory's stem_activation / supervision_activation params (each default 'gelu'). See
-    # decisions.md D-002/D-005/D-006.
+
     y = block_cls(
         kernel_size=kernel_size,
         filters=filters,

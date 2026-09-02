@@ -130,23 +130,50 @@ def test_the_scan_can_actually_see_a_keras_backend_call():
     assert len(hits) == 1 and hits[0].startswith("injected.py:3"), hits
 
 
-def test_no_create_factory_in_this_package_takes_a_variant_parameter():
+def test_every_create_factory_taking_a_variant_backs_it_with_from_variant():
     """``variant`` is a reserved parameter name for module-level ``create_*``.
 
     The repo-wide sweep ``_sweep_create_delegation`` classifies any module-level
-    ``create_*`` with a parameter literally named ``variant`` as a MODEL factory
-    and demands a ``from_variant`` classmethod in the same module; a module with
-    none lands in the ``_CREATE_WITHOUT_FROM_VARIANT`` set-equality pin and turns
-    it red. Nothing in this package is a ``keras.Model`` factory with variants,
-    so the correct answer is to not use the word. See decisions.md D-015.
+    ``create_*`` with a parameter literally named ``variant`` as a MODEL factory,
+    demands a ``from_variant`` classmethod in the same module, and demands the
+    factory body be a pure delegation to it. A module with no such classmethod
+    lands in the ``_CREATE_WITHOUT_FROM_VARIANT`` set-equality pin and turns it
+    red -- which is exactly what ``sde.py``'s ``create_bridge_sde(variant=...)``
+    did for three steps while this package's own gate stayed green (D-015).
 
-    **Known blind spot**: this arm is LOCAL. It cannot see the repo-wide set
-    equality, so it would not have caught the original defect in the form the
-    contract suite reported it -- only in the form that causes it.
+    **This arm was widened at step 7, not weakened.** Until then the package
+    held no model at all, so the correct local rule was "nobody may use the
+    word". ``model.py`` now ships a genuine variant factory, so the rule becomes
+    the repo-wide one: use the word only if you back it. ``sde.py`` still may
+    not -- its ``create_bridge_sde`` returns a plain math object that is not a
+    ``keras.Model``, has no variant table, and could never grow a
+    ``from_variant``; that is why its parameter is ``sde_type``.
+
+    **Known blind spot, unchanged**: this arm is LOCAL. It cannot see the
+    repo-wide set equality, so it catches the CAUSE, never the form the contract
+    suite reports. ``tests/test_models/test_package_api_contract.py`` must still
+    be run.
     """
     offenders = []
+    checked = []
     for name, source, _path in _package_modules():
         tree = ast.parse(source)
+        backed_by = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and any(
+                isinstance(m, ast.FunctionDef) and m.name == "from_variant"
+                for m in node.body
+            )
+            and any(
+                isinstance(m, ast.Assign)
+                and any(getattr(t, "id", "") == "MODEL_VARIANTS" for t in m.targets)
+                or isinstance(m, ast.AnnAssign)
+                and getattr(m.target, "id", "") == "MODEL_VARIANTS"
+                for m in node.body
+            )
+        }
         for fn in tree.body:
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -155,12 +182,44 @@ def test_no_create_factory_in_this_package_takes_a_variant_parameter():
             params = [a.arg for a in fn.args.args] + [
                 a.arg for a in fn.args.kwonlyargs
             ]
-            if "variant" in params:
-                offenders.append(f"{name}:{fn.lineno} {fn.name}(variant=...)")
+            if "variant" not in params:
+                continue
+            checked.append(f"{name}:{fn.name}")
+            if not backed_by:
+                offenders.append(
+                    f"{name}:{fn.lineno} {fn.name}(variant=...) with no "
+                    "from_variant/MODEL_VARIANTS class in the same module"
+                )
+                continue
+            body = [n for n in fn.body if not _is_docstring(n)]
+            delegates = (
+                len(body) == 1
+                and isinstance(body[0], ast.Return)
+                and isinstance(body[0].value, ast.Call)
+                and getattr(body[0].value.func, "attr", "") == "from_variant"
+            )
+            if not delegates:
+                offenders.append(
+                    f"{name}:{fn.lineno} {fn.name} does more than delegate to "
+                    "from_variant"
+                )
     assert not offenders, (
         "a module-level create_*(variant=...) is read tree-wide as a model "
-        "factory that must delegate to from_variant. Rename the parameter "
-        f"(e.g. `sde_type`). Found: {offenders}"
+        "factory that must delegate to a from_variant classmethod in the same "
+        f"module. Rename the parameter (e.g. `sde_type`) or back it. Found: {offenders}"
+    )
+    assert checked == ["model.py:create_ditxa"], (
+        "the population this arm checks changed; a new create_*(variant=...) "
+        f"appeared or create_ditxa vanished: {checked}"
+    )
+
+
+def _is_docstring(node) -> bool:
+    """True for a bare string-constant statement."""
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
     )
 
 

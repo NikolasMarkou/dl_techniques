@@ -174,9 +174,10 @@ class BitLinear(keras.layers.Layer):
         to ``None``, which ``keras.activations.get`` resolves to the identity,
         matching ``keras.layers.Dense``.
     :type activation: Optional[Union[str, Callable]]
-    :param use_bias: Whether the layer uses a bias vector. Note that BitNet
-        drops the bias in its quantized projections; the Keras ``Dense``
-        default of ``True`` is kept here.
+    :param use_bias: Whether the layer uses a bias vector. Defaults to
+        ``False``, following BitNet, which drops the bias in its quantized
+        projections -- unlike ``keras.layers.Dense``, whose default is
+        ``True``. See the migration note below.
     :type use_bias: bool
     :param use_input_norm: Whether to apply layer normalization to inputs
         before quantization.
@@ -217,6 +218,18 @@ class BitLinear(keras.layers.Layer):
 
     Output shape:
         N-D tensor ``(batch_size, ..., units)``.
+
+    .. note::
+
+        **Migration, 2026-09-02.** ``use_bias`` changed default from ``True``
+        to ``False`` so the layer matches the BitNet formulation it cites.
+        Existing archives are unaffected: ``use_bias`` has always been written
+        into ``get_config``, so a saved model rebuilds with whatever it was
+        constructed with. Code that constructed ``BitLinear(units=...)``
+        without naming ``use_bias`` and relied on the bias must now pass
+        ``use_bias=True`` explicitly; a layer built the new way has one
+        trainable variable instead of two, so a weight file written before
+        this change will refuse to load into it rather than load silently.
     """
 
     #: Accepted values for the two ``*_scale_method`` parameters.
@@ -235,7 +248,7 @@ class BitLinear(keras.layers.Layer):
         weight_per_channel: bool = False,
         quantization_method: str = "round_clip",
         activation: Optional[Union[str, Callable]] = None,
-        use_bias: bool = True,
+        use_bias: bool = False,
         use_input_norm: bool = False,
         ste_lambda: float = 1.0,
         ste_clip_gradient: bool = True,

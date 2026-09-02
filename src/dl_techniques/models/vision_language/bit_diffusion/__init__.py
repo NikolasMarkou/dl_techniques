@@ -5,8 +5,9 @@ machinery around it: a lossless channels-last token<->bridge packing, the SDE
 base processes and their direction-specific score-matching targets, the sampler,
 and a decoder that reads text back out of a sampled bridge tensor.
 
-Currently exported: the bridge geometry, the packing bijection, and the four SDE
-base processes. The model and the decoder land in later steps of the port.
+Currently exported: the bridge geometry, the packing bijection, the four SDE
+base processes and the `DiTXA` model. The token decoder lands in a later step of
+the port.
 
     from dl_techniques.models.vision_language.bit_diffusion import (
         BRIDGE_PRESETS, PeriodicVolatilitySDE, token_flat_to_bridge,
@@ -21,6 +22,11 @@ from .config import (
     TOKEN_LAYOUTS,
     BridgeConfig,
     get_bridge_config,
+)
+from .model import (
+    DiTXA,
+    DiTXAFinalLayer,
+    create_ditxa,
 )
 from .sde import (
     SDE_TYPES,
@@ -46,6 +52,8 @@ __all__ = [
     "BridgeConfig",
     "BridgeSDE",
     "CosineDecayingVolatilitySDE",
+    "DiTXA",
+    "DiTXAFinalLayer",
     "FlowMatchingODE",
     "PeriodicVolatilitySDE",
     "PROMPT_KIND_TO_LABEL",
@@ -58,6 +66,7 @@ __all__ = [
     "bridge_to_token_flat",
     "compute_token_norms",
     "create_bridge_sde",
+    "create_ditxa",
     "get_bridge_config",
     "norm_based_token_stops",
     "pad_id_token_stops",

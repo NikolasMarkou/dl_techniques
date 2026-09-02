@@ -35,7 +35,7 @@ reading the injected defect produced.
      ``magnitude=1.0`` arm is the control: there both forms are finite.
 
 RED proofs, 2026-09-02. Each historical defect was re-injected over the shipped class
-and the whole file re-run; the head run is 81 passed. Every injection reddens at least
+and the whole file re-run; the head run is 83 passed. Every injection reddens at least
 one guard, and no injection leaves the file green:
 
   | injected defect                                          | tests reddened |
@@ -49,6 +49,7 @@ one guard, and no injection leaves the file green:
   | ``weight_per_channel`` read then discarded in ``call``     | 2 |
   | scale materialized as ``Q_max / gamma``                    | 2 |
   | ``activation`` stored but never applied in ``call``        | 1 |
+  | ``use_bias`` back to the pre-flip Dense default of True    | 2 |
 """
 
 import os
@@ -89,9 +90,15 @@ def basic_config() -> dict:
 
 
 def _layer(**kwargs) -> BitLinear:
-    """Build a BitLinear on ``(None, D)`` from a fixed seed."""
+    """Build a BitLinear on ``(None, D)`` from a fixed seed.
+
+    ``use_bias`` is forced on here so the pins that match two layers weight for
+    weight keep exercising the bias path; the constructor's own default is
+    ``False`` and is pinned separately by
+    ``TestBitLinearInitialization.test_the_bias_is_dropped_by_default``.
+    """
     keras.utils.set_random_seed(1234)
-    layer = BitLinear(**{"units": U, **kwargs})
+    layer = BitLinear(**{"units": U, "use_bias": True, **kwargs})
     layer.build((None, D))
     return layer
 
@@ -128,6 +135,20 @@ class TestBitLinearInitialization:
         assert layer.activation_range == (-127.0, 127.0)
         assert layer.supports_masking is True
         assert not layer.built
+
+    def test_the_bias_is_dropped_by_default(self):
+        """BitNet drops the bias in its quantized projections; keras.layers.Dense
+        does not. This layer follows BitNet, so the default differs from Dense."""
+        default = BitLinear(units=U)
+        assert default.use_bias is False
+        default.build((None, D))
+        assert default.bias is None
+        assert len(default.trainable_variables) == 1
+
+        with_bias = BitLinear(units=U, use_bias=True)
+        with_bias.build((None, D))
+        assert with_bias.bias is not None
+        assert len(with_bias.trainable_variables) == 2
 
     def test_the_sub_layer_is_created_in_init(self):
         assert BitLinear(units=U, use_input_norm=True).input_norm is not None
@@ -220,12 +241,15 @@ class TestBitLinearForward:
         out = keras.ops.convert_to_numpy(layer(np.zeros((B, D), "float32")))
         assert np.all(np.isfinite(out))
 
-    def test_gradients_reach_every_trainable_weight(self, sample_input):
-        layer = _layer()
+    @pytest.mark.parametrize("use_bias, expected", [(False, 1), (True, 2)])
+    def test_gradients_reach_every_trainable_weight(
+        self, sample_input, use_bias, expected
+    ):
+        layer = _layer(use_bias=use_bias)
         with tf.GradientTape() as tape:
             loss = tf.reduce_sum(layer(sample_input))
         grads = tape.gradient(loss, layer.trainable_variables)
-        assert len(grads) == 2
+        assert len(grads) == expected
         for variable, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, variable.name
             assert np.abs(grad.numpy()).max() > 0.0, variable.name
@@ -540,10 +564,10 @@ class TestBitLinearSerialization:
         assert BitLinear.from_config(config).weight_range == (-3.0, 3.0)
 
     def test_get_config_round_trip(self):
-        layer = BitLinear(units=U, weight_bits=2, activation_bits=4, use_bias=False)
+        layer = BitLinear(units=U, weight_bits=2, activation_bits=4, use_bias=True)
         rebuilt = BitLinear.from_config(layer.get_config())
         assert rebuilt.units == U
-        assert rebuilt.use_bias is False
+        assert rebuilt.use_bias is True
         assert rebuilt.weight_range == (-1.0, 1.0)
         assert rebuilt.activation_range == (-7.0, 7.0)
 
