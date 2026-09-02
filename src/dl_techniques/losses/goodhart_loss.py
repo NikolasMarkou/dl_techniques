@@ -61,8 +61,8 @@ References:
 
 import keras
 import warnings
-from keras import ops
-from typing import Dict, Any
+import numpy as np
+from typing import Any, Dict, Optional, Sequence
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -72,22 +72,26 @@ class GoodhartAwareLoss(keras.losses.Loss):
     """
     An information-theoretic loss combining cross-entropy with regularization.
 
-    This loss function augments standard cross-entropy with entropy and mutual
-    information regularization to encourage robust, well-calibrated models.
+    This loss function augments standard cross-entropy with a per-sample
+    confidence penalty and an optional, off-by-default anti-collapse term that
+    keeps the batch-marginal prediction distribution close to a class prior.
 
     The total loss is calculated as:
-    ``L = CE(y, y_pred) - entropy_weight * H(y_pred) + mi_weight * I(X; y_pred)``
+    ``L = CE(y, y_pred) - entropy_weight * H(y_pred) + prior_weight * KL(prior || mean_p)``
     """
 
     def __init__(
         self,
         label_smoothing: float = 0.0,
         entropy_weight: float = 0.1,
-        mi_weight: float = 0.01,
+        prior_weight: float = 0.0,
+        class_prior: Optional[Sequence[float]] = None,
         from_logits: bool = True,
         epsilon: float = 1e-8,
         name: str = 'goodhart_aware_loss',
-        reduction: str = 'sum_over_batch_size'
+        reduction: str = 'sum_over_batch_size',
+        dtype: Optional[str] = None,
+        mi_weight: Optional[float] = None
     ) -> None:
         """
         Initializes the GoodhartAwareLoss.
@@ -96,34 +100,62 @@ class GoodhartAwareLoss(keras.losses.Loss):
             technique applied to the cross-entropy component. Must be in the
             range [0, 1). Defaults to 0.0 (no smoothing).
         :type label_smoothing: float
-        :param entropy_weight: Weight (:math:`\\lambda`) for the entropy
-            regularization term. Controls how much the model is encouraged to
-            maintain uncertainty. Higher values combat overconfidence more
-            strongly. Typical range: [0.001, 0.5]. Defaults to 0.1.
+        :param entropy_weight: Weight (:math:`\\lambda`) for the confidence
+            penalty. Controls how much the model is encouraged to maintain
+            uncertainty. Higher values combat overconfidence more strongly.
+            Typical range: [0.001, 0.5]. Defaults to 0.1.
         :type entropy_weight: float
-        :param mi_weight: Weight (:math:`\\beta`) for the mutual information
-            regularization term. Controls the compression of input-output
-            information flow. Higher values force the model to be more
-            "forgetful" of spurious details. Typical range: [0.001, 0.1].
-            Defaults to 0.01.
-        :type mi_weight: float
+        :param prior_weight: Weight for the anti-collapse term
+            :math:`KL(prior \\| \\bar{p})`, where :math:`\\bar{p}` is the mean
+            prediction over the batch. Must be non-negative. Defaults to 0.0,
+            which switches the term off entirely. Any positive value makes the
+            loss batch-coupled; see :meth:`get_config` for the consequences.
+        :type prior_weight: float
+        :param class_prior: Target marginal distribution over the classes for
+            the anti-collapse term. Entries must be finite and strictly
+            positive; the sequence is normalized to sum to one if it does not
+            already. Its length must equal the number of classes. Defaults to
+            ``None``, meaning the uniform prior ``1 / num_classes``.
+        :type class_prior: Optional[Sequence[float]]
         :param from_logits: Whether `y_pred` is a tensor of logits or
             probabilities. Set to ``True`` (default) if your model does not have
             a final softmax activation.
         :type from_logits: bool
-        :param epsilon: A small constant for numerical stability in log
-            operations. Should be much smaller than 1/num_classes.
+        :param epsilon: A small constant for numerical stability on the
+            ``from_logits=False`` path, where probabilities are clipped and
+            renormalized. Should be much smaller than 1/num_classes.
             Defaults to 1e-8.
         :type epsilon: float
         :param name: String name for the loss function.
         :type name: str
         :param reduction: Type of reduction to apply to loss.
         :type reduction: str
-        :raises ValueError: If any parameter is outside its valid range.
+        :param dtype: Optional dtype (or dtype policy name) for the loss
+            computation. ``None`` (default) follows the global Keras policy.
+        :type dtype: Optional[str]
+        :param mi_weight: **Removed.** Passing anything other than ``None``
+            raises. See the ``:raises:`` entry below.
+        :type mi_weight: Optional[float]
+        :raises ValueError: If any parameter is outside its valid range, or if
+            ``mi_weight`` is passed at all -- the term it weighted was added
+            with the wrong sign and has been removed, not reweighted.
         """
-        super().__init__(name=name, reduction=reduction)
-
-        # --- Parameter Validation ---
+        # --- Parameter Validation (before super().__init__ so no half-built
+        # --- object can escape a raise) ---
+        # DECISION plan-2026-09-02T081011-9b26b501/D-001
+        # Do NOT silently drop or silently accept mi_weight: an archived config
+        # would then deserialize into a DIFFERENT objective. Do not flip its
+        # sign and keep it either -- the term is not I(X;Y-hat) under any sign.
+        if mi_weight is not None:
+            raise ValueError(
+                "mi_weight has been removed from GoodhartAwareLoss "
+                f"(got mi_weight={mi_weight}). The term it weighted was "
+                "H(mean_p) - mean H(p_i) added with a POSITIVE sign, so it was "
+                "maximized at the accurate, confident classifier and minimized "
+                "at marginal collapse -- the opposite of the intended effect. "
+                "Use prior_weight (with the optional class_prior) for a "
+                "correctly-signed anti-collapse term."
+            )
         if not (0 <= label_smoothing < 1):
             raise ValueError(
                 f"label_smoothing must be in the range [0, 1), "
@@ -134,10 +166,10 @@ class GoodhartAwareLoss(keras.losses.Loss):
                 f"Entropy weight must be a non-negative number, "
                 f"but got {entropy_weight}."
             )
-        if not (isinstance(mi_weight, (int, float)) and mi_weight >= 0):
+        if not (isinstance(prior_weight, (int, float)) and prior_weight >= 0):
             raise ValueError(
-                f"MI weight must be a non-negative number, "
-                f"but got {mi_weight}."
+                f"Prior weight must be a non-negative number, "
+                f"but got {prior_weight}."
             )
         if not (0 < epsilon < 0.1):
             raise ValueError(
@@ -145,22 +177,46 @@ class GoodhartAwareLoss(keras.losses.Loss):
                 f"but got {epsilon}."
             )
 
-        if entropy_weight > 1.0:
+        normalized_prior = None
+        if class_prior is not None:
+            prior_array = np.asarray(class_prior, dtype="float64").reshape(-1)
+            if prior_array.size == 0:
+                raise ValueError("class_prior must be a non-empty sequence.")
+            if not np.all(np.isfinite(prior_array)):
+                raise ValueError(
+                    f"class_prior entries must all be finite, but got {class_prior}."
+                )
+            if not np.all(prior_array > 0):
+                raise ValueError(
+                    f"class_prior entries must all be strictly positive, "
+                    f"but got {class_prior}."
+                )
+            normalized_prior = prior_array / float(prior_array.sum())
+
+        if entropy_weight > 0.5:
             warnings.warn(
                 f"High entropy_weight ({entropy_weight}) may dominate training. "
                 "Consider values in [0.001, 0.5].", UserWarning
             )
-        if mi_weight > 0.1:
-            warnings.warn(
-                f"High mi_weight ({mi_weight}) may dominate training. "
-                "Consider values in [0.001, 0.1].", UserWarning
-            )
+
+        super().__init__(name=name, reduction=reduction, dtype=dtype)
 
         self.label_smoothing = float(label_smoothing)
         self.entropy_weight = float(entropy_weight)
-        self.mi_weight = float(mi_weight)
+        self.prior_weight = float(prior_weight)
+        self.class_prior = None if class_prior is None else list(class_prior)
         self.from_logits = bool(from_logits)
         self.epsilon = float(epsilon)
+
+        # DECISION plan-2026-09-02T081011-9b26b501/D-004
+        # Keep the user's dtype ARGUMENT, not `self.dtype`. Keras 3's
+        # Loss.get_config() emits only {name, reduction}, and `self.dtype`
+        # resolves None to the live global policy -- emitting it would pin that
+        # policy into every saved config. Do not "simplify" to self.dtype.
+        self._dtype_arg = dtype
+        # Normalized prior kept separately so get_config() can round-trip the
+        # sequence the caller actually passed.
+        self._normalized_prior = normalized_prior
 
     def call(
         self,
@@ -175,98 +231,155 @@ class GoodhartAwareLoss(keras.losses.Loss):
         :param y_pred: Predicted logits or probabilities, shape
             (batch_size, num_classes).
         :type y_pred: keras.KerasTensor
-        :return: A scalar tensor representing the total loss for the batch.
+        :return: A tensor of shape (batch_size,) holding the per-sample loss.
+            At ``prior_weight > 0`` a single batch-level scalar is added to
+            every entry, so the returned vector no longer decomposes per row.
         :rtype: keras.KerasTensor
         """
-        y_true = ops.cast(y_true, dtype=y_pred.dtype)
+        y_true = keras.ops.cast(y_true, dtype=y_pred.dtype)
 
         # --- Component 1: Standard Cross-Entropy Loss ---
         # This component drives task accuracy and incorporates label smoothing.
-        ce_loss = keras.losses.categorical_crossentropy(
+        per_sample_loss = keras.losses.categorical_crossentropy(
             y_true=y_true,
             y_pred=y_pred,
             from_logits=self.from_logits,
             label_smoothing=self.label_smoothing
         )
 
-        # For regularization, we always need probabilities.
-        if self.from_logits:
-            probs = ops.softmax(y_pred, axis=-1)
-        else:
-            # Clip user-provided probabilities to avoid log(0) issues.
-            probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
+        # Every regularizer is derived from ONE producer of log p, so the
+        # conditional entropy cannot be computed two different ways.
+        log_probs = self._log_probabilities(y_pred)
 
-        # --- Component 2: Entropy Regularization ---
-        # This term is added to penalize overconfident predictions.
-        entropy_term = 0.0
+        # --- Component 2: Confidence Penalty (per sample) ---
+        # Maximizing H(p_i) is minimizing -H(p_i). It rides INSIDE the
+        # (batch,) vector so sample_weight weights it row-wise.
         if self.entropy_weight > 0:
-            entropy_term = self.entropy_weight * self._entropy_regularization(probs)
+            per_sample_loss = per_sample_loss - (
+                self.entropy_weight * self._conditional_entropy(log_probs)
+            )
 
-        # --- Component 3: Mutual Information Regularization ---
-        # This term is added to penalize reliance on spurious features.
-        mi_term = 0.0
-        if self.mi_weight > 0:
-            mi_term = self.mi_weight * self._mutual_information_regularization(probs)
+        # --- Component 3: Anti-collapse term (batch level) ---
+        if self.prior_weight > 0:
+            per_sample_loss = per_sample_loss + (
+                self.prior_weight * self._prior_matching_regularization(log_probs)
+            )
 
-        # --- Combine all components ---
-        total_loss = ce_loss + entropy_term + mi_term
+        return per_sample_loss
 
-        return total_loss
-
-    def _entropy_regularization(
+    def _log_probabilities(
         self,
-        probs: keras.KerasTensor
+        y_pred: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Calculates the negative conditional entropy term to be minimized.
+        Produces log-probabilities, the single source of every regularizer.
 
-        The goal is to maximize the conditional entropy :math:`H(\\hat{Y}|X)`.
-        We achieve this by minimizing its negative, :math:`-H(\\hat{Y}|X)`.
+        On the ``from_logits=True`` path this is ``log_softmax``, exact for
+        saturated logits where ``softmax -> clip -> log`` floored the entropy
+        at ``(K-1) * epsilon * |log epsilon|`` and zeroed its gradient. On the
+        ``from_logits=False`` path probabilities are clipped away from zero and
+        RENORMALIZED so each row still sums to one.
 
-        :param probs: The model's output probabilities.
-        :type probs: keras.KerasTensor
-        :return: The negative of the mean conditional entropy.
+        :param y_pred: Predicted logits or probabilities, shape
+            (batch_size, num_classes).
+        :type y_pred: keras.KerasTensor
+        :return: Log-probabilities of the same shape as `y_pred`.
         :rtype: keras.KerasTensor
         """
-        probs = ops.clip(probs, self.epsilon, 1.0 - self.epsilon)
-        # H(Y|X) per sample = - sum(p * log(p))
-        conditional_entropy_per_sample = -ops.sum(probs * ops.log(probs), axis=-1)
-        # We want to minimize -mean(H(Y|X)) to maximize entropy.
-        return -ops.mean(conditional_entropy_per_sample)
+        if self.from_logits:
+            return keras.ops.log_softmax(y_pred, axis=-1)
 
-    def _mutual_information_regularization(
+        # DECISION plan-2026-09-02T081011-9b26b501/D-005
+        # `epsilon` defaults to 1e-8, BELOW float16's smallest normal (6.1e-5),
+        # so a bare clip(y, self.epsilon, ...) floors to 0.0 under
+        # mixed_float16 and log() returns -inf. Do not restore the literal.
+        dtype = keras.backend.standardize_dtype(y_pred.dtype)
+        floor = max(self.epsilon, float(np.finfo(dtype).tiny))
+        probs = keras.ops.clip(y_pred, floor, 1.0)
+        probs = probs / keras.ops.sum(probs, axis=-1, keepdims=True)
+        return keras.ops.log(probs)
+
+    def _conditional_entropy(
         self,
-        probs: keras.KerasTensor
+        log_probs: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
-        Approximates the mutual information :math:`I(X; \\hat{Y})` to be minimized.
+        Computes the Shannon entropy of each row, :math:`H(\\hat{Y}|X=x_i)`.
 
-        The approximation is :math:`I(X; \\hat{Y}) \\approx H(\\hat{Y}) - H(\\hat{Y}|X)`.
-
-        :param probs: The model's output probabilities.
-        :type probs: keras.KerasTensor
-        :return: The approximated mutual information.
+        :param log_probs: Log-probabilities, shape (batch_size, num_classes).
+        :type log_probs: keras.KerasTensor
+        :return: Per-sample entropy, shape (batch_size,).
         :rtype: keras.KerasTensor
         """
-        probs = ops.clip(probs, self.epsilon, 1.0 - self.epsilon)
+        probs = keras.ops.exp(log_probs)
+        return -keras.ops.sum(probs * log_probs, axis=-1)
 
-        # H(Y|X): Mean conditional entropy across the batch.
-        h_y_given_x = -ops.mean(ops.sum(probs * ops.log(probs), axis=-1))
+    def _prior_matching_regularization(
+        self,
+        log_probs: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """
+        Computes the anti-collapse term :math:`KL(q \\| \\bar{p})`.
 
-        # H(Y): Entropy of the batch-averaged prediction distribution.
-        mean_probs = ops.mean(probs, axis=0)
-        mean_probs = ops.clip(mean_probs, self.epsilon, 1.0 - self.epsilon)
-        h_y = -ops.sum(mean_probs * ops.log(mean_probs))
+        :math:`\\bar{p}` is the batch-marginal prediction and :math:`q` is
+        `class_prior` (uniform when unset). The term is zero when the marginal
+        matches the prior and grows without bound as the marginal collapses
+        onto a strict subset of the classes, so a COLLAPSED marginal scores
+        strictly higher -- the sign the removed `mi_weight` term had backwards.
+        The value is irreducibly batch-level: it is computed over every row
+        regardless of `sample_weight`.
 
-        # Approximate mutual information I(X;Y) = H(Y) - H(Y|X)
-        mutual_information = h_y - h_y_given_x
+        :param log_probs: Log-probabilities, shape (batch_size, num_classes).
+        :type log_probs: keras.KerasTensor
+        :return: A scalar tensor.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If `class_prior`'s length does not match the
+            statically known number of classes.
+        """
+        compute_dtype = log_probs.dtype
+        batch_size = keras.ops.cast(keras.ops.shape(log_probs)[0], compute_dtype)
 
-        # MI cannot be negative, so clip at zero.
-        return ops.maximum(0.0, mutual_information)
+        # log of the batch-marginal, computed in log space so an underflowed
+        # softmax column cannot become log(0).
+        log_mean_probs = keras.ops.logsumexp(
+            log_probs, axis=0
+        ) - keras.ops.log(batch_size)
+
+        if self._normalized_prior is None:
+            # Uniform q: KL = -log(K) - mean_k log(mean_p_k).
+            num_classes = keras.ops.cast(
+                keras.ops.shape(log_probs)[-1], compute_dtype
+            )
+            return -keras.ops.log(num_classes) - keras.ops.mean(log_mean_probs)
+
+        static_classes = log_probs.shape[-1]
+        if static_classes is not None and static_classes != self._normalized_prior.size:
+            raise ValueError(
+                f"class_prior has length {self._normalized_prior.size} but "
+                f"y_pred has {static_classes} classes."
+            )
+        prior = keras.ops.convert_to_tensor(
+            self._normalized_prior, dtype=compute_dtype
+        )
+        log_prior = keras.ops.convert_to_tensor(
+            np.log(self._normalized_prior), dtype=compute_dtype
+        )
+        return keras.ops.sum(prior * (log_prior - log_mean_probs))
 
     def get_config(self) -> Dict[str, Any]:
         """
         Returns the configuration dictionary for serialization.
+
+        ``super().get_config()`` returns only ``{name, reduction}`` on Keras 3,
+        so ``dtype`` is emitted explicitly -- and it is the caller's argument,
+        not the resolved ``self.dtype``, so a config saved under one global
+        policy does not pin that policy on reload.
+
+        Note that at ``prior_weight > 0`` this loss is batch-coupled: the
+        anti-collapse term is one scalar computed over ALL rows and added to
+        every entry of the returned vector, so the loss does NOT decompose per
+        row and zeroing a row's ``sample_weight`` is NOT equivalent to dropping
+        that row. At the default ``prior_weight = 0.0`` it decomposes exactly.
 
         :return: A dictionary of the loss function's configuration.
         :rtype: Dict[str, Any]
@@ -275,9 +388,11 @@ class GoodhartAwareLoss(keras.losses.Loss):
         config.update({
             'label_smoothing': self.label_smoothing,
             'entropy_weight': self.entropy_weight,
-            'mi_weight': self.mi_weight,
+            'prior_weight': self.prior_weight,
+            'class_prior': self.class_prior,
             'from_logits': self.from_logits,
             'epsilon': self.epsilon,
+            'dtype': self._dtype_arg,
         })
         return config
 
@@ -300,7 +415,7 @@ def analyze_loss_components(
         loss component, as well as their percentage contribution.
     :rtype: Dict[str, float]
     """
-    y_true = ops.cast(y_true, dtype=y_pred.dtype)
+    y_true = keras.ops.cast(y_true, dtype=y_pred.dtype)
 
     # Calculate individual components using the loss function's settings
     ce_loss = keras.losses.categorical_crossentropy(
@@ -310,30 +425,29 @@ def analyze_loss_components(
         label_smoothing=loss_fn.label_smoothing
     )
 
-    if loss_fn.from_logits:
-        probs = ops.softmax(y_pred, axis=-1)
-    else:
-        probs = y_pred
+    # Same producer of log p that call() uses, so the diagnostic cannot drift
+    # away from the live loss.
+    log_probs = loss_fn._log_probabilities(y_pred)
 
-    entropy_term_unweighted = loss_fn._entropy_regularization(probs)
-    mi_term_unweighted = loss_fn._mutual_information_regularization(probs)
+    entropy_term_unweighted = -keras.ops.mean(loss_fn._conditional_entropy(log_probs))
+    prior_term_unweighted = loss_fn._prior_matching_regularization(log_probs)
 
     # Compute weighted contributions
     entropy_term_weighted = loss_fn.entropy_weight * entropy_term_unweighted
-    mi_term_weighted = loss_fn.mi_weight * mi_term_unweighted
-    total_loss = ops.mean(ce_loss + entropy_term_weighted + mi_term_weighted)
+    prior_term_weighted = loss_fn.prior_weight * prior_term_unweighted
+    total_loss = keras.ops.mean(ce_loss + entropy_term_weighted + prior_term_weighted)
 
     # Convert tensors to Python floats for easy inspection
     results = {
-        'total_loss': float(ops.convert_to_numpy(total_loss)),
-        'cross_entropy': float(ops.convert_to_numpy(ops.mean(ce_loss))),
-        'entropy_term_unweighted': float(ops.convert_to_numpy(entropy_term_unweighted)),
-        'mi_term_unweighted': float(ops.convert_to_numpy(mi_term_unweighted)),
-        'entropy_term_weighted': float(ops.convert_to_numpy(entropy_term_weighted)),
-        'mi_term_weighted': float(ops.convert_to_numpy(mi_term_weighted)),
+        'total_loss': float(keras.ops.convert_to_numpy(total_loss)),
+        'cross_entropy': float(keras.ops.convert_to_numpy(keras.ops.mean(ce_loss))),
+        'entropy_term_unweighted': float(keras.ops.convert_to_numpy(entropy_term_unweighted)),
+        'prior_term_unweighted': float(keras.ops.convert_to_numpy(prior_term_unweighted)),
+        'entropy_term_weighted': float(keras.ops.convert_to_numpy(entropy_term_weighted)),
+        'prior_term_weighted': float(keras.ops.convert_to_numpy(prior_term_weighted)),
         'label_smoothing': loss_fn.label_smoothing,
         'entropy_weight': loss_fn.entropy_weight,
-        'mi_weight': loss_fn.mi_weight
+        'prior_weight': loss_fn.prior_weight
     }
 
     # Calculate percentage contributions
@@ -342,15 +456,14 @@ def analyze_loss_components(
         results.update({
             'ce_contrib_pct': (results['cross_entropy'] / total_loss_val) * 100,
             'entropy_contrib_pct': (results['entropy_term_weighted'] / total_loss_val) * 100,
-            'mi_contrib_pct': (results['mi_term_weighted'] / total_loss_val) * 100
+            'prior_contrib_pct': (results['prior_term_weighted'] / total_loss_val) * 100
         })
     else:
         results.update({
             'ce_contrib_pct': 0.0,
             'entropy_contrib_pct': 0.0,
-            'mi_contrib_pct': 0.0
+            'prior_contrib_pct': 0.0
         })
     return results
 
 # ---------------------------------------------------------------------
-
