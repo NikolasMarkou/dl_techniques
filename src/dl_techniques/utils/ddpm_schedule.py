@@ -195,6 +195,12 @@ def get_named_beta_schedule(
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-09-02T170923-1285ed83/D-030: this lives in `utils/`, not
+# inside the DiT package, because its three consumers sit in three packages --
+# `losses/ddpm_hybrid_loss.py`, `models/.../dit/diffusion.py` and
+# `train/dit/synthetic_data.py`. Do NOT fold it back into the model package:
+# `losses/` importing `models/` inverts the dependency direction, and a second
+# copy of the algebra is a drift the tables' agreement depends on.
 @dataclass(frozen=True, eq=False)
 class DDPMSchedule:
     """Immutable container for every constant table a Gaussian diffusion process reads.

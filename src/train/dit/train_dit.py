@@ -45,7 +45,7 @@ The pipeline
     ┌──────────────────────────────────────────────────────────────────┐
     │ create_callbacks(monitor='val_loss', TerminateOnNaN)             │
     │        + WeightEMACallback(decay=0.9999)                         │
-    │ artifacts -> <repo>/results/<experiment_name>/                   │
+    │ artifacts -> <repo>/results/dit_<variant>_<timestamp>/           │
     └──────────────────────────────────────────────────────────────────┘
 
 NO CUSTOM ``train_step``
@@ -114,6 +114,7 @@ from dl_techniques.utils.logger import logger
 from train.common import (
     config_values_from_args,
     create_callbacks,
+    default_experiment_name,
     prepare_run_dir,
     resolved_run_dir,
     save_training_history_json,
@@ -212,7 +213,10 @@ class TrainingConfig:
     :param seed: Seed for every RNG source.
     :param output_dir: Results root. A RELATIVE path resolves against the REPO
         ROOT via ``resolved_run_dir``, never the working directory.
-    :param experiment_name: Run directory name under ``output_dir``.
+    :param experiment_name: Run directory name under ``output_dir``. ``None``
+        (the default) is filled by ``__post_init__`` with a TIMESTAMPED name,
+        so two runs never write into the same directory; pass
+        ``--experiment-name`` to pin one.
     :param smoke: Shrink the run to a wiring proof (see :data:`SMOKE_PRESET`).
     """
 
@@ -254,7 +258,7 @@ class TrainingConfig:
 
     # -- output ---------------------------------------------------------
     output_dir: str = "results"
-    experiment_name: str = "dit"
+    experiment_name: Optional[str] = None
     smoke: bool = False
 
     def __post_init__(self) -> None:
@@ -318,6 +322,19 @@ class TrainingConfig:
                 f"{variant_row['patch_size']} which does not tile an "
                 f"input_size of {self.input_size}: {error}"
             ) from error
+
+        if self.experiment_name is None:
+            # The default used to be the CONSTANT "dit", so every run wrote into
+            # `results/dit/` and the second run OVERWROTE the first run's
+            # best_model.keras, final_model.keras, training_history.json and
+            # training_log.csv in place -- silently, since nothing errors on an
+            # existing run directory. Do NOT restore a constant default. The
+            # variant is in the name because it is the field that changes what
+            # the artifacts MEAN; `/` is not legal in a directory component, so
+            # `DiT-S/2` is spelled `DiT-S-2`.
+            self.experiment_name = default_experiment_name(
+                "dit", self.variant.replace("/", "-")
+            )
 
     @property
     def diffusion_config(self) -> DiffusionConfig:
@@ -530,8 +547,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Relative paths resolve against the REPO ROOT, "
                              "never the current directory, so a run from "
                              "anywhere writes to <repo>/results/.")
-    output.add_argument("--experiment-name", type=str,
-                        default=defaults.experiment_name)
+    output.add_argument("--experiment-name", type=str, default=None,
+                        help="Run directory under --output-dir. Default: a "
+                             "TIMESTAMPED name, so a second run never "
+                             "overwrites the first run's artifacts.")
     output.add_argument("--gpu", type=int, default=None,
                         help="GPU index for setup_gpu (process-level; not a "
                              "config field).")

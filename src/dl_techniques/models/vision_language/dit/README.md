@@ -205,7 +205,7 @@ over `(H, W)`. It is a hand-maintained contract between whoever builds the batch
 external dataset and no VAE:
 
 ```bash
-# wiring proof on CPU, ~70 s, writes <repo>/results/dit/
+# wiring proof on CPU, ~70 s, writes <repo>/results/dit_<variant>_<timestamp>/
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES="" python -m train.dit.train_dit --smoke
 
 # a real (still synthetic-latent) run
@@ -221,6 +221,24 @@ latent *geometry* (`DiT-S/2` at an 8x8x4 grid over a 50-step chain) — the carv
 `train_dit.py`'s `SMOKE_PRESET`. Any flag you type explicitly wins over the preset. The defaults
 otherwise reproduce upstream's recipe: `AdamW(lr=1e-4, weight_decay=0)` with **no** LR schedule, an
 EMA of the trainable weights at decay `0.9999`, and stock `compile()`/`fit()`.
+
+The run directory is TIMESTAMPED by default (`dit_<variant>_<YYYYmmdd_HHMMSS>`), so a second run
+never overwrites the first one's `best_model.keras` / `final_model.keras` /
+`training_history.json` / `training_log.csv`; pass `--experiment-name` to pin a name.
+
+**The falling `val_loss` has a negative control.** A loss that falls is not by itself evidence of
+learning, so the smoke configuration was also run with the optimizer made inert. `--learning-rate 0`
+is rejected by `TrainingConfig`, so the control used `--learning-rate 1e-30` — an AdamW update of
+order 1e-30 against float32 weights of order 1e-2, with `weight_decay=0`:
+
+| epoch | shipped `lr=1e-4` | control `lr=1e-30` |
+|---|---|---|
+| 1 | 1.329365 | 1.390627 |
+| 2 | 1.270306 | 1.390627 |
+| 3 | 1.168718 | 1.390627 |
+
+The control's `val_loss` is bit-identical across all three epochs, so none of the shipped arm's
+`-0.160648` comes from the data pipeline. Recorded as D-029.
 
 ## Modules
 

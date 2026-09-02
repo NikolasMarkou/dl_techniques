@@ -110,15 +110,74 @@ def _recorded_decision_ids() -> set:
 
     Interface contract: reads the file, matches only headings (``## D-NNN``), and
     drops the schema example's placeholder. Returns a set of ``"D-NNN"`` strings.
-    Raises if the file is missing -- a silently empty set would make every
-    consumer vacuous.
+    An EMPTY set is never returned -- a silently empty set would make every
+    consumer vacuous -- and a MISSING file SKIPS rather than fails.
+
+    Why skip and not raise. ``plans/`` is gitignored (``.gitignore:212:plans/*``;
+    ``git ls-files plans/`` returns only ``plans/ANCHORS.md``) and a plan
+    directory is deleted when the plan closes, so a hard requirement on this path
+    is red on every fresh clone and red here the day this plan closes. The repo
+    already settled this shape the other way at
+    ``tests/test_analyzer/test_analyzer_docs.py:1305-1310``: a guard pointed at a
+    plan artifact "is live exactly while the artifact it points at exists". The
+    tracked ``plans/ANCHORS.md`` was rejected as the source instead: it is
+    appended at CLOSE, so it records NOTHING for the plan that is still open --
+    exactly the window in which this guard has to catch a dangling citation.
+
+    The skip is inside this helper on purpose, so the anti-vacuity arm
+    (:meth:`TestThePortNotesExist.test_the_recorded_decision_probe_can_fail`)
+    disappears with the arm it protects rather than passing on an empty set.
     """
     if not PLAN_DECISIONS.is_file():
-        raise AssertionError(f"plan decisions.md not found at {PLAN_DECISIONS}")
+        pytest.skip(
+            f"plan decisions.md not present at {PLAN_DECISIONS}; plans/ is "
+            "gitignored and plan directories are deleted at CLOSE, so this "
+            "guard is live exactly while the artifact it cites exists"
+        )
     text = PLAN_DECISIONS.read_text()
     ids = set(re.findall(r"^## (D-\d{3})\b", text, flags=re.MULTILINE))
     assert ids, "decisions.md records no D-NNN headings -- the probe is broken"
     return ids
+
+
+#: The number of MUST-WRITE-NEW assets SC-8 claims `PORT_NOTES.md` §3 declares:
+#: the sin-cos module, `TimestepEmbedding`, `DDPMSchedule` and `DDPMHybridLoss`.
+EXPECTED_NEW_ASSET_ROWS = 4
+
+
+def _new_asset_rows(port_notes_text: str) -> List[str]:
+    """The DATA rows of ``PORT_NOTES.md`` §3's MUST-WRITE-NEW table.
+
+    Interface contract: pure over the passed text -- it reads no file, so the
+    anti-vacuity arm can drive the identical parser over a table with a row
+    added or removed. Slices §3 by its heading and the next ``## `` heading,
+    keeps only pipe-delimited lines, and drops the header row and the ``|---|``
+    separator.
+
+    :param port_notes_text: The whole ``PORT_NOTES.md`` body.
+    :return: One string per data row, in document order.
+    """
+    lines = port_notes_text.splitlines()
+    try:
+        start = next(
+            i for i, line in enumerate(lines)
+            if line.startswith("## 3. What Was BUILT NEW")
+        )
+    except StopIteration:
+        return []
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    rows = [
+        line for line in lines[start + 1:end]
+        if line.lstrip().startswith("|")
+    ]
+    return [
+        row for row in rows
+        if not set(row.replace("|", "").strip()) <= set("- :")
+        and not row.lstrip().startswith("| Upstream component")
+    ]
 
 
 def _module_source_paths() -> List[Path]:
@@ -415,6 +474,51 @@ class TestThePortNotesExist:
             "## 4. What Does NOT Fit",
         ):
             assert heading in text, f"PORT_NOTES.md is missing '{heading}'"
+
+    def test_section_three_declares_exactly_four_new_assets(self) -> None:
+        """SC-8's NUMBER, not just its headings.
+
+        SC-8 claims §3 carries "exactly four MUST-WRITE-NEW rows". The heading
+        and citation arms above pass with three rows, or with a fifth shared
+        asset quietly added and never justified, so the number itself needs its
+        own arm. The four are the sin-cos module, ``TimestepEmbedding``,
+        ``DDPMSchedule`` and ``DDPMHybridLoss``; the §3 prose says "Four shared
+        assets", so a row change without a prose change is also a contradiction.
+        """
+        text = (PACKAGE_DIR / "PORT_NOTES.md").read_text()
+        rows = _new_asset_rows(text)
+        assert len(rows) == EXPECTED_NEW_ASSET_ROWS, (
+            f"PORT_NOTES.md §3 declares {len(rows)} MUST-WRITE-NEW rows, "
+            f"SC-8 claims {EXPECTED_NEW_ASSET_ROWS}: {rows}"
+        )
+        for name in (
+            "sincos_pos_embed_2d",
+            "TimestepEmbedding",
+            "DDPMSchedule",
+            "DDPMHybridLoss",
+        ):
+            assert any(name in row for row in rows), (
+                f"§3 has {EXPECTED_NEW_ASSET_ROWS} rows but none names {name!r}"
+            )
+
+    def test_the_row_count_probe_can_fail(self) -> None:
+        """Anti-vacuity: the parser above must MOVE when a row moves.
+
+        Drives the identical pure parser over the real §3 with one row deleted
+        and with one row appended. A parser that returned a constant -- or that
+        swallowed the whole table into a single element -- passes the arm above
+        and is worthless; this one reads 3 and 5.
+        """
+        text = (PACKAGE_DIR / "PORT_NOTES.md").read_text()
+        rows = _new_asset_rows(text)
+        assert len(rows) == EXPECTED_NEW_ASSET_ROWS
+
+        without = text.replace(rows[-1] + "\n", "")
+        assert len(_new_asset_rows(without)) == EXPECTED_NEW_ASSET_ROWS - 1
+
+        extra = "| a fifth thing | **NEW** `nowhere` | unjustified |"
+        with_extra = text.replace(rows[-1], rows[-1] + "\n" + extra)
+        assert len(_new_asset_rows(with_extra)) == EXPECTED_NEW_ASSET_ROWS + 1
 
     def test_every_cited_decision_exists_in_the_plan(self) -> None:
         """A ``D-NNN`` reference that points at nothing is worse than none.
