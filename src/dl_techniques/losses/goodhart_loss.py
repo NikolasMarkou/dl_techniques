@@ -411,8 +411,11 @@ def analyze_loss_components(
     :type y_true: keras.KerasTensor
     :param y_pred: Predicted logits or probabilities.
     :type y_pred: keras.KerasTensor
-    :return: A dictionary containing the unweighted and weighted values of each
-        loss component, as well as their percentage contribution.
+    :return: A dictionary containing, for each component, its unweighted value,
+        its weighted value, the absolute magnitude of that weighted value
+        (``*_magnitude``) and its bounded share of the total magnitude
+        (``*_share``, in [0, 1], summing to one). ``total_loss`` is the same
+        number the live loss returns for the same inputs.
     :rtype: Dict[str, float]
     """
     y_true = keras.ops.cast(y_true, dtype=y_pred.dtype)
@@ -450,19 +453,33 @@ def analyze_loss_components(
         'prior_weight': loss_fn.prior_weight
     }
 
-    # Calculate percentage contributions
-    total_loss_val = results['total_loss']
-    if abs(total_loss_val) > 1e-9:  # Avoid division by zero
+    # DECISION plan-2026-09-02T081011-9b26b501/D-006
+    # Do NOT restore `component / total_loss * 100`. The total is a SIGNED sum
+    # of signed terms, so that ratio is unbounded: at a negative total it reads
+    # ce = -100% with entropy = +200%. Divide magnitudes by the sum of
+    # magnitudes instead -- every share is then in [0, 1] and they sum to one.
+    magnitudes = {
+        'ce_magnitude': abs(results['cross_entropy']),
+        'entropy_magnitude': abs(results['entropy_term_weighted']),
+        'prior_magnitude': abs(results['prior_term_weighted']),
+    }
+    results.update(magnitudes)
+
+    total_magnitude = sum(magnitudes.values())
+    results['total_magnitude'] = total_magnitude
+    if total_magnitude > 0.0:
         results.update({
-            'ce_contrib_pct': (results['cross_entropy'] / total_loss_val) * 100,
-            'entropy_contrib_pct': (results['entropy_term_weighted'] / total_loss_val) * 100,
-            'prior_contrib_pct': (results['prior_term_weighted'] / total_loss_val) * 100
+            'ce_share': magnitudes['ce_magnitude'] / total_magnitude,
+            'entropy_share': magnitudes['entropy_magnitude'] / total_magnitude,
+            'prior_share': magnitudes['prior_magnitude'] / total_magnitude,
         })
     else:
+        # Every component is exactly zero; no component has a share of the
+        # total, and 0/0 is not 1/3.
         results.update({
-            'ce_contrib_pct': 0.0,
-            'entropy_contrib_pct': 0.0,
-            'prior_contrib_pct': 0.0
+            'ce_share': 0.0,
+            'entropy_share': 0.0,
+            'prior_share': 0.0,
         })
     return results
 
