@@ -48,44 +48,15 @@ from dl_techniques.models.vision_language.dit.model import (
     unpatchify_tokens,
 )
 
+from ._dit_helpers import BATCH, TINY, tiny_inputs, tiny_model
+
 # ---------------------------------------------------------------------
 # A tiny, fully-specified configuration every arm shares
 # ---------------------------------------------------------------------
-
-TINY: Dict[str, Any] = {
-    "input_size": 8,
-    "patch_size": 2,
-    "in_channels": 4,
-    "hidden_size": 32,
-    "depth": 2,
-    "num_heads": 4,
-    "mlp_ratio": 4.0,
-    "class_dropout_rate": 0.1,
-    "num_classes": 10,
-    "learn_sigma": True,
-    "frequency_embedding_size": 16,
-}
-
-BATCH = 4
-
-
-def tiny_model(**overrides: Any) -> DiT:
-    """Construct the shared tiny DiT with optional per-test overrides."""
-    config = dict(TINY)
-    config.update(overrides)
-    return DiT(**config)
-
-
-def tiny_inputs(seed: int = 0, batch: int = BATCH, config: Dict[str, Any] = None):
-    """Fixed-seed ``(x, t, y)`` for the tiny configuration."""
-    cfg = config or TINY
-    rng = np.random.default_rng(seed)
-    x = rng.standard_normal(
-        (batch, cfg["input_size"], cfg["input_size"], cfg["in_channels"])
-    ).astype("float32")
-    t = rng.integers(0, 1000, size=(batch,)).astype("float32")
-    y = rng.integers(0, cfg["num_classes"], size=(batch,)).astype("int32")
-    return x, t, y
+#
+# `TINY`, `tiny_model` and `tiny_inputs` MOVED to `_dit_helpers.py` at step 9,
+# when the comprehensive suite became a second consumer. One home for the
+# geometry, rather than two dicts kept equal by hand.
 
 
 def expected_parameter_count(cfg: Dict[str, Any]) -> int:
