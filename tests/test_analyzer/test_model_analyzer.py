@@ -1211,3 +1211,55 @@ class TestTheAnalyzerCanUndoItsGlobalStyleMutation:
                 "the style no longer leaks without `with`; D-039 needs updating")
         finally:
             plt.rcParams.update(before)
+
+
+# ---------------------------------------------------------------------
+# W-7 (review iteration 1) -- artifacts must be self-identifying
+# ---------------------------------------------------------------------
+
+class TestSavedResultsCarryASchemaStamp:
+    """`per_class_ece` changed MEANING while keeping its key name.
+
+    It went from the masked top-1 ECE (now published as
+    `per_class_conditional_top1_ece`) to Kull classwise ECE (D-015) — measured
+    moving `per_class_ece[2]` from `0.0` to `0.30000` on a class the model never
+    predicts. A stored `analysis_results.json` from before that change compares
+    silently against a different quantity unless the artifact says which version
+    wrote it.
+    """
+
+    def _saved(self, tmp_path, probe_data) -> dict:
+        analyzer = ModelAnalyzer(
+            models={"sv": _build_compiled_classifier("sv", seed=71)},
+            config=_quiet_config(analyze_calibration=True),
+            output_dir=str(tmp_path),
+        )
+        analyzer.analyze(probe_data, analysis_types={"calibration"})
+        analyzer.save_results("stamped.json")
+        with open(tmp_path / "stamped.json") as fh:
+            return json.load(fh)
+
+    def test_the_artifact_names_its_schema_and_the_analyzer_version(
+            self, tmp_path, probe_data):
+        from dl_techniques.analyzer import __version__ as package_version
+        from dl_techniques.analyzer.model_analyzer import RESULTS_SCHEMA_VERSION
+
+        saved = self._saved(tmp_path, probe_data)
+        assert saved["schema_version"] == RESULTS_SCHEMA_VERSION
+        assert saved["analyzer_version"] == package_version
+        assert saved["analyzer_version"] != "unknown"
+
+    def test_the_stamp_covers_the_key_that_changed_meaning(
+            self, tmp_path, probe_data):
+        """Anti-vacuity: the artifact really does carry the redefined key.
+
+        A schema stamp on an artifact that does not contain `per_class_ece`
+        would identify nothing.
+        """
+        saved = self._saved(tmp_path, probe_data)
+        calibration = saved["calibration_metrics"]["sv"]
+        assert "per_class_ece" in calibration
+        # ...and the legacy quantity ships beside it under an honest name, so a
+        # reader of an old artifact can reconstruct what they used to have.
+        assert "per_class_conditional_top1_ece" in calibration
+        assert len(calibration["per_class_ece"]) == N_CLASSES

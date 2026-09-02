@@ -67,10 +67,10 @@ attributes.
 | `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
 | `smooth_training_curves` / `smoothing_window` | `True` / `5` | |
 | `spectral_min_evals` / `spectral_max_evals` | `10` / `15000` | layers outside this eigenvalue range are skipped; above the cap the analyzer switches to truncated SVD |
-| `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test (it is ~100× the cost of the alpha fit) |
+| `spectral_bootstraps` | `50` | `pl_pvalue` resolution; `0` skips the test. It is ~100x the cost of the alpha fit, and **that fit is QUADRATIC in the number of eigenvalues** — measured 0.028 / 0.424 / 3.505 s at n = 1000 / 5000 / 15000 (3x the data, 8.3x the time). At the defaults (`spectral_bootstraps=50`, `spectral_max_evals=15000`, ~51 fits at 3.5 s) the worst case is **~178 s for a single layer** |
 | `spectral_concentration_analysis` | `True` | Gini / dominance / participation ratio |
-| `spectral_randomize` | `False` | randomized-weight comparison (slow) |
-| `spectral_n_randomizations` | `5` | independent permutations averaged per layer when `spectral_randomize` is on |
+| `spectral_randomize` | `False` | randomized-weight comparison (slow). Now **~5x** what it used to cost: `spectral_n_randomizations` defaults to 5 and each draw runs a fresh full `compute_eigenvalues`, so the SVD is repeated per draw rather than the permutation being averaged over one decomposition |
+| `spectral_n_randomizations` | `5` | independent permutations averaged per layer when `spectral_randomize` is on; each one is a full extra `compute_eigenvalues`, so this is a direct multiplier on the randomized-comparison cost |
 | `spectral_glorot_fix` | `False` | |
 | `spectral_per_layer_diagnostics` | `False` | one power-law fit plot per layer into `spectral_plots/` |
 | `plot_style` | `'publication'` | also `'presentation'`, `'draft'` |
@@ -136,12 +136,21 @@ that panel (see `D-033`).
 |---|---|---|
 | `ece` | expected calibration error over `calibration_bins` bins | 0 |
 | `brier_score` | MSE between predicted probabilities and one-hot labels | 0 |
-| `per_class_ece` | ECE per class | 0 |
+| `per_class_ece` | **classwise ECE** (Kull et al. 2019): class `c`'s probability COLUMN over ALL samples against the indicator `y_true == c` | 0 |
+| `per_class_conditional_top1_ece` | the legacy quantity under an honest name: top-1 ECE over only the samples whose true label is `c` | 0 |
 | `mean_entropy`, `std_entropy`, `median_entropy`, `min_entropy`, `max_entropy` | Shannon entropy of the predictive distribution (in `results.confidence_metrics`) | context-dependent |
 | `max_probability`, `margin`, `gini_coefficient` | per-sample confidence arrays (in `results.confidence_metrics`) | — |
 
 `mean_confidence` is not stored on the results object; it is computed in
 `get_summary_statistics()`.
+
+> **`per_class_ece` CHANGED MEANING and kept its name.** It used to be the masked top-1 ECE now
+> published as `per_class_conditional_top1_ece`. That quantity is blind to the whole off-diagonal
+> and reports `0.0` for a class the model never predicts, however wrong that class's column is —
+> measured `per_class_ece[2]` moving `0.0 -> 0.30000` on exactly such a case. A stored
+> `analysis_results.json` written before this change therefore carries a DIFFERENT quantity under
+> the same key. Every artifact now stamps `schema_version` and `analyzer_version` at its top level;
+> compare those before diffing two runs. Artifacts with no `schema_version` predate the change.
 
 ### Information flow (`results.information_flow`, per layer)
 
@@ -307,8 +316,11 @@ correlation traps are in `CORRELATION_TRAPS.md`.
 - Layers with fewer than `spectral_min_evals` eigenvalues never appear in the DataFrame at all.
 - Multi-input models are detected and warned about; calibration and information flow are
   limited for them.
-- Spectral analysis is the expensive part: an SVD per layer, ×`spectral_bootstraps` if
-  `pl_pvalue` is on, ×2 if `spectral_randomize` is on. Turn `analyze_spectral` off for quick runs.
+- Spectral analysis is the expensive part: an SVD per layer, x`spectral_bootstraps` if
+  `pl_pvalue` is on, and x`spectral_n_randomizations` (default 5, not 2) if `spectral_randomize`
+  is on. The alpha fit itself is quadratic in the eigenvalue count, so cost grows with layer width
+  faster than layer count — see the `spectral_bootstraps` row for the measured ~178 s/layer worst
+  case at defaults. Turn `analyze_spectral` off for quick runs.
 - `AnalysisResults` holds numpy arrays and a DataFrame; JSON serialization drops them unless the
   `json_include_*` flags are set.
 

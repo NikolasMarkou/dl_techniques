@@ -230,8 +230,34 @@ _ACCURACY_METRIC_CLASSES = tuple(
 # JSON serialization parameters
 JSON_INDENT: int = 2
 
+# DECISION plan-2026-09-01T225724-e79ad4bd/D-040
+# Stamp every saved artifact so it is self-identifying. `per_class_ece` changed
+# MEANING while keeping its key (masked top-1 ECE -> Kull classwise ECE, D-015),
+# so an older `analysis_results.json` compares silently against a different
+# quantity. BUMP this whenever a published key changes meaning or is removed —
+# an added key alone does not need a bump. An artifact with no `schema_version`
+# predates the stamp. See decisions.md D-040.
+RESULTS_SCHEMA_VERSION: int = 2
+
 
 # ---------------------------------------------------------------------
+
+def _analyzer_version() -> str:
+    """Return the analyzer package version, or ``'unknown'``.
+
+    Read lazily and defensively: `dl_techniques.analyzer.__init__` imports this
+    module, so a module-level `from . import __version__` would be circular.
+
+    Returns:
+        The `dl_techniques.analyzer.__version__` string, or `'unknown'` if it
+        cannot be read.
+    """
+    try:
+        from dl_techniques import analyzer as _analyzer_package
+        return str(getattr(_analyzer_package, '__version__', 'unknown'))
+    except Exception:  # pragma: no cover - defensive
+        return 'unknown'
+
 
 def _iter_leaf_metrics(metric: Any, _depth: int = 0) -> Any:
     """Yield the leaf ``keras.metrics.Metric`` objects under ``metric``.
@@ -837,6 +863,8 @@ class ModelAnalyzer:
 
         # Compile all results into a single dictionary structure
         results_dict = {
+            'schema_version': RESULTS_SCHEMA_VERSION,
+            'analyzer_version': _analyzer_version(),
             'timestamp': self.results.analysis_timestamp,
             'config': serializable_config,
             'model_metrics': self.results.model_metrics,
