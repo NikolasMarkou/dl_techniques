@@ -1142,11 +1142,30 @@ class TestBulkVarianceExcludesSpikes:
 
 
 # =====================================================================
-# S1 — the Glorot factor double-counted rf after the flat CONV reshape
-# (plan step 19, decisions.md D-002)
+# S1 — the Glorot factor and the matricized fan axes
+# (plan step 19, decisions.md D-002; plan step 19.1, decisions.md D-035)
 # =====================================================================
 
 _CONV_KERNEL_SHAPE = (3, 3, 64, 128)
+
+#: Conv kernels spanning BOTH matricization regimes. `get_weight_matrices`
+#: reshapes `(kh,kw,in_c,out_c)` to `(kh*kw*in_c, out_c)` and then reports
+#: `N = max(...)`, `M = min(...)`, so the fan axes SWAP between the two groups
+#: below and any formula written on `N`/`M` alone is right in one and wrong in
+#: the other. Each entry is `(kernel_shape, expected_matrix_shape)`.
+_GLOROT_SHAPES_ROWS_GE_COLS = [
+    ((3, 3, 64, 128), (576, 128)),    # the only regime the first fix covered
+    ((7, 7, 3, 64), (147, 64)),       # large rf, still rows > cols
+    ((1, 1, 256, 64), (256, 64)),     # rf == 1 conv
+    ((3, 3, 3, 18), (27, 18)),        # rows AND cols both divisible by rf
+]
+_GLOROT_SHAPES_ROWS_LT_COLS = [
+    ((3, 3, 3, 64), (27, 64)),        # THE canonical first conv of a vision net
+    ((3, 3, 32, 512), (288, 512)),
+    ((3, 3, 16, 256), (144, 256)),
+    ((5, 5, 8, 256), (200, 256)),
+]
+_GLOROT_SHAPES = _GLOROT_SHAPES_ROWS_GE_COLS + _GLOROT_SHAPES_ROWS_LT_COLS
 
 
 def _keras_glorot_scale(kernel_shape) -> float:
@@ -1162,37 +1181,149 @@ def _keras_glorot_scale(kernel_shape) -> float:
     return float(np.sqrt(2.0 / (fan_in + fan_out)))
 
 
-class TestGlorotFactorDoesNotDoubleCountRf:
-    """After the flat reshape ``N`` already contains ``rf``."""
+class TestGlorotFactorMatchesKerasOwnFans:
+    """The factor is ``sqrt(2/(fan_in+fan_out))`` in BOTH matricization regimes.
 
-    def test_the_conv_factor_is_the_true_glorot_scale(self):
+    `calculate_glorot_normalization_factor` takes the ORDERED matricized shape
+    (`Wmats[0].shape`) precisely because `N`/`M` are `max`/`min` and therefore
+    cannot say which axis is `fan_in` — see decisions.md D-035.
+    """
+
+    @pytest.mark.parametrize("kernel_shape,matrix_shape", _GLOROT_SHAPES)
+    def test_the_conv_factor_is_the_true_glorot_scale(
+            self, kernel_shape, matrix_shape):
         from dl_techniques.analyzer import spectral_utils
         from dl_techniques.analyzer.constants import LayerType
 
         rng = np.random.default_rng(20260902)
-        kernel = rng.normal(size=_CONV_KERNEL_SHAPE).astype("float32")
-        _, N, M, rf = spectral_utils.get_weight_matrices(kernel, LayerType.CONV2D)
+        kernel = rng.normal(size=kernel_shape).astype("float32")
+        Wmats, N, M, rf = spectral_utils.get_weight_matrices(
+            kernel, LayerType.CONV2D)
 
         # Anti-vacuity: pin the matricization this guard is written against, so a
         # change of reshape convention reddens here rather than silently passing.
-        assert (N, M, rf) == (576, 128, 9)
+        assert Wmats[0].shape == matrix_shape
+        assert (N, M) == (max(matrix_shape), min(matrix_shape))
+        assert rf == kernel_shape[0] * kernel_shape[1]
 
-        expected = _keras_glorot_scale(_CONV_KERNEL_SHAPE)
-        assert expected == pytest.approx(0.0340207, abs=1e-7)
-
-        got = calculate_glorot_normalization_factor(N, M, rf)
+        expected = _keras_glorot_scale(kernel_shape)
+        got = calculate_glorot_normalization_factor(Wmats[0].shape, rf)
         assert got == pytest.approx(expected, rel=1e-12), (
-            f"glorot factor is {got!r}, the true scale is {expected!r} "
-            f"({expected / got:.4f}x)"
+            f"{kernel_shape}: glorot factor is {got!r}, the true scale is "
+            f"{expected!r} ({got / expected:.4f}x)"
         )
+
+    def test_both_matricization_regimes_are_actually_covered(self):
+        """Anti-vacuity for the parametrization itself.
+
+        If every shape in the table happened to satisfy ``rows >= cols`` the
+        parametrized test above would pass under the pre-D-035 ``N + M*rf``
+        spelling, i.e. it would be blind to the bug it exists for.
+        """
+        assert all(r >= c for _, (r, c) in _GLOROT_SHAPES_ROWS_GE_COLS)
+        assert all(r < c for _, (r, c) in _GLOROT_SHAPES_ROWS_LT_COLS)
+        assert len(_GLOROT_SHAPES_ROWS_GE_COLS) >= 1
+        assert len(_GLOROT_SHAPES_ROWS_LT_COLS) >= 1
+        assert ((3, 3, 3, 64), (27, 64)) in _GLOROT_SHAPES_ROWS_LT_COLS
+
+    def test_the_max_min_spelling_is_measurably_wrong_where_it_is_wrong(self):
+        """The discriminating power of the table, written out as numbers.
+
+        These are the ratios MEASURED against the shipped pre-D-035 code
+        (``N + M*rf`` with ``N = max``, ``M = min``). They are literals: they
+        state how large the defect was per shape, and they show the guard is
+        not merely re-deriving the implementation's own arithmetic.
+        """
+        ratios = {}
+        for kernel_shape, (rows, cols) in _GLOROT_SHAPES:
+            rf = kernel_shape[0] * kernel_shape[1]
+            old = float(np.sqrt(2.0 / (max(rows, cols) + min(rows, cols) * rf)))
+            ratios[kernel_shape] = old / _keras_glorot_scale(kernel_shape)
+
+        assert ratios[(3, 3, 64, 128)] == pytest.approx(1.0, rel=1e-12)
+        assert ratios[(7, 7, 3, 64)] == pytest.approx(1.0, rel=1e-12)
+        assert ratios[(1, 1, 256, 64)] == pytest.approx(1.0, rel=1e-12)
+        assert ratios[(3, 3, 3, 18)] == pytest.approx(1.0, rel=1e-12)
+        # ...and wrong by these factors in the swapped regime:
+        assert ratios[(3, 3, 3, 64)] == pytest.approx(1.4015, abs=1e-4)
+        assert ratios[(3, 3, 32, 512)] == pytest.approx(1.2559, abs=1e-4)
+        assert ratios[(3, 3, 16, 256)] == pytest.approx(1.2559, abs=1e-4)
+        assert ratios[(5, 5, 8, 256)] == pytest.approx(1.1206, abs=1e-4)
+
+    def test_the_hand_written_fan_formula_agrees_with_keras(self):
+        """Cross-check `_keras_glorot_scale` against Keras' OWN `compute_fans`.
+
+        `GlorotNormal` is `VarianceScaling(scale=1.0, mode='fan_avg')`, whose
+        nominal stddev is `sqrt(scale / fan_avg) = sqrt(2/(fan_in+fan_out))`
+        over the fans `compute_fans` returns. Private import, so the check
+        skips rather than fails if Keras moves it.
+        """
+        compute_fans = pytest.importorskip(
+            "keras.src.initializers.random_initializers").compute_fans
+
+        import keras
+        init = keras.initializers.GlorotNormal()
+        assert init.scale == 1.0 and init.mode == "fan_avg"
+
+        for kernel_shape, _ in _GLOROT_SHAPES:
+            fan_in, fan_out = compute_fans(kernel_shape)
+            kh, kw, in_c, out_c = kernel_shape
+            assert (fan_in, fan_out) == (kh * kw * in_c, kh * kw * out_c)
+            assert _keras_glorot_scale(kernel_shape) == pytest.approx(
+                float(np.sqrt(init.scale / ((fan_in + fan_out) / 2.0))),
+                rel=1e-12)
 
     def test_a_dense_layer_is_unaffected(self):
         """rf == 1 for Dense, so the fix must be an exact no-op there."""
-        assert calculate_glorot_normalization_factor(64, 32, 1) == pytest.approx(
+        assert calculate_glorot_normalization_factor((64, 32), 1) == pytest.approx(
             float(np.sqrt(2.0 / 96.0)), rel=1e-15)
+        # ...and it is symmetric there, so the max/min ordering cannot matter.
+        assert calculate_glorot_normalization_factor((32, 64), 1) == pytest.approx(
+            calculate_glorot_normalization_factor((64, 32), 1), rel=1e-15)
 
     def test_the_zero_guard_is_retained(self):
-        assert calculate_glorot_normalization_factor(0, 0, 1) == 1.0
+        assert calculate_glorot_normalization_factor((0, 0), 1) == 1.0
+
+    def test_the_analyzer_divides_a_first_conv_by_the_true_scale(self):
+        """End-to-end through `SpectralAnalyzer`, which is where the order was lost.
+
+        `spectral_glorot_fix` divides the matricized kernel by `kappa`, and
+        `sv_max` is homogeneous of degree 1 in the matrix, so the ratio of the
+        two runs IS the `kappa` the analyzer used. `(3,3,3,64)` is the shape the
+        pre-D-035 caller got wrong by 1.4015x.
+        """
+        import keras
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        rng = np.random.default_rng(20260902)
+        kernel = rng.normal(size=(3, 3, 3, 64)).astype("float32")
+
+        def _sv_max(glorot_fix: bool) -> float:
+            inputs = keras.Input(shape=(8, 8, 3), name="conv_in")
+            conv = keras.layers.Conv2D(
+                64, 3, padding="same", use_bias=False, name="conv")
+            model = keras.Model(inputs, conv(inputs), name="cm")
+            conv.set_weights([kernel])
+            results = AnalysisResults()
+            SpectralAnalyzer(
+                models={"cm": model},
+                config=AnalysisConfig(
+                    analyze_spectral=True, spectral_glorot_fix=glorot_fix),
+            ).analyze(results)
+            return float(results.spectral_analysis.iloc[0]["sv_max"])
+
+        raw, fixed = _sv_max(False), _sv_max(True)
+        kappa_used = raw / fixed
+
+        expected = _keras_glorot_scale((3, 3, 3, 64))
+        assert expected == pytest.approx(0.0575912, abs=1e-7)
+        assert kappa_used == pytest.approx(expected, rel=1e-6), (
+            f"the analyzer divided by {kappa_used!r}; the true Glorot scale for "
+            f"(3,3,3,64) is {expected!r} ({kappa_used / expected:.4f}x — the "
+            f"pre-D-035 max/min spelling lands at 1.4015x)"
+        )
 
 
 class TestConvEsdIsUnchanged:

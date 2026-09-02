@@ -73,7 +73,7 @@ import numpy as np
 from scipy import stats
 from scipy.special import logsumexp
 from scipy.sparse.linalg import svds
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -1530,35 +1530,47 @@ def smooth_matrix(W: np.ndarray, n_comp: int) -> np.ndarray:
 
 # ---------------------------------------------------------------------
 
-def calculate_glorot_normalization_factor(N: int, M: int, rf: int) -> float:
+def calculate_glorot_normalization_factor(
+        matrix_shape: Sequence[int],
+        rf: float = 1.0,
+) -> float:
     """
     Calculate the Glorot normalization factor for a matricized layer.
 
-    ``sqrt(2 / (fan_in + fan_out))``, expressed in the dimensions this package's
-    matricization produces. ``get_weight_matrices`` flattens a conv kernel
-    ``(kh, kw, in_c, out_c)`` to ``(kh*kw*in_c, out_c)``, so ``N`` IS ``fan_in``
-    already and ``fan_out`` is ``M * rf``. For a Dense layer ``rf == 1`` and this
-    reduces to the familiar ``sqrt(2 / (N + M))``.
+    ``sqrt(2 / (fan_in + fan_out))`` under Keras' own convolutional fan
+    convention: for a kernel ``(kh, kw, in_c, out_c)``, ``fan_in = kh*kw*in_c``
+    and ``fan_out = kh*kw*out_c``. ``get_weight_matrices`` flattens that kernel
+    to ``(kh*kw*in_c, out_c)`` and reports ``rf = kh*kw``, so writing
+    ``rows, cols = matrix_shape`` gives ``fan_in = rows`` and
+    ``fan_out = cols * rf``. For Dense/Embedding/RNN ``rf == 1`` and this
+    reduces to the familiar ``sqrt(2 / (rows + cols))``.
 
     Args:
-        N: Larger dimension of the matricized weight (``fan_in`` for CONV).
-        M: Smaller dimension of the matricized weight (output channels for CONV).
+        matrix_shape: ``(rows, cols)`` of the MATRICIZED weight, in the order
+            ``get_weight_matrices`` produced it (i.e. ``Wmats[0].shape``).
+            ``rows`` is ``fan_in``, ``cols`` is the output-unit count. It must
+            NOT be pre-sorted into ``(max, min)`` — see the anchor below.
         rf: Receptive field size (``kh*kw``; 1 for Dense/Embedding/RNN).
 
     Returns:
         The Glorot standard deviation, or ``1.0`` on degenerate dimensions.
     """
-    # DECISION plan-2026-09-01T225724-e79ad4bd/D-002
-    # The denominator is `N + M*rf`, NOT `(N + M)*rf`. After the flat CONV reshape
-    # `N = kh*kw*in_c` ALREADY CONTAINS rf, so the old spelling multiplied it in
-    # twice — measured 0.0177667 for a (3,3,64,128) kernel where the true Glorot
-    # scale is 0.0340207 (1.915x). WeightWatcher's `(N+M)*rf` is correct only for
-    # ITS per-slice dimensions (N=128, M=64); this package deliberately keeps ONE
-    # flattened matrix instead (D-002), so the formula must be restated in the
-    # flattened dimensions rather than copied across. Do NOT "restore WW parity"
-    # by reverting this line without also switching to the per-slice
-    # decomposition. See decisions.md D-002.
-    denominator = N + M * rf
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-035
+    # This takes the ORDERED matricized shape, never `(N, M)`. `get_weight_
+    # matrices` returns `N = max(shape)` and `M = min(shape)`, which DESTROYS
+    # which axis is fan_in: for `(3,3,3,64)` — the canonical first conv — the
+    # matrix is `(27, 64)`, so `N` is the OUTPUT axis, not the input one. The
+    # earlier `N + M*rf` spelling therefore computed `64 + 27*9 = 307` against
+    # the true `27 + 64*9 = 603`, a 1.4015x too-large kappa (also measured:
+    # (3,3,32,512) 1.2559x, (3,3,16,256) 1.2559x, (5,5,8,256) 1.1206x; it is
+    # exact only while `kh*kw*in_c >= out_c`). Do NOT "simplify" this back to
+    # a max/min pair, and do NOT try to recover the order from N/M/rf — the
+    # rows-divisible-by-rf trick is ambiguous whenever out_c is also a multiple
+    # of rf (e.g. `(3,3,3,18)` -> 27 and 18). Pass `Wmats[0].shape`.
+    # See decisions.md D-035 (supersedes the mechanism of D-002; the
+    # single-flattened-matrix decision itself is unchanged).
+    rows, cols = int(matrix_shape[0]), int(matrix_shape[1])
+    denominator = rows + cols * rf
     if denominator == 0:
         return 1.0
     return np.sqrt(2 / denominator)

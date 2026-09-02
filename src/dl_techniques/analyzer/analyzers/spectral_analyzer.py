@@ -252,8 +252,15 @@ class SpectralAnalyzer(BaseAnalyzer):
             layer_type = spectral_utils.infer_layer_type(layer)
             Wmats, N, M, rf = spectral_utils.get_weight_matrices(weights, layer_type)
 
-            if self.config.spectral_glorot_fix:
-                kappa = spectral_metrics.calculate_glorot_normalization_factor(N, M, rf)
+            if self.config.spectral_glorot_fix and Wmats:
+                # DECISION plan-2026-09-01T225724-e79ad4bd/D-035
+                # Pass the ORDERED matricized shape, never `(N, M)`: those are
+                # `max`/`min` and so lose which axis is `fan_in`, which made
+                # `kappa` up to 1.4015x too large for every conv whose
+                # `out_c > kh*kw*in_c` (the canonical `(3,3,3,64)` first conv).
+                # See decisions.md D-035.
+                kappa = spectral_metrics.calculate_glorot_normalization_factor(
+                    Wmats[0].shape, rf)
                 Wmats = [W / kappa for W in Wmats]
 
             # DECISION plan-2026-09-01T225724-e79ad4bd/D-002
