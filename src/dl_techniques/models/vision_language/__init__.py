@@ -1,6 +1,7 @@
 """Vision-language models — architectures that consume or relate both an image and a text
 stream, plus the promptable segmenters that grew out of them.
 
+- `bit_diffusion/` — BiT/BiB bidirectional text<->image diffusion bridge (DiTXA)
 - `clip/` — CLIP
 - `fastvlm/` — a vision-only hybrid backbone (MobileOne stem + RepMixer + attention
   stages). The name misattributes; see `models/CLAUDE.md`

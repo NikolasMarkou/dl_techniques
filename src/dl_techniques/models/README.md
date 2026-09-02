@@ -1,8 +1,8 @@
 # `dl_techniques.models`
 
-Complete model architectures — **85 leaf packages** grouped into **12 family directories**.
+Complete model architectures — **86 leaf packages** grouped into **12 family directories**.
 A *leaf package* is a directory with an `__init__.py` and no `__init__.py`-bearing child; it
-holds one architecture, its blocks, usually a factory, and a `README.md` (85 of 85 have one).
+holds one architecture, its blocks, usually a factory, and a `README.md` (86 of 86 have one).
 The family directory above it is a filing decision, not a namespace.
 
 This file is the orientation map. For authoring rules, the per-leaf census, the house module
@@ -37,7 +37,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 |---|---|---|
 | [`vision/`](vision/) | **35** | image backbones, detectors, segmenters, denoisers, generators |
 | [`language/`](language/) | 17 | token-sequence models: encoders, decoders, SSMs, reasoning stacks |
-| [`vision_language/`](vision_language/) | **9** | models consuming an image and a text stream (plus one that does not — see below) |
+| [`vision_language/`](vision_language/) | **10** | models consuming an image and a text stream (plus one that does not — see below) |
 | [`time_series/`](time_series/) | 8 | forecasting, probabilistic and point |
 | [`embeddings_experimental/`](embeddings_experimental/) | 4 | ASCII text-embedding encoders, built to be compared against each other |
 | [`general_purpose/`](general_purpose/) | 3 | architecture-level MLP replacements, modality-agnostic |
@@ -47,7 +47,7 @@ direct-child count, because those two nest one level further. Re-derive with the
 | [`memory/`](memory/) | 1 | learned codebook topologies |
 | [`point_cloud/`](point_cloud/) | 1 | 3D point set models |
 | [`tabular/`](tabular/) | 1 | tabular-data models |
-| **Sum** | **85** | |
+| **Sum** | **86** | |
 
 ### `vision/` (35)
 
@@ -114,10 +114,11 @@ direct-child count, because those two nest one level further. Re-derive with the
 Packages here are filed by input modality — token sequences — which is not a claim that
 `mamba`, `fnet` or `fftnet` is only a language model.
 
-### `vision_language/` (9)
+### `vision_language/` (10)
 
 | Package | |
 |---|---|
+| `bit_diffusion/` | BiT/BiB bidirectional text<->image diffusion bridge: the DiTXA cross-attention transformer, a lossless token<->latent packing, four SDE bridge processes and a shared token decoder |
 | `clip/` | CLIP |
 | `fastvlm/` | vision-only hybrid backbone: MobileOne stem, RepMixer, attention stages. Name misattributes |
 | `ideogram4/` | Ideogram4 text-to-image flow-matching DiT |
