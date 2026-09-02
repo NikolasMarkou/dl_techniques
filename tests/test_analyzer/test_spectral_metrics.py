@@ -424,7 +424,7 @@ class TestComputeEigenvalues:
     def test_basic_eigenvalue_computation(self):
         np.random.seed(42)
         W = np.random.randn(64, 32)
-        evals, sv_max, sv_min, rank_loss = compute_eigenvalues([W], 64, 32, 32)
+        evals, sv_max, sv_min, rank_loss, _ = compute_eigenvalues([W], 64, 32, 32)
         assert len(evals) == 32
         assert sv_max > 0
         assert sv_min >= 0
@@ -435,8 +435,8 @@ class TestComputeEigenvalues:
     def test_normalization(self):
         np.random.seed(42)
         W = np.random.randn(32, 16)
-        evals_norm, _, _, _ = compute_eigenvalues([W], 32, 16, 16, normalize=True)
-        evals_raw, _, _, _ = compute_eigenvalues([W], 32, 16, 16, normalize=False)
+        evals_norm, *_ = compute_eigenvalues([W], 32, 16, 16, normalize=True)
+        evals_raw, *_ = compute_eigenvalues([W], 32, 16, 16, normalize=False)
         np.testing.assert_allclose(evals_norm, evals_raw / 32, rtol=1e-5)
 
     def test_matrix_rank_full_rank(self):
@@ -444,7 +444,7 @@ class TestComputeEigenvalues:
         # 64x32 Gaussian is full column rank (32).
         np.random.seed(42)
         W = np.random.randn(64, 32)
-        evals, _, _, rank_loss = compute_eigenvalues([W], 64, 32, 32)
+        evals, _, _, rank_loss, _ = compute_eigenvalues([W], 64, 32, 32)
         assert int(len(evals) - rank_loss) == 32
 
     def test_matrix_rank_rank_deficient(self):
@@ -452,7 +452,7 @@ class TestComputeEigenvalues:
         # so the effective matrix_rank must drop below the full-rank count.
         np.random.seed(0)
         W = np.random.randn(64, 10) @ np.random.randn(10, 32)
-        evals, _, _, rank_loss = compute_eigenvalues([W], 64, 32, 32)
+        evals, _, _, rank_loss, _ = compute_eigenvalues([W], 64, 32, 32)
         assert int(len(evals) - rank_loss) <= 10
 
 
@@ -1280,7 +1280,7 @@ class TestRankLossUsesThePreCastEps:
         assert sv[39] > 1.0
         assert sv[40] < 1e-4
 
-        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        _, _, _, rank_loss, _ = compute_eigenvalues([w], 80, 60, 60)
         assert int(rank_loss) == 20, (
             f"rank_loss is {rank_loss} for a matrix with exact deficiency 20; "
             f"float64 tol={sv.max() * 80 * np.finfo(np.float64).eps:.4g} vs "
@@ -1291,7 +1291,7 @@ class TestRankLossUsesThePreCastEps:
         """Anti-vacuity: the looser tolerance must not manufacture deficiency."""
         rng = np.random.default_rng(self._SEED + 1)
         w = rng.normal(size=(80, 60)).astype("float32")
-        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        _, _, _, rank_loss, _ = compute_eigenvalues([w], 80, 60, 60)
         assert int(rank_loss) == 0
 
     def test_a_float64_matrix_keeps_the_weightwatcher_tolerance(self):
@@ -1307,5 +1307,80 @@ class TestRankLossUsesThePreCastEps:
         ww_tol = sv.max() * 80 * np.finfo(sv.dtype).eps
         ww_rank_loss = len(sv) - int(np.count_nonzero(sv > ww_tol))
 
-        _, _, _, rank_loss = compute_eigenvalues([w], 80, 60, 60)
+        _, _, _, rank_loss, _ = compute_eigenvalues([w], 80, 60, 60)
         assert int(rank_loss) == ww_rank_loss
+
+
+# =====================================================================
+# A4 - a truncated spectrum must announce itself
+# =====================================================================
+
+class TestTruncatedSpectrumIsFlagged:
+    """`svds` returns the k LARGEST singular values, not the whole spectrum.
+
+    On that path `sv_min` is the k-th largest value, and `rank_loss` counts
+    deficiency over a spectrum that never contained the small values. Nothing in
+    the returned tuple or in the details frame recorded the truncation.
+    """
+
+    _SEED = 7
+
+    @staticmethod
+    def _rank_deficient_float32():
+        """A 200x60 float32 matrix of EXACT rank 40 (deficiency 20)."""
+        rng = np.random.default_rng(TestTruncatedSpectrumIsFlagged._SEED)
+        a = rng.normal(size=(200, 40)).astype("float32")
+        b = rng.normal(size=(40, 60)).astype("float32")
+        return (a @ b).astype("float32")
+
+    def test_the_truncated_path_reports_truncation(self):
+        w = self._rank_deficient_float32()
+        evals, sv_max, sv_min, rank_loss, truncated = compute_eigenvalues(
+            [w], 200, 60, n_comp=10)
+
+        # Anti-vacuity: the path really was truncated - 10 of 60 values returned.
+        assert len(evals) == 10
+        assert truncated is True
+
+        assert np.isnan(sv_min), (
+            f"sv_min is {sv_min!r}; on a truncated spectrum it is the k-th "
+            f"LARGEST singular value, not a minimum"
+        )
+        assert np.isnan(rank_loss), (
+            f"rank_loss is {rank_loss!r} on a spectrum that never contained the "
+            f"small singular values (true deficiency 20)"
+        )
+
+    def test_the_full_path_is_untouched(self):
+        """Anti-vacuity: the complete-spectrum path keeps real numbers."""
+        w = self._rank_deficient_float32()
+        evals, sv_max, sv_min, rank_loss, truncated = compute_eigenvalues(
+            [w], 200, 60, n_comp=60)
+
+        assert truncated is False
+        assert len(evals) == 60
+        sv = np.linalg.svd(w.astype(np.float64), compute_uv=False)
+        assert sv_min == pytest.approx(sv.min(), rel=1e-9)
+        assert not np.isnan(rank_loss)
+        assert int(rank_loss) == 20
+
+    def test_the_details_frame_carries_the_flag_at_defaults(self):
+        """The analyzer does not truncate at defaults - the column must say so."""
+        import keras
+        from dl_techniques.analyzer.config import AnalysisConfig
+        from dl_techniques.analyzer.constants import MetricNames
+        from dl_techniques.analyzer.data_types import AnalysisResults
+        from dl_techniques.analyzer.analyzers.spectral_analyzer import SpectralAnalyzer
+
+        inputs = keras.Input(shape=(32,), name="t_in")
+        model = keras.Model(
+            inputs, keras.layers.Dense(24, name="d")(inputs), name="tm")
+
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models={"tm": model}, config=AnalysisConfig(analyze_spectral=True)
+        ).analyze(results)
+
+        frame = results.spectral_analysis
+        assert MetricNames.SPECTRUM_TRUNCATED in frame.columns
+        assert not bool(frame.iloc[0][MetricNames.SPECTRUM_TRUNCATED])

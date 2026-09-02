@@ -99,7 +99,7 @@ def compute_eigenvalues(
         M: int,
         n_comp: int,
         normalize: bool = False
-) -> Tuple[np.ndarray, float, float, int]:
+) -> Tuple[np.ndarray, float, float, float, bool]:
     """
     Compute the eigenvalues for all weight matrices combined.
 
@@ -112,15 +112,19 @@ def compute_eigenvalues(
 
     Returns:
         Tuple containing:
-            - Array of sorted eigenvalues (descending order).
+            - Array of sorted eigenvalues (descending order). PARTIAL (the
+              ``n_comp`` largest) when the truncated path was taken.
             - Maximum singular value.
-            - Minimum singular value.
-            - Total rank loss.
+            - Minimum singular value, or ``nan`` if the spectrum was truncated.
+            - Total rank loss, or ``nan`` if the spectrum was truncated.
+            - ``spectrum_truncated``: True when at least one matrix returned
+              fewer singular values than ``min(W.shape)``.
     """
     all_evals = []
     max_sv = 0.0
     min_sv = float('inf')
     rank_loss = 0
+    spectrum_truncated = False
 
     for W in weight_matrices:
         # DECISION plan-2026-09-01T225724-e79ad4bd/D-003: capture the eps of the
@@ -159,6 +163,14 @@ def compute_eigenvalues(
             if len(sv) > n_comp:
                 sv = sv[:n_comp]
 
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-019: truncation is decided from
+        # the RESULT, not from the branch taken. `svds`, the `k_target < 1` fallback
+        # and the exception fallback all reach this point, and only the count of
+        # returned singular values says whether the spectrum is complete. Do NOT
+        # re-test `n_comp < M` here: it is a request, not an outcome.
+        truncated = len(sv) < min(W.shape)
+        spectrum_truncated = spectrum_truncated or truncated
+
         # Calculate eigenvalues from singular values
         evals = sv * sv
 
@@ -167,9 +179,17 @@ def compute_eigenvalues(
 
         all_evals.extend(evals)
 
-        # Update global min/max singular values
+        # Update global min/max singular values. `max_sv` survives truncation - the
+        # largest singular value is exactly what a truncated SVD does return.
         current_max_sv = np.max(sv) if len(sv) > 0 else 0.0
         max_sv = max(max_sv, current_max_sv)
+
+        if truncated:
+            # `np.min(sv)` here is the k-th LARGEST singular value and the rank
+            # count is taken over a spectrum that never held the small values.
+            # Report neither rather than reporting a plausible wrong number.
+            continue
+
         if len(sv) > 0:
             min_sv = min(min_sv, np.min(sv))
 
@@ -178,12 +198,16 @@ def compute_eigenvalues(
         rank = np.sum(sv > tol)
         rank_loss += len(sv) - rank
 
-    # Handle the case where min_sv was never updated
-    if min_sv == float('inf'):
+    if spectrum_truncated:
+        min_sv = float('nan')
+        rank_loss = float('nan')
+    elif min_sv == float('inf'):
+        # Handle the case where min_sv was never updated
         min_sv = 0.0
 
     # Sort all combined eigenvalues descending
-    return np.sort(np.array(all_evals))[::-1], max_sv, min_sv, rank_loss
+    return (np.sort(np.array(all_evals))[::-1], max_sv, min_sv, rank_loss,
+            spectrum_truncated)
 
 
 # ---------------------------------------------------------------------

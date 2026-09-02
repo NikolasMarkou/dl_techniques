@@ -225,12 +225,29 @@ class SpectralAnalyzer(BaseAnalyzer):
             # structurally unreachable and the `sv[:n_comp]` slices were no-ops.
             # See decisions.md D-002.
             n_comp = M
-            evals, sv_max, sv_min, rank_loss = spectral_metrics.compute_eigenvalues(Wmats, N, M, n_comp)
+            (evals, sv_max, sv_min, rank_loss,
+             spectrum_truncated) = spectral_metrics.compute_eigenvalues(
+                Wmats, N, M, n_comp)
             self._esd_cache[layer_id] = evals
 
-            weak_rank_loss = np.sum(evals < SPECTRAL_WEAK_RANK_LOSS_TOLERANCE)
             alpha, xmin, D, sigma, num_pl_spikes, status, warning = spectral_metrics.fit_powerlaw(evals)
-            entropy = spectral_metrics.calculate_matrix_entropy(np.sqrt(evals), N)
+
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-019
+            # On a truncated spectrum the small singular values were never computed,
+            # so every quantity that counts or integrates over the WHOLE spectrum is
+            # unknowable. Emit NaN, never 0: a `weak_rank_loss` of 0 and an entropy
+            # of "1.0, perfectly flat" are the answers a complete healthy spectrum
+            # gives, so the failure would be indistinguishable from success.
+            # See decisions.md D-019.
+            if spectrum_truncated:
+                weak_rank_loss = float('nan')
+                entropy = float('nan')
+                matrix_rank = float('nan')
+            else:
+                weak_rank_loss = float(
+                    np.sum(evals < SPECTRAL_WEAK_RANK_LOSS_TOLERANCE))
+                entropy = spectral_metrics.calculate_matrix_entropy(np.sqrt(evals), N)
+                matrix_rank = int(len(evals) - rank_loss)
             spectral_mets = spectral_metrics.calculate_spectral_metrics(evals, alpha, N=N)
 
             # SETOL: Learning phase classification
@@ -272,7 +289,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                         np.random.permutation(W.flatten()).reshape(W.shape)
                         for W in Wmats
                     ]
-                    rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(
+                    rand_evals, rand_sv_max, _, _, _ = spectral_metrics.compute_eigenvalues(
                         rand_Wmats, N, M, n_comp)
                     if first_rand_evals is None:
                         first_rand_evals = rand_evals
@@ -323,6 +340,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
                 MetricNames.SV_MAX: sv_max, MetricNames.SV_MIN: sv_min,
                 MetricNames.RANK_LOSS: rank_loss, MetricNames.WEAK_RANK_LOSS: weak_rank_loss,
+                MetricNames.SPECTRUM_TRUNCATED: spectrum_truncated,
                 # DECISION plan-2026-09-01T225724-e79ad4bd/D-003
                 # Effective rank = (#evals) - rank_loss, with rank_loss computed in
                 # compute_eigenvalues using the tolerance max_sv * max(shape) * eps.
@@ -331,7 +349,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                 # rather than from the float64 cast WW reads it from. Do NOT restore the
                 # post-cast eps to claim parity: it makes exact rank deficiency invisible.
                 # This is a documented divergence - see decisions.md D-003.
-                MetricNames.MATRIX_RANK: int(len(evals) - rank_loss),
+                MetricNames.MATRIX_RANK: matrix_rank,
                 MetricNames.LAMBDA_MAX: np.max(evals) if len(evals) > 0 else 0,
                 MetricNames.ALPHA: alpha, MetricNames.XMIN: xmin, MetricNames.D: D,
                 MetricNames.SIGMA: sigma, MetricNames.NUM_PL_SPIKES: num_pl_spikes,

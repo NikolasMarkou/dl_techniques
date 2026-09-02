@@ -105,6 +105,11 @@ class MetricNames:
     SV_MIN = 'sv_min'
     RANK_LOSS = 'rank_loss'
     WEAK_RANK_LOSS = 'weak_rank_loss'
+    # True when `compute_eigenvalues` returned only the `n_comp` largest singular
+    # values. Every spectrum-wide column on that row is computed over a PARTIAL
+    # spectrum; `sv_min`, `rank_loss`, `weak_rank_loss`, `matrix_rank` and
+    # `entropy` are NaN there rather than plausible-looking wrong numbers.
+    SPECTRUM_TRUNCATED = 'spectrum_truncated'
     XMIN = 'xmin'
     D = 'D'
     SIGMA = 'sigma'
