@@ -180,7 +180,7 @@ Fit-dependent columns (verify before trusting — see below):
 |---|---|
 | `alpha` | power-law exponent of the ESD tail; the primary training-quality indicator |
 | `alpha_weighted` | `alpha * log10(λ_max)` on un-normalized eigenvalues — the **canonical** WeightWatcher name for this quantity (`METRICS.ALPHA_WEIGHTED`, "also called AlphaHat"); lower is better |
-| `alpha_hat` | the SETOL papers' notation `α̂` for the same quantity. It is an **alias of `alpha_weighted`, not the other way round**, and it is not a WeightWatcher column name; the two columns are bit-identical (`(df['alpha_weighted'] == df['alpha_hat']).all()` is `True`, guarded by `test_analyzer_docs.py -k alpha_weighted`) |
+| `alpha_hat` | the SETOL papers' notation `α̂` for the same quantity. It is an **alias of `alpha_weighted`, not the other way round**, and it is not a WeightWatcher column name; the two columns are bit-identical (`(df['alpha_weighted'] == df['alpha_hat']).all()` is `True`, guarded by `test_analyzer_docs.py -k AlphaWeighted`) |
 | `alpha_hat_normalized` | `alpha * log10(λ_max / N)`; a SETOL extra, not part of the WW metric set; comparable across differing layer widths |
 | `learning_phase` | categorical from alpha (see the phase table) |
 | `dominance_ratio` | `λ_max / sum(rest)`; > 1.0 = rank-1 spike |

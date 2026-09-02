@@ -6,6 +6,7 @@
 
 ## Table of Contents
 
+0. [Divergences from the shipped implementation](#0-divergences-from-the-shipped-implementation)
 1. [Introduction & Theoretical Context](#1-introduction--theoretical-context)
 2. [Mathematical Foundations](#2-mathematical-foundations)
 3. [What is a Correlation Trap?](#3-what-is-a-correlation-trap)
@@ -16,6 +17,39 @@
 8. [Consequences & Impact](#8-consequences--impact)
 9. [Practical Implementation](#9-practical-implementation)
 10. [Mitigation Strategies](#10-mitigation-strategies)
+
+---
+
+## 0. Divergences from the shipped implementation
+
+**This document is the theory guide, not the specification.** `spectral_metrics.detect_correlation_trap`
+deliberately differs from the pseudocode in §9.1 and from the formulas in §4-§5. Where they
+disagree, **the code is what runs**. Every number quoted below was executed on a 200×50 Gaussian
+matrix (`X = WᵀW / 200`, seed 3, σ² over all eigenvalues = `1.006857`), and each claim is guarded by
+`tests/test_analyzer/test_analyzer_docs.py -k CorrelationTraps`.
+
+| Quantity | This document | Shipped code | Status |
+|---|---|---|---|
+| MP edges | `λ± = σ²(1 ± √Q)²`, `Q = N/M` with `N` the **column** count (§9.1 does `M, N = W.shape`; the §5.2 example has `Q = 256/512 = 0.5`) | `λ± = σ²(1 ± 1/√Q)²`, `Q = N/M` with `N` the **larger** dimension, so `Q ≥ 1` (`calc_mp_edges`) | **Not a divergence — the same formula under opposite `Q` conventions.** Measured identical: doc `λ₊ = 2.265427` at `Q = 0.25`, code `λ₊ = 2.265427` at `Q = 4` on the same σ². Substituting the code's `Q ≥ 1` into this document's spelling inflates `λ₊` by exactly a factor of `Q` (`9.061710` vs `2.265427`), which is a reading error, not a code defect. Read each formula with its own `Q`. |
+| Tracy-Widom offset | `Δ_TW = c_TW · σ² · N^(-1/3)` (§4 Step 6, §5.1, Appendix A.2) | `TW = (1/√Q) · λ₊^(2/3) · M^(-2/3)`; `threshold = λ₊ + c_TW·√TW` (WeightWatcher `remove_traps.identify_trap_mode_indices`) | **Real divergence.** Different functional form, not a rescaling. Measured threshold on the probe: doc `2.948685` (`Δ_TW = 0.683257`) vs shipped `2.452807`. |
+| `c_TW` | `≈ 2.0-3.0`, "typically 2.5" (§4 Step 6, §5.1, §9.1, Appendix B.1) | `SPECTRAL_TW_SAFETY_FACTOR = 1.0`, which is WeightWatcher-exact, and it multiplies `√TW`, not `σ²·N^(-1/3)` | **Real divergence.** The two constants are not comparable because they scale different quantities. |
+| Bulk variance σ² | `sigma_sq = np.mean(eigenvalues)` over the **whole** spectrum (§9.1 Step 4, Appendix B.1) | `estimate_bulk_variance`: the mean is re-estimated over only the eigenvalues at or below the current MP edge, iterated to convergence | **Real divergence, deliberate (`D-017`).** The document's estimator counts a spike into the very edge meant to identify it: one 20× spike moved the mean `201.37 → 381.12` (1.89×) and the edge `453.09 → 857.52` with it, making the detector *conservative* exactly when it should fire hardest. On a clean probe the two differ mildly: `1.006857` (doc) vs `0.979137` (shipped). |
+| Number of draws | one randomization (§4 Step 4) | `config.spectral_n_randomizations` independent permutations (default 5); `has_trap` is a **majority vote** and every other trap quantity is the **mean** over the draws, so `num_rand_spikes` can be fractional | **Real divergence, deliberate (`D-017`).** |
+
+### Known-open behaviour (recorded, not fixed)
+
+- **The threshold is not scale-equivariant.** `λ₊ ∝ s` while `√TW ∝ s^(1/3)`, and
+  `compute_eigenvalues` is called with `normalize=False`, so the verdict depends on the absolute
+  weight scale. Measured on the IDENTICAL clean 200×50 Wishart spectrum, rescaled by `s`, the
+  relative headroom `(threshold − λ₊)/λ₊` reads `52.02` at `s = 1e-4`, `0.1121` at `s = 1` and
+  `0.00520` at `s = 100` (seed 0). For seeds 3 and 7 the rescale **flips the verdict**:
+  `has_trap = False, spikes = 0` at `s = 1` becomes `has_trap = True, spikes = 1` at `s = 100` on the
+  same eigenvalues. Fixing this means normalizing before the Tracy-Widom comparison (reusing
+  `rescale_eigenvalues`), which moves `mp_lambda_plus` / `trap_threshold` into normalized units and
+  needs its own boundary-case guard; it was out of scope for the step that fixed the σ² estimator.
+- A clean Wishart spectrum at `s = 1` reports `num_rand_spikes = 0` for seeds 0, 3 and 7 after the
+  `estimate_bulk_variance` change, so the false-positive-at-unit-scale behaviour recorded during
+  review no longer reproduces at that scale — only under the rescale above.
 
 ---
 
@@ -142,6 +176,12 @@ Q = N/M  (aspect ratio)
 λ_- = σ²(1 - √Q)²  (lower edge)
 λ_+ = σ²(1 + √Q)²  (upper edge)
 ```
+
+> **`Q` convention.** Throughout this document `N` is the COLUMN count, so the §5.2 example has
+> `Q = 256/512 = 0.5 < 1`. The shipped `calc_mp_edges` takes `N` to be the LARGER dimension
+> (`Q ≥ 1`) and therefore writes the same edges as `σ²(1 ± 1/√Q)²`. The two spellings are
+> numerically identical (measured `2.265427` both ways); mixing them inflates `λ₊` by a factor of
+> `Q`. See §0.
 
 **Shape Characteristics:**
 
@@ -458,6 +498,11 @@ where c_TW ≈ 2.0 - 3.0 (typically 2.5)
 λ_threshold = λ_+ + δ_TW
 ```
 
+> **Not what ships.** `detect_correlation_trap` uses WeightWatcher's form
+> `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)`, `threshold = λ₊ + c_TW·√TW`, with
+> `c_TW = SPECTRAL_TW_SAFETY_FACTOR = 1.0` multiplying `√TW` rather than `σ²·N^(-1/3)`. Measured
+> threshold on the §0 probe: `2.948685` here vs `2.452807` shipped. See §0.
+
 ### Step 7: Identify Spikes (Traps)
 
 **Detection Criterion:**
@@ -500,6 +545,10 @@ where:
     
     c_TW ≈ 2.5 (safety factor)
 ```
+
+> **Three shipped differences** (see §0): the TW offset is `c_TW·√TW` with
+> `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)`; `c_TW` is `1.0`, not `2.5`; and `σ²` is estimated over the bulk
+> with spikes excluded (`estimate_bulk_variance`), not as the mean of the whole spectrum.
 
 ### 5.2 Detailed Calculation Example
 
@@ -957,6 +1006,13 @@ Input ═══════> L1 ═══╳═> L2 ══════> Output
 
 ### 9.1 Detection Algorithm (Pseudocode)
 
+> **Teaching reference, NOT the shipped function.** The real
+> `dl_techniques.analyzer.spectral_metrics.detect_correlation_trap` takes the eigenvalues of the
+> already-randomized matrix plus `(N, M)`, defaults `c_TW` to `1.0`, estimates `sigma_sq` with
+> spikes excluded, and uses the `√TW` threshold form. Its caller averages
+> `config.spectral_n_randomizations` draws. The block below is kept because it is the clearest
+> statement of the PROTOCOL; do not read it as documentation of the shipped numbers. See §0.
+
 ```python
 def detect_correlation_trap(W, c_TW=2.5):
     """
@@ -1366,6 +1422,9 @@ where c_TW ≈ 2-3 accounts for:
 - Deviation from ideal MP
 ```
 
+> Shipped instead: `threshold = λ₊ + c_TW·√TW` with `TW = (1/√Q)·λ₊^(2/3)·M^(-2/3)` and
+> `c_TW = 1.0`. See §0.
+
 ---
 
 ## Appendix B: Quick Reference
@@ -1377,11 +1436,11 @@ where c_TW ≈ 2-3 accounts for:
 □ Create randomized W^rand  
 □ Compute X^rand = (1/N) W^rand^T W^rand
 □ Get eigenvalues λ_i (sorted descending)
-□ Compute σ² = mean(λ_i)
-□ Compute Q = N/M
-□ Compute λ_+ = σ²(1 + √Q)²
-□ Compute Δ_TW = 2.5 × σ² × N^(-1/3)
-□ Check: λ_max > λ_+ + Δ_TW ?
+□ Compute σ² = mean(λ_i)          [shipped: bulk mean, spikes excluded]
+□ Compute Q = N/M                 [shipped: N = larger dim, so Q >= 1]
+□ Compute λ_+ = σ²(1 + √Q)²       [shipped: σ²(1 + 1/√Q)², same value under its own Q]
+□ Compute Δ_TW = 2.5 × σ² × N^(-1/3)   [shipped: 1.0 × √((1/√Q)·λ_+^(2/3)·M^(-2/3))]
+□ Check: λ_max > λ_+ + Δ_TW ?     [shipped: majority vote over spectral_n_randomizations draws]
 □ If yes → TRAP DETECTED
 □ Compute severity: (λ_max - threshold)/λ_+
 □ Count spikes: num = Σ 𝟙(λ_i > threshold)

@@ -18,6 +18,9 @@ Scope, one class per documented claim:
   -- the output table, the API table and the spectral column census (plan step 37).
 * ``TestTheModuleDocstringResolves`` -- every import path, attribute and call keyword the
   ``__init__`` docstring and the README quick start demonstrate (plan step 38).
+* ``TestCorrelationTrapsDocMatchesTheImplementation`` -- ``CORRELATION_TRAPS.md`` against the
+  shipped trap detector, including the divergences it now declares (plan step 39).
+* ``TestEveryQuotedPytestSelectorMatchesSomething`` -- the doc pointers themselves.
 """
 
 import ast
@@ -942,4 +945,257 @@ class TestTheModuleDocstringResolves:
             problems.extend(_check_example_block(block, seeds={}))
         assert not problems, (
             f"the README shows API usage that does not resolve: {problems}"
+        )
+
+
+# ---------------------------------------------------------------------
+# S4 -- CORRELATION_TRAPS.md vs the shipped detector
+# ---------------------------------------------------------------------
+
+TRAPS_PATH = PACKAGE_ROOT / "CORRELATION_TRAPS.md"
+
+
+def _wishart_spectrum(seed: int = 3, rows: int = 200, cols: int = 50) -> np.ndarray:
+    """Eigenvalues of ``WᵀW / rows`` for a Gaussian ``W``, descending.
+
+    This is the probe the document's §0 quotes its numbers from.
+
+    Args:
+        seed: RNG seed for the Gaussian draw.
+        rows: Number of rows of ``W`` (the larger dimension).
+        cols: Number of columns of ``W``.
+
+    Returns:
+        numpy.ndarray: The eigenvalues, sorted descending.
+    """
+    rng = np.random.default_rng(seed)
+    weights = rng.standard_normal((rows, cols))
+    correlation = (weights.T @ weights) / rows
+    return np.sort(np.linalg.eigvalsh(correlation))[::-1]
+
+
+class TestCorrelationTrapsDocMatchesTheImplementation:
+    """`CORRELATION_TRAPS.md` must not contradict the detector it describes.
+
+    Defect guarded (S4): the document's `c_TW ≈ 2.5`, its `Δ_TW = c_TW·σ²·N^(-1/3)`
+    offset and its whole-spectrum `sigma_sq` all disagree with what ships, and a grep
+    for `D-00` / `diverge` / `shipped` over the document returned ZERO hits -- nothing
+    told a reader which side to believe. A `Divergences from the shipped
+    implementation` section (§0) now states each difference with an executed number.
+    """
+
+    def test_the_divergence_section_exists_and_is_referenced(self):
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        assert "## 0. Divergences from the shipped implementation" in text, (
+            "CORRELATION_TRAPS.md has no divergences section; a reader still cannot "
+            "tell which of the document and the code is authoritative"
+        )
+        # Each contradicting site must point at it, not just the top of the file.
+        assert text.count("See §0") >= 4, (
+            "the contradicting formulas do not point at the divergence section; a "
+            f"reader landing mid-document would still be misled (found {text.count('See §0')})"
+        )
+
+    def test_the_documented_c_tw_matches_the_constant(self):
+        from dl_techniques.analyzer.constants import SPECTRAL_TW_SAFETY_FACTOR
+
+        assert SPECTRAL_TW_SAFETY_FACTOR == 1.0, (
+            f"the shipped Tracy-Widom factor moved to {SPECTRAL_TW_SAFETY_FACTOR}; the "
+            "document's divergence table quotes 1.0"
+        )
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        assert "`SPECTRAL_TW_SAFETY_FACTOR = 1.0`" in text, (
+            "the divergence table no longer names the shipped c_TW value"
+        )
+
+    def test_the_two_mp_edge_spellings_agree_under_their_own_conventions(self):
+        """The §0 claim that the MP-edge 'contradiction' is a Q-convention artefact.
+
+        This is a REFUTATION of the review's S4 sub-claim, so it is asserted rather
+        than repeated: the document's `σ²(1 ± √Q)²` with its own `Q = cols/rows` and
+        the code's `σ²(1 ± 1/√Q)²` with `Q = larger/smaller` are the same number.
+        """
+        from dl_techniques.analyzer.spectral_metrics import calc_mp_edges
+
+        evals = _wishart_spectrum()
+        sigma_sq = float(np.mean(evals))
+        q_doc = 50 / 200
+        q_code = 200 / 50
+
+        doc_plus = sigma_sq * (1.0 + np.sqrt(q_doc)) ** 2
+        doc_minus = sigma_sq * (1.0 - np.sqrt(q_doc)) ** 2
+        code_minus, code_plus = calc_mp_edges(sigma_sq, q_code)
+
+        assert doc_plus == pytest.approx(code_plus, rel=1e-12), (
+            f"doc edge {doc_plus} != code edge {code_plus}; §0's 'same formula, "
+            "opposite conventions' claim is wrong"
+        )
+        assert doc_minus == pytest.approx(code_minus, rel=1e-12)
+
+        # Anti-vacuity: the mistaken substitution really does inflate by Q, which is
+        # the discrepancy the review reported. If this were also equal, the guard
+        # above would be insensitive to the convention it exists to pin.
+        mistaken = sigma_sq * (1.0 + np.sqrt(q_code)) ** 2
+        assert mistaken == pytest.approx(code_plus * q_code, rel=1e-9), (
+            f"substituting the code's Q into the doc's spelling gave {mistaken}, not "
+            f"{code_plus * q_code}"
+        )
+
+    def test_the_documented_threshold_numbers_are_the_measured_ones(self):
+        """Every number §0 quotes for the probe is recomputed here."""
+        from dl_techniques.analyzer.spectral_metrics import (
+            detect_correlation_trap,
+            estimate_bulk_variance,
+        )
+
+        evals = _wishart_spectrum(seed=3)
+        sigma_all = float(np.mean(evals))
+        sigma_bulk = estimate_bulk_variance(evals, 200 / 50)
+        result = detect_correlation_trap(evals, 200, 50)
+        doc_threshold = (
+            sigma_all * (1.0 + np.sqrt(50 / 200)) ** 2
+            + 2.5 * sigma_all * (50 ** (-1.0 / 3.0))
+        )
+
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        for label, value in (
+            ("sigma over all eigenvalues", sigma_all),
+            ("bulk sigma", sigma_bulk),
+            ("shipped threshold", result["trap_threshold"]),
+            ("doc threshold", doc_threshold),
+        ):
+            assert f"{value:.6f}" in text, (
+                f"CORRELATION_TRAPS.md §0 no longer quotes the measured {label} "
+                f"({value:.6f}); the document's numbers have gone stale"
+            )
+
+        # The divergence must be real, not a rounding difference.
+        assert doc_threshold > result["trap_threshold"] * 1.1, (
+            f"the two thresholds have converged ({doc_threshold} vs "
+            f"{result['trap_threshold']}); §0 calls this a real divergence"
+        )
+
+    def test_the_shipped_sigma_excludes_spikes(self):
+        """The `D-017` divergence, executed rather than asserted in prose."""
+        from dl_techniques.analyzer.spectral_metrics import estimate_bulk_variance
+
+        evals = _wishart_spectrum(seed=3)
+        spiked = evals.copy()
+        spiked[0] = evals[0] * 20.0
+
+        doc_estimate = float(np.mean(spiked))
+        shipped = estimate_bulk_variance(spiked, 200 / 50)
+        clean = estimate_bulk_variance(evals, 200 / 50)
+
+        assert doc_estimate > 1.5 * float(np.mean(evals)), (
+            "anti-vacuity: the injected spike does not move the whole-spectrum mean, "
+            "so this probe cannot show the difference the document describes"
+        )
+        assert shipped == pytest.approx(clean, rel=0.05), (
+            f"the shipped bulk variance moved with the spike ({shipped} vs {clean}); "
+            "the document's divergence entry describes a fix that is no longer there"
+        )
+
+    def test_the_scale_dependence_recorded_in_the_doc_still_reproduces(self):
+        """The known-open item §0 records, kept honest by measurement.
+
+        If someone normalizes before the Tracy-Widom comparison, this reddens and the
+        document's "known-open behaviour" bullet must be rewritten -- which is exactly
+        the point of recording it as an executable claim rather than as prose.
+        """
+        from dl_techniques.analyzer.spectral_metrics import detect_correlation_trap
+
+        evals = _wishart_spectrum(seed=3)
+        verdicts = {}
+        headroom = {}
+        for scale in (1.0, 100.0):
+            result = detect_correlation_trap(evals * scale, 200, 50)
+            verdicts[scale] = result["has_trap"]
+            headroom[scale] = (
+                result["trap_threshold"] - result["mp_lambda_plus"]
+            ) / result["mp_lambda_plus"]
+
+        assert headroom[1.0] > 10 * headroom[100.0], (
+            "the relative Tracy-Widom headroom no longer collapses under a rescale: "
+            f"{headroom}"
+        )
+        assert verdicts[1.0] is False and verdicts[100.0] is True, (
+            "the documented verdict flip under a pure rescale no longer reproduces: "
+            f"{verdicts}"
+        )
+        text = TRAPS_PATH.read_text(encoding="utf-8")
+        assert "not scale-equivariant" in text, (
+            "CORRELATION_TRAPS.md no longer records the scale-dependence as a "
+            "known-open item"
+        )
+
+
+# ---------------------------------------------------------------------
+# The doc pointers themselves
+# ---------------------------------------------------------------------
+
+class TestEveryQuotedPytestSelectorMatchesSomething:
+    """A doc that cites a test command must cite one that selects a test.
+
+    This module's own first draft shipped two dead pointers -- `-k alpha_weighted` and
+    `-k correlation_traps` -- because ``-k`` matches node-id substrings CASE
+    SENSITIVELY and the classes are `TestAlphaWeightedIsTheCanonicalName` and
+    `TestCorrelationTrapsDocMatchesTheImplementation`. A citation that selects nothing
+    is exactly the "documentation pointers rot silently" failure this package has a
+    recorded history of, and it is invisible to every other guard here.
+    """
+
+    DOC_SOURCES = ("README.md", "CORRELATION_TRAPS.md", "__init__.py")
+
+    # `<something>test_<file>.py ... -k <selector>`: the selector is checked against the
+    # FILE the citation names, not against the whole directory. Checking the directory
+    # is what made the first spelling of this guard vacuous -- `-k alpha_weighted` does
+    # select a test, just one in `test_spectral_metrics.py`, which is not the guard the
+    # README was pointing the reader at.
+    CITATION = re.compile(r"(test_[a-z_0-9]+\.py)[^`\n]*?-k ([A-Za-z_][A-Za-z_0-9]*)")
+
+    @staticmethod
+    def _names_in(path: Path) -> set:
+        """Every class and test-function name defined in one test module."""
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        return {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+        }
+
+    def test_every_documented_selector_selects_at_least_one_test(self):
+        test_dir = Path(__file__).parent
+        dead = []
+        checked = 0
+        for source in self.DOC_SOURCES:
+            text = (PACKAGE_ROOT / source).read_text(encoding="utf-8")
+            for module_name, selector in self.CITATION.findall(text):
+                module_path = test_dir / module_name
+                if not module_path.exists():
+                    dead.append(f"{source}: cites missing module {module_name}")
+                    continue
+                checked += 1
+                if not any(selector in name for name in self._names_in(module_path)):
+                    dead.append(f"{source}: `{module_name} -k {selector}` matches nothing")
+        assert checked >= 3, (
+            f"only {checked} documented pytest citations were parsed; the citation "
+            "regex, not the docs, is what failed"
+        )
+        assert not dead, f"these documented pytest citations are dead: {dead}"
+
+    def test_the_selector_check_would_notice_a_dead_pointer(self):
+        """Anti-vacuity: the citation regex and the name parser both do their job.
+
+        MEASURED while writing this guard: with the README's pointer reverted to
+        `-k alpha_weighted`, the check reports
+        ``['README.md: `test_analyzer_docs.py -k alpha_weighted` matches nothing']``.
+        """
+        names = self._names_in(Path(__file__))
+        assert len(names) > 20, f"only {len(names)} names parsed out of this module"
+        assert not any("no_such_selector_token" in name for name in names)
+        assert self.CITATION.findall(
+            "see `tests/test_analyzer/test_analyzer_docs.py -k CorrelationTraps`"
+        ) == [("test_analyzer_docs.py", "CorrelationTraps")], (
+            "the citation regex no longer parses the form the docs actually use"
         )
