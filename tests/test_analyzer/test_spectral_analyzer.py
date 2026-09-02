@@ -451,3 +451,81 @@ class TestSingleModelAnalysisReturnsItsArtifacts:
         assert results.spectral_esds["a"] is not results.spectral_esds["b"]
         assert set(results.spectral_recommendations) == {"a", "b"}
         assert set(results.spectral_summary_per_model) == {"a", "b"}
+
+
+class TestTheAnalyzerNeverEnumeratesEveryCriticalWeight:
+    """`find_critical_weights` lists the WHOLE critical-weight population.
+
+    On a dense layer at the shipped threshold of 0.1 that is one entry per matrix
+    element — 11,385,666 on a 4096x4096 layer, MEASURED at 21.73 s of the 24.48 s
+    the concentration path spent there. The analyzer needs only the count and the
+    top ten, both of which `summarize_critical_weights` returns without building
+    the list, so the analyzer path must not reach the listing function at all.
+
+    The function itself is retained as public API; this pins that nothing on the
+    default path calls it.
+    """
+
+    def test_the_default_path_does_not_call_the_listing_function(self):
+        from unittest import mock
+        from dl_techniques.analyzer import spectral_metrics as sm
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        calls = []
+        real = sm.find_critical_weights
+
+        def spy(*args, **kwargs):
+            calls.append(True)
+            return real(*args, **kwargs)
+
+        config = AnalysisConfig(
+            analyze_spectral=True, spectral_concentration_analysis=True)
+        with mock.patch.object(sm, "find_critical_weights", side_effect=spy):
+            SpectralAnalyzer(
+                models={"m": _two_layer_model("m")}, config=config,
+            ).analyze(AnalysisResults())
+
+        assert not calls, (
+            f"find_critical_weights was called {len(calls)} time(s) on the default "
+            f"analyzer path; it materialises one tuple per matrix element and the "
+            f"analyzer only ever consumes the count and the top ten"
+        )
+
+    def test_the_concentration_analysis_flag_really_was_on(self):
+        """Anti-vacuity: the test above passes trivially if nothing ran.
+
+        `spectral_concentration_analysis` defaults to True, and the column it
+        produces must actually be in the frame — otherwise "the function was not
+        called" would be evidence of a skipped analysis, not of a cheaper one.
+        """
+        from dl_techniques.analyzer.data_types import AnalysisResults
+
+        import keras
+
+        # Wide enough that `min(shape)` clears SPECTRAL_DEFAULT_MIN_EVALS, so the
+        # concentration path actually runs. The 16 -> 12 -> 8 model used elsewhere
+        # in this file is below that floor.
+        inputs = keras.Input(shape=(64,), name="cw_in")
+        hidden = keras.layers.Dense(48, name="cw_h")(inputs)
+        model = keras.Model(
+            inputs, keras.layers.Dense(32, name="cw_o")(hidden), name="cw")
+
+        results = AnalysisResults()
+        SpectralAnalyzer(
+            models={"cw": model},
+            config=AnalysisConfig(
+                analyze_spectral=True, spectral_concentration_analysis=True),
+        ).analyze(results)
+
+        # `spectral_analysis` is one concatenated DataFrame over all models, not a
+        # per-model dict.
+        frame = results.spectral_analysis
+        assert "critical_weight_count" in frame.columns, (
+            "critical_weight_count is absent from the frame, so the concentration "
+            "path did not run and the call-count assertion proves nothing"
+        )
+        counts = frame["critical_weight_count"].dropna()
+        assert len(counts) > 0 and (counts > 0).any(), (
+            f"every critical_weight_count is zero or missing ({list(counts)}); the "
+            f"published column would have gone dead alongside the listing call"
+        )

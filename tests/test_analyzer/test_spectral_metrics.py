@@ -2216,9 +2216,8 @@ class TestCriticalWeightEnumerationIsNotThePathsHotSpot:
 
     @pytest.mark.parametrize("shape", sorted(_HEAD_COLUMNS))
     def test_every_published_concentration_column_is_bit_identical(self, shape):
-        got = calculate_concentration_metrics(
-            _critical_weight_fixture(*shape)[0],
-            evals=_critical_weight_fixture(*shape)[1])
+        weight_matrix, evals = _critical_weight_fixture(*shape)
+        got = calculate_concentration_metrics(weight_matrix, evals=evals)
 
         for column, want in self._HEAD_COLUMNS[shape].items():
             assert float(got[column]) == float(want), (
