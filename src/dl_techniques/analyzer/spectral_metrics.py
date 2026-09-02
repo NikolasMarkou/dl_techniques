@@ -1310,6 +1310,114 @@ def _power_iteration(
 
 # ---------------------------------------------------------------------
 
+def summarize_critical_weights(
+        weight_matrix: np.ndarray,
+        eigenvectors: np.ndarray,
+        eigenvalues: np.ndarray,
+        threshold: float = SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
+        *,
+        top_k: Optional[int] = None
+) -> Tuple[int, List[Tuple[int, int, float]]]:
+    """
+    Count the critical weights and report the largest few, without listing all of them.
+
+    A weight ``W[i, j]`` is critical when row ``i`` is important (its
+    eigenvalue-weighted mean absolute eigenvector component exceeds ``threshold``
+    times the largest such score in the matrix) AND ``|W[i, j]|`` exceeds
+    ``threshold`` times the largest magnitude in its own row.
+
+    Interface contract. Callers that need only the population size and a short
+    report should use THIS function and pass ``top_k``; the count is exact
+    regardless of ``top_k``, so it never has to be recovered from the length of a
+    returned list. ``find_critical_weights`` is the ``top_k=None`` special case
+    and materialises the whole population.
+
+    Args:
+        weight_matrix: The layer's weight matrix, shape ``(n, m)``.
+        eigenvectors: Top-k left singular vectors, shape ``(n, k)``.
+        eigenvalues: The matching top-k eigenvalues, shape ``(k,)``.
+        threshold: Relative cut applied to both the row importance and the
+            within-row magnitude.
+        top_k: How many of the largest-magnitude contributions to return.
+            ``None`` returns all of them, in which case this costs one Python
+            tuple per critical weight.
+
+    Returns:
+        A ``(count, entries)`` pair. ``count`` is the total number of critical
+        weights. ``entries`` holds up to ``top_k`` of them as
+        ``(row, column, contribution)``, ordered by descending
+        ``|contribution|``, where ``contribution`` is the row's importance score
+        times the weight itself.
+    """
+    empty: Tuple[int, List[Tuple[int, int, float]]] = (0, [])
+
+    if eigenvectors.size == 0 or eigenvalues.size == 0:
+        return empty
+
+    total_eigenvalue_sum = np.sum(eigenvalues)
+    if total_eigenvalue_sum < SPECTRAL_EPSILON:
+        return empty
+
+    # Normalize eigenvalues for weighting, then score each row by the weighted
+    # sum of its absolute eigenvector components.
+    weights_ev = eigenvalues / total_eigenvalue_sum
+    row_importance = np.sum(weights_ev * np.abs(eigenvectors), axis=1)
+
+    max_importance = np.max(row_importance)
+    if max_importance < SPECTRAL_EPSILON:
+        return empty
+
+    rows = np.where(row_importance > threshold * max_importance)[0]
+    if rows.size == 0:
+        return empty
+
+    # DECISION plan-2026-09-02T041737-e85f2027/D-004
+    # The membership test below is a whole-array mask. Do NOT restore the Python
+    # double loop that inserted one `(i, j, float(contribution))` tuple per
+    # qualifying element into a `set`. At the shipped threshold of 0.1 nearly
+    # every element of a Gaussian row qualifies, so that loop built one tuple per
+    # MATRIX ELEMENT - 751,140 on a 1024x1024 layer and 11,385,666 on a 4096x4096
+    # one - and MEASURED 21.73 s of the 24.48 s the whole concentration path spent
+    # on a 4096x4096 layer, against 0.31 s for the entire power-law fit. It also
+    # made the returned order of tied contributions depend on set-hash iteration
+    # order. The `set` was never deduplicating anything: each `(i, j)` pair is
+    # visited at most once, so the count is exactly the mask's population.
+    # See decisions.md D-004.
+    candidate = weight_matrix[rows]
+    magnitudes = np.abs(candidate)
+    row_maxima = np.max(magnitudes, axis=1)
+    mask = magnitudes > threshold * row_maxima[:, None]
+    mask &= (row_maxima >= SPECTRAL_EPSILON)[:, None]
+
+    count = int(np.count_nonzero(mask))
+    if count == 0:
+        return empty
+
+    contributions = row_importance[rows][:, None] * candidate
+    n_report = count if top_k is None else min(int(top_k), count)
+    if n_report <= 0:
+        return count, []
+
+    # Rank by |contribution| over the masked entries only. Non-members are pushed
+    # below every member with a sentinel, which is safe because a member's row
+    # importance and weight magnitude are both strictly positive.
+    ranked = np.where(mask, np.abs(contributions), -1.0).ravel()
+    if n_report < ranked.size:
+        top = np.argpartition(ranked, -n_report)[-n_report:]
+    else:
+        top = np.arange(ranked.size)
+    top = top[np.argsort(ranked[top], kind="stable")[::-1]]
+
+    flat_rows, flat_cols = np.divmod(top, weight_matrix.shape[1])
+    entries = [
+        (int(rows[r]), int(c), float(contributions[r, c]))
+        for r, c in zip(flat_rows, flat_cols)
+    ]
+    return count, entries
+
+
+# ---------------------------------------------------------------------
+
 def find_critical_weights(
         weight_matrix: np.ndarray,
         eigenvectors: np.ndarray,
@@ -1318,51 +1426,25 @@ def find_critical_weights(
 ) -> List[Tuple[int, int, float]]:
     """
     Find individual weights that contribute most to top eigenvectors.
+
+    This lists the ENTIRE critical-weight population, which is one tuple per
+    matrix element on a dense layer at the default threshold. Prefer
+    ``summarize_critical_weights`` with a ``top_k``: it returns the same count
+    without materialising the list.
+
+    Args:
+        weight_matrix: The layer's weight matrix, shape ``(n, m)``.
+        eigenvectors: Top-k left singular vectors, shape ``(n, k)``.
+        eigenvalues: The matching top-k eigenvalues, shape ``(k,)``.
+        threshold: Relative cut applied to both the row importance and the
+            within-row magnitude.
+
+    Returns:
+        Every critical weight as ``(row, column, contribution)``, ordered by
+        descending ``|contribution|``.
     """
-    if eigenvectors.size == 0 or eigenvalues.size == 0:
-        return []
-
-    n, m = weight_matrix.shape
-    critical_weights = set()
-
-    # Calculate an overall importance score for each row
-    # Weighted average of absolute eigenvector components
-    total_eigenvalue_sum = np.sum(eigenvalues)
-
-    if total_eigenvalue_sum < SPECTRAL_EPSILON:
-        return []
-
-    # Normalize eigenvalues for weighting
-    weights_ev = eigenvalues / total_eigenvalue_sum
-
-    # Compute row importance: Sum(weight_k * |u_ik|) across k eigenvectors
-    row_importance = np.sum(weights_ev * np.abs(eigenvectors), axis=1)
-
-    # Find rows with high importance scores
-    max_importance = np.max(row_importance)
-    if max_importance < SPECTRAL_EPSILON:
-        return []
-
-    high_importance_row_indices = np.where(row_importance > threshold * max_importance)[0]
-
-    # For each important row, find the weights with the largest magnitudes
-    for i in high_importance_row_indices:
-        row_weights = weight_matrix[i, :]
-        max_weight_in_row = np.max(np.abs(row_weights))
-
-        if max_weight_in_row < SPECTRAL_EPSILON:
-            continue
-
-        high_magnitude_col_indices = np.where(np.abs(row_weights) > threshold * max_weight_in_row)[0]
-
-        for j in high_magnitude_col_indices:
-            contribution = row_importance[i] * weight_matrix[i, j]
-            critical_weights.add((i, j, float(contribution)))
-
-    # Sort by contribution magnitude (descending)
-    sorted_critical_weights = sorted(list(critical_weights), key=lambda x: abs(x[2]), reverse=True)
-
-    return sorted_critical_weights
+    return summarize_critical_weights(
+        weight_matrix, eigenvectors, eigenvalues, threshold, top_k=None)[1]
 
 
 # ---------------------------------------------------------------------
@@ -1403,7 +1485,8 @@ def calculate_concentration_metrics(
     k_safe = min(num_eigenvectors, min_dim - 1)
     mean_pr = 0.0
     min_pr = 0.0
-    critical_weights = []
+    critical_weight_count = 0
+    critical_weights: List[Tuple[int, int, float]] = []
 
     if k_safe >= 1:
         eigenvalues_topk, eigenvectors = get_top_eigenvectors(weight_matrix, k=k_safe)
@@ -1418,8 +1501,9 @@ def calculate_concentration_metrics(
             mean_pr = np.mean(participation_ratios) if participation_ratios else 0.0
             min_pr = np.min(participation_ratios) if participation_ratios else 0.0
 
-            critical_weights = find_critical_weights(
-                weight_matrix, eigenvectors, eigenvalues_topk)
+            critical_weight_count, critical_weights = summarize_critical_weights(
+                weight_matrix, eigenvectors, eigenvalues_topk,
+                top_k=SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED)
 
     # Concentration score: Higher = more concentrated (fragile)
     # Combines inequality (Gini), dominance, and localization (1/PR)
@@ -1430,8 +1514,8 @@ def calculate_concentration_metrics(
         'dominance_ratio': dominance,
         'participation_ratio': mean_pr,
         'min_participation_ratio': min_pr,
-        'critical_weight_count': len(critical_weights),
-        'critical_weights': critical_weights[:SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED],
+        'critical_weight_count': critical_weight_count,
+        'critical_weights': critical_weights,
         'concentration_score': np.log1p(concentration_score)
     }
 
