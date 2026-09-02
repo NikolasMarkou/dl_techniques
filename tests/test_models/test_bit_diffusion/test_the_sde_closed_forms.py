@@ -416,13 +416,22 @@ def test_the_base_class_raises_for_every_quantity():
             call()
 
 
-def test_dX_t_and_simulate_are_declared_but_not_yet_implemented():
-    """Step 8 owns the sampler; the stubs must raise rather than return silence."""
+def test_dX_t_and_simulate_refuse_to_run_without_a_network():
+    """The sampler landed at step 8; what stays pinned is D-009's consequence.
+
+    These classes deliberately do NOT hold a ``score_network`` the way upstream
+    does, so both entry points must fail loudly rather than quietly sampling the
+    base process with a zero score -- which would be finite, plausible and
+    completely untrained.
+
+    The behaviour of the sampler itself is pinned by
+    ``test_the_sampler_skips_the_first_ode_step.py``.
+    """
     sde = UniformVolatilitySDE(A=0.0, K=1.0)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="score_network"):
         sde.dX_t(x_t=None, t=None, x_cond=None, y=None, dt=0.1)
-    with pytest.raises(NotImplementedError):
-        sde.simulate(x_start=None, num_steps=2, score_network=None)
+    with pytest.raises(ValueError, match="score_network"):
+        sde.simulate(x_start=None, num_steps=2, y=0)
 
 
 # =====================================================================

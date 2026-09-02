@@ -66,10 +66,10 @@ Two deliberate divergences from upstream, both recorded in ``decisions.md``:
 1. **No ``score_network`` attribute.** Upstream stores the network on the SDE
    object (``SDE.__init__(self, A, score_network)``). These classes are pure
    math objects; the network is passed in at sampling time. See D-009.
-2. **``dX_t`` / ``simulate`` are declared here but raise.** They belong to the
-   sampler step of the port and are written later; a stub that RAISES is the
-   only honest placeholder, because one that returned a plausible tensor would
-   be an untested code path under a green suite.
+2. **``dX_t`` / ``simulate`` take the network as an argument.** Same reason:
+   the sampler is a method on the math object, but the network reaches it
+   through the call, and passing ``score_network=None`` raises rather than
+   silently sampling from the base process.
 
 References:
     - Upstream ``sde_utils_sde.py``, staged verbatim under the plan's
@@ -130,6 +130,75 @@ def bridge_math_dtype(*dtypes: Any) -> str:
         if (getattr(dtype, "name", None) or str(dtype)) == "float64":
             return "float64"
     return "float32"
+
+
+def _expand_like(scalars: Any, reference: Any) -> Any:
+    """Reshape a per-sample ``(B,)`` vector to broadcast against ``reference``.
+
+    ``t`` and every quantity derived from it (``sigma(t)``, ``phi``, ``C``) is
+    one value per sample, while the bridge tensor is rank-4 in production.
+    Broadcasting a ``(B,)`` against a ``(B, H, W, C)`` without an explicit
+    reshape aligns it with the LAST axis, silently weighting channels instead of
+    samples -- a wrong answer with the right shape.
+
+    Interface contract: returns ``scalars`` unchanged when either operand is
+    effectively rank-<=1 (nothing to broadcast against), otherwise a view of
+    shape ``(-1, 1, 1, ...)`` with ``rank(reference) - 1`` trailing ones. It
+    never changes dtype and never reduces.
+
+    :param scalars: A rank-0 or rank-1 tensor.
+    :type scalars: Any
+    :param reference: The tensor to broadcast against.
+    :type reference: Any
+    :return: ``scalars`` reshaped to ``(-1, 1, 1, ...)``, or unchanged.
+    :rtype: Any
+    """
+    rank = len(keras.ops.shape(reference))
+    if len(keras.ops.shape(scalars)) == 0 or rank <= 1:
+        return scalars
+    return keras.ops.reshape(scalars, (-1,) + (1,) * (rank - 1))
+
+
+def _require_network(score_network: Any, caller: str) -> None:
+    """Reject a missing score network loudly.
+
+    Interface contract: returns ``None`` when ``score_network`` is anything but
+    ``None``; otherwise raises. It performs no other validation -- a network
+    that is merely wrong will fail at its own call site.
+
+    :param score_network: The candidate network.
+    :type score_network: Any
+    :param caller: Method name, for the message.
+    :type caller: str
+    :raises ValueError: If ``score_network`` is ``None``.
+    """
+    if score_network is None:
+        raise ValueError(
+            f"{caller} needs a score_network; this port deliberately does not "
+            f"store one on the SDE object (see decisions.md D-009). Without it "
+            f"the sampler would silently integrate the base process with a zero "
+            f"score -- finite, plausible and completely untrained."
+        )
+
+
+def _time_grid(num_steps: int, reverse: bool) -> list:
+    """The ``num_steps + 1`` integration times, endpoints included.
+
+    ``linspace(1, 0)`` when reversing (image -> text), ``linspace(0, 1)``
+    otherwise. Built in Python rather than with ``keras.ops.linspace`` because
+    the sampler needs each ``dt`` as a Python float and reads the grid inside a
+    Python loop anyway.
+
+    :param num_steps: Number of integration steps; the grid has one more entry.
+    :type num_steps: int
+    :param reverse: Whether to integrate from ``t = 1`` down to ``t = 0``.
+    :type reverse: bool
+    :return: The monotonically ordered times.
+    :rtype: list
+    """
+    if reverse:
+        return [1.0 - i / num_steps for i in range(num_steps + 1)]
+    return [i / num_steps for i in range(num_steps + 1)]
 
 
 def _as_working(*tensors: Any) -> Any:
@@ -218,7 +287,52 @@ class BridgeSDE:
             f"{type(self).__name__} does not define the base-process covariance C"
         )
 
-    # -- sampler surface, implemented in a later step ---------------------
+    # -- sampler surface --------------------------------------------------
+
+    def _time_vector(self, x_t: Any, t_value: float) -> Any:
+        """A ``(B,)`` constant-time vector matching ``x_t``'s batch and dtype."""
+        work = bridge_math_dtype(x_t.dtype)
+        return keras.ops.ones(keras.ops.shape(x_t)[:1], dtype=work) * t_value
+
+    def _evaluate_score(
+        self,
+        score_network: Any,
+        x_t: Any,
+        t: Any,
+        x_cond: Any,
+        y: Any,
+        reverse: bool,
+        cfg_scale: float,
+        training: Optional[bool],
+    ) -> Any:
+        """Call the network for the score, routing through CFG only when asked.
+
+        :return: The predicted score, cast to ``x_t``'s dtype.
+        """
+        direction = keras.ops.ones_like(t) if reverse else keras.ops.zeros_like(t)
+        inputs = {
+            "x_t": x_t,
+            "t": t,
+            "y": y,
+            "x_cond": x_cond,
+            "direction": direction,
+        }
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-018
+        # Do NOT "simplify" this to always calling `forward_with_cfg` and letting
+        # `cfg_scale = 0` be a no-op. Upstream gates on `if cfg_scale > 0`
+        # (`sde_utils_sde.py:18`) and the gate is load-bearing for COST, not for
+        # value: `forward_with_cfg` runs the network TWICE, so an ungated call
+        # doubles every sampler step of every unguided run. The two formulas do
+        # coincide at `s = 0` (this port's `cond + 0*(cond - uncond) == cond`),
+        # which is exactly why no value-level test can see the regression.
+        # See decisions.md D-018.
+        if cfg_scale > 0:
+            score = score_network.forward_with_cfg(
+                inputs, cfg_scale=cfg_scale, training=training
+            )
+        else:
+            score = score_network(inputs, training=training)
+        return keras.ops.cast(score, x_t.dtype)
 
     def dX_t(
         self,
@@ -232,20 +346,113 @@ class BridgeSDE:
         cfg_scale: float = 0.0,
         ode: bool = False,
         x_start: Optional[Any] = None,
+        seed: Optional[Any] = None,
+        training: Optional[bool] = False,
     ) -> Any:
-        """One Euler-Maruyama / probability-flow increment. **Not yet implemented.**
+        """One Euler-Maruyama (or probability-flow) increment of the bridge.
 
-        Declared here so the interface is visible where the closed forms live,
-        but deliberately left raising: the sampler is written in a later step of
-        the port, and a stub returning a plausible tensor would ship an
-        untested code path under a green suite.
+        The stochastic branch (``ode=False``) is the standard Euler-Maruyama
+        discretisation of a linear-drift SDE whose drift is corrected by the
+        learned score::
 
-        :raises NotImplementedError: Always, for now.
+            dB_Q = sqrt(dt) * N(0, I)
+            dB_P = dB_Q + sigma(t) * score * dt
+            A_eff = +A if reverse else -A
+            dX_t  = A_eff * x_t * dt + sigma(t) * dB_P
+
+        The ``ode=True`` branch does **not** integrate the full probability-flow
+        drift. It integrates only the model's DEVIATION from the analytically
+        known base-process score for the endpoint the trajectory is anchored to::
+
+            dX_t = 1/2 * sigma(t)^2 * (score - analytic_base_score) * dt
+
+        and the analytic term is the **swapped** one: ``reverse`` uses
+        :func:`~...bridge_process.score_target_forward` (upstream's
+        ``grad_wrt_x_t_log_p_base_x_1_cond_x_t``) because a reverse trajectory
+        starts at ``t = 1`` and is anchored to ``x_1``; the forward direction
+        uses :func:`~...bridge_process.score_target_reverse`. Those are the
+        opposite pairings from the training-time targets, and that is correct --
+        at sampling time ``x_start`` is an endpoint, not a training role. Verified
+        against ``reference/sde_utils_sde.py:22-29``.
+
+        :param x_t: Current state, ``(B, ...)``.
+        :type x_t: Any
+        :param t: Per-sample time, ``(B,)``.
+        :type t: Any
+        :param x_cond: Conditioning bridge tensor, shaped like ``x_t``.
+        :type x_cond: Any
+        :param y: Prompt-kind labels, ``(B,)``.
+        :type y: Any
+        :param dt: Positive step size.
+        :type dt: float
+        :param score_network: The trained network. Required; keyword-only in
+            practice because upstream stores it on the object and this port
+            deliberately does not (D-009).
+        :type score_network: Optional[Any]
+        :param reverse: Integrate image -> text rather than text -> image.
+        :type reverse: bool
+        :param cfg_scale: Classifier-free guidance strength. Strictly positive
+            values route through ``forward_with_cfg``; ``0`` does not.
+        :type cfg_scale: float
+        :param ode: Take the probability-flow branch. Requires ``A == 0`` and
+            ``x_start``.
+        :type ode: bool
+        :param x_start: The anchored endpoint. Required when ``ode`` is set.
+        :type x_start: Optional[Any]
+        :param seed: Integer or :class:`keras.random.SeedGenerator` for the
+            Brownian increment. Threaded explicitly -- never global RNG.
+        :type seed: Optional[Any]
+        :param training: Forwarded to the network.
+        :type training: Optional[bool]
+        :return: The increment, shaped like and dtyped like ``x_t``.
+        :rtype: Any
+        :raises ValueError: If ``score_network`` is ``None``, if ``dt`` is not
+            positive, or if ``ode`` is requested with ``A != 0`` or without an
+            ``x_start``.
         """
-        raise NotImplementedError(
-            "BridgeSDE.dX_t is not implemented yet; the Euler-Maruyama step and "
-            "the probability-flow ODE branch land with the sampler."
+        _require_network(score_network, "dX_t")
+        if not dt > 0:
+            raise ValueError(f"dt must be positive, got {dt}")
+
+        x_t = keras.ops.convert_to_tensor(x_t)
+        t = keras.ops.convert_to_tensor(t)
+        score = self._evaluate_score(
+            score_network, x_t, t, x_cond, y, reverse, cfg_scale, training
         )
+        sigma_t = _expand_like(keras.ops.cast(self.sigma(t), x_t.dtype), x_t)
+
+        if ode:
+            if self.A != 0.0:
+                raise ValueError(
+                    "the probability-flow branch requires a driftless process "
+                    f"(A == 0); this one has A = {self.A}"
+                )
+            if x_start is None:
+                raise ValueError(
+                    "ode=True needs the anchored endpoint x_start; the analytic "
+                    "base score is conditioned on it."
+                )
+            # Imported here, not at module scope: `bridge_process` imports
+            # `BridgeSDE` from this module, so a top-level import would be a
+            # cycle. The alternative -- re-deriving the two analytic scores
+            # inline -- would put a second copy of the formulas that
+            # `test_the_bridge_process_math.py` pins somewhere it does not look.
+            from .bridge_process import score_target_forward, score_target_reverse
+
+            analytic = (
+                score_target_forward(self, x_t, t, x_start)
+                if reverse
+                else score_target_reverse(self, x_t, t, x_start)
+            )
+            analytic = keras.ops.cast(analytic, x_t.dtype)
+            return 0.5 * sigma_t ** 2 * (score - analytic) * dt
+
+        dB_Q = keras.ops.sqrt(
+            keras.ops.cast(dt, x_t.dtype)
+        ) * keras.random.normal(keras.ops.shape(x_t), dtype=x_t.dtype, seed=seed)
+        dB_P = dB_Q + sigma_t * score * dt
+        drift = self.A if reverse else -self.A
+        return drift * x_t * dt + sigma_t * dB_P
 
     def simulate(
         self,
@@ -258,16 +465,104 @@ class BridgeSDE:
         ode: bool = False,
         x_cond: Optional[Any] = None,
         y: Optional[Any] = None,
+        seed: Optional[Any] = None,
+        training: Optional[bool] = False,
     ) -> Any:
-        """Integrate the bridge over ``num_steps``. **Not yet implemented.**
+        """Integrate the bridge from one anchored endpoint to the other.
 
-        :raises NotImplementedError: Always, for now.
+        The loop, for ``num_steps = 4`` in the reverse direction::
+
+            i      =      0         1         2         3
+            t      =    1.00      0.75      0.50      0.25      0.00
+                        x_1 -------> . -------> . -------> . -------> x_0
+            branch =     SDE       ODE?      ODE?      ODE?
+                          ^          ^
+                          |          `-- ode=True from here on
+                          `-- ALWAYS the SDE branch, even when ode=True
+
+        The first-step skip is ``ode and i > 0``, and it is not a style choice.
+        The analytic base score divides by ``C(start, t, t)``, which is exactly
+        ``0`` at the anchored endpoint (``C(0,0,0) = 0`` forward, ``C(1,1,1) = 0``
+        reverse). Taking the ODE branch on step ``0`` therefore divides by zero
+        and the whole remaining trajectory is ``nan``. Reproduce it; do not
+        "fix" it into a pure-ODE start.
+
+        :param x_start: The anchored endpoint, ``(B, ...)``.
+        :type x_start: Any
+        :param num_steps: Number of integration steps. Must be positive.
+        :type num_steps: int
+        :param score_network: The trained network (required).
+        :type score_network: Optional[Any]
+        :param reverse: ``True`` integrates ``t: 1 -> 0``, ``False`` ``0 -> 1``.
+        :type reverse: bool
+        :param return_all: Return the list of every intermediate state instead
+            of only the final one.
+        :type return_all: bool
+        :param cfg_scale: Guidance strength; see :meth:`dX_t`.
+        :type cfg_scale: float
+        :param ode: Take the probability-flow branch from step 1 onwards.
+        :type ode: bool
+        :param x_cond: Conditioning tensor; defaults to ``x_start``, as upstream.
+        :type x_cond: Optional[Any]
+        :param y: Prompt-kind labels, ``(B,)``. Required.
+        :type y: Optional[Any]
+        :param seed: Integer or :class:`keras.random.SeedGenerator`.
+        :type seed: Optional[Any]
+        :param training: Forwarded to the network; ``False`` by default so a
+            sampler never triggers label dropout or stochastic depth.
+        :type training: Optional[bool]
+        :return: The final state, or every state when ``return_all``.
+        :rtype: Any
+        :raises ValueError: If ``num_steps`` is not positive or ``y`` is None.
         """
-        raise NotImplementedError(
-            "BridgeSDE.simulate is not implemented yet; it lands with the sampler, "
-            "including the `ode and i > 0` first-step skip that avoids the "
-            "C(0, 0, 0) = 0 singularity."
-        )
+        # Validated before anything is converted or allocated, so a caller who
+        # forgot the network gets the useful message rather than a dtype error
+        # from `convert_to_tensor(None)`.
+        _require_network(score_network, "simulate")
+        if num_steps <= 0:
+            raise ValueError(f"num_steps must be positive, got {num_steps}")
+        if y is None:
+            raise ValueError("y is required for simulation")
+
+        x_t = keras.ops.convert_to_tensor(x_start)
+        if x_cond is None:
+            x_cond = x_t
+
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-019
+        # Do NOT pass a bare integer `seed` down to the per-step
+        # `keras.random.normal`. `keras.random.*` is STATELESS given an int: the
+        # same integer draws the same tensor every call, so every step of the
+        # trajectory would get the IDENTICAL Brownian increment. The result is
+        # still finite, still shaped right, and still varies with the seed, so
+        # no finiteness, shape or reproducibility arm can see it. Promoting the
+        # int to one SeedGenerator here -- once, outside the loop -- is what
+        # makes the increments independent. See decisions.md D-019.
+        if seed is not None and not isinstance(seed, keras.random.SeedGenerator):
+            seed = keras.random.SeedGenerator(seed)
+
+        # `simulate` is an eager sampling utility built around a Python loop, so
+        # the static batch size is always available here.
+        times = _time_grid(num_steps, reverse)
+        trajectory = []
+        for i in range(num_steps):
+            dt = abs(times[i + 1] - times[i])
+            x_t = x_t + self.dX_t(
+                x_t=x_t,
+                t=self._time_vector(x_t, times[i]),
+                x_cond=x_cond,
+                y=y,
+                dt=dt,
+                score_network=score_network,
+                reverse=reverse,
+                cfg_scale=cfg_scale,
+                ode=ode and i > 0,
+                x_start=x_start if ode else None,
+                seed=seed,
+                training=training,
+            )
+            if return_all:
+                trajectory.append(x_t)
+        return trajectory if return_all else x_t
 
     # -- serialization ----------------------------------------------------
 

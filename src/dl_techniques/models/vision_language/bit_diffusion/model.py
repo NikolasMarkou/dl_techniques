@@ -914,6 +914,66 @@ class DiTXA(keras.Model):
 
         return self.final_layer([tokens, c], training=training)
 
+    def forward_with_cfg(
+        self,
+        inputs: Dict[str, Any],
+        cfg_scale: float,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Classifier-free guidance, in upstream's **non-standard** algebra.
+
+        Two forward passes: one with the conditioning stream intact, one with
+        ``cond_mask`` all-false so every conditioning token is the exact zero
+        tensor (the branch :meth:`_embed_conditioning` guards). Then::
+
+            cond + cfg_scale * (cond - uncond)
+
+        **This is NOT the DiT paper's formula.** The textbook form is
+        ``uncond + s * (cond - uncond)``; upstream (``dit.py:584``) starts from
+        ``cond``, which is the textbook formula evaluated at ``s + 1``. The two
+        differ by exactly one unit of guidance at every ``s``, so a "corrected"
+        implementation reproduces none of the reference results at any published
+        ``cfg_scale`` -- and produces perfectly plausible images while doing it.
+        Ported as-written, deliberately; recorded in ``PORT_NOTES.md`` and
+        pinned by ``test_the_cfg_formula_is_the_nonstandard_one.py``.
+
+        Note the consequence at ``s = 0``: this formula returns ``cond``
+        unchanged, so guidance is off. The sampler still gates on
+        ``cfg_scale > 0`` before calling here (``BridgeSDE._evaluate_score``),
+        because the gate saves the second forward pass, not because the value
+        would differ.
+
+        Any ``cond_mask`` present in ``inputs`` is ignored: the conditional pass
+        is defined as the fully-unmasked one.
+
+        :param inputs: The same dict :meth:`call` takes.
+        :type inputs: Dict[str, Any]
+        :param cfg_scale: Guidance strength ``s``.
+        :type cfg_scale: float
+        :param training: Forwarded to both passes.
+        :type training: Optional[bool]
+        :return: ``(B, H, W, out_channels)``.
+        :rtype: keras.KerasTensor
+        """
+        cond_inputs = {k: v for k, v in inputs.items() if k != "cond_mask"}
+        # The all-false mask is derived from `t`, which is `(B,)` by contract, so
+        # no static batch size is needed and this stays graph-safe.
+        uncond_inputs = dict(cond_inputs)
+        uncond_inputs["cond_mask"] = keras.ops.zeros_like(
+            _as_batch_vector(inputs["t"])
+        )
+
+        cond = self(cond_inputs, training=training)
+        uncond = self(uncond_inputs, training=training)
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-018
+        # Do NOT change this to the textbook `uncond + cfg_scale * (cond - uncond)`.
+        # It is not a typo upstream and it is not a bug: it is the formula the
+        # reference checkpoints and every published `cfg_scale` value were tuned
+        # against, and it equals the textbook form at `cfg_scale + 1`. Nothing in
+        # a shape, dtype, finiteness or round-trip test can tell the two apart.
+        # See decisions.md D-018.
+        return cond + cfg_scale * (cond - uncond)
+
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
         """Return ``(B, H, W, out_channels)`` without building anything.
 

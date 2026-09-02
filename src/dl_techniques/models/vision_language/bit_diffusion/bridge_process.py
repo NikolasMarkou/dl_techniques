@@ -89,7 +89,10 @@ from .config import TIME_EPS
 # `_as_working` is imported rather than re-implemented: it is the ONE copy of the
 # never-narrow cast this package uses (D-010). A local duplicate here would make
 # it the fifth hand-rolled copy in the tree.
-from .sde import BridgeSDE, _as_working, bridge_math_dtype
+# `_expand_like` lives in `sde.py` for the same reason: `sde.dX_t` needs the
+# identical (B,) -> (B,1,1,1) reshape for `sigma(t)`, and two copies of a
+# broadcasting rule is how a channel-axis bug gets fixed in one place only.
+from .sde import BridgeSDE, _as_working, _expand_like, bridge_math_dtype
 
 # ---------------------------------------------------------------------
 # Constants
@@ -99,32 +102,6 @@ from .sde import BridgeSDE, _as_working, bridge_math_dtype
 #: script rather than the function's own defaults (which upstream never uses).
 LOGIT_NORMAL_P_MEAN: float = 0.4
 LOGIT_NORMAL_P_STD: float = 0.7
-
-
-# ---------------------------------------------------------------------
-# Broadcasting helper
-# ---------------------------------------------------------------------
-
-
-def _expand_like(scalars: Any, reference: Any) -> Any:
-    """Reshape a per-sample ``(B,)`` vector to broadcast against ``reference``.
-
-    ``t`` and every quantity derived from it is one value per sample, while the
-    bridge tensor is rank-4 in production. Broadcasting a ``(B,)`` against a
-    ``(B, H, W, C)`` without an explicit reshape would align it with the LAST
-    axis, silently weighting channels instead of samples.
-
-    :param scalars: A rank-0 or rank-1 tensor.
-    :type scalars: Any
-    :param reference: The tensor to broadcast against.
-    :type reference: Any
-    :return: ``scalars`` reshaped to ``(B, 1, 1, ...)``, or unchanged if rank-0.
-    :rtype: Any
-    """
-    rank = len(keras.ops.shape(reference))
-    if len(keras.ops.shape(scalars)) == 0 or rank <= 1:
-        return scalars
-    return keras.ops.reshape(scalars, (-1,) + (1,) * (rank - 1))
 
 
 # ---------------------------------------------------------------------
