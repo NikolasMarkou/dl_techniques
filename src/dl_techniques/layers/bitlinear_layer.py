@@ -11,33 +11,49 @@ to faster inference and lower power consumption.
 
 Architecturally, this layer replaces the standard floating-point matrix
 multiplication `y = matmul(x, W)` with a quantized equivalent. The core
-idea is to dynamically scale, quantize, and then de-quantize both the
-input activations (`x`) and the weights (`W`) during each forward pass.
+idea is to dynamically scale and quantize both the input activations (`x`)
+and the weights (`W`) during each forward pass, and to fold the inverse
+scaling into the output.
 
 The mathematical formulation for a given tensor `T` (either `x` or `W`)
 involves three main steps:
 1.  **Scaling:** The full-precision tensor `T` is first scaled into the
     target integer range `[Q_min, Q_max]`. This is achieved by multiplying
-    it with a scaling factor `alpha`.
-    `T_scaled = T * alpha`
-    The scaling factor `alpha` is calculated as `Q_max / gamma`, where
-    `gamma` is a representative value of the tensor's magnitude (e.g., the
-    absolute maximum or absolute mean value). This ensures that the bulk
-    of the tensor's values are mapped into the limited integer range. The
-    BitNet paper specifically advocates for using the mean of the absolute
-    values for `gamma` for its robustness.
+    it with a scaling factor `alpha = Q_max / gamma`, where `gamma` is a
+    representative value of the tensor's magnitude (the absolute maximum,
+    mean or median). This ensures that the bulk of the tensor's values are
+    mapped into the limited integer range. The BitNet paper advocates the
+    mean of the absolute values for `gamma` for its robustness, which is
+    why ``abs_mean`` is the default for weights here.
 
-2.  **Quantization:** The scaled tensor is then quantized by rounding to the
+    `gamma` is **never** reduced over the batch axis. Activations are scaled
+    per token (`gamma` reduced over the feature axis, giving one factor per
+    row), and weights either per output channel or per tensor. A statistic
+    taken across the batch would make the quantization of one sample depend
+    on the other samples in its batch, so the layer would compute a
+    different function at `batch_size=1` than the one it was trained with.
+
+    In the implementation the scale is applied as `T / gamma * Q_max` rather
+    than `T * (Q_max / gamma)`. The two are algebraically identical, but the
+    former never materialises `Q_max / gamma`, which overflows float16 for
+    any `gamma` below `Q_max / 65504` (about `1.9e-3` at 8 bits).
+
+2.  **Quantization:** The scaled tensor is quantized by rounding to the
     nearest integer and clipping values that fall outside the target range.
     `T_quant = clip(round(T_scaled), Q_min, Q_max)`
     For "1.58-bit" quantization, this corresponds to a ternary range
     `{-1, 0, 1}`, effectively mapping the scaled weights to one of three
-    possible values.
+    possible values. True binary quantization (`bits=1`, the set `{-1, +1}`)
+    is a distinct code path built on `sign`, because rounding into the range
+    `[-1, 1]` can reach zero and would therefore yield ternary values.
 
 3.  **Matrix Multiplication:** The quantized activations and weights are used
-    in the matrix multiplication. The result is then rescaled to approximate
+    in the matrix multiplication, and the result is rescaled to approximate
     the original full-precision output.
     `y = matmul(x_quant, W_quant) / (alpha_x * alpha_W)`
+    Because `alpha_x` carries one factor per row and `alpha_W` one factor per
+    column, neither is contracted away by the matmul and both survive the
+    fold to the output.
 
 A critical challenge in training such a network is that the `round`
 function has zero gradients almost everywhere, which stalls learning via
@@ -50,6 +66,13 @@ trick allows the underlying full-precision weights to be updated by the
 optimizer, while the forward pass continues to use the quantized values,
 thus making the model "aware" of the effects of quantization.
 
+The STE is written as `stop_gradient(quantized - lambda * T) + lambda * T`,
+so that the forward value is **exactly** `quantized` for every `ste_lambda`
+and only the gradient is scaled. Writing it as
+`stop_gradient(quantized - T) + lambda * T` instead leaks `(lambda - 1) * T`
+into the forward pass, which silently de-quantizes the layer whenever
+`ste_lambda != 1`.
+
 References:
     - Wang et al., 2024. The Era of 1-bit LLMs: All Large Language Models
       are in 1.58 Bits. (https://arxiv.org/abs/2402.17764)
@@ -60,7 +83,7 @@ References:
 """
 
 import keras
-from typing import Optional, Dict, Any, Union, Tuple
+from typing import Optional, Dict, Any, Union, Tuple, Sequence
 
 # ---------------------------------------------------------------------
 # local imports
@@ -83,66 +106,93 @@ class BitLinear(keras.layers.Layer):
     ``y = matmul(x_quant, W_quant) / (alpha_x * alpha_W)``. For 1.58-bit
     weights the quantized range is the ternary set ``{-1, 0, 1}``.
 
+    Activation ``gamma`` is reduced over the **feature** axis (one factor per
+    token), and weight ``gamma`` over the **input** axis when
+    ``weight_per_channel`` is set (one factor per output unit) or over the
+    whole kernel otherwise. Neither statistic crosses the batch axis, so the
+    layer computes the same function at every batch size.
+
     **Architecture Overview:**
 
     .. code-block:: text
 
-        ┌──────────────────────────────┐
-        │  Input (..., D_in)           │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │  [Optional] LayerNorm        │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │  Scale + Quantize Activations│
-        │  alpha_x = Q_max / gamma(x)  │
-        │  x_q = clip(round(x*alpha))  │
-        └──────────────┬───────────────┘
-                       │
-        ┌──────────────┴───────────────┐
-        │  Scale + Quantize Weights    │
-        │  alpha_w = Q_max / gamma(W)  │
-        │  W_q = clip(round(W*alpha))  │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │  matmul(x_q, W_q)            │
-        │  + bias (optional)           │
-        │  / (alpha_x * alpha_w)       │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌──────────────────────────────┐
-        │  Output (..., units)         │
-        └──────────────────────────────┘
+        ┌──────────────────────────────┐    ┌──────────────────────────────┐
+        │  Input (..., D_in)           │    │  Kernel (D_in, units)        │
+        └──────────────┬───────────────┘    └──────────────┬───────────────┘
+                       ▼                                   │
+        ┌──────────────────────────────┐                   │
+        │  [Optional] LayerNorm        │                   │
+        └──────────────┬───────────────┘                   ▼
+                       ▼                    ┌──────────────────────────────┐
+        ┌──────────────────────────────┐    │  Scale + Quantize Weights    │
+        │  Scale + Quantize Activations│    │  alpha_w = Q_max / gamma(W)  │
+        │  alpha_x = Q_max / gamma(x)  │    │    -> (1, units) or scalar   │
+        │    -> (..., 1) per token     │    │  W_q = clip(round(W*alpha))  │
+        │  x_q = clip(round(x*alpha))  │    └──────────────┬───────────────┘
+        └──────────────┬───────────────┘                   │
+                       └─────────────┬─────────────────────┘
+                                     ▼
+                      ┌──────────────────────────────┐
+                      │  matmul(x_q, W_q)            │
+                      │  / (alpha_x * alpha_w)       │
+                      │  + bias (optional)           │
+                      └──────────────┬───────────────┘
+                                     ▼
+                      ┌──────────────────────────────┐
+                      │  Output (..., units)         │
+                      └──────────────────────────────┘
 
     :param units: Positive integer, dimensionality of the output space.
     :type units: int
-    :param weight_bits: Number of bits for weight quantization or explicit
-        range tuple. Default is 1.58 bits (ternary weights).
+    :param weight_bits: Number of bits for weight quantization, or an explicit
+        ``(min, max)`` range. Default is 1.58 bits (ternary weights). ``1.58``
+        and ``2`` both map to the ternary range ``{-1, 0, 1}``; ``1`` is a
+        distinct **binary** path producing ``{-1, +1}`` via ``sign``.
     :type weight_bits: Union[float, int, Tuple[float, float]]
     :param activation_bits: Number of bits for activation quantization or
         explicit range. Default is 8 bits.
     :type activation_bits: Union[float, int, Tuple[float, float]]
     :param weight_scale_method: Method to compute weight scaling factor.
-        One of ``"abs_max"``, ``"abs_mean"``, ``"abs_median"``.
+        One of ``"abs_max"``, ``"abs_mean"``, ``"abs_median"``. Defaults to
+        ``"abs_mean"``, the value advocated by the BitNet paper.
     :type weight_scale_method: str
     :param activation_scale_method: Method to compute activation scaling
         factor. One of ``"abs_max"``, ``"abs_mean"``, ``"abs_median"``.
     :type activation_scale_method: str
+    :param weight_per_channel: If ``True``, compute one weight scale per
+        output unit (shape ``(1, units)``); if ``False``, one scale for the
+        whole kernel, which is the BitNet formulation and the default.
+    :type weight_per_channel: bool
     :param quantization_method: Quantization strategy. One of
-        ``"round_clip"``, ``"stochastic"``.
+        ``"round_clip"``, ``"stochastic"``. Stochastic rounding is a
+        training-time regulariser and falls back to deterministic rounding
+        whenever ``training`` is not true, so inference stays deterministic.
     :type quantization_method: str
-    :param use_bias: Whether the layer uses a bias vector.
+    :param use_bias: Whether the layer uses a bias vector. Note that BitNet
+        drops the bias in its quantized projections; the Keras ``Dense``
+        default of ``True`` is kept here.
     :type use_bias: bool
     :param use_input_norm: Whether to apply layer normalization to inputs
         before quantization.
     :type use_input_norm: bool
-    :param ste_lambda: Scaling factor for straight-through estimator gradient.
+    :param ste_lambda: Scaling factor for the straight-through estimator
+        gradient. Affects the backward pass only; the forward value is the
+        quantized tensor for every value of this parameter.
     :type ste_lambda: float
-    :param epsilon: Small constant for numerical stability.
+    :param ste_clip_gradient: If ``True`` (default), the straight-through
+        gradient is masked outside the representable range, so saturated
+        values do not receive gradient for a forward output that is locally
+        constant. This is the canonical STE of Bengio et al.
+    :type ste_clip_gradient: bool
+    :param epsilon: Small constant for numerical stability, used as a floor
+        on ``gamma``.
     :type epsilon: float
+    :param norm_epsilon: Epsilon of the optional input ``LayerNormalization``.
+        Named separately from ``epsilon`` because the two guard unrelated
+        denominators.
+    :type norm_epsilon: float
+    :param seed: Seed for the stochastic-rounding random draws.
+    :type seed: Optional[int]
     :param kernel_initializer: Initializer for the kernel weights matrix.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for the bias vector.
@@ -151,52 +201,70 @@ class BitLinear(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Regularizer for bias vector.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_constraint: Constraint on the latent full-precision kernel.
+        BitNet-style QAT commonly clips these shadow weights to ``[-1, 1]``.
+    :type kernel_constraint: Optional[keras.constraints.Constraint]
     :param kwargs: Additional keyword arguments passed to ``keras.layers.Layer``.
+
+    Input shape:
+        N-D tensor ``(batch_size, ..., input_dim)``.
+
+    Output shape:
+        N-D tensor ``(batch_size, ..., units)``.
     """
+
+    #: Accepted values for the two ``*_scale_method`` parameters.
+    VALID_SCALE_METHODS = ("abs_max", "abs_mean", "abs_median")
+
+    #: Accepted values for ``quantization_method``.
+    VALID_QUANT_METHODS = ("round_clip", "stochastic")
 
     def __init__(
         self,
         units: int,
         weight_bits: Union[float, int, Tuple[float, float]] = 1.58,
         activation_bits: Union[float, int, Tuple[float, float]] = 8,
-        weight_scale_method: str = "abs_median",
+        weight_scale_method: str = "abs_mean",
         activation_scale_method: str = "abs_max",
+        weight_per_channel: bool = False,
         quantization_method: str = "round_clip",
         use_bias: bool = True,
         use_input_norm: bool = False,
         ste_lambda: float = 1.0,
+        ste_clip_gradient: bool = True,
         epsilon: float = 1e-5,
+        norm_epsilon: float = 1e-6,
+        seed: Optional[int] = None,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        kernel_constraint: Optional[keras.constraints.Constraint] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the BitLinear layer."""
         super().__init__(**kwargs)
 
         # Validate units parameter
-        if not isinstance(units, int) or units <= 0:
+        if isinstance(units, bool) or not isinstance(units, int) or units <= 0:
             raise ValueError(f"units must be a positive integer, got {units}")
 
         # Validate scale methods
-        valid_scale_methods = ["abs_max", "abs_mean", "abs_median"]
-        if weight_scale_method not in valid_scale_methods:
+        if weight_scale_method not in self.VALID_SCALE_METHODS:
             raise ValueError(
-                f"weight_scale_method must be one of {valid_scale_methods}, "
+                f"weight_scale_method must be one of {list(self.VALID_SCALE_METHODS)}, "
                 f"got {weight_scale_method}"
             )
-        if activation_scale_method not in valid_scale_methods:
+        if activation_scale_method not in self.VALID_SCALE_METHODS:
             raise ValueError(
-                f"activation_scale_method must be one of {valid_scale_methods}, "
+                f"activation_scale_method must be one of {list(self.VALID_SCALE_METHODS)}, "
                 f"got {activation_scale_method}"
             )
 
         # Validate quantization method
-        valid_quant_methods = ["round_clip", "stochastic"]
-        if quantization_method not in valid_quant_methods:
+        if quantization_method not in self.VALID_QUANT_METHODS:
             raise ValueError(
-                f"quantization_method must be one of {valid_quant_methods}, "
+                f"quantization_method must be one of {list(self.VALID_QUANT_METHODS)}, "
                 f"got {quantization_method}"
             )
 
@@ -205,6 +273,8 @@ class BitLinear(keras.layers.Layer):
             raise ValueError(f"ste_lambda must be positive, got {ste_lambda}")
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if norm_epsilon <= 0:
+            raise ValueError(f"norm_epsilon must be positive, got {norm_epsilon}")
 
         # Store configuration
         self.units = units
@@ -212,27 +282,46 @@ class BitLinear(keras.layers.Layer):
         self.activation_bits = activation_bits
         self.weight_scale_method = weight_scale_method
         self.activation_scale_method = activation_scale_method
+        self.weight_per_channel = weight_per_channel
         self.quantization_method = quantization_method
         self.use_bias = use_bias
         self.use_input_norm = use_input_norm
         self.ste_lambda = ste_lambda
+        self.ste_clip_gradient = ste_clip_gradient
         self.epsilon = epsilon
+        self.norm_epsilon = norm_epsilon
+        self.seed = seed
 
-        # Store initializers and regularizers
+        # Store initializers, regularizers and constraints
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
 
-        # Convert bit specifications to ranges
-        self.weight_range = self._bits_to_range(weight_bits)
-        self.activation_range = self._bits_to_range(activation_bits)
+        # Convert bit specifications to ranges. ``*_is_binary`` selects the
+        # ``sign`` path, which is the only way to reach the two-valued set
+        # {-1, +1}: rounding into [-1, 1] can land on zero.
+        self.weight_range, self._weight_is_binary = self._parse_bits(
+            weight_bits, "weight_bits"
+        )
+        self.activation_range, self._activation_is_binary = self._parse_bits(
+            activation_bits, "activation_bits"
+        )
+
+        # Stochastic rounding needs an owned, serializable RNG so that a
+        # traced/JIT-compiled forward pass stays reproducible.
+        self.seed_generator = keras.random.SeedGenerator(seed)
+
+        # The transformation is elementwise on the feature axis and every
+        # statistic is per token, so a mask passes through unchanged.
+        self.supports_masking = True
 
         # Optional input normalization sub-layer (created in __init__, built in build)
         if self.use_input_norm:
             self.input_norm = keras.layers.LayerNormalization(
                 axis=-1,
-                epsilon=1e-6,
+                epsilon=self.norm_epsilon,
                 center=True,
                 scale=True,
                 name="input_norm",
@@ -244,165 +333,185 @@ class BitLinear(keras.layers.Layer):
         self.kernel = None
         self.bias = None
 
-    def _bits_to_range(
-        self,
-        bits: Union[float, int, Tuple[float, float]]
-    ) -> Tuple[float, float]:
-        """Convert bit specification to quantization range.
+    @staticmethod
+    def _parse_bits(
+        bits: Union[float, int, Sequence[float]],
+        name: str
+    ) -> Tuple[Tuple[float, float], bool]:
+        """Convert a bit specification to a quantization range.
 
-        :param bits: Number of bits or explicit range tuple.
-        :type bits: Union[float, int, Tuple[float, float]]
-        :return: Tuple of ``(min_value, max_value)`` for quantization.
-        :rtype: Tuple[float, float]
+        A JSON round trip turns a ``tuple`` config value into a ``list``, so
+        both are accepted here; rejecting the list would make every
+        explicit-range model unloadable.
+
+        :param bits: Number of bits, or an explicit ``(min, max)`` range.
+        :type bits: Union[float, int, Sequence[float]]
+        :param name: Parameter name, used in error messages.
+        :type name: str
+        :return: ``((min_value, max_value), is_binary)``.
+        :rtype: Tuple[Tuple[float, float], bool]
+        :raises ValueError: If the specification is not a positive number or a
+            two-element increasing range.
         """
-        if isinstance(bits, tuple):
-            return bits
+        if isinstance(bits, (tuple, list)):
+            if len(bits) != 2:
+                raise ValueError(
+                    f"{name} given as an explicit range must have exactly 2 "
+                    f"elements, got {bits}"
+                )
+            low, high = float(bits[0]), float(bits[1])
+            if not low < high:
+                raise ValueError(
+                    f"{name} range must satisfy min < max, got {bits}"
+                )
+            return (low, high), False
 
-        if isinstance(bits, (int, float)):
-            if bits <= 1:
-                # Binary quantization
-                return (-1.0, 1.0)
-            elif bits < 2:
-                # 1.58 bits = ternary {-1, 0, 1}
-                return (-1.0, 1.0)
-            elif bits == 2:
-                # 2-bit = {-1, 0, 1}
-                return (-1.0, 1.0)
-            else:
-                # n-bit quantization: [-(2^(n-1)-1), 2^(n-1)-1]
-                n = int(bits)
-                max_val = float(2 ** (n - 1) - 1)
-                return (-max_val, max_val)
+        # ``bool`` is a subclass of ``int``; ``weight_bits=True`` is a mistake.
+        if isinstance(bits, bool) or not isinstance(bits, (int, float)):
+            raise ValueError(f"Invalid bit specification for {name}: {bits!r}")
 
-        raise ValueError(f"Invalid bit specification: {bits}")
+        if bits <= 0:
+            raise ValueError(f"{name} must be positive, got {bits}")
 
-    def _compute_scale(
+        if bits == 1:
+            # True binary {-1, +1}, taken by the sign path.
+            return (-1.0, 1.0), True
+        if bits < 3:
+            # 1.58 and 2 bits alike -> ternary {-1, 0, 1}.
+            return (-1.0, 1.0), False
+
+        # n-bit quantization: [-(2^(n-1)-1), 2^(n-1)-1]
+        n = int(bits)
+        max_val = float(2 ** (n - 1) - 1)
+        return (-max_val, max_val), False
+
+    def _compute_gamma(
         self,
         tensor: keras.KerasTensor,
         method: str,
-        per_channel: bool,
-        target_range: Tuple[float, float]
+        reduce_axis: Optional[int]
     ) -> keras.KerasTensor:
-        """Compute scaling factor for quantization.
+        """Compute the magnitude statistic ``gamma`` used to set the scale.
 
-        :param tensor: Tensor to compute scale for.
+        The scale is ``Q_max / gamma``; this helper returns ``gamma`` itself so
+        that callers can divide by it rather than materialize a reciprocal that
+        overflows float16 for small ``gamma``.
+
+        ``gamma`` is returned under ``stop_gradient``: it is a differentiable
+        function of the tensor, and letting the gradient flow through it adds a
+        spurious ``-T/gamma**2 * dgamma/dT`` term. For ``abs_max`` that entire
+        term is routed to whichever single element attained the maximum.
+
+        :param tensor: Tensor to compute the statistic for.
         :type tensor: keras.KerasTensor
-        :param method: Scaling method (``"abs_max"``, ``"abs_mean"``, or ``"abs_median"``).
+        :param method: One of ``"abs_max"``, ``"abs_mean"``, ``"abs_median"``.
         :type method: str
-        :param per_channel: If ``True``, compute per-channel scaling.
-        :type per_channel: bool
-        :param target_range: Target quantization range.
-        :type target_range: Tuple[float, float]
-        :return: Scaling factor tensor.
+        :param reduce_axis: Axis to reduce over, keeping dimensions, or ``None``
+            to reduce the whole tensor to a scalar.
+        :type reduce_axis: Optional[int]
+        :return: Magnitude statistic, floored at ``epsilon``.
         :rtype: keras.KerasTensor
         """
-        min_val, max_val = target_range
         abs_tensor = keras.ops.abs(tensor)
 
-        # Determine reduction axes
-        if per_channel:
-            # Reduce all dimensions except the last one
-            ndims = len(keras.ops.shape(tensor))
-            axes = list(range(ndims - 1))
-            keepdims = True
-        else:
-            # Reduce all dimensions
-            axes = None
-            keepdims = False
-
-        # Compute representative value based on method
-        if method == "abs_max":
-            if axes:
-                gamma = keras.ops.max(abs_tensor, axis=axes, keepdims=keepdims)
-            else:
+        if reduce_axis is None:
+            if method == "abs_max":
                 gamma = keras.ops.max(abs_tensor)
-        elif method == "abs_mean":
-            if axes:
-                gamma = keras.ops.mean(abs_tensor, axis=axes, keepdims=keepdims)
-            else:
+            elif method == "abs_mean":
                 gamma = keras.ops.mean(abs_tensor)
-        elif method == "abs_median":
-            # Approximate median using 50th percentile
-            if per_channel:
-                # Compute per-channel median
-                shape = keras.ops.shape(tensor)
-                # Flatten all dimensions except last
-                flat_shape = (-1, shape[-1])
-                flat_tensor = keras.ops.reshape(abs_tensor, flat_shape)
-                gamma = keras.ops.quantile(flat_tensor, 0.5, axis=0, keepdims=True)
-                # Ensure proper broadcasting shape
-                new_shape = [1] * (len(shape) - 1) + [shape[-1]]
-                gamma = keras.ops.reshape(gamma, new_shape)
+            elif method == "abs_median":
+                gamma = keras.ops.quantile(
+                    keras.ops.reshape(abs_tensor, (-1,)), 0.5
+                )
             else:
-                flat_tensor = keras.ops.reshape(abs_tensor, (-1,))
-                gamma = keras.ops.quantile(flat_tensor, 0.5)
+                raise ValueError(f"Unknown scaling method: {method}")
         else:
-            raise ValueError(f"Unknown scaling method: {method}")
+            if method == "abs_max":
+                gamma = keras.ops.max(abs_tensor, axis=reduce_axis, keepdims=True)
+            elif method == "abs_mean":
+                gamma = keras.ops.mean(abs_tensor, axis=reduce_axis, keepdims=True)
+            elif method == "abs_median":
+                gamma = keras.ops.quantile(
+                    abs_tensor, 0.5, axis=reduce_axis, keepdims=True
+                )
+            else:
+                raise ValueError(f"Unknown scaling method: {method}")
 
-        # Prevent division by zero
+        # Prevent division by zero.
         gamma = keras.ops.maximum(gamma, self.epsilon)
 
-        # Compute scale to map to target range
-        target_max = max(abs(min_val), abs(max_val))
-        scale = target_max / gamma
-
-        return scale
+        return keras.ops.stop_gradient(gamma)
 
     def _quantize_tensor(
         self,
         tensor: keras.KerasTensor,
-        target_range: Tuple[float, float]
+        target_range: Tuple[float, float],
+        is_binary: bool = False,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply quantization with straight-through estimator.
+        """Apply quantization with a straight-through estimator.
 
         :param tensor: Scaled tensor to quantize.
         :type tensor: keras.KerasTensor
         :param target_range: Target quantization range.
         :type target_range: Tuple[float, float]
-        :return: Quantized tensor with straight-through gradient.
+        :param is_binary: If ``True``, map to ``{-1, +1}`` with ``sign``
+            (ties resolved to ``+1``) instead of rounding.
+        :type is_binary: bool
+        :param training: Whether the call is in training mode. Stochastic
+            rounding only applies when this is true.
+        :type training: Optional[bool]
+        :return: Quantized tensor whose forward value is exactly the quantized
+            grid and whose gradient is the straight-through pass-through.
         :rtype: keras.KerasTensor
         """
         min_val, max_val = target_range
 
-        if self.quantization_method == "round_clip":
-            # Round to nearest integer and clip to range
-            rounded = keras.ops.round(tensor)
-            clipped = keras.ops.clip(rounded, min_val, max_val)
-
-            # Straight-through estimator: use quantized forward, original gradient
-            quantized = keras.ops.stop_gradient(clipped - tensor) + tensor * self.ste_lambda
-
-        elif self.quantization_method == "stochastic":
-            # Stochastic rounding for better gradient estimation
-            floor_val = keras.ops.floor(tensor)
-            ceil_val = keras.ops.ceil(tensor)
-
-            # Probability of rounding up
-            prob_ceil = tensor - floor_val
-
-            # Generate random values for stochastic rounding
-            random_uniform = keras.random.uniform(
-                keras.ops.shape(tensor),
-                minval=0.0,
-                maxval=1.0,
-                dtype=tensor.dtype
+        if is_binary:
+            # sign() is 0 at 0, which would produce a ternary set; break the
+            # tie towards +1 so the output really is two-valued.
+            quantized = keras.ops.sign(tensor) + keras.ops.cast(
+                keras.ops.equal(tensor, 0.0), tensor.dtype
             )
-
-            # Stochastic rounding
-            rounded = keras.ops.where(
-                random_uniform < prob_ceil,
-                ceil_val,
-                floor_val
-            )
-            clipped = keras.ops.clip(rounded, min_val, max_val)
-
-            # Straight-through estimator
-            quantized = keras.ops.stop_gradient(clipped - tensor) + tensor * self.ste_lambda
-
         else:
-            raise ValueError(f"Unknown quantization method: {self.quantization_method}")
+            if self.quantization_method == "stochastic" and training:
+                floor_val = keras.ops.floor(tensor)
+                prob_ceil = tensor - floor_val
+                # Draw in float32: a float16 uniform has ~1e-3 resolution,
+                # which would coarsely discretize the rounding probability.
+                random_uniform = keras.random.uniform(
+                    keras.ops.shape(tensor),
+                    minval=0.0,
+                    maxval=1.0,
+                    dtype="float32",
+                    seed=self.seed_generator,
+                )
+                random_uniform = keras.ops.cast(random_uniform, tensor.dtype)
+                rounded = keras.ops.where(
+                    random_uniform < prob_ceil,
+                    floor_val + 1.0,
+                    floor_val
+                )
+            else:
+                rounded = keras.ops.round(tensor)
 
-        return quantized
+            quantized = keras.ops.clip(rounded, min_val, max_val)
+
+        # Straight-through estimator. Keeping ``stop_gradient`` around the whole
+        # residual makes the forward value exactly ``quantized`` for every
+        # ``ste_lambda`` and the gradient exactly ``ste_lambda``.
+        passthrough = self.ste_lambda * tensor
+        if self.ste_clip_gradient:
+            in_range = keras.ops.cast(
+                keras.ops.logical_and(
+                    keras.ops.greater_equal(tensor, min_val),
+                    keras.ops.less_equal(tensor, max_val),
+                ),
+                tensor.dtype,
+            )
+            passthrough = passthrough * in_range
+
+        return keras.ops.stop_gradient(quantized - passthrough) + passthrough
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer weights based on input shape.
@@ -424,8 +533,8 @@ class BitLinear(keras.layers.Layer):
             shape=(input_dim, self.units),
             initializer=self.kernel_initializer,
             regularizer=self.kernel_regularizer,
+            constraint=self.kernel_constraint,
             trainable=True,
-            dtype=self.dtype
         )
 
         # Create bias weights if needed
@@ -436,7 +545,6 @@ class BitLinear(keras.layers.Layer):
                 initializer=self.bias_initializer,
                 regularizer=self.bias_regularizer,
                 trainable=True,
-                dtype=self.dtype
             )
 
         # Build the optional input normalization sub-layer
@@ -466,40 +574,42 @@ class BitLinear(keras.layers.Layer):
         else:
             x = inputs
 
-        # Scale and quantize activations
-        activation_scale = self._compute_scale(
-            x,
-            method=self.activation_scale_method,
-            per_channel=True,  # Per-channel scaling for activations
-            target_range=self.activation_range
+        # Activation statistic per token: reduce the feature axis, never the
+        # batch axis, so the quantization of one sample is independent of the
+        # others and batch_size=1 is the same function as batch_size=N.
+        activation_max = max(abs(v) for v in self.activation_range)
+        gamma_x = self._compute_gamma(x, self.activation_scale_method, -1)
+        gamma_x = keras.ops.cast(gamma_x, x.dtype)
+        x_quantized = self._quantize_tensor(
+            x / gamma_x * activation_max,
+            self.activation_range,
+            is_binary=self._activation_is_binary,
+            training=training,
         )
-        x_scaled = x * activation_scale
-        x_quantized = self._quantize_tensor(x_scaled, self.activation_range)
 
-        # Scale and quantize weights
-        weight_scale = self._compute_scale(
-            self.kernel,
-            method=self.weight_scale_method,
-            per_channel=False,  # Global scaling for weights
-            target_range=self.weight_range
+        # Weight statistic per output channel (axis 0) or per tensor.
+        weight_max = max(abs(v) for v in self.weight_range)
+        weight_axis = 0 if self.weight_per_channel else None
+        kernel = keras.ops.cast(self.kernel, x.dtype)
+        gamma_w = self._compute_gamma(kernel, self.weight_scale_method, weight_axis)
+        w_quantized = self._quantize_tensor(
+            kernel / gamma_w * weight_max,
+            self.weight_range,
+            is_binary=self._weight_is_binary,
+            training=training,
         )
-        w_scaled = self.kernel * weight_scale
-        w_quantized = self._quantize_tensor(w_scaled, self.weight_range)
 
-        # Dequantize BEFORE the matmul so that per-channel activation scaling
-        # (one factor per input feature) is applied to the correct axis. Folding
-        # the rescale into the post-matmul output only works when the activation
-        # scale is per-tensor; for per-channel scaling the input-feature factor
-        # is contracted away by the matmul and cannot be recovered afterwards.
-        x_dequantized = x_quantized / activation_scale
-        w_dequantized = w_quantized / weight_scale
-
-        # Perform the (simulated-quantized) matrix multiplication
-        output = keras.ops.matmul(x_dequantized, w_dequantized)
+        # gamma_x has shape (..., 1) and broadcasts over the output rows;
+        # gamma_w has shape (1, units) or is a scalar and broadcasts over the
+        # output columns. Neither axis is contracted by the matmul, so the
+        # de-quantization folds into the output and the matmul operands stay
+        # on the integer grid.
+        output = keras.ops.matmul(x_quantized, w_quantized)
+        output = output * (gamma_x / activation_max) * (gamma_w / weight_max)
 
         # Add bias if present
         if self.use_bias and self.bias is not None:
-            output = output + self.bias
+            output = output + keras.ops.cast(self.bias, output.dtype)
 
         return output
 
@@ -514,9 +624,7 @@ class BitLinear(keras.layers.Layer):
         :return: Shape tuple of output.
         :rtype: Tuple[Optional[int], ...]
         """
-        output_shape = list(input_shape)
-        output_shape[-1] = self.units
-        return tuple(output_shape)
+        return tuple(input_shape[:-1]) + (self.units,)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
@@ -531,47 +639,43 @@ class BitLinear(keras.layers.Layer):
             "activation_bits": self.activation_bits,
             "weight_scale_method": self.weight_scale_method,
             "activation_scale_method": self.activation_scale_method,
+            "weight_per_channel": self.weight_per_channel,
             "quantization_method": self.quantization_method,
             "use_bias": self.use_bias,
             "use_input_norm": self.use_input_norm,
             "ste_lambda": self.ste_lambda,
+            "ste_clip_gradient": self.ste_clip_gradient,
             "epsilon": self.epsilon,
+            "norm_epsilon": self.norm_epsilon,
+            "seed": self.seed,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer)
-                                  if self.kernel_regularizer else None,
-            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer)
-                               if self.bias_regularizer else None,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+            "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "kernel_constraint": keras.constraints.serialize(self.kernel_constraint),
         })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BitLinear":
-        """Create layer instance from configuration.
+        """Create a layer instance from configuration.
 
         :param config: Configuration dictionary.
         :type config: Dict[str, Any]
         :return: New BitLinear instance.
         :rtype: BitLinear
         """
-        # Deserialize initializers
-        if "kernel_initializer" in config:
-            config["kernel_initializer"] = keras.initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if "bias_initializer" in config:
-            config["bias_initializer"] = keras.initializers.deserialize(
-                config["bias_initializer"]
-            )
+        config = dict(config)
 
-        # Deserialize regularizers
-        if "kernel_regularizer" in config and config["kernel_regularizer"]:
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        if "bias_regularizer" in config and config["bias_regularizer"]:
-            config["bias_regularizer"] = keras.regularizers.deserialize(
-                config["bias_regularizer"]
+        for key in ("kernel_initializer", "bias_initializer"):
+            if isinstance(config.get(key), dict):
+                config[key] = keras.initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "bias_regularizer"):
+            if isinstance(config.get(key), dict):
+                config[key] = keras.regularizers.deserialize(config[key])
+        if isinstance(config.get("kernel_constraint"), dict):
+            config["kernel_constraint"] = keras.constraints.deserialize(
+                config["kernel_constraint"]
             )
 
         return cls(**config)
