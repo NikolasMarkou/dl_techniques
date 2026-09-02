@@ -79,6 +79,7 @@ attributes.
 | `max_layers_heatmap` / `max_layers_info_flow` | `12` / `8` | plot truncation |
 | `pareto_analysis_threshold` | `2` | minimum models for Pareto plots |
 | `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded |
+| `random_state` | `None` | seeds every stochastic site (data subsampling, spectral randomization, the goodness-of-fit bootstrap, power iteration); `None` is unseeded and NOT reproducible |
 | `verbose` | `True` | |
 
 `AnalysisConfig.setup_plotting_style()` is called in `ModelAnalyzer.__init__` and forces

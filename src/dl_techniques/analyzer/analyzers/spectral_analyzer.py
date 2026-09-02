@@ -95,7 +95,7 @@ from ..constants import (
 )
 from .. import spectral_metrics
 from .. import spectral_utils
-from ..utils import recursively_get_layers
+from ..utils import make_rng, recursively_get_layers
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -202,7 +202,14 @@ class SpectralAnalyzer(BaseAnalyzer):
             warnings.filterwarnings(
                 "ignore", message="invalid value encountered",
                 category=RuntimeWarning)
-            self._analyze_layers(details, all_layers, esds, rand_esds)
+            # DECISION plan-2026-09-01T225724-e79ad4bd/D-031
+            # ONE generator per analysis pass, not one per layer: a per-layer
+            # generator built from the same seed would hand every layer the identical
+            # permutation stream, and the `spectral_n_randomizations` draws within a
+            # layer must differ from each other (D-017). See decisions.md D-031.
+            self._analyze_layers(
+                details, all_layers, esds, rand_esds,
+                rng=make_rng(self.config.random_state))
 
         # Generate the per-model summary and recommendations. The summary is kept (not
         # discarded after the recommendations) so callers can read a per-model figure
@@ -220,6 +227,7 @@ class SpectralAnalyzer(BaseAnalyzer):
             all_layers: List[keras.layers.Layer],
             esds: Dict[int, np.ndarray],
             rand_esds: Dict[int, np.ndarray],
+            rng: np.random.Generator,
     ) -> None:
         """Perform spectral analysis on each qualifying layer.
 
@@ -229,6 +237,8 @@ class SpectralAnalyzer(BaseAnalyzer):
             esds: Output mapping ``layer_id -> eigenvalue spectrum``, filled in place.
             rand_esds: Output mapping ``layer_id -> randomized spectrum``, filled in
                 place; left empty unless ``config.spectral_randomize`` is set.
+            rng: Generator shared by every stochastic step of this pass - the
+                randomization permutations and the goodness-of-fit bootstrap.
         """
         for layer_id in details.index:
             layer = all_layers[layer_id]
@@ -304,7 +314,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                 # test refit would re-search xmin inside the tail and test a different fit.
                 pl_pvalue = spectral_metrics.powerlaw_goodness_of_fit(
                     evals, alpha, xmin, n_bootstraps=self.config.spectral_bootstraps,
-                    d_observed=D)
+                    d_observed=D, rng=rng)
 
             concentration_metrics = {}
             if self.config.spectral_concentration_analysis and Wmats:
@@ -325,7 +335,7 @@ class SpectralAnalyzer(BaseAnalyzer):
 
                 for _ in range(n_draws):
                     rand_Wmats = [
-                        np.random.permutation(W.flatten()).reshape(W.shape)
+                        rng.permutation(W.flatten()).reshape(W.shape)
                         for W in Wmats
                     ]
                     rand_evals, rand_sv_max, _, _, _ = spectral_metrics.compute_eigenvalues(

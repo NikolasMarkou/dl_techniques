@@ -64,6 +64,12 @@ class AnalysisConfig:
 
     # Advanced options
     verbose: bool = True
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-031
+    # Seed for EVERY stochastic site in the package: the `DataSampler` draw, the
+    # spectral randomization permutations, the goodness-of-fit bootstrap and
+    # `_power_iteration`. `None` keeps the historical unseeded behaviour.
+    # See decisions.md D-031.
+    random_state: Optional[int] = None
 
     # JSON serialization options
     json_include_per_sample_data: bool = False  # Set to False to exclude bulky per-sample arrays (e.g., confidence, entropy)

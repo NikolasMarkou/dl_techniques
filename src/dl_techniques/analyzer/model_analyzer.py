@@ -98,7 +98,8 @@ import matplotlib.pyplot as plt
 
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
-from .utils import find_pareto_front, normalize_metric, DataSampler, recursively_get_layers
+from .utils import (find_pareto_front, normalize_metric, DataSampler, make_rng,
+                    recursively_get_layers)
 from . import spectral_metrics, spectral_utils
 from .constants import SmoothingMethod
 
@@ -448,7 +449,8 @@ class ModelAnalyzer:
 
         # Use the robust DataSampler to handle TF Datasets, Dicts, and large arrays
         # This returns a new DataInput with clean numpy arrays of size <= n_samples
-        sampled_data = DataSampler.sample(data, self.config.n_samples)
+        sampled_data = DataSampler.sample(
+            data, self.config.n_samples, rng=make_rng(self.config.random_state))
 
         x_data = sampled_data.x_data
         y_data = sampled_data.y_data

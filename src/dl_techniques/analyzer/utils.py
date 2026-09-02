@@ -21,6 +21,22 @@ from dl_techniques.analyzer.data_types import DataInput
 
 # ---------------------------------------------------------------------
 
+def make_rng(random_state: Optional[int] = None) -> np.random.Generator:
+    """Build the analyzer's random generator.
+
+    Single source of truth for how ``AnalysisConfig.random_state`` becomes a
+    generator, so no call site reaches for the global ``np.random.*`` state.
+
+    Args:
+        random_state: Seed, or ``None`` for a nondeterministic generator.
+
+    Returns:
+        A ``numpy.random.Generator``. ``None`` yields an unseeded one, which is the
+        historical (unreproducible) behaviour and remains the default.
+    """
+    return np.random.default_rng(random_state)
+
+
 class DataSampler:
     """
     Helper class to handle robust data sampling from various input formats.
@@ -33,13 +49,21 @@ class DataSampler:
     """
 
     @staticmethod
-    def sample(data: DataInput, n_samples: int) -> DataInput:
+    def sample(
+            data: DataInput,
+            n_samples: int,
+            rng: Optional[np.random.Generator] = None,
+    ) -> DataInput:
         """
         Sample a subset of data from the input, handling various formats.
 
         Args:
             data: The DataInput object containing x_data and y_data.
             n_samples: The desired number of samples.
+            rng: Generator used for the subsampling draw. ``None`` builds an
+                unseeded one, so the draw is not reproducible - pass
+                ``make_rng(config.random_state)`` to make the whole analysis
+                reproducible.
 
         Returns:
             A new DataInput object containing the sampled data as NumPy arrays.
@@ -47,6 +71,16 @@ class DataSampler:
         Raises:
             ValueError: If input data formats are inconsistent or unsupported.
         """
+        # DECISION plan-2026-09-01T225724-e79ad4bd/D-031
+        # `DataSampler` is the single sampling chokepoint on the analysis default
+        # path (`model_analyzer.py:451`). Do NOT reintroduce a bare
+        # `np.random.choice` below: the draw selects WHICH samples every downstream
+        # calibration and confidence number is computed from, so an unseeded draw
+        # made the entire analysis unreproducible run to run.
+        # See decisions.md D-031.
+        if rng is None:
+            rng = make_rng()
+
         x_data = data.x_data
         y_data = data.y_data
 
@@ -60,11 +94,11 @@ class DataSampler:
 
         # 2. Handle Dictionaries (Multi-input models)
         if isinstance(x_data, dict):
-            return DataSampler._sample_dict_inputs(x_data, y_data, n_samples)
+            return DataSampler._sample_dict_inputs(x_data, y_data, n_samples, rng)
 
         # 3. Handle Standard NumPy Arrays / Lists
         if hasattr(x_data, '__len__') and hasattr(x_data, '__getitem__'):
-            return DataSampler._sample_array_inputs(x_data, y_data, n_samples)
+            return DataSampler._sample_array_inputs(x_data, y_data, n_samples, rng)
 
         # 4. Handle Generic Iterators
         if isinstance(x_data, Iterator):
@@ -75,7 +109,10 @@ class DataSampler:
         return data
 
     @staticmethod
-    def _sample_array_inputs(x: Any, y: Any, n_samples: int) -> DataInput:
+    def _sample_array_inputs(
+            x: Any, y: Any, n_samples: int,
+            rng: np.random.Generator,
+    ) -> DataInput:
         """
         Sample from indexable array-like inputs (NumPy, Lists).
 
@@ -83,6 +120,7 @@ class DataSampler:
             x: Input features (array-like).
             y: Target labels (array-like).
             n_samples: Number of samples to select.
+            rng: Generator for the without-replacement draw.
 
         Returns:
             DataInput with sampled subsets.
@@ -92,7 +130,7 @@ class DataSampler:
         if total_samples <= n_samples:
             return DataInput(x_data=np.array(x), y_data=np.array(y))
 
-        indices = np.random.choice(total_samples, n_samples, replace=False)
+        indices = rng.choice(total_samples, n_samples, replace=False)
 
         # Handle x sampling
         if isinstance(x, np.ndarray):
@@ -109,7 +147,10 @@ class DataSampler:
         return DataInput(x_data=x_sampled, y_data=y_sampled)
 
     @staticmethod
-    def _sample_dict_inputs(x: Dict[str, Any], y: Any, n_samples: int) -> DataInput:
+    def _sample_dict_inputs(
+            x: Dict[str, Any], y: Any, n_samples: int,
+            rng: np.random.Generator,
+    ) -> DataInput:
         """
         Sample from dictionary inputs (common in multi-input Keras models).
 
@@ -117,6 +158,7 @@ class DataSampler:
             x: Dictionary of input features.
             y: Target labels.
             n_samples: Number of samples to select.
+            rng: Generator for the without-replacement draw.
 
         Returns:
             DataInput with sampled subsets.
@@ -130,7 +172,7 @@ class DataSampler:
             x_out = {k: np.array(v) for k, v in x.items()}
             return DataInput(x_data=x_out, y_data=np.array(y))
 
-        indices = np.random.choice(total_samples, n_samples, replace=False)
+        indices = rng.choice(total_samples, n_samples, replace=False)
 
         x_sampled = {}
         for key, val in x.items():

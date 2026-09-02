@@ -416,7 +416,9 @@ def powerlaw_goodness_of_fit(
         alpha: float,
         xmin: float,
         n_bootstraps: int = 100,
-        d_observed: Optional[float] = None
+        d_observed: Optional[float] = None,
+        *,
+        rng: Optional[np.random.Generator] = None
 ) -> float:
     """
     Bootstrap goodness-of-fit test for power-law hypothesis (Clauset et al. 2009).
@@ -433,6 +435,9 @@ def powerlaw_goodness_of_fit(
         d_observed: The KS distance of the fit being tested, when the caller already has
             it. Preferred over refitting, which would re-search xmin inside the tail and
             therefore test a different fit from the one reported.
+        rng: Generator for the synthetic bootstrap draws. Keyword-only and
+            defaulted, so the positional signature is unchanged. ``None`` builds an
+            unseeded generator, which makes the returned p-value irreproducible.
 
     Returns:
         p-value in [0, 1]. Values < 0.1 suggest the power-law is a poor fit.
@@ -463,11 +468,17 @@ def powerlaw_goodness_of_fit(
     if D_obs < 0:
         return SPECTRAL_PVALUE_NOT_COMPUTED
 
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-031: the bootstrap draws come from
+    # the passed generator, never the global `np.random` state. An unseeded p-value
+    # moves on every run of the SAME analysis. See decisions.md D-031.
+    if rng is None:
+        rng = np.random.default_rng()
+
     count_ge = 0
     n_valid = 0
     for _ in range(n_bootstraps):
         # Generate synthetic power-law sample: x = xmin * (1 - u)^(-1/(alpha-1))
-        u = np.random.uniform(0, 1, n_tail)
+        u = rng.uniform(0, 1, n_tail)
         synthetic = xmin * (1.0 - u) ** (-1.0 / (alpha - 1.0))
         _, _, D_syn, _, _, status_syn, _ = fit_powerlaw(synthetic)
         if status_syn != "success":
@@ -1120,7 +1131,9 @@ def calculate_participation_ratio(vector: np.ndarray) -> float:
 def get_top_eigenvectors(
         weight_matrix: np.ndarray,
         k: int = 1,
-        method: str = 'direct'
+        method: str = 'direct',
+        *,
+        rng: Optional[np.random.Generator] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate the top k left singular vectors of a weight matrix.
@@ -1129,6 +1142,8 @@ def get_top_eigenvectors(
         weight_matrix: Weight matrix to analyze.
         k: Number of top eigenvectors to return.
         method: Method to use ('direct' or 'power_iteration').
+        rng: Generator for the ``power_iteration`` start vectors. Keyword-only and
+            defaulted; unused by the ``direct`` method, which is deterministic.
 
     Returns:
         Tuple containing:
@@ -1170,7 +1185,7 @@ def get_top_eigenvectors(
             return s[:k] ** 2, u[:, :k]
         else:
             # Use power iteration for very large matrices (approximation)
-            return _power_iteration(weight_matrix @ weight_matrix.T, k)
+            return _power_iteration(weight_matrix @ weight_matrix.T, k, rng=rng)
     except Exception as e:
         logger.error(f"Eigenvector computation failed: {e}")
         return np.array([]), np.array([])
@@ -1182,17 +1197,33 @@ def _power_iteration(
         matrix: np.ndarray,
         k: int = 1,
         max_iter: int = 100,
-        tol: float = 1e-5
+        tol: float = 1e-5,
+        *,
+        rng: Optional[np.random.Generator] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate the top k eigenvalues and eigenvectors using power iteration.
+
+    Args:
+        matrix: Symmetric matrix to decompose.
+        k: Number of eigenpairs to return.
+        max_iter: Iteration cap per eigenpair.
+        tol: Convergence tolerance on the eigenvector update.
+        rng: Generator for the random start vectors. ``None`` builds an unseeded
+            one, so the returned vectors are not reproducible.
     """
     n = matrix.shape[0]
     eigvals = np.zeros(k)
     eigvecs = np.zeros((n, k))
 
-    # Start with random vectors
-    Q = np.random.randn(n, k)
+    # DECISION plan-2026-09-01T225724-e79ad4bd/D-031: the start vectors come from the
+    # passed generator. Power iteration converges to the same subspace from any
+    # start, but the returned vectors' SIGNS and the tie-breaking among near-equal
+    # eigenvalues do not, so an unseeded start makes the output irreproducible.
+    # See decisions.md D-031.
+    if rng is None:
+        rng = np.random.default_rng()
+    Q = rng.standard_normal((n, k))
     Q, _ = np.linalg.qr(Q)
 
     for i in range(k):
