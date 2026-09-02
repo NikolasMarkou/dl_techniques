@@ -29,7 +29,9 @@ Available Initializers:
     `in_channels * filters_per_channel`).
 -   `PolarInitializer`: Samples in polar coordinates -- exact per-vector L2 norm
     with a uniform-on-sphere direction (PolarQuant Lemma 2), enabling equinorm
-    initialization.
+    initialization. By default the norm is taken over the fan-in block (every
+    axis but the last), so the He-equivalent target is correct for Conv2D
+    kernels as well as Dense ones.
 -   `LinearUpInitializer`: THERA heat-field frequency init -- 2D frequency vectors
     drawn uniformly over a disk of radius `pi*scale` (`r = pi*scale*sqrt(U)`),
     producing a `(2, N)` x/y-row matrix for SIREN-style neural heat fields.

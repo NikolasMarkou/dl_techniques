@@ -4,7 +4,7 @@ The `dl_techniques.initializers` module provides a collection of advanced weight
 
 ## Overview
 
-This module offers eight specialized initializers that go beyond standard random distributions. They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
+This module offers nine specialized initializers that go beyond standard random distributions (the table below covers the six with a dedicated section here; `LinearUpInitializer`, `IdentityPlusNoise` and `KANInitializer` are described in `CLAUDE.md`, which lists the complete public surface). They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
 
 ## Available Initializers
 
@@ -14,7 +14,7 @@ This module offers eight specialized initializers that go beyond standard random
 | `he_orthonormal` | `HeOrthonormalInitializer`| Combines He normal seeding with QR decomposition to produce an orthonormal matrix. | Orthonormal initialization where the underlying random source is scaled for ReLU-based architectures. |
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates the fixed, orthonormal 2x2 filter bank of the 2D Haar wavelet decomposition (every tap +/- 0.5); output slot `j` is sub-band `j % 4` for every input channel. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
-| `polar` | `PolarInitializer` | Sets each weight vector (along a chosen axis) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
+| `polar` | `PolarInitializer` | Sets each fan-in vector (every axis but the last by default, so He-correct for Dense AND Conv2D) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
 | `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters over a factorized orientation x scale x phase sweep (Ozbulak-Ekenel), DC-removed and energy-normalized to a He-like scale. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
 
 ## Orthonormal Initializer
@@ -183,18 +183,53 @@ builder warns when both are set.
 
 ## Polar Initializer
 
-Samples weights "in polar coordinates": every vector along `axis` is given an
+Samples weights "in polar coordinates": every fan-in vector is given an
 **exact** L2 norm with a direction drawn **uniformly on the unit sphere**. By
 PolarQuant's Lemma 2, a Gaussian vector's direction is exactly uniform on the
 sphere, so this is realized by normalizing a Gaussian and rescaling to the
 target norm — for any shape, power-of-two or not.
 
 Unlike He/Glorot/Gaussian sampling (whose per-vector norms are chi-distributed),
-`PolarInitializer` gives every vector an identical, exact norm — useful for
-"equinorm" initialization and precise magnitude control.
+`PolarInitializer` gives every vector an identical norm — useful for "equinorm"
+initialization and precise magnitude control.
 
-**Arguments:** `norm` (target L2 norm; `None` => `sqrt(2)`, the He-normal energy),
-`axis` (vector axis; `0` = `fan_in` for a Dense kernel), `gain`, `seed`.
+### Which axes form a vector
+
+`axis=None` (the default) means **every axis except the last**, i.e. the fan-in
+block of each output unit: axis `0` for a `Dense` kernel `(fan_in, units)` and
+axes `(0, 1, 2)` for a `Conv2D` kernel `(kh, kw, in_ch, out_ch)`. He variance is
+defined over the whole fan-in, so normalizing a single axis of a conv kernel is
+**not** He-equivalent — measured on `(3, 3, 64, 128)` with `axis=0`, each output
+unit accumulated a fan-in energy of `384.0` instead of `2.0` (192x) and the
+per-element std came out 13.9x above He's `sqrt(2/576)`, which compounds to
+~2.6e11 over ten such layers. Pass an int or a tuple of ints only when you want
+something other than the fan-in block.
+
+### What it does and does not give you
+
+It guarantees equal fan-in norms. It does **not** give dynamical isometry:
+fixing the norms controls only the diagonal of `WᵀW`, leaving the singular-value
+spectrum essentially Marchenko-Pastur, the same as Gaussian init — use
+`keras.initializers.Orthogonal` for that.
+
+The benefit also shrinks as `1/sqrt(2·fan_in)`. The relative spread of He-normal
+column norms measures **17.9%** at `fan_in=16`, 8.9% at 64, 3.1% at 512 and 1.1%
+at 4096; equinorm init removes exactly that spread, so it differs materially
+from He only for narrow fan-ins.
+
+"Exact" means exact to the compute dtype: max deviation from the target measures
+`4.4e-16` in float64, `3.0e-07` in float32 and `2.6e-05` after a float16 cast, so
+under a `mixed_float16` policy the guarantee is two orders of magnitude looser.
+
+**Arguments:** `norm` (target L2 norm, must be positive; `None` => `sqrt(2)`, the
+He-normal energy), `axis` (`None` = the fan-in block; or an int / tuple of ints),
+`gain` (positive; it multiplies the target, so `gain=2.0, norm=None` targets
+`2*sqrt(2)` — four times He's energy, not twice), `seed`.
+
+Seeding follows the Keras contract: an initializer **instance** replays the same
+tensor at every matching shape whether or not a seed was given, and a seedless
+instance resolves its seed from the global RNG state so `keras.utils.set_random_seed`
+controls it. Use `clone_initializer` when two weights must start differently.
 
 ### Usage
 
@@ -203,11 +238,23 @@ import keras
 from dl_techniques.initializers import PolarInitializer
 
 # Every output unit's weight vector starts with L2 norm exactly 1.0
-layer = keras.layers.Dense(128, kernel_initializer=PolarInitializer(norm=1.0, axis=0))
+layer = keras.layers.Dense(128, kernel_initializer=PolarInitializer(norm=1.0))
+
+# Each of the 64 filters starts with the He fan-in energy of 2.0
+conv = keras.layers.Conv2D(64, 3, kernel_initializer=PolarInitializer())
 ```
 
-It is the companion of `PolarWeightNorm` (see the module docstring of
-`dl_techniques/layers/norms/polar_weight_norm.py`).
+It is the thematic companion of `PolarWeightNorm` (see the module docstring of
+`dl_techniques/layers/norms/polar_weight_norm.py`) — the layer uses PolarQuant's
+Definition 1 / Algorithm 1, this initializer uses Lemma 2. There is no code
+dependency in either direction: `PolarWeightNorm` defaults to `"glorot_uniform"`.
+The two agree on the Dense convention, since the layer's exact per-unit norm is
+also a reduction over `fan_in`.
+
+The closest prior art for the scheme itself is Salimans & Kingma's *Weight
+Normalization* (2016), which separates a magnitude from a direction for the same
+reason; PolarQuant is a KV-cache quantization paper and supports the
+decomposition, not the initialization scheme.
 
 ## Gabor Filters Initializer
 
