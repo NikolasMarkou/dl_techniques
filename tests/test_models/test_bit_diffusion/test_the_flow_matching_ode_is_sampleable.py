@@ -31,7 +31,18 @@ green 497-arm suite, because no arm had ever called ``simulate`` on it.
 ``TestTheSignFlipIsObservable``
     ``signed_dt = -dt if reverse else dt``. Dropping the flip leaves every
     shape, dtype and finiteness arm green; what changes is which way the
-    trajectory moves from a fixed start.
+    trajectory moves from a fixed start. Both arms here hold ``t`` and the
+    state FIXED and call ``dX_t`` directly. There is deliberately **no**
+    ``simulate``-level version: through ``simulate`` the two directions do not
+    share a time (step 0 forward is at ``t = 0``, step 0 reverse at ``t = 1``),
+    so the increments are only approximately opposed and any statistic over
+    them is marginal. One was tried, and was FLAKY -- ">0.9 of entries opposed
+    in sign" measured, over 24 seeds, ``min 0.8555 / mean 0.9204 / max 0.9609``
+    unforced, i.e. 20.8% of draws at or below its own threshold. Do not
+    re-add it, and in particular do not re-add it with a lower bound: the exact
+    identity ``dX_t == velocity * signed_dt`` is already pinned below, at both
+    ``force_unconditional`` settings and in both directions. See
+    decisions.md D-030.
 
 ``TestTheThreeUndefinedQuantitiesStayUndefined``
     The anti-regression partner: the whole point of the override is that the
@@ -331,29 +342,80 @@ class TestTheSignFlipIsObservable:
     """``signed_dt = -dt if reverse else dt``, pinned by direction of travel."""
 
     @pytest.mark.parametrize("force_unconditional", [True, False])
-    def test_reverse_and_forward_move_oppositely(
-        self, model, anchor, force_unconditional
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_the_increment_is_the_velocity_times_a_SIGNED_dt(
+        self, model, anchor, force_unconditional, reverse
     ):
-        """From the SAME start, one step each way.
+        """``dX_t == velocity * (-dt if reverse else dt)``, exactly, at both settings.
 
-        ``num_steps=1`` so both runs evaluate the velocity at the same ``x_t``;
-        under ``force_unconditional`` they additionally evaluate at the same
-        ``direction``, so the increments are exact negatives of each other. The
-        unforced pair is compared only for sign, since ``t`` and the
-        conditioning stream differ between the two runs.
+        The velocity is not re-derived here: it is obtained by replaying the
+        input dict the SDE *itself* handed the network (recorded at the
+        boundary) back through the same model. So the only thing this arm can
+        fail on is the sign and magnitude ``dX_t`` applied to that network
+        output -- which is ``signed_dt``, the whole claim.
+
+        **Why not the obvious ``simulate``-level version.** This arm replaces a
+        "more than 0.9 of the entries of a forward and a reverse increment are
+        opposed in sign" arm that was **flaky** (found at step 12; fixed at step
+        8.2). Two separate reasons, and neither is fixable by moving the
+        threshold:
+
+        * *Structural*: through :meth:`simulate` the two directions do not share
+          a time -- step 0 forward sits at ``t = 0`` and step 0 reverse at
+          ``t = 1`` -- so the two velocity fields are evaluated at different
+          ``t`` (and, unforced, on different conditioning), and the increments
+          are only APPROXIMATELY opposed. The statistic's true mean is nowhere
+          near 1.
+        * *RNG*: nothing seeds the Glorot draws of the model fixture (``activate``
+          only replaces the all-zero adaLN weights), so the statistic is a fresh
+          draw per process and shifts with test order. Measured over 24
+          independent global seeds: forced ``min 0.9766 / mean 0.9893 / max
+          0.9980``, unforced ``min 0.8555 / mean 0.9204 / max 0.9609``, with
+          **20.8% of draws at or below the 0.9 threshold**. The bound sat inside
+          its own noise band.
+
+        A bound that survives that distribution would have to sit near 0.8, i.e.
+        assert something much weaker than the exact identity below already
+        proves -- so the marginal statistic is gone rather than re-tuned.
         """
+        network = RecordingNetwork(model)
         sde = FlowMatchingODE(force_unconditional=force_unconditional)
-        start = anchor["x_start"]
-        fwd = simulate(sde, model, anchor, num_steps=1, reverse=False) - start
-        rev = simulate(sde, model, anchor, num_steps=1, reverse=True) - start
+        dt = 0.25
+        increment = np_(
+            sde.dX_t(
+                x_t=anchor["x_start"],
+                t=np.full((BATCH,), 0.35, dtype="float32"),
+                x_cond=anchor["x_start"],
+                y=anchor["y"],
+                dt=dt,
+                score_network=network,
+                reverse=reverse,
+            )
+        )
 
-        assert float(np.max(np.abs(fwd))) > 0.0
-        assert float(np.max(np.abs(rev))) > 0.0
-        opposite = np.mean(np.sign(fwd) * np.sign(rev) < 0)
-        assert opposite > 0.9, (
-            "forward and reverse increments do not point in opposite "
-            f"directions ({opposite:.3f} of entries disagree in sign); the "
-            "signed_dt flip is missing"
+        assert len(network.calls) == 1, (
+            f"expected exactly one network call per dX_t, got "
+            f"{len(network.calls)}"
+        )
+        velocity = np_(model(network.calls[0], training=False))
+        assert float(np.max(np.abs(velocity))) > 0.0, (
+            "the recorded velocity is the exact zero tensor, so every sign "
+            "below would be vacuous"
+        )
+
+        signed_dt = -dt if reverse else dt
+        assert np.allclose(increment, signed_dt * velocity, atol=1e-6, rtol=0.0), (
+            f"reverse={reverse} did not scale the network's velocity by "
+            f"{signed_dt}: max|delta| = "
+            f"{float(np.max(np.abs(increment - signed_dt * velocity)))}"
+        )
+        # Anti-vacuity: the flip is what makes the two branches differ at all.
+        # Without it the SAME assertion would hold with the opposite sign.
+        assert not np.allclose(
+            increment, -signed_dt * velocity, atol=1e-6, rtol=0.0
+        ), (
+            "the increment satisfies BOTH signs of dt, so this arm cannot see "
+            "signed_dt at all (velocity is degenerate or dt is 0)"
         )
 
     def test_dX_t_at_a_FIXED_time_negates_exactly(self, model, anchor):
