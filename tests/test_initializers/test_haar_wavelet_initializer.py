@@ -38,6 +38,8 @@ import os
 from typing import Tuple, List
 from unittest.mock import patch
 
+from tests.numerics import reassociation_atol
+
 from dl_techniques.initializers.haar_wavelet_initializer import (
     HAAR_PATTERNS,
     SUBBAND_NAMES,
@@ -468,12 +470,40 @@ class TestCreateHaarDepthwiseConv2D:
         )
 
     def test_the_layer_transform_preserves_energy(self):
-        """End to end: the frozen layer is a Parseval frame on 2x2 blocks."""
-        layer = create_haar_depthwise_conv2d(input_shape=(8, 8, 1))
-        x = np.random.default_rng(3).normal(size=(4, 8, 8, 1)).astype('float32')
-        y = np.asarray(layer(x))
+        """End to end: the frozen layer is a Parseval frame on 2x2 blocks.
 
-        assert float((y ** 2).sum()) == pytest.approx(float((x ** 2).sum()), rel=1e-5)
+        The two sides are mathematically identical and differ only in the order
+        the backend accumulates, so the bound is DERIVED from that reduction
+        structure via `reassociation_atol` rather than pasted.
+
+        TF32 is disabled for the duration. Measured on an RTX 4090: with TF32 ON
+        the relative gap is 1.19e-05, i.e. 119 x eps_f32 -- reduced-mantissa
+        arithmetic, not float32 reassociation -- and with it OFF the gap is
+        EXACTLY 0.0. A literal `rel=1e-5` here was therefore a tolerance sitting
+        inside the TF32 noise it did not know it was measuring: it passed on the
+        run that committed it and failed on the next one. The toggle is scoped to
+        this test and restored in `finally`, because it is process-global for the
+        session (`tests/test_layers/conftest.py::tf32_disabled` does the same for
+        modules under that tree, which this one is not).
+        """
+        import tensorflow as tf
+
+        was_enabled = tf.config.experimental.tensor_float_32_execution_enabled()
+        tf.config.experimental.enable_tensor_float_32_execution(False)
+        try:
+            layer = create_haar_depthwise_conv2d(input_shape=(8, 8, 1))
+            x = np.random.default_rng(3).normal(size=(4, 8, 8, 1)).astype('float32')
+            y = np.asarray(layer(x))
+        finally:
+            tf.config.experimental.enable_tensor_float_32_execution(was_enabled)
+
+        assert tf.config.experimental.tensor_float_32_execution_enabled() is was_enabled
+
+        input_energy = float((x ** 2).sum())
+        atol = reassociation_atol(
+            reduction_lengths=(x.size, y.size, 4), num_steps=1, scale=input_energy
+        )
+        assert float((y ** 2).sum()) == pytest.approx(input_energy, abs=atol, rel=0)
 
     @pytest.mark.parametrize("invalid_input_shape", [(32, 32), (32, 32, 3, 1), (32,)])
     def test_invalid_input_shapes(self, invalid_input_shape):

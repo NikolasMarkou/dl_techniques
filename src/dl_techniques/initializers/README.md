@@ -12,7 +12,7 @@ This module offers nine specialized initializers that go beyond standard random 
 |------|-------|-------------|----------|
 | `orthonormal` | `OrthonormalInitializer` | Generates a set of mutually orthogonal vectors with unit norm (orthonormal) via QR decomposition. | Stabilizing training and mitigating vanishing/exploding gradients in deep networks. |
 | `he_orthonormal` | `HeOrthonormalInitializer`| Combines He normal seeding with QR decomposition to produce an orthonormal matrix. | Orthonormal initialization where the underlying random source is scaled for ReLU-based architectures. |
-| `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
+| `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates vectors on a hypersphere of a specified radius, mutually orthogonal where possible; beyond `latent_dim` vectors it stacks independent orthonormal bases (a tight frame) rather than degrading to uniform sampling. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates the fixed, orthonormal 2x2 filter bank of the 2D Haar wavelet decomposition (every tap +/- 0.5); output slot `j` is sub-band `j % 4` for every input channel. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
 | `polar` | `PolarInitializer` | Sets each fan-in vector (every axis but the last by default, so He-correct for Dense AND Conv2D) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
 | `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters over a factorized orientation x scale x phase sweep (Ozbulak-Ekenel), DC-removed and energy-normalized to a He-like scale. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
@@ -69,11 +69,44 @@ layer = keras.layers.Dense(
 
 ## Orthogonal Hypersphere Initializer
 
-This initializer creates weight vectors that are both mutually orthogonal and lie on the surface of a hypersphere with a specified `radius`. It intelligently handles cases where perfect orthogonality is mathematically impossible.
+This initializer creates weight vectors that lie exactly on the surface of a hypersphere with a
+specified `radius` and are mutually orthogonal wherever orthogonality is available.
 
-**Behavior Modes:**
-1.  **Feasible (`num_vectors <= latent_dim`):** Generates a perfectly orthogonal set of vectors via QR decomposition and scales each to the desired `radius`.
-2.  **Infeasible (`num_vectors > latent_dim`):** Issues a `UserWarning` and falls back to generating vectors that are uniformly distributed on the hypersphere's surface. This maximizes the *average* angular separation when perfect orthogonality cannot be achieved.
+The flattened matrix is `(num_vectors, latent_dim)` with `num_vectors = prod(shape[:-1])` and
+`latent_dim = shape[-1]` — the same convention `keras.initializers.Orthogonal` uses. **For a Dense
+kernel `(input_dim, units)` that means `num_vectors = input_dim` and `latent_dim = units`: the
+initializer does NOT transpose.** A narrowing projection (`units < input_dim`) therefore lands in
+the second regime below, as does effectively every `Conv2D` kernel.
+
+**Behavior modes:**
+1. **Orthogonal (`num_vectors <= latent_dim`):** a perfectly orthogonal set from a sign-corrected
+   QR decomposition, each vector scaled to `radius`.
+2. **Tight frame (`num_vectors > latent_dim`):** at most `latent_dim` rows can be mutually
+   orthogonal, so `ceil(num_vectors / latent_dim)` **independent orthonormal bases** are stacked and
+   truncated. Every vector still has norm exactly `radius`, and `1 / ceil(num_vectors / latent_dim)`
+   of all pairs are still exactly orthogonal.
+
+The second regime used to sample uniformly on the sphere and emit a `UserWarning` calling the
+request "mathematically impossible". It is not impossible — only *all rows* being orthogonal is —
+and the uniform construction was measurably worse. At `(512, 128)`:
+
+| construction | max abs cos | mean abs cos | `cond(W)` | exactly-orthogonal pairs |
+|---|---|---|---|---|
+| uniform (previous) | 0.371 | 0.0706 | 2.92 | 0.2% |
+| stacked bases (now) | 0.386 | 0.0530 | **1.0000** | **25.0%** |
+| Welch lower bound | 0.0766 | n/a | n/a | n/a |
+
+Neither is a good spherical code — both sit far above the Welch bound — but the uniform version's
+singular values spanned 1.03 to 3.01, discarding the dynamical isometry that is the reason to reach
+for orthogonal initialization at all. Pass `fallback='uniform'` to restore the old construction.
+
+**Versus `keras.initializers.Orthogonal`:** for `num_vectors > latent_dim` Keras orthogonalizes the
+other axis and returns orthonormal *columns*, giving `cond == 1` at any shape. That is the better
+tool when a perfectly conditioned map is what you want; it leaves the row norms unequal, so the
+vectors no longer share a hypersphere. This class keeps `||v_i|| == radius` as its invariant.
+
+Note that for a `Conv2D` kernel the flattening makes a "vector" span `(kh, kw, in_ch)`, so the
+separated set is not the per-filter weight vectors.
 
 ### Usage
 
@@ -81,31 +114,19 @@ This initializer creates weight vectors that are both mutually orthogonal and li
 import keras
 from dl_techniques.initializers import OrthogonalHypersphereInitializer
 
-# Feasible case: 64 orthogonal vectors in 256D space on a hypersphere of radius 1.5
-init_feasible = OrthogonalHypersphereInitializer(radius=1.5, seed=42)
-layer_feasible = keras.layers.Embedding(
-    input_dim=1000,
-    output_dim=256,
-    embeddings_initializer=init_feasible
-) # The weights will have shape (1000, 256) - Infeasible! This will fallback.
+init = OrthogonalHypersphereInitializer(radius=1.5, seed=42)
 
-# Corrected example for an embedding layer
-# To get orthogonal embeddings, the output_dim must be >= input_dim
-# This is unusual for embeddings but illustrates the principle for a weight matrix
-# A better example is a Dense layer:
-layer_dense_feasible = keras.layers.Dense(
-    units=64,
-    input_dim=256,
-    kernel_initializer=init_feasible
-) # Kernel shape (256, 64) -> Transposed (64, 256), so 64 vectors in 256D. Feasible.
+# Orthogonal regime: a Dense kernel (128, 512) is 128 vectors in 512-D.
+widening = keras.layers.Dense(units=512, kernel_initializer=init)   # input_dim 128
 
-# Infeasible case: Tries to create 512 orthogonal vectors in 128D space.
-# Will issue a warning and fall back to uniform hypersphere distribution.
-init_infeasible = OrthogonalHypersphereInitializer(radius=1.0, seed=42)
-layer_infeasible = keras.layers.Dense(
-    units=512,
-    input_dim=128,
-    kernel_initializer=init_infeasible # Kernel shape (128, 512) -> (512, 128). Infeasible.
+# Tight-frame regime: a Dense kernel (256, 64) is 256 vectors in 64-D, so the
+# bank is 4 stacked orthonormal bases -- 25% of pairs exactly orthogonal, and
+# every vector still on the hypersphere of radius 1.5.
+narrowing = keras.layers.Dense(units=64, kernel_initializer=init)   # input_dim 256
+
+# An embedding matrix (1000, 256) is likewise 1000 vectors in 256-D: 4 bases.
+embedding = keras.layers.Embedding(
+    input_dim=1000, output_dim=256, embeddings_initializer=init,
 )
 ```
 
@@ -432,7 +453,9 @@ model = keras.Sequential([
     keras.layers.ReLU(),
     keras.layers.Dense(
         10,
-        # Use Hypersphere to encourage diverse features before softmax
+        # Use Hypersphere to encourage diverse features before softmax. This
+        # kernel is (128, 10) -- 128 vectors in 10-D -- so it is the tight-frame
+        # regime: 13 stacked bases, every row still of norm 1.2.
         kernel_initializer=OrthogonalHypersphereInitializer(radius=1.2, seed=3)
     ),
     keras.layers.Softmax()

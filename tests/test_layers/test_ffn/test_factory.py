@@ -1234,8 +1234,6 @@ from pathlib import Path as _SweepPath
 # `tests/test_the_deliberate_advisories_still_fire.py`.
 pytestmark = [
     pytest.mark.filterwarnings(
-        "ignore:Orthogonality constraint violation:UserWarning"),
-    pytest.mark.filterwarnings(
         "ignore:moe_config is provided:UserWarning"),
 ]
 

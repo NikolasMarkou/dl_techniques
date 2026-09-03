@@ -49,6 +49,7 @@ See ``plans/plan-2026-08-22T035419-a11304c8/decisions.md`` D-252 (R-038 closure)
 and ``plans/plan-2026-08-23T091307-9a110062/decisions.md`` D-442.
 """
 
+import pathlib
 import warnings
 
 import keras
@@ -63,39 +64,64 @@ from dl_techniques.layers.transformers.transformer import TransformerLayer
 
 
 # ---------------------------------------------------------------------
-# W-03 -- the orthogonality fallback
+# W-03 -- the orthogonality fallback, RETIRED
 # `src/dl_techniques/initializers/hypersphere_orthogonal_initializer.py`
 # ---------------------------------------------------------------------
 
 
-class TestTheOrthogonalityFallbackAdvisory:
-    """``num_vectors > latent_dim`` is mathematically impossible; we say so."""
+class TestTheOrthogonalityFallbackAdvisoryIsRetired:
+    """W-03 no longer exists, because the thing it advised about was fixed.
 
-    def test_an_infeasible_request_warns(self):
-        init = OrthogonalHypersphereInitializer()
-        with pytest.warns(
-            UserWarning, match=r"Orthogonality constraint violation"
-        ):
-            out = init(shape=(8, 4))
-        # The fallback must still produce the requested geometry -- an advisory
-        # that came with a broken tensor would be a defect, not an advisory.
-        assert tuple(out.shape) == (8, 4)
+    The advisory said ``num_vectors > latent_dim`` is "mathematically
+    impossible" and that the initializer was degrading to uniform sampling. The
+    impossibility claim was about ROWS only, and the degradation was real: the
+    uniform construction measured ``cond(W) = 2.92`` at ``(512, 128)`` with 0.2%
+    of pairs exactly orthogonal. That regime now stacks independent orthonormal
+    bases instead -- ``cond = 1.0000``, 25% of pairs exactly orthogonal, every
+    row still of norm ``radius`` -- so there is nothing to warn about, and a
+    UserWarning on the ORDINARY case for a dimension-reducing projection was
+    noise that ten test modules had to suppress.
 
-    def test_a_feasible_request_does_not_warn(self):
-        """The control: without it the positive arm cannot fail."""
+    These tests replace the three that pinned the message. They are kept in this
+    file rather than deleted so that reintroducing the advisory reddens here,
+    where the advisory families live.
+    """
+
+    def test_the_over_complete_regime_is_silent(self):
+        """No warning of any category: it is a supported regime, not a fallback."""
         init = OrthogonalHypersphereInitializer()
         with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
+            warnings.simplefilter("error")
+            out = init(shape=(8, 4))
+        assert tuple(out.shape) == (8, 4)
+
+    def test_the_feasible_regime_is_silent_too(self):
+        """The control: both branches must be quiet, not just the one that changed."""
+        init = OrthogonalHypersphereInitializer()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             out = init(shape=(4, 8))
         assert tuple(out.shape) == (4, 8)
 
-    def test_the_message_names_both_numbers(self):
-        """The ``ignore`` filters key on the prefix; the numbers are the payload."""
-        with pytest.warns(UserWarning) as rec:
-            OrthogonalHypersphereInitializer()(shape=(9, 3))
-        text = str(rec[0].message)
-        assert "requesting 9 orthogonal vectors" in text, text
-        assert "3-dimensional space" in text, text
+    def test_no_module_still_suppresses_the_retired_advisory(self):
+        """A suppression that outlives the warning it excused is documentation rot.
+
+        Ten modules carried
+        ``filterwarnings("ignore:Orthogonality constraint violation")`` under an
+        R-038/D-251 comment block. They were removed with the advisory; this
+        catches a re-add, and catches a copy-paste into a new module.
+        """
+        root = pathlib.Path(__file__).resolve().parent
+        offenders = [
+            str(path.relative_to(root))
+            for path in root.rglob("*.py")
+            if path.name != pathlib.Path(__file__).name
+            and "Orthogonality constraint violation" in path.read_text()
+        ]
+        assert not offenders, (
+            "these modules still suppress or assert the retired W-03 advisory: "
+            f"{offenders}"
+        )
 
 
 # ---------------------------------------------------------------------

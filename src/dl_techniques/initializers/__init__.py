@@ -13,9 +13,11 @@ Available Initializers:
 -   `HeOrthonormalInitializer`: Combines He normal variance scaling with
     orthonormalization, providing a well-conditioned starting point for
     ReLU-based networks.
--   `OrthogonalHypersphereInitializer`: Creates mutually orthogonal weight
-    vectors that lie on a hypersphere of a given radius, maximizing initial
-    geometric separation.
+-   `OrthogonalHypersphereInitializer`: Creates weight vectors on a hypersphere
+    of a given radius, mutually orthogonal where the shape allows it. Beyond
+    `latent_dim` vectors it stacks independent orthonormal bases (a tight
+    frame), which is the ordinary case for the narrowing projections of its
+    three default consumers.
 -   `HaarWaveletInitializer`: Constructs the fixed, orthonormal 2D Haar wavelet
     filter bank (every tap +/- 0.5) for use in convolutional layers, enabling
     energy-preserving multi-resolution feature extraction; output slot `j` holds

@@ -1,3 +1,25 @@
+"""Tests for OrthogonalHypersphereInitializer.
+
+Several tests here are single-claim guards for defects found by review and
+verified by measurement against the previous implementation:
+
+* orthogonality was enforced between ROWS only, so every narrowing Dense and
+  effectively every Conv2D took a "mathematically impossible" fallback that was
+  neither impossible nor necessary. (128, 64), (512, 128), (3, 3, 64, 128) and
+  (30000, 512) all warned and degraded.
+* that fallback sampled uniformly on the sphere and claimed to maximize "average
+  angular separation", a property no configuration has. Measured at (512, 128):
+  cond(W) 2.92, singular values 1.03 to 3.01, and 0.2% of pairs exactly
+  orthogonal -- discarding the dynamical isometry the Saxe reference is cited
+  for. Stacking independent orthonormal bases gives cond 1.0000 and 25%.
+* the QR was not sign corrected, so Q was not Haar distributed: over 2000 seeds
+  at d=8, Q[0, 0] was negative in 2000 of 2000 draws with E[Q[0, 0]] = -0.2897
+  where Haar gives 0.
+* np.random.default_rng(None) bypassed keras.utils.set_random_seed, radius=nan
+  passed validation and produced an all-NaN tensor, a rank-1 shape was silently
+  accepted, and dtype=None ignored floatx.
+"""
+
 import pytest
 import numpy as np
 import tempfile
@@ -6,7 +28,27 @@ import warnings
 from typing import Any, Dict, Tuple
 
 import keras
-from dl_techniques.initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from dl_techniques.initializers.hypersphere_orthogonal_initializer import (
+    FALLBACK_MODES,
+    OrthogonalHypersphereInitializer,
+)
+
+
+def _rows(weights, latent_dim: int) -> np.ndarray:
+    """Flatten a weight tensor to its (num_vectors, latent_dim) matrix."""
+    return np.asarray(keras.ops.convert_to_numpy(weights)).reshape(-1, latent_dim)
+
+
+def _condition_number(matrix: np.ndarray) -> float:
+    singular = np.linalg.svd(matrix, compute_uv=False)
+    return float(singular.max() / singular.min())
+
+
+def _exactly_orthogonal_fraction(matrix: np.ndarray) -> float:
+    unit = matrix / np.linalg.norm(matrix, axis=1, keepdims=True)
+    gram = np.abs(unit @ unit.T)
+    np.fill_diagonal(gram, 0.0)
+    return float((gram < 1e-6).mean())
 
 
 class TestOrthogonalHypersphereInitializer:
@@ -27,8 +69,8 @@ class TestOrthogonalHypersphereInitializer:
 
     @pytest.fixture
     def infeasible_shape(self) -> Tuple[int, ...]:
-        """Shape where orthogonality is infeasible (num_vectors > latent_dim)."""
-        return (256, 64)  # 256 vectors in 64D space
+        """Shape where not all ROWS can be orthogonal (num_vectors > latent_dim)."""
+        return (256, 64)  # 256 vectors in 64D space -> 4 stacked bases
 
     @pytest.fixture
     def multi_dim_shape(self) -> Tuple[int, ...]:
@@ -65,14 +107,20 @@ class TestOrthogonalHypersphereInitializer:
         initializer(shape=(5, 5, 32))
 
         # Invalid shapes
-        with pytest.raises(ValueError, match="shape cannot be empty"):
+        with pytest.raises(ValueError, match="at least 2 dimensions"):
             initializer(shape=())
 
-        with pytest.raises(ValueError, match="latent dimension must be positive"):
+        with pytest.raises(ValueError, match="at least 2 dimensions"):
+            initializer(shape=(64,))
+
+        with pytest.raises(ValueError, match="dimensions must be positive"):
             initializer(shape=(10, 0))
 
-        with pytest.raises(ValueError, match="latent dimension must be positive"):
+        with pytest.raises(ValueError, match="dimensions must be positive"):
             initializer(shape=(10, -5))
+
+        with pytest.raises(ValueError, match="dimensions must be positive"):
+            initializer(shape=(0, 10))
 
     def test_feasible_orthogonal_generation(self, basic_config, feasible_shape):
         """Test orthogonal vector generation when mathematically feasible."""
@@ -119,37 +167,180 @@ class TestOrthogonalHypersphereInitializer:
             err_msg="Self dot products should equal radius squared"
         )
 
-    def test_infeasible_fallback_with_warning(self, basic_config, infeasible_shape):
-        """Test fallback to uniform hypersphere when orthogonality is impossible."""
+    def test_the_over_complete_regime_is_silent_and_well_conditioned(
+        self, basic_config, infeasible_shape
+    ):
+        """num_vectors > latent_dim stacks orthonormal bases, and does not warn.
+
+        It previously emitted a UserWarning calling the request "mathematically
+        impossible" and degraded to uniform sampling. Ten test modules had to
+        suppress that warning because it fires on the ORDINARY case for a
+        dimension-reducing projection.
+        """
         initializer = OrthogonalHypersphereInitializer(**basic_config)
 
-        # Should generate a warning about impossibility
-        with warnings.catch_warnings(record=True) as warning_list:
-            warnings.simplefilter("always")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             weights = initializer(shape=infeasible_shape)
 
-            # Check that warning was issued
-            assert len(warning_list) == 1
-            warning = warning_list[0]
-            assert issubclass(warning.category, UserWarning)
-            assert "Orthogonality constraint violation" in str(warning.message)
-            assert "256 orthogonal vectors" in str(warning.message)
-            assert "64-dimensional space" in str(warning.message)
-
-        weights_np = keras.ops.convert_to_numpy(weights)
-
-        # Check shape
         assert weights.shape == infeasible_shape
 
-        # Check radius property - all vectors should still have specified radius
-        vector_norms = np.linalg.norm(weights_np, axis=1)
-        expected_radius = basic_config['radius']
+        matrix = _rows(weights, infeasible_shape[-1])
         np.testing.assert_allclose(
-            vector_norms,
-            np.full_like(vector_norms, expected_radius),
+            np.linalg.norm(matrix, axis=1), basic_config["radius"],
             rtol=1e-5, atol=1e-5,
-            err_msg="All vectors should have the specified radius even in fallback mode"
+            err_msg="every vector must still lie on the hypersphere",
         )
+        # 256 = 4 x 64 exactly, so this is an exact tight frame.
+        assert _condition_number(matrix) == pytest.approx(1.0, abs=1e-4)
+        assert _exactly_orthogonal_fraction(matrix) == pytest.approx(0.25, abs=0.01)
+
+    def test_stacked_bases_beat_the_uniform_fallback(self):
+        """The construction that replaced uniform sampling is measurably better.
+
+        Anti-vacuity: the retired construction is still reachable behind
+        fallback='uniform', and it must fail the same predicate the default
+        passes -- otherwise this test would pass on any two random matrices.
+        """
+        shape = (512, 128)
+        block = _rows(
+            OrthogonalHypersphereInitializer(seed=0)(shape), shape[-1]
+        )
+        uniform = _rows(
+            OrthogonalHypersphereInitializer(seed=0, fallback="uniform")(shape),
+            shape[-1],
+        )
+
+        assert _condition_number(block) == pytest.approx(1.0, abs=1e-4)
+        assert _condition_number(uniform) > 2.0
+
+        assert _exactly_orthogonal_fraction(block) > 0.2
+        assert _exactly_orthogonal_fraction(uniform) < 0.01
+
+        # Mean coherence improves too, though neither is a good spherical code:
+        # the Welch bound here is 0.0766.
+        def mean_coherence(m):
+            unit = m / np.linalg.norm(m, axis=1, keepdims=True)
+            gram = np.abs(unit @ unit.T)
+            np.fill_diagonal(gram, 0.0)
+            return float(gram.mean())
+
+        assert mean_coherence(block) < mean_coherence(uniform)
+
+    @pytest.mark.parametrize("shape,blocks", [
+        ((128, 64), 2), ((512, 128), 4), ((3, 3, 64, 128), 5), ((10, 8, 32), 3),
+    ])
+    def test_the_shapes_that_used_to_degrade(self, shape, blocks):
+        """Every shape that took the old fallback now keeps its geometry.
+
+        These are the real consumer shapes: a narrowing Dense (OrthoBlock), an
+        OrthoGLU down-projection, a Conv2D kernel, and a NeuroGrid grid.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            weights = OrthogonalHypersphereInitializer(seed=0)(shape=shape)
+
+        matrix = _rows(weights, shape[-1])
+        np.testing.assert_allclose(
+            np.linalg.norm(matrix, axis=1), 1.0, rtol=1e-5, atol=1e-5
+        )
+        # A partial trailing block bounds the condition number by sqrt(2).
+        assert _condition_number(matrix) <= np.sqrt(2.0) + 1e-4
+        assert _exactly_orthogonal_fraction(matrix) == pytest.approx(
+            1.0 / blocks, abs=0.05
+        )
+
+    def test_the_uniform_fallback_is_still_reachable(self):
+        """The retired behaviour stays available, and says it is worse."""
+        assert "uniform" in FALLBACK_MODES
+        weights = OrthogonalHypersphereInitializer(
+            radius=1.5, seed=0, fallback="uniform"
+        )(shape=(256, 64))
+        matrix = _rows(weights, 64)
+        np.testing.assert_allclose(
+            np.linalg.norm(matrix, axis=1), 1.5, rtol=1e-5, atol=1e-5
+        )
+
+    def test_an_unknown_fallback_is_rejected(self):
+        with pytest.raises(ValueError, match="fallback must be one of"):
+            OrthogonalHypersphereInitializer(fallback="random")
+
+    def test_the_qr_is_sign_corrected(self):
+        """Q must be Haar distributed, which LAPACK's raw QR is not.
+
+        Householder QR fixes the sign of R's diagonal, which made Q[0, 0]
+        negative in 2000 of 2000 draws with E[Q[0, 0]] = -0.2897. Multiplying by
+        sign(diag(R)) restores it -- the same convention
+        he_orthonormal_initializer.py already used.
+        """
+        first = np.array([
+            np.asarray(keras.ops.convert_to_numpy(
+                OrthogonalHypersphereInitializer(seed=s)(shape=(8, 8))
+            ))[0, 0]
+            for s in range(400)
+        ])
+
+        assert abs(float(first.mean())) < 0.08, float(first.mean())
+        assert 0.35 < float((first < 0).mean()) < 0.65, float((first < 0).mean())
+
+    def test_a_seedless_instance_honours_the_global_seed(self):
+        """np.random.default_rng(None) ignored keras.utils.set_random_seed."""
+        keras.utils.set_random_seed(1234)
+        a = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer()(shape=(8, 16))))
+        keras.utils.set_random_seed(1234)
+        b = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer()(shape=(8, 16))))
+        np.testing.assert_array_equal(a, b)
+
+        keras.utils.set_random_seed(4321)
+        c = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer()(shape=(8, 16))))
+        assert not np.allclose(a, c)
+
+    def test_reproducibility_on_the_over_complete_branch(self):
+        """Determinism was only ever asserted on the feasible branch."""
+        shape = (256, 64)
+        a = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer(seed=7)(shape)))
+        b = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer(seed=7)(shape)))
+        np.testing.assert_array_equal(a, b)
+
+    def test_a_rank_one_shape_is_rejected(self):
+        """(32,) silently became one random direction spread over a bias."""
+        with pytest.raises(ValueError, match="at least 2 dimensions"):
+            OrthogonalHypersphereInitializer()(shape=(32,))
+
+    @pytest.mark.parametrize("radius", [float("nan"), float("inf")])
+    def test_a_non_finite_radius_is_rejected(self, radius):
+        """radius=nan passed `radius <= 0` and produced an all-NaN tensor."""
+        with pytest.raises(ValueError, match="radius must be finite"):
+            OrthogonalHypersphereInitializer(radius=radius)
+
+    def test_dtype_none_follows_floatx(self):
+        original = keras.config.floatx()
+        try:
+            for floatx in ("float32", "float64"):
+                keras.config.set_floatx(floatx)
+                weights = OrthogonalHypersphereInitializer(seed=0)(shape=(4, 8))
+                assert keras.backend.standardize_dtype(weights.dtype) == floatx
+        finally:
+            keras.config.set_floatx(original)
+
+    def test_float64_is_not_a_float32_upcast(self):
+        weights = np.asarray(keras.ops.convert_to_numpy(
+            OrthogonalHypersphereInitializer(seed=0)(shape=(64, 128), dtype="float64")))
+        assert weights.dtype == np.float64
+        assert not np.array_equal(
+            weights, weights.astype(np.float32).astype(np.float64)
+        )
+
+    def test_call_accepts_extra_kwargs(self):
+        weights = OrthogonalHypersphereInitializer(seed=0)(
+            (4, 8), None, partition_shape=None
+        )
+        assert tuple(weights.shape) == (4, 8)
 
     def test_multi_dimensional_grids(self, basic_config, multi_dim_shape):
         """Test handling of multi-dimensional weight grids."""
@@ -175,6 +366,12 @@ class TestOrthogonalHypersphereInitializer:
             rtol=1e-5, atol=1e-5,
             err_msg="Multi-dimensional grids should preserve radius property"
         )
+
+        # The grid path was never checked for orthogonality, only for norms.
+        matrix = _rows(weights, multi_dim_shape[-1])
+        gram = matrix @ matrix.T
+        np.fill_diagonal(gram, 0.0)
+        assert np.abs(gram).max() < 1e-4
 
     def test_reproducibility_with_seed(self):
         """Test that same seed produces identical results."""
@@ -257,6 +454,7 @@ class TestOrthogonalHypersphereInitializer:
         config = initializer.get_config()
 
         # Check all config parameters are present
+        assert config["fallback"] == "block_orthogonal"
         for key in basic_config:
             assert key in config, f"Missing {key} in get_config()"
             assert config[key] == basic_config[key], f"Config value mismatch for {key}"
@@ -315,26 +513,16 @@ class TestOrthogonalHypersphereInitializer:
         )
 
     def test_edge_case_1d_latent(self):
-        """Test edge case with 1D latent space."""
-        shape = (3, 1)  # 3 vectors in 1D space (infeasible)
-        initializer = OrthogonalHypersphereInitializer(radius=2.0, seed=42)
+        """3 vectors in a 1-D space: 3 stacked 1-D bases, i.e. +/- radius, silently."""
+        initializer = OrthogonalHypersphereInitializer(radius=2.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            weights = initializer(shape=(3, 1))
 
-        with warnings.catch_warnings(record=True) as warning_list:
-            warnings.simplefilter("always")
-            weights = initializer(shape=shape)
-
-            # Should warn about impossibility
-            assert len(warning_list) == 1
-
-        weights_np = keras.ops.convert_to_numpy(weights)
-
-        # All vectors should still have correct radius
-        vector_norms = np.abs(weights_np.flatten())  # 1D vectors
+        assert weights.shape == (3, 1)
         np.testing.assert_allclose(
-            vector_norms,
-            np.full_like(vector_norms, 2.0),
-            rtol=1e-5, atol=1e-5,
-            err_msg="1D vectors should have correct radius"
+            np.abs(np.asarray(keras.ops.convert_to_numpy(weights))).ravel(),
+            2.0, rtol=1e-5, atol=1e-5,
         )
 
     def test_dtype_handling(self, basic_config, feasible_shape):
