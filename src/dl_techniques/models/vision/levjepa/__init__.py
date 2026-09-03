@@ -16,6 +16,7 @@ from dl_techniques.models.vision.levjepa.masking import (
     build_block_causal_mask,
     random_token_drop,
 )
+from dl_techniques.models.vision.levjepa.projector import LeVJEPAProjector
 
 __all__ = [
     "LeVJEPABlock",
@@ -26,4 +27,5 @@ __all__ = [
     "create_levjepa",
     "build_block_causal_mask",
     "random_token_drop",
+    "LeVJEPAProjector",
 ]

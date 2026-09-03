@@ -18,10 +18,16 @@ pretraining.
 - `model.py` -- `SCALE_CONFIGS` (`vit_tiny` .. `vit_gigantic`),
   `MODEL_VARIANTS`, `from_variant(...)`, `create_levjepa(...)`.
 - `masking.py` -- `build_block_causal_mask`, `random_token_drop` (Step 3).
+- `projector.py::LeVJEPAProjector` -- the SIGReg projection head
+  (`Dense -> BatchNorm -> GELU -> Dense`); no reshape-around
+  `BatchNormalization`, see `decisions.md` D-014.
+- `dl_techniques/callbacks/ema_shadow_callback.py::EMAShadowCallback` --
+  checkpoint-only EMA-shadow driver (lives in `callbacks/`, not this
+  package -- see `decisions.md` D-006); reuses `teacher_ema.py`'s decay
+  schedules.
 
-Not yet implemented (later plan steps): the projector head, the EMA-shadow
-checkpoint callback, the multiview training wrapper (`SIGReg` + `add_loss`),
-and the `src/train/levjepa/` training script.
+Not yet implemented (later plan steps): the multiview training wrapper
+(`SIGReg` + `add_loss`) and the `src/train/levjepa/` training script.
 
 ## Usage
 
