@@ -55,6 +55,7 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
@@ -355,7 +356,7 @@ class BandRMS(keras.layers.Layer):
         # max_band_width=0.1: float32 statistics return exactly [[0.95] * 4] and
         # float64 ones return [[0.94999999, 0.95, 0.95, 0.95000001]], a gap of
         # 1.425e-08.
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: RMS normalization to achieve dimension-independent scaling

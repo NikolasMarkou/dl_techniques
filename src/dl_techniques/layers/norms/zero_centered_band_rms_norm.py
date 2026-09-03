@@ -55,6 +55,7 @@ from typing import Any, Dict, Optional, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
@@ -369,7 +370,7 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         # policy. Measured on the float64 input [[1e8+1, 1e8+2, 1e8+3, 1e8+4]]:
         # float32 statistics collapse `centered_inputs` to exactly [[0, 0, 0, 0]]
         # while float64 ones give [[-1.275, -0.425, 0.425, 1.275]].
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Compute mean and center the input (zero-centering innovation)

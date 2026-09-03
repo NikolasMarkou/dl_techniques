@@ -118,6 +118,7 @@ from typing import Optional, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -405,7 +406,7 @@ class BiasFreeBatchNorm(keras.layers.Layer):
         # mixed precision), but float64 when the layer really is float64 -
         # a hardcoded "float32" here made the layer raise a dtype TypeError
         # under any non-float32 policy. See D-002 in build().
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         ndims = len(inputs.shape)

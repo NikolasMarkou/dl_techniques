@@ -46,6 +46,7 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.layers.norms._masking import (
     normalizes_only_the_feature_axis,
 )
@@ -369,7 +370,7 @@ class RMSNorm(keras.layers.Layer):
         # policy. Measured on the float64 input [[1e8+1, 1e8+2, 1e8+3, 1e8+4]]:
         # float32 statistics return exactly [[1, 1, 1, 1]] and float64 ones
         # return [[0.99999999, 1, 1, 1.00000001]], a gap of 1.5e-08.
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         inputs_fp32 = keras.ops.cast(inputs, stat_dtype)
 
         # Compute RMS: sqrt(mean(x²) + ε)

@@ -54,6 +54,7 @@ from typing import Any, Dict, Optional, Union, Tuple, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -550,7 +551,7 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
         # [[-1.2745587, -0.4248529, 0.4248529, 1.2745587]]. This also feeds the
         # internal Dense at the policy's dtype, so a float64 policy no longer
         # promotes a float32 tensor against a float64 kernel.
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         inputs_fp32 = ops.cast(inputs, stat_dtype)
 
         # Step 1: Zero-centering.

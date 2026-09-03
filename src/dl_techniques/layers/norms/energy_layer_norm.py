@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import statistics_dtype
 from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -501,7 +502,7 @@ class EnergyLayerNorm(keras.layers.Layer):
         # measured before/after and decisions.md D-008.
         # Template: rms_norm.py:362-372 (the in-package upcast pattern).
         original_dtype = inputs.dtype
-        stat_dtype = keras.backend.result_type(original_dtype, "float32")
+        stat_dtype = statistics_dtype(original_dtype)
         x = ops.cast(inputs, stat_dtype)
 
         # Statistics over the LAST axis only — per token, per sample. No token mixing.
