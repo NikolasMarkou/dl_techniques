@@ -1,106 +1,30 @@
-"""
-A self-attention mechanism for computer vision tasks,
-based on the influential paper "Non-local Neural Networks".
+"""Self-attention over 4D image feature maps, built by ``NonLocalAttention``.
 
-Standard convolutional layers operate on a small, local neighborhood of pixels,
-limiting their receptive field. In contrast, this Non-local Attention layer captures
-long-range dependencies by computing the response at a position as a weighted sum of
-features at *all* positions in the input feature map. This allows the model to
-build relationships between distant pixels, which is crucial for understanding
-complex scenes and objects.
+Standard convolutions see only a local neighborhood; this layer computes the
+response at each position as a weighted sum of features at every other
+position, following "Non-local Neural Networks" (Wang et al., 2018). The
+input first passes through a depthwise convolution and optional
+normalization, giving each token a local receptive field before any global
+mixing. Query, key and value are 1x1 convolutions flattened to sequences of
+length H*W, so the attention matrix is quadratic in spatial resolution. In
+``'dot_product'`` mode scores are scaled by ``1/sqrt(d_k)``; in
+``'gaussian'`` mode they are unscaled and the query/key/value channels are
+reduced to ``attention_channels // 8``, matching the paper's embedded-
+Gaussian instantiation.
 
-It functions as a self-attention block tailored for 4D image-like tensors
-(batch, height, width, channels).
-
-Architecture:
-    A non-local block over a 4D ``(B, H, W, C)`` feature map. Note that this
-    implementation is **not** a bare residual add-on: it front-loads a depthwise
-    convolution and ends with its own output projection, so it behaves as a
-    self-contained block rather than as an identity-at-init insert.
-
-    1.  **Depthwise spatial pre-mixing.** The input passes through a
-        ``kernel_size`` :class:`DepthwiseConv2D` (default ``(7, 7)``, ``padding
-        ='same'``), an intermediate activation, and — when ``output_norm_type`` is
-        set (default ``"batch_norm"``) — a spatial normalization. This gives each
-        token a local receptive field before any global mixing happens.
-
-    2.  **Three 1x1 projections to a shared embedded dim.** ``query_conv``,
-        ``key_conv`` and ``value_conv`` all emit ``key_value_channels``. In
-        ``attention_mode='dot_product'`` that equals ``attention_channels``; in the
-        default ``'gaussian'`` mode it is ``max(1, attention_channels // 8)``,
-        matching the original paper's reduction (see the ``D-002`` anchor at the
-        assignment — Q@Kᵀ needs a matched contraction dim, so the reduction cannot
-        be applied to only one of them). The key projection carries a second
-        activation.
-
-    3.  **Spatial flattening.** Each projection is reshaped from
-        ``(B, H, W, C_kv)`` to ``(B, H*W, C_kv)``, turning every pixel into a token.
-        This is what makes the block *non-local*: the score matrix is
-        ``(B, H*W, H*W)`` and therefore quadratic in spatial resolution — the
-        block's dominant cost.
-
-    4.  **Scoring.** Optional QK-normalization (``qk_norm_type``) is applied to the
-        flattened query and key, then ``Q @ Kᵀ``. Scaling by
-        ``common.compute_attention_scale(key_value_channels)`` is applied **only in
-        ``dot_product`` mode**. ``gaussian`` mode is left unscaled on purpose, to
-        preserve the behavior of the ``keras.layers.Attention(use_scale=False)``
-        this layer replaced. An optional additive ``attention_mask`` is added, and
-        :class:`ProbabilityOutput` (``probability_type`` / ``probability_config``)
-        converts scores to weights, followed by optional attention dropout.
-
-    5.  **Aggregation and output projection.** The weights aggregate the flattened
-        values, the result is reshaped back to ``(B, H, W, C_kv)``, and passed
-        through ``output_conv`` + ``output_activation_layer`` + optional dropout.
-        Those two sub-layers alone are created lazily in ``build()`` because their
-        filter count defaults to the RUNTIME input channel count. This is the
-        package's one documented exception to "create every sub-layer in
-        ``__init__``", and the ``D-003`` anchor that records it sits in
-        ``__init__``, beside the two ``None`` sentinels.
-
-Foundational Mathematics:
-    For an input feature map ``x`` with positions ``i`` (output) and ``j`` (all
-    other positions), the generic non-local operation is::
-
-        y_i = (1 / C(x)) * sum_j f(x_i, x_j) * g(x_j)
-
-    With ``f`` an exponentiated dot product in an embedding space and ``C(x)`` its
-    sum over ``j``, ``f / C(x)`` is exactly a softmax over ``j`` — the *embedded
-    Gaussian* instantiation. Writing ``theta``, ``phi``, ``g`` for the query/key/
-    value 1x1 convolutions, ``W_z`` for the output convolution and ``h`` for the
-    depthwise pre-mixing stage::
-
-        u        = norm( act( DepthwiseConv(x) ) )
-        s_ij     = theta(u)_i^T phi(u)_j            ( * 1/sqrt(d_kv) iff dot_product )
-        alpha_ij = ProbabilityOutput_j( s_ij + mask_ij )
-        y_i      = sum_j alpha_ij * g(u)_j
-        z        = act_out( W_z(y) )
-
-    ``ProbabilityOutput`` defaults to softmax, which recovers the paper's embedded
-    Gaussian; other ``probability_type`` values substitute a different normalizer
-    for the same slot.
-
-Score-to-probability conversion is delegated to :class:`ProbabilityOutput`
-via ``probability_type`` / ``probability_config``. Optional QK-normalization
-(``qk_norm_type``) applies a normalization layer independently to the query
-and key projections before computing attention scores. The optional output
-spatial normalization (``output_norm_type``) is created via
-:func:`create_normalization_layer` and accepts the full set of registered
-normalization types.
+``output_conv`` and ``output_activation_layer`` are built lazily in
+``build()`` rather than ``__init__``, the layer's one exception to eager
+sub-layer creation: the default ``output_channels=-1`` (match input) cannot
+resolve a filter count before the input shape is known.
 
 References:
-    - Wang, X., Girshick, R., Gupta, A., & He, K. (2018). "Non-local Neural
-      Networks". (https://arxiv.org/abs/1711.07971)
+    - Wang et al., 2018. Non-local Neural Networks.
+      (https://arxiv.org/abs/1711.07971)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 import numpy as np
 from typing import Any, Dict, Tuple, Optional, Literal, Union
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
@@ -112,7 +36,6 @@ from dl_techniques.utils.activation_serialization import (
 from .common import compute_attention_scale, mask_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.non_local_attention")
 class NonLocalAttention(keras.layers.Layer):
@@ -134,49 +57,51 @@ class NonLocalAttention(keras.layers.Layer):
     output is reshaped back to spatial
     format and projected to the desired output channels.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────────────────────┐
-        │    NonLocalAttention — single-head spatial attention    │
-        │                                                         │
-        │   Convolutional pre-processing, then ONE flat attention │
-        │   over all H*W spatial positions. There is no multi-head│
-        │   split — a single (H*W) x (H*W) map is materialized.   │
-        │                                                         │
-        │                   Input  [B, H, W, C]                   │
-        │                            ▼                            │
-        │       DepthwiseConv2D(kernel_size)  ►  activation       │
-        │                            ▼                            │
-        │    optional output_norm   (spatial, before the 1x1s)    │
-        │                            ▼                            │
-        │   1x1 Conv2D projections                                │
-        │     ├─► Q  [B, H, W, d_kv]                              │
-        │     ├─► K  [B, H, W, d_kv]  ►  its own activation       │
-        │     └─► V  [B, H, W, d_kv]                              │
-        │                            ▼                            │
-        │     flatten (H, W) ► H*W    Q, K, V  [B, H*W, d_kv]     │
-        │                            ▼                            │
-        │                optional q_norm / k_norm                 │
-        │                            ▼                            │
-        │   scores = Q Kᵀ   [B, H*W, H*W]                         │
-        │     * 1/sqrt(d_kv)  ONLY when attention_mode is         │
-        │     'dot_product';  'gaussian' leaves it UNSCALED       │
-        │                            ▼                            │
-        │    + attention_mask  (ADDITIVE: 0 keeps, -big masks),   │
-        │      clamped to the compute dtype's floor / 2 FIRST,    │
-        │      in mask_dtype, so -1e9 never becomes -inf (D-015)  │
-        │                            ▼                            │
-        │    attn = attn_prob(scores) ► optional attn dropout     │
-        │                            ▼                            │
-        │   out = attn @ V  [B, H*W, d_kv] ► reshape to (H, W)    │
-        │                            ▼                            │
-        │     output Conv2D 1x1 ► output activation ► dropout     │
-        │                            ▼                            │
-        │   Output  [B, H, W, output_channels]                    │
-        │   (output_channels may differ from the input C)         │
-        └─────────────────────────────────────────────────────────┘
+        input [B, H, W, C]
+             │
+             ▼
+        DepthwiseConv2D(kernel_size) -> activation
+             │
+             ▼
+        output_norm (optional, spatial)
+             │
+             ▼
+        1x1 Conv2D projections
+             ├─► Q  [B, H, W, d_kv]
+             ├─► K  [B, H, W, d_kv] -> its own activation
+             └─► V  [B, H, W, d_kv]
+             │
+             ▼
+        flatten (H, W) -> H*W tokens   [B, H*W, d_kv]
+             │
+             ▼
+        q_norm / k_norm (optional)
+             │
+             ▼
+        scores = Q Kᵀ  [B, H*W, H*W]
+          * 1/sqrt(d_kv) only in 'dot_product' mode
+             │
+             ▼
+        + attention_mask (additive, optional, clamped before cast)
+             │
+             ▼
+        attn = attn_prob(scores) -> attn dropout (optional)
+             │
+             ▼
+        out = attn @ V  [B, H*W, d_kv] -> reshape to (H, W)
+             │
+             ▼
+        output Conv2D 1x1 -> output activation -> dropout (optional)
+             │
+             ▼
+        output [B, H, W, output_channels]
+
+    A single flat (H*W) x (H*W) attention map is computed; there is no
+    multi-head split.
 
     :param attention_channels: Number of channels in the attention mechanism.
         Must be positive.
@@ -226,24 +151,16 @@ class NonLocalAttention(keras.layers.Layer):
     :param dropout_rate: Dropout rate between 0.0 and 1.0.
     :type dropout_rate: float
     :param attention_mode: Attention type (``'gaussian'`` or ``'dot_product'``).
-
-        Both names are inherited and BOTH ARE IMPRECISE against Wang et al. 2018,
-        which defines four pairwise functions (gaussian, embedded gaussian, dot
-        product, concatenation). Only two exist here, and neither is the variant
-        its name suggests:
-
-        * ``'gaussian'`` is really the paper's **Embedded Gaussian** -- the scores
-          are computed on LEARNED theta/phi embeddings, not on raw features, and
-          are softmax-normalized.
-        * ``'dot_product'`` is a **softmax-normalized** scaled dot product, not
-          the paper's ``1/N``-normalized dot-product variant.
-
-        Measured 2026-08-27: both modes route through the same default softmax
-        ``ProbabilityOutput``, so the only difference between them is the scaling.
-        The names are kept because they are public registry-adjacent surface; this
-        note records what they actually mean.
-        ``'dot_product'`` scales scores by ``1/sqrt(d_k)``; ``'gaussian'`` does
-        not scale and uses reduced key/value channels.
+        Wang et al. 2018 defines four pairwise functions (gaussian, embedded
+        gaussian, dot product, concatenation); only two are implemented here,
+        and neither matches its name exactly. ``'gaussian'`` is the paper's
+        embedded gaussian: scores come from learned theta/phi embeddings and
+        are softmax-normalized. ``'dot_product'`` is a softmax-normalized
+        scaled dot product, not the paper's ``1/N``-normalized variant. Both
+        modes use the same default softmax :class:`ProbabilityOutput`, so the
+        only functional difference is scaling: ``'dot_product'`` scales
+        scores by ``1/sqrt(d_k)``; ``'gaussian'`` does not scale and uses
+        reduced key/value channels.
     :type attention_mode: Literal['gaussian', 'dot_product']
     :param kernel_initializer: Initializer for kernel weights.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -342,7 +259,6 @@ class NonLocalAttention(keras.layers.Layer):
             'activity_regularizer': self.activity_regularizer
         }
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=self.kernel_size,
             padding='same',
@@ -379,25 +295,16 @@ class NonLocalAttention(keras.layers.Layer):
         else:
             self.output_norm = None
 
-        # Adjust the embedded attention dim for the attention mode. Gaussian
-        # mode uses fewer channels, as in the original paper.
-        # DECISION plan_2026-06-14_adaddf34/D-002
-        # The originating plan directory is gone, so this comment is the record.
-        # `gaussian` reduces Q, K AND V to one shared embedded dim, because Q@Kᵀ
-        # needs a matched contraction dim. Don't reduce only one of them. The
-        # `dot_product` path is byte-identical, since `key_value_channels` equals
-        # `attention_channels` there. The `max(1, ...)` clamps
-        # `attention_channels < 8` to an embedded dim of 1, never 0.
+        # DECISION plan_2026-06-14_adaddf34/D-002: reduce Q, K and V together to
+        # one shared embedded dim in gaussian mode -- Q@Kᵀ needs a matched
+        # contraction dim. See decisions.md.
         self.key_value_channels = (
             self.attention_channels
             if self.attention_mode == 'dot_product'
             else max(1, self.attention_channels // 8)
         )
-        # R13: adopts the shared helper instead of re-deriving the scale. This is a
-        # spelling change only — `compute_attention_scale` IS
-        # `1.0 / math.sqrt(float(head_dim))`, the exact expression that stood here, so
-        # the stored float is bit-identical. Kept in `__init__` (never `call()`) per
-        # the standing anchor `plan_2026-06-14_33b77a7a/D-002`; see common.py.
+        # Scale is precomputed here, not in call(), per the standing anchor
+        # plan_2026-06-14_33b77a7a/D-002; see common.py.
         self._inv_sqrt_kv = compute_attention_scale(self.key_value_channels)
 
         # Create Query, Key, Value projection layers (all share the embedded dim)
@@ -454,32 +361,10 @@ class NonLocalAttention(keras.layers.Layer):
             self.attn_dropout = None
             self.dropout = None
 
-        # DECISION plan_2026-06-14_0c5d4a21/D-003
-        # The originating plan directory is gone, so this comment is the record.
-        # `output_conv` and `output_activation_layer` are declared here as `None`
-        # sentinels and NOT instantiated. Their filter count depends on the input
-        # channels, which are only resolved in `build()`, so they are built there
-        # behind an idempotency guard. Don't move full instantiation up here, the
-        # filters are unknown before build. Don't leave them undeclared until
-        # `build()` either: Keras 3 expects attributes to exist after `__init__`,
-        # and a second `build()` must not replace an already-built sub-layer.
-        #
-        # This pair is the package's one documented deviation from "create every
-        # sub-layer unconditionally in __init__", and it is a deviation by
-        # necessity. `output_channels` defaults to -1, meaning "match the input
-        # channel count". That count comes from `input_shape[-1]` in `build()`,
-        # so `Conv2D(filters=...)` cannot be constructed in `__init__` for the
-        # default configuration.
-        #
-        # Don't "fix" this by making `output_channels` a required constructor
-        # argument so the convs can move up here. That breaks the public API: it
-        # invalidates every caller and every serialized `get_config()` that
-        # relies on the -1 default, in exchange for cosmetic uniformity. The
-        # sentinel, the `is None` guard and the `if self.built: return` in
-        # `build()` already give the two properties the rule protects. Attributes
-        # exist immediately after `__init__`, so `hasattr` and `from_config`
-        # introspection are safe, and a second `build()` cannot replace an
-        # already-built sub-layer.
+        # DECISION plan_2026-06-14_0c5d4a21/D-003: output_conv and
+        # output_activation_layer stay None sentinels here, built in build()
+        # instead, since output_channels=-1 needs the runtime input channel
+        # count. See decisions.md.
         self.output_conv = None
         self.output_activation_layer = None
 
@@ -530,11 +415,8 @@ class NonLocalAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the 4-D input ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Idempotency guard (D-003): a second build() (from_config / functional reuse)
-        # must be a no-op. The explicit child `.build(...)` calls below are NOT
-        # self-guarded by Keras and would raise a "cannot add state to an already-built
-        # layer" lock violation if re-run; returning early preserves first-build state
-        # and numerics exactly. See decisions.md D-003 (F3).
+        # A second build() must be a no-op: the child .build() calls below are
+        # not self-guarded and would raise on an already-built layer. See D-003.
         if self.built:
             return
 
@@ -544,10 +426,7 @@ class NonLocalAttention(keras.layers.Layer):
             else self.output_channels
         )
 
-        # Create output projection layer (needs input channels). Idempotency-guarded:
-        # a second build() (e.g. under from_config / functional reuse) must NOT replace
-        # already-built sublayers. See D-003, and the R6-exception rationale block at
-        # the end of __init__ for why these two alone are built here rather than there.
+        # output_conv/output_activation_layer are built here, not __init__; see D-003.
         if self.output_conv is None:
             self.output_conv = keras.layers.Conv2D(
                 filters=actual_output_channels,
@@ -659,24 +538,15 @@ class NonLocalAttention(keras.layers.Layer):
         # Scaled dot-product attention scores: (B, N_q, N_k)
         scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 2, 1]))
         if self.attention_mode == 'dot_product':
-            # Match the previous behavior of
-            # `keras.layers.Attention(use_scale=True)`.
-            # DECISION plan_2026-06-14_33b77a7a/D-003
-            # The originating plan directory is gone, so this comment is the
-            # record. `1/sqrt(key_value_channels)` is precomputed in `__init__`,
-            # where `key_value_channels` is already final. Don't recompute it per
-            # call, and don't apply it in `gaussian` mode; that mode stays
-            # unscaled.
+            # DECISION plan_2026-06-14_33b77a7a/D-003: scale by the precomputed
+            # 1/sqrt(key_value_channels); never apply it in gaussian mode. See decisions.md.
             scores = scores * self._inv_sqrt_kv
         # In 'gaussian' mode, no scaling (matches previous use_scale=False)
 
         # Optional additive attention mask
         if attention_mask is not None:
-            # DECISION plan-2026-08-27T040114-580f8b63/D-015 — CLAMP the mask in
-            # `mask_dtype` (>= float32) before the cast down: `-1e9` cast to float16
-            # is `-inf`, and a fully-masked row then softmaxes to NaN (measured 32).
-            # Do NOT route this through `common.apply_attention_mask` — it wants a
-            # KEEP PREDICATE, not this layer's ADDITIVE contract. See decisions.md D-015.
+            # DECISION plan-2026-08-27T040114-580f8b63/D-015: clamp the mask in
+            # mask_dtype before casting down -- -1e9 cast to float16 is -inf. See decisions.md.
             compute_floor = float(
                 np.finfo(np.dtype(self.compute_dtype)).min
             ) / 2.0
@@ -760,5 +630,3 @@ class NonLocalAttention(keras.layers.Layer):
             'activity_regularizer': keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

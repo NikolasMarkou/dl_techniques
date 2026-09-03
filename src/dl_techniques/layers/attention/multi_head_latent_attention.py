@@ -1,48 +1,23 @@
-"""
-Multi-Head Latent Attention (MLA) Layer.
+"""Multi-Head Latent Attention (MLA), built by ``MultiHeadLatentAttention``.
 
-This module provides a Keras 3 implementation of the Multi-Head Latent Attention
-mechanism as proposed in the DeepSeek-V2 architecture.
-
-MLA significantly reduces Key-Value (KV) cache memory usage during inference
-through low-rank compression, while maintaining performance comparable to
-standard Multi-Head Attention (MHA).
-
-Architecture:
-    The core idea is to compress KV representations into a low-dimensional
-    latent space (``kv_latent_dim``) before expanding them back for attention
-    computation. Combined with a decoupled Rotary Position Embedding (RoPE)
-    strategy that separates content and positional components, MLA achieves up
-    to 93% KV cache reduction.
-
-    Three of the four moving parts are shared components rather than local
-    implementations — the latent norms, the RoPE embedding and the score
-    normalization; see the ``[REUSE]`` note on the class below.
-
-Foundational Mathematics:
-    The attention score is computed as::
-
-        scores = (Q_nope @ K_nope^T + Q_pe @ K_pe^T) * scale
-        scale  = 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim)
-
-    where ``Q_nope/K_nope`` carry content information and ``Q_pe/K_pe`` carry
-    positional information via RoPE. ``K_pe`` is shared across all heads for
-    additional memory savings, which is what makes the positional term
-    broadcast over the head axis instead of being materialized per head.
+MLA cuts key-value cache memory by compressing K and V into a low-dimensional
+latent space (``kv_latent_dim``) before expanding them back for attention,
+cutting KV cache size by up to 93% versus standard multi-head attention. A
+decoupled RoPE strategy keeps positional information out of that bottleneck:
+each query/key head splits into a content part (compressed) and a positional
+part (a separate, uncompressed projection with RoPE applied). The positional
+key is shared across all heads, so it broadcasts rather than being
+materialized per head. Attention scores are the sum of the content and
+positional dot products, scaled by ``1/sqrt(qk_nope_head_dim +
+qk_rope_head_dim)``.
 
 References:
-    - DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model
-    - arXiv:2405.04434
+    - DeepSeek-V2: A Strong, Economical, and Efficient MoE Language Model.
+      (https://arxiv.org/abs/2405.04434)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Dict, Any, Tuple, Union
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
@@ -50,7 +25,6 @@ from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .common import apply_attention_mask, compute_attention_scale
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.multi_head_latent_attention")
@@ -69,25 +43,21 @@ class MultiHeadLatentAttention(keras.layers.Layer):
     bypass the bottleneck via a separate projection with RoPE applied. The positional
     key (``K_pe``) is shared across all heads for additional memory savings.
 
-    **[REUSE]** Three responsibilities are delegated rather than reimplemented:
-
-    -   The two latent norms (``q_norm``, ``kv_norm``) come from
-        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`,
-        so ``qk_norm_type`` selects from all registered norm types rather than a
-        hard-wired RMSNorm.
-    -   RoPE comes from
-        :func:`~dl_techniques.layers.embedding.create_embedding_layer` (``"rope"``),
-        which is the same implementation ``group_query_attention.py`` uses. Do not
-        hand-roll the sin/cos tables here; the decoupled-RoPE trick is about WHICH
-        tensors get RoPE applied, not about a different RoPE.
-    -   Score normalization goes through the shared
-        :class:`~dl_techniques.layers.activations.ProbabilityOutput` layer.
+    Three responsibilities are delegated rather than reimplemented: the two
+    latent norms (``q_norm``, ``kv_norm``) come from
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`,
+    so ``qk_norm_type`` selects from all registered norm types; RoPE comes
+    from :func:`~dl_techniques.layers.embedding.create_embedding_layer`
+    (``"rope"``), the same implementation ``group_query_attention.py`` uses
+    (the decoupled-RoPE trick is about which tensors get RoPE applied, not a
+    different RoPE); score normalization goes through the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput` layer.
 
     Symbols used below: ``D`` = dim, ``H`` = num_heads, ``n`` =
     qk_nope_head_dim, ``r`` = qk_rope_head_dim, ``v`` = v_head_dim,
     ``q_lat`` = q_latent_dim, ``kv_lat`` = kv_latent_dim.
 
-    **Architecture Overview — building Q, K, V and the rotary parts:**
+    Architecture, building Q, K, V and the rotary parts:
 
     .. code-block:: text
 
@@ -120,17 +90,16 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         The query tower is optional. With q_latent_dim=None the three
         query boxes collapse into one query_proj, D -> H*(n + r).
-        k_rope_proj reads kv_input DIRECTLY, never c_kv. That is the
-        decoupled half of decoupled RoPE, and it is why an inference
-        cache only has to hold c_kv and k_pe instead of full per-head
-        K and V. This layer itself is stateless and keeps no cache.
+        k_rope_proj reads kv_input directly, never c_kv, which is why an
+        inference cache only has to hold c_kv and k_pe instead of full
+        per-head K and V. This layer itself is stateless and keeps no cache.
 
-    **Score computation and output:**
+    Score computation and output:
 
     .. code-block:: text
 
-        Q_pe and K_pe are transposed into the (B, H, S, D) frame FIRST
-        and rotated there, because RoPE reads its sequence length from
+        Q_pe and K_pe are transposed into the (B, H, S, D) frame and
+        rotated there first, because RoPE reads its sequence length from
         axis 2.
 
             rope(Q_pe)  [B, H, S_q,  r]
@@ -286,21 +255,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Scaling factor for attention scores. The shared helper IS
-        # `1.0 / math.sqrt(float(d))`, the exact expression that stood here, so
-        # the stored float is bit-identical.
-        # NOTE the argument: MLA's per-head score width is the SUM of the content
-        # and RoPE head dims, not `dim // num_heads`. Do not "correct" it to
-        # `self.head_dim` — this layer has no such attribute, and the sum is what
-        # the DeepSeek-V2 formulation scales by.
-        # Keep the call HERE in __init__, never in call(): a backend tensor built
-        # during a symbolic trace leaks out of that scope.
+        # The per-head score width is the sum of the content and RoPE head
+        # dims (the DeepSeek-V2 formulation), not dim // num_heads.
         self._scale = compute_attention_scale(qk_nope_head_dim + qk_rope_head_dim)
 
-        # ──────────────────────────────────────────────────────────
-        # Create Sub-layers in __init__ (Keras 3 Pattern)
-        # All sub-layers instantiated here, built in build()
-        # ──────────────────────────────────────────────────────────
 
         # 1. Query Path: Optional compression via down-project -> norm -> up-project
         if self.q_latent_dim is not None:
@@ -356,8 +314,8 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             name="kv_up_proj"
         )
 
-        # 4. Decoupled RoPE Key projection (shared across heads)
-        #    This generates positional keys directly from input, NOT from latent
+        # Decoupled RoPE key projection, shared across heads, reads the
+        # input directly rather than the latent vector.
         self.k_rope_proj = keras.layers.Dense(
             qk_rope_head_dim,
             use_bias=use_bias,
@@ -412,18 +370,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         if self.built:
             return
 
-        # Handle input_shape being a list (cross-attention) or single tuple.
-        #
-        # Three DIFFERENT spellings of this predicate exist in the package and
-        # they are not interchangeable. This one is the POSITIVE test: the
-        # container must be a `list` and its first element must itself be a
-        # `list`/`tuple`. `multi_head_cross_attention.py` uses the complementary
-        # NEGATIVE test, where the first element must not be `int`/`None`.
-        # `perceiver_attention.py` uses the positive test but also accepts a
-        # `tuple` CONTAINER, because a `.keras` round-trip hands shapes back as
-        # tuples and a bare `isinstance(input_shape, list)` then misclassifies
-        # them. Do not unify the three — each classifies the serialized-shape
-        # edge cases differently, and a merge silently changes two of them.
+        # Positive test: container is a list whose first element is itself a
+        # list/tuple. multi_head_cross_attention.py and perceiver_attention.py
+        # each use a differently-shaped variant; not interchangeable.
         is_list_of_shapes = isinstance(input_shape, list) and len(input_shape) > 0 and isinstance(input_shape[0], (list, tuple))
 
         if is_list_of_shapes:
@@ -520,16 +469,13 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         seq_len_q = keras.ops.shape(query_input)[1]
         seq_len_kv = keras.ops.shape(kv_input)[1]
 
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 1: QUERY GENERATION
-        # ═══════════════════════════════════════════════════════════════════
         if self.q_latent_dim is not None:
-            # Compressed Query Path (DeepSeek-V2 Standard)
+            # Compressed query path (DeepSeek-V2 standard).
             c_q = self.q_down_proj(query_input)
             c_q = self.q_norm(c_q)
             q = self.q_up_proj(c_q)
         else:
-            # Standard Query Path (DeepSeek-V2 Lite)
+            # Direct query path (DeepSeek-V2 Lite).
             q = self.query_proj(query_input)
 
         # Reshape Q -> (B, S_q, H, nope_dim + rope_dim)
@@ -543,15 +489,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         q_nope = q[..., :self.qk_nope_head_dim]
         q_pe = q[..., self.qk_nope_head_dim:]
 
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 2: KEY-VALUE GENERATION (MLA Core)
-        # ═══════════════════════════════════════════════════════════════════
-
-        # a. Latent Compression for K_nope and V
         c_kv = self.kv_down_proj(kv_input)
         c_kv = self.kv_norm(c_kv)
 
-        # b. Up-Projection for K_nope and V
         kv_up = self.kv_up_proj(c_kv)
         kv_up = keras.ops.reshape(
             kv_up,
@@ -563,48 +503,30 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         k_nope = kv_up[..., :self.qk_nope_head_dim]
         v = kv_up[..., self.qk_nope_head_dim:]
 
-        # c. Decoupled RoPE key, shared by every head.
-        # K_pe comes from the original input, NOT from the latent vector.
-        # Result: (B, S_kv, rope_dim).
+        # Decoupled RoPE key, shared by every head, from the original input,
+        # not the latent vector: (B, S_kv, rope_dim).
         k_pe = self.k_rope_proj(kv_input)
         # Expand dims for heads to broadcast: (B, S_kv, 1, rope_dim)
         k_pe = keras.ops.expand_dims(k_pe, axis=2)
 
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 3: ROPE APPLICATION
-        # ═══════════════════════════════════════════════════════════════════
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-083: RoPE is applied in the
-        # (B, H, S, D) frame, so transpose FIRST and leave the tensors transposed.
-        # Do NOT call `self.rope(q_pe)` on the (B, S, H, D) tensor: axis 2 is HEADS
-        # there, and no relative-position signal survived — permuting two input
-        # tokens moved the output by 4.47e-08, float32 noise. See decisions.md D-083.
+        # (B, H, S, D) frame -- transpose first and leave the tensors transposed. See decisions.md.
         q_pe = self.rope(keras.ops.transpose(q_pe, (0, 2, 1, 3)))
         k_pe = self.rope(keras.ops.transpose(k_pe, (0, 2, 1, 3)))
 
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 4: ATTENTION SCORE CALCULATION
-        # ═══════════════════════════════════════════════════════════════════
-
-        # Transpose for matmul: (B, H, S, D).
-        # `q_pe` and `k_pe` are ALREADY in this frame -- STEP 3 transposed them
-        # before applying RoPE, so transposing them again here would undo it.
-        # Only the two nope tensors still need it. `k_pe` is (B, 1, S_kv, r).
+        # Only the two nope tensors still need transposing to (B, H, S, D);
+        # q_pe/k_pe are already in that frame from the RoPE step above.
         q_nope = keras.ops.transpose(q_nope, (0, 2, 1, 3))
         k_nope = keras.ops.transpose(k_nope, (0, 2, 1, 3))
 
-        # Content Score: (B, H, S_q, S_kv)
+        # Content score: (B, H, S_q, S_kv)
         score_content = keras.ops.matmul(q_nope, keras.ops.transpose(k_nope, (0, 1, 3, 2)))
 
-        # Positional Score: (B, H, S_q, S_kv)
-        # K_pe broadcasts along Head dimension because shape is (B, 1, S_kv, D)
+        # Positional score, K_pe broadcasts over the head dimension: (B, H, S_q, S_kv)
         score_pos = keras.ops.matmul(q_pe, keras.ops.transpose(k_pe, (0, 1, 3, 2)))
 
-        # Combine and Scale
         scores = (score_content + score_pos) * self._scale
 
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 5: MASKING & SOFTMAX
-        # ═══════════════════════════════════════════════════════════════════
         if attention_mask is not None:
             scores = self._apply_attention_mask(scores, attention_mask)
 
@@ -613,10 +535,6 @@ class MultiHeadLatentAttention(keras.layers.Layer):
 
         if self.dropout_layer is not None:
             attn_weights = self.dropout_layer(attn_weights, training=training)
-
-        # ═══════════════════════════════════════════════════════════════════
-        # STEP 6: OUTPUT COMPUTATION
-        # ═══════════════════════════════════════════════════════════════════
 
         # V shape: (B, S_kv, H, v_dim) -> (B, H, S_kv, v_dim)
         v = keras.ops.transpose(v, (0, 2, 1, 3))
@@ -648,27 +566,12 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         :return: Masked scores tensor.
         :rtype: keras.KerasTensor
         """
-        # This helper is NOT shared, and that is a choice rather than an oversight.
-        #
-        # Its nearest twin is `MultiHeadCrossAttention._apply_attention_mask`. The
-        # two produce the same broadcast RESULT but are not textually equivalent:
-        #   * cast ORDER — this body casts AFTER expanding; the sibling casts the
-        #     mask to `scores.dtype` FIRST and expands the already-cast tensor;
-        #   * rank PROBE — this body uses `len(ops.shape(mask))`, a backend shape
-        #     op; the sibling uses `len(mask.shape)`, a static Python attribute.
-        # `GroupedQueryAttention._apply_mask` is a third variant again: it reshapes
-        # for the 2D case and repeats explicitly over the head axis.
-        #
-        # WHAT NOT TO DO: do not merge these into one shared helper. One shared
-        # body has to pick a single cast order and a single rank probe, which
-        # changes the traced graph of the other two layers for no behavioural
-        # gain. The bias arithmetic below is the only part that was shared; the
-        # broadcast and cast-order lines are exactly as they were.
-
-        # Get mask dimensions
+        # Not shared with the near-identical helpers in
+        # MultiHeadCrossAttention and GroupedQueryAttention -- each casts and
+        # probes rank in its own order, and unifying them would change the
+        # traced graph of the other two layers for no behavioural gain.
         mask_ndim = len(keras.ops.shape(attention_mask))
 
-        # Expand mask for broadcasting if needed
         if mask_ndim == 2:
             # (B, S_kv) -> (B, 1, 1, S_kv)
             attention_mask = keras.ops.expand_dims(
@@ -678,40 +581,17 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             # (B, S_q, S_kv) -> (B, 1, S_q, S_kv)
             attention_mask = keras.ops.expand_dims(attention_mask, axis=1)
 
-        # Cast and apply additive mask
+        # attention_mask is a 1-means-keep predicate; passed through as-is.
         attention_mask = keras.ops.cast(attention_mask, scores.dtype)
-        # THIS SITE'S MASK POLARITY, passed through as-is: `attention_mask` is a
-        # `1 = keep` predicate, already cast to the scores dtype on its own line
-        # above, which is exactly what the shared bias helper wants. Do NOT
-        # "normalize" it into a `> 0` comparison and do NOT invert it. The helper
-        # infers no polarity, so an inversion raises nothing, changes no shape and
-        # stays finite — the layer would simply attend to the padding instead.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007 — `out_dtype` is pinned to
-        # the SCORES' own dtype. The form this replaces, `scores + (1.0 - mask) *
-        # -1e9`, is `0 * -inf = NaN` at every UNMASKED position in float16: measured
-        # at (B=2, N=64, dim=64, num_heads=4, kv_latent_dim=16), 8192/8192 NaN under
-        # `mixed_float16` against 0/8192 in float32. Do NOT use `out_dtype=None`;
-        # `attn_prob` autocasts a float32 input back to float16. See decisions.md D-007.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — the fully-masked-row
-        # rescue arrives via the helper's DEFAULT rescue axis, so the all-`-inf` row
-        # is never FORMED and no NaN gradient is created. Do NOT pass
-        # `rescue_axis=None` to "get the loud NaN back": opting out also restores
-        # the NaN GRADIENT on that row. See decisions.md D-009 and D-008.
-        #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the rescue axis is DERIVED
-        # from this layer's own `probability_config`, not the helper's `-1` default;
-        # a caller can move the reduction axis. Measured at the sibling
-        # `gated_attention` under `mixed_float16` with an axis of -2 and a dead key
-        # column: 8192/8192 non-finite. Do NOT restore a bare `-1`, and do NOT read
-        # this as the rank/shape INFERENCE the helper forbids. See decisions.md D-017.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007: out_dtype pinned to
+        # scores' own dtype -- the additive form this replaces gives 0*-inf=NaN in float16. See decisions.md.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009: use the helper's
+        # default rescue axis so a fully-masked row never forms a NaN gradient. See decisions.md.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017: rescue axis is
+        # derived from probability_config, not a bare -1 default. See decisions.md.
         scores = apply_attention_mask(
             scores,
             attention_mask,
-            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
             out_dtype=(getattr(scores.dtype, "name", None) or str(scores.dtype)),
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
@@ -771,5 +651,3 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
