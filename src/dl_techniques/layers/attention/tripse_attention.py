@@ -1,110 +1,38 @@
 """
-TripSE: Triplet Squeeze and Excitation Attention Block.
+TripSE: Triplet Squeeze and Excitation attention, four fusion variants.
 
-Implementation of "Achieving 3D Attention via Triplet Squeeze and Excitation Block"
-(Alhazmi and Altahhan, 2025, arXiv:2505.05943).
+Combines Triplet Attention (rotate a plane, pool it, gate it spatially) with
+Squeeze-and-Excitation (global channel gating) into one 3D attention block.
+The four classes, :class:`TripSE1` through :class:`TripSE4`, share both
+primitives and differ only in where the SE block sits relative to the three
+triplet branches and how the branches are combined:
 
-Combines Triplet Attention with Squeeze-and-Excitation to build 3D attention.
-Triplet Attention supplies the inter-dimensional relationships; SE supplies
-global channel importance.
+.. code-block:: text
 
-Architecture:
-    Every variant is built from the same two primitives. What differs is WHERE
-    the SE block sits relative to the triplet branches.
+    variant  SE position                  fusion   gate input
+    -------  ---------------------------  -------  ----------
+    TripSE1  after the fusion             sum      spatial
+    TripSE2  per branch, before Z-pool    average  spatial
+    TripSE3  per branch, parallel to it   average  spatial
+    TripSE4  per branch, added to logits  sum      fused 3-D
 
-    1.  **Rotation + Z-Pool (the "triplet" part).** A 4D input ``(B, H, W, C)``
-        is transposed so a chosen pair of axes occupies the spatial slots. The
-        trailing axis is then reduced by concatenating its mean and its max,
-        which is "Z-pooling", to ``(B, D1, D2, 2)``. A ``k x k`` convolution,
-        batch norm and a sigmoid turn that into an attention map. The map is
-        broadcast-multiplied onto the rotated tensor, then the inverse
-        permutation restores the original axis order. Three fixed permutations
-        cover the three axis pairs: ``(0,1,2)`` = H-W, ``(0,2,1)`` = C-W,
-        ``(2,1,0)`` = H-C. Rotating is what lets a 2D convolution see
-        channel-spatial interaction at all.
+TripSE4 is the only variant whose gate sees a genuine 3-D tensor: it adds a
+channel-logit path (:class:`_SEWeights`, pre-sigmoid) to the spatial logits
+before one sigmoid, rather than multiplying two already-gated maps.
 
-    2.  **Squeeze-and-Excitation (the "SE" part).** Global average pooling to
-        ``(B, 1, 1, C)``, then a bottleneck MLP, produces per-channel gates.
-        This is the package's shared
-        :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`
-        layer, reused rather than re-implemented.
-
-    **Variant table.** Every column below was read off this module's own
-    ``__init__``, ``build`` and ``call``:
-
-    .. code-block:: text
-
-        variant  SE position           fusion   final SE  gate input
-        -------  --------------------  -------  --------  ----------
-        TripSE1  after the fusion      SUM      yes       spatial
-        TripSE2  per branch, before    AVERAGE  no        spatial
-                 the Z-pool
-        TripSE3  per branch, parallel  AVERAGE  no        spatial
-                 to the spatial path
-        TripSE4  per branch, added to  SUM      yes       fused 3-D
-                 the spatial LOGITS
-
-        variant  branch code                SE sub-layers
-        -------  -------------------------  ---------------------
-        TripSE1  3x TripletAttentionBranch  1 SqueezeExcitation
-        TripSE2  inline, per branch         3 SqueezeExcitation
-        TripSE3  inline, per branch         3 SqueezeExcitation
-        TripSE4  inline, per branch         3 _SEWeights + 1 SE
-
-    Two consequences of that table are easy to miss. TripSE1 and TripSE4 SUM
-    their branches; TripSE2 and TripSE3 divide by 3. And the gate activation is
-    built on ``(B, D1, D2, 1)`` in TripSE1, TripSE2 and TripSE3, but on the
-    full permuted shape ``(B, D1, D2, D3)`` in TripSE4, because TripSE4 is the
-    only variant whose gate sees a 3-D tensor.
-
-Foundational Mathematics:
-    Writing ``Z(x) = [mean_c(x); max_c(x)]`` for Z-pooling and ``P_i`` for the
-    i-th axis permutation, one triplet branch is::
-
-        b_i(x) = P_i^-1 [ P_i x ⊗ σ(BN(Conv_k(Z(P_i x)))) ]
-
-    TripSE1 fuses by summation, then gates channels: ``SE(Σ_i b_i(x))``.
-    TripSE2 and TripSE3 average their branches instead, ``(1/3) Σ_i``. TripSE4
-    is the only variant that forms a genuinely 3D gate. Instead of multiplying
-    a spatial map ``(B, D1, D2, 1)`` by a channel map ``(B, 1, 1, D3)``, it
-    adds their LOGITS and applies one sigmoid::
-
-        a_i(x) = σ( BN(Conv_k(Z(P_i x))) + SElogits(P_i x) )
-               → (B, D1, D2, D3)
-
-    Adding in the logit domain is not the same operation as multiplying two
-    sigmoids. That is why TripSE4 needs :class:`_SEWeights`, which returns
-    pre-sigmoid logits, rather than the standard SE layer, which returns a
-    post-sigmoid product.
+None of the five classes here validate constructor arguments: a bad
+``reduction_ratio`` or ``kernel_size`` surfaces later as a Keras or Conv2D
+error, not at construction time. This behavior is unchanged — see
+``plans/plan-2026-07-27T130643-38c5646a/decisions.md``
+D-012.
 
 References:
-    - Alhazmi, A., & Altahhan, A. (2025). "Achieving 3D Attention via Triplet
-      Squeeze and Excitation Block". (https://arxiv.org/abs/2505.05943)
-    - Misra, D., et al. (2021). "Rotate to Attend: Convolutional Triplet
-      Attention Module". WACV.
-    - Hu, J., Shen, L., & Sun, G. (2018). "Squeeze-and-Excitation Networks".
+    - Alhazmi, A., & Altahhan, A. (2025). Achieving 3D Attention via Triplet
+      Squeeze and Excitation Block. (https://arxiv.org/abs/2505.05943)
+    - Misra, D., et al. (2021). Rotate to Attend: Convolutional Triplet
+      Attention Module. WACV.
+    - Hu, J., Shen, L., & Sun, G. (2018). Squeeze-and-Excitation Networks.
       CVPR.
-
-Rubric R6 — accepted deviation (constructor validation is ABSENT here):
-    None of the five public classes in this module raise ``ValueError`` from
-    ``__init__``: :class:`TripletAttentionBranch`, :class:`TripSE1`,
-    :class:`TripSE2`, :class:`TripSE3`, :class:`TripSE4`. ``reduction_ratio``,
-    ``kernel_size`` and ``permute_pattern`` are all accepted unchecked. A
-    ``reduction_ratio`` of ``0``, or a negative ``kernel_size``, surfaces later
-    as a Keras or Conv2D error, not as a named argument error at the
-    construction site.
-
-    This is recorded as a DEVIATION, not a pass. Plan
-    ``plan-2026-07-27T130643-38c5646a`` left it alone on purpose. That plan's
-    governing invariant is behavior preservation, and adding a
-    ``raise ValueError`` where none exists is a real behavior change: code that
-    constructs ``TripSE1(reduction_ratio=0.0)`` succeeds today and would start
-    failing. Adding validation is a correctness improvement, but it belongs in
-    a plan that is allowed to change behavior, together with the tests that pin
-    the new messages. See ``decisions.md`` D-012 of that plan.
-
-    WHAT NOT TO DO: don't add the validation "while you are in here". Do it as
-    its own change, with tests, or leave it documented as it is.
 """
 
 # ---------------------------------------------------------------------
@@ -139,7 +67,7 @@ class TripletAttentionBranch(layers.Layer):
     spatial attention map is broadcast-multiplied onto the permuted input,
     then the inverse permutation restores the original axis order.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -193,9 +121,8 @@ class TripletAttentionBranch(layers.Layer):
     :raises ValueError: From ``build()``, if the input shape is not 4D.
 
     .. note::
-       **Rubric R6 deviation** — this ``__init__`` performs NO argument
-       validation. See the "Rubric R6 — accepted deviation" section of the
-       module docstring for why that is recorded rather than fixed.
+       This ``__init__`` does not validate its arguments. See the module
+       docstring for why that is unchanged rather than fixed.
     """
 
     def __init__(
@@ -311,11 +238,8 @@ class TripletAttentionBranch(layers.Layer):
         # 3. Attention Map Generation
         attention = self.conv(pooled)
         attention = self.batch_norm(attention, training=training)
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 — forward `training=`
-        # EXPLICITLY. Don't drop back to `self.sigmoid(attention)` because "Keras
-        # propagates it anyway": `CallContext.training` is a single mutable slot
-        # nobody restores, and injecting that at `self.batch_norm` measured this
-        # gate receiving `False` on a `training=True` call. See decisions.md D-015.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015: forward training= to
+        # self.sigmoid explicitly -- CallContext.training measured False here under training=True otherwise. See decisions.md.
         attention = self.sigmoid(attention, training=training)
 
         # 4. Apply Attention
@@ -379,16 +303,12 @@ class TripSE1(layers.Layer):
     Squeeze-and-Excitation block performs channel-wise recalibration on
     the fused result.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
-        │  TripSE1 — three gated branches, SUM, then a single SE   │
-        │                                                         │
-        │  Fusion topology 1 of 4, POST-fusion SE. Branches are    │
-        │  gated on their own, SUMMED, and ONE SE block sees only  │
-        │  the sum.                                               │
+        │  TripSE1 — three gated branches, sum, then a single SE   │
         └─────────────────────────────────────────────────────────┘
 
         Input  [B, H, W, C]
@@ -404,11 +324,11 @@ class TripSE1(layers.Layer):
         │ no SE anywhere inside a branch                  │
         └───────────────────────┬─────────────────────────┘
                                 ▼
-        element-wise SUM of the 3 branch outputs
+        element-wise sum of the 3 branch outputs
                   ▼
         ┌─────────────────────────────────────────────────┐
-        │ se   SqueezeExcitation, the only SE block, and  │
-        │      it runs AFTER the fusion                   │
+        │ se   SqueezeExcitation, the only SE block, runs │
+        │      after the fusion                            │
         └───────────────────────┬─────────────────────────┘
                                 ▼
         Output  [B, H, W, C]
@@ -435,9 +355,8 @@ class TripSE1(layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     .. note::
-       **Rubric R6 deviation** — this ``__init__`` performs NO argument
-       validation. See the "Rubric R6 — accepted deviation" section of the
-       module docstring for why that is recorded rather than fixed.
+       This ``__init__`` does not validate its arguments. See the module
+       docstring for why that is unchanged rather than fixed.
     """
 
     def __init__(
@@ -453,12 +372,11 @@ class TripSE1(layers.Layer):
     ) -> None:
         """Store the configuration and create every sub-layer.
 
-        SE placement for this variant: one SqueezeExcitation AFTER the fusion. The three branch outputs are
-        combined by SUM. The three branches are TripletAttentionBranch instances, so this is
-        the only variant that reuses that class. No argument is validated: see the module
-        docstring's "Rubric R6" section.
-
-        See the class docstring for the parameter reference.
+        SE placement for this variant: one SqueezeExcitation after the fusion.
+        The three branch outputs are summed; the three branches are
+        TripletAttentionBranch instances, so this is the only variant that
+        reuses that class. See the class docstring for the parameter
+        reference.
         """
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
@@ -533,7 +451,7 @@ class TripSE1(layers.Layer):
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Run the three branches, SUM them, then recalibrate channels.
+        """Run the three branches, sum them, then recalibrate channels.
 
         :param inputs: 4-D input, ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
@@ -548,7 +466,7 @@ class TripSE1(layers.Layer):
         out_cw = self.branch_cw(inputs, training=training)
         out_hc = self.branch_hc(inputs, training=training)
 
-        # TripSE1 SUMS its branches; TripSE2 and TripSE3 divide by 3 instead.
+        # TripSE1 sums its branches; TripSE2 and TripSE3 divide by 3 instead.
         # The SE block that follows recalibrates channels, so it absorbs the
         # magnitude difference the sum introduces.
         combined = ops.add(ops.add(out_hw, out_cw), out_hc)
@@ -597,16 +515,12 @@ class TripSE2(layers.Layer):
     Triplet Attention core (Z-Pool, Conv, BN, Sigmoid) on the SE-refined
     features. Outputs are inverse-permuted and averaged.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
-        │  TripSE2 — per-branch SE first, gate second, AVERAGE     │
-        │                                                         │
-        │  Fusion topology 2 of 4, PRE-process SE. Every branch    │
-        │  owns an SE block, applied BEFORE the gate. The three    │
-        │  outputs are AVERAGED.                                  │
+        │  TripSE2 — per-branch SE first, gate second, average     │
         └─────────────────────────────────────────────────────────┘
 
         Input  [B, H, W, C]
@@ -620,7 +534,7 @@ class TripSE2(layers.Layer):
         │   permute  ►  x  [B, D1, D2, D3]                │
         │        ▼                                        │
         │   se_*   SqueezeExcitation  ►  x_se             │
-        │          channel recalibration comes FIRST      │
+        │          channel recalibration comes first      │
         │        ▼                                        │
         │   Z-pool(x_se) ► conv_* ► bn_* ► gate_*         │
         │          the gate is a spatial map              │
@@ -628,9 +542,9 @@ class TripSE2(layers.Layer):
         │   x_se * gate  ►  inverse permute               │
         └───────────────────────┬─────────────────────────┘
                                 ▼
-        AVERAGE of the 3 branch outputs, sum / 3
+        average of the 3 branch outputs, sum / 3
                   ▼
-        Output  [B, H, W, C].  No SE after the fusion.
+        Output  [B, H, W, C]. No SE after the fusion.
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -654,9 +568,8 @@ class TripSE2(layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     .. note::
-       **Rubric R6 deviation** — this ``__init__`` performs NO argument
-       validation. See the "Rubric R6 — accepted deviation" section of the
-       module docstring for why that is recorded rather than fixed.
+       This ``__init__`` does not validate its arguments. See the module
+       docstring for why that is unchanged rather than fixed.
     """
 
     def __init__(
@@ -672,12 +585,9 @@ class TripSE2(layers.Layer):
     ) -> None:
         """Store the configuration and create every sub-layer.
 
-        SE placement for this variant: one SqueezeExcitation per branch, BEFORE the Z-pool. The three branch outputs are
-        combined by AVERAGE. The branch body is written inline rather than reusing
-        TripletAttentionBranch; the R13 comment below says why. No argument is validated: see the module
-        docstring's "Rubric R6" section.
-
-        See the class docstring for the parameter reference.
+        SE placement for this variant: one SqueezeExcitation per branch, before
+        the Z-pool. The three branch outputs are combined by averaging. See the
+        class docstring for the parameter reference.
         """
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
@@ -688,26 +598,11 @@ class TripSE2(layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
-        # Each branch needs its own SE and Conv blocks, because the permuted
-        # shapes differ.
-        #
-        # R13 cross-reference: TripSE2, TripSE3 and TripSE4 each write the
-        # permute / Z-pool / conv / BN / gate / inverse-permute sequence inline
-        # instead of composing `TripletAttentionBranch`, which TripSE1 does
-        # reuse. That is not accidental copy-paste, and it must not be "cleaned
-        # up" by swapping in the branch class. Each variant splices the SE block
-        # into a DIFFERENT point of the sequence, and `TripletAttentionBranch`
-        # exposes no seam there.
-        #   * TripSE2 puts SE between the permute and the Z-pool, so the Z-pool
-        #     sees SE-refined features (`x_se`), not the raw permuted input.
-        #   * TripSE3 runs SE and the spatial path in parallel off the same
-        #     permuted input, then multiplies the two results.
-        #   * TripSE4 needs the spatial path's PRE-sigmoid logits, so it can add
-        #     them to `_SEWeights` logits. The branch class returns a post-gate
-        #     product instead.
-        # Folding these into one parameterized branch would either change op
-        # order or produce a leaky abstraction with a mode flag per variant. The
-        # duplication is the intended outcome, not an oversight.
+        # Written inline rather than composing TripletAttentionBranch: each
+        # variant splices its SE block into a different point of the
+        # permute/Z-pool/conv/gate sequence, and the branch class exposes no
+        # seam for that. Each branch needs its own SE and Conv blocks too,
+        # since the permuted shapes differ per axis pair.
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
 
@@ -869,16 +764,12 @@ class TripSE3(layers.Layer):
     by the spatial attention map, producing a joint spatial-channel
     attention. Results are inverse-permuted and averaged.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
-        │  TripSE3 — per-branch SE and gate in PARALLEL, AVERAGE   │
-        │                                                         │
-        │  Fusion topology 3 of 4, PARALLEL. The channel and the   │
-        │  spatial path both read the SAME x. Their results are    │
-        │  MULTIPLIED, and the branches are AVERAGED.             │
+        │  TripSE3 — per-branch SE and gate in parallel, average    │
         └─────────────────────────────────────────────────────────┘
 
         Input  [B, H, W, C]
@@ -890,7 +781,7 @@ class TripSE3(layers.Layer):
         ┌─────────────────────────────────────────────────┐
         │ each branch, two parallel paths:                │
         │   permute  ►  x  [B, D1, D2, D3]                │
-        │        │      both paths read this SAME x       │
+        │        │      both paths read this same x        │
         │        ├───────────────────┐                    │
         │        ▼                   ▼                    │
         │   se_*(x)             Z-pool(x) ► conv_*        │
@@ -899,15 +790,15 @@ class TripSE3(layers.Layer):
         │                       [B, D1, D2, 1]            │
         │        │                   │                    │
         │        └─────────┬─────────┘                    │
-        │                  ▼   element-wise MULTIPLY      │
+        │                  ▼   element-wise multiply       │
         │   x_se_scaled × att_spatial                     │
         │                  ▼                              │
         │   inverse permute                               │
         └───────────────────────┬─────────────────────────┘
                                 ▼
-        AVERAGE of the 3 branch outputs, sum / 3
+        average of the 3 branch outputs, sum / 3
                   ▼
-        Output  [B, H, W, C].  No SE after the fusion.
+        Output  [B, H, W, C]. No SE after the fusion.
 
     :param reduction_ratio: SE bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -931,9 +822,8 @@ class TripSE3(layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     .. note::
-       **Rubric R6 deviation** — this ``__init__`` performs NO argument
-       validation. See the "Rubric R6 — accepted deviation" section of the
-       module docstring for why that is recorded rather than fixed.
+       This ``__init__`` does not validate its arguments. See the module
+       docstring for why that is unchanged rather than fixed.
     """
 
     def __init__(
@@ -949,12 +839,10 @@ class TripSE3(layers.Layer):
     ) -> None:
         """Store the configuration and create every sub-layer.
 
-        SE placement for this variant: one SqueezeExcitation per branch, PARALLEL to the spatial path. The three branch outputs are
-        combined by AVERAGE. The two paths read the same permuted tensor and their results are
-        multiplied. No argument is validated: see the module
-        docstring's "Rubric R6" section.
-
-        See the class docstring for the parameter reference.
+        SE placement for this variant: one SqueezeExcitation per branch,
+        parallel to the spatial path. The two paths read the same permuted
+        tensor and their results are multiplied; the three branch outputs are
+        then averaged. See the class docstring for the parameter reference.
         """
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
@@ -965,13 +853,9 @@ class TripSE3(layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
-        # TripSE3 uses the shared SqueezeExcitation, not the private _SEWeights,
-        # and it can because multiplication is associative. The source formula is
-        # `out = x * (att_spatial * weights_se)`, which equals
-        # `(x * weights_se) * att_spatial`, which is `SE(x) * att_spatial`. So the
-        # standard SE block's own output is exactly what this branch needs, and
-        # the pre-sigmoid weights never have to be extracted. TripSE4 cannot use
-        # this trick, because it ADDS logits rather than multiplying gates.
+        # Uses the shared SqueezeExcitation rather than the private
+        # _SEWeights: multiplication is associative, so SE(x) * att_spatial
+        # already equals x * (att_spatial * weights_se).
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
 
@@ -1125,31 +1009,19 @@ class _SEWeights(layers.Layer):
     exactly what separates it from a full Squeeze-and-Excitation block. TripSE4
     needs the logits so it can add them to spatial logits in logit space.
 
-    This class is private and gets no Architecture Overview; the four sub-layer
-    line above is the whole graph.
+    Its bottleneck width differs from the standard SE block's:
+    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`
+    computes ``max(1, int(round(C * reduction_ratio)))``; this class truncates
+    instead, ``max(1, int(C * reduction_ratio))``. They agree except when the
+    product lands between integers (measured: ``C=24, reduction_ratio=0.0625``
+    gives 1 channel here against 2 there). Left unaligned because matching them
+    would change the weight shape of every existing TripSE4 checkpoint.
 
-    "Mirrors SE" is not exact. The difference is the bottleneck width.
-    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation` computes
-    ``max(1, int(round(C * reduction_ratio)))``. This class computes
-    ``max(1, int(C * reduction_ratio))``, so it TRUNCATES where the shared layer
-    ROUNDS. They agree on most configurations and diverge when the product lands
-    between integers. Measured 2026-08-27: ``C=24, reduction_ratio=0.0625``
-    gives 1 channel here against 2 there. Recorded rather than changed, because
-    aligning them would alter the weight SHAPE of every existing TripSE4
-    checkpoint.
-
-    **Private on purpose.** The leading underscore carries weight. This class is
-    not exported from ``attention/__init__.py``, not registered in
+    Not exported from ``attention/__init__.py`` or registered in
     ``attention/factory.py``, and has no consumer outside :class:`TripSE4`. It
-    is NOT a substitute for
-    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`. It
-    stops one step short of it, so using it as a general SE block silently drops
-    the gating. It still carries
-    ``@register_dl_technique("dl_techniques.layers.attention.tripse_attention")``,
-    because it is a real
-    sub-layer of a serializable layer and must resolve when a TripSE4 ``.keras``
-    checkpoint is loaded. Don't remove that decorator on the grounds that the
-    class is private.
+    still carries ``@register_dl_technique(...)`` because it is a sub-layer of
+    a serializable layer and must resolve when a TripSE4 ``.keras`` checkpoint
+    loads.
 
     :param reduction_ratio: Bottleneck reduction ratio.
     :type reduction_ratio: float
@@ -1201,21 +1073,12 @@ class _SEWeights(layers.Layer):
         self.conv_restore = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # DECISION plan_2026-06-14_0c5d4a21/D-005
-        # conv_reduce and conv_restore are created here, in build(). Their filter
-        # counts depend on the build-time input_channels, so they cannot be fully
-        # instantiated in __init__. Don't drop the two guards below. The explicit
-        # child .build(...) calls are NOT self-guarded by Keras, so a second
-        # build() (from_config, or functional reuse) would re-create the convs
-        # and re-build already-built children, hitting the "cannot add state to
-        # an already-built layer" lock. The `if self.built: return` early return
-        # plus the `is None` sentinels make build() idempotent while leaving the
-        # first-build path byte-identical.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_0c5d4a21/D-005: keep the `if self.built` and
+        # `is None` guards -- a second build() would otherwise re-create conv_reduce/conv_restore and hit the already-built lock. See decisions.md.
         """Create the two 1x1 convolutions and build every sub-layer.
 
         The bottleneck width is ``max(1, int(C * reduction_ratio))``, which
-        TRUNCATES. The shared ``SqueezeExcitation`` layer rounds instead; the
+        truncates. The shared ``SqueezeExcitation`` layer rounds instead; the
         class docstring records the divergence and why it is not aligned.
 
         :param input_shape: 4-D input shape ``(B, H, W, C)``.
@@ -1278,11 +1141,8 @@ class _SEWeights(layers.Layer):
         x = self.global_pool(inputs)
         # Excitation (MLP)
         x = self.conv_reduce(x, training=training)
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 (second site, same
-        # argument) — the bottleneck activation is handed `training=` explicitly.
-        # Don't revert to `self.reduction_activation(x)`: a context-poisoning
-        # `global_pool` measured it receiving `False` while `_SEWeights` was
-        # called with `training=True`. See decisions.md D-015.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-015 (second site): forward
+        # training= to self.reduction_activation explicitly -- measured False under training=True otherwise. See decisions.md.
         x = self.reduction_activation(x, training=training)
         logits = self.conv_restore(x, training=training)
         # Return logits (pre-sigmoid) for addition in TripSE4
@@ -1294,8 +1154,8 @@ class _SEWeights(layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Return the channel-logit shape ``(B, 1, 1, C)``.
 
-        The spatial extent is reduced away here: this sub-layer emits ONE logit
-        per channel, not a feature map.
+        The spatial extent is reduced away here: this sub-layer emits one
+        logit per channel, not a feature map.
 
         :param input_shape: 4-D input shape ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -1335,17 +1195,12 @@ class TripSE4(layers.Layer):
     three branch outputs are summed and refined by a final
     Squeeze-and-Excitation block.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
-        │  TripSE4 — logit-space fusion, SUM, then a final SE      │
-        │                                                         │
-        │  Fusion topology 4 of 4, LOGIT-space fusion. Spatial and │
-        │  channel logits are ADDED before a SINGLE sigmoid, which │
-        │  gives one true 3-D gate. Branches are SUMMED, and a     │
-        │  final SE closes the block.                             │
+        │  TripSE4 — logit-space fusion, sum, then a final SE       │
         └─────────────────────────────────────────────────────────┘
 
         Input  [B, H, W, C]
@@ -1361,20 +1216,20 @@ class TripSE4(layers.Layer):
         │        ▼                   ▼                    │
         │   Z-pool(x) ► conv_*   se_logits_*(x)           │
         │   ► bn_*               a _SEWeights layer       │
-        │   NO gate here         NO sigmoid               │
+        │   no gate here          no sigmoid               │
         │   logits_spatial       logits_channel           │
         │   [B, D1, D2, 1]       [B, 1, 1, D3]            │
         │        │                   │                    │
         │        └─────────┬─────────┘                    │
-        │                  ▼   broadcast ADD, in LOGITS   │
+        │                  ▼   broadcast add, in logits    │
         │   fused logits  [B, D1, D2, D3]                 │
         │                  ▼                              │
-        │   gate_*, ONE activation  ►  3-D attention      │
+        │   gate_*, one activation  ►  3-D attention       │
         │                  ▼                              │
         │   x * attention_3d  ►  inverse permute          │
         └───────────────────────┬─────────────────────────┘
                                 ▼
-        element-wise SUM of the 3 branch outputs
+        element-wise sum of the 3 branch outputs
                   ▼
         ┌─────────────────────────────────────────────────┐
         │ final_se   SqueezeExcitation, after the fusion  │
@@ -1413,9 +1268,8 @@ class TripSE4(layers.Layer):
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     .. note::
-       **Rubric R6 deviation** — this ``__init__`` performs NO argument
-       validation. See the "Rubric R6 — accepted deviation" section of the
-       module docstring for why that is recorded rather than fixed.
+       This ``__init__`` does not validate its arguments. See the module
+       docstring for why that is unchanged rather than fixed.
     """
 
     def __init__(
@@ -1433,12 +1287,11 @@ class TripSE4(layers.Layer):
     ) -> None:
         """Store the configuration and create every sub-layer.
 
-        SE placement for this variant: a _SEWeights logit path per branch, ADDED to the spatial logits, plus one SqueezeExcitation after the fusion. The three branch outputs are
-        combined by SUM. This is the only variant whose gate activation sees a full 3-D
-        tensor. No argument is validated: see the module
-        docstring's "Rubric R6" section.
-
-        See the class docstring for the parameter reference.
+        SE placement for this variant: a _SEWeights logit path per branch,
+        added to the spatial logits, plus one SqueezeExcitation after the
+        branches are summed. This is the only variant whose gate activation
+        sees a full 3-D tensor. See the class docstring for the parameter
+        reference.
         """
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
