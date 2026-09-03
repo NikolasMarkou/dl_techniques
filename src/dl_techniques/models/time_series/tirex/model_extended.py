@@ -1,62 +1,28 @@
 """
-Query-token variant of the TiRex forecaster: the pooled decoder of `TiRexCore` is
-replaced by learnable horizon tokens that are appended to the encoded history and
-read out position-wise, giving one distinct latent state per forecast step.
+TiRexExtended and its factory create_tirex_extended, a query-token variant of
+TiRexCore whose pooled decoder is replaced by learnable horizon tokens that
+give one distinct latent state per forecast step.
 
-`TiRexCore` collapses its entire encoded history to a single mean-pooled vector and
-projects that one vector to the whole `(H, Q)` grid. That is cheap and stable, but
-it forces every forecast step to be decoded from *identical* evidence: step 1 and
-step H differ only through the weights of one Dense layer, and the pooling has
-already erased which patch any pattern came from. For short horizons this rarely
-matters; as H grows, the single summary becomes the bottleneck.
+TiRexCore collapses its encoded history to a single mean-pooled vector and
+projects that one vector to the whole horizon grid, so every forecast step is
+decoded from identical evidence. This variant keeps the same front half
+(normalization, patch embedding, mixed LSTM/attention blocks) but appends a
+learnable weight of shape (1, prediction_length, embed_dim), one token per
+forecast step, to the end of the embedded history along the time axis. The
+LSTM sub-layer carries state forward into these tokens, and attention lets a
+token read specific history positions directly; the final normalization's
+last prediction_length states are sliced out (no pooling) and a token-wise
+quantile head maps each to its own quantiles. Under attention_type='window' a
+query token sees only its own window of the augmented sequence, so long-range
+history access falls back onto the recurrent path.
 
-This variant keeps the entire front half of `TiRexCore` — NaN-aware reversible
-instance normalization, mask concatenation onto the feature axis, patch embedding,
-input projection, and the same mixed LSTM/attention block stack — and
-changes only how the horizon representation is formed. A weight of shape
-`(1, prediction_length, embed_dim)` holds one learnable token per forecast step.
-These are broadcast to the batch and concatenated onto the *end* of the embedded
-history along the time axis, so the blocks process a sequence of
-`num_patches + prediction_length` positions. Two mechanisms then populate the
-tokens: the LSTM sub-layer, which is strictly ordered, carries state forward from
-the history positions into the appended tokens; and the attention sub-layer, which
-lets a token read specific positions directly. After the final normalization the
-last `prediction_length` states are sliced out — no pooling anywhere — and a
-token-wise quantile head maps each state to its own `Q` quantiles.
-
-The result is that each horizon step now owns a latent vector rather than sharing
-one, which is what a decoder-style architecture buys, while remaining a single
-forward pass with no autoregressive loop and therefore no compounding of sampled
-errors.
-
-The interaction with the inherited `attention_type` is the non-obvious part and it
-is easy to misread, because the two settings give the query tokens entirely
-different reach. Under the default `'multi_head'` every query token attends over the
-whole augmented sequence, so each horizon token can read any history patch directly.
-Under `attention_type='window'` a query token sees only its own window of that
-sequence: tokens near the start of the appended block can reach the final history
-patches, while later tokens see mostly other query tokens, and long-range access to
-the history falls back onto the recurrent path and depth. Widening
-`attention_window_size` is the knob that changes this in the windowed setting; it is
-inert under the global default.
-
-Two implementation consequences follow from the changed topology and are the
-reason this class cannot simply inherit its parent's plumbing. `build` is
-reimplemented rather than delegated: the blocks and output normalization see a
-sequence longer than the parent's by exactly `prediction_length`, and the head is
-the token-wise `QuantileSequenceHead` over `(B, prediction_length, embed_dim)`
-instead of the parent's flattening `QuantileHead` over a pooled `(B, 1, embed_dim)`.
-It also skips `TiRexCore.build` entirely and calls `keras.Model.build`, since
-running the parent's version would build the sub-layers against the wrong shapes.
-The explicit per-sub-layer builds are required, not stylistic: a `.keras` load
-restores weights before the first call, and any sub-layer still unbuilt at that
-moment has its restored weights silently discarded and re-initialized on the first
-forward pass.
-
-Everything downstream is unchanged from the parent: quantiles are made
-non-crossing by cumulative softplus rather than by a penalty, de-normalization uses
-the last feature's statistics, and the output contract stays `(B, H, Q)`, so
-`predict_quantiles`, `_forecast` and the `Forecast` contract are inherited as-is.
+build() is reimplemented rather than inherited: the blocks and output
+normalization see a sequence longer than the parent's by prediction_length,
+and the head is QuantileSequenceHead rather than the parent's pooled
+QuantileHead. It calls keras.Model.build directly rather than
+TiRexCore.build, since the parent's version would build sub-layers against
+the wrong shapes. predict_quantiles, _forecast and the Forecast contract are
+inherited unchanged from TiRexCore.
 
 References:
     - Auer et al., 2025. TiRex: Zero-Shot Forecasting Across Long and Short
@@ -77,42 +43,45 @@ import numpy as np
 from keras import ops
 from typing import Optional, List, Any, Dict, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.models.tirex.model_extended")
 class TiRexExtended(TiRexCore):
-    """
-    TiRex Extended (Query-Based) Architecture.
+    """TiRex with a query-token decoder instead of mean-pooling.
 
-    This variant differs from the Core architecture in how the prediction representations
-    are formed. Instead of Mean Pooling the historical context and projecting it,
-    this model appends a sequence of learnable 'Query Tokens' to the embedded
-    time series.
+    Architecture:
 
-    Architecture Changes:
-        1.  **Input**: Standard patch embedding of history.
-        2.  **Token Augmentation**: `prediction_length` learnable vectors are
-            concatenated to the end of the sequence.
-        3.  **Processing**: The Mixed Sequential Blocks process the combined sequence
-            [History, Queries]. The LSTM flows state from history into queries;
-            Attention allows queries to look back at specific historical patches.
-        4.  **Output Extraction**: No pooling is performed. The last `prediction_length`
-            vectors are sliced from the sequence.
-        5.  **Head**: These vectors are projected directly to quantiles.
+    .. code-block:: text
 
-    This approach allows for more fine-grained control per time-step and aligns
-    closer to Decoder-style architectures without autoregressive loop overhead.
+        history embedded [B, num_patches, embed_dim]
+             |
+        (append learnable query tokens)
+             |
+             v
+        [B, num_patches + prediction_length, embed_dim]
+             |
+             v
+        ┌──────────────┐
+        │ block 1        │  lstm carries history state into query tokens;
+        │ ...            │  attention lets a query token read history directly
+        │ block N        │
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ output norm    │
+        │ slice last     │  -> [B, prediction_length, embed_dim]
+        │ prediction_len │
+        │ quantile head  │  token-wise, -> [B, prediction_length, Q]
+        └──────────────┘
+
+    No pooling: each forecast step keeps its own latent state instead of
+    sharing one summary vector.
     """
 
     def __init__(
@@ -133,15 +102,11 @@ class TiRexExtended(TiRexCore):
             name: str = "TiRexExtended",
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the TiRexExtended model.
+        """Create the parent TiRexCore graph, then the query-token head.
 
-        All arguments mirror TiRexCore, but the internal graph construction
-        differs for the prediction head and token handling.
+        Every argument mirrors ``TiRexCore``; only the prediction head and
+        token handling differ.
         """
-        # Explicitly pass arguments to the parent TiRexCore.
-        # attention_window_size is surfaced in the signature (was previously
-        # swallowed by **kwargs) and forwarded so it round-trips via get_config.
         super().__init__(
             patch_size=patch_size,
             embed_dim=embed_dim,
@@ -160,14 +125,12 @@ class TiRexExtended(TiRexCore):
             **kwargs
         )
 
-        # NOTE: the learnable query tokens are created in `build()`, not here.
-        # See the D-037 anchor there.
+        # Learnable query tokens are created in build() — see the D-037 anchor there.
         self.query_tokens = None
 
-        # Quantile prediction head
         self.quantile_head = QuantileSequenceHead(
             num_quantiles=len(self.quantile_levels),
-            # Hardcode a safe low value, or dividing the global rate
+            # Capped rather than the global dropout_rate directly.
             dropout_rate=min(self.dropout_rate, 0.1),
             enforce_monotonicity=True,
             use_bias=True,
@@ -175,21 +138,16 @@ class TiRexExtended(TiRexCore):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers explicitly for the query-token (Extended) topology.
+        """Build every sublayer for the query-token topology.
 
-        Cannot delegate to ``TiRexCore.build``: the Extended variant appends
-        ``prediction_length`` learnable query tokens to the embedded history,
-        so the blocks (and output norm) see a LONGER sequence
-        (``num_patches + prediction_length``), and the head is the token-wise
-        ``QuantileSequenceHead`` operating on ``(B, prediction_length, embed_dim)``
-        rather than the pooled ``QuantileHead``.
+        Cannot delegate to ``TiRexCore.build``: the blocks and output norm
+        see a sequence longer by ``prediction_length``, and the head is the
+        token-wise ``QuantileSequenceHead`` over
+        ``(B, prediction_length, embed_dim)`` rather than the parent's
+        pooled ``QuantileHead``.
 
-        Explicit per-sublayer builds are required so a ``.keras`` load restores
-        weights onto already-built sub-layers (see plan D-002).
-
-        Args:
-            input_shape: Raw input shape ``(batch, seq_len, features)``.
+        :param input_shape: Raw input shape ``(batch, seq_len, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if len(input_shape) == 2:
             input_shape = (input_shape[0], input_shape[1], 1)
@@ -201,22 +159,8 @@ class TiRexExtended(TiRexCore):
 
         batch_size, seq_len, features = input_shape[0], input_shape[1], input_shape[2]
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-037
-        # Learnable query tokens for the prediction horizon. CREATED HERE, not
-        # in `__init__` -- do not move it back. `add_weight` in `__init__` was
-        # the only R-001 violation in `models/` and the guide grades it
-        # CRITICAL, because a weight created before `build()` is created
-        # outside whatever scope Keras has arranged for it.
-        # HONESTY NOTE, because it changes what this edit claims: the predicted
-        # CONSEQUENCES did NOT reproduce here. MEASURED before the move -- a
-        # `.keras` round trip with `query_tokens` perturbed to 0.375 restored
-        # 0.375 with a forward delta of exactly 0.000000e+00 against an output
-        # range of 2.604545e+00, and constructing the model inside a
-        # `StatelessScope` did NOT leave the tokens at zero. So this is
-        # compliance with a house rule whose failure mode is latent here, not
-        # the repair of a measured defect; the move is made because the rule
-        # exists and the move is free, and it is recorded as such.
-        # See decisions.md D-037.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-037: create query_tokens here,
+        # not in __init__ — a weight added before build() sits outside Keras's build scope. See decisions.md.
         if self.query_tokens is None:
             self.query_tokens = self.add_weight(
                 shape=(1, self.prediction_length, self.embed_dim),
@@ -229,51 +173,42 @@ class TiRexExtended(TiRexCore):
         masked_features = None if features is None else features * 2
         patch_input_shape = (batch_size, seq_len, masked_features)
 
-        # 1. Patch embedding -> (B, num_patches, 2*embed_dim)
         self.patch_embedding.build(patch_input_shape)
         embedded_shape = self.patch_embedding.compute_output_shape(patch_input_shape)
 
-        # 2. Input projection -> (B, num_patches, embed_dim)
         self.input_projection.build(embedded_shape)
         projected_shape = self.input_projection.compute_output_shape(embedded_shape)
 
-        # 3. Append prediction_length query tokens along the time axis.
+        # Append prediction_length query tokens along the time axis.
         num_patches = projected_shape[1]
         augmented_len = (
             None if num_patches is None else num_patches + self.prediction_length
         )
         current_shape = (projected_shape[0], augmented_len, self.embed_dim)
 
-        # 4. Mixed sequential blocks (shape-preserving) over the augmented sequence
         for block in self.blocks:
             block.build(current_shape)
             current_shape = block.compute_output_shape(current_shape)
 
-        # 5. Output normalization (shape-preserving)
         self.output_norm.build(current_shape)
 
-        # 6. Quantile head: token-wise over the sliced query states
-        #    (B, prediction_length, embed_dim)
+        # Quantile head is token-wise over the sliced query states.
         head_input_shape = (current_shape[0], self.prediction_length, self.embed_dim)
         self.quantile_head.build(head_input_shape)
 
-        # query_tokens is created via add_weight in __init__ (already built).
-        # Skip TiRexCore.build (different topology); go straight to keras.Model.
+        # query_tokens is already built via add_weight above; skip TiRexCore.build
+        # (different topology) and go straight to keras.Model.build.
         keras.Model.build(self, input_shape)
 
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape: ``(batch, prediction_length, num_quantiles)``.
+        """Return the output shape: identical rank-3 contract to ``TiRexCore``.
 
-        Identical rank-3 ``[B, H, Q]`` contract to ``TiRexCore``.
-
-        Args:
-            input_shape: Raw input shape ``(batch, seq_len, features)``.
-
-        Returns:
-            Output shape ``(batch, prediction_length, len(quantile_levels))``.
+        :param input_shape: Raw input shape ``(batch, seq_len, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(batch, prediction_length, len(quantile_levels))``.
+        :rtype: Tuple[Optional[int], ...]
         """
         batch_size = input_shape[0]
         return (batch_size, self.prediction_length, len(self.quantile_levels))
@@ -283,27 +218,25 @@ class TiRexExtended(TiRexCore):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass with Query Token appending.
+        """Normalize, embed history, append query tokens, then decode token-wise.
 
-        Logic:
-            1. Mask & Normalize (NaN-safe)
-            2. Embed History -> [Batch, Patches, Dim]
-            3. Append Learnable Queries -> [Batch, Patches + Pred_Len, Dim]
-            4. Process via Mixed Blocks (LSTM flows history -> queries)
-            5. Slice last Pred_Len tokens
-            6. Project to Quantiles
+        :param inputs: Input tensor, ``[batch, sequence_length, features]`` or
+            ``[batch, sequence_length]`` (expanded to 3D).
+        :type inputs: keras.KerasTensor
+        :param training: Whether dropout runs in training mode.
+        :type training: Optional[bool]
+        :return: Quantile predictions,
+            ``[batch, prediction_length, num_quantiles]``.
+        :rtype: keras.KerasTensor
         """
-        # Ensure 3D input
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
 
-        # 1. HANDLE MASKING (before normalization to avoid NaN propagation)
+        # Mask before normalization, so NaNs never reach the statistics.
         nan_mask = ops.logical_not(ops.isnan(inputs))
         nan_mask = ops.cast(nan_mask, dtype=inputs.dtype)
         clean_inputs = ops.where(ops.isnan(inputs), ops.zeros_like(inputs), inputs)
 
-        # 2. CALCULATE STATISTICS & NORMALIZE (NaN-safe Reversible Norm)
         if self.use_normalization:
             valid_count = ops.maximum(ops.sum(nan_mask, axis=1, keepdims=True), 1e-7)
             mean = ops.sum(clean_inputs * nan_mask, axis=1, keepdims=True) / valid_count
@@ -317,78 +250,46 @@ class TiRexExtended(TiRexCore):
             mean = None
             std = None
 
-        # 3. CONCATENATE DATA WITH MASK
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # 4. ENCODE HISTORY
         x_patches = self.patch_embedding(x_with_mask, training=training)
         x_embedded = self.input_projection(x_patches, training=training)
-        # x_embedded shape: (Batch, Num_Patches, Embed_Dim)
 
-        # ---------------------------------------------------------------------
-        # 5. APPEND LEARNABLE PREDICTION TOKENS
-        # ---------------------------------------------------------------------
         batch_size = ops.shape(x_embedded)[0]
 
-        # Broadcast learnable query tokens to batch size
-        # self.query_tokens shape: (1, Pred_Len, Embed_Dim)
+        # Broadcast the learnable query tokens to the batch and append them
+        # along the time axis: (B, num_patches + prediction_length, embed_dim).
         prediction_tokens = ops.broadcast_to(
             self.query_tokens,
             (batch_size, self.prediction_length, self.embed_dim)
         )
-
-        # Concatenate along time dimension (axis 1)
-        # New Shape: (Batch, Num_Patches + Prediction_Length, Embed_Dim)
         mixed_sequence = ops.concatenate([x_embedded, prediction_tokens], axis=1)
 
-        # ---------------------------------------------------------------------
-        # 6. PROCESS SEQUENCE
-        # ---------------------------------------------------------------------
         hidden_states = mixed_sequence
-
-        # Iterate through MixedSequentialBlocks
-        # The LSTM component allows information to flow from the history patches
-        # into the query tokens. The Attention component allows query tokens
-        # to attend back to specific historical events.
         for block in self.blocks:
             hidden_states = block(hidden_states, training=training)
 
         hidden_states = self.output_norm(hidden_states, training=training)
 
-        # ---------------------------------------------------------------------
-        # 7. EXTRACT PREDICTION PART (No Pooling)
-        # ---------------------------------------------------------------------
-        # We only care about the states of our Query Tokens (the end of the sequence).
-        # Slice the last 'prediction_length' steps.
-        # Shape: (Batch, Prediction_Length, Embed_Dim)
+        # No pooling: keep only the query-token states, at the sequence end.
         prediction_states = hidden_states[:, -self.prediction_length:, :]
 
-        # 8. PREDICT (Normalized Space)
-        # The head operates token-wise
-        # It projects (Batch, Pred_Len, Dim) -> (Batch, Pred_Len, Num_Quantiles)
         quantile_predictions = self.quantile_head(prediction_states, training=training)
 
-        # 9. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
             norm_mean, norm_std = self._get_target_stats(mean, std)
-            # Broadcasting: (B, PredLen, Quantiles) * (B, 1, 1) + (B, 1, 1)
             quantile_predictions = (quantile_predictions * norm_std) + norm_mean
 
         return quantile_predictions
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return config for serialization.
+        """Return the constructor configuration, inherited from ``TiRexCore``.
 
-        Since we explicitly accept the same arguments as TiRexCore,
-        super().get_config() captures most of what we need.
+        :return: The configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         return super().get_config()
 
-
-# ---------------------------------------------------------------------
-# Factory Function for the Extended Variant
-# ---------------------------------------------------------------------
 
 def create_tirex_extended(
     variant: str = "medium",
@@ -397,25 +298,25 @@ def create_tirex_extended(
     quantile_levels: List[float] = DEFAULT_QUANTILES,
     **kwargs
 ) -> TiRexExtended:
-    """
-    Convenience function to create TiRex models from predefined variants.
+    """Create a TiRexExtended model from a predefined variant, then build it.
 
-    Args:
-        variant: String, model variant ("tiny", "small", "medium", "large")
-        input_length: Integer, length of input sequences
-        prediction_length: Integer, length of prediction horizon
-        quantile_levels: List of quantile levels to predict
-        **kwargs: Additional arguments passed to the model constructor
+    :param variant: Model variant (``"tiny"``, ``"small"``, ``"medium"``,
+        ``"large"``).
+    :type variant: str
+    :param input_length: Length of input sequences.
+    :type input_length: int
+    :param prediction_length: Length of the prediction horizon.
+    :type prediction_length: int
+    :param quantile_levels: Quantile levels to predict.
+    :type quantile_levels: List[float]
+    :param kwargs: Additional arguments passed to the model constructor.
+    :return: A built :class:`TiRexExtended` instance.
+    :rtype: TiRexExtended
 
-    Returns:
-        TiRexCore model instance
+    Example::
 
-    Example:
-        >>> # Create TiRex-Extended-Small for quick experiments
-        >>> model = create_tirex_extended("small", input_length=96, prediction_length=24)
-        >>>
-        >>> # Create TiRex-Extended-Large for production forecasting
-        >>> model = create_tirex_extended("large", input_length=256, prediction_length=48)
+        model = create_tirex_extended("small", input_length=96, prediction_length=24)
+        model = create_tirex_extended("large", input_length=256, prediction_length=48)
     """
     model = TiRexExtended.from_variant(
         variant,
@@ -424,7 +325,6 @@ def create_tirex_extended(
         **kwargs
     )
 
-    # Build the model with a dummy input
     dummy_input = np.zeros((1, input_length, 1), dtype='float32')
     _ = model(dummy_input)
 
@@ -434,5 +334,3 @@ def create_tirex_extended(
     )
 
     return model
-
-# ---------------------------------------------------------------------

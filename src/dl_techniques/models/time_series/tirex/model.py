@@ -1,98 +1,27 @@
 """
-TiRex-style probabilistic forecaster: patch tokens processed by a stack of blocks
-that mix LSTM recurrence with self-attention, decoded in one shot into
-non-crossing quantiles under reversible per-instance normalization.
+TiRexCore and its factories create_tirex_model/create_tirex_by_variant, a
+patch-token forecaster whose blocks mix LSTM recurrence with self-attention,
+decoded in one shot into non-crossing quantiles under reversible
+per-instance normalization.
 
-The design answers three problems at once, and each answer costs something worth
-knowing about.
-
-The first is *scale*. A forecaster trained across many series sees windows whose
-level and amplitude differ by orders of magnitude; a network fed those raw learns
-the scale instead of the shape. Every window is therefore z-scored along its own
-time axis before anything else touches it and the prediction is mapped back
-afterwards, `y = q * std + mean`. The statistics are per-series and per-feature,
-computed over `axis=1` — never over the batch — so the model becomes indifferent to
-level and scale without any leakage between examples. Missing data is folded into
-the same step: NaNs are located, replaced by zeros, and the mean/variance sums are
-divided by the *count of valid steps* rather than the window length, so a gap
-neither poisons the statistics nor propagates a NaN forward. The validity mask is
-not then discarded — it is concatenated onto the feature axis, doubling it, so the
-encoder can tell an imputed zero from an observed zero. This is why the patch
-embedding is constructed at `embed_dim * 2` and immediately projected back down to
-`embed_dim`: the doubled width carries the mask, and shape threading in `build`
-must mirror that doubling or the restored weights will not fit.
-
-The second is *sequence length*. Point-wise attention over a long lookback is
-quadratic in the number of timesteps and spends most of its capacity on
-neighbouring samples that carry nearly identical information. Segmenting the
-series into patches of `patch_size` and embedding each as one token cuts the
-sequence by that factor and gives each token a local waveform rather than a scalar
-— the same trade PatchTST makes.
-
-The third is *inductive bias*. Attention has no notion of order beyond what a
-positional encoding supplies, while an LSTM has order built in but struggles to
-reach across a long context. A `mixed` block runs both in series, pre-normalized
-and residual at each stage: `x = x + LSTM(norm(x))`, then `x = x + Attn(norm(x))`,
-then `x = x + FFN(norm(x))`. Attention therefore operates on tokens that already
-carry recurrent state, so the ordering information it needs is inside the values
-rather than added to them, and no positional embedding exists anywhere in this
-model. Per-block `block_types` let the stack be tuned from purely recurrent to
-purely attentional; the `lstm` and `transformer` variants are the same block with
-one of the two sub-layers omitted.
-
-Attention follows the published TiRex by default and the windowed divergence is now
-an opt-in, chosen through `attention_type`. The default `'multi_head'` is the
-factory's key for standard full self-attention — there is no key spelled `'global'`
-— so every patch token attends to every other, at `O(L^2)` in the number of patches.
-Passing `attention_type='window'` restores the earlier behaviour: each token then
-attends only within `attention_window_size` tokens (default 8) at `O(L*w)`, and
-long-range coupling falls back onto the LSTM path and the stacking of windows across
-depth. The knob exists because the two answers differ in kind, not degree — a
-windowed stack cannot form a single long-range association at any depth cheaply, and
-a global stack pays quadratically for one it may not need — and because a model whose
-attention span is fixed in the source cannot be compared against the paper it cites.
-`attention_window_size` stays wired through `attention_args` under both settings, and as
-of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011) it is `MixedSequentialBlock`, not the
-attention factory, that scopes it. `create_attention_layer` used to filter keyword
-arguments against the target type's own parameter list and drop the rest rather than
-raising; it is now STRICT and raises on any key the target type does not declare, which
-this model's unconditional `attention_args={'window_size': ...}` would otherwise trip at
-its own `'multi_head'` default. The block treats `window_size` as a documented-conditional
-key and removes it on the branches whose attention type does not accept it, so both paths
-now behave as this docstring has always described:
-`'multi_head'` genuinely ignores the knob, and `'window'` genuinely uses it. That second
-half was itself broken until the same commit — the block's `'window'` branch was injecting
-a `normalization='softmax'` key `WindowAttention` has no parameter for, which the old
-silent drop hid. Every OTHER `attention_args` key still reaches the factory verbatim, so a
-misspelled one is now a loud `ValueError` instead of a silent no-op. The remaining block
-internals are fixed rather than exposed: RMSNorm, GeGLU feed-forward and Mish
-activations throughout.
-
-Decoding is one-shot and pooled. After the final normalization the patch axis is
-collapsed by a mean — the whole encoded history becomes a single `(B, 1, embed_dim)`
-summary — and the head projects that summary directly to
-`prediction_length * num_quantiles` values, reshaped to `(B, H, Q)`. There is no
-autoregressive loop, so horizon cost is constant and no error compounds across
-steps; the price is that the head cannot condition step `h` on step `h-1`, and that
-mean-pooling discards *which* patch a pattern came from. Pooling with
-`keepdims=True` is load-bearing rather than cosmetic: the head flattens its input,
-which requires a statically known sequence length, and a length of exactly 1
-supplies one. Quantile crossing is structurally prevented instead of penalized —
-the head emits `r`, then `Q_0 = r_0` and `Q_i = Q_{i-1} + softplus(r_i)`, so the
-outputs are non-decreasing by construction and no loss term or post-hoc sort is
-needed. For multivariate input the de-normalization uses the statistics of the
-**last** feature, which is the model's standing convention for which column is the
-target.
-
-`predict_quantiles` maps user-requested levels onto the levels the model was
-actually trained with, falling back to the nearest trained level and logging a
-warning rather than interpolating: an interpolated 0.95 from a model that only
-learned 0.9 would look like a calibrated quantile while being nothing of the kind.
-The median is extracted as the point forecast because it is the minimizer of
-absolute error under the quantile loss. When `use_layer_norm=False` the output
-normalization becomes `keras.layers.Identity` rather than a `Lambda` identity —
-lambdas serialize as pickled Python and do not survive a portable `.keras`
-round-trip.
+Every window is z-scored along its own time axis before anything else touches
+it (statistics per series and per feature, never over the batch), and the
+prediction is mapped back with y = q * std + mean. Missing values are zeroed
+and excluded from the statistics by dividing by the count of valid steps, and
+the validity mask is concatenated onto the feature axis so the encoder can
+tell an imputed zero from an observed one. The series is segmented into
+patches before encoding, cutting sequence length by patch_size. Each `mixed`
+block runs LSTM then attention then a feed-forward layer in series, each
+pre-normalized and residual, so attention operates on tokens that already
+carry recurrent state and no positional embedding is needed; block_types lets
+each block be purely recurrent, purely attentional, or both. attention_type
+defaults to 'multi_head' (full self-attention, matching the published TiRex);
+'window' restricts each token to attention_window_size neighbors. Decoding is
+one-shot: the patch axis is mean-pooled to one summary token, and the head
+projects it directly to prediction_length * num_quantiles values with
+quantile crossing prevented by construction (Q_i = Q_{i-1} + softplus(r_i)).
+For multivariate input, de-normalization uses the statistics of the last
+feature, which is the model's convention for the target column.
 
 References:
     - Auer et al., 2025. TiRex: Zero-Shot Forecasting Across Long and Short
@@ -113,10 +42,6 @@ import numpy as np
 from keras import ops
 from typing import Optional, Union, List, Any, Sequence, Tuple, Dict, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
@@ -126,78 +51,96 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-# Type definitions
-# ---------------------------------------------------------------------
-
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
-# Default quantile levels for probabilistic forecasting.
-# Canonical source list; also exposed as the class attr `TiRexCore.DEFAULT_QUANTILES`
-# (which references this list). Kept module-level for backward-compat: external
-# modules (e.g. model_extended.py) import this name directly.
-# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a TUPLE, and it must
-# stay one. It was a `List[float]`, aliased by the class attribute below, so the
-# module constant and `TiRexCore.DEFAULT_QUANTILES` were ONE object under two
-# names -- and a caller who took the parameter default and mutated it in place
-# silently changed the default for every later caller in the process. Do NOT
-# "fix" that by copying in `__init__`: a copy in the constructor leaves the two
-# ALIASES pointing at the same mutable object and repairs nothing. A tuple kills
-# the parameter default (R-009 S1), the `ast.Name` default (S2) and the class
-# alias (S3) together, which is why the remedy is the type and not the copy.
+# Canonical source list; also exposed as TiRexCore.DEFAULT_QUANTILES and
+# imported directly by model_extended.py.
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: keep this a tuple, not a list;
+# a mutable list aliased by the class attribute let a caller mutate the shared default in place. See decisions.md.
 DEFAULT_QUANTILES: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.tirex.model")
 class TiRexCore(keras.Model, ForecastMixin):
-    """
-    TiRex Core Model for Time Series Forecasting.
+    """TiRex Core model for probabilistic time series forecasting.
 
-    **Intent**: Provide a Keras-3-canonical, serializable hybrid LSTM/Transformer
-    forecaster that emits monotonic quantile predictions with reversible
-    per-instance normalization, configurable per-block (lstm/transformer/mixed),
-    and ForecastMixin-wired inference.
+    A hybrid LSTM/Transformer forecaster that emits monotonic quantile
+    predictions with reversible per-instance normalization.
 
-    This model implements a TiRex-inspired architecture using mixed sequential blocks
-    (LSTM + Transformer) for probabilistic time series forecasting. The model follows
-    modern Keras 3 patterns and utilizes factory systems for component creation.
+    Architecture:
 
-    The architecture consists of:
-    1. Input scaling and preprocessing
-    2. Patch embedding for time series tokenization
-    3. Sequential processing blocks (configurable LSTM/Transformer mix)
-    4. Quantile prediction head for probabilistic outputs
+    .. code-block:: text
 
-    Args:
-        patch_size: Integer, size of input patches for tokenization.
-        embed_dim: Integer, embedding dimension for all model components.
-        num_blocks: Integer, number of mixed sequential blocks.
-        num_heads: Integer, number of attention heads for transformer components.
-        lstm_units: Integer, LSTM units per block. If None, uses embed_dim.
-        ff_dim: Integer, feed-forward dimension. If None, uses embed_dim * 4.
-        block_types: List of BlockType strings, type for each block ('lstm', 'transformer', 'mixed').
-        quantile_levels: List of floats, quantile levels to predict.
-        prediction_length: Integer, length of prediction horizon.
-        dropout_rate: Float, dropout rate for regularization.
-        use_layer_norm: Boolean, whether to use layer normalization.
-        use_normalization: Boolean, whether to apply reversible per-instance
-            normalization to the inputs.
-        attention_window_size: Integer, window width in tokens, used only when
-            `attention_type='window'`. Wired through `attention_args`
-            unconditionally; `MixedSequentialBlock` drops it on the attention
-            types that do not accept it (see the module docstring), so on every
-            other setting it is genuinely inert rather than merely tolerated.
-        attention_type: String, attention factory key used by every block.
-            Defaults to `'multi_head'` — full/global self-attention, `O(L^2)` in the
-            number of patch tokens, matching the published TiRex. `'window'` selects
-            the local-window variant at `O(L*attention_window_size)`. Any other key
-            from `layers/attention/factory.py`'s registry is accepted and validated
-            there — note that the factory is now STRICT about parameters it does
-            not declare, so a type whose constructor rejects `dim`/`num_heads`
-            fails loudly at construction instead of silently.
-        **kwargs: Additional keyword arguments for the Model base class.
+        input [B, T, F]
+             |
+             v
+        ┌──────────────┐
+        │ mask + z-score │  NaN-safe, per series/feature (optional)
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ patch embed    │  [B, T, 2F] -> [B, num_patches, 2*embed_dim]
+        │ input proj     │  -> [B, num_patches, embed_dim]
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ block 1        │  lstm / transformer / mixed
+        │ ...            │
+        │ block N        │
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ output norm    │
+        │ mean pool      │  -> [B, 1, embed_dim]
+        │ quantile head  │  -> [B, prediction_length, num_quantiles]
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ denormalize    │  (optional)
+        └──────────────┘
+             |
+             v
+        output [B, prediction_length, num_quantiles]
+
+    :param patch_size: Size of input patches for tokenization.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension for all model components.
+    :type embed_dim: int
+    :param num_blocks: Number of mixed sequential blocks.
+    :type num_blocks: int
+    :param num_heads: Number of attention heads for transformer components.
+    :type num_heads: int
+    :param lstm_units: LSTM units per block. Uses ``embed_dim`` if ``None``.
+    :type lstm_units: Optional[int]
+    :param ff_dim: Feed-forward dimension. Uses ``embed_dim * 4`` if ``None``.
+    :type ff_dim: Optional[int]
+    :param block_types: Type per block, from ``'lstm'``, ``'transformer'``,
+        ``'mixed'``.
+    :type block_types: Optional[List[BlockType]]
+    :param quantile_levels: Quantile levels to predict.
+    :type quantile_levels: Sequence[float]
+    :param prediction_length: Length of the prediction horizon.
+    :type prediction_length: int
+    :param dropout_rate: Dropout rate for regularization.
+    :type dropout_rate: float
+    :param use_layer_norm: Whether to use layer normalization.
+    :type use_layer_norm: bool
+    :param use_normalization: Whether to apply reversible per-instance
+        normalization to the inputs.
+    :type use_normalization: bool
+    :param attention_window_size: Window width in tokens, used only when
+        ``attention_type='window'``.
+    :type attention_window_size: int
+    :param attention_type: Attention factory key used by every block.
+        ``'multi_head'`` is full self-attention, matching the published TiRex;
+        ``'window'`` restricts attention to ``attention_window_size`` tokens.
+        Any other key from the attention factory registry is accepted.
+    :type attention_type: str
+    :param kwargs: Additional arguments for the ``Model`` base class.
 
     Input shape:
         3D tensor with shape: `(batch_size, sequence_length, features)`.
@@ -228,13 +171,9 @@ class TiRexCore(keras.Model, ForecastMixin):
         ```
     """
 
-    # Default quantile levels for probabilistic forecasting (class-level attr).
-    # References the single module-level source list (defined above the class)
-    # so the value lives in exactly one place; model_extended.py imports the
-    # module-level name, which remains a backward-compat alias for the same list.
+    # References the module-level list so the value lives in exactly one place.
     DEFAULT_QUANTILES: Tuple[float, ...] = DEFAULT_QUANTILES
 
-    # Model variant configurations following ConvNeXt V2 pattern
     MODEL_VARIANTS = {
         "tiny": {
             "patch_size": 8,
@@ -287,7 +226,6 @@ class TiRexCore(keras.Model, ForecastMixin):
     ) -> None:
         super().__init__(name=name, **kwargs)
 
-        # Validate inputs
         if patch_size <= 0:
             raise ValueError(f"patch_size must be positive, got {patch_size}")
         if embed_dim <= 0:
@@ -299,7 +237,6 @@ class TiRexCore(keras.Model, ForecastMixin):
         if attention_window_size <= 0:
             raise ValueError(f"attention_window_size must be positive, got {attention_window_size}")
 
-        # Store configuration
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.num_blocks = num_blocks
@@ -307,28 +244,16 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.lstm_units = lstm_units if lstm_units is not None else embed_dim
         self.ff_dim = ff_dim if ff_dim is not None else embed_dim * 4
         self.block_types = block_types if block_types is not None else ['mixed'] * num_blocks
-        # Materialize as a LIST: the default is now an immutable tuple (D-079),
-        # and `get_config()` must keep round-tripping the same JSON type it
-        # always has. Every consumer below uses `.index()` / `len()` / `in`,
-        # which both types answer identically.
+        # Materialize as a list: the default is an immutable tuple (D-079), but
+        # get_config() must keep round-tripping the same JSON type it always has.
         self.quantile_levels = list(quantile_levels)
         self.prediction_length = prediction_length
         self.dropout_rate = dropout_rate
         self.use_layer_norm = use_layer_norm
         self.use_normalization = use_normalization
         self.attention_window_size = attention_window_size
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-008
-        # `attention_type` deliberately carries NO membership check here, unlike
-        # every other argument above. `create_attention_layer` already raises
-        # `ValueError: Unknown attention type '<value>'. Available types: [...]`
-        # for an unregistered key, and it does so eagerly — the blocks below are
-        # constructed in `__init__`, not lazily in `build`. A local whitelist would
-        # either duplicate that raise or, worse, freeze this model to the two keys
-        # anyone happened to test, locking out the other 29 registry entries for no
-        # reason. Do NOT "fix" this by adding `if attention_type not in
-        # ('multi_head', 'window')`. The one gap is an all-`'lstm'` `block_types`
-        # stack, which builds no attention layer at all and so cannot validate the
-        # key; there it is inert and round-trips unused.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-008: no membership check on
+        # attention_type here; create_attention_layer already raises eagerly on an unregistered key. Don't add a local whitelist. See decisions.md.
         self.attention_type = attention_type
 
         if len(self.block_types) != num_blocks:
@@ -336,10 +261,10 @@ class TiRexCore(keras.Model, ForecastMixin):
                 f"Length of block_types ({len(self.block_types)}) must match num_blocks ({num_blocks})"
             )
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         self.patch_embedding = PatchEmbedding1D(
             patch_size=self.patch_size,
-            embed_dim=self.embed_dim * 2,  # Include mask information
+            # Doubled width: the mask is concatenated onto the feature axis.
+            embed_dim=self.embed_dim * 2,
             name="patch_embedding"
         )
 
@@ -351,28 +276,10 @@ class TiRexCore(keras.Model, ForecastMixin):
             name="input_projection"
         )
 
-        # Create sequential processing blocks
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
-            # --- DIVERGENCE FROM TIREX: WINDOW ATTENTION INSTEAD OF GLOBAL ATTENTION ---
-            # Kept as history, no longer as behaviour: this line hardcoded
-            # `attention_type='window'`, so no caller could build the paper's global
-            # attention. The divergence is now OPT-IN via the constructor argument
-            # and the default is the paper's `'multi_head'` (the factory's key for
-            # full self-attention; there is no key spelled `'global'`). Existing
-            # windowed behaviour is one keyword away, and `window_size` stays wired
-            # unconditionally.
-            #
-            # DECISION plan-2026-08-17T183311-79c63e38/D-011
-            # That last clause used to be justified by the attention factory
-            # filtering unknown kwargs against the target type's parameter list.
-            # It no longer does: `create_attention_layer` RAISES on any key the
-            # type does not declare. `MixedSequentialBlock` is now what scopes
-            # `window_size` (its `_CONDITIONAL_ATTENTION_ARG_KEYS` allowlist).
-            # Do NOT "fix" this by making the line below conditional on
-            # `self.attention_type` -- that pushes registry knowledge into every
-            # block consumer, which is exactly what the block-side repair
-            # exists to avoid.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-011: window_size stays
+            # wired unconditionally; MixedSequentialBlock scopes it per attention type, not this call site. See decisions.md.
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
@@ -388,10 +295,8 @@ class TiRexCore(keras.Model, ForecastMixin):
                 attention_args={'window_size': self.attention_window_size},
                 name=f"block_{i}"
             )
-            # ---------------------------------------------
             self.blocks.append(block)
 
-        # Output normalization using factory
         if self.use_layer_norm:
             self.output_norm = (
                 create_normalization_layer(
@@ -400,17 +305,14 @@ class TiRexCore(keras.Model, ForecastMixin):
                 )
             )
         else:
-            # DEFECT #3 fix: keras.layers.Identity is a serializable Keras-3
-            # drop-in for the old Lambda(lambda x: x), which serialized a
-            # Python lambda (fragile / non-portable). Identity has build +
-            # compute_output_shape and accepts the training kwarg.
+            # keras.layers.Identity is a serializable Keras-3 drop-in for a
+            # Lambda identity, which serializes as a non-portable pickled Python callable.
             self.output_norm = keras.layers.Identity(name="output_norm")
 
-        # Quantile prediction head
         self.quantile_head = QuantileHead(
             num_quantiles=len(self.quantile_levels),
             output_length=self.prediction_length,
-            # Hardcode a safe low value, or dividing the global rate
+            # Capped rather than the global dropout_rate directly.
             dropout_rate=min(self.dropout_rate, 0.1),
             enforce_monotonicity=True,
             use_bias=True,
@@ -425,26 +327,17 @@ class TiRexCore(keras.Model, ForecastMixin):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Build all sub-layers explicitly with threaded shapes.
+        Build every sublayer with shapes threaded from the raw input.
 
-        Explicit per-sublayer builds are REQUIRED (not optional): on
-        ``.keras`` load, Keras replays the captured build config and restores
-        weights BEFORE the first ``call``. If sub-layers are left unbuilt at
-        restore time, the restored weights have nowhere to land and the first
-        forward pass lazily re-initializes them, silently discarding the saved
-        values. (See plan D-002 — the same failure mode bit DeepAR.)
+        Explicit per-sublayer builds are required: on a ``.keras`` load, Keras
+        restores weights before the first ``call``, so an unbuilt sublayer has
+        nowhere for its restored weights to land and silently re-initializes.
 
-        Shape threading mirrors ``call``: the raw input ``(B, T, F)`` is
-        concatenated with its NaN-mask (doubling the feature axis to ``2F``)
-        before patch embedding, then projected, processed through the blocks,
-        mean-pooled over time, and projected to quantiles.
-
-        Args:
-            input_shape: Raw input shape ``(batch, seq_len, features)``. A 2D
-                ``(batch, seq_len)`` shape is treated as ``(batch, seq_len, 1)``
-                to match ``call``'s expand-dims path.
+        :param input_shape: Raw input shape ``(batch, seq_len, features)``. A
+            2D ``(batch, seq_len)`` shape is treated as
+            ``(batch, seq_len, 1)``, matching ``call``'s expand-dims path.
+        :type input_shape: Tuple[Optional[int], ...]
         """
-        # Normalize a 2D input shape to 3D (mirrors call's expand_dims).
         if len(input_shape) == 2:
             input_shape = (input_shape[0], input_shape[1], 1)
         if len(input_shape) != 3:
@@ -459,24 +352,20 @@ class TiRexCore(keras.Model, ForecastMixin):
         masked_features = None if features is None else features * 2
         patch_input_shape = (batch_size, seq_len, masked_features)
 
-        # 1. Patch embedding: (B, T, 2F) -> (B, num_patches, 2*embed_dim)
         self.patch_embedding.build(patch_input_shape)
         embedded_shape = self.patch_embedding.compute_output_shape(patch_input_shape)
 
-        # 2. Input projection (ResidualBlock): -> (B, num_patches, embed_dim)
         self.input_projection.build(embedded_shape)
         projected_shape = self.input_projection.compute_output_shape(embedded_shape)
 
-        # 3. Mixed sequential blocks (shape-preserving)
         current_shape = projected_shape
         for block in self.blocks:
             block.build(current_shape)
             current_shape = block.compute_output_shape(current_shape)
 
-        # 4. Output normalization (rms_norm or Identity; shape-preserving)
         self.output_norm.build(current_shape)
 
-        # 5. Quantile head: input is mean-pooled over time -> (B, 1, embed_dim)
+        # Quantile head input is mean-pooled over time.
         pooled_shape = (current_shape[0], 1, current_shape[2])
         self.quantile_head.build(pooled_shape)
 
@@ -485,16 +374,12 @@ class TiRexCore(keras.Model, ForecastMixin):
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """
-        Compute the output shape: ``(batch, prediction_length, num_quantiles)``.
+        """Return the output shape, matching the rank-3 quantile output of ``call``.
 
-        Matches the rank-3 ``[B, H, Q]`` quantile output of ``call``.
-
-        Args:
-            input_shape: Raw input shape ``(batch, seq_len, features)``.
-
-        Returns:
-            Output shape ``(batch, prediction_length, len(quantile_levels))``.
+        :param input_shape: Raw input shape ``(batch, seq_len, features)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(batch, prediction_length, len(quantile_levels))``.
+        :rtype: Tuple[Optional[int], ...]
         """
         batch_size = input_shape[0]
         return (batch_size, self.prediction_length, len(self.quantile_levels))
@@ -504,51 +389,44 @@ class TiRexCore(keras.Model, ForecastMixin):
             inputs: Union[keras.KerasTensor, np.ndarray],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the TiRex model.
+        """Normalize, mask, encode, and decode into quantile predictions.
 
-        Args:
-            inputs: Input tensor of shape [batch_size, sequence_length, features] or
-                   [batch_size, sequence_length] which will be expanded.
-            training: Boolean, whether in training mode.
-
-        Returns:
-            Quantile predictions of shape [batch_size, prediction_length, num_quantiles].
+        :param inputs: Input tensor, ``[batch_size, sequence_length, features]``
+            or ``[batch_size, sequence_length]`` (expanded to 3D).
+        :type inputs: Union[keras.KerasTensor, np.ndarray]
+        :param training: Whether dropout runs in training mode.
+        :type training: Optional[bool]
+        :return: Quantile predictions,
+            ``[batch_size, prediction_length, num_quantiles]``.
+        :rtype: keras.KerasTensor
         """
-        # Ensure 3D input
         if len(inputs.shape) == 2:
             inputs = ops.expand_dims(inputs, axis=-1)
 
-        # 1. HANDLE MASKING (before normalization to avoid NaN propagation)
+        # Mask before normalization, so NaNs never reach the statistics.
         nan_mask = ops.logical_not(ops.isnan(inputs))
         nan_mask = ops.cast(nan_mask, dtype=inputs.dtype)
-        # Replace NaN with 0 for safe stat computation
         clean_inputs = ops.where(ops.isnan(inputs), ops.zeros_like(inputs), inputs)
 
-        # 2. CALCULATE STATISTICS & NORMALIZE
         if self.use_normalization:
-            # Compute NaN-safe mean: sum of valid values / count of valid values
+            # NaN-safe mean/std: sum over valid values, divide by valid count.
             valid_count = ops.maximum(ops.sum(nan_mask, axis=1, keepdims=True), 1e-7)
             mean = ops.sum(clean_inputs * nan_mask, axis=1, keepdims=True) / valid_count
-            # Compute NaN-safe std
             sq_diff = ((clean_inputs - mean) * nan_mask) ** 2
             variance = ops.sum(sq_diff, axis=1, keepdims=True) / valid_count
             std = ops.sqrt(variance)
-            std = ops.maximum(std, 1e-7)  # Prevent division by zero
+            std = ops.maximum(std, 1e-7)
             x = (clean_inputs - mean) / std
         else:
             x = clean_inputs
             mean = None
             std = None
 
-        # 3. CONCATENATE DATA WITH MASK
         x_with_mask = ops.concatenate([x, nan_mask], axis=-1)
 
-        # 4. ENCODE
         x_patches = self.patch_embedding(x_with_mask, training=training)
         x_embedded = self.input_projection(x_patches, training=training)
 
-        # 5. PROCESS
         hidden_states = x_embedded
         for block in self.blocks:
             hidden_states = block(hidden_states, training=training)
@@ -556,14 +434,10 @@ class TiRexCore(keras.Model, ForecastMixin):
         hidden_states = self.output_norm(hidden_states, training=training)
         mean_hidden_states = ops.mean(hidden_states, axis=1, keepdims=True)
 
-        # 6. PREDICT (Normalized Space)
-        # Shape: [batch, prediction_length, num_quantiles]
         quantile_predictions = self.quantile_head(mean_hidden_states, training=training)
 
-        # 7. DENORMALIZE OUTPUT (Reversible Instance Normalization)
         if self.use_normalization:
             norm_mean, norm_std = self._get_target_stats(mean, std)
-            # Broadcasting: (B, PredLen, Quantiles) * (B, 1, 1) + (B, 1, 1)
             quantile_predictions = (quantile_predictions * norm_std) + norm_mean
 
         return quantile_predictions
@@ -573,21 +447,18 @@ class TiRexCore(keras.Model, ForecastMixin):
         mean: keras.KerasTensor,
         std: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Extract normalization stats for the target (last) feature.
+        """Extract the last feature's normalization stats, for broadcasting with quantiles.
 
-        For multivariate inputs, assumes the target is the last feature.
-        Returns stats shaped (Batch, 1, 1) for broadcasting with quantile predictions.
+        For multivariate input, the target is assumed to be the last feature.
 
-        Args:
-            mean: Mean tensor of shape (Batch, 1, Features).
-            std: Std tensor of shape (Batch, 1, Features).
-
-        Returns:
-            Tuple of (norm_mean, norm_std), each shaped (Batch, 1, 1).
+        :param mean: Mean tensor, ``(Batch, 1, Features)``.
+        :type mean: keras.KerasTensor
+        :param std: Std tensor, ``(Batch, 1, Features)``.
+        :type std: keras.KerasTensor
+        :return: ``(norm_mean, norm_std)``, each shaped ``(Batch, 1, 1)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         if mean.shape[-1] is not None and mean.shape[-1] > 1:
-            # Select stats for the last feature -> (Batch, 1, 1)
             norm_mean = mean[:, :, -1:]
             norm_std = std[:, :, -1:]
         else:
@@ -602,88 +473,47 @@ class TiRexCore(keras.Model, ForecastMixin):
             batch_size: int = 32,
             **kwargs: Any
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Generate specific quantile and point forecasts for time series data.
+        """Map requested quantile levels to output indices, wrapping ``model.predict()``.
 
-        This method acts as a high-level wrapper around `model.predict()`. It handles
-        the complexity of mapping user-requested quantile levels (e.g., 0.95) to the
-        specific output indices of the model's neural network head. It also automatically
-        extracts the median (0.5 quantile) to serve as a robust point forecast.
+        Also extracts the median (0.5 quantile) as a point forecast.
 
-        **Shape Logic**:
-        The raw model outputs a tensor of shape `(Batch, Time, Trained_Quantiles)`.
-        This method slices the last dimension based on the requested `quantile_levels`.
+        :param context: Input data — a NumPy array of shape
+            ``(batch_size, input_length, features)``, or a
+            ``keras.utils.PyDataset`` / ``tf.data.Dataset``.
+        :type context: Union[np.ndarray, keras.utils.PyDataset]
+        :param quantile_levels: Probabilities to extract (e.g.
+            ``[0.1, 0.5, 0.9]``). Returns every trained quantile if ``None``.
+            A level absent from training falls back to the closest trained
+            level, with a warning.
+        :type quantile_levels: Optional[List[float]]
+        :param batch_size: Samples per batch during inference.
+        :type batch_size: int
+        :param kwargs: Forwarded to ``model.predict()`` (e.g. ``verbose``).
+        :return: ``(quantile_preds, point_preds)`` — quantile predictions
+            ``(batch_size, prediction_length, num_requested_quantiles)`` and
+            the median as a point forecast ``(batch_size, prediction_length)``.
+        :rtype: Tuple[np.ndarray, np.ndarray]
 
-        Args:
-            context: Input data.
-                - A Numpy array of shape `(batch_size, input_length, features)`.
-                - Or a `keras.utils.PyDataset` / `tf.data.Dataset`.
-            quantile_levels: List of floats between 0 and 1.
-                The specific probabilities to extract (e.g., `[0.1, 0.5, 0.9]`).
-                If None, returns all quantiles the model was trained with.
-                If a requested quantile was not in the training set, the closest
-                available trained quantile will be used (with a warning).
-            batch_size: Integer, number of samples per batch during inference.
-                Defaults to 32.
-            **kwargs: Additional arguments passed directly to `model.predict()`,
-                such as `verbose` or `callbacks`.
+        Example::
 
-        Returns:
-            A tuple `(quantile_preds, point_preds)`:
-            1. **quantile_preds**: Numpy array of shape
-               `(batch_size, prediction_length, num_requested_quantiles)`.
-               Contains the predicted values for the requested probability levels.
-            2. **point_preds**: Numpy array of shape
-               `(batch_size, prediction_length)`.
-               Contains the median prediction (0.5 quantile), used as the primary
-               point forecast.
-
-        Example:
-            ```python
-            # Train with [0.1, 0.5, 0.9]
-            model = TiRexCore(...)
-
-            # Request specific confidence intervals at inference
-            # context shape: (100, 168, 1)
             q_preds, median = model.predict_quantiles(
                 context,
-                quantile_levels=[0.05, 0.5, 0.95] # 0.05/0.95 map to closest (0.1/0.9)
+                quantile_levels=[0.05, 0.5, 0.95]
             )
-
-            # q_preds shape: (100, 24, 3)
-            # median shape:  (100, 24)
-            ```
         """
-        # ---------------------------------------------------------------------
-        # 1. Setup and Validation
-        # ---------------------------------------------------------------------
-        # If no specific levels requested, return everything the model knows
         if quantile_levels is None:
             quantile_levels = self.quantile_levels
 
-        # ---------------------------------------------------------------------
-        # 2. Run Inference
-        # ---------------------------------------------------------------------
-        # Perform the forward pass.
-        # Output Shape: [batch_size, prediction_length, num_trained_quantiles]
         raw_predictions = self.predict(context, batch_size=batch_size, **kwargs)
 
-        # ---------------------------------------------------------------------
-        # 3. Map Requested Quantiles to Model Output Indices
-        # ---------------------------------------------------------------------
-        # We need to find which index in the last dimension corresponds to
-        # the requested quantiles (e.g., user asks for 0.5, we find index 2).
         quantile_indices = []
         trained_quantiles_arr = np.array(self.quantile_levels)
 
         for q in quantile_levels:
-            # Case A: Exact match found
             if q in self.quantile_levels:
                 idx = self.quantile_levels.index(q)
                 quantile_indices.append(idx)
-            # Case B: Approximation needed (User asks for 0.95, model has 0.9)
             else:
-                # Find index of the smallest absolute difference
                 closest_idx = int(np.argmin(np.abs(trained_quantiles_arr - q)))
                 quantile_indices.append(closest_idx)
 
@@ -693,31 +523,18 @@ class TiRexCore(keras.Model, ForecastMixin):
                     f"{self.quantile_levels[closest_idx]}"
                 )
 
-        # ---------------------------------------------------------------------
-        # 4. Extract Quantile Predictions
-        # ---------------------------------------------------------------------
-        # Slice the raw predictions tensor.
-        # We select all batches (:), all time steps (:), and specific quantile indices.
-        # Result Shape: [batch_size, prediction_length, num_requested_quantiles]
         quantile_preds = raw_predictions[:, :, quantile_indices]
 
-        # ---------------------------------------------------------------------
-        # 5. Extract Point Forecast (Median)
-        # ---------------------------------------------------------------------
-        # The median (0.5) minimizes MAE and is the standard point forecast
-        # for quantile regression models.
+        # The median minimizes MAE and is the standard point forecast here.
         if 0.5 in self.quantile_levels:
             median_idx = self.quantile_levels.index(0.5)
         else:
-            # Fallback: Use the middle index if strict 0.5 is missing
             median_idx = len(self.quantile_levels) // 2
             logger.debug(
                 f"Median (0.5) not found in quantiles. Using index {median_idx} "
                 f"({self.quantile_levels[median_idx]}) as point forecast."
             )
 
-        # Slice out the median to get a 2D array.
-        # Result Shape: [batch_size, prediction_length]
         mean_preds = raw_predictions[:, :, median_idx]
 
         return quantile_preds, mean_preds
@@ -734,18 +551,16 @@ class TiRexCore(keras.Model, ForecastMixin):
         mapping; it delegates to the model's existing ``predict_quantiles`` and
         packs the result into the shared contract.
 
-        Args:
-            x: Context window, shape ``[B, input_length, F]`` (or a dataset).
-            quantile_levels: Levels to extract; defaults to the model's
-                configured ``self.quantile_levels``.
-            **kwargs: Forwarded to ``predict_quantiles`` (e.g. ``batch_size``,
-                ``verbose``).
-
-        Returns:
-            A :class:`Forecast` with ``point`` shape ``[B, H]`` and ``quantiles``
-            shape ``[B, H, Q]``. TiRex flattens the target feature axis, so the
-            shapes are intentionally passed through unchanged (no fabricated
-            ``F`` axis); downstream metrics/helpers handle both ranks.
+        :param x: Context window, ``[B, input_length, F]`` (or a dataset).
+        :type x: Union[np.ndarray, keras.utils.PyDataset]
+        :param quantile_levels: Levels to extract; defaults to
+            ``self.quantile_levels``.
+        :type quantile_levels: Optional[List[float]]
+        :param kwargs: Forwarded to ``predict_quantiles``.
+        :return: A :class:`Forecast` with ``point`` shape ``[B, H]`` and
+            ``quantiles`` shape ``[B, H, Q]``. TiRex flattens the target
+            feature axis, so these shapes pass through unchanged.
+        :rtype: Forecast
         """
         levels = quantile_levels if quantile_levels is not None else self.quantile_levels
         quantile_preds, point_preds = self.predict_quantiles(x, levels, **kwargs)
@@ -763,26 +578,24 @@ class TiRexCore(keras.Model, ForecastMixin):
         quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
         **kwargs
     ) -> "TiRexCore":
-        """
-        Create a TiRex model from a predefined variant.
+        """Create a TiRex model from a predefined variant.
 
-        Args:
-            variant: String, one of "tiny", "small", "medium", "large"
-            prediction_length: Integer, length of prediction horizon
-            quantile_levels: List of quantile levels to predict
-            **kwargs: Additional arguments passed to the constructor
+        :param variant: One of ``"tiny"``, ``"small"``, ``"medium"``, ``"large"``.
+        :type variant: str
+        :param prediction_length: Length of the prediction horizon.
+        :type prediction_length: int
+        :param quantile_levels: Quantile levels to predict.
+        :type quantile_levels: Sequence[float]
+        :param kwargs: Additional arguments passed to the constructor;
+            take precedence over the variant's defaults.
+        :return: The configured model.
+        :rtype: TiRexCore
+        :raises ValueError: If ``variant`` is not recognized.
 
-        Returns:
-            TiRexCore model instance
+        Example::
 
-        Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> # Tiny model for quick experiments
-            >>> model = TiRexCore.from_variant("tiny", prediction_length=24)
-            >>> # Large model for production
-            >>> model = TiRexCore.from_variant("large", prediction_length=48)
+            model = TiRexCore.from_variant("tiny", prediction_length=24)
+            model = TiRexCore.from_variant("large", prediction_length=48)
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -791,8 +604,6 @@ class TiRexCore(keras.Model, ForecastMixin):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
-
-        # Update config with kwargs (kwargs take precedence)
         config.update(kwargs)
 
         logger.info(f"Creating TiRex-{variant.upper()} model")
@@ -829,10 +640,6 @@ class TiRexCore(keras.Model, ForecastMixin):
         """Create model from configuration."""
         return cls(**config)
 
-# ---------------------------------------------------------------------
-# Factory Functions (following ConvNeXt V2 pattern)
-# ---------------------------------------------------------------------
-
 
 def create_tirex_model(
     input_length: int,
@@ -845,22 +652,27 @@ def create_tirex_model(
     block_types: Optional[List[str]] = None,
     **kwargs
 ) -> TiRexCore:
-    """
-    Create a TiRex model with specified configuration.
+    """Create a TiRex model, then build it against ``input_length``.
 
-    Args:
-        input_length: Integer, length of input sequences.
-        prediction_length: Integer, length of prediction horizon.
-        patch_size: Integer, size of input patches.
-        embed_dim: Integer, embedding dimension.
-        num_blocks: Integer, number of sequential blocks.
-        num_heads: Integer, number of attention heads.
-        quantile_levels: List of quantile levels to predict.
-        block_types: List of block types for each layer.
-        **kwargs: Additional arguments for TiRexCore.
-
-    Returns:
-        TiRexCore model instance.
+    :param input_length: Length of input sequences.
+    :type input_length: int
+    :param prediction_length: Length of the prediction horizon.
+    :type prediction_length: int
+    :param patch_size: Size of input patches.
+    :type patch_size: int
+    :param embed_dim: Embedding dimension.
+    :type embed_dim: int
+    :param num_blocks: Number of sequential blocks.
+    :type num_blocks: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param quantile_levels: Quantile levels to predict.
+    :type quantile_levels: Sequence[float]
+    :param block_types: Block type for each layer.
+    :type block_types: Optional[List[str]]
+    :param kwargs: Additional arguments for :class:`TiRexCore`.
+    :return: A built :class:`TiRexCore` instance.
+    :rtype: TiRexCore
     """
     model = TiRexCore(
         patch_size=patch_size,
@@ -873,8 +685,7 @@ def create_tirex_model(
         **kwargs
     )
 
-    # See the D-078 note on `create_tirex_by_variant`: `build()` replaces a
-    # dummy forward pass and is byte-identical at the same seed.
+    # build() is byte-identical to a dummy forward pass at the same seed (D-078).
     model.build((None, input_length, 1))
 
     logger.info(
@@ -892,25 +703,25 @@ def create_tirex_by_variant(
     quantile_levels: Sequence[float] = DEFAULT_QUANTILES,
     **kwargs
 ) -> TiRexCore:
-    """
-    Convenience function to create TiRex models from predefined variants.
+    """Create a TiRex model from a predefined variant, then build it.
 
-    Args:
-        variant: String, model variant ("tiny", "small", "medium", "large")
-        input_length: Integer, length of input sequences
-        prediction_length: Integer, length of prediction horizon
-        quantile_levels: List of quantile levels to predict
-        **kwargs: Additional arguments passed to the model constructor
+    :param variant: Model variant (``"tiny"``, ``"small"``, ``"medium"``,
+        ``"large"``).
+    :type variant: str
+    :param input_length: Length of input sequences.
+    :type input_length: int
+    :param prediction_length: Length of the prediction horizon.
+    :type prediction_length: int
+    :param quantile_levels: Quantile levels to predict.
+    :type quantile_levels: Sequence[float]
+    :param kwargs: Additional arguments passed to the model constructor.
+    :return: A built :class:`TiRexCore` instance.
+    :rtype: TiRexCore
 
-    Returns:
-        TiRexCore model instance
+    Example::
 
-    Example:
-        >>> # Create TiRex-Small for quick experiments
-        >>> model = create_tirex_by_variant("small", input_length=96, prediction_length=24)
-        >>>
-        >>> # Create TiRex-Large for production forecasting
-        >>> model = create_tirex_by_variant("large", input_length=256, prediction_length=48)
+        model = create_tirex_by_variant("small", input_length=96, prediction_length=24)
+        model = create_tirex_by_variant("large", input_length=256, prediction_length=48)
     """
     model = TiRexCore.from_variant(
         variant,
@@ -919,15 +730,8 @@ def create_tirex_by_variant(
         **kwargs
     )
 
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: materialize with
-    # `build()`, not with a dummy forward pass. This used to be
-    # `model(np.zeros((1, input_length, 1)))`, which R-051 charges as logic in a
-    # factory. It is NOT dead code -- `input_length` exists only to size this
-    # call, and dropping it outright would make the parameter a silent no-op and
-    # hand back a lazily-built model whose sublayers can lose weights on a
-    # `.keras` round trip. `build()` is the byte-identical substitute, measured
-    # at the same seed: the SAME 47 weight paths, `max|weight delta| == 0.0`,
-    # and `max|forward delta| == 0.0`.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: build() materializes the
+    # model instead of a dummy forward pass; byte-identical at the same seed. See decisions.md.
     model.build((None, input_length, 1))
 
     logger.info(
@@ -936,5 +740,3 @@ def create_tirex_by_variant(
     )
 
     return model
-
-# ---------------------------------------------------------------------
