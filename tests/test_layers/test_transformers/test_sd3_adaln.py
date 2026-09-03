@@ -366,3 +366,356 @@ class TestAdaLayerNormContinuous:
             cond = keras.random.normal((b, DIM))
             out = layer([x, cond])
             assert tuple(out.shape) == (b, N, DIM)
+
+
+# =====================================================================
+# Chunk roles: which learned scalar reaches which sub-op
+# =====================================================================
+#
+# Everything above this line runs at the layers' zero-initialised default,
+# where every modulation chunk is exactly 0. That is the regime in which a
+# `shift`/`scale` transposition is INVISIBLE: `modulate(n, 0, 0)` is the
+# identity whichever name is bound to whichever slot, and the measured
+# difference between the correct split and the transposed one is 0.0. At a
+# non-zero bias the same transposition moves the output by 1.619. Every arm
+# below therefore writes a non-zero bias first; an arm written at init would
+# be structurally incapable of failing.
+#
+# The chunk ORDER is written out by hand here, from the layers' documented
+# return contract. It is never read back from the implementation -- a name
+# list derived from the code under test cannot disagree with it.
+
+#: The 6-way split consumed by :class:`AdaLayerNormZero`.
+ADALN_ZERO_CHUNK_NAMES = (
+    "shift_msa", "scale_msa", "gate_msa",
+    "shift_mlp", "scale_mlp", "gate_mlp",
+)
+
+#: The 9-way split consumed by :class:`AdaLayerNormZeroX`: the 6-way order,
+#: then the second (dual) attention triple.
+ADALN_ZEROX_CHUNK_NAMES = ADALN_ZERO_CHUNK_NAMES + (
+    "shift_msa2", "scale_msa2", "gate_msa2",
+)
+
+#: An arbitrary non-zero modulation magnitude. Nothing depends on the value.
+VALUE = 0.7
+
+
+def _bias_with(names, **chunks: float) -> np.ndarray:
+    """Build a ``(len(names) * DIM,)`` bias vector with the named chunks set flat.
+
+    :param names: the chunk-name tuple defining slot order (6-way or 9-way).
+    :param chunks: ``chunk_name=value`` pairs; every other chunk stays zero.
+    :returns: a float32 vector suitable for ``layer.linear.bias.assign``.
+    :raises ValueError: if a name is not in ``names``.
+    """
+    vec = np.zeros((len(names) * DIM,), dtype="float32")
+    for name, value in chunks.items():
+        if name not in names:
+            raise ValueError(f"unknown chunk {name!r}, expected one of {names}")
+        index = names.index(name)
+        vec[index * DIM:(index + 1) * DIM] = value
+    return vec
+
+
+def _built(layer, x, cond):
+    """Run the layer once so its ``Dense`` exists, then return it."""
+    layer([x, cond])
+    return layer
+
+
+def _outputs(layer, bias: np.ndarray, x, cond):
+    """Set the modulation bias, run the layer once, return numpy outputs."""
+    layer.linear.bias.assign(keras.ops.convert_to_tensor(bias))
+    return [
+        np.asarray(keras.ops.convert_to_numpy(t)) for t in layer([x, cond])
+    ]
+
+
+class TestAdaLayerNormZeroXChunkRolesAreNotInterchangeable:
+    """``shift`` adds, ``scale`` multiplies: chunks 0/1 and 6/7 are not pairs.
+
+    ``AdaLayerNormZeroX`` is live -- ``MMDiTBlock(use_dual_attention=True)``
+    constructs it, and the SD3.5-medium configuration enables 13 such layers --
+    yet every arm above this one runs at zero bias, where transposing
+    ``shift_msa`` with ``scale_msa`` (or ``shift_msa2`` with ``scale_msa2``)
+    changes the output by exactly nothing.
+
+    The discriminator is read off the modulated stream itself, by comparing two
+    runs of the layer against each other. No expected value is ever taken from
+    the layer's own formula:
+
+    * an ADDITIVE chunk moves every position by the SAME number, so the delta
+      is constant and equal to the value written into the bias;
+    * a MULTIPLICATIVE chunk moves each position in proportion to its own
+      normalised activation, so the delta is ``value * base``.
+
+    On a non-degenerate input those two are far apart, and each arm asserts the
+    spread that makes the other's claim false, so neither can pass under the
+    transposed split. The gate of the triple under test is held OPEN throughout
+    -- the layer only returns its gates, so a gate must not be able to change
+    ``x_norm``, and holding it non-zero proves the reading is not gate-borne.
+
+    The zero-input arm is the same statement without a tolerance: ``norm(0)``
+    is ``0``, so ``0 * (1 + scale) == 0`` exactly and a multiplicative chunk has
+    nothing to act on, while an additive one still injects its value.
+    """
+
+    #: ``(output index, shift name, scale name, gate name)`` per modulated
+    #: stream: chunks 0/1 feed ``x_norm`` (output 0), chunks 6/7 feed
+    #: ``x_norm2`` (output 5).
+    STREAMS = (
+        (0, "shift_msa", "scale_msa", "gate_msa"),
+        (5, "shift_msa2", "scale_msa2", "gate_msa2"),
+    )
+
+    @pytest.fixture
+    def probe(self, sample):
+        x, cond = sample
+        layer = _built(AdaLayerNormZeroX(dim=DIM, eps=EPS), x, cond)
+        return layer, x, cond
+
+    @pytest.mark.parametrize("index,shift,scale,gate", STREAMS)
+    def test_the_shift_chunk_moves_every_position_by_the_same_amount(
+        self, probe, index, shift, scale, gate
+    ):
+        layer, x, cond = probe
+        names = ADALN_ZEROX_CHUNK_NAMES
+        base = _outputs(layer, _bias_with(names, **{gate: VALUE}), x, cond)[index]
+        moved = _outputs(
+            layer, _bias_with(names, **{gate: VALUE, shift: VALUE}), x, cond
+        )[index]
+        delta = moved - base
+
+        # Anti-vacuity: a multiplicative chunk would give `VALUE * base`, whose
+        # spread must be far above the tolerance below -- otherwise the
+        # constant-delta assertion does not exclude the other role.
+        spread = float(np.std(VALUE * base))
+        assert spread > 1e-2, (
+            "the normalised activation is nearly constant on this input, so an "
+            f"additive and a multiplicative chunk look alike (std = {spread})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            np.full_like(delta, VALUE),
+            rtol=0,
+            atol=1e-5,
+            err_msg=(
+                f"{shift} did not act additively: its delta is not the constant "
+                "written into the bias, so it is being consumed as the "
+                "multiplicative scale -- the 9-way chunk order in "
+                "AdaLayerNormZeroX.call is wrong"
+            ),
+        )
+
+    @pytest.mark.parametrize("index,shift,scale,gate", STREAMS)
+    def test_the_scale_chunk_moves_each_position_in_proportion_to_itself(
+        self, probe, index, shift, scale, gate
+    ):
+        layer, x, cond = probe
+        names = ADALN_ZEROX_CHUNK_NAMES
+        base = _outputs(layer, _bias_with(names, **{gate: VALUE}), x, cond)[index]
+        moved = _outputs(
+            layer, _bias_with(names, **{gate: VALUE, scale: VALUE}), x, cond
+        )[index]
+        delta = moved - base
+
+        # Anti-vacuity: an additive chunk gives a CONSTANT delta; this one must
+        # vary, otherwise the proportionality claim below is unobservable.
+        assert float(np.std(delta)) > 1e-2, (
+            f"{scale} moved every position by the same amount, i.e. it acted as "
+            "an additive shift -- the 9-way chunk order in "
+            f"AdaLayerNormZeroX.call is wrong (std = {float(np.std(delta))})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            VALUE * base,
+            rtol=0,
+            atol=1e-5,
+            err_msg=(
+                f"{scale} is not multiplying the normalised activation -- the "
+                "9-way chunk order in AdaLayerNormZeroX.call is wrong"
+            ),
+        )
+
+    @pytest.mark.parametrize("index,shift,scale,gate", STREAMS)
+    def test_on_a_zero_input_only_the_shift_chunk_can_act(
+        self, probe, index, shift, scale, gate
+    ):
+        layer, _, cond = probe
+        names = ADALN_ZEROX_CHUNK_NAMES
+        x = np.zeros((BATCH, N, DIM), dtype="float32")
+
+        base = _outputs(layer, _bias_with(names, **{gate: VALUE}), x, cond)[index]
+        scaled = _outputs(
+            layer, _bias_with(names, **{gate: VALUE, scale: VALUE}), x, cond
+        )[index]
+        shifted = _outputs(
+            layer, _bias_with(names, **{gate: VALUE, shift: VALUE}), x, cond
+        )[index]
+
+        # atol=0: `0 * (1 + scale)` is exactly `0`, so this is an exact claim.
+        np.testing.assert_array_equal(
+            scaled,
+            base,
+            err_msg=(
+                f"{scale} changed the output of a ZERO input, so it is being "
+                "added rather than multiplied"
+            ),
+        )
+        delta_shift = float(np.max(np.abs(shifted - base)))
+        assert delta_shift > 1e-5, (
+            f"{shift} could not move a ZERO input, so it is being multiplied "
+            f"rather than added (max |delta| = {delta_shift})"
+        )
+
+
+class TestAdaLayerNormZeroXNineSlotAttribution:
+    """Every one of the nine chunks carries its own bias slot, and no other.
+
+    The two arms above pin the ROLE of chunks 0/1 and 6/7. They say nothing
+    about the remaining five -- ``shift_mlp``/``scale_mlp`` (3/4) and the three
+    gates (2/5/8) -- which this layer returns without consuming, so a rotation
+    among them is invisible to any numeric claim made inside the layer.
+    Closing a mutation family halfway is indistinguishable from closing it, so
+    this arm closes all nine at once.
+
+    A distinct value goes into every slot in a single run. With the modulation
+    ``Dense``'s kernel zero-initialised the pre-split vector IS the bias, so:
+
+    * the five returned chunks must each be flat at their own value;
+    * ``x_norm`` must equal ``base * (1 + v[1]) + v[0]`` and ``x_norm2`` must
+      equal ``base * (1 + v[7]) + v[6]``, with ``base`` measured from a
+      separate all-zero-bias run rather than recomputed from the formula.
+
+    The values are pairwise distinct and none is 0, so any permutation of the
+    nine slots is convicted by at least one of these equalities.
+    """
+
+    #: One distinct non-zero value per slot, in split order. Pairwise distinct
+    #: is the property that makes a permutation observable.
+    SLOT_VALUES = (0.11, 0.22, 0.33, 0.44, 0.55, 0.66, 0.77, 0.88, 0.99)
+
+    def test_each_of_the_nine_chunks_carries_its_own_slot(self, sample):
+        x, cond = sample
+        names = ADALN_ZEROX_CHUNK_NAMES
+        assert len(names) == len(self.SLOT_VALUES) == 9
+        assert len(set(self.SLOT_VALUES)) == 9, "slot values must be distinct"
+
+        layer = _built(AdaLayerNormZeroX(dim=DIM, eps=EPS), x, cond)
+        base = _outputs(layer, np.zeros((9 * DIM,), dtype="float32"), x, cond)
+        x_norm_base, x_norm2_base = base[0], base[5]
+
+        # Anti-vacuity: the normalised stream must vary across positions, or
+        # the shift/scale reconstruction below cannot separate v[0] from v[1].
+        assert float(np.std(x_norm_base)) > 1e-2, (
+            "norm(x) is nearly constant on this input, so the reconstruction "
+            "below cannot distinguish an additive slot from a multiplicative one"
+        )
+
+        bias = _bias_with(names, **dict(zip(names, self.SLOT_VALUES)))
+        outs = _outputs(layer, bias, x, cond)
+
+        v = self.SLOT_VALUES
+        # The five chunks the layer only returns: output index -> chunk name.
+        for out_index, name in (
+            (1, "gate_msa"), (2, "shift_mlp"), (3, "scale_mlp"),
+            (4, "gate_mlp"), (6, "gate_msa2"),
+        ):
+            expected = v[names.index(name)]
+            np.testing.assert_allclose(
+                outs[out_index],
+                np.full_like(outs[out_index], expected),
+                rtol=0,
+                atol=1e-6,
+                err_msg=(
+                    f"returned chunk {out_index} does not carry slot "
+                    f"{names.index(name)} ({name} = {expected}); the 9-way split "
+                    "order in AdaLayerNormZeroX.call is permuted"
+                ),
+            )
+
+        np.testing.assert_allclose(
+            outs[0],
+            x_norm_base * (1.0 + v[1]) + v[0],
+            rtol=0,
+            atol=1e-5,
+            err_msg=(
+                "x_norm is not norm(x)*(1+slot1)+slot0 -- slots 0/1 (shift_msa, "
+                "scale_msa) are not reaching the primary modulation in that order"
+            ),
+        )
+        np.testing.assert_allclose(
+            outs[5],
+            x_norm2_base * (1.0 + v[7]) + v[6],
+            rtol=0,
+            atol=1e-5,
+            err_msg=(
+                "x_norm2 is not norm(x)*(1+slot7)+slot6 -- slots 6/7 "
+                "(shift_msa2, scale_msa2) are not reaching the dual modulation "
+                "in that order"
+            ),
+        )
+
+
+class TestAdaLayerNormZeroSixSlotAttribution:
+    """The same statement for the 6-way sibling, beside its own layer.
+
+    ``AdaLayerNormZero``'s split is currently pinned only from OUTSIDE this
+    package, by ``tests/test_models/test_dit/test_dit_blocks.py``, which
+    exercises it through ``DiTBlock``. That leaves the layer's own suite unable
+    to see a permutation of its six chunks, and it leaves the coverage filed
+    under a consumer rather than the owner. This arm is the 9-slot arm above,
+    minus the dual triple.
+    """
+
+    SLOT_VALUES = (0.11, 0.22, 0.33, 0.44, 0.55, 0.66)
+
+    def test_each_of_the_six_chunks_carries_its_own_slot(self, sample):
+        x, cond = sample
+        names = ADALN_ZERO_CHUNK_NAMES
+        assert len(names) == len(self.SLOT_VALUES) == 6
+        assert len(set(self.SLOT_VALUES)) == 6, "slot values must be distinct"
+
+        layer = _built(AdaLayerNormZero(dim=DIM, eps=EPS), x, cond)
+        x_norm_base = _outputs(
+            layer, np.zeros((6 * DIM,), dtype="float32"), x, cond
+        )[0]
+        assert float(np.std(x_norm_base)) > 1e-2, (
+            "norm(x) is nearly constant on this input, so the reconstruction "
+            "below cannot distinguish an additive slot from a multiplicative one"
+        )
+
+        v = self.SLOT_VALUES
+        outs = _outputs(
+            layer, _bias_with(names, **dict(zip(names, v))), x, cond
+        )
+
+        for out_index, name in (
+            (1, "gate_msa"), (2, "shift_mlp"), (3, "scale_mlp"), (4, "gate_mlp"),
+        ):
+            expected = v[names.index(name)]
+            np.testing.assert_allclose(
+                outs[out_index],
+                np.full_like(outs[out_index], expected),
+                rtol=0,
+                atol=1e-6,
+                err_msg=(
+                    f"returned chunk {out_index} does not carry slot "
+                    f"{names.index(name)} ({name} = {expected}); the 6-way split "
+                    "order in AdaLayerNormZero.call is permuted"
+                ),
+            )
+
+        np.testing.assert_allclose(
+            outs[0],
+            x_norm_base * (1.0 + v[1]) + v[0],
+            rtol=0,
+            atol=1e-5,
+            err_msg=(
+                "x_norm is not norm(x)*(1+slot1)+slot0 -- slots 0/1 (shift_msa, "
+                "scale_msa) are not reaching the modulation in that order"
+            ),
+        )
