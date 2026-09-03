@@ -1,51 +1,21 @@
 """
-SAM 1 Two-Way Transformer: the mask decoder's bidirectional core.
-=================================================================
+The mask decoder's bidirectional core, built by :class:`TwoWayTransformer`:
+a stack of :class:`TwoWayAttentionBlock` layers that update the query
+tokens and the image features in the same pass.
 
-:class:`TwoWayTransformer` is a stack of :class:`TwoWayAttentionBlock` layers
-that update the query tokens AND the image features in the same pass. The
-positional encoding is re-added at every attention rather than once at the
-input, so the geometry survives ``depth`` residual updates.
+Each block runs four operations in order: query self-attention,
+token-to-image cross-attention, an FFN on the queries, then image-to-token
+cross-attention, each a residual plus normalization. The positional
+encoding is re-added at every attention rather than once at the input, so
+geometry survives the residual updates across ``depth`` blocks.
+``attention_downsample_rate`` (default 2) runs the three cross-attentions at
+``embedding_dim // rate`` while self-attention stays at full width, matching
+reference SAM; changing it changes the weight shapes, so the two settings
+are not checkpoint compatible.
 
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
-- Vaswani, A. et al. (2017). "Attention Is All You Need."
-
-Key Features:
-------------
-- Four ordered operations per block: query self-attention, token-to-image
-  cross-attention, an FFN on the queries, then image-to-token cross-attention.
-- ``skip_first_layer_pe`` reproduces reference SAM's first block, whose query
-  self-attention runs WITHOUT the positional term.
-- A final token-to-image cross-attention plus normalization after the stack.
-
-Architecture Overview:
----------------------
-Per block, in order: ``self_attn(q+pe) -> cross_attn_token_to_image(q+pe,
-k+pe) -> ffn(q) -> cross_attn_image_to_token(k+pe, q+pe)``, each a residual
-followed by a normalization. Image features enter as ``(B, H, W, C)`` and are
-flattened to ``(B, H*W, C)`` for attention.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
-transformer = TwoWayTransformer(depth=2, embedding_dim=256, num_heads=8,
-                                mlp_dim=2048)
-queries, keys = transformer(image_embedding, image_pe, point_embedding)
-```
-
-Measured caveats:
-----------------
-- **``attention_downsample_rate`` defaults to 2 and is a LAYOUT knob.** The
-  three CROSS-attentions (``cross_attn_token_to_image``,
-  ``cross_attn_image_to_token``, ``final_attn_token_to_image``) run at internal
-  dim ``embedding_dim // rate``, as reference SAM does, while ``self_attn``
-  always runs at full ``embedding_dim``. ``rate=1`` restores a uniform width
-  and changes the weight shapes, so the two settings are not checkpoint
-  compatible. ``embedding_dim`` must be divisible by ``num_heads * rate`` or
-  construction raises ``ValueError``.
+References:
+    - Kirillov et al., 2023. Segment Anything. (https://arxiv.org/abs/2304.02643)
+    - Vaswani et al., 2017. Attention Is All You Need. (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
@@ -64,18 +34,9 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# DECISION plan-2026-08-23T091307-9a110062/D-601
-#: The SHIPPED attention-dropout rate of SAM 1's mask-decoder transformer, and
-#: the single home of the number. Both classes below take it as their
-#: constructor default and ``SAM.MODEL_VARIANTS`` reads it from here rather than
-#: restating ``0.0``. Mirrors ``sam2/memory_attention.DEFAULT_DROPOUT_RATE``
-#: (D-090), including the fact that the number, not just the knob, has one home.
-#: It is ``0.0`` on purpose and that is what makes the SAM 1 knob a
-#: behaviour-preserving addition: MEASURED, ``TwoWayTransformer(depth=2)``
-#: builds **7** ``keras.layers.Dropout`` layers at ``.rate == 0.0``, so the rate
-#: SAM 1 shipped was inert -- unlike SAM 2, whose unreachable default was 0.1.
-#: Do NOT "simplify" a bare ``0.0`` back into either signature or into the
-#: variant rows. See decisions.md D-601.
+# DECISION plan-2026-08-23T091307-9a110062/D-601: single home for the shipped
+# 0.0 attention-dropout rate -- TwoWayTransformer(depth=2) measured 7 Dropout
+# layers at this rate, so it was inert; keep it here, not restated inline. See decisions.md.
 DEFAULT_ATTENTION_DROPOUT_RATE: float = 0.0
 
 # ---------------------------------------------------------------------
@@ -84,48 +45,60 @@ DEFAULT_ATTENTION_DROPOUT_RATE: float = 0.0
 @register_dl_technique("dl_techniques.models.sam1.transformer")
 class TwoWayAttentionBlock(keras.layers.Layer):
     """
-    A transformer block with four layers for bidirectional attention.
+    One block of bidirectional attention between sparse query tokens and
+    dense image features, refining both.
 
-    This block implements the core processing unit of the Two-Way Transformer,
-    performing self-attention on queries, bidirectional cross-attention between
-    queries and keys (image features), and feed-forward processing.
+    Architecture:
 
-    **Intent**: To enable bidirectional information flow between sparse tokens
-    (prompts) and dense image embeddings, allowing both to be refined based on
-    each other.
+    .. code-block:: text
 
-    **Architecture**:
-    The block consists of four sequential operations:
-    1. Self-attention on sparse queries (tokens)
-    2. Cross-attention from queries to image features
-    3. Feed-forward network on queries
-    4. Cross-attention from image features to queries
+        queries [B, Nq, D]         keys [B, Nk, D]
+              │                          │
+              ▼                          │
+        self_attn(q [+pe]) ── Add ── Norm1
+              │                          │
+              ▼                          ▼
+        cross_attn_token_to_image(q+pe, k+pe) ── Add ── Norm2
+              │
+              ▼
+        ffn(q) ── Add ── Norm3
+              │                          │
+              ▼                          ▼
+        cross_attn_image_to_token(k+pe, q+pe) ── Add ── Norm4
+              │                          │
+              ▼                          ▼
+        queries_out [B, Nq, D]     keys_out [B, Nk, D]
 
-    Each operation includes a residual connection and normalization.
-
-    Args:
-        embedding_dim: Integer, the embedding dimension for queries and keys.
-            Must be divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must divide embedding_dim
-            evenly.
-        mlp_dim: Integer, hidden dimension of the feed-forward network.
-            Defaults to 2048.
-        skip_first_layer_pe: Boolean, if True, skips adding positional encoding
-            to the first self-attention layer. Used in the first block of the
-            transformer. Defaults to False.
-        normalization_type: String, type of normalization to use. Supports
-            'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation function for FFN. Defaults to 'relu'.
-        attention_dropout_rate: Float, dropout rate for attention layers.
-            Defaults to 0.0.
-        attention_downsample_rate: Integer, factor by which the internal
-            (per-head x heads) dimension of the two CROSS-attentions is reduced
-            relative to ``embedding_dim``. Reference SAM uses 2, so the cross
-            attentions run at ``embedding_dim // 2`` internally while
-            ``self_attn`` stays at full width. Requires
-            ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
-            Defaults to 2.
-        **kwargs: Additional arguments for the Layer base class.
+    :param embedding_dim: Embedding dimension for queries and keys. Must be
+        divisible by ``num_heads``.
+    :type embedding_dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param mlp_dim: Hidden dimension of the FFN. Defaults to 2048.
+    :type mlp_dim: int
+    :param skip_first_layer_pe: If True, skip adding positional encoding to
+        the first self-attention layer, used in the transformer's first
+        block. Defaults to False.
+    :type skip_first_layer_pe: bool
+    :param normalization_type: Normalization variant. Defaults to
+        ``'layer_norm'``.
+    :type normalization_type: str
+    :param activation: FFN activation. Defaults to ``'relu'``.
+    :type activation: str
+    :param attention_dropout_rate: Dropout rate for attention layers.
+        Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param attention_downsample_rate: Factor by which the two
+        cross-attentions' internal dimension is reduced relative to
+        ``embedding_dim``, while ``self_attn`` stays full width. Requires
+        ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
+        Defaults to 2.
+    :type attention_downsample_rate: int
+    :param kwargs: Additional arguments for the Layer base class.
+    :ivar self_attn: Query self-attention.
+    :ivar cross_attn_token_to_image: Token-to-image cross-attention.
+    :ivar cross_attn_image_to_token: Image-to-token cross-attention.
+    :ivar ffn: Feed-forward network for query processing.
 
     Input shape (in call):
         - queries: Shape (batch_size, num_queries, embedding_dim)
@@ -137,13 +110,6 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         Tuple of two tensors:
         - queries: Shape (batch_size, num_queries, embedding_dim)
         - keys: Shape (batch_size, num_keys, embedding_dim)
-
-    Attributes:
-        self_attn: MultiHeadAttention layer for query self-attention.
-        cross_attn_token_to_image: MultiHeadAttention for token->image attention.
-        cross_attn_image_to_token: MultiHeadAttention for image->token attention.
-        ffn: Feed-forward network for query processing.
-        norm1, norm2, norm3, norm4: Normalization layers for each sub-layer.
 
     Example:
         ```python
@@ -215,15 +181,9 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-009
-        # Two key dims, not one. Reference SAM's TwoWayAttentionBlock runs
-        # self_attn at FULL width and all three cross-attentions at
-        # embedding_dim // downsample_rate. Do NOT "simplify" this to a single
-        # self.key_dim applied everywhere (that is exactly the pre-repair state,
-        # finding F-4) and do NOT downsample self_attn too -- either variant is
-        # numerically plausible, produces the same weight COUNT, and silently
-        # breaks official-checkpoint key/shape compatibility. See decisions.md
-        # D-009.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-009: two key dims, not
+        # one -- self_attn stays full width while the cross-attentions downsample.
+        # A single shared key_dim produces the same weight count but breaks official-checkpoint compatibility. See decisions.md.
         self.key_dim = embedding_dim // num_heads
         self.cross_attn_key_dim = embedding_dim // (
             num_heads * attention_downsample_rate
@@ -286,17 +246,12 @@ class TwoWayAttentionBlock(keras.layers.Layer):
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
-        Builds all sub-layers.
+        Build every sub-layer explicitly so weights exist before
+        deserialization restores them.
 
-        Following the "Create vs. Build" principle, we explicitly build all
-        sub-layers to ensure their weights are created before the model attempts
-        to load any saved weights during deserialization.
-
-        Args:
-            input_shape: Optional shape tuple (not used for this layer).
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
         """
-        # Build attention layers
-        # Self-attention: queries attend to queries
         self.self_attn.build(
             query_shape=(None, None, self.embedding_dim),
             value_shape=(None, None, self.embedding_dim),
@@ -335,28 +290,26 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Forward pass through the two-way attention block.
+        Run the four-stage bidirectional attention block.
 
-        Args:
-            queries: Query tokens (e.g., prompt embeddings), shape
-                (batch_size, num_queries, embedding_dim).
-            keys: Key/value tokens (e.g., image features), shape
-                (batch_size, num_keys, embedding_dim).
-            query_pe: Positional encoding for queries, shape
-                (batch_size, num_queries, embedding_dim).
-            key_pe: Positional encoding for keys, shape
-                (batch_size, num_keys, embedding_dim).
-            training: Optional boolean for training mode.
-
-        Returns:
-            Tuple of (updated_queries, updated_keys):
-            - updated_queries: Shape (batch_size, num_queries, embedding_dim)
-            - updated_keys: Shape (batch_size, num_keys, embedding_dim)
+        :param queries: Query tokens, e.g. prompt embeddings, shape
+            ``(batch_size, num_queries, embedding_dim)``.
+        :type queries: keras.KerasTensor
+        :param keys: Key/value tokens, e.g. image features, shape
+            ``(batch_size, num_keys, embedding_dim)``.
+        :type keys: keras.KerasTensor
+        :param query_pe: Positional encoding for queries, same shape as
+            ``queries``.
+        :type query_pe: keras.KerasTensor
+        :param key_pe: Positional encoding for keys, same shape as ``keys``.
+        :type key_pe: keras.KerasTensor
+        :param training: Whether the layer runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(updated_queries, updated_keys)``, same shapes as the
+            inputs.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-
-        # 1. Self-attention block on queries
         if self.skip_first_layer_pe:
-            # First block: don't add PE to self-attention
             attn_out = self.self_attn(
                 query=queries,
                 value=queries,
@@ -412,32 +365,27 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         keys_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
-        Compute output shapes.
+        Compute output shapes. The argument names must be
+        ``<call argument>_shape`` for every argument -- Keras 3's rule for a
+        multi-argument ``compute_output_shape`` -- resolved against
+        ``call(queries, keys, query_pe, key_pe)``.
 
-        The argument names are load-bearing, not cosmetic: for a
-        `compute_output_shape()` with more than one argument Keras 3 requires
-        every name to be `<call argument>_shape`, and it resolves them against
-        this layer's `call(queries, keys, query_pe, key_pe)`. The previous
-        `query_shape` / `key_shape` matched no call argument, so Keras raised
-        `ValueError` before reaching the body and the method was uncallable by
-        the framework.
-
-        Args:
-            queries_shape: Shape of the `queries` argument of `call`.
-            keys_shape: Shape of the `keys` argument of `call`.
-
-        Returns:
-            Tuple of (queries_output_shape, keys_output_shape), which are
-            identical to the input shapes.
+        :param queries_shape: Shape of the ``queries`` argument of ``call``.
+        :type queries_shape: Tuple[Optional[int], ...]
+        :param keys_shape: Shape of the ``keys`` argument of ``call``.
+        :type keys_shape: Tuple[Optional[int], ...]
+        :return: ``(queries_output_shape, keys_output_shape)``, identical to
+            the inputs.
+        :rtype: Tuple[tuple, tuple]
         """
         return queries_shape, keys_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the layer for serialization.
+        Return the layer's configuration.
 
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -456,58 +404,53 @@ class TwoWayAttentionBlock(keras.layers.Layer):
 @register_dl_technique("dl_techniques.models.sam1.transformer")
 class TwoWayTransformer(layers.Layer):
     """
-    A two-way transformer decoder for joint refinement of queries and image features.
+    A stack of :class:`TwoWayAttentionBlock` layers plus a final
+    query-to-image cross-attention, for joint refinement of queries and
+    image features.
 
-    This transformer implements bidirectional attention between sparse queries
-    (e.g., prompt tokens) and dense image features. It consists of multiple
-    TwoWayAttentionBlock layers followed by a final attention layer that allows
-    queries to attend to the refined image features one last time.
+    Architecture:
 
-    **Intent**: To serve as the core processing module in SAM's mask decoder,
-    enabling prompts to gather information from the image while simultaneously
-    allowing the image representation to be refined based on the prompts.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input: Image Embeddings + Positional Encoding, Point/Prompt Embeddings
+        image_embedding [B, H, W, D]     point_embedding [B, N, D]
+              │                                │
+              ▼                                │
+        flatten to [B, H*W, D]                 │
+              │                                │
+              └──────► TwoWayAttentionBlock x depth ◄──────┘
+                              │
+                              ▼
+                final_attn_token_to_image ── Add ── norm_final_attn
+                              │
+                              ▼
+              queries [B, N, D], keys [B, H*W, D]
 
-    For each of 'depth' layers:
-        ┌─────────────────────────────────┐
-        │  TwoWayAttentionBlock           │
-        │  - Self-attention on queries    │
-        │  - Cross-attention (Q→Img)      │
-        │  - FFN on queries               │
-        │  - Cross-attention (Img→Q)      │
-        └─────────────────────────────────┘
-                    ↓
-    ┌─────────────────────────────────────┐
-    │  Final Cross-Attention              │
-    │  Queries attend to refined image    │
-    └─────────────────────────────────────┘
-                    ↓
-    Output: Refined Queries, Refined Image Features
-    ```
-
-    Args:
-        depth: Integer, number of TwoWayAttentionBlock layers. Must be positive.
-        embedding_dim: Integer, the embedding dimension for all inputs and
-            throughout the transformer. Must be divisible by num_heads.
-        num_heads: Integer, number of attention heads in each attention layer.
-        mlp_dim: Integer, hidden dimension of the feed-forward networks.
-            Defaults to 2048.
-        normalization_type: String, type of normalization to use. Supports
-            'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation function for FFN. Defaults to 'relu'.
-        attention_dropout_rate: Float, dropout rate for attention layers.
-            Defaults to 0.0.
-        attention_downsample_rate: Integer, forwarded to every
-            :class:`TwoWayAttentionBlock` and applied to
-            ``final_attn_token_to_image``. Reference SAM uses 2: the three
-            cross-attentions run at internal dim ``embedding_dim // 2`` while
-            each block's ``self_attn`` stays at full width. Requires
-            ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
-            Defaults to 2.
-        **kwargs: Additional arguments for the Layer base class.
+    :param depth: Number of :class:`TwoWayAttentionBlock` layers. Must be
+        positive.
+    :type depth: int
+    :param embedding_dim: Embedding dimension throughout the transformer.
+        Must be divisible by ``num_heads``.
+    :type embedding_dim: int
+    :param num_heads: Number of attention heads per layer.
+    :type num_heads: int
+    :param mlp_dim: Hidden dimension of the FFNs. Defaults to 2048.
+    :type mlp_dim: int
+    :param normalization_type: Normalization variant. Defaults to
+        ``'layer_norm'``.
+    :type normalization_type: str
+    :param activation: FFN activation. Defaults to ``'relu'``.
+    :type activation: str
+    :param attention_dropout_rate: Dropout rate for attention layers.
+        Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param attention_downsample_rate: Forwarded to every block and to
+        ``final_attn_token_to_image``. Requires
+        ``embedding_dim % (num_heads * attention_downsample_rate) == 0``.
+        Defaults to 2.
+    :type attention_downsample_rate: int
+    :param kwargs: Additional arguments for the Layer base class.
+    :ivar layers_list: List of :class:`TwoWayAttentionBlock` instances.
+    :ivar final_attn_token_to_image: Final query-to-image attention.
 
     Input shape (in call):
         - image_embedding: Shape (batch_size, H, W, embedding_dim)
@@ -518,11 +461,6 @@ class TwoWayTransformer(layers.Layer):
         Tuple of two tensors:
         - queries: Shape (batch_size, num_points, embedding_dim)
         - keys: Shape (batch_size, H*W, embedding_dim)
-
-    Attributes:
-        layers: List of TwoWayAttentionBlock instances.
-        final_attn_token_to_image: Final attention layer for queries to image.
-        norm_final_attn: Normalization after final attention.
 
     Example:
         ```python
@@ -543,9 +481,8 @@ class TwoWayTransformer(layers.Layer):
         ```
 
     Note:
-        The first TwoWayAttentionBlock has skip_first_layer_pe=True, meaning
-        it doesn't add positional encoding to its self-attention. This is a
-        design choice from the original SAM architecture.
+        The first block runs with ``skip_first_layer_pe=True``, matching
+        reference SAM.
     """
 
     def __init__(
@@ -600,11 +537,9 @@ class TwoWayTransformer(layers.Layer):
         self.attention_dropout_rate = attention_dropout_rate
         self.attention_downsample_rate = attention_downsample_rate
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-009
-        # final_attn_token_to_image is a CROSS attention (queries -> refined
-        # image features), so it takes the downsampled key_dim, not
-        # self.key_dim. self.key_dim is retained only because it is part of the
-        # public attribute surface. See decisions.md D-009.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-009: final_attn_token_to_image
+        # is a cross attention, so it takes the downsampled key_dim, not
+        # self.key_dim -- self.key_dim is kept only as public attribute surface. See decisions.md.
         self.key_dim = embedding_dim // num_heads
         self.cross_attn_key_dim = embedding_dim // (
             num_heads * attention_downsample_rate
@@ -643,20 +578,15 @@ class TwoWayTransformer(layers.Layer):
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
-        Builds all sub-layers.
+        Build every sub-layer explicitly so weights exist before
+        deserialization restores them.
 
-        Following the "Create vs. Build" principle, we explicitly build all
-        sub-layers to ensure their weights are created before the model attempts
-        to load any saved weights during deserialization.
-
-        Args:
-            input_shape: Optional shape tuple (not used for this layer).
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
         """
-        # Build all two-way attention blocks
         for block in self.layers_list:
             block.build(None)
 
-        # Build final attention layer
         self.final_attn_token_to_image.build(
             query_shape=(None, None, self.embedding_dim),
             value_shape=(None, None, self.embedding_dim),
@@ -674,45 +604,45 @@ class TwoWayTransformer(layers.Layer):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Forward pass through the two-way transformer.
+        Flatten the image features, run the block stack, then a final
+        query-to-image cross-attention.
 
-        Args:
-            image_embedding: Image features from encoder, shape
-                (batch_size, H, W, embedding_dim).
-            image_pe: Positional encoding for image, shape
-                (batch_size, H, W, embedding_dim).
-            point_embedding: Query tokens (prompts + output tokens), shape
-                (batch_size, num_queries, embedding_dim).
-            training: Optional boolean for training mode.
-
-        Returns:
-            Tuple of (refined_queries, refined_image_features):
-            - refined_queries: Shape (batch_size, num_queries, embedding_dim)
-            - refined_image_features: Shape (batch_size, H*W, embedding_dim)
+        :param image_embedding: Image features from the encoder, shape
+            ``(batch_size, H, W, embedding_dim)``.
+        :type image_embedding: keras.KerasTensor
+        :param image_pe: Positional encoding for the image, same shape as
+            ``image_embedding``.
+        :type image_pe: keras.KerasTensor
+        :param point_embedding: Query tokens (prompts + output tokens),
+            shape ``(batch_size, num_queries, embedding_dim)``.
+        :type point_embedding: keras.KerasTensor
+        :param training: Whether the layer runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(refined_queries, refined_image_features)`` of shapes
+            ``(batch_size, num_queries, embedding_dim)`` and
+            ``(batch_size, H*W, embedding_dim)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Reshape image embeddings from (B, H, W, C) to (B, H*W, C) for attention
         B, H, W, C = ops.shape(image_embedding)
         image_embedding_flat = ops.reshape(image_embedding, (B, H * W, C))
 
-        # Broadcast image PE to match batch size and reshape
         image_pe = ops.broadcast_to(image_pe, (B, H, W, C))
         image_pe_flat = ops.reshape(image_pe, (B, H * W, C))
 
-        # Initialize queries and keys
         queries = point_embedding
         keys = image_embedding_flat
 
-        # Process through stack of two-way attention blocks
+        # The original point embedding is used as the query PE in every
+        # block, not the running `queries`.
         for layer in self.layers_list:
             queries, keys = layer(
                 queries=queries,
                 keys=keys,
-                query_pe=point_embedding,  # Use original point embedding as PE throughout
+                query_pe=point_embedding,
                 key_pe=image_pe_flat,
                 training=training
             )
 
-        # Final attention: queries attend to refined image features one more time
         q = queries + point_embedding
         k = keys + image_pe_flat
         attn_out = self.final_attn_token_to_image(
@@ -732,28 +662,26 @@ class TwoWayTransformer(layers.Layer):
         point_embedding_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """
-        Compute output shapes.
+        Compute output shapes. The argument names must be
+        ``<call argument>_shape`` for every argument -- Keras 3's rule for a
+        multi-argument ``compute_output_shape`` -- resolved against
+        ``call(image_embedding, image_pe, point_embedding)``.
 
-        The argument names must be `<call argument>_shape` for every argument
-        (Keras 3's rule for a multi-argument `compute_output_shape`), resolved
-        against `call(image_embedding, image_pe, point_embedding)`. The previous
-        `image_shape` / `point_shape` matched no call argument and made this
-        method uncallable by the framework.
-
-        Args:
-            image_embedding_shape: Shape of image_embedding (B, H, W, C).
-            point_embedding_shape: Shape of point_embedding (B, N, C).
-
-        Returns:
-            Tuple of (query_shape, key_shape):
-            - query_shape: (B, N, C) - same as point_embedding_shape
-            - key_shape: (B, H*W, C) - flattened image shape
+        :param image_embedding_shape: Shape of ``image_embedding``,
+            ``(B, H, W, C)``.
+        :type image_embedding_shape: Tuple[Optional[int], ...]
+        :param point_embedding_shape: Shape of ``point_embedding``,
+            ``(B, N, C)``.
+        :type point_embedding_shape: Tuple[Optional[int], ...]
+        :return: ``(query_shape, key_shape)`` -- query is
+            ``point_embedding_shape``, key is the flattened image shape
+            ``(B, H*W, C)``.
+        :rtype: Tuple[tuple, tuple]
         """
         batch_size = point_embedding_shape[0]
         num_queries = point_embedding_shape[1]
         embedding_dim = point_embedding_shape[2]
 
-        # Image is flattened spatially
         if image_embedding_shape[1] is not None and image_embedding_shape[2] is not None:
             num_keys = image_embedding_shape[1] * image_embedding_shape[2]
         else:
@@ -766,10 +694,10 @@ class TwoWayTransformer(layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the layer for serialization.
+        Return the layer's configuration.
 
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

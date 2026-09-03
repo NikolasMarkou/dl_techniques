@@ -1,60 +1,21 @@
 """
-SAM 1 Prompt Encoder: points, boxes and masks into decoder embeddings.
-======================================================================
+Turns points, boxes and masks into the embeddings the mask decoder takes,
+built by :class:`PromptEncoder`.
 
-:class:`PromptEncoder` turns user input into the two things the mask decoder
-takes: SPARSE embeddings ``(B, N, D)`` for points and boxes, and a DENSE
-embedding grid ``(B, H_emb, W_emb, D)`` for an input mask. It is also the owner
-of the image positional encoding -- :meth:`get_dense_pe` is what supplies
-``image_pe`` to the decoder.
+It produces two kinds of output: sparse embeddings ``(B, N, D)`` for points
+and boxes, and a dense embedding grid ``(B, H_emb, W_emb, D)`` for an input
+mask. It also owns the image positional encoding -- :meth:`get_dense_pe`
+supplies ``image_pe`` to the decoder, using the same random-Fourier
+encoding (:class:`PositionEmbeddingRandom`) as the sparse prompts, so
+prompts and image live in one coordinate frame.
 
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+A mask prompt's spatial size must be exactly ``4 * image_embedding_size`` in
+both axes -- the downscaling stack is a fixed 4x reduction -- and any other
+size raises. A padding point (label -1) has its positional encoding zeroed
+before the padding-type embedding is added, matching reference SAM.
 
-Key Features:
-------------
-- A random-Gaussian Fourier positional encoding
-  (:class:`PositionEmbeddingRandom`) shared by the sparse prompts and by
-  :meth:`get_dense_pe`, so prompts and image live in one coordinate frame.
-- Four learnable type embeddings -- background point, foreground point,
-  box top-left, box bottom-right -- plus ``not_a_point_embed`` for padding rows
-  and ``no_mask_embed`` for the no-mask case.
-- Masks go through a fixed 4x downscaling conv stack to reach the embedding
-  grid.
-
-Architecture Overview:
----------------------
-1. Points ``(B, N, 2)`` + labels ``(B, N)`` -> positional encoding + the type
-   embedding selected by the label -> ``(B, N, D)``.
-2. Boxes ``(B, 1, 4)`` -> two corner rows -> ``(B, 2, D)``; concatenated with
-   the point rows.
-3. Masks ``(B, 1, 4*H_emb, 4*W_emb)`` -> conv stack -> ``(B, H_emb, W_emb, D)``;
-   absent -> ``no_mask_embed`` broadcast to the same shape.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
-encoder = PromptEncoder(embed_dim=256, image_embedding_size=(64, 64),
-                        input_image_size=(1024, 1024), mask_in_chans=16)
-sparse, dense = encoder(points=(coords, labels))   # (B, N, 256), (B, 64, 64, 256)
-image_pe = encoder.get_dense_pe()                  # (1, 64, 64, 256)
-```
-
-Measured caveats:
-----------------
-- **A mask prompt's spatial size must be EXACTLY ``4 * image_embedding_size``
-  in BOTH axes.** The downscaling stack is a fixed 4x reduction, so nothing
-  else can land on the embedding grid; anything else raises ``ValueError``.
-- **A padding row (``label == -1``) has its positional encoding ZEROED before
-  ``not_a_point_embed`` is added, not merely overwritten by it.** Reference SAM
-  does ``point_embedding[labels == -1] = 0.0`` first. Relying on the additive
-  block alone leaves the padding point's coordinate in the embedding: measured
-  max abs deviation ``0.962855`` against the correct row, and ``1.727846``
-  between two padding points placed at different coordinates -- both exactly
-  ``0.0`` after the fix, which is why the guard asserts exact zero rather than
-  a tolerance.
+References:
+    - Kirillov et al., 2023. Segment Anything. (https://arxiv.org/abs/2304.02643)
 """
 
 import keras
@@ -79,31 +40,39 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.sam1.prompt_encoder")
 class PositionEmbeddingRandom(keras.layers.Layer):
     """
-    Positional encoding using random spatial frequencies.
+    Random-Fourier-feature positional encoding: coordinates projected
+    through a fixed random Gaussian matrix, then sin/cos encoded.
 
-    This layer generates positional embeddings using a random Fourier feature
-    approach. It maps 2D coordinates to high-dimensional positional encodings
-    using random projection followed by sinusoidal encoding.
+    Architecture:
 
-    **Intent**: To provide learnable positional information for point and box
-    prompts, enabling the model to understand spatial relationships in the input.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Coordinates (normalized to [0, 1]) -> Scale to [-1, 1]
-                                        -> Random projection
-                                        -> Scale by 2π
-                                        -> [sin(...), cos(...)]
-                                        -> Positional encoding
-    ```
+        coords [..., 2], in [0, 1]
+              │
+              ▼
+        scale to [-1, 1]
+              │
+              ▼
+        @ positional_encoding_gaussian_matrix [2, num_pos_feats]
+              │
+              ▼
+        * 2*pi
+              │
+              ▼
+        [sin(.), cos(.)]
+              │
+              ▼
+        out [..., 2*num_pos_feats]
 
-    Args:
-        num_pos_feats: Integer, number of positional features. The output
-            dimension will be 2 * num_pos_feats (due to sin and cos).
-            Defaults to 64.
-        scale: Float, scale for the random Gaussian matrix initialization.
-            Controls the frequency of the positional encoding. Defaults to 1.0.
-        **kwargs: Additional arguments for the Layer base class.
+    :param num_pos_feats: Number of positional features; the output
+        dimension is ``2 * num_pos_feats``. Defaults to 64.
+    :type num_pos_feats: int
+    :param scale: Standard deviation of the random Gaussian projection
+        matrix, controlling the encoding's frequency. Defaults to 1.0.
+    :type scale: float
+    :param kwargs: Additional arguments for the Layer base class.
+    :ivar positional_encoding_gaussian_matrix: Non-trainable weight of shape
+        ``(2, num_pos_feats)``.
 
     Input shape:
         - For `call()`: Tuple of two integers (height, width) representing the
@@ -114,10 +83,6 @@ class PositionEmbeddingRandom(keras.layers.Layer):
     Output shape:
         - For `call()`: Tensor of shape (2*num_pos_feats, height, width).
         - For `forward_with_coords()`: Tensor of shape (..., 2*num_pos_feats).
-
-    Attributes:
-        positional_encoding_gaussian_matrix: Non-trainable weight of shape
-            (2, num_pos_feats) containing random projection matrix.
     """
 
     def __init__(
@@ -134,10 +99,10 @@ class PositionEmbeddingRandom(keras.layers.Layer):
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
-        Creates the random projection matrix.
+        Create the fixed random projection matrix.
 
-        Args:
-            input_shape: Optional shape tuple (not used, can be None).
+        :param input_shape: Not used; may be None.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
         """
         self.positional_encoding_gaussian_matrix = self.add_weight(
             name="positional_encoding_gaussian_matrix",
@@ -149,13 +114,13 @@ class PositionEmbeddingRandom(keras.layers.Layer):
 
     def _pe_encoding(self, coords: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Encode coordinates using sinusoidal positional encoding.
+        Encode normalized coordinates with the sinusoidal random-Fourier
+        transform.
 
-        Args:
-            coords: Tensor of shape (..., 2) with normalized coordinates in [0, 1].
-
-        Returns:
-            Positional encoding tensor of shape (..., 2*num_pos_feats).
+        :param coords: Coordinates in ``[0, 1]``, shape ``(..., 2)``.
+        :type coords: keras.KerasTensor
+        :return: Positional encoding, shape ``(..., 2*num_pos_feats)``.
+        :rtype: keras.KerasTensor
         """
         # Scale coords to [-1, 1]
         coords = 2 * coords - 1
@@ -170,46 +135,34 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         """
         Generate a grid of positional encodings for a given spatial size.
 
-        Args:
-            size: Tuple of (height, width) for the spatial dimensions.
-
-        Returns:
-            Positional encoding tensor of shape (2*num_pos_feats, height, width).
+        :param size: Spatial dimensions ``(height, width)``.
+        :type size: Tuple[int, int]
+        :return: Positional encoding, shape ``(2*num_pos_feats, height, width)``.
+        :rtype: keras.KerasTensor
         """
         h, w = size
         pe = self._pe_encoding(self._coord_grid(h, w))
-        # Return as (C, H, W) for compatibility with original SAM
+        # (C, H, W), for compatibility with reference SAM.
         return ops.transpose(pe, (2, 0, 1))
 
     def _coord_grid(self, h: int, w: int) -> keras.KerasTensor:
         """
         Return the normalized ``(h, w, 2)`` ``(x, y)`` coordinate grid.
 
-        Recomputed on every call, deliberately -- see the anchor below.
+        Recomputed on every call rather than cached; see the DECISION comment
+        below.
 
-        Args:
-            h: Grid height.
-            w: Grid width.
-
-        Returns:
-            Tensor of shape ``(h, w, 2)`` holding pixel-centre coordinates
-            normalized to ``[0, 1]``, ``x`` first.
+        :param h: Grid height.
+        :type h: int
+        :param w: Grid width.
+        :type w: int
+        :return: Pixel-centre coordinates normalized to ``[0, 1]``, ``x``
+            first, shape ``(h, w, 2)``.
+        :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-03T191222-1d751f81/D-025
-        # Do NOT memoize this grid on the instance, however obviously
-        # weight-independent and cheap-to-cache it looks (F-16 said "cache it";
-        # D-020 did, and it was a defect). A tensor produced inside ANY graph
-        # context -- a traced function, `predict`, `fit`, `jit_compile` -- belongs
-        # to that trace's FuncGraph, so a slot filled during the first trace hands a
-        # dead `SymbolicTensor` to every later call and the layer raises
-        # `TypeError: ... is out of scope and cannot be used here` FOREVER,
-        # eagerly and on re-trace alike. Measured on this class and on the real
-        # SAM fixture. The recompute below has no failure mode; the cache traded
-        # a few `cumsum` ops for a model object that dies under `fit()`.
-        # Do NOT "fix" it with an eager-only gate either: detecting eagerness
-        # needs TensorFlow's own eager-execution predicate or its EagerTensor
-        # type, and a raw backend call in this forward path breaks invariant I-1 /
-        # SC-9 (`keras.ops` purity). See decisions.md D-025.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-025: do not memoize this
+        # grid on the instance. A tensor built inside one trace's FuncGraph is
+        # dead in every later call, raising "out of scope" under fit()/jit_compile. See decisions.md.
         grid = ops.ones((h, w), dtype=self.compute_dtype)
         y_embed = ops.cumsum(grid, axis=0) - 0.5
         x_embed = ops.cumsum(grid, axis=1) - 0.5
@@ -224,15 +177,15 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         image_size: Tuple[int, int]
     ) -> keras.KerasTensor:
         """
-        Encode explicit coordinates (e.g., point or box coordinates).
+        Encode explicit pixel-space coordinates, e.g. point or box corners.
 
-        Args:
-            coords_input: Tensor of shape (..., 2) containing (x, y) coordinates
-                in pixel space.
-            image_size: Tuple of (height, width) of the image for normalization.
-
-        Returns:
-            Positional encoding tensor of shape (..., 2*num_pos_feats).
+        :param coords_input: ``(x, y)`` coordinates in pixel space, shape
+            ``(..., 2)``.
+        :type coords_input: keras.KerasTensor
+        :param image_size: Image size ``(height, width)`` for normalization.
+        :type image_size: Tuple[int, int]
+        :return: Positional encoding, shape ``(..., 2*num_pos_feats)``.
+        :rtype: keras.KerasTensor
         """
         coords = ops.copy(coords_input)
         # Normalize coordinates to [0, 1]
@@ -246,26 +199,24 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         """
-        Compute the output shape of :meth:`call`.
+        Compute the output shape of :meth:`call`, which maps a
+        ``(height, width)`` spatial size to a positional-encoding grid.
 
-        ``call`` receives a ``(height, width)`` spatial size and returns a
-        positional-encoding grid of shape ``(2 * num_pos_feats, height, width)``.
-
-        Args:
-            input_shape: The ``(height, width)`` spatial size passed to ``call``.
-
-        Returns:
-            Output shape ``(2 * num_pos_feats, height, width)``.
+        :param input_shape: The ``(height, width)`` spatial size passed to
+            :meth:`call`.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape ``(2 * num_pos_feats, height, width)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         height, width = input_shape
         return (2 * self.num_pos_feats, height, width)
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the layer for serialization.
+        Return the layer's configuration.
 
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -279,40 +230,43 @@ class PositionEmbeddingRandom(keras.layers.Layer):
 @register_dl_technique("dl_techniques.models.sam1.prompt_encoder")
 class PromptEncoder(layers.Layer):
     """
-    Encodes prompts (points, boxes, masks) for the SAM mask decoder.
+    Encode points, boxes and masks into the sparse and dense embeddings the
+    mask decoder takes.
 
-    This layer is a core component of the Segment Anything Model (SAM), responsible
-    for converting various types of user prompts into a format that can be used by
-    the mask decoder. It handles three types of prompts:
+    Architecture:
 
-    1. **Points**: Individual points with labels (foreground/background)
-    2. **Boxes**: Bounding boxes defined by two corners
-    3. **Masks**: Dense segmentation masks
+    .. code-block:: text
 
-    **Intent**: To provide a unified interface for encoding different prompt types,
-    producing sparse embeddings for points/boxes and dense embeddings for masks.
+        points + labels ──► pos. encoding + type embed ──┐
+        boxes           ──► corner encoding + type embed ─┤──► sparse [B, N, D]
+                                                            │
+        mask (present)  ──► mask_downscaling ─────────────►│
+        mask (absent)   ──► no_mask_embed, broadcast ──────► dense [B, H, W, D]
 
-    **Architecture**:
-    ```
-    Points + Labels → Positional Encoding + Type Embeddings → Sparse Embeddings
-    Boxes → Corner Encoding + Type Embeddings → Sparse Embeddings
-    Masks → Conv Network → Dense Embeddings
-    No prompt → Learned "no prompt" embeddings
-    ```
-
-    Args:
-        embed_dim: Integer, the dimension of the output embeddings. Must be positive.
-        image_embedding_size: Tuple of two integers, the spatial size (height, width)
-            of the image embeddings from the vision encoder. This determines the
-            output spatial size for dense embeddings.
-        input_image_size: Tuple of two integers, the size (height, width) of the
-            original input image. Used for normalizing point/box coordinates.
-        mask_in_chans: Integer, number of channels for mask downscaling network's
-            first layer. Defaults to 16.
-        normalization_type: String, type of normalization to use in mask downscaling.
-            Supports 'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation function for mask downscaling. Defaults to 'gelu'.
-        **kwargs: Additional arguments for the Layer base class.
+    :param embed_dim: Dimension of the output embeddings. Must be positive.
+    :type embed_dim: int
+    :param image_embedding_size: Spatial size ``(height, width)`` of the
+        vision encoder's output, which sets the dense-embedding output size.
+    :type image_embedding_size: Tuple[int, int]
+    :param input_image_size: Size ``(height, width)`` of the original input
+        image, used to normalize point/box coordinates.
+    :type input_image_size: Tuple[int, int]
+    :param mask_in_chans: Channel count of the mask-downscaling network's
+        first layer. Defaults to 16.
+    :type mask_in_chans: int
+    :param normalization_type: Normalization used in mask downscaling.
+        Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param activation: Activation used in mask downscaling. Defaults to
+        ``'gelu'``.
+    :type activation: str
+    :param kwargs: Additional arguments for the Layer base class.
+    :ivar pe_layer: :class:`PositionEmbeddingRandom` positional encoder.
+    :ivar point_embeddings: Four Embedding layers, one per point/box-corner
+        type.
+    :ivar not_a_point_embed: Embedding for padding points.
+    :ivar no_mask_embed: Embedding used when no mask is provided.
+    :ivar mask_downscaling: Sequential conv stack processing mask inputs.
 
     Input shape (in call):
         - points: Optional tuple of (coords, labels) where:
@@ -329,13 +283,6 @@ class PromptEncoder(layers.Layer):
         - sparse_embeddings: Shape (batch_size, num_sparse, embed_dim)
         - dense_embeddings: Shape (batch_size, image_embedding_size[0],
                                    image_embedding_size[1], embed_dim)
-
-    Attributes:
-        pe_layer: PositionEmbeddingRandom layer for positional encoding.
-        point_embeddings: List of 4 Embedding layers for different point types.
-        not_a_point_embed: Embedding layer for padding points.
-        no_mask_embed: Embedding layer for when no mask is provided.
-        mask_downscaling: Sequential model for processing mask inputs.
 
     Example:
         ```python
@@ -419,41 +366,36 @@ class PromptEncoder(layers.Layer):
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
-        Builds all sub-layers.
+        Build every sub-layer explicitly so weights exist before
+        deserialization restores them.
 
-        Following the "Create vs. Build" principle, we explicitly build all
-        sub-layers to ensure their weights are created before the model attempts
-        to load any saved weights during deserialization.
-
-        Args:
-            input_shape: Optional shape tuple (not used for this layer).
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
         """
-        # Build positional encoding layer
         self.pe_layer.build(None)
 
-        # Build all embedding layers
         for emb in self.point_embeddings:
             emb.build((None,))
         self.not_a_point_embed.build((None,))
         self.no_mask_embed.build((None,))
 
-        # Build mask downscaling network
-        # We know masks will have shape (batch, H, W, 1) after transpose
+        # Masks have shape (batch, H, W, 1) after transpose.
         self.mask_downscaling.build((None, None, None, 1))
 
         super().build(input_shape)
 
     def get_dense_pe(self) -> keras.KerasTensor:
         """
-        Get dense positional encoding grid.
+        Get the dense positional encoding grid for the image embeddings.
 
-        Returns:
-            Positional encoding tensor of shape
-            (1, image_embedding_size[0], image_embedding_size[1], embed_dim).
+        :return: Positional encoding, shape
+            ``(1, image_embedding_size[0], image_embedding_size[1], embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        pe = self.pe_layer(size=self.image_embedding_size)  # (C, H, W)
-        pe = ops.transpose(pe, (1, 2, 0))  # (H, W, C)
-        return ops.expand_dims(pe, axis=0)  # (1, H, W, C)
+        # pe is (C, H, W); transpose to (H, W, C) then add the batch axis.
+        pe = self.pe_layer(size=self.image_embedding_size)
+        pe = ops.transpose(pe, (1, 2, 0))
+        return ops.expand_dims(pe, axis=0)
 
     def _embed_points(
         self,
@@ -464,41 +406,30 @@ class PromptEncoder(layers.Layer):
         """
         Embed point coordinates and labels.
 
-        Args:
-            points: Tensor of shape (batch_size, num_points, 2) with (x, y) coordinates.
-            labels: Tensor of shape (batch_size, num_points) with point labels.
-            pad: Boolean, whether to add a padding point.
-
-        Returns:
-            Point embeddings of shape (batch_size, num_points, embed_dim).
+        :param points: ``(x, y)`` coordinates, shape
+            ``(batch_size, num_points, 2)``.
+        :type points: keras.KerasTensor
+        :param labels: Point labels, shape ``(batch_size, num_points)``.
+        :type labels: keras.KerasTensor
+        :param pad: Whether to append a padding point.
+        :type pad: bool
+        :return: Point embeddings, shape ``(batch_size, num_points, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        # Add 0.5 for pixel center offset
         points = points + 0.5
 
         if pad:
-            # Add padding point when no boxes are provided
+            # Add a padding point for when no boxes are provided.
             padding_point = ops.zeros((ops.shape(points)[0], 1, 2), dtype=points.dtype)
             padding_label = -ops.ones((ops.shape(labels)[0], 1), dtype=labels.dtype)
             points = ops.concatenate([points, padding_point], axis=1)
             labels = ops.concatenate([labels, padding_label], axis=1)
 
-        # Get positional encoding for coordinates
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-013
-        # ZERO the positional encoding of every label == -1 row BEFORE any type
-        # embedding is added. Reference SAM does `point_embedding[labels == -1] = 0.0`
-        # and only then adds `not_a_point_embed`, so a padding point carries the
-        # not-a-point embedding ALONE.
-        # Do NOT delete this and rely on the additive `not_a_point_embed` block
-        # below: without this line the Fourier PE of the dummy (0, 0) padding
-        # point SURVIVES and `not_a_point_embed` is merely added on top. That
-        # makes a padding point's embedding depend on its coordinates (measured
-        # up to 1.85 apart for two padding points at different coordinates) and
-        # silently diverges from reference SAM on EVERY point-only prompt, which
-        # is the most common prompt in practice (`call` sets `pad=(boxes is None)`).
-        # Do NOT move it after the additive blocks either -- that would zero the
-        # type embedding as well. See decisions.md D-013.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-013: zero the positional
+        # encoding of label == -1 rows before adding any type embedding, matching
+        # reference SAM. Skipping this leaves a padding point's embedding coordinate-dependent. See decisions.md.
         point_embedding = ops.where(
             ops.expand_dims(labels, -1) == -1,
             ops.zeros_like(point_embedding),
@@ -530,21 +461,16 @@ class PromptEncoder(layers.Layer):
         """
         Embed bounding box coordinates.
 
-        Args:
-            boxes: Tensor of shape (batch_size, num_boxes, 4) with
-                (x1, y1, x2, y2) coordinates.
-
-        Returns:
-            Box embeddings of shape (batch_size, 2*num_boxes, embed_dim).
+        :param boxes: ``(x1, y1, x2, y2)`` box coordinates, shape
+            ``(batch_size, num_boxes, 4)``.
+        :type boxes: keras.KerasTensor
+        :return: Box embeddings, shape ``(batch_size, 2*num_boxes, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        # Add 0.5 for pixel center offset
         boxes = boxes + 0.5
-        # reshape must PRESERVE the batch axis. The old `reshape(boxes, (-1, 2, 2))`
-        # collapsed batch*num_boxes into the leading dim, returning (B*N, 2, D)
-        # instead of (B, 2N, D) — which crashed the axis-1 concat in call() for
-        # N>1 (batch B vs B*N) and only happened to work for N==1. Split each
-        # (x1,y1,x2,y2) box into its two corners while keeping (B, 2N, 2):
-        # order is [tl0, br0, tl1, br1, ...].
+        # Reshape must preserve the batch axis: split each (x1,y1,x2,y2) box
+        # into its two corners as (B, 2N, 2), order [tl0, br0, tl1, br1, ...],
+        # not (B*N, 2, D) which crashes the axis-1 concat in call() for N>1.
         batch_size = ops.shape(boxes)[0]
         num_boxes = ops.shape(boxes)[1]
         coords = ops.reshape(boxes, (batch_size, num_boxes * 2, 2))
@@ -552,13 +478,13 @@ class PromptEncoder(layers.Layer):
         # Get positional encoding for corner coordinates -> (B, 2N, D)
         corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
 
-        # Add per-corner type embeddings, alternating top-left / bottom-right for
-        # each box: [emb2, emb3, emb2, emb3, ...] of length 2N, broadcast over batch.
+        # Alternating top-left/bottom-right type embeddings: [emb2, emb3,
+        # emb2, emb3, ...] of length 2N, broadcast over the batch.
         type_pair = ops.concatenate([
-            self.point_embeddings[2].weights[0],   # (1, D) top-left
-            self.point_embeddings[3].weights[0],   # (1, D) bottom-right
-        ], axis=0)                                 # (2, D)
-        type_embeddings = ops.tile(type_pair, [num_boxes, 1])      # (2N, D)
+            self.point_embeddings[2].weights[0],
+            self.point_embeddings[3].weights[0],
+        ], axis=0)
+        type_embeddings = ops.tile(type_pair, [num_boxes, 1])
         corner_embedding = corner_embedding + ops.expand_dims(type_embeddings, 0)
         return corner_embedding
 
@@ -566,32 +492,18 @@ class PromptEncoder(layers.Layer):
         """
         Embed mask inputs through convolutional downscaling.
 
-        Args:
-            masks: Tensor of shape (batch_size, 1, mask_h, mask_w) with mask values.
-
-        Returns:
-            Dense mask embeddings of shape
-            (batch_size, image_embedding_size[0], image_embedding_size[1], embed_dim).
-
-        Raises:
-            ValueError: If the mask's spatial size is not exactly
-                `4 * image_embedding_size`. The downscaling stack is a fixed
-                two-stride-2 convolution chain; any other input size produces a
-                silently wrong-shaped dense embedding.
+        :param masks: Mask values, shape ``(batch_size, 1, mask_h, mask_w)``.
+        :type masks: keras.KerasTensor
+        :return: Dense mask embeddings, shape
+            ``(batch_size, image_embedding_size[0], image_embedding_size[1], embed_dim)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If the mask's spatial size is not exactly
+            ``4 * image_embedding_size`` -- the downscaling stack is a fixed
+            two-stride-2 convolution chain.
         """
-        # DECISION plan-2026-08-03T191222-1d751f81/D-016: `mask_downscaling` is
-        # a FIXED 4x downscaling conv stack, so the only mask size it can map
-        # onto the image-embedding grid is exactly 4 * image_embedding_size.
-        # Measured: a 32x32 mask against image_embedding_size=(16, 16) returns
-        # (1, 8, 8, 8) from here without complaint, and the failure only
-        # surfaces much later and elsewhere, as a broadcast error inside
-        # `image_embeddings + dense_embeddings` in the mask decoder -- a message
-        # that names neither the mask nor this layer. Refuse AT THE POINT OF
-        # VIOLATION. Do NOT "fix" this by resizing the mask here: reference SAM
-        # requires the caller to supply the mask in the model's padded input
-        # frame, and a hidden resize would misalign it with the image without
-        # any signal. Static shapes are read deliberately, so this is a plain
-        # Python branch that is skipped (not traced) on an unknown extent.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-016: refuse a mask whose
+        # spatial size isn't exactly 4 * image_embedding_size, at this point of
+        # violation. Left unchecked it surfaces later as a broadcast error inside the mask decoder instead. See decisions.md.
         expected_h = 4 * self.image_embedding_size[0]
         expected_w = 4 * self.image_embedding_size[1]
         static_shape = tuple(masks.shape)
@@ -627,42 +539,35 @@ class PromptEncoder(layers.Layer):
         """
         Encode prompts into sparse and dense embeddings.
 
-        Args:
-            points: Optional tuple of (coords, labels) where:
-                - coords: Shape (batch_size, num_points, 2)
-                - labels: Shape (batch_size, num_points)
-            boxes: Optional tensor of shape (batch_size, num_boxes, 4).
-            masks: Optional tensor of shape (batch_size, 1, mask_h, mask_w).
-            training: Optional boolean for training mode.
-
-        Returns:
-            Tuple of (sparse_embeddings, dense_embeddings):
-            - sparse_embeddings: Shape (batch_size, num_sparse, embed_dim)
-            - dense_embeddings: Shape (batch_size, image_embedding_size[0],
-                                       image_embedding_size[1], embed_dim)
+        :param points: Optional ``(coords, labels)`` pair, shapes
+            ``(batch_size, num_points, 2)`` and ``(batch_size, num_points)``.
+        :type points: Optional[Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param boxes: Optional boxes, shape ``(batch_size, num_boxes, 4)``.
+        :type boxes: Optional[keras.KerasTensor]
+        :param masks: Optional masks, shape ``(batch_size, 1, mask_h, mask_w)``.
+        :type masks: Optional[keras.KerasTensor]
+        :param training: Whether the layer runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(sparse_embeddings, dense_embeddings)`` -- sparse of shape
+            ``(batch_size, num_sparse, embed_dim)``, dense of shape
+            ``(batch_size, image_embedding_size[0], image_embedding_size[1], embed_dim)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Determine batch size from inputs
         bs = self._get_batch_size(points, boxes, masks)
-
-        # Initialize empty sparse embeddings
         sparse_embeddings = ops.zeros((bs, 0, self.embed_dim), dtype=self.compute_dtype)
 
-        # Encode points if provided
         if points is not None:
             coords, labels = points
             point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
             sparse_embeddings = ops.concatenate([sparse_embeddings, point_embeddings], axis=1)
 
-        # Encode boxes if provided
         if boxes is not None:
             box_embeddings = self._embed_boxes(boxes)
             sparse_embeddings = ops.concatenate([sparse_embeddings, box_embeddings], axis=1)
 
-        # Encode masks or use "no mask" embedding
         if masks is not None:
             dense_embeddings = self._embed_masks(masks)
         else:
-            # Use learned "no mask" embedding
             dense_embeddings = self.no_mask_embed.weights[0]
             dense_embeddings = ops.reshape(dense_embeddings, (1, 1, 1, self.embed_dim))
             dense_embeddings = ops.broadcast_to(
@@ -679,15 +584,16 @@ class PromptEncoder(layers.Layer):
         masks: Optional[keras.KerasTensor]
     ) -> int:
         """
-        Determine batch size from provided inputs.
+        Determine batch size from whichever prompt input is provided.
 
-        Args:
-            points: Optional point inputs.
-            boxes: Optional box inputs.
-            masks: Optional mask inputs.
-
-        Returns:
-            Batch size as an integer or tensor.
+        :param points: Optional point inputs.
+        :type points: Optional[Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param boxes: Optional box inputs.
+        :type boxes: Optional[keras.KerasTensor]
+        :param masks: Optional mask inputs.
+        :type masks: Optional[keras.KerasTensor]
+        :return: Batch size, as an integer or tensor.
+        :rtype: int
         """
         if points is not None:
             return ops.shape(points[0])[0]
@@ -705,13 +611,12 @@ class PromptEncoder(layers.Layer):
         """
         Compute output shapes for sparse and dense embeddings.
 
-        Args:
-            input_shape: Not used for this layer.
-
-        Returns:
-            Tuple of (sparse_shape, dense_shape):
-            - sparse_shape: (batch_size, num_sparse, embed_dim)
-            - dense_shape: (batch_size, H, W, embed_dim)
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
+        :return: ``(sparse_shape, dense_shape)`` -- sparse
+            ``(batch_size, num_sparse, embed_dim)``, dense
+            ``(batch_size, H, W, embed_dim)``.
+        :rtype: Tuple[tuple, tuple]
         """
         sparse_shape = (None, None, self.embed_dim)
         dense_shape = (
@@ -724,10 +629,10 @@ class PromptEncoder(layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the layer for serialization.
+        Return the layer's configuration.
 
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({

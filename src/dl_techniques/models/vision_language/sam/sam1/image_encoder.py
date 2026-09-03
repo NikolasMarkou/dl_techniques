@@ -1,68 +1,26 @@
 """
-SAM 1 Image Encoder: the ViT backbone and its stride-1 channel neck.
+The ViT backbone that turns an image into the dense embedding grid every
+other SAM 1 component consumes, built by :class:`ImageEncoderViT`.
 
-:class:`ImageEncoderViT` turns an image into the single dense embedding every
-other SAM 1 component consumes. It is a plain (non-hierarchical) ViT whose
-attention is windowed everywhere except at a named set of global block indices,
-followed by a two-convolution neck that changes the channel count only.
+It is a plain, non-hierarchical ViT: attention is windowed in every block
+except a named set of global-attention indices, and a stride-1 neck
+(1x1 conv, norm, 3x3 conv, norm) changes the channel count without touching
+the spatial grid, which is fixed by the patch embedding alone. A windowed
+attention layer with an optional learnable relative position bias
+(:class:`WindowedAttentionWithRelPos`) backs each block.
 
-Key Features:
-------------
-- Windowed attention with an optional learnable RELATIVE positional bias
-  (:class:`WindowedAttentionWithRelPos`), interleaved with full-grid global
-  blocks at ``global_attn_indexes``.
-- The neck is a 1x1 conv -> norm -> 3x3 conv -> norm stack at stride 1. It
-  does NOT change the spatial grid; the grid is fixed by the patch embedding
-  alone (measured ``(1, 64, 64, out_chans)`` at ``img_size=1024,
-  patch_size=16``).
-- Every sublayer is built through the repository factories
-  (``create_ffn_layer``, ``create_normalization_layer``,
-  :class:`PatchEmbedding2D`), so attention/FFN/norm types are configurable.
-
-Architecture Overview:
----------------------
-1. ``(B, H, W, 3)`` -> ``Conv2D`` patch embedding -> ``(B, H/p, W/p, embed_dim)``.
-2. -> plus a learnable absolute positional embedding of that grid shape.
-3. -> ``depth`` ViT blocks; block ``i`` runs global attention if
-   ``i in global_attn_indexes``, else windowed at ``window_size``.
-4. -> neck -> ``(B, H/p, W/p, out_chans)``.
-
-Model Variants:
---------------
-``vit_b`` 768/12/12, ``vit_l`` 1024/24/16, ``vit_h`` 1280/32/16
-(``embed_dim``/``depth``/``num_heads``), all at ``out_chans=256``. See
-:mod:`.model` for the measured per-variant parameter counts.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
-encoder = ImageEncoderViT(img_size=1024, patch_size=16, embed_dim=768,
-                          depth=12, num_heads=12, out_chans=256,
-                          window_size=14, global_attn_indexes=(2, 5, 8, 11))
-embedding = encoder(image)           # (batch, 64, 64, 256)
-```
-
-Measured caveats:
-----------------
-- **A windowed-only encoder is REFUSED, by construction.** ``0 < window_size <
-  grid_size`` with an EMPTY ``global_attn_indexes`` windows every block, so no
-  unit ever attains a global receptive field; the constructor raises
-  ``ValueError`` rather than silently training a crippled backbone. The two
-  legitimate configurations -- ``window_size=0`` (all global) and a non-empty
-  ``global_attn_indexes`` -- are unaffected.
-- **``use_rel_pos=True`` is a ``.keras`` LAYOUT change, not a flag.** It creates
-  per-block ``rel_pos_h`` / ``rel_pos_w`` variables, so a checkpoint saved at
-  one setting cannot be restored at the other. It also requires ``input_size``;
-  omitting it raises.
-- The relative-position path is pinned by a spy in
-  ``tests/test_models/test_sam/test_correctness.py`` (call count non-zero with
-  the flag on, exactly zero with it off) rather than assumed to be reached.
+A configuration with ``window_size > 0`` and no ``global_attn_indexes``
+raises: it would window every block and leave the encoder with no global
+receptive field. ``use_rel_pos=True`` changes the weight layout (adds
+per-block ``rel_pos_h``/``rel_pos_w`` variables), so a checkpoint saved at
+one setting of that flag cannot load at the other.
 
 References:
-    Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
-    Dosovitskiy, A. et al. (2020). ViT -- patch embedding, absolute position.
-    Liu, Z. et al. (2021). Swin -- the windowed-attention idea, not the shifts.
+    - Kirillov et al., 2023. Segment Anything. (https://arxiv.org/abs/2304.02643)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers
+      for Image Recognition at Scale. (https://arxiv.org/abs/2010.11929)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
+      using Shifted Windows. (https://arxiv.org/abs/2103.14030)
 """
 
 import keras
@@ -89,34 +47,52 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class WindowedAttentionWithRelPos(layers.Layer):
     """
-    Multi-Head Self-Attention with optional Relative Positional Embeddings and Windowing.
+    Multi-head self-attention over a 4D feature map, with an optional
+    learnable relative position bias.
 
-    This layer wraps the attention factory to provide windowed attention with relative
-    positional bias, which is crucial for capturing spatial relationships in vision tasks.
+    Architecture:
 
-    **Intent**: To model relationships between patches in a window (or globally) and
-    enrich patch representations with contextual information, while supporting relative
-    positional encodings for better spatial understanding.
+    .. code-block:: text
 
-    **Architecture**:
-    1.  Input is linearly projected to Query (Q), Key (K), and Value (V).
-    2.  Attention scores are computed: `softmax(Q @ K^T / sqrt(d_k))`.
-    3.  If `use_rel_pos` is True, a learnable relative positional bias is added
-        to the attention scores before the softmax operation.
-    4.  The attention scores are used to create a weighted sum of the Values (V).
-    5.  The output is passed through a final linear projection.
+        x [B, H, W, C]
+              │
+              ▼
+        ┌─────────────┐
+        │  Dense(3C)   │  qkv projection
+        └──────┬───────┘
+               ▼
+        split into Q, K, V, reshape to heads
+               │
+               ▼
+        (Q·scale) @ K^T ── + rel-pos bias (optional)
+               │
+               ▼
+             softmax
+               │
+               ▼
+             @ V, merge heads
+               │
+               ▼
+        ┌─────────────┐
+        │  Dense(C)    │  output projection
+        └──────┬───────┘
+               ▼
+        out [B, H, W, C]
 
-    Args:
-        dim: Integer, the input and output dimension of tokens.
-        num_heads: Integer, the number of attention heads. Defaults to 8.
-        qkv_bias: Boolean, if True, add a learnable bias to Q, K, V projections.
-            Defaults to True.
-        use_rel_pos: Boolean, if True, add relative positional embeddings to the
-            attention scores. Defaults to False.
-        input_size: Tuple of two integers, the height and width of the input
-            feature map. Required if `use_rel_pos` is True to initialize the
-            relative position bias tables.
-        **kwargs: Additional `keras.layers.Layer` arguments.
+    :param dim: Input and output dimension of tokens.
+    :type dim: int
+    :param num_heads: Number of attention heads. Defaults to 8.
+    :type num_heads: int
+    :param qkv_bias: Whether the Q/K/V projection carries a bias. Defaults
+        to True.
+    :type qkv_bias: bool
+    :param use_rel_pos: Whether to add a learnable relative position bias to
+        the attention scores. Defaults to False.
+    :type use_rel_pos: bool
+    :param input_size: Height and width of the input feature map. Required
+        when ``use_rel_pos`` is True, to size the relative position tables.
+    :type input_size: Optional[Tuple[int, int]]
+    :param kwargs: Additional :class:`keras.layers.Layer` arguments.
 
     Input shape:
         4D tensor with shape: `(batch_size, height, width, dim)`.
@@ -157,10 +133,10 @@ class WindowedAttentionWithRelPos(layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Creates the layer's weights and builds its sub-layers.
+        Create the relative position tables (if used) and build sub-layers.
 
-        Args:
-            input_shape: Shape tuple of the input.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # CREATE the layer's own weights
         if self.use_rel_pos:
@@ -236,17 +212,9 @@ class WindowedAttentionWithRelPos(layers.Layer):
         max_rel_dist = 2 * max(q_size, k_size) - 1
         # Interpolate relative positional embeddings if needed.
         if ops.shape(rel_pos)[0] != max_rel_dist:
-            # DECISION plan-2026-08-03T191222-1d751f81/D-007: `rel_pos` is
-            # `(L, C)` = (relative-distance positions, head channels) and ONLY
-            # the distance axis may be interpolated. Reshape to a 4-D BATCHED
-            # image `(1, 1, L, C)` so `ops.image.resize` maps L -> width and C
-            # -> channels, then resize the width axis alone with `size=(1, D)`.
-            # Do NOT feed a 3-D `(1, C, L)` tensor here: `ops.image.resize`
-            # reads a 3-D input as UNBATCHED `(h, w, c)`, so `(1, C, L)` is
-            # read as h=1/w=C/c=L, it resizes the CHANNEL table instead of the
-            # distance table, and the following squeeze raises
-            # ValueError("Cannot squeeze axis=0, because the dimension is not
-            # 1."). See decisions.md D-007.
+            # DECISION plan-2026-08-03T191222-1d751f81/D-007: reshape to a 4D
+            # batched image (1, 1, L, C) before resize, not a 3D (1, C, L) one.
+            # A 3D input reads as unbatched (h, w, c) and resizes channels, not distance. See decisions.md.
             shape = ops.shape(rel_pos)
             rel_pos_resized = ops.image.resize(
                 ops.reshape(rel_pos, (1, 1, shape[0], shape[1])),
@@ -257,19 +225,13 @@ class WindowedAttentionWithRelPos(layers.Layer):
         else:
             rel_pos_resized = rel_pos
 
-        # Calculate relative coordinates.
-        # DECISION plan_2026-06-15_e6a0391c/D-004: cast arange (int32) to float32
-        # before scaling by the Python float ratio — multiplying an int32 tensor
-        # by a float raised "Cannot convert 1.0 to EagerTensor of dtype int32".
+        # DECISION plan_2026-06-15_e6a0391c/D-004: cast arange to float32 before
+        # scaling by the float ratio; multiplying int32 by float raises. See decisions.md.
         q_coords = ops.cast(ops.expand_dims(ops.arange(q_size), axis=1), "float32") * max(k_size / q_size, 1.0)
         k_coords = ops.cast(ops.expand_dims(ops.arange(k_size), axis=0), "float32") * max(q_size / k_size, 1.0)
         relative_coords = (q_coords - k_coords) + float(k_size - 1) * max(q_size / k_size, 1.0)
 
-        # Gather the embeddings using the coordinates.
-        # `keras.ops.gather` does not exist on keras 3.8; `ops.take(..., axis=0)`
-        # is the row-gather. (Verified by execution, not assumed: an earlier
-        # comment here framed this as a keras.ops limitation in general, which
-        # misled a later reader into thinking row-gathering was unavailable.)
+        # keras.ops.gather does not exist on keras 3.8; ops.take(..., axis=0) is the row-gather.
         return ops.take(rel_pos_resized, ops.cast(relative_coords, 'int32'), axis=0)
 
     def _add_decomposed_rel_pos(
@@ -299,9 +261,8 @@ class WindowedAttentionWithRelPos(layers.Layer):
         # Reshape query for einsum operations
         r_q = ops.reshape(q, (B, nH, q_h, q_w, D))
 
-        # Compute relative biases for height and width.
-        # DECISION plan_2026-06-15_e6a0391c/D-004: rel_w output label was a typo
-        # ('x' not present in inputs → einsum ValueError); must be 'k' like rel_h.
+        # DECISION plan_2026-06-15_e6a0391c/D-004: rel_w's einsum output label
+        # must be 'k' like rel_h, not 'x' -- 'x' is absent from the inputs and raises. See decisions.md.
         rel_h = ops.einsum("bnhwc,hkc->bnhwk", r_q, Rh)
         rel_w = ops.einsum("bnhwc,wkc->bnhwk", r_q, Rw)
 
@@ -344,62 +305,62 @@ class WindowedAttentionWithRelPos(layers.Layer):
 @register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class ViTBlock(layers.Layer):
     """
-    Transformer Block for the Vision Transformer with Windowing Support.
+    A pre-norm transformer block over a 4D feature map: windowed or global
+    attention, then an FFN, each behind a residual connection.
 
-    This layer implements a standard transformer block with pre-normalization
-    (pre-LN) and support for windowed attention for computational efficiency.
-    It uses the factory patterns from dl_techniques for attention, FFN, and normalization.
+    Architecture:
 
-    **Intent**: To serve as the primary building block of the ViT, responsible
-    for processing sequences of tokens and refining their representations through
-    self-attention and feed-forward networks.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input
-      |
-      +------------------------ (Residual Connection 1)
-      |
-      v
-    Norm1
-      |
-      v
-    Attention (Windowed or Global with Relative Position Bias)
-      |
-      v
-    Add (Input + Attention Output)
-      |
-      +------------------------ (Residual Connection 2)
-      |
-      v
-    Norm2
-      |
-      v
-    FFN (Feed-Forward Network)
-      |
-      v
-    Add (Previous Sum + FFN Output)
-      |
-      v
-    Output
-    ```
+        x [B, H, W, C]
+          │
+          ├──────────────────────────────┐
+          ▼                               │
+        Norm1                             │
+          ▼                               │
+        window partition (optional)       │
+          ▼                               │
+        WindowedAttentionWithRelPos       │
+          ▼                               │
+        window unpartition (optional)     │
+          ▼                               │
+        Add ◄──────────────────────────────┘
+          │
+          ├──────────────────────────────┐
+          ▼                               │
+        Norm2 → FFN                       │
+          ▼                               │
+        Add ◄──────────────────────────────┘
+          ▼
+        out [B, H, W, C]
 
-    Args:
-        dim: Integer, the embedding dimension.
-        num_heads: Integer, number of attention heads.
-        mlp_ratio: Float, determines the hidden dimension of the FFN as
-            `int(dim * mlp_ratio)`. Defaults to 4.0.
-        qkv_bias: Boolean, whether to use bias in the QKV projection. Defaults to True.
-        use_rel_pos: Boolean, whether to use relative positional embeddings in
-            attention. Defaults to False.
-        window_size: Integer, size of the attention window. If 0 or less, global
-            attention is used over the entire feature map. Defaults to 0.
-        input_size: Tuple of integers, the input feature map resolution (H, W).
-            Required for global attention with relative positions.
-        normalization_type: String, type of normalization to use. Defaults to 'layer_norm'.
-        ffn_type: String, type of FFN to use. Defaults to 'mlp'.
-        activation: String, activation function for FFN. Defaults to 'gelu'.
-        **kwargs: Additional `keras.layers.Layer` arguments.
+    :param dim: Embedding dimension.
+    :type dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param mlp_ratio: FFN hidden dimension as ``int(dim * mlp_ratio)``.
+        Defaults to 4.0.
+    :type mlp_ratio: float
+    :param qkv_bias: Whether the QKV projection carries a bias. Defaults to
+        True.
+    :type qkv_bias: bool
+    :param use_rel_pos: Whether attention uses a relative position bias.
+        Defaults to False.
+    :type use_rel_pos: bool
+    :param window_size: Attention window size; 0 or less means global
+        attention over the whole feature map. Defaults to 0.
+    :type window_size: int
+    :param input_size: Input feature map resolution ``(H, W)``. Required for
+        global attention with relative positions.
+    :type input_size: Optional[Tuple[int, int]]
+    :param normalization_type: Normalization variant. Defaults to
+        ``'layer_norm'``.
+    :type normalization_type: str
+    :param ffn_type: FFN variant. Defaults to ``'mlp'``.
+    :type ffn_type: str
+    :param activation: FFN activation. Defaults to ``'gelu'``.
+    :type activation: str
+    :param kwargs: Additional :class:`keras.layers.Layer` arguments.
 
     Input shape:
         4D tensor with shape: `(batch_size, height, width, dim)`.
@@ -450,15 +411,9 @@ class ViTBlock(layers.Layer):
 
         self.norm2 = create_normalization_layer(normalization_type, name="norm2")
 
-        # DECISION plan-2026-07-30T140922-8af1028f/D-022
-        # `activation` is this block's own generic default, pre-filtered
-        # against what `ffn_type` accepts. This is NOT hypothetical here:
-        # `ffn_type` is declared `Literal['mlp', 'swiglu', 'geglu', 'glu']`
-        # and `SwiGLUFFN` takes no `activation` at all, so `swiglu` -- inside
-        # this block's own documented surface -- silently dropped it, and
-        # `create_ffn_layer` now RAISES on a dropped key. DISCARD is the right
-        # semantics for `swiglu` (its SiLU gate is definitional, and there is
-        # no renamed analogue to forward it to).
+        # DECISION plan-2026-07-30T140922-8af1028f/D-022: `create_ffn_layer`
+        # discards `activation` for `ffn_type='swiglu'` (SwiGLUFFN takes none);
+        # do not treat that as an error, its SiLU gate is definitional. See decisions.md.
         self.ffn = create_ffn_layer(
             ffn_type,
             name="ffn",
@@ -617,56 +572,83 @@ class ViTBlock(layers.Layer):
 @register_dl_technique("dl_techniques.models.sam1.image_encoder")
 class ImageEncoderViT(keras.Model):
     """
-    The Vision Transformer (ViT) Image Encoder for SAM.
+    The ViT image encoder: patch embedding, a stack of transformer blocks,
+    and a stride-1 neck that projects to the output channel count.
 
-    This model takes an image as input and outputs a grid of powerful feature
-    embeddings. It follows a standard ViT architecture but incorporates windowed
-    attention in most of its blocks for computational efficiency.
+    Architecture:
 
-    **Intent**: To serve as a powerful and scalable image feature extractor,
-    capable of producing high-quality embeddings for downstream tasks like
-    segmentation.
+    .. code-block:: text
 
-    Args:
-        img_size: Integer, the size of the input image (assumed square).
-        patch_size: Integer, the size of the image patches.
-        in_chans: Integer, the number of input channels (e.g., 3 for RGB).
-        embed_dim: Integer, the patch embedding dimension.
-        depth: Integer, the number of transformer blocks.
-        num_heads: Integer, the number of attention heads in each block.
-        mlp_ratio: Float, the ratio for the FFN hidden dimension.
-        out_chans: Integer, the number of output channels from the neck module.
-        qkv_bias: Boolean, whether to use bias in QKV projections.
-        use_rel_pos: Boolean, whether to use relative positional embeddings.
-            Defaults to `True`, matching reference SAM (all released variants
-            set it). Note that `rel_pos_h`/`rel_pos_w` are zero-initialized, so
-            enabling this is numerically inert until the tables are trained.
-        window_size: Integer, the size for windowed attention. Set to `0` to
-            make every block global, in which case `global_attn_indexes` is
-            correctly empty.
-        global_attn_indexes: Tuple of integers, indices of `ViTBlock`s that
-            should use global attention instead of windowed attention. Must be
-            non-empty whenever `window_size > 0`; reference SAM uses four
-            evenly-spaced indices (e.g. `(2, 5, 8, 11)` at `depth=12`).
+        image [B, img_size, img_size, in_chans]
+              │
+              ▼
+        ┌───────────────────┐
+        │ PatchEmbedding2D   │
+        └─────────┬──────────┘
+                   ▼  + pos_embed
+        [B, grid, grid, embed_dim]
+                   │
+                   ▼
+        ViTBlock x depth (global at global_attn_indexes,
+                           windowed elsewhere)
+                   │
+                   ▼
+        ┌───────────────────┐
+        │ neck: 1x1 conv,    │
+        │ norm, 3x3 conv,    │
+        │ norm (stride 1)    │
+        └─────────┬──────────┘
+                   ▼
+        out [B, grid, grid, out_chans]
 
-    Raises:
-        ValueError: If `window_size > 0` and `global_attn_indexes` is empty —
-            that configuration windows every block, so the encoder never
-            attains a global receptive field.
-        normalization_type: String, type of normalization to use in blocks.
-            Defaults to 'layer_norm'.
-        ffn_type: String, type of FFN to use in blocks. Defaults to 'mlp'.
-        activation: String, activation function for FFN. Defaults to 'gelu'.
-        **kwargs: Additional `keras.Model` arguments.
+    :param img_size: Size of the input image (assumed square).
+    :type img_size: int
+    :param patch_size: Size of the image patches.
+    :type patch_size: int
+    :param in_chans: Number of input channels, e.g. 3 for RGB.
+    :type in_chans: int
+    :param embed_dim: Patch embedding dimension.
+    :type embed_dim: int
+    :param depth: Number of transformer blocks.
+    :type depth: int
+    :param num_heads: Number of attention heads per block.
+    :type num_heads: int
+    :param mlp_ratio: FFN hidden-dimension ratio.
+    :type mlp_ratio: float
+    :param out_chans: Number of output channels from the neck.
+    :type out_chans: int
+    :param qkv_bias: Whether QKV projections carry a bias.
+    :type qkv_bias: bool
+    :param use_rel_pos: Whether attention uses a relative position bias.
+        Defaults to True, matching reference SAM. The tables are
+        zero-initialized, so enabling this is numerically inert until they
+        are trained.
+    :type use_rel_pos: bool
+    :param window_size: Attention window size. ``0`` makes every block
+        global, in which case ``global_attn_indexes`` is correctly empty.
+    :type window_size: int
+    :param global_attn_indexes: Indices of blocks that use global attention
+        instead of windowed attention. Must be non-empty whenever
+        ``window_size > 0``; reference SAM uses four evenly-spaced indices,
+        e.g. ``(2, 5, 8, 11)`` at ``depth=12``.
+    :type global_attn_indexes: Tuple[int, ...]
+    :param normalization_type: Normalization variant used in blocks.
+        Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param ffn_type: FFN variant used in blocks. Defaults to ``'mlp'``.
+    :type ffn_type: str
+    :param activation: FFN activation. Defaults to ``'gelu'``.
+    :type activation: str
+    :param kwargs: Additional :class:`keras.Model` arguments.
+    :raises ValueError: If ``window_size > 0`` and ``global_attn_indexes`` is
+        empty -- that configuration windows every block, leaving no global
+        receptive field.
 
     Input shape:
         4D tensor with shape: `(batch_size, img_size, img_size, in_chans)`.
 
     Output shape:
         4D tensor with shape: `(batch_size, img_size/patch_size, img_size/patch_size, out_chans)`.
-        The neck is a pair of 1x1/3x3 convolutions at stride 1, so it changes the
-        channel count only; the spatial grid is set by the patch embedding alone
-        (measured: `(1, 64, 64, out_chans)` at `img_size=1024, patch_size=16`).
     """
 
     def __init__(
@@ -690,25 +672,10 @@ class ImageEncoderViT(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-014: refuse the
-        # windowed-only encoder. `window_size > 0` with an EMPTY
-        # `global_attn_indexes` windows every block, so the receptive field is
-        # never global — the shipped defaults did exactly this. Do NOT
-        # "simplify" this to an unconditional `global_attn_indexes` non-empty
-        # requirement: `window_size == 0` already makes every block global and
-        # an empty tuple is then CORRECT, not degenerate (measured: 4/4 global
-        # blocks). The `window_size > 0` conjunct is the discriminating half.
-        #
-        # DECISION plan-2026-08-03T191222-1d751f81/D-026 (F-R3): the SECOND
-        # conjunct, `window_size < grid_size`, is equally load-bearing and was
-        # missing. A window at least as large as the token grid already covers
-        # the whole grid, so every block IS global and an empty
-        # `global_attn_indexes` is CORRECT — measured at the legitimate
-        # `img_size=224, patch_size=16, window_size=14` (grid 14x14), which the
-        # narrower guard refused. Do NOT drop either conjunct: without the
-        # first, a global-only encoder (`window_size=0`) is refused; without
-        # this one, a window-covers-grid encoder is. See decisions.md D-014,
-        # D-026.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-014: refuse only when
+        # window_size > 0 and global_attn_indexes is empty, not whenever window_size == 0. See decisions.md.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-026: also require
+        # window_size < grid_size -- a window covering the whole grid is already global. See decisions.md.
         grid_size = img_size // patch_size
         if 0 < window_size < grid_size and not global_attn_indexes:
             raise ValueError(
@@ -745,12 +712,8 @@ class ImageEncoderViT(keras.Model):
         self.activation = deserialize_activation(activation)
         self.grid_size = img_size // patch_size
 
-        # CREATE all sub-layers in __init__.
-        # DECISION plan_2026-06-16_6e8c78a3/D-009: reuse the shared
-        # PatchEmbedding2D with flatten=False (returns the 4D spatial grid) in
-        # place of an inline duplicate. Do NOT use the default flatten=True here
-        # — the SAM encoder adds a 4D pos_embed and runs windowed attention on
-        # the spatial layout. See decisions.md D-009.
+        # DECISION plan_2026-06-16_6e8c78a3/D-009: PatchEmbedding2D needs
+        # flatten=False here, not the default True -- this encoder adds a 4D pos_embed and runs windowed attention on the spatial layout. See decisions.md.
         self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
@@ -803,27 +766,16 @@ class ImageEncoderViT(keras.Model):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
-        Creates the positional embedding AND materializes every sub-layer.
+        Create the positional embedding weight and build every sub-layer.
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-122
-        The explicit sub-layer builds below are LOAD-PATH CORRECTNESS, not
-        style. The former comment here ("sub-layers are built automatically on
-        the first call") is true of `__call__` and false of
-        `keras.models.load_model`, which builds from the saved `input_shape`
-        and then restores. With `pos_embed` as the only weight `build` created,
-        a reloaded encoder owned **1 of 65** weights at restore time and the
-        other 64 were silently re-initialised: MEASURED on CPU at
-        `img_size=64, patch_size=16, embed_dim=32, depth=4, out_chans=16`,
-        perturb-save-reload gave `max|dOut| = 4.628568e+00` with 64/65 weights
-        back at class defaults. Do NOT "simplify" this away, and do NOT verify
-        it with a post-forward weight count: the SAME broken build reads
-        `len(model.weights) == 65` once anything has called the model, and the
-        `.keras` archive is a red herring too (its `model.weights.h5` held all
-        65 both before and after this fix -- the loss was on the LOAD side).
-        See decisions.md D-122.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[Optional[int], ...]
 
-        Args:
-            input_shape: Shape tuple of the input.
+        .. note::
+           DECISION plan-2026-08-19T163559-499b6f0e/D-122: the explicit
+           sub-layer builds here are required for ``load_model``, which
+           builds from the saved shape and restores before any call runs.
+           Without them a reloaded encoder held 1 of 65 weights. See decisions.md.
         """
         self.pos_embed = self.add_weight(
             name="pos_embed",

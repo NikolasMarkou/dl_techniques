@@ -1,67 +1,23 @@
 """
-SAM 1 Mask Decoder: output tokens, a two-way transformer and a hypernetwork.
-============================================================================
+The mask decoder, built by :class:`MaskDecoder`: output tokens, a two-way
+transformer, and a hypernetwork head.
 
-:class:`MaskDecoder` consumes the image embedding and the prompt embeddings and
-emits low-resolution mask logits plus one predicted IoU per mask. The masks are
-not produced by a convolutional head: a per-mask MLP emits a weight VECTOR
-which is dotted against the upscaled feature map, so the head is a hypernetwork.
+It consumes the image embedding and the prompt embeddings and emits
+low-resolution mask logits plus one predicted IoU per mask. The masks are
+not produced by a convolutional head: a per-mask MLP emits a weight vector
+that is dotted against the upscaled feature map, so the head is a
+hypernetwork rather than a decoder in the usual convolutional sense.
 
-Based on:
----------
-- Kirillov, A. et al. (2023). "Segment Anything." https://arxiv.org/abs/2304.02643
+``activation`` and ``mlp_activation`` are separate knobs, matching reference
+SAM: ``'gelu'`` reaches only the output-upscaling convolutions, ``'relu'``
+reaches every non-final layer of the hypernetwork and IoU heads. Collapsing
+them into one shared activation makes one of the two halves wrong.
+``sparse_prompt_embeddings`` must carry a batch of 1 or exactly the image
+batch size; any other value raises rather than silently tiling into a
+scrambled pairing.
 
-Key Features:
-------------
-- ``num_multimask_outputs + 1`` learnable mask tokens -- index 0 is the
-  single-mask output returned at ``multimask_output=False``, the rest are the
-  proposals -- plus one IoU token, concatenated in front of the sparse prompts.
-- Output upscaling by 4x via transposed convolutions; the mask logits are the
-  matrix product of the upscaled map with the hypernetwork vectors.
-- Every MLP head is ``iou_head_depth`` Dense layers total, hidden layers
-  activated by ``mlp_activation`` and the final layer linear so it can emit
-  signed logits.
-
-Architecture Overview:
----------------------
-1. ``image_embeddings + dense_prompt_embeddings`` -> source ``(B, H, W, C)``.
-2. ``[iou_token, mask_tokens, sparse_prompts]`` -> tokens ``(B, 1+N+M, C)``.
-3. -> :class:`TwoWayTransformer` -> updated tokens and updated source.
-4. -> source upscaled 4x to ``(B, 4H, 4W, C/8)``; each mask token -> its own
-   MLP -> ``(B, N, C/8)``.
-5. -> matmul -> mask logits ``(B, N, 4H, 4W)``; IoU token -> MLP -> ``(B, N)``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
-from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
-decoder = MaskDecoder(transformer_dim=256, num_multimask_outputs=3,
-                      transformer=TwoWayTransformer(depth=2, embedding_dim=256,
-                                                    num_heads=8, mlp_dim=2048))
-masks, iou = decoder(image_embeddings=feat, image_pe=pe,
-                     sparse_prompt_embeddings=sparse,
-                     dense_prompt_embeddings=dense, multimask_output=True)
-```
-
-Measured caveats:
-----------------
-- **``activation`` and ``mlp_activation`` are two SEPARATE knobs and their
-  defaults deliberately differ** -- ``'gelu'`` for ``output_upscaling`` only,
-  ``'relu'`` for every non-final layer of the hypernetwork and IoU heads. This
-  mirrors reference SAM, whose ``MaskDecoder(activation=...)`` reaches the
-  upscaler alone while ``MLP`` hardcodes ``F.relu``. Do NOT collapse them into
-  one knob "so the decoder agrees with itself": either single choice makes one
-  of the two halves wrong, and the error is a value drift with no shape symptom.
-- **``iou_head_depth`` drives BOTH the IoU head and every hypernetwork MLP.**
-  Reference SAM hardcodes 3 for the hypernetwork and applies the knob to the
-  IoU head only, so this is a deliberate deviation reachable only at a
-  non-default depth. At the default 3 the two agree exactly.
-- **``sparse_prompt_embeddings`` must carry a batch of 1 or exactly
-  ``batch_size``.** Anything in between raises ``ValueError``; before that
-  guard existed an intermediate value tiled into an interleaved ``[a, b, a,
-  b]`` order and scored every image against the wrong prompt with no error at
-  all.
+References:
+    - Kirillov et al., 2023. Segment Anything. (https://arxiv.org/abs/2304.02643)
 """
 
 import keras
@@ -93,33 +49,29 @@ def _build_mlp_head(
     name: str,
 ) -> keras.Sequential:
     """
-    Build reference SAM's ``MLP``: ``num_layers`` Dense layers, last one linear.
+    Build reference SAM's MLP head: ``num_layers`` Dense layers, last one
+    linear, shared by the hypernetwork MLPs and the IoU head.
 
-    Interface contract (shared by the hypernetwork MLPs and the IoU head):
-
-    Args:
-        num_layers: Total number of ``Dense`` layers, i.e. reference SAM's
-            ``MLP(..., num_layers=N)``. ``N`` layers means ``N - 1`` hidden
-            layers of width ``hidden_dim`` followed by one ``output_dim``
-            layer. Must be ``>= 1``; callers validate.
-        hidden_dim: Width of every layer except the last.
-        output_dim: Width of the last layer.
-        activation: Activation applied to every layer EXCEPT the last, which is
-            always linear (reference SAM applies ``relu`` to all but the final
-            ``Linear``, so the head can emit signed logits).
-        dense_name_template: Naming pattern for the sub-layers, containing a
-            single ``{n}`` placeholder filled with the 1-based layer index --
-            e.g. ``"iou_dense{n}"`` or ``"hyper_dense{n}_0"``. Chosen so that
-            at ``num_layers == 2`` the names are byte-identical to the ones
-            this package shipped before the depth knob was made live.
-        name: Name of the returned ``Sequential``.
-
-    Returns:
-        An UNBUILT ``keras.Sequential`` of ``num_layers`` ``Dense`` layers.
-
-    Raises:
-        ValueError: never directly; ``num_layers < 1`` yields an empty
-            ``Sequential``, which is why every caller validates the depth first.
+    :param num_layers: Total number of Dense layers -- ``N - 1`` hidden
+        layers of width ``hidden_dim`` followed by one ``output_dim`` layer.
+        Must be at least 1; callers validate.
+    :type num_layers: int
+    :param hidden_dim: Width of every layer except the last.
+    :type hidden_dim: int
+    :param output_dim: Width of the last layer.
+    :type output_dim: int
+    :param activation: Activation applied to every layer except the last,
+        which is always linear so the head can emit signed logits.
+    :type activation: str
+    :param dense_name_template: Naming pattern for the sub-layers, with one
+        ``{n}`` placeholder for the 1-based layer index, e.g.
+        ``"iou_dense{n}"``.
+    :type dense_name_template: str
+    :param name: Name of the returned ``Sequential``.
+    :type name: str
+    :return: An unbuilt :class:`keras.Sequential` of ``num_layers`` Dense
+        layers.
+    :rtype: keras.Sequential
     """
     dense_layers = []
     for index in range(num_layers):
@@ -137,54 +89,63 @@ def _build_mlp_head(
 @register_dl_technique("dl_techniques.models.sam1.mask_decoder")
 class MaskDecoder(keras.layers.Layer):
     """
-    Predicts segmentation masks from image and prompt embeddings using a transformer.
+    Predict segmentation masks and per-mask IoU scores from image and prompt
+    embeddings.
 
-    This layer is the final component of the Segment Anything Model (SAM), responsible
-    for generating mask predictions from encoded image features and user prompts. It
-    uses a two-way transformer to jointly refine prompt and image embeddings, followed
-    by upscaling and dynamic mask prediction.
+    Architecture:
 
-    **Intent**: To provide a flexible, high-quality mask decoder that can generate
-    multiple mask proposals with quality estimates, supporting both single-mask and
-    multi-mask prediction modes.
+    .. code-block:: text
 
-    **Architecture**:
-    The decoder processes inputs through several stages:
-    1. Combines image embeddings with dense prompt embeddings
-    2. Prepends learnable output tokens (IoU + mask tokens) to sparse prompts
-    3. Runs two-way transformer to update both tokens and image features
-    4. Upscales image features 4x using transposed convolutions
-    5. Uses hypernetwork MLPs to generate mask-specific parameters
-    6. Produces final masks via dynamic convolution (matrix multiplication)
-    7. Predicts mask quality (IoU) from IoU token
+        image_embeddings + dense_prompt_embeddings -> src [B, H, W, C]
+        [iou_token, mask_tokens, sparse_prompts] -> tokens [B, 1+N+M, C]
+                       │
+                       ▼
+              TwoWayTransformer
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+        iou_token_out     mask_tokens_out, src_out
+              │                 │
+              ▼                 ▼
+        iou_prediction_head  output_upscaling (4x)
+              │                 │
+              ▼                 ▼
+        iou [B, N]        hypernetwork_mlps -> hyper_in [B, N, C/8]
+                                 │
+                                 ▼
+                    hyper_in @ upscaled_flat -> masks [B, N, 4H, 4W]
 
-    Args:
-        transformer_dim: Integer, the embedding dimension used by the transformer.
-            Must match the dimension of input embeddings.
-        transformer: TwoWayTransformer instance, the core transformer for joint
-            refinement of prompts and image features.
-        num_multimask_outputs: Integer, number of mask predictions to generate
-            beyond the single output mask. Defaults to 3. Total masks =
-            num_multimask_outputs + 1.
-        iou_head_depth: Integer, total number of Dense layers in EACH MLP head
-            -- the IoU prediction head and every hypernetwork MLP. Matches
-            reference SAM's ``MLP(..., num_layers=N)``: ``N - 1`` hidden layers
-            plus one linear output layer. Must be positive. Defaults to 3,
-            which is reference SAM's value for both heads.
-        iou_head_hidden_dim: Integer, hidden dimension of the IoU prediction head.
-            Defaults to 256.
-        normalization_type: String, type of normalization to use in upscaling module.
-            Supports 'layer_norm', 'rms_norm', 'batch_norm'. Defaults to 'layer_norm'.
-        activation: String, activation applied inside the ``output_upscaling``
-            module ONLY. Defaults to 'gelu', which is reference SAM's
-            ``MaskDecoder(activation=nn.GELU)`` default -- there, ``activation``
-            is passed to ``output_upscaling`` and to nothing else.
-        mlp_activation: String, activation applied to every non-final layer of
-            the hypernetwork MLPs and the IoU head. Defaults to 'relu', which
-            reference SAM hardcodes inside ``MLP`` (``F.relu``). It is a
-            separate knob from ``activation`` because reference SAM makes the
-            two halves DIFFER; see the D-024 anchor below.
-        **kwargs: Additional arguments for the Layer base class.
+    :param transformer_dim: Embedding dimension used by the transformer.
+        Must match the dimension of input embeddings.
+    :type transformer_dim: int
+    :param transformer: The two-way transformer that jointly refines prompt
+        and image embeddings.
+    :type transformer: TwoWayTransformer
+    :param num_multimask_outputs: Number of mask predictions beyond the
+        single output mask. Defaults to 3; total masks =
+        ``num_multimask_outputs + 1``.
+    :type num_multimask_outputs: int
+    :param iou_head_depth: Total Dense layers in each MLP head -- the IoU
+        head and every hypernetwork MLP. Must be positive. Defaults to 3.
+    :type iou_head_depth: int
+    :param iou_head_hidden_dim: Hidden dimension of the IoU head. Defaults
+        to 256.
+    :type iou_head_hidden_dim: int
+    :param normalization_type: Normalization used in the upscaling module.
+        Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param activation: Activation inside ``output_upscaling`` only. Defaults
+        to ``'gelu'``.
+    :type activation: str
+    :param mlp_activation: Activation applied to every non-final layer of
+        the hypernetwork MLPs and the IoU head. Defaults to ``'relu'``.
+    :type mlp_activation: str
+    :param kwargs: Additional arguments for the Layer base class.
+    :ivar iou_token: Embedding for the IoU prediction token.
+    :ivar mask_tokens: Embedding for the mask prediction tokens.
+    :ivar output_upscaling: Sequential model that upsamples image features 4x.
+    :ivar output_hypernetworks_mlps: One MLP head per mask token.
+    :ivar iou_prediction_head: MLP predicting mask quality.
 
     Input shape (in call):
         - image_embeddings: Shape (batch_size, H, W, transformer_dim)
@@ -199,22 +160,13 @@ class MaskDecoder(keras.layers.Layer):
             num_multimask_outputs (if multimask_output=True) or 1 (if False)
         - iou_predictions: Shape (batch_size, num_masks) with predicted IoU scores
 
-    Attributes:
-        iou_token: Embedding layer for the IoU prediction token.
-        mask_tokens: Embedding layer for mask prediction tokens.
-        output_upscaling: Sequential model for 4x upsampling of image features.
-        output_hypernetworks_mlps: List of MLP heads, one per mask token.
-        iou_prediction_head: MLP for predicting mask quality (IoU).
-
     Example:
         ```python
-        # Create decoder
         from .transformer import TwoWayTransformer
 
         transformer = TwoWayTransformer(depth=2, embedding_dim=256, num_heads=8)
         decoder = MaskDecoder(transformer_dim=256, transformer=transformer)
 
-        # Generate masks
         masks, iou_pred = decoder(
             image_embeddings=image_emb,
             image_pe=pos_encoding,
@@ -223,11 +175,6 @@ class MaskDecoder(keras.layers.Layer):
             multimask_output=True
         )
         ```
-
-    Note:
-        The transformer is passed as a parameter to allow flexible transformer
-        architectures while maintaining the decoder's structure. The transformer
-        must implement a compatible interface returning (tokens, source) tuple.
     """
 
     def __init__(
@@ -267,15 +214,9 @@ class MaskDecoder(keras.layers.Layer):
         self.iou_head_depth = iou_head_depth
         self.iou_head_hidden_dim = iou_head_hidden_dim
         self.normalization_type = normalization_type
-        # DECISION plan-2026-08-03T191222-1d751f81/D-024
-        # These are TWO knobs on purpose. Do NOT "simplify" them back into one
-        # shared `activation`, and do NOT make them default to the same value
-        # "so the decoder agrees with itself" -- reference SAM deliberately
-        # makes them differ: `MaskDecoder.activation` defaults to `nn.GELU` and
-        # is passed ONLY to `output_upscaling`, while the hypernetwork/IoU heads
-        # hardcode `F.relu` inside `MLP`. One shared knob cannot be correct for
-        # both halves; routing a single value to both is what made this package
-        # trade a wrong-MLP deviation for a wrong-upscaler one. See D-024.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-024: activation and
+        # mlp_activation stay separate knobs, matching reference SAM's differing
+        # defaults for output_upscaling vs the hypernetwork/IoU heads. See decisions.md.
         self.activation = deserialize_activation(activation)
         self.mlp_activation = deserialize_activation(mlp_activation)
 
@@ -312,21 +253,11 @@ class MaskDecoder(keras.layers.Layer):
             keras.layers.Activation(activation, name="upsample_act2"),
         ], name="output_upscaling")
 
-        # Hypernetwork MLPs: one for each mask token.
-        # Each MLP transforms a mask token embedding into the parameters of the
-        # final dynamic convolution. Reference SAM:
-        #   MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)
-        # i.e. (iou_head_depth - 1) hidden layers at transformer_dim, then one
-        # linear layer at transformer_dim // 8.
-        #
-        # DECISION plan-2026-08-03T191222-1d751f81/D-010
-        # Do NOT hardcode 3 here (nor 2, which is what shipped before). Reference
-        # SAM hardcodes 3 for the hypernetwork and uses iou_head_depth only for
-        # the IoU head; this package instead drives BOTH from iou_head_depth, so
-        # the knob is observably live and the two heads cannot silently diverge.
-        # A hardcoded depth passes every count/shape assertion at the default and
-        # is indistinguishable from a dead knob -- which is exactly the defect
-        # (F-5) this replaced. See decisions.md D-010.
+        # Hypernetwork MLPs: one per mask token, each mapping a mask token
+        # embedding to the parameters of the final dynamic convolution.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-010: depth comes from
+        # iou_head_depth here, not a hardcoded 3 -- a hardcoded depth would be
+        # indistinguishable from a dead knob at the default. See decisions.md.
         self.output_hypernetworks_mlps = []
         for i in range(self.num_mask_tokens):
             self.output_hypernetworks_mlps.append(
@@ -354,14 +285,11 @@ class MaskDecoder(keras.layers.Layer):
 
     def build(self, input_shape: Optional[Tuple[Optional[int], ...]] = None) -> None:
         """
-        Builds all sub-layers.
+        Build every sub-layer explicitly so weights exist before
+        deserialization restores them.
 
-        Following the "Create vs. Build" principle, we explicitly build all
-        sub-layers to ensure their weights are created before the model attempts
-        to load any saved weights during deserialization.
-
-        Args:
-            input_shape: Optional shape tuple (not used for this layer).
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
         """
         # Build embedding layers
         self.iou_token.build((None,))
@@ -397,25 +325,25 @@ class MaskDecoder(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Forward pass for mask prediction.
+        Predict masks and select the single-mask or multi-mask output.
 
-        Args:
-            image_embeddings: Image features from encoder, shape
-                (batch_size, H, W, transformer_dim).
-            image_pe: Positional encoding for image features, shape
-                (batch_size, H, W, transformer_dim).
-            sparse_prompt_embeddings: Encoded sparse prompts (points/boxes), shape
-                (batch_size, num_sparse, transformer_dim).
-            dense_prompt_embeddings: Encoded dense prompts (masks), shape
-                (batch_size, H, W, transformer_dim).
-            multimask_output: Boolean, if True returns num_multimask_outputs masks,
-                if False returns single best mask.
-            training: Optional boolean for training mode.
-
-        Returns:
-            Tuple of (masks, iou_predictions):
-            - masks: Shape (batch_size, num_masks, H*4, W*4)
-            - iou_predictions: Shape (batch_size, num_masks)
+        :param image_embeddings: Image features, shape
+            ``(batch_size, H, W, transformer_dim)``.
+        :param image_pe: Positional encoding, same shape as
+            ``image_embeddings``.
+        :param sparse_prompt_embeddings: Encoded sparse prompts, shape
+            ``(batch_size, num_sparse, transformer_dim)``.
+        :param dense_prompt_embeddings: Encoded dense prompts, same shape as
+            ``image_embeddings``.
+        :param multimask_output: If True, return ``num_multimask_outputs``
+            masks; if False, return the single best mask.
+        :type multimask_output: bool
+        :param training: Whether the layer runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(masks, iou_predictions)`` -- masks of shape
+            ``(batch_size, num_masks, H*4, W*4)`` and IoU scores of shape
+            ``(batch_size, num_masks)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         # Predict all masks
         masks, iou_pred = self.predict_masks(
@@ -447,32 +375,26 @@ class MaskDecoder(keras.layers.Layer):
         training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Generate mask predictions and IoU estimates.
+        Run the token preparation, two-way transformer, upscaling and
+        hypernetwork stages that produce every mask and IoU score.
 
-        This is the core prediction logic that:
-        1. Prepares output tokens (IoU + mask tokens)
-        2. Runs two-way transformer to refine tokens and image features
-        3. Upscales image features
-        4. Generates masks via hypernetwork dynamic convolution
-        5. Predicts IoU scores
-
-        Args:
-            image_embeddings: Image features, shape (batch_size, H, W, transformer_dim).
-            image_pe: Positional encoding, shape (batch_size, H, W, transformer_dim).
-            sparse_prompt_embeddings: Sparse prompts, shape (batch_size, num_sparse, transformer_dim).
-            dense_prompt_embeddings: Dense prompts, shape (batch_size, H, W, transformer_dim).
-            training: Optional boolean for training mode.
-
-        Returns:
-            Tuple of (masks, iou_predictions):
-            - masks: All mask logits, shape (batch_size, num_mask_tokens, H*4, W*4)
-            - iou_predictions: Quality scores, shape (batch_size, num_mask_tokens)
-
-        Raises:
-            ValueError: If `sparse_prompt_embeddings`'s batch dimension is
-                neither 1 (a shared prompt set) nor exactly the image batch
-                size (one prompt set per image). Any other value is either an
-                impossible tile or an order-scrambling one.
+        :param image_embeddings: Image features, shape
+            ``(batch_size, H, W, transformer_dim)``.
+        :param image_pe: Positional encoding, same shape as
+            ``image_embeddings``.
+        :param sparse_prompt_embeddings: Sparse prompts, shape
+            ``(batch_size, num_sparse, transformer_dim)``.
+        :param dense_prompt_embeddings: Dense prompts, same shape as
+            ``image_embeddings``.
+        :param training: Whether the layer runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(masks, iou_predictions)`` -- all mask logits, shape
+            ``(batch_size, num_mask_tokens, H*4, W*4)``, and quality scores,
+            shape ``(batch_size, num_mask_tokens)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :raises ValueError: If ``sparse_prompt_embeddings``'s batch dimension
+            is neither 1 (a shared prompt set) nor exactly the image batch
+            size (one prompt set per image).
         """
         # Concatenate IoU token and mask tokens: shape (num_mask_tokens + 1, transformer_dim)
         output_tokens = ops.concatenate(
@@ -496,20 +418,10 @@ class MaskDecoder(keras.layers.Layer):
         # concat (and downstream cross-attention) batch dims agree.
         sparse_batch = ops.shape(sparse_prompt_embeddings)[0]
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-015: the tile factor below
-        # is INTEGER DIVISION, and only two sparse batch sizes are meaningful:
-        # 1 (a shared prompt broadcast over the image batch) and `batch_size`
-        # (one prompt set per image). Everything else is silently wrong rather
-        # than merely unsupported. Measured: B=1 with 3 prompt rows gives a tile
-        # factor of 0 and an opaque `InvalidArgumentError`; B=4 with 2 prompt
-        # sets tiles to [a, b, a, b] -- NOT [a, a, b, b] -- so every image is
-        # scored against the wrong prompt with no error at all. Do NOT "fix"
-        # this by switching the tile to `ops.repeat` (that would make the
-        # B=4/2 case silently *plausible* instead of refused, and the correct
-        # per-image pairing is the caller's contract, not a guess this layer
-        # gets to make), and do NOT ceil/clamp the factor.
-        # The check reads STATIC shapes so it is a plain Python branch: under
-        # tracing with an unknown batch dim it is skipped rather than traced.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-015: only sparse batch
+        # sizes of 1 or batch_size are valid for the tile below; anything else
+        # tiles into a scrambled [a, b, a, b] pairing with no error. See decisions.md.
+        # Reads static shapes, so this is a plain Python branch skipped under tracing.
         static_batch = image_embeddings.shape[0]
         static_sparse = sparse_prompt_embeddings.shape[0]
         if (
@@ -546,32 +458,30 @@ class MaskDecoder(keras.layers.Layer):
         # Returns refined tokens and refined image features
         hs, src_out = self.transformer(src, pos_src, tokens, training=training)
 
-        # Extract specific tokens
-        iou_token_out = hs[:, 0, :]  # IoU token: (batch_size, transformer_dim)
-        mask_tokens_out = hs[:, 1:(1 + self.num_mask_tokens), :]  # Mask tokens: (batch_size, num_mask_tokens, transformer_dim)
+        # iou_token_out is (batch_size, transformer_dim); mask_tokens_out is
+        # (batch_size, num_mask_tokens, transformer_dim).
+        iou_token_out = hs[:, 0, :]
+        mask_tokens_out = hs[:, 1:(1 + self.num_mask_tokens), :]
 
-        # Reshape and upscale image features
+        # upscaled_embedding is (B, H*4, W*4, C//8).
         src_out = ops.reshape(src_out, (B, H, W, C))
-        upscaled_embedding = self.output_upscaling(src_out, training=training)  # (B, H*4, W*4, C//8)
+        upscaled_embedding = self.output_upscaling(src_out, training=training)
 
-        # Generate mask-specific parameters using hypernetwork MLPs
+        # hyper_in is (batch_size, num_mask_tokens, C//8).
         hyper_in_list = []
         for i in range(self.num_mask_tokens):
             hyper_in_list.append(
                 self.output_hypernetworks_mlps[i](mask_tokens_out[:, i, :], training=training)
             )
-        hyper_in = ops.stack(hyper_in_list, axis=1)  # (batch_size, num_mask_tokens, C//8)
+        hyper_in = ops.stack(hyper_in_list, axis=1)
 
-        # Generate masks via dynamic convolution (matrix multiplication)
-        # Flatten upscaled embeddings spatially
+        # Flatten upscaled embeddings spatially to (batch_size, H*W, C//8),
+        # then matmul with hyper_in to get (batch_size, num_mask_tokens, H*W).
         B, H_up, W_up, C_up = ops.shape(upscaled_embedding)
         upscaled_embedding_flat = ops.reshape(
             upscaled_embedding,
             (B, H_up * W_up, C_up)
-        )  # (batch_size, H*W, C//8)
-
-        # Matrix multiply: (batch_size, num_mask_tokens, C//8) @ (batch_size, C//8, H*W)
-        #                -> (batch_size, num_mask_tokens, H*W)
+        )
         masks = hyper_in @ ops.transpose(upscaled_embedding_flat, (0, 2, 1))
         masks = ops.reshape(masks, (B, self.num_mask_tokens, H_up, W_up))
 
@@ -588,13 +498,12 @@ class MaskDecoder(keras.layers.Layer):
         """
         Compute output shapes for masks and IoU predictions.
 
-        Args:
-            input_shape: Not used for this layer.
-
-        Returns:
-            Tuple of (mask_shape, iou_shape):
-            - mask_shape: (batch_size, num_mask_tokens, H*4, W*4)
-            - iou_shape: (batch_size, num_mask_tokens)
+        :param input_shape: Not used by this layer.
+        :type input_shape: Optional[Tuple[Optional[int], ...]]
+        :return: ``(mask_shape, iou_shape)`` -- masks of shape
+            ``(batch_size, num_mask_tokens, H*4, W*4)`` and IoU scores of
+            shape ``(batch_size, num_mask_tokens)``.
+        :rtype: Tuple[tuple, tuple]
         """
         mask_shape = (None, self.num_mask_tokens, None, None)
         iou_shape = (None, self.num_mask_tokens)
@@ -602,13 +511,11 @@ class MaskDecoder(keras.layers.Layer):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the layer for serialization.
+        Return the layer's configuration, including the serialized
+        transformer sub-layer.
 
-        Note: The transformer is handled separately by Keras serialization
-        since it's a layer passed as a parameter.
-
-        Returns:
-            Configuration dictionary.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -621,12 +528,18 @@ class MaskDecoder(keras.layers.Layer):
             "mlp_activation": serialize_activation(self.mlp_activation),
             "transformer": keras.layers.serialize(self.transformer),
         })
-        # Note: self.transformer is passed in __init__ as a layer,
-        # so Keras automatically handles its serialization
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MaskDecoder":
-        """Creates a MaskDecoder from its config."""
+        """
+        Build a :class:`MaskDecoder` from a config dict, deserializing the
+        transformer sub-layer.
+
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new :class:`MaskDecoder` instance.
+        :rtype: MaskDecoder
+        """
         config["transformer"] = keras.layers.deserialize(config.pop("transformer"))
         return cls(**config)

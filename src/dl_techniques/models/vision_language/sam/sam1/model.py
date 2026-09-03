@@ -1,87 +1,30 @@
 """
-Promptable segmentation with a heavy image encoder and a near-free mask decoder.
+Promptable image segmentation, built by :class:`SAM`, from an image encoder,
+a prompt encoder and a mask decoder.
 
-The problem SAM 1 solves is not "segment the object" but "segment *an* object,
-given whatever the user points at" -- and a prompt is intrinsically ambiguous.
-A single click on a shirt is a valid request for the shirt, for the person
-wearing it, or for the checked pattern on its sleeve, and no amount of encoder
-capacity can decide which one was meant. The design resolves this by refusing
-to: the decoder emits a small fixed set of masks (three, plus a single-mask
-token used when the caller says the prompt is unambiguous) and a separate head
-predicts each one's IoU against the mask it is trying to be. Ambiguity becomes
-a *ranking* problem the caller can settle, instead of an ill-posed regression
-whose loss averages incompatible answers into a blur.
+A prompt (a click, a box) is ambiguous: it can mean the object, the region
+around it, or a detail inside it. Instead of predicting one mask, the model
+predicts a small fixed set (three, plus a single-mask option) with a
+separate IoU head scoring each one, turning ambiguity into a ranking problem
+for the caller rather than an averaged, blurred regression target. Compute
+is asymmetric: the ViT image encoder runs once per image and costs 90M-637M
+parameters depending on variant, while the prompt encoder and mask decoder
+together cost about 4.06M at every variant, so each subsequent prompt only
+re-runs the cheap tail.
 
-The second idea is an asymmetry in where the compute lives. The image encoder is
-a full ViT and costs 89.7M to 637.0M parameters depending on variant; the prompt
-encoder and mask decoder together cost about 4.06M **at every variant**, because
-both run at a fixed `prompt_embed_dim=256` regardless of encoder width. The
-image is encoded once into a `(B, img_size/16, img_size/16, 256)` grid, and each
-subsequent click re-runs only the 4M-parameter tail. That split is what makes
-interactive use viable at all, and it is why the variant table below touches the
-encoder alone.
+`preprocess` only pads to the encoder's input size and raises on an
+oversize image rather than resizing it -- resizing happens before the model,
+via `resize_longest_side`, so prompt coordinates and image stay in one
+frame. `binarize_masks` defaults to True, matching reference SAM's own
+output contract; the returned `'masks'` are then `uint8` and not
+differentiable, so a trainer supervises `'low_res_logits'` instead.
+`get_build_config`/`build_from_config` run a full dummy forward on load
+because the ViT and two-way-transformer sublayers build lazily on first
+call, and skipping that dummy forward would silently drop part of a
+restored checkpoint's weights.
 
-The image encoder is a plain, non-hierarchical ViT: windowed attention with a
-learnable relative position bias everywhere, interrupted by full-grid global
-blocks at four indices spread evenly through the depth, then a stride-1 neck of
-a 1x1 and a 3x3 convolution that changes only the channel count to 256. The
-grid is fixed by the patch embedding alone -- the neck does not resample. The
-prompt encoder maps points, box corners and mask hints into that same 256-wide
-space through a random-Gaussian Fourier positional encoding that is *shared*
-with `get_dense_pe()`, so a prompt coordinate and an image position are
-expressed in one frame rather than two that must be kept in sync. Points and
-box corners additionally pick up one of four learned type embeddings, with
-`not_a_point_embed` for padding rows and `no_mask_embed` standing in when no
-mask prompt is given.
-
-The mask decoder is a two-way transformer of depth 2: tokens attend to the
-image and the image attends back to the tokens, with the positional encoding
-re-added at every attention rather than once at the input so geometry survives
-the residual updates. The head that finally produces a mask is a hypernetwork,
-not a convolution -- a per-mask MLP emits a weight *vector* which is dotted
-against the 4x-upscaled feature map. That is what keeps a per-prompt mask head
-essentially free: the prompt-dependent part is a vector, and the expensive
-spatial part is shared.
-
-Two places in this file behave in ways a reader would otherwise guess wrong.
-`preprocess` only PADS -- it normalizes and pads to the encoder size, and raises
-`ValueError` on an oversize image rather than resizing it. Resizing here would
-be silently wrong, because reference SAM resizes the raw image *before* the
-model precisely so prompt coordinates can be rescaled by the same factor; a
-hidden resize inside the model would leave every prompt in the wrong frame.
-Callers apply `resize_longest_side` first. And `get_build_config` /
-`build_from_config` deliberately run a full-resolution dummy forward pass on
-every load: the ViT blocks and the two-way transformer build their attention
-and FFN sublayers lazily, so the static `build()` chain alone materializes only
-138 of the reduced fixture's 202 weights, Keras restores those 138, and the
-other 64 are created fresh and random on the first real call -- a mask drift of
-order 1-2 absolute with no error and no warning. A weight *count* cannot detect
-this (both the correct and the broken build report 202/201/321,862 after any
-forward pass), which is why the guards compare index-aligned weight values.
-
-Two behavioural choices are worth stating as choices. `binarize_masks` defaults
-to `True`, which casts the full-resolution `masks` output to `uint8` and makes
-it gradient-dead -- differentiating it returns `None` for every trainable
-variable, silently. It stays the default because it is reference SAM's own
-output contract; `low_res_logits` is the training target at either setting, and
-`binarize_masks=False` is the escape hatch when a differentiable full-resolution
-mask is genuinely needed. Separately, `SAM.call` cannot be traced: it always
-ends in `postprocess_masks`, whose `ops.image.resize` raises under graph mode
-regardless of which key the caller reads. `SAMTrainingModel` in
-`training_model.py` is the `fit()` path -- it drives the submodules directly and
-never reaches the postprocess.
-
-This package is architecture only, and that is deliberate rather than
-unfinished. `SAM.from_variant('vit_b')` returns a randomly initialized model;
-no official Meta checkpoint has ever been loaded here, no key-mapping layer
-exists, and no accuracy or segmentation-quality claim is made anywhere in the
-package. The parameter counts quoted below are this package's own
-`count_params()` measurements at `img_size=1024`, not reference-PyTorch quotes,
-and this implementation's layout deviations move them: encoder 89,670,912 /
-308,278,272 / 637,026,048 for `vit_b` / `vit_l` / `vit_h`, over a
-variant-independent 6,476 (prompt encoder) + 4,058,340 (mask decoder). Only
-`vit_b` and a reduced fixture are ever forward-passed by the test suite; the two
-larger variants are constructed and parameter-counted only.
+This package ships architecture only: `SAM.from_variant` returns randomly
+initialized weights, with no checkpoint loading and no accuracy claim.
 
 References:
     - Kirillov et al., 2023. Segment Anything.
@@ -116,52 +59,59 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.sam1.model")
 class SAM(keras.Model):
     """
-    Segment Anything Model (SAM) - A foundation model for image segmentation.
+    A promptable segmentation model: a ViT image encoder, a prompt encoder,
+    and a hypernetwork mask decoder.
 
-    SAM is a promptable segmentation system that can generate high-quality object
-    masks from various types of prompts (points, boxes, or masks). It consists of
-    three main components:
+    Architecture:
 
-    1. **Image Encoder**: A Vision Transformer (ViT) that processes the input
-       image once to produce image embeddings.
-    2. **Prompt Encoder**: Encodes various prompt types (points, boxes, masks)
-       into embedding space.
-    3. **Mask Decoder**: A lightweight transformer decoder that combines image
-       and prompt embeddings to predict segmentation masks.
+    .. code-block:: text
 
-    **Intent**: To provide a unified interface for promptable segmentation that
-    can be used for interactive segmentation, automatic mask generation, or as
-    a component in larger vision pipelines.
+        image [B, H, W, 3]
+              │
+              ▼
+        preprocess (normalize, pad)
+              │
+              ▼
+        ImageEncoderViT ──► image_embeddings [B, h, w, 256]
+                                     │
+        points/boxes/masks ─► PromptEncoder ─► sparse, dense embeddings
+                                     │                │
+                                     ▼                ▼
+                              MaskDecoder (image_embeddings, image_pe,
+                                           sparse, dense)
+                                     │
+                                     ▼
+                        postprocess_masks ──► masks, iou, low_res_logits
 
-    **Key Features**:
-    - Supports multiple prompt types (points, boxes, masks)
-    - Can predict single or multiple mask proposals
-    - Provides mask quality scores (predicted IoU)
-    - Fully serializable with complete state preservation
-    - Pre-configured variants for different compute budgets
-
-    Args:
-        image_encoder: ImageEncoderViT instance, processes input images into
-            feature embeddings.
-        prompt_encoder: PromptEncoder instance, encodes user prompts into
-            embeddings.
-        mask_decoder: MaskDecoder instance, predicts masks from image and
-            prompt embeddings.
-        pixel_mean: List of floats, mean values for image normalization (RGB order).
-            Defaults to ImageNet means [123.675, 116.28, 103.53].
-        pixel_std: List of floats, standard deviation for image normalization (RGB order).
-            Defaults to ImageNet stds [58.395, 57.12, 57.375].
-        mask_threshold: Float, threshold for converting mask logits to binary masks.
-            Defaults to 0.0.
-        image_format: String, expected color format of input images. Currently
-            only 'RGB' is supported. Defaults to 'RGB'.
-        binarize_masks: Boolean, controls the `'masks'` output only. At `True`
-            (the default, and reference SAM's own contract) `'masks'` is the
-            thresholded `uint8` mask, which is **gradient-dead**. At `False`
-            `'masks'` carries the full-resolution float logits and is
-            differentiable. `'low_res_logits'` is unaffected and is the
-            training target in both cases. Defaults to True.
-        **kwargs: Additional arguments for the Model base class.
+    :param image_encoder: ViT encoder that turns an image into feature
+        embeddings.
+    :type image_encoder: ImageEncoderViT
+    :param prompt_encoder: Encodes user prompts into embeddings.
+    :type prompt_encoder: PromptEncoder
+    :param mask_decoder: Predicts masks from image and prompt embeddings.
+    :type mask_decoder: MaskDecoder
+    :param pixel_mean: Per-channel mean for image normalization, RGB order.
+        Defaults to ImageNet means.
+    :type pixel_mean: Sequence[float]
+    :param pixel_std: Per-channel standard deviation for image
+        normalization, RGB order. Defaults to ImageNet stds.
+    :type pixel_std: Sequence[float]
+    :param mask_threshold: Threshold for converting mask logits to binary
+        masks. Defaults to 0.0.
+    :type mask_threshold: float
+    :param image_format: Expected input color format. Only ``'RGB'`` is
+        supported.
+    :type image_format: str
+    :param binarize_masks: Controls the ``'masks'`` output only. At True
+        (the default, matching reference SAM), ``'masks'`` is a thresholded
+        ``uint8`` mask and not differentiable. At False it carries float
+        logits and is differentiable. ``'low_res_logits'`` is the training
+        target either way.
+    :type binarize_masks: bool
+    :param kwargs: Additional arguments for the Model base class.
+    :ivar image_encoder: The ViT image encoder.
+    :ivar prompt_encoder: The prompt encoder.
+    :ivar mask_decoder: The mask decoder.
 
     Input shape (in call):
         Dictionary with the following keys:
@@ -199,16 +149,6 @@ class SAM(keras.Model):
         the structure and dies with a `KeyError`. A trainer therefore needs a
         thin single-tensor wrapper model that returns `low_res_logits` alone.
         No such wrapper ships in this package yet.
-
-    Attributes:
-        image_encoder: The ViT image encoder.
-        prompt_encoder: The prompt encoder.
-        mask_decoder: The mask decoder.
-        pixel_mean: Image normalization mean.
-        pixel_std: Image normalization standard deviation.
-        mask_threshold: Threshold for binary mask conversion.
-        image_format: Expected image format.
-        binarize_masks: Whether the `'masks'` output is thresholded to `uint8`.
 
     Example:
         ```python
@@ -299,17 +239,9 @@ class SAM(keras.Model):
         self.image_encoder = image_encoder
         self.prompt_encoder = prompt_encoder
         self.mask_decoder = mask_decoder
-        # DECISION plan-2026-08-03T191222-1d751f81/D-019: do NOT re-add
-        # class-level `mask_threshold` / `image_format` defaults above
-        # `__init__`. They were NOT the dead shadowed pair F-13 described:
-        # TF's `KerasAutoTrackable.__setattr__` short-circuits
-        # `if getattr(self, name) is value: return`, and BOTH defaults are
-        # identical objects to the class-level ones (`"RGB"` is interned; the
-        # `0.0` constants are deduped), so at the defaults these two lines set
-        # NOTHING and the class attributes were the live storage. Measured:
-        # with the pair present, `'mask_threshold' in instance.__dict__` was
-        # False. Removing them makes the assignment actually reach the instance
-        # dict; the resolved values are unchanged.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-019: no class-level
+        # mask_threshold/image_format defaults above __init__ -- TF's
+        # __setattr__ short-circuits an assignment identical to the class default, so a class-level pair silently shadows the instance dict. See decisions.md.
         self.mask_threshold = mask_threshold
         self.image_format = image_format
         self.binarize_masks = bool(binarize_masks)
@@ -318,12 +250,8 @@ class SAM(keras.Model):
         self.pixel_mean = ops.array(pixel_mean, dtype="float32")
         self.pixel_std = ops.array(pixel_std, dtype="float32")
 
-        # Store as Python lists for serialization
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
-        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
-        # store as `list(...)` is what makes the conversion invisible: it is
-        # the type `get_config` has always emitted, so a saved config's JSON
-        # shape and every `== [..]` assertion in the suites are unchanged.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as list, not
+        # the constructor's tuple default -- get_config has always emitted a list. See decisions.md.
         self._pixel_mean_list = list(pixel_mean)
         self._pixel_std_list = list(pixel_std)
 
@@ -331,15 +259,13 @@ class SAM(keras.Model):
         """
         Explicitly build the three sub-models.
 
-        DECISION plan_2026-06-15_e6a0391c/D-008: `call()` takes a dict input
-        (`inputs['image']`). Without a `build()` override, Keras tries to
-        auto-trace `call()` with a single symbolic tensor, hits the dict
-        membership check (`'image' not in inputs`), and emits a spurious
-        "iterating over a symbolic tf.Tensor" UserWarning on first call. Defining
-        `build()` makes Keras call it instead of tracing, and explicitly building
-        the sub-models ensures their weights exist before any weight load
-        (deserialization robustness). Each sub-build is idempotent and
-        input-shape-independent, so the guards keep this safe to call repeatedly.
+        :param input_shape: Not used; ``call`` takes a dict input.
+        :type input_shape: Optional[Any]
+
+        .. note::
+           DECISION plan_2026-06-15_e6a0391c/D-008: without this override,
+           Keras auto-traces ``call()`` with a single symbolic tensor and hits
+           the dict membership check, emitting a spurious warning. See decisions.md.
         """
         if not self.image_encoder.built:
             img = self.image_encoder.img_size
@@ -352,23 +278,20 @@ class SAM(keras.Model):
 
     def get_build_config(self) -> Dict[str, Any]:
         """
-        Returns a build config so Keras invokes `build_from_config` on load.
+        Return a build config so Keras invokes ``build_from_config`` on load,
+        or None if the model was never built.
 
-        DECISION plan_2026-06-16_6e8c78a3/D-011: returning a non-empty dict is
-        what makes Keras call `build_from_config` during deserialization. The
-        image-encoder ViT blocks and the mask-decoder two-way transformer build
-        their attention/FFN/norm sublayers LAZILY on the first `call()`, so the
-        explicit `build()` chain alone materializes only ~92 of ~124 weights.
-        Without a full materialization before weight restore, the lazily-built
-        weights are created fresh (random) on first call and the saved values are
-        silently dropped -> a save/load round-trip produced a model with ~30%
-        mask drift. We pin `img_size` so `build_from_config` can run a dummy
-        forward to materialize the complete weight set.
+        :return: ``{"img_size": ...}`` if built, else None.
+        :rtype: Optional[Dict[str, Any]]
 
-        Gated on `self.built`: a model saved UNBUILT (no forward pass yet) has no
-        weights in the archive, so forcing a full build at load would raise
-        "expected N variables, received 0". Returning None there preserves the
-        stock unbuilt-save / unbuilt-load behavior.
+        .. note::
+           DECISION plan_2026-06-16_6e8c78a3/D-011: a non-empty dict is what
+           makes Keras call ``build_from_config``. The lazily-built ViT and
+           two-way-transformer sublayers materialize only ~92 of ~124 weights
+           from the static build chain alone, so skipping this dropped ~30% of a
+           restored checkpoint's weights. Gated on ``self.built`` -- an unbuilt
+           model has no weights in the archive, so forcing a build at load
+           would raise. See decisions.md.
         """
         if not self.built:
             return None
@@ -376,37 +299,19 @@ class SAM(keras.Model):
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """
-        Fully materializes the weight set at load time (see D-011).
+        Run the static build chain plus a dummy forward pass so every
+        lazily-built sublayer materializes its variables before Keras
+        restores saved weights.
 
-        Runs the static `build()` chain plus a single dummy forward pass so that
-        every lazily-built sublayer (ViT blocks, two-way transformer, mask-decoder
-        heads) creates its variables BEFORE Keras restores the saved weights.
+        :param config: Build config from :meth:`get_build_config`.
+        :type config: Dict[str, Any]
 
-        Cost, measured (F-11):
-            The dummy forward is a full-resolution forward pass at the encoder's
-            own `img_size`, plus a `(1, num_masks, img_size, img_size)`
-            postprocess, on EVERY `load_model`. On the reduced test fixture
-            (`img_size=256`, 321,862 params) `keras.models.load_model` takes
-            roughly **0.82-0.86 s** steady-state (median ~0.84 s over 15 loads in
-            3 processes; the first load in a process runs ~1.1 s from warm-up).
-            The cost scales with the encoder, so a `vit_h` load pays a 1024x1024
-            forward through 630M parameters. Wall-clock is deliberately NOT
-            asserted anywhere: it is not reproducible across processes.
-            Dropping the dummy forward saves ~0.29 s at fixture size (median
-            0.54 s) and is REJECTED -- see the DECISION anchor below.
+        .. note::
+           DECISION plan-2026-08-03T191222-1d751f81/D-018: the dummy forward
+           cannot be replaced by the static build chain alone -- that chain
+           materializes only 138 of 202 weights on the reduced fixture, so the
+           other 64 come back random with no error. See decisions.md.
         """
-        # DECISION plan-2026-08-03T191222-1d751f81/D-018: do NOT replace this
-        # dummy forward with the `self.build(None)` chain alone, however
-        # wasteful the full-resolution pass looks. Measured on the reduced
-        # fixture: the build chain alone materializes only 138 of 202 weights at
-        # load time, so Keras restores 138 and the remaining 64 are created
-        # FRESH (random) on the first real `call()` -- a `low_res_logits` drift
-        # of order 1-2 absolute, with no error and no warning. The weight COUNT
-        # cannot see it: sampled after any forward pass, both variants report
-        # 202/201/321,862 identically. Any future optimization here must be
-        # judged by (a) `len(restored.weights)` sampled BEFORE the first call and
-        # (b) index-aligned weight VALUES, never by a post-forward count.
-        # Pinned by `TestBuildFromConfigLoadCost` in test_correctness.py.
         img_size = int(config.get("img_size") or self.image_encoder.img_size)
         if not self.built:
             self.build(None)
@@ -425,57 +330,45 @@ class SAM(keras.Model):
         multimask_output: bool = True
     ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through the SAM model.
+        Run the full segmentation pipeline: preprocess, encode, decode,
+        postprocess.
 
-        Args:
-            inputs: Dictionary containing:
-                - 'image': Required, shape (batch_size, H, W, 3)
-                - 'points': Optional, tuple of (coords, labels)
-                - 'boxes': Optional, shape (batch_size, num_boxes, 4)
-                - 'masks': Optional, shape (batch_size, 1, mask_h, mask_w)
-                - 'original_size': Required, tuple of (height, width)
-            training: Optional boolean for training mode.
-            multimask_output: Boolean, if True predicts multiple masks
-                (usually 3), if False predicts single best mask. Defaults to True.
+        :param inputs: Dict with ``'image'`` (required,
+            ``(batch_size, H, W, 3)``), ``'points'`` (optional, ``(coords,
+            labels)``), ``'boxes'`` (optional, ``(batch_size, num_boxes,
+            4)``), ``'masks'`` (optional, ``(batch_size, 1, mask_h,
+            mask_w)``), and ``'original_size'`` (required, ``(height,
+            width)``).
+        :type inputs: Dict[str, Any]
+        :param training: Whether the model runs in training mode.
+        :type training: Optional[bool]
+        :param multimask_output: If True, predict multiple masks (usually
+            3); if False, predict the single best mask. Defaults to True.
+        :type multimask_output: bool
+        :return: Dict with ``'masks'`` (thresholded ``uint8`` and
+            non-differentiable at the default ``binarize_masks=True``, float
+            logits otherwise), ``'iou_predictions'``, and
+            ``'low_res_logits'`` -- the training target, differentiable at
+            either ``binarize_masks`` setting.
+        :rtype: Dict[str, keras.KerasTensor]
 
-        Returns:
-            Dictionary containing:
-            - 'masks': Full-resolution masks. At the default
-              `binarize_masks=True` these are thresholded `uint8` masks and are
-              **not differentiable** -- differentiating this key returns `None`
-              for every trainable variable. At `binarize_masks=False` they are
-              float logits and carry gradient.
-            - 'iou_predictions': Predicted IoU scores for each mask.
-            - 'low_res_logits': Low-resolution mask logits. **This is the
-              training target** -- it is differentiable at both settings of
-              `binarize_masks` and is the output reference SAM supervises.
-
-        Note:
-            This dict is an inference contract, not a `fit()` contract. On
-            keras 3.8.0 a dict `y_pred` cannot be trained with stock
-            `compile()`/`fit()`: `CompileLoss.build` broadcasts a single `Loss`
-            across every leaf of the structure and raises `KeyError`. A trainer
-            must wrap this model in a single-tensor model that emits
-            `low_res_logits` alone.
+        .. note::
+           This dict is an inference contract, not a ``fit()`` contract. On
+           keras 3.8.0 a dict ``y_pred`` cannot be trained with stock
+           ``compile()``/``fit()``; a trainer needs a wrapper model that
+           emits ``low_res_logits`` alone.
         """
-        # Validate inputs
         if 'image' not in inputs:
             raise ValueError("Input dictionary must contain 'image' key")
         if 'original_size' not in inputs:
             raise ValueError("Input dictionary must contain 'original_size' key")
 
-        image = inputs['image']  # (B, H, W, C)
+        image = inputs['image']
 
-        # Store input image shape for postprocessing
         input_image_shape = ops.shape(image)[1:3]
-
-        # Step 1: Preprocess image (normalize and pad to encoder size)
         image = self.preprocess(image)
-
-        # Step 2: Encode image to get image embeddings
         image_embeddings = self.image_encoder(image, training=training)
 
-        # Step 3: Encode prompts (points, boxes, masks)
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
             points=inputs.get("points"),
             boxes=inputs.get("boxes"),
@@ -483,7 +376,6 @@ class SAM(keras.Model):
             training=training
         )
 
-        # Step 4: Decode masks from image and prompt embeddings
         low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embeddings,
             image_pe=self.prompt_encoder.get_dense_pe(),
@@ -493,25 +385,15 @@ class SAM(keras.Model):
             training=training,
         )
 
-        # Step 5: Postprocess masks (upscale and threshold)
         masks = self.postprocess_masks(
             low_res_masks,
             input_image_shape,
             inputs["original_size"]
         )
 
-        # DECISION plan-2026-08-03T191222-1d751f81/D-011: the `uint8` cast is
-        # GRADIENT-DEAD -- differentiating `outputs['masks']` yields `None` for
-        # EVERY trainable variable, so a trainer supervising this key trains
-        # nothing and says nothing. It stays the DEFAULT because it is reference
-        # SAM's own output contract; `binarize_masks=False` is the escape hatch.
-        # Do NOT "simplify" this back to an unconditional cast, and do NOT
-        # instead add a fourth `masks_logits` output key: that widens a dict
-        # `y_pred` which already cannot be consumed by stock `compile()`/`fit()`
-        # on keras 3.8.0, and pays a full-resolution tensor on every forward.
-        # Flipping the default to float logits was also rejected (it breaks the
-        # pre-existing binary-mask assertions and diverges from reference SAM).
-        # `low_res_logits` is THE training target either way. See D-002.
+        # DECISION plan-2026-08-03T191222-1d751f81/D-011: the uint8 cast is
+        # gradient-dead, but stays the default to match reference SAM's own
+        # output contract; low_res_logits is the training target either way. See decisions.md.
         if self.binarize_masks:
             masks = ops.cast(masks > self.mask_threshold, dtype='uint8')
 
@@ -523,41 +405,25 @@ class SAM(keras.Model):
 
     def preprocess(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Preprocess input image for the encoder.
+        Normalize with ImageNet statistics and pad to the encoder's input
+        size.
 
-        Performs normalization using ImageNet statistics and pads the image
-        to match the encoder's expected input size.
-
-        Args:
-            x: Input image tensor of shape (batch_size, H, W, 3) with values
-                in [0, 255] range.
-
-        Returns:
-            Preprocessed image of shape (batch_size, img_size, img_size, 3)
-            where img_size is the encoder's expected size (typically 1024).
-
-        Raises:
-            ValueError: If either spatial extent of `x` exceeds the encoder's
-                `img_size`. This method only PADS; it never resizes. Apply
-                `dl_techniques.models.vision_language.sam.sam1.resize_longest_side` first, exactly as
-                reference SAM's `ResizeLongestSide` transform does.
+        :param x: Image in ``[0, 255]``, shape ``(batch_size, H, W, 3)``.
+        :type x: keras.KerasTensor
+        :return: Preprocessed image, shape
+            ``(batch_size, img_size, img_size, 3)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If either spatial extent of ``x`` exceeds the
+            encoder's ``img_size``. This method only pads; it never resizes.
+            Apply
+            ``dl_techniques.models.vision_language.sam.sam1.resize_longest_side``
+            first, as reference SAM's ``ResizeLongestSide`` transform does.
         """
         img_size = self.image_encoder.img_size
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-005: refuse an oversize
-        # image HERE, at the point where the contract is violated. Without this,
-        # `pad_h`/`pad_w` below go negative and `ops.pad` raises
-        # `InvalidArgumentError` -- which is an `OpError`, NOT a `ValueError`
-        # (verified by execution: its MRO is OpError -> Exception), so a caller
-        # cannot catch it as an input-validation error and the message names
-        # neither the offending size nor the remedy. Do NOT "fix" this by
-        # clamping the pad to zero (silently crops the image) and do NOT resize
-        # inside `preprocess` (reference SAM resizes the raw image BEFORE the
-        # model so prompt coordinates can be rescaled in the same frame; a
-        # hidden resize here would leave every prompt in the wrong frame).
-        # The static shape is used, not `ops.shape`, so the check is a plain
-        # Python branch that neither traces into the graph nor fires on an
-        # unknown-at-trace-time extent.
+        # image here, at the point of violation -- otherwise pad_h/pad_w go
+        # negative and ops.pad raises an uncatchable-as-ValueError OpError. See decisions.md.
         static_shape = tuple(x.shape)
         if len(static_shape) == 4:
             for axis_name, dim in (
@@ -576,19 +442,9 @@ class SAM(keras.Model):
                         f"prompt coordinates by the same factor."
                     )
 
-        # Normalize using ImageNet statistics.
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-063
-        # `pixel_mean` / `pixel_std` are built once in `__init__` as HARD
-        # float32 constants (`ops.array(..., dtype="float32")`), so they must
-        # be cast to the tensor's dtype at every use. Without the cast, the
-        # line immediately below raised `InvalidArgumentError: cannot compute
-        # Sub as input #1 was expected to be a half tensor but is a float
-        # tensor` on ANY `mixed_float16` forward -- MEASURED at HEAD on the
-        # reduced fixture, with the float32 control green. Do NOT fix this by
-        # making `__init__` build the constants in the compute dtype: the
-        # policy can change after construction, and a float16 `123.675` is not
-        # exactly `123.675`. See decisions.md D-063.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-063: pixel_mean/pixel_std
+        # are fixed float32 constants, so they must be cast to the tensor's
+        # dtype at every use, not once in __init__ -- the dtype policy can change after construction. See decisions.md.
         x = ops.cast(x, self.compute_dtype)
         x = (x - ops.cast(self.pixel_mean, x.dtype)) / ops.cast(
             self.pixel_std, x.dtype)
@@ -610,36 +466,28 @@ class SAM(keras.Model):
         original_size: Tuple[int, int]
     ) -> keras.KerasTensor:
         """
-        Postprocess predicted masks to match original image size.
+        Upscale to encoder size, crop off padding, then resize to the
+        original image size.
 
-        The mask decoder outputs low-resolution masks which need to be:
-        1. Upscaled to encoder input size
-        2. Cropped to remove padding
-        3. Scaled to original image size
-
-        Args:
-            masks: Low-resolution mask logits from decoder, shape
-                (batch_size, num_masks, H_low, W_low).
-            input_size: Size of input image before padding, tuple of (H, W).
-            original_size: Original image size before any preprocessing,
-                tuple of (H, W).
-
-        Returns:
-            Masks at original image resolution, shape
-            (batch_size, num_masks, original_H, original_W).
+        :param masks: Low-resolution mask logits from the decoder, shape
+            ``(batch_size, num_masks, H_low, W_low)``.
+        :type masks: keras.KerasTensor
+        :param input_size: Input image size before padding, ``(H, W)``.
+        :type input_size: Tuple[int, int]
+        :param original_size: Original image size before any preprocessing,
+            ``(H, W)``.
+        :type original_size: Tuple[int, int]
+        :return: Masks at original resolution, shape
+            ``(batch_size, num_masks, original_H, original_W)``.
+        :rtype: keras.KerasTensor
         """
-        # Step 1: Upscale to encoder input size
         masks = ops.image.resize(
             masks,
             (self.image_encoder.img_size, self.image_encoder.img_size),
             interpolation="bilinear",
             data_format="channels_first"
         )
-
-        # Step 2: Remove padding by cropping to input size
         masks = masks[..., :input_size[0], :input_size[1]]
-
-        # Step 3: Scale to original image size
         masks = ops.image.resize(
             masks,
             original_size,
@@ -649,18 +497,9 @@ class SAM(keras.Model):
 
         return masks
 
-    # DECISION plan-2026-08-23T091307-9a110062/D-601
-    # DERIVED, deliberately, exactly as SAM 2's is (D-090): `dropout_rate` is
-    # NOT an `__init__` parameter and NOT a `get_config()` key. Every
-    # `Dropout` a SAM 1 owns belongs to the mask decoder's `TwoWayTransformer`,
-    # which already stores and serializes `attention_dropout_rate` in its own
-    # config; a second copy on the outer model would be a number with two homes
-    # -- and one that can silently DISAGREE, because a caller may pass an
-    # already-constructed `mask_decoder` whose rate differs from whatever the
-    # outer `__init__` was told. This property can never disagree, and it round
-    # trips for free through the nested config, so no pre-existing `.keras` file
-    # gains a required key. Do NOT "complete" this by adding a stored
-    # `self.dropout_rate` + config key. See decisions.md D-601.
+    # DECISION plan-2026-08-23T091307-9a110062/D-601: dropout_rate is derived,
+    # not a stored __init__/get_config field -- a second copy on the outer model
+    # could silently disagree with the transformer's own stored rate. See decisions.md.
     @property
     def dropout_rate(self) -> float:
         """Attention-dropout rate actually in force on the mask decoder.
@@ -677,34 +516,22 @@ class SAM(keras.Model):
         **kwargs: Any
     ) -> 'SAM':
         """
-        Create a SAM model from a predefined variant configuration.
+        Build a SAM model from a named size preset (``vit_b``/``vit_l``/``vit_h``).
 
-        This factory method provides easy access to standard SAM architectures
-        with different capacity/compute tradeoffs:
-
-        - **vit_b** (Base): Fastest, lowest memory, good quality
-        - **vit_l** (Large): Balanced speed/quality
-        - **vit_h** (Huge): Best quality, highest resource requirements
-
-        Args:
-            variant: String, model variant name. Options are:
-                - 'vit_b': Base model (768 dim, 12 layers, ~90M params)
-                - 'vit_l': Large model (1024 dim, 24 layers, ~300M params)
-                - 'vit_h': Huge model (1280 dim, 32 layers, ~630M params)
-            **kwargs: Additional arguments to pass to SAM constructor
-                (e.g., mask_threshold, pixel_mean, pixel_std). One key is
-                intercepted rather than forwarded: ``dropout_rate`` is a variant
-                table key that reaches every ``Dropout`` in the mask decoder's
-                ``TwoWayTransformer``. It defaults to
-                ``DEFAULT_ATTENTION_DROPOUT_RATE`` (0.0), so omitting it
-                reproduces the shipped model bit for bit.
-
-        Returns:
-            Configured SAM model instance.
-
-        Raises:
-            ValueError: If variant is not one of the supported options, or if
-                ``dropout_rate`` is outside ``[0.0, 1.0)``.
+        :param variant: ``'vit_b'`` (768 dim, 12 layers, ~90M params),
+            ``'vit_l'`` (1024 dim, 24 layers, ~300M params), or ``'vit_h'``
+            (1280 dim, 32 layers, ~630M params).
+        :type variant: Literal['vit_b', 'vit_l', 'vit_h']
+        :param kwargs: Additional arguments passed to the SAM constructor
+            (e.g. ``mask_threshold``, ``pixel_mean``). One key is
+            intercepted rather than forwarded: ``dropout_rate`` reaches
+            every ``Dropout`` in the mask decoder's ``TwoWayTransformer``.
+            It defaults to ``DEFAULT_ATTENTION_DROPOUT_RATE`` (0.0), so
+            omitting it reproduces the shipped model bit for bit.
+        :return: A configured :class:`SAM` model instance.
+        :rtype: SAM
+        :raises ValueError: If ``variant`` is not supported, or if
+            ``dropout_rate`` is outside ``[0.0, 1.0)``.
 
         Example:
             ```python
@@ -729,14 +556,9 @@ class SAM(keras.Model):
 
         config = cls.MODEL_VARIANTS[variant]
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-601
-        # `dropout_rate` is popped out of `kwargs` HERE rather than passed
-        # through to `cls(...)` with the rest: it is a variant-table key that
-        # configures a SUB-LAYER, not a `SAM.__init__` parameter (see the
-        # `dropout_rate` property for why the outer model deliberately does not
-        # store it). Only this one key is intercepted -- the encoder-geometry
-        # keys stay non-overridable from here, unchanged from before this step.
-        # An explicit `None` means "use the variant's value", matching SAM 2.
+        # DECISION plan-2026-08-23T091307-9a110062/D-601: dropout_rate is
+        # popped from kwargs here, not forwarded to cls(...), since it
+        # configures a sub-layer rather than SAM.__init__. See decisions.md.
         dropout_rate = kwargs.pop("dropout_rate", None)
         if dropout_rate is None:
             dropout_rate = config["dropout_rate"]
@@ -775,22 +597,9 @@ class SAM(keras.Model):
             mask_in_chans=16,
         )
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-601
-        # The ONLY path by which a caller-chosen attention-dropout rate reaches
-        # the 7 `keras.layers.Dropout` layers this transformer builds (MEASURED
-        # at depth=2; they are nested inside the custom `MultiHeadAttention`, not
-        # direct children, which is why an earlier survey reported "0 live
-        # Dropout"). Deleting this keyword fails no shape, no count and no round
-        # trip -- the layer default silently takes over and the knob goes dead,
-        # exactly as it was before this step. The keyword is spelled
-        # `attention_dropout_rate=` because that is the LAYER's parameter name;
-        # the model-level name is `dropout_rate`, mirroring SAM 2 (D-090). This
-        # REPLACES D-091, which ruled the knob unnecessary because the rate it
-        # could not reach was 0.0 and therefore inert -- true, and still true:
-        # the default here is that same 0.0, so shipped behaviour is
-        # bit-identical. What D-091 got wrong is that "inert at the default" is
-        # a reason to keep a knob cheap, not a reason to have none.
-        # See decisions.md D-601.
+        # DECISION plan-2026-08-23T091307-9a110062/D-601: this is the only
+        # path by which a caller-chosen dropout rate reaches the 7 Dropout
+        # layers this transformer builds -- dropping it silently makes the knob dead at its 0.0 default. See decisions.md.
         transformer = TwoWayTransformer(
             depth=2,
             embedding_dim=prompt_embed_dim,
@@ -818,13 +627,11 @@ class SAM(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Returns the configuration of the model for serialization.
+        Serialize all sub-models and configuration parameters for full
+        reconstruction via :meth:`from_config`.
 
-        This method serializes all sub-models and configuration parameters,
-        enabling full model reconstruction via `from_config`.
-
-        Returns:
-            Configuration dictionary containing all model parameters.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -842,18 +649,13 @@ class SAM(keras.Model):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'SAM':
         """
-        Creates a SAM model from a configuration dictionary.
+        Deserialize a :class:`SAM` model, reconstructing its sub-models.
 
-        This method deserializes the model from a configuration, reconstructing
-        all sub-models and restoring their weights.
-
-        Args:
-            config: Configuration dictionary from `get_config()`.
-
-        Returns:
-            Reconstructed SAM model instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: Reconstructed :class:`SAM` instance.
+        :rtype: SAM
         """
-        # Deserialize sub-models
         image_encoder_config = config.pop("image_encoder")
         prompt_encoder_config = config.pop("prompt_encoder")
         mask_decoder_config = config.pop("mask_decoder")
@@ -871,18 +673,16 @@ class SAM(keras.Model):
         """
         Compute output shapes given input shapes.
 
-        Args:
-            input_shape: Dictionary of input shapes.
-
-        Returns:
-            Dictionary of output shapes.
+        :param input_shape: Dictionary of input shapes.
+        :type input_shape: Dict[str, Tuple[Optional[int], ...]]
+        :return: Dictionary of output shapes.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         batch_size = input_shape.get('image', (None,))[0]
-        original_h, original_w = None, None  # Unknown until runtime
-
-        # Number of masks depends on multimask_output setting
-        # Default is 3 for multimask, 1 for single mask
-        num_masks = None  # Variable
+        # Unknown until runtime: original size and mask count (depends on
+        # multimask_output).
+        original_h, original_w = None, None
+        num_masks = None
 
         return {
             'masks': (batch_size, num_masks, original_h, original_w),
