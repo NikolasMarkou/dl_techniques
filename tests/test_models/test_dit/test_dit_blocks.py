@@ -27,6 +27,23 @@ and each gets a dedicated arm here.
    ``x_norm`` directly, and again at the block level on an exactly zero input,
    where ``norm(0) == 0`` leaves a multiplicative chunk with nothing to scale.
 
+   The identical hole exists for the OTHER additive/multiplicative pair in the
+   same 6-way split -- ``shift_mlp`` and ``scale_mlp``, chunks 3 and 4, which
+   ``AdaLayerNormZero`` hands back and ``DiTBlock`` applies to the MLP branch
+   itself. That swap survived the whole 490-test suite at the pass-2 review,
+   after the msa arms had landed;
+   ``TestShiftMlpAndScaleMlpAreNotInterchangeable`` is its mirror.
+
+   **Disclosed gap.** ``sd3_adaln.py`` also defines ``AdaLayerNormZeroX``, a
+   dual-variant block with two more chunk-role pairs (``shift_msa``/
+   ``scale_msa`` and ``shift_msa2``/``scale_msa2``). Both transpositions
+   survive the whole shared-layer suite, and both are still uncovered. DiT does
+   NOT construct that class, so no arm for it belongs in this module -- a DiT
+   test that reached into a class DiT never instantiates would be coverage
+   filed under the wrong owner. It is recorded here, and in the plan's
+   ``progress.md``, so the gap is disclosed rather than silently uncovered; the
+   arms belong beside the layer, in ``tests/test_layers/test_transformers/``.
+
 2. **The attention is non-causal.** A causal mask changes no shape, no
    parameter count and no config; it only makes a later patch invisible to an
    earlier one. Pinned by a three-arm probe: perturbing a LATER token must move
@@ -381,6 +398,152 @@ class TestShiftMsaAndScaleMsaAreNotInterchangeable:
         assert delta_shift > 1e-5, (
             "chunk 0 (shift_msa) could not move a ZERO input, so it is being "
             f"multiplied rather than added (max |delta| = {delta_shift})"
+        )
+
+
+class TestShiftMlpAndScaleMlpAreNotInterchangeable:
+    """The same claim for chunks 3 and 4, which ``DiTBlock`` applies itself.
+
+    ``AdaLayerNormZero.call`` splits SIX chunks and consumes only the first
+    triple; ``shift_mlp`` and ``scale_mlp`` are handed back to ``DiTBlock``,
+    which applies them as ``modulate(norm2(x), shift_mlp, scale_mlp)`` on the
+    MLP branch. Swapping those two names in the split is the exact mirror of
+    the ``shift_msa``/``scale_msa`` transposition above -- same file, same
+    ``keras.ops.split``, same invisibility to shape, parameter count,
+    ``get_config()`` and round trip -- and it survived the whole DiT suite at
+    the pass-2 review even after the msa arms landed. These arms close it.
+
+    The MLP branch has no publicly returned pre-activation to read, so the
+    first two arms observe the tensor the block actually feeds its MLP by
+    swapping ``block.mlp`` for a recorder that captures its input and returns
+    zeros. That is the block's own value; no expected value is reconstructed
+    from ``modulate``'s formula. The captured tensor is taken with the msa gate
+    CLOSED, so ``norm2`` sees the untouched ``x``.
+
+    The third arm needs no stub and forces ``gate_mlp`` open instead: the MLP
+    residual is multiplied by that gate, so with it at zero the branch is
+    annihilated and nothing about chunks 3 and 4 is observable at all -- the
+    same trap that let the original attribution probe miss the msa pair.
+    """
+
+    #: An arbitrary non-zero modulation magnitude. Nothing depends on the value.
+    VALUE = 0.7
+
+    @staticmethod
+    def _mlp_input(block: DiTBlock, bias: np.ndarray, x, c) -> np.ndarray:
+        """Return the tensor ``block`` feeds to its MLP under ``bias``.
+
+        ``block.mlp`` is replaced by a recorder returning zeros, so the MLP
+        residual contributes nothing and the captured value is exactly
+        ``modulate(norm2(x), shift_mlp, scale_mlp)`` as the block computed it.
+        """
+        captured: List[np.ndarray] = []
+
+        def recorder(tensor, training=None):
+            captured.append(
+                np.asarray(keras.ops.convert_to_numpy(tensor))
+            )
+            return keras.ops.zeros_like(tensor)
+
+        original = block.mlp
+        block.mlp = recorder
+        try:
+            block.adaln.linear.bias.assign(keras.ops.convert_to_tensor(bias))
+            block([x, c], training=False)
+        finally:
+            block.mlp = original
+        assert len(captured) == 1, (
+            "the block called its MLP "
+            f"{len(captured)} times; this probe assumes exactly one call"
+        )
+        return captured[0]
+
+    def test_shift_mlp_moves_every_position_by_the_same_amount(self):
+        block = _make_block()
+        x, c = _inputs()
+
+        base = self._mlp_input(block, _bias_with(), x, c)
+        moved = self._mlp_input(block, _bias_with(shift_mlp=self.VALUE), x, c)
+        delta = moved - base
+
+        # Anti-vacuity: a multiplicative chunk would give `VALUE * base`, whose
+        # spread must be far above the tolerance below for the constant-delta
+        # assertion to exclude that role.
+        spread = float(np.std(self.VALUE * base))
+        assert spread > 1e-2, (
+            "the normalised activation is nearly constant on this input, so an "
+            f"additive and a multiplicative chunk look alike (std = {spread})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            np.full_like(delta, self.VALUE),
+            rtol=0,
+            atol=1e-6,
+            err_msg=(
+                "chunk 3 (shift_mlp) did not act additively on the MLP branch: "
+                "its delta is not the constant written into the bias, so it is "
+                "being consumed as the multiplicative `scale` -- the 6-way "
+                "chunk order in AdaLayerNormZero.call is wrong"
+            ),
+        )
+
+    def test_scale_mlp_moves_each_position_in_proportion_to_itself(self):
+        block = _make_block()
+        x, c = _inputs()
+
+        base = self._mlp_input(block, _bias_with(), x, c)
+        moved = self._mlp_input(block, _bias_with(scale_mlp=self.VALUE), x, c)
+        delta = moved - base
+
+        # Anti-vacuity: an additive chunk gives a CONSTANT delta; this one must
+        # vary, or the proportionality claim below is unobservable.
+        assert float(np.std(delta)) > 1e-2, (
+            "chunk 4 (scale_mlp) moved every position by the same amount, i.e. "
+            "it acted as an additive shift -- the 6-way chunk order in "
+            f"AdaLayerNormZero.call is wrong (std = {float(np.std(delta))})"
+        )
+
+        np.testing.assert_allclose(
+            delta,
+            self.VALUE * base,
+            rtol=0,
+            atol=1e-6,
+            err_msg=(
+                "chunk 4 (scale_mlp) is not multiplying the MLP branch's "
+                "normalised activation -- the 6-way chunk order is wrong"
+            ),
+        )
+
+    def test_on_a_zero_input_only_the_mlp_shift_chunk_can_act(self):
+        """Block level, no stub, ``gate_mlp`` forced open.
+
+        With ``x == 0`` and the msa gate closed, ``norm2(0) == 0``, so a
+        multiplicative chunk has nothing to scale while an additive one still
+        injects its constant into the MLP.
+        """
+        block = _make_block()
+        _, c = _inputs()
+        x = np.zeros((BATCH, SEQ, HIDDEN), dtype="float32")
+
+        base = _run(block, _bias_with(gate_mlp=1.0), x, c)
+        scaled = _run(block, _bias_with(gate_mlp=1.0, scale_mlp=self.VALUE), x, c)
+        shifted = _run(block, _bias_with(gate_mlp=1.0, shift_mlp=self.VALUE), x, c)
+
+        # atol=0: `0 * (1 + scale)` is exactly `0`, so this is exact.
+        np.testing.assert_array_equal(
+            scaled,
+            base,
+            err_msg=(
+                "chunk 4 (scale_mlp) changed the MLP branch on a ZERO input, "
+                "so it is being added rather than multiplied"
+            ),
+        )
+        delta_shift = float(np.max(np.abs(shifted - base)))
+        assert delta_shift > 1e-5, (
+            "chunk 3 (shift_mlp) could not move a ZERO input through the MLP, "
+            f"so it is being multiplied rather than added (max |delta| = "
+            f"{delta_shift})"
         )
 
 

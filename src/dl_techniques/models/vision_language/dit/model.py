@@ -611,8 +611,11 @@ class DiT(keras.Model):
         # of this port protects (see `diffusion.py::_compute_dtype`, D-018).
         # `mixed_float16` is unaffected either way -- its variable dtype is
         # already float32. See decisions.md D-028; pinned by
-        # `tests/test_models/test_dit/test_dit.py::
-        # TestPrecisionPolicies::test_the_frozen_table_follows_the_policy_without_narrowing`.
+        # `tests/test_models/test_dit/test_dit.py::TestUnderEveryDtypePolicy::
+        # test_the_frozen_table_follows_the_policy_without_narrowing`, whose
+        # `TABLE_POLICIES` carries a PURE `float16` arm precisely so the floor
+        # is convictable -- the three `POLICIES` arms cannot see it, because
+        # `mixed_float16`'s variable dtype is float32.
         table_dtype = "float64" if self.variable_dtype == "float64" else "float32"
         table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         self.pos_embed = self.add_weight(

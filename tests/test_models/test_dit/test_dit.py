@@ -244,6 +244,16 @@ COMPUTE_DTYPE = {
     "float64": "float64",
 }
 
+#: The frozen ``pos_embed`` arm runs over a WIDER set than ``POLICIES``.
+#: ``mixed_float16``'s VARIABLE dtype is already float32, so no member of
+#: ``POLICIES`` can tell D-028's "follows the policy" clause apart from its
+#: "never narrows below float32" clause -- the bare ``dtype=self.variable_dtype``
+#: the anchor forbids passed all three (measured: 490 passed / 0 failed). A pure
+#: (non-"mixed") float16 policy is the case the floor exists for: its variable
+#: dtype IS float16, so the bare form would store the sin/cos table with ~3
+#: decimal digits while the floored form keeps float32.
+TABLE_POLICIES = POLICIES + ["float16"]
+
 
 @pytest.fixture
 def policy(request) -> Iterator[str]:
@@ -364,7 +374,7 @@ class TestUnderEveryDtypePolicy:
         assert trainable
         assert {str(w.dtype) for w in trainable} == {"float32"}
 
-    @pytest.mark.parametrize("policy", POLICIES, indirect=True)
+    @pytest.mark.parametrize("policy", TABLE_POLICIES, indirect=True)
     def test_the_frozen_table_follows_the_policy_without_narrowing(
         self, policy: str
     ) -> None:
@@ -377,6 +387,11 @@ class TestUnderEveryDtypePolicy:
         ``mixed_float16``'s variable dtype is already float32, so its table is
         unchanged. ``DiT.call`` still casts to the token dtype at the point of
         use, which is what keeps every policy legal.
+
+        This arm is parametrized over ``TABLE_POLICIES``, not ``POLICIES``: the
+        pure ``float16`` member is the ONLY one whose variable dtype sits below
+        the floor, and it is therefore the only one that can convict the bare
+        ``dtype=self.variable_dtype`` the D-028 anchor forbids.
         """
         model = built_model(seed=0)
         table = [w for w in model.weights if w.path.endswith("pos_embed")][0]
@@ -385,11 +400,27 @@ class TestUnderEveryDtypePolicy:
             f"under the {policy} policy the frozen table is {table.dtype}, "
             f"expected {expected} (D-028)"
         )
-        # Anti-vacuity: the three policies must not all expect the same dtype,
-        # or this arm is one claim stated three times.
+        # Anti-vacuity 1: the policies must not all expect the same dtype, or
+        # this arm is one claim stated N times.
         assert {"float32", "float64"} == {
-            "float64" if p == "float64" else "float32" for p in POLICIES
+            "float64" if p == "float64" else "float32" for p in TABLE_POLICIES
         }
+        # Anti-vacuity 2 -- D-028's FLOOR half. At least one policy here must
+        # have a variable dtype NARROWER than float32, otherwise "never
+        # narrows" is unobservable and `dtype=self.variable_dtype` passes the
+        # whole suite (which is exactly what pass 2 measured).
+        below_the_floor = [
+            name
+            for name in TABLE_POLICIES
+            if keras.mixed_precision.Policy(name).variable_dtype
+            not in ("float32", "float64")
+        ]
+        assert below_the_floor, (
+            "no policy in TABLE_POLICIES has a variable dtype below float32, "
+            "so the never-narrow half of D-028 is untested and this arm cannot "
+            "distinguish the floored expression from a bare "
+            "`dtype=self.variable_dtype`"
+        )
         inputs = cast_inputs(list(tiny_inputs(seed=7)), input_dtype_for(policy))
         assert_finite_and_shaped(model(inputs, training=False), TINY, BATCH)
 
