@@ -1,50 +1,17 @@
-"""
-Attention-augmented CNN backbone built on the Convolutional Block Attention Module.
+"""CBAMNet, a CNN backbone that refines feature maps with the Convolutional Block Attention Module.
 
-This model embodies the principle of sequential attention refinement, a design
-paradigm that treats feature recalibration as two separable questions applied in
-order rather than one joint reweighting. The core idea is that a convolutional
-feature map is over-complete in two independent senses: not every channel is
-informative for a given input, and not every spatial location is informative
-either. Asking both questions at once requires a 3-D attention tensor whose cost
-scales with `C x H x W`; asking them one at a time factorizes the problem into a
-`C`-dimensional and an `H x W`-dimensional decision, which is dramatically
-cheaper and, empirically, more effective.
-
-CBAM composes the two in sequence:
-
-`F' = M_c(F) (*) F`
-`F'' = M_s(F') (*) F'`
-
-where `(*)` is element-wise multiplication with broadcasting. Channel attention
-`M_c` pools each feature map to a scalar (both average and max pooling, whose
-descriptors are complementary), passes them through a shared bottleneck MLP with
-reduction ratio `r`, and sums the results before a sigmoid. The bottleneck is what
-forces the module to learn inter-channel relationships rather than per-channel
-gains. Spatial attention `M_s` pools across the channel axis instead, producing a
-two-channel descriptor that a single large convolution (kernel size 7 by default)
-maps to a spatial mask; the large receptive field matters here because deciding
-whether a location is salient requires context beyond that location. Both masks
-pass through a sigmoid, so attention can only attenuate or preserve, never invert
-or amplify beyond the original magnitude.
-
-Architecturally, the backbone is a stack of uniform stages, one per entry in
-`dims`:
-
-`Conv2D(dim, 3x3, relu) -> BatchNormalization -> CBAM(dim) -> MaxPooling2D(2x2)`
-
-Placing CBAM after normalization and before pooling is deliberate: attention
-operates on normalized activations, and downsampling then acts on an already
-refined map, so the pooling decision is made over features whose salience has
-been accounted for. The head is a global average pool followed by a softmax
-`Dense`, and is omitted entirely when `include_top=False`, in which case the
-model returns the final stage's feature maps and serves as a backbone for
-detection, segmentation, or transfer learning.
-
-Three preset variants trade capacity against cost: tiny (`[64, 128]`), small
-(`[64, 128, 256]`), and base (`[128, 256, 512]`). Because each stage halves the
-spatial resolution, depth is bounded below by input size; a 32x32 input supports
-at most five stages before the feature map degenerates.
+CBAM applies attention as two separate steps instead of one joint reweighting: channel
+attention picks which channels matter, then spatial attention picks which locations
+matter. Channel attention pools each feature map to a scalar with both average and max
+pooling, mixes them through a shared bottleneck MLP, and produces per-channel gains.
+Spatial attention pools across channels instead, and a large convolution turns the
+result into a spatial mask. Both masks pass through a sigmoid, so attention can only
+attenuate or preserve a feature, never invert or amplify it. The backbone stacks one
+`Conv2D -> BatchNorm -> CBAM -> MaxPooling2D` stage per entry in `dims`, with CBAM
+placed after normalization and before pooling so downsampling acts on an already
+refined map. Three presets trade capacity for cost: tiny (`[64, 128]`), small
+(`[64, 128, 256]`), and base (`[128, 256, 512]`). No pretrained weights ship with this
+model; `pretrained=True` raises `NotImplementedError`.
 
 References:
     - Woo et al., 2018. CBAM: Convolutional Block Attention Module. ECCV 2018.
@@ -77,124 +44,64 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.cbam.model")
 class CBAMNet(keras.Model):
-    """
-    CNN model with CBAM attention for image classification.
+    """CNN model with CBAM attention after every convolutional stage.
 
-    This model integrates CBAM (Convolutional Block Attention Module) after
-    convolutional blocks to refine feature maps by focusing on salient channels
-    and spatial regions. It provides a flexible, configurable architecture with
-    proper serialization support for production deployment.
+    Architecture:
 
-    **Intent**: Provide a robust attention-augmented CNN architecture that
-    demonstrates modern Keras 3 model implementation patterns while delivering
-    strong performance through spatial and channel attention mechanisms.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    ┌─────────────────────────────────┐
-    │   Input(shape=input_shape)      │
-    └──────────────┬──────────────────┘
-                   ▼
-    ┌─────────────────────────────────┐
-    │ Stage i (for each dim in dims): │
-    │   Conv2D(dim, 3, 'relu')        │
-    │   BatchNormalization()          │
-    │   CBAM(channels=dim)            │
-    │   MaxPooling2D(2x2)             │
-    └──────────────┬──────────────────┘
-                   ▼
-    ┌─────────────────────────────────┐
-    │    GlobalAveragePooling2D()     │
-    └──────────────┬──────────────────┘
-                   ▼
-    ┌─────────────────────────────────┐
-    │  Dense(num_classes, 'softmax')  │
-    │    ← (if include_top=True)      │
-    └──────────────┬──────────────────┘
-                   ▼
-    ┌─────────────────────────────────┐
-    │           Output                │
-    └─────────────────────────────────┘
-    ```
+        input [B, H, W, C]
+          |
+          v
+        Stage i, for each dim in dims:
+          Conv2D(dim, 3x3, relu) -> BatchNorm -> CBAM(dim) -> MaxPooling2D(2x2)
+          |
+          v
+        GlobalAveragePooling2D             ('include_top' only)
+          |
+          v
+        Dense(num_classes, softmax)        ('include_top' only)
+          |
+          v
+        output: [B, num_classes] or [B, H', W', dims[-1]]
 
-    **Mathematical Operations**:
-    - Convolution: output = activation(W * input + b)
-    - CBAM Attention: output = Ms(Mc(F) ⊗ F) ⊗ (Mc(F) ⊗ F)
-      where Mc is channel attention, Ms is spatial attention, ⊗ is element-wise multiplication
-    - Softmax Classification: P(class_i) = exp(z_i) / Σ_j exp(z_j)
-
-    Args:
-        num_classes: Integer, number of output classes for classification.
-            Only used if `include_top=True`. Must be positive.
-        dims: List of integers, channel dimensions for each stage.
-            Each value creates one Conv-BN-CBAM-Pool stage. Must not be empty
-            and all values must be positive. `None` (default) resolves to
-            [64, 128].
-        attention_ratio: Integer, reduction ratio for channel attention MLP
-            in CBAM blocks. Controls the compression of channel dimension in
-            the attention mechanism. Must be positive. Default: 8.
-        attention_kernel_size: Integer, kernel size for spatial attention
-            convolution in CBAM blocks. Must be positive and odd. Default: 7.
-        kernel_initializer: Initializer for Conv2D and Dense layer kernels.
-            Can be a string identifier or Initializer instance. Default: 'glorot_uniform'.
-        kernel_regularizer: Optional regularizer for Conv2D and Dense kernels.
-            Can be a string identifier or Regularizer instance. Default: None.
-        include_top: Boolean, whether to include the classification head.
-            If False, returns feature maps from final stage. Default: True.
-        input_shape: Optional tuple, input shape excluding batch dimension,
-            e.g., (height, width, channels). If None, shape is inferred on first call.
-        **kwargs: Additional arguments for Model base class (e.g., name).
+    :param num_classes: Number of output classes. Only used if `include_top` is True. Must be positive.
+    :type num_classes: int
+    :param dims: Channel dimensions for each stage; each entry creates one Conv-BN-CBAM-Pool stage. Must be non-empty with all positive values. Defaults to ``[64, 128]``.
+    :type dims: Optional[List[int]]
+    :param attention_ratio: Reduction ratio for the channel-attention MLP in each CBAM block. Must be positive.
+    :type attention_ratio: int
+    :param attention_kernel_size: Kernel size for the spatial-attention convolution in each CBAM block. Must be positive and odd.
+    :type attention_kernel_size: int
+    :param kernel_initializer: Initializer for Conv2D and Dense kernels.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for Conv2D and Dense kernels.
+    :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+    :param include_top: Whether to include the classification head. If False, returns the final stage's feature maps.
+    :type include_top: bool
+    :param input_shape: Input shape excluding the batch dimension, e.g. ``(height, width, channels)``. Inferred on first call if omitted.
+    :type input_shape: Optional[Tuple[int, ...]]
+    :param kwargs: Additional keyword arguments for `keras.Model` (e.g. `name`).
+    :ivar stages: One list of layers per stage (Conv2D, BatchNormalization, CBAM, MaxPooling2D).
+    :vartype stages: List[List[keras.layers.Layer]]
+    :ivar head: Classification-head layers (GlobalAveragePooling2D, Dense). Empty if `include_top` is False.
+    :vartype head: List[keras.layers.Layer]
+    :raises ValueError: If `num_classes` is not positive when `include_top` is True, if `dims` is empty or non-positive, if `attention_ratio` is not positive, or if `attention_kernel_size` is not positive.
 
     Input shape:
-        4D tensor with shape `(batch_size, height, width, channels)`.
+        4D tensor, shape ``(batch_size, height, width, channels)``.
 
     Output shape:
-        - If `include_top=True`: 2D tensor `(batch_size, num_classes)` with class probabilities.
-        - If `include_top=False`: 4D tensor `(batch_size, H', W', dims[-1])` with feature maps.
-
-    Attributes:
-        stages: List of lists, each inner list contains layers for one stage
-            (Conv2D, BatchNormalization, CBAM, MaxPooling2D).
-        head: List of layers for classification head (GlobalAveragePooling2D, Dense).
-            Empty if `include_top=False`.
-
-    Raises:
-        ValueError: If `num_classes` <= 0 when `include_top=True`.
-        ValueError: If `dims` is empty or contains non-positive values.
-        ValueError: If `attention_ratio` <= 0.
-        ValueError: If `attention_kernel_size` <= 0.
+        2D tensor ``(batch_size, num_classes)`` if `include_top` is True, otherwise 4D tensor ``(batch_size, H', W', dims[-1])``.
 
     Example:
-        ```python
-        # CIFAR-10 classifier with tiny variant
-        model = CBAMNet(num_classes=10, dims=[64, 128], input_shape=(32, 32, 3))
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
+        .. code-block:: python
 
-        # ImageNet feature extractor with base variant
-        model = CBAMNet(
-            dims=[128, 256, 512],
-            include_top=False,
-            input_shape=(224, 224, 3)
-        )
+            model = CBAMNet(num_classes=10, dims=[64, 128], input_shape=(32, 32, 3))
+            model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
-        # Custom architecture with regularization
-        model = CBAMNet(
-            num_classes=100,
-            dims=[64, 128, 256, 512],
-            attention_ratio=16,
-            kernel_regularizer='l2',
-            input_shape=(128, 128, 3)
-        )
-        ```
-
-    Note:
-        As a Model subclass, Keras automatically handles building of sub-layers
-        on the first call. No custom build() method is needed. All sub-layers
-        are created in __init__() for proper serialization support.
+            # Feature extractor, no classification head.
+            model = CBAMNet(dims=[128, 256, 512], include_top=False, input_shape=(224, 224, 3))
     """
 
     MODEL_VARIANTS: Dict[str, Dict[str, List[int]]] = {
@@ -215,7 +122,6 @@ class CBAMNet(keras.Model):
         input_shape: Optional[Tuple[int, ...]] = None,
         **kwargs: Any
     ) -> None:
-        """Initialize CBAMNet model with specified architecture and configuration."""
         super().__init__(**kwargs)
 
         if dims is None:
@@ -253,22 +159,8 @@ class CBAMNet(keras.Model):
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"stage_{i}_conv"
                 ),
-                # DECISION plan-2026-08-22T035419-a11304c8/D-111
-                # This BatchNorm keeps Keras' documented defaults
-                # (momentum=0.99, epsilon=1e-3) and that is a RULING, not an
-                # oversight. R-083 asks that a numeric trace to a named external
-                # reference; here there is none to trace to. Woo et al. 2018
-                # (CBAM) specifies an attention MODULE, not a backbone -- the
-                # paper's experiments bolt CBAM onto ResNet/WideResNet/MobileNet
-                # and inherit each host's BatchNorm settings, so "the CBAM
-                # momentum" does not exist as a published quantity. This stage
-                # stack is this repository's own demonstration backbone, so the
-                # framework default is the honest provenance. Do NOT copy
-                # MobileNet's `REFERENCE_BN_MOMENTUM` here: that constant is
-                # traced to the TF Model Garden MobileNet backbone and means
-                # nothing outside it. If you host CBAM inside a real backbone,
-                # take that backbone's value.
-                # See decisions.md D-111.
+                # DECISION plan-2026-08-22T035419-a11304c8/D-111: keep Keras' default
+                # BatchNorm momentum/epsilon — CBAM's paper specifies the attention module only, no BatchNorm setting to trace to. See decisions.md.
                 keras.layers.BatchNormalization(
                     momentum=0.99,
                     epsilon=1e-3,
@@ -302,16 +194,14 @@ class CBAMNet(keras.Model):
                 )
 
     def build(self, input_shape: Any) -> None:
-        """Materialize every sub-layer from ``input_shape``.
+        """Materialize every sub-layer from `input_shape`.
 
-        Without this method CBAMNet inherits ``Layer.build``, which marks the
-        model built while every sub-layer is still unbuilt -- Keras warns about
-        exactly that at ``layers/layer.py:393``. The shared helper traces
-        ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        Without this method Keras marks the model built while every sub-layer is
+        still unbuilt. The shared helper traces `call` on symbolic inputs, so
+        what gets built cannot drift from what gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to `call`.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -323,27 +213,21 @@ class CBAMNet(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the model.
+        """Run the forward pass.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, height, width, channels).
-            training: Boolean or None, whether the model is in training mode.
-                Affects BatchNormalization and Dropout layers.
-
-        Returns:
-            Output tensor. Shape depends on `include_top`:
-            - If True: (batch_size, num_classes) with class probabilities
-            - If False: (batch_size, H', W', dims[-1]) with feature maps
+        :param inputs: Input tensor, shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode. Affects BatchNormalization.
+        :type training: Optional[bool]
+        :return: Class probabilities ``(batch_size, num_classes)`` if `include_top` is True, otherwise feature maps ``(batch_size, H', W', dims[-1])``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
-        # Pass through all stages
         for stage_layers in self.stages:
             for layer in stage_layers:
                 x = layer(x, training=training)
 
-        # Pass through classification head if present
         if self.include_top:
             for layer in self.head:
                 x = layer(x, training=training)
@@ -351,15 +235,10 @@ class CBAMNet(keras.Model):
         return x
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for serialization.
+        """Return the model configuration for serialization.
 
-        Returns ALL constructor parameters needed to reconstruct the model.
-        This is called during model.save() and must include every parameter
-        that was passed to __init__().
-
-        Returns:
-            Dictionary containing all model configuration parameters.
+        :return: Config dict with every constructor argument.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -376,20 +255,13 @@ class CBAMNet(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CBAMNet":
+        """Build a model from a config dict, deserializing initializer and regularizer entries.
+
+        :param config: Config dict as returned by `get_config`.
+        :type config: Dict[str, Any]
+        :return: A new `CBAMNet` instance.
+        :rtype: CBAMNet
         """
-        Create model instance from configuration dictionary.
-
-        This is called during model loading (keras.models.load_model).
-        It deserializes configuration objects like initializers and regularizers
-        back into their proper types before passing to __init__().
-
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            New CBAMNet instance with the specified configuration.
-        """
-        # Deserialize initializers and regularizers from their serialized form
         if "kernel_initializer" in config:
             config["kernel_initializer"] = keras.initializers.deserialize(config["kernel_initializer"])
         if "kernel_regularizer" in config:
@@ -407,44 +279,30 @@ class CBAMNet(keras.Model):
         weights_dataset: str = "imagenet",
         **kwargs: Any
     ) -> "CBAMNet":
-        """
-        Create a CBAMNet model from a predefined variant.
+        """Create a `CBAMNet` model from a predefined variant.
 
-        This convenience method allows creating standard model configurations
-        using simple variant names, optionally with pretrained weights.
-
-        Args:
-            variant: Model variant name. One of: "tiny", "small", "base".
-            num_classes: Number of output classes. Default: 1000 (ImageNet).
-            input_shape: Input shape tuple (height, width, channels).
-                Default: (224, 224, 3).
-            pretrained: If a string path, loads weights from that path. If
-                True, raises NotImplementedError -- no public CBAMNet weights
-                ship with dl_techniques. Default: False (random
-                initialization).
-            weights_dataset: Dataset identifier for pretrained weights.
-                Default: "imagenet". Used only if pretrained=True.
-            **kwargs: Additional arguments passed to the model constructor
-                (e.g., attention_ratio, kernel_regularizer).
-
-        Returns:
-            CBAMNet model instance with the specified variant configuration.
-
-        Raises:
-            ValueError: If variant name is not recognized.
-            NotImplementedError: If pretrained is True.
+        :param variant: Variant name, one of ``"tiny"``, ``"small"``, ``"base"``.
+        :type variant: str
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param input_shape: Input shape ``(height, width, channels)``.
+        :type input_shape: Optional[Tuple[int, ...]]
+        :param pretrained: A local weights path, or True to raise `NotImplementedError` (no public CBAMNet weights ship with `dl_techniques`).
+        :type pretrained: Union[bool, str]
+        :param weights_dataset: Dataset identifier, used only when `pretrained` is True.
+        :type weights_dataset: str
+        :param kwargs: Additional arguments passed to the constructor (e.g. `attention_ratio`, `kernel_regularizer`).
+        :return: A `CBAMNet` instance with the variant's configuration.
+        :rtype: CBAMNet
+        :raises ValueError: If `variant` is not recognized.
+        :raises NotImplementedError: If `pretrained` is True.
 
         Example:
-            ```python
-            # Create tiny variant for CIFAR-10
-            model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+            .. code-block:: python
 
-            # Create small variant as feature extractor
-            model = CBAMNet.from_variant("small", include_top=False)
-
-            # Load from local weights
-            model = CBAMNet.from_variant("tiny", pretrained="path/to/weights.keras")
-            ```
+                model = CBAMNet.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+                model = CBAMNet.from_variant("small", include_top=False)
+                model = CBAMNet.from_variant("tiny", pretrained="path/to/weights.keras")
         """
         if variant not in cls.MODEL_VARIANTS:
             available = list(cls.MODEL_VARIANTS.keys())
@@ -452,16 +310,8 @@ class CBAMNet(keras.Model):
                 f"Unknown variant '{variant}'. Available variants: {available}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
-        # House style (`wave_field/model.py`): copy the preset, drop the
-        # metadata key, then `config.update(kwargs)`. Do NOT go back to
-        # splatting named preset fields alongside `**kwargs` -- every
-        # documented override of one of those fields raised
-        # `TypeError: got multiple values for keyword argument`
-        # (MEASURED at all six sites). The `.copy()` is NOT optional and
-        # NOT cosmetic: `config.update(kwargs)` on the shared
-        # `MODEL_VARIANTS[variant]` dict would permanently poison the
-        # class-level table for every later caller. See decisions.md D-127.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset before
+        # updating with kwargs — splatting preset fields alongside **kwargs raised TypeError on any override, and updating in place poisons the shared table. See decisions.md.
         variant_config = cls.MODEL_VARIANTS[variant].copy()
         variant_config.pop("description", None)
         variant_config.update(kwargs)
@@ -507,19 +357,16 @@ class CBAMNet(keras.Model):
 
     @staticmethod
     def _download_weights(variant: str, dataset: str = "imagenet") -> str:
-        """
-        Resolve a download path for pretrained weights of ``variant``.
+        """Raise, since no public CBAMNet weights ship with `dl_techniques`.
 
-        Not implemented: no public CBAMNet weights ship with dl_techniques.
-        Always raises. Kept so `pretrained=True` fails loudly instead of
-        silently returning a randomly-initialized model.
+        Kept so `pretrained=True` fails loudly instead of silently returning a
+        randomly initialized model.
 
-        Args:
-            variant: Model variant name (unused).
-            dataset: Dataset identifier (unused).
-
-        Raises:
-            NotImplementedError: Always.
+        :param variant: Model variant name (unused).
+        :type variant: str
+        :param dataset: Dataset identifier (unused).
+        :type dataset: str
+        :raises NotImplementedError: Always.
         """
         raise NotImplementedError(
             f"No pretrained CBAMNet weights are distributed with dl_techniques "
@@ -537,33 +384,24 @@ def create_cbam_net(
     pretrained: Union[bool, str] = False,
     **kwargs: Any
 ) -> CBAMNet:
-    """
-    Convenience function to create a CBAMNet model.
+    """Create a `CBAMNet` model. A thin wrapper around `CBAMNet.from_variant`.
 
-    This is a simple wrapper around CBAMNet.from_variant() for more
-    concise model creation in scripts and experiments.
-
-    Args:
-        variant: Model variant ("tiny", "small", "base"). Default: "tiny".
-        num_classes: Number of output classes. Default: 1000.
-        input_shape: Input shape tuple (height, width, channels).
-            Default: (224, 224, 3).
-        pretrained: If True, loads pretrained weights. If string,
-            loads from the specified path. Default: False.
-        **kwargs: Additional arguments for the model constructor.
-
-    Returns:
-        CBAMNet model instance.
+    :param variant: Variant name, one of ``"tiny"``, ``"small"``, ``"base"``.
+    :type variant: str
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: Input shape ``(height, width, channels)``.
+    :type input_shape: Optional[Tuple[int, ...]]
+    :param pretrained: A local weights path, or True to raise `NotImplementedError`.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Additional arguments for the model constructor.
+    :return: A `CBAMNet` instance.
+    :rtype: CBAMNet
 
     Example:
-        ```python
-        # Quick model creation for CIFAR-10
-        model = create_cbam_net("tiny", num_classes=10, input_shape=(32, 32, 3))
+        .. code-block:: python
 
-        # Warm-start from a local checkpoint (`pretrained=True` raises
-        # NotImplementedError -- no public CBAMNet weights are distributed)
-        model = create_cbam_net("base", pretrained="/path/to/weights.keras")
-        ```
+            model = create_cbam_net("tiny", num_classes=10, input_shape=(32, 32, 3))
     """
     return CBAMNet.from_variant(
         variant=variant,
