@@ -1,16 +1,16 @@
-"""
-PW-FNet: Pyramid Wavelet-Fourier Network for Image Restoration.
+"""PW-FNet: Pyramid Wavelet-Fourier Network for image restoration.
 
-This module implements the complete PW-FNet architecture with configurable
-normalization and feed-forward network components. It replaces self-attention
-with Fourier-based token mixing for efficient image restoration tasks such as
-deraining, deblurring, and dehazing.
+Defines :class:`PW_FNet`, a 3-level U-Net for tasks like deraining, deblurring,
+and dehazing, built from :class:`PW_FNet_Block`, :class:`PWFNetDownsample`, and
+:class:`PWFNetUpsample`.
 
-**Key Components**:
-- FFTLayer & IFFTLayer: Frequency domain transformations
-- PW_FNet_Block: Core building block with configurable norm and FFN
-- PWFNetDownsample & PWFNetUpsample: Spatial resolution scaling layers
-- PW_FNet: Complete model with multi-scale supervision
+Each block replaces self-attention with a Fourier-based token mixer: a
+pointwise convolution, an FFT, a pointwise convolution on the real and
+imaginary parts, and an inverse FFT, giving global context at
+``O(N log N)`` instead of the ``O(N^2)`` of standard attention. The model
+returns three tensors, one per scale, for hierarchical supervision during
+training. Normalization and the block's feed-forward network are both
+configurable through the layer factories.
 
 References:
     - Jiang et al., 2025. Global Modeling Matters: A Fast, Lightweight and
@@ -57,73 +57,64 @@ class PW_FNet_Block(keras.layers.Layer):
     and FFN types through factory patterns while maintaining the original spatial
     FFN as the default for optimal performance.
 
-    **Intent**: To provide an efficient and effective feature processing block
-    that captures global context through Fourier transforms while maintaining
-    low computational overhead. Achieves O(N log N) complexity compared to O(N²)
-    for standard attention. Now supports experimentation with different
-    normalization and FFN architectures.
+    Captures global context through a Fourier transform at ``O(N log N))``
+    cost, instead of the ``O(N^2)`` cost of standard attention.
 
-    **Architecture**:
-    ```
-    Input(shape=[batch, H, W, C])
-           ↓
-    Norm1 (configurable) ────────────────────┐
-       ↓                                     │
-    Token Mixer                              │ (Residual)
-       ├─ PointwiseConv(→hidden_dim)         │
-       ├─ FFT2D (→ 2*hidden_dim channels)    │
-       ├─ PointwiseConv (on real+imag parts) │
-       ├─ GELU                               │
-       ├─ IFFT2D (→ hidden_dim channels)     │
-       └─ PointwiseConv(→C)                  │
-       ↓                                     │
-    Add ←────────────────────────────────────┘
-       ↓
-    Norm2 (configurable) ──────────────┐
-       ↓                               │
-    FFN (configurable)                 │ (Residual)
-       ├─ Spatial FFN (default):       │
-       │  ├─ PointwiseConv(→hidden_dim)│
-       │  ├─ DepthwiseConv(3×3)        │
-       │  ├─ GELU                      │
-       │  └─ PointwiseConv(→C)         │
-       │                               │
-       └─ Factory FFN (optional):      │
-          └─ Dense-based FFN layers    │
-       ↓                               │
-    Add ←──────────────────────────────┘
-       ↓
-    Output(shape=[batch, H, W, C])
-    ```
+    Architecture:
 
-    Args:
-        dim: Number of input and output channels. Must be positive.
-        ffn_expansion_factor: Expansion factor for the hidden dimension
-            in the FFN and token mixer. Determines computational cost and
-            capacity. Defaults to 2.0 (2x expansion).
-        normalization_type: Type of normalization to use. Supports all types
-            from the normalization factory: 'layer_norm', 'rms_norm',
-            'zero_centered_rms_norm', 'band_rms', etc. Defaults to 'layer_norm'.
-        norm1_kwargs: Optional dictionary of custom arguments for the first
-            normalization layer (after token mixer). These will be passed to
-            the normalization factory.
-        norm2_kwargs: Optional dictionary of custom arguments for the second
-            normalization layer (after FFN). These will be passed to the
-            normalization factory.
-        use_spatial_ffn: If True, uses the spatial FFN with depthwise convolution
-            (original architecture, recommended for image restoration). If False,
-            uses a factory-based FFN. Defaults to True.
-        ffn_type: Type of FFN to use when use_spatial_ffn=False. Options include:
-            'mlp', 'swiglu', 'geglu', 'glu', 'differential', 'residual', etc.
-            Ignored when use_spatial_ffn=True. Must be specified if use_spatial_ffn=False.
-        ffn_kwargs: Optional dictionary of custom arguments for the factory FFN.
-            Only used when use_spatial_ffn=False. These will be passed to the
-            FFN factory.
-        **kwargs: Additional arguments for the Layer base class.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If dim is not positive, or if use_spatial_ffn=False but
-            ffn_type is not specified.
+        input [B, H, W, C]
+            |
+        Norm1 -----------------------------+
+            |                              | (residual)
+        token mixer:                       |
+          Conv1x1(-> hidden_dim)            |
+          FFT2D (-> 2*hidden_dim channels)  |
+          Conv1x1 (on real and imag parts)  |
+          GELU                              |
+          IFFT2D (-> hidden_dim channels)   |
+          Conv1x1(-> C)                     |
+            |                              |
+        Add <-------------------------------+
+            |
+        Norm2 -----------------------+
+            |                        | (residual)
+        FFN (configurable):           |
+          spatial (default):          |
+            Conv1x1, DWConv3x3, GELU, Conv1x1
+          or factory FFN (optional)
+            |                        |
+        Add <---------------------------+
+            |
+        output [B, H, W, C]
+
+    :param dim: Number of input and output channels. Must be positive.
+    :param ffn_expansion_factor: Expansion factor for the hidden dimension
+        in the FFN and token mixer. Determines computational cost and
+        capacity. Defaults to 2.0 (2x expansion).
+    :param normalization_type: Type of normalization to use. Supports all types
+        from the normalization factory: 'layer_norm', 'rms_norm',
+        'zero_centered_rms_norm', 'band_rms', etc. Defaults to 'layer_norm'.
+    :param norm1_kwargs: Optional dictionary of custom arguments for the first
+        normalization layer (after token mixer). These will be passed to
+        the normalization factory.
+    :param norm2_kwargs: Optional dictionary of custom arguments for the second
+        normalization layer (after FFN). These will be passed to the
+        normalization factory.
+    :param use_spatial_ffn: If True, uses the spatial FFN with depthwise convolution
+        (original architecture, recommended for image restoration). If False,
+        uses a factory-based FFN. Defaults to True.
+    :param ffn_type: Type of FFN to use when use_spatial_ffn=False. Options include:
+        'mlp', 'swiglu', 'geglu', 'glu', 'differential', 'residual', etc.
+        Ignored when use_spatial_ffn=True. Must be specified if use_spatial_ffn=False.
+    :param ffn_kwargs: Optional dictionary of custom arguments for the factory FFN.
+        Only used when use_spatial_ffn=False. These will be passed to the
+        FFN factory.
+    :param **kwargs: Additional arguments for the Layer base class.
+
+    :raises ValueError: If dim is not positive, or if use_spatial_ffn=False but
+        ffn_type is not specified.
 
     Example:
         >>> # Default configuration (original architecture)
@@ -160,19 +151,17 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Initialize the PW-FNet block with configurable components.
 
-        Args:
-            dim: Number of input/output channels.
-            ffn_expansion_factor: Expansion factor for hidden dimensions.
-            normalization_type: Type of normalization layer to use.
-            norm1_kwargs: Custom arguments for first normalization layer.
-            norm2_kwargs: Custom arguments for second normalization layer.
-            use_spatial_ffn: Whether to use spatial FFN (True) or factory FFN (False).
-            ffn_type: Type of factory FFN to use (required if use_spatial_ffn=False).
-            ffn_kwargs: Custom arguments for factory FFN.
-            **kwargs: Additional Layer arguments.
+        :param dim: Number of input/output channels.
+        :param ffn_expansion_factor: Expansion factor for hidden dimensions.
+        :param normalization_type: Type of normalization layer to use.
+        :param norm1_kwargs: Custom arguments for first normalization layer.
+        :param norm2_kwargs: Custom arguments for second normalization layer.
+        :param use_spatial_ffn: Whether to use spatial FFN (True) or factory FFN (False).
+        :param ffn_type: Type of factory FFN to use (required if use_spatial_ffn=False).
+        :param ffn_kwargs: Custom arguments for factory FFN.
+        :param **kwargs: Additional Layer arguments.
 
-        Raises:
-            ValueError: If parameters are invalid.
+        :raises ValueError: If parameters are invalid.
         """
         super().__init__(**kwargs)
 
@@ -245,8 +234,7 @@ class PW_FNet_Block(keras.layers.Layer):
         This is the default FFN configuration that uses spatial operations
         optimized for image restoration tasks.
 
-        Args:
-            hidden_dim: Hidden dimension for FFN expansion.
+        :param hidden_dim: Hidden dimension for FFN expansion.
         """
         self.ffn_expand = keras.layers.Conv2D(
             hidden_dim,
@@ -275,8 +263,7 @@ class PW_FNet_Block(keras.layers.Layer):
         Note: Factory FFNs are Dense-based and may not preserve spatial structure
         as well as the spatial FFN for image tasks.
 
-        Args:
-            hidden_dim: Hidden dimension for FFN expansion.
+        :param hidden_dim: Hidden dimension for FFN expansion.
         """
         self.ffn = create_ffn_layer(
             ffn_type=self.ffn_type,
@@ -293,8 +280,7 @@ class PW_FNet_Block(keras.layers.Layer):
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         This ensures all weight variables are created before weight loading.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
         """
         self.norm1.build(input_shape)
         self.token_mixer_expand.build(input_shape)
@@ -334,11 +320,9 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Forward pass through the token mixer (frequency domain processing).
 
-        Args:
-            x: Input tensor of shape (batch, height, width, dim).
+        :param x: Input tensor of shape (batch, height, width, dim).
 
-        Returns:
-            Token-mixed features of shape (batch, height, width, dim).
+        :return: Token-mixed features of shape (batch, height, width, dim).
         """
         x_expanded = self.token_mixer_expand(x)
 
@@ -359,11 +343,9 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Forward pass through the spatial FFN.
 
-        Args:
-            x: Input tensor of shape (batch, height, width, dim).
+        :param x: Input tensor of shape (batch, height, width, dim).
 
-        Returns:
-            FFN output of shape (batch, height, width, dim).
+        :return: FFN output of shape (batch, height, width, dim).
         """
         # FFN: Expand -> Depthwise Conv -> GELU -> Project
         x_ffn_expanded = self.ffn_expand(x)
@@ -381,12 +363,10 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Forward pass through the PW-FNet block.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, dim).
-            training: Boolean indicating training mode (for potential dropout).
+        :param inputs: Input tensor of shape (batch, height, width, dim).
+        :param training: Boolean indicating training mode (for potential dropout).
 
-        Returns:
-            Output tensor of shape (batch, height, width, dim).
+        :return: Output tensor of shape (batch, height, width, dim).
         """
         # -- Token Mixer Stage --
         x_norm1 = self.norm1(inputs)
@@ -412,11 +392,9 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Compute output shape (same as input shape).
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
 
-        Returns:
-            Output shape tuple (identical to input).
+        :return: Output shape tuple (identical to input).
         """
         return input_shape
 
@@ -424,8 +402,7 @@ class PW_FNet_Block(keras.layers.Layer):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters.
+        :return: Dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -445,11 +422,8 @@ class PW_FNet_Block(keras.layers.Layer):
 # Scaling Layers
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix is load-bearing. The
-# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
-# already claimed by another registered class must be prefixed with its package rather than
-# registered twice. Do NOT simplify this back to ``Downsample``: ideogram4's VAE owns that
-# bare name, and re-taking it re-creates the collision this rename removed.
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix stays -- ideogram4's
+# VAE already owns the bare name ``Downsample`` in the legacy alias namespace. See decisions.md.
 @register_dl_technique("dl_techniques.models.pw_fnet.model")
 class PWFNetDownsample(keras.layers.Layer):
     """
@@ -459,21 +433,18 @@ class PWFNetDownsample(keras.layers.Layer):
     while increasing the channel dimension. It uses a strided convolution with
     a 4×4 kernel to learn optimal downsampling patterns for the specific task.
 
-    Args:
-        dim: Number of output channels. Must be positive.
-        **kwargs: Additional arguments for the Layer base class.
+    :param dim: Number of output channels. Must be positive.
+    :param **kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(self, dim: int, **kwargs: Any) -> None:
         """
         Initialize the downsample layer.
 
-        Args:
-            dim: Number of output channels.
-            **kwargs: Additional Layer arguments.
+        :param dim: Number of output channels.
+        :param **kwargs: Additional Layer arguments.
 
-        Raises:
-            ValueError: If dim is not positive.
+        :raises ValueError: If dim is not positive.
         """
         super().__init__(**kwargs)
 
@@ -501,11 +472,9 @@ class PWFNetDownsample(keras.layers.Layer):
         """
         Apply downsampling to input tensor.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
+        :param inputs: Input tensor of shape (batch, height, width, channels).
 
-        Returns:
-            Downsampled tensor of shape (batch, height//2, width//2, dim).
+        :return: Downsampled tensor of shape (batch, height//2, width//2, dim).
         """
         return self.conv(inputs)
 
@@ -516,11 +485,9 @@ class PWFNetDownsample(keras.layers.Layer):
         """
         Compute output shape after downsampling.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
 
-        Returns:
-            Output shape tuple with halved spatial dimensions.
+        :return: Output shape tuple with halved spatial dimensions.
         """
         return self.conv.compute_output_shape(input_shape)
 
@@ -528,19 +495,15 @@ class PWFNetDownsample(keras.layers.Layer):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dictionary containing the dim parameter.
+        :return: Dictionary containing the dim parameter.
         """
         config = super().get_config()
         config.update({"dim": self.dim})
         return config
 
 
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix is load-bearing. The
-# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
-# already claimed by another registered class must be prefixed with its package rather than
-# registered twice. Do NOT simplify this back to ``Upsample``: ideogram4's VAE owns that bare
-# name, and re-taking it re-creates the collision this rename removed.
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the package prefix stays -- ideogram4's
+# VAE already owns the bare name ``Upsample`` in the legacy alias namespace. See decisions.md.
 @register_dl_technique("dl_techniques.models.pw_fnet.model")
 class PWFNetUpsample(keras.layers.Layer):
     """
@@ -550,21 +513,18 @@ class PWFNetUpsample(keras.layers.Layer):
     while reducing the channel dimension. It uses a transposed convolution (also
     known as deconvolution) to learn optimal upsampling patterns for the specific task.
 
-    Args:
-        dim: Number of output channels. Must be positive.
-        **kwargs: Additional arguments for the Layer base class.
+    :param dim: Number of output channels. Must be positive.
+    :param **kwargs: Additional arguments for the Layer base class.
     """
 
     def __init__(self, dim: int, **kwargs: Any) -> None:
         """
         Initialize the upsample layer.
 
-        Args:
-            dim: Number of output channels.
-            **kwargs: Additional Layer arguments.
+        :param dim: Number of output channels.
+        :param **kwargs: Additional Layer arguments.
 
-        Raises:
-            ValueError: If dim is not positive.
+        :raises ValueError: If dim is not positive.
         """
         super().__init__(**kwargs)
 
@@ -592,11 +552,9 @@ class PWFNetUpsample(keras.layers.Layer):
         """
         Apply upsampling to input tensor.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, channels).
+        :param inputs: Input tensor of shape (batch, height, width, channels).
 
-        Returns:
-            Upsampled tensor of shape (batch, height*2, width*2, dim).
+        :return: Upsampled tensor of shape (batch, height*2, width*2, dim).
         """
         return self.conv_transpose(inputs)
 
@@ -607,11 +565,9 @@ class PWFNetUpsample(keras.layers.Layer):
         """
         Compute output shape after upsampling.
 
-        Args:
-            input_shape: Shape tuple of input tensor.
+        :param input_shape: Shape tuple of input tensor.
 
-        Returns:
-            Output shape tuple with doubled spatial dimensions.
+        :return: Output shape tuple with doubled spatial dimensions.
         """
         # Ensure the output is a tuple to satisfy strict tests
         return tuple(self.conv_transpose.compute_output_shape(input_shape))
@@ -620,8 +576,7 @@ class PWFNetUpsample(keras.layers.Layer):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dictionary containing the dim parameter.
+        :return: Dictionary containing the dim parameter.
         """
         config = super().get_config()
         config.update({"dim": self.dim})
@@ -647,49 +602,45 @@ class PW_FNet(keras.Model):
     outputs to enable hierarchical supervision during training, improving
     convergence and final performance.
 
-    **Configurability**: This implementation supports configurable normalization
+    Configurability: This implementation supports configurable normalization
     and FFN components through factory patterns, enabling experimentation with
     different architectural choices while maintaining backward compatibility.
 
-    Args:
-        img_channels: Number of channels in input/output images (e.g., 3 for RGB).
-            Must be positive.
-        width: Base channel width of the model. Controls model capacity and
-            computational cost. Typical values: 32-64. Must be positive.
-        middle_blk_num: Number of PW-FNet blocks in the bottleneck. More blocks
-            capture more complex patterns. Typical values: 4-12. Must be non-negative.
-        enc_blk_nums: Block counts for the two encoder levels, ``[level1, level2]``.
-            **Must have exactly 2 entries** -- the depth of this architecture is
-            FIXED, not derived from this list. See the note below.
-        dec_blk_nums: Block counts for the two decoder levels,
-            ``[decoder_level2, decoder_level1]``. **Must have exactly 2 entries.**
+    :param img_channels: Number of channels in input/output images (e.g., 3 for RGB).
+        Must be positive.
+    :param width: Base channel width of the model. Controls model capacity and
+        computational cost. Typical values: 32-64. Must be positive.
+    :param middle_blk_num: Number of PW-FNet blocks in the bottleneck. More blocks
+        capture more complex patterns. Typical values: 4-12. Must be non-negative.
+    :param enc_blk_nums: Block counts for the two encoder levels, ``[level1, level2]``.
+        Must have exactly 2 entries -- the depth of this architecture is
+        FIXED, not derived from this list. See the note below.
+    :param dec_blk_nums: Block counts for the two decoder levels,
+        ``[decoder_level2, decoder_level1]``. Must have exactly 2 entries.
+    :param normalization_type: Type of normalization to use throughout the model.
+        Supports all types from the normalization factory: 'layer_norm',
+        'rms_norm', 'zero_centered_rms_norm', 'band_rms', 'dynamic_tanh', etc.
+        Defaults to 'layer_norm'.
+    :param norm_kwargs: Optional dictionary of custom arguments to pass to all
+        normalization layers. Applied globally unless overridden.
+    :param use_spatial_ffn: If True, uses spatial FFN with depthwise convolution
+        in every block (the original architecture). If False, uses a
+        factory-based FFN. Defaults to True.
+    :param ffn_type: Type of factory FFN to use when ``use_spatial_ffn=False``.
+        Options include 'mlp', 'swiglu', 'geglu', 'glu', 'differential', etc.
+        Ignored when ``use_spatial_ffn=True``.
+    :param ffn_kwargs: Optional dictionary of custom arguments for the factory
+        FFN. Only used when ``use_spatial_ffn=False``.
+    :param kwargs: Additional arguments for the Model base class.
 
     Note:
-        **The number of scales is NOT configurable, and this list does not set
-        it.** The encoder/decoder/output topology is written out explicitly
-        (``down1``/``down2``, ``up2``/``up1``, ``output_l2``/``output_l1``/
-        ``output_l0``) and ``call`` returns exactly three tensors, so a third
-        entry has nowhere to go. These two lists set only HOW MANY blocks run at
-        each of the two levels. A length other than 2 raises ``ValueError``;
-        until 2026-08-15 the docstring said "length determines number of
-        scales", ``[2, 2, 2]`` silently built a 2-level network and dropped the
-        third entry, and ``[2]`` raised ``IndexError`` from the middle of
-        ``__init__`` instead of from validation.
-        normalization_type: Type of normalization to use throughout the model.
-            Supports all types from the normalization factory: 'layer_norm',
-            'rms_norm', 'zero_centered_rms_norm', 'band_rms', 'dynamic_tanh', etc.
-            Defaults to 'layer_norm' (original behavior).
-        norm_kwargs: Optional dictionary of custom arguments to pass to all
-            normalization layers. Applied globally unless overridden.
-        use_spatial_ffn: If True, uses spatial FFN with depthwise convolution
-            in all blocks (original architecture, recommended). If False, uses
-            factory-based FFN. Defaults to True.
-        ffn_type: Type of factory FFN to use when use_spatial_ffn=False. Options
-            include: 'mlp', 'swiglu', 'geglu', 'glu', 'differential', etc.
-            Ignored when use_spatial_ffn=True.
-        ffn_kwargs: Optional dictionary of custom arguments for factory FFN.
-            Only used when use_spatial_ffn=False.
-        **kwargs: Additional arguments for the Model base class.
+        The number of scales is not configurable, and ``enc_blk_nums`` /
+        ``dec_blk_nums`` do not set it. The encoder/decoder/output topology is
+        written out explicitly (``down1``/``down2``, ``up2``/``up1``,
+        ``output_l2``/``output_l1``/``output_l0``) and ``call`` returns exactly
+        three tensors, so a third entry has nowhere to go. These two lists set
+        only how many blocks run at each of the two levels; a length other than
+        2 raises ``ValueError``.
 
     Example:
         >>> # Default configuration (original architecture)
@@ -730,21 +681,19 @@ class PW_FNet(keras.Model):
         """
         Initialize the PW-FNet model.
 
-        Args:
-            img_channels: Number of image channels.
-            width: Base channel width.
-            middle_blk_num: Number of bottleneck blocks.
-            enc_blk_nums: Block counts for encoder levels.
-            dec_blk_nums: Block counts for decoder levels.
-            normalization_type: Type of normalization to use.
-            norm_kwargs: Custom arguments for normalization layers.
-            use_spatial_ffn: Whether to use spatial FFN or factory FFN.
-            ffn_type: Type of factory FFN (required if use_spatial_ffn=False).
-            ffn_kwargs: Custom arguments for factory FFN.
-            **kwargs: Additional Model arguments.
+        :param img_channels: Number of image channels.
+        :param width: Base channel width.
+        :param middle_blk_num: Number of bottleneck blocks.
+        :param enc_blk_nums: Block counts for encoder levels.
+        :param dec_blk_nums: Block counts for decoder levels.
+        :param normalization_type: Type of normalization to use.
+        :param norm_kwargs: Custom arguments for normalization layers.
+        :param use_spatial_ffn: Whether to use spatial FFN or factory FFN.
+        :param ffn_type: Type of factory FFN (required if use_spatial_ffn=False).
+        :param ffn_kwargs: Custom arguments for factory FFN.
+        :param **kwargs: Additional Model arguments.
 
-        Raises:
-            ValueError: If parameters are invalid.
+        :raises ValueError: If parameters are invalid.
         """
         super().__init__(**kwargs)
 
@@ -774,18 +723,8 @@ class PW_FNet(keras.Model):
                 f"enc_blk_nums and dec_blk_nums must have same length, "
                 f"got {len(enc_blk_nums)} and {len(dec_blk_nums)}"
             )
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-052
-        # Validate the FIXED depth here rather than generalizing the model to N
-        # scales. The two-level structure is intrinsic, not unfinished: the
-        # encoder, decoder and OUTPUT HEADS are each written out by name
-        # (`down1`/`down2`, `up2`/`up1`, `output_l2`/`output_l1`/`output_l0`)
-        # and `call` returns a 3-element list that the multi-scale loss and
-        # every caller unpack positionally. Generalizing would change the
-        # RETURN ARITY with the block list -- a silent contract break for every
-        # existing consumer, to buy a depth knob nothing asks for. DO NOT
-        # replace this check with a loop over `len(enc_blk_nums)` without first
-        # changing that return contract deliberately.
-        # See decisions.md D-052.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-052: the 2-level depth is fixed, not a
+        # knob -- encoder/decoder/output heads are each written out by name. See decisions.md.
         if len(enc_blk_nums) != _NUM_SCALES:
             raise ValueError(
                 f"PW_FNet has a FIXED {_NUM_SCALES}-level encoder/decoder and "
@@ -903,12 +842,10 @@ class PW_FNet(keras.Model):
         """
         Create a PW-FNet block with the model's configuration.
 
-        Args:
-            dim: Number of channels for the block.
-            name: Name for the block.
+        :param dim: Number of channels for the block.
+        :param name: Name for the block.
 
-        Returns:
-            Configured PW_FNet_Block instance.
+        :return: Configured PW_FNet_Block instance.
         """
         return PW_FNet_Block(
             dim=dim,
@@ -930,8 +867,7 @@ class PW_FNet(keras.Model):
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
         gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         """
         if self.built:
             return
@@ -946,12 +882,10 @@ class PW_FNet(keras.Model):
         """
         Forward pass through the PW-FNet model.
 
-        Args:
-            inputs: Input tensor of shape (batch, height, width, img_channels).
-            training: Boolean indicating training mode (for potential dropout/BN).
+        :param inputs: Input tensor of shape (batch, height, width, img_channels).
+        :param training: Boolean indicating training mode (for potential dropout/BN).
 
-        Returns:
-            List of three restored images at different scales:
+        :return: List of three restored images at different scales:
             [full_resolution, half_resolution, quarter_resolution].
         """
         # Downsample the original input for the multi-scale supervision
@@ -1020,8 +954,7 @@ class PW_FNet(keras.Model):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters.
+        :return: Dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -1066,29 +999,26 @@ def create_pw_fnet(
     family to enumerate. This factory therefore constructs the class with the
     reference defaults instead of delegating to a ``from_variant``.
 
-    Args:
-        img_channels: Number of channels in input/output images. Must be positive.
-        width: Base channel width. Must be positive.
-        middle_blk_num: Number of bottleneck blocks. Must be non-negative.
-        enc_blk_nums: Per-level encoder block counts; ``None`` resolves to
-            ``[2, 2]``.
-        dec_blk_nums: Per-level decoder block counts; ``None`` resolves to
-            ``[2, 2]``. Must match ``enc_blk_nums`` in length.
-        normalization_type: Normalization type from the normalization factory.
-        norm_kwargs: Optional arguments forwarded to every normalization layer.
-        use_spatial_ffn: If True use the original spatial FFN; if False use the
-            factory FFN named by ``ffn_type``.
-        ffn_type: Factory FFN type; required when ``use_spatial_ffn`` is False.
-        ffn_kwargs: Optional arguments for the factory FFN.
-        **kwargs: Additional arguments forwarded to the model constructor.
+    :param img_channels: Number of channels in input/output images. Must be positive.
+    :param width: Base channel width. Must be positive.
+    :param middle_blk_num: Number of bottleneck blocks. Must be non-negative.
+    :param enc_blk_nums: Per-level encoder block counts; ``None`` resolves to
+        ``[2, 2]``.
+    :param dec_blk_nums: Per-level decoder block counts; ``None`` resolves to
+        ``[2, 2]``. Must match ``enc_blk_nums`` in length.
+    :param normalization_type: Normalization type from the normalization factory.
+    :param norm_kwargs: Optional arguments forwarded to every normalization layer.
+    :param use_spatial_ffn: If True use the original spatial FFN; if False use the
+        factory FFN named by ``ffn_type``.
+    :param ffn_type: Factory FFN type; required when ``use_spatial_ffn`` is False.
+    :param ffn_kwargs: Optional arguments for the factory FFN.
+    :param **kwargs: Additional arguments forwarded to the model constructor.
 
-    Returns:
-        A configured PW_FNet instance. Calling it returns the three multi-scale
+    :return: A configured PW_FNet instance. Calling it returns the three multi-scale
         outputs ``[full, half, quarter]``.
 
-    Raises:
-        ValueError: If any argument is invalid or the encoder/decoder block
-            lists disagree in length.
+    :raises ValueError: If any argument is invalid or the encoder/decoder block
+        lists disagree in length.
 
     Example:
         >>> model = create_pw_fnet(width=16, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
