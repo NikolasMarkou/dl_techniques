@@ -975,7 +975,10 @@ class SingleWindowAttention(keras.layers.Layer):
         attn = apply_attention_mask(
             attn,
             broadcast_mask,
-            out_dtype=keras.backend.standardize_dtype(attn.dtype),
+            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+            out_dtype=(getattr(attn.dtype, "name", None) or str(attn.dtype)),
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 

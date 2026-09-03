@@ -629,7 +629,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         # "normalize" it into a `> 0` comparison and do NOT invert it. The helper
         # infers no polarity, so an inversion raises nothing, changes no shape and
         # stays finite — the layer would simply attend to the padding instead.
-        scores_dtype = keras.backend.standardize_dtype(scores.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        scores_dtype = getattr(scores.dtype, "name", None) or str(scores.dtype)
         return apply_attention_mask(
             scores,
             attention_mask,

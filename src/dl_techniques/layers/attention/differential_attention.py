@@ -727,7 +727,10 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         return apply_attention_mask(
             scores,
             attention_mask,
-            out_dtype=keras.backend.standardize_dtype(scores.dtype),
+            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+            out_dtype=(getattr(scores.dtype, "name", None) or str(scores.dtype)),
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 

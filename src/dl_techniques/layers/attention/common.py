@@ -385,7 +385,19 @@ def apply_attention_mask(
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
     :rtype: keras.KerasTensor
     """
-    md = mask_dtype(keras.backend.standardize_dtype(logits.dtype))
+    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007
+    # `getattr(d, "name", None) or str(d)` rather than
+    # `keras.backend.standardize_dtype`, here and at the 14 sibling sites in this
+    # package. WHAT NOT TO DO: do not "simplify" it back to the standardize_dtype
+    # call -- `keras.backend.*` is a Keras-2 residue banned across all of `src/`
+    # by `tests/test_the_keras2_backend_calls_are_gone.py` -- and do not reduce it
+    # to a bare `str(d)`, because a `tf.DType` stringifies as "<dtype: 'float32'>"
+    # and `mask_dtype` would not recognise that. The two agree on every dtype
+    # SPELLING (str, `tf.DType`, `np.dtype`: 47/47 measured) but NOT on non-dtype
+    # objects -- `None`, a numpy scalar TYPE like `np.float32`, and a
+    # `keras.DTypePolicy` all diverge -- so pass a tensor's `.dtype`, never a
+    # layer's dtype policy. See decisions.md D-007 and plans/DECISIONS.md D-018.
+    md = mask_dtype(getattr(logits.dtype, "name", None) or str(logits.dtype))
     x = keras.ops.cast(logits, md)
     kept = keras.ops.cast(keep, md) > 0.0
     if rescue_axis is not None:

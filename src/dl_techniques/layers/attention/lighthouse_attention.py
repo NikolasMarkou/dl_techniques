@@ -179,7 +179,10 @@ _MASK_SENTINEL: Dict[str, float] = {
 
 def _mask_value(dtype: Any) -> float:
     """Return a dtype-safe large-negative additive mask value."""
-    return _MASK_SENTINEL.get(keras.backend.standardize_dtype(dtype), -1.0e9)
+    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+    # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+    # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+    return _MASK_SENTINEL.get(getattr(dtype, "name", None) or str(dtype), -1.0e9)
 
 
 def _compute_level_sizes(n: int, num_levels: int, pooling_factor: int) -> np.ndarray:

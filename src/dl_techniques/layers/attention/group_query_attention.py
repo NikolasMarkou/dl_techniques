@@ -766,7 +766,10 @@ class GroupedQueryAttention(keras.layers.Layer):
         # `gated_attention` under `mixed_float16` with `{"axis": -2}` and a dead KEY
         # COLUMN: 8192/8192 non-finite. Don't restore a bare `-1`, and don't read
         # this as the rank/shape INFERENCE `common.py` forbids. See decisions.md D-017.
-        scores_dtype = keras.backend.standardize_dtype(scores.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        scores_dtype = getattr(scores.dtype, "name", None) or str(scores.dtype)
         return apply_attention_mask(
             scores,
             mask,

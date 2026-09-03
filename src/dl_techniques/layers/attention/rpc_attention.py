@@ -550,7 +550,10 @@ class RPCAttention(keras.layers.Layer):
         # This is what the cast-back boundary below restores, which is what makes the
         # no-mask path a bit-for-bit no-op (`ops.cast` to the dtype a tensor already
         # has returns the tensor itself).
-        scores_dtype = keras.backend.standardize_dtype(attention_scores.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        scores_dtype = getattr(attention_scores.dtype, "name", None) or str(attention_scores.dtype)
 
         # Apply mask if provided
         if mask is not None:

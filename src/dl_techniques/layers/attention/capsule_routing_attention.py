@@ -750,7 +750,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # The dtype the logits arrive in, captured before the helper's internal
         # promotion to `mask_dtype(...)`, so the return dtype of this method is
         # exactly what it always was.
-        logits_dtype = keras.backend.standardize_dtype(attention_logits.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        logits_dtype = getattr(attention_logits.dtype, "name", None) or str(attention_logits.dtype)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim. The eight
         # multiply-form siblings take `1 = keep` floats, and `rpc_attention.py`

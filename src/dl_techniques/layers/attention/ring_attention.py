@@ -634,7 +634,10 @@ class RingAttention(keras.layers.Layer):
         # order map 1:1 to the original q_start offsets along axis=2).
         block_outputs = []
 
-        state_dtype = keras.backend.standardize_dtype(queries.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        state_dtype = getattr(queries.dtype, "name", None) or str(queries.dtype)
         if attention_mask is not None:
             # DECISION plan-2026-07-27T183600-b4ef45f0/D-013 — validate the mask
             # rank ONCE here: a rank this layer cannot dispatch on used to surface
@@ -836,7 +839,12 @@ class RingAttention(keras.layers.Layer):
         outputs = keras.ops.concatenate(block_outputs, axis=2)
         # Back to the layer's compute dtype. An identity unless a mask promoted
         # the accumulation to `mask_dtype(...)` where the mask was validated.
-        return keras.ops.cast(outputs, keras.backend.standardize_dtype(queries.dtype))
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        return keras.ops.cast(
+            outputs, getattr(queries.dtype, "name", None) or str(queries.dtype)
+        )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.

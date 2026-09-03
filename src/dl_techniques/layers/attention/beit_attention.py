@@ -572,8 +572,11 @@ class BeitAttention(keras.layers.Layer):
         # the compute dtype, which is what `common.mask_dtype` returns; under
         # `mixed_float16` an fp16 softmax over a biased logit row is where this package
         # has repeatedly measured NaNs. The result is cast back to the compute dtype.
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
+        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
         softmax_dtype = mask_dtype(
-            keras.backend.standardize_dtype(scores.dtype)
+            getattr(scores.dtype, "name", None) or str(scores.dtype)
         )
         if attention_mask is not None:
             keep = self._broadcast_mask(attention_mask, seq_len)
