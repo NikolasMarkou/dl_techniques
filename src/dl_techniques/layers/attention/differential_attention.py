@@ -1,81 +1,28 @@
 r"""
-Differential multi-head attention: two parallel attention streams whose weighted
-difference cancels the common-mode component of the attention distribution.
+Differential multi-head attention, in :class:`DifferentialMultiHeadAttention`:
+two parallel attention streams whose weighted difference cancels the
+common-mode component of the attention distribution.
 
-Ordinary softmax attention is normalized, so its weights sum to one whether or
-not anything in the context is worth attending to. When nothing is, the mass
-does not disappear. It spreads thinly over irrelevant tokens, and that diffuse
-allocation is added to the value aggregate as noise. The effect grows with
-context length, because there are more irrelevant tokens to spread over.
+Ordinary softmax attention always allocates its full probability mass, even
+when nothing in the context is worth attending to; that mass spreads thinly
+over irrelevant tokens and enters the value aggregate as noise. This layer
+borrows the differential-amplifier idea from analog electronics: two streams
+read the same shared value matrix ``V`` through separate query/key
+projections, and their weighted difference, ``out = (A1 - lambda * A2) V``,
+keeps what only one stream selects and cancels what both select equally. The
+mixing coefficient ``lambda`` is scheduled by depth (shallow layers near 0.2,
+deep layers saturating near 0.8) and scaled by a learned parameter, clipped to
+``[0.1, 0.9]`` for training stability.
 
-Differential attention borrows the fix from analog electronics. A differential
-amplifier rejects interference by measuring the difference between two lines
-that carry the same interference and different signal. Here two attention
-streams read the same values through different query/key projections. Their
-difference keeps what only one stream selects and cancels what both select
-equally.
+Two steps from Ye et al.'s original paper are not implemented here: a
+per-head GroupNorm on the differential output, and a rescale by
+``(1 - lambda_init)`` to match a standard attention block's magnitude. A
+caller comparing against published numbers should expect a different output
+scale. `layer_idx` is a call argument, not constructor state (absent from
+`get_config()`, a stack must pass its own depth each call), and there is no
+`dim % num_heads` check since `head_dim` is an explicit required argument.
 
-What makes this a cancellation rather than an arbitrary linear combination is
-that ``V`` is SHARED. Both streams multiply the same value matrix, so the
-operator actually applied to the values is the single matrix
-``A1 - lambda * A2``. The two streams differ only in *where* they look, never in
-*what* they read. A key that both streams weight equally contributes
-``(1 - lambda) * A1_ij`` and is attenuated. A key only the first stream selects
-keeps its full weight. Note that the rows of that operator sum to
-``1 - lambda``, not to ``1``. This is not a convex combination, and that is the
-point.
-
-The mixing coefficient is scheduled by depth::
-
-    lambda(l) = clip((0.8 - 0.6 * exp(-0.3 * max(l - 1, 0))) * lambda_learned,
-                     0.1, 0.9)
-
-Shallow layers start near 0.2 and deep layers saturate near 0.8, so cancellation
-strengthens with depth while early layers keep their attention mostly intact.
-The clip is a training-stability guard: at ``lambda -> 1`` the operator's rows
-sum to zero and the residual stream loses its DC component. The learned scalar
-multiplies the schedule rather than replacing it, so a layer can soften its own
-cancellation but cannot escape the depth trend.
-
-TWO STEPS OF THE PAPER ARE NOT IMPLEMENTED HERE, and neither was disclosed
-anywhere until 2026-08-27. Ye et al.'s Differential Transformer also applies a
-per-head GroupNorm to each head's differential output, and rescales that output
-by ``(1 - lambda_init)`` to align the residual-stream magnitude with a standard
-attention block. Verified absent, from the repository root::
-
-    grep -rnE "GroupNorm[a-z]*\(" src/dl_techniques/layers/attention/*.py
-
-That prints nothing today, and unlike an earlier version of this check it can
-still fail. The pattern requires a CALL: the name, then lowercase letters, then
-an open parenthesis. A real ``keras.layers.GroupNormalization`` construction is
-a hit, in THIS file as much as in any other. Prose is not a hit, and the pattern
-does not match itself, because ``[`` follows ``GroupNorm`` here. The earlier
-version excluded this file by name. That made the command blind to the one place
-the missing step would actually be added. Nothing in this file rescales by
-``(1 - lambda_init)`` either. The single-scalar reparameterization is
-a separate, already-disclosed simplification (the paper learns per-head
-``exp(lam_q1 . lam_k1) - exp(lam_q2 . lam_k2) + lambda_init``). These two are
-omissions rather than simplifications, so a caller comparing against published
-numbers should expect a different output scale.
-
-Attention is computed here rather than delegated to two
-`keras.layers.MultiHeadAttention` instances. That is what makes the per-stream
-probability normalization pluggable: each stream owns its own
-`ProbabilityOutput`, so softmax can be swapped for sparsemax or threshmax. It
-is also what exposes the optional QK-norm hook, applied independently to each
-stream's Q and K projections. Five separate `Dense` layers produce ``Q1, K1,
-Q2, K2`` and the one shared ``V``. There is no fused QKV matmul, which keeps
-per-site debugging and weight inspection straightforward.
-
-Two conventions in this file are non-standard on purpose. First, `layer_idx` is
-a *call* argument, not constructor state, because a stack of these layers must
-tell each one its own depth. It is therefore absent from `get_config()`, and a
-reloaded layer defaults to ``layer_idx=0`` unless the caller passes it again.
-Second, there is no `dim % num_heads` check, because `head_dim` is an explicit
-required argument here. `dim` and `num_heads * head_dim` are independent, and
-the output projection reconciles them.
-
-Foundational mathematics, with ``s = 1 / sqrt(head_dim)`` and shared ``V``::
+With ``s = 1 / sqrt(head_dim)`` and shared ``V``::
 
     A1  = P(Q1 K1^T s) ,   A2 = P(Q2 K2^T s)
     out = (A1 - lambda * A2) V
@@ -94,14 +41,8 @@ References:
       QK-norm hook) (https://arxiv.org/abs/2010.04245)
 """
 
-# ---------------------------------------------------------------------
-
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.activations import ProbabilityOutput
@@ -109,8 +50,6 @@ from dl_techniques.layers.norms import create_normalization_layer
 
 from .common import apply_attention_mask, compute_attention_scale
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.differential_attention")
@@ -129,27 +68,25 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     works: softmax, sparsemax, threshmax or adaptive. Two separate instances
     are constructed so per-site debugging and weight inspection stay simple.
 
-    **[EXTRA CALL ARGUMENT — intentional, frozen]** ``call()`` takes an extra
-    positional ``layer_idx: int = 0`` between ``attention_mask`` and
-    ``training``: ``call(inputs, attention_mask=None, layer_idx=0,
-    training=None)``. It selects the depth-dependent lambda schedule. It is a
-    **call** argument rather than constructor state, so it is absent from
-    ``get_config()``, and a reloaded layer defaults to ``layer_idx=0`` unless
-    the caller passes it again. Do NOT move it into ``__init__`` or drop it to
-    match the package's standard signature. A stack of these layers must pass
-    its own depth, and the signature is part of the public contract.
+    ``call()`` takes an extra positional ``layer_idx: int = 0`` between
+    ``attention_mask`` and ``training``: ``call(inputs, attention_mask=None,
+    layer_idx=0, training=None)``. It selects the depth-dependent lambda
+    schedule. Because it is a call argument rather than constructor state, it
+    is absent from ``get_config()``, and a reloaded layer defaults to
+    ``layer_idx=0`` unless the caller passes it again on every call. A stack
+    of these layers must pass its own depth; this signature is part of the
+    public contract, not a deviation to fix.
 
-    **[REUSE]** The ``1 / sqrt(head_dim)`` temperature comes from
+    The ``1 / sqrt(head_dim)`` temperature comes from
     :mod:`~dl_techniques.layers.attention.common`. Score normalization is the
     shared :class:`~dl_techniques.layers.activations.ProbabilityOutput`, and
     the optional QK-norms come from
     :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
-    This layer has **no** ``dim % num_heads`` check to share: ``head_dim`` is an
-    explicit required constructor argument, so ``dim`` and
-    ``num_heads * head_dim`` are independent and the output projection
-    reconciles them.
+    There is no ``dim % num_heads`` check: ``head_dim`` is an explicit
+    required constructor argument, so ``dim`` and ``num_heads * head_dim``
+    are independent and the output projection reconciles them.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -159,7 +96,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
                 ┌──────────────────────────────────────┐
                 │ 5 separate Dense → q1, k1, q2, k2, v │
                 │ each [B, L, H·D_h] → [B, H, L, D_h]  │
-                │ there is NO fused QKV matmul         │
+                │ no fused QKV matmul                  │
                 └───────┬───────────────────┬──────────┘
                         │ q1, k1, v         │ q2, k2, v
                         ▼                   ▼
@@ -186,11 +123,11 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
                                    ▼
                          output  [B, L, D]
 
-        The SAME v tensor enters both streams. That is what makes the
+        The same v tensor enters both streams. That is what makes the
         difference a cancellation. The rows of (A1 − lambda·A2) sum to
         1 − lambda, not to 1.
 
-    **One stream (``_stream``, run twice):**
+    One stream (``_stream``, run twice):
 
     .. code-block:: text
 
@@ -228,7 +165,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
                         ▼
               context  [B, H, L, D_h]
 
-    **Lambda schedule by depth:**
+    Lambda schedule by depth:
 
     .. code-block:: text
 
@@ -346,7 +283,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         3D tensor with shape ``(batch_size, sequence_length, dim)``. The optional
         ``attention_mask`` may be ``(batch, kv_seq)``, ``(batch, q_seq, kv_seq)`` or
         ``(batch, num_heads, q_seq, kv_seq)``, in keep-predicate semantics, and is
-        applied to BOTH streams.
+        applied to both streams.
 
     Output shape:
         3D tensor with shape ``(batch_size, sequence_length, dim)``, unchanged
@@ -473,7 +410,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
                 "'adaptive'."
             )
 
-        # Store configuration - ALL __init__ parameters must be stored
+        # Store every __init__ parameter for get_config.
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -498,7 +435,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # Scale factor for scaled dot-product attention.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
+        # Sub-layers are created here, per the Keras 3 pattern.
         try:
             dense_kwargs = {
                 "kernel_initializer": self.kernel_initializer,
@@ -657,7 +594,6 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             self.q_norm_2.build(qk_shape)
             self.k_norm_2.build(qk_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def get_lambda(self, layer_idx: int = 0) -> keras.KerasTensor:
@@ -771,7 +707,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         Applies optional QK-norm, computes scaled dot-product scores, applies
         the optional mask, normalizes through the supplied
         ``ProbabilityOutput``, applies optional attention-weight dropout, and
-        returns ``attn @ v``. Both streams call this with the SAME ``v``, which
+        returns ``attn @ v``. Both streams call this with the same ``v``, which
         is what makes their difference a cancellation.
 
         :param q: Per-head queries, ``(B, H, L, D_h)``.
@@ -833,7 +769,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             for different masking strategies. One mask serves both streams.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Index of the layer in the network stack, 0-based.
-            Selects the depth-dependent lambda. Defaults to 0. NOT stored in
+            Selects the depth-dependent lambda. Defaults to 0. Not stored in
             the config, so a stack must pass its own depth on every call.
         :type layer_idx: int
         :param training: Optional boolean indicating whether in training mode.
@@ -901,8 +837,8 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
 
-        ``layer_idx`` is absent on purpose. It is a ``call`` argument, so a
-        reloaded layer defaults to ``layer_idx=0`` unless the caller passes it.
+        ``layer_idx`` is absent: it is a ``call`` argument, so a reloaded
+        layer defaults to ``layer_idx=0`` unless the caller passes it.
 
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]
@@ -926,4 +862,3 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
