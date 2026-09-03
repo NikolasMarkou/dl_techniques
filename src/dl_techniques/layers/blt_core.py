@@ -1,90 +1,30 @@
-"""
-Fuse entropy-based byte processing with iterative hierarchical reasoning.
+"""``ByteLatentReasoningCore``, a layer that fuses entropy-based dynamic byte
+patching with an iterative hierarchical reasoning engine (HRE).
 
-This layer implements a sophisticated architecture designed for complex reasoning
-tasks directly on raw byte sequences. It uniquely combines two powerful concepts:
-a Transformer that operates on dynamically-sized, information-aware patches of
-bytes, and a stateful, recurrent reasoning engine that iteratively refines its
-understanding of the input through multiple hierarchical thinking steps.
-
-The model is motivated by the need to process long, unstructured byte streams
-(e.g., source code, binary files, complex documents) where fixed-size tokenization
-is suboptimal and where problems require multi-step, abstract reasoning rather
-than simple pattern matching.
-
-Architectural and Mathematical Foundations:
-The architecture is best understood as two parallel, interacting streams: a
-**Byte Processing Pipeline** and a **Hierarchical Reasoning Engine**.
-
-1.  **Byte Processing Pipeline**: This stream handles the direct transformation
-    of raw bytes into predictions. Its key innovation is the **Dynamic Patcher**,
-    which replaces conventional fixed-size tokenization.
-    -   **Information-Theoretic Patching**: An `EntropyModel`, itself a small
-        transformer, first computes the per-byte information entropy `H(b) =
-        -Σ p(b) log p(b)` for each byte `b` in the sequence. The sequence is
-        then dynamically segmented: a byte whose entropy exceeds the fixed
-        `entropy_threshold` (a constructor hyperparameter in nats, not a
-        learned quantity) opens a new patch. The intuition is to group
-        information-sparse regions (e.g., padding, repeated characters) into
-        large patches and information-dense regions into smaller, more granular
-        patches. This focuses the model's capacity on the most complex parts
-        of the input.
-    -   **Hierarchical Encoding/Decoding**: A `LocalEncoder` processes bytes
-        within each patch, a `GlobalTransformer` processes the sequence of
-        patch representations, and a `LocalDecoder` generates final byte
-        predictions, conditioned on the globally-aware patch context.
-
-2.  **Hierarchical Reasoning Engine (HRE)**: This is a stateful, recurrent
-    module designed to mimic iterative thought. It maintains two latent states:
-    a high-level state `z_h` (representing an abstract plan or summary) and a
-    low-level state `z_l` (representing detailed, grounded features).
-    -   **Reasoning Cycles**: The model performs a series of `h_cycles` and
-        `l_cycles`. Within each high-level cycle, the model performs multiple
-        low-level cycles where `z_l` is updated based on both the input from
-        the byte stream and the current high-level plan `z_h`. After the low-level
-        cycles, `z_h` is updated based on the newly refined `z_l`. This
-        process allows the model to iteratively refine its understanding,
-        alternating between detailed analysis and abstract planning.
-
-3.  **Pipeline-Engine Interaction**: The two streams are not independent. The
-    patch representations from the byte pipeline are projected into the
-    reasoning space to serve as the primary input for the HRE. Conversely, the
-    final, refined high-level state `z_h` from the HRE is projected back into
-    the byte processing space, providing crucial top-down context to the
-    `GlobalTransformer` before final predictions are made.
-
-4.  **Adaptive Computation**: A `q_head` is trained to predict whether the
-    reasoning process for a given input has converged. It outputs "halt" and
-    "continue" logits based on the final reasoning state. This allows the model
-    to dynamically allocate computational resources, performing more reasoning
-    cycles for difficult inputs and halting early for simpler ones, improving
-    efficiency.
-
-The optional `puzzle_embedding` provides a mechanism to condition the entire
-reasoning process on a specific task or context, analogous to a prompt.
+Fixed-size tokenization wastes capacity on long, unstructured byte streams:
+padding and repeated characters cost the same per-token compute as the hardest
+part of the input. An `EntropyModel` scores each byte's information content and
+`DynamicPatcher` opens a new patch whenever entropy crosses `entropy_threshold`,
+so dense regions get finer patches and sparse regions get coarser ones. The HRE
+then refines two latent states, a high-level plan `z_h` and a low-level detail
+state `z_l`, across `h_cycles` outer and `l_cycles` inner steps per outer step;
+only the final step keeps gradients, the rest run under `stop_gradient` for
+truncated backpropagation-through-time. A `q_head` predicts halt-vs-continue
+from the final state so different inputs can use different amounts of compute.
+An optional `puzzle_embedding` conditions the whole process on a task ID.
 
 References:
-    -   **Hierarchical Reasoning**: The iterative, dual-state reasoning
-        engine is inspired by architectures designed for abstract visual and
-        logical reasoning.
-        Nguyen et al. "A Hierarchical Reasoning Model for Abstract
-        Visual Reasoning". https://arxiv.org/abs/2212.03052
-
-    -   **Adaptive Computation**: The halting mechanism is a common technique
-        for creating dynamically computed networks.
-        Graves, A. "Adaptive Computation Time for Recurrent Neural Networks".
-        https://arxiv.org/abs/1603.08983
-        Banino et al. "PonderNet: Learning to Ponder".
-        https://arxiv.org/abs/2107.05407
+    - Nguyen et al. A Hierarchical Reasoning Model for Abstract Visual
+      Reasoning. (https://arxiv.org/abs/2212.03052)
+    - Graves, A. Adaptive Computation Time for Recurrent Neural Networks.
+      (https://arxiv.org/abs/1603.08983)
+    - Banino et al. PonderNet: Learning to Ponder.
+      (https://arxiv.org/abs/2107.05407)
 """
 
 import math
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from .embedding.positional_embedding import PositionalEmbedding
 from .embedding.rotary_position_embedding import RotaryPositionEmbedding
@@ -98,7 +38,6 @@ from .blt_blocks import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.blt_core")
 class ByteLatentReasoningCore(keras.layers.Layer):
@@ -112,7 +51,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
     understanding through alternating high-level and low-level reasoning cycles.
     An adaptive ``q_head`` predicts halting to allocate compute dynamically.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -258,12 +197,8 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.embeddings_regularizer = embeddings_regularizer
         self.kernel_regularizer = kernel_regularizer
 
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
-        # No construction-time degeneracy warning -- see the sibling anchor in
-        # models/language/byte_latent_transformer/model.py. The check moved to
-        # `DynamicPatcher.warn_if_segmentation_is_degenerate(entropy)`, which
-        # measures the OBSERVED boundary rate instead of doing arithmetic on
-        # vocab_size. Do not reintroduce a constructor-side variant here.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018: no construction-time degeneracy
+        # warning here; use DynamicPatcher.warn_if_segmentation_is_degenerate(entropy) instead. See decisions.md.
 
         # Calculate embedding scale
         self.embed_scale = math.sqrt(embed_dim)
@@ -605,28 +540,19 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         # Step 5: Hierarchical reasoning cycles with byte-patch interaction
         z_h, z_l = carry["z_h"], carry["z_l"]
 
-        # Forward iterations (detached for efficiency / truncated BPTT).
-        # DECISION plan_2026-06-14_080e7636/D-002: detach via the FUNCTION
-        # keras.ops.stop_gradient(x) after the loop — NOT `with keras.ops.stop_gradient():`.
-        # stop_gradient is a function, not a context manager; the `with` form is a
-        # TypeError on every forward. The cycle loop runs plainly; only the final
-        # step carries gradient. Mirrors reasoning/hrm_reasoning_core.py:534-540.
+        # Forward iterations run under stop_gradient; only the final step below keeps gradients.
+        # DECISION plan_2026-06-14_080e7636/D-002: call stop_gradient(x) as a function, never
+        # `with keras.ops.stop_gradient():` -- it is not a context manager. See decisions.md.
         for h_step in range(self.h_cycles):
             for l_step in range(self.l_cycles):
-                # Skip last L step of last H cycle (done with gradients below)
                 if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
-                    # Low-level reasoning: incorporate patch information.
-                    # DECISION plan_2026-06-14_080e7636/D-002: HierarchicalReasoningModule
-                    # takes a SINGLE 2-element list [hidden_states, input_injection]
-                    # (hrm_reasoning_module.py:227-231) — two positional tensors fail
-                    # its isinstance(list)/len==2 assert. Do NOT pass positionally.
+                    # DECISION plan_2026-06-14_080e7636/D-002: pass [hidden_states, input_injection]
+                    # as one 2-element list, never as two positional args. See decisions.md.
                     z_l = self.l_reasoning(
                         [z_l, z_h + reasoning_input], training=training
                     )
 
-            # Skip last H step (done with gradients below)
             if h_step != self.h_cycles - 1:
-                # High-level reasoning: abstract patch representations
                 z_h = self.h_reasoning([z_h, z_l], training=training)
 
         # Detach states before the final step (truncated BPTT)
@@ -721,9 +647,6 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "embeddings_regularizer": keras.regularizers.serialize(self.embeddings_regularizer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
-        # DECISION plan_2026-06-14_080e7636/D-003: get_config MUST `return config`.
-        # The original method built+updated config but never returned it (returned
-        # None) -> .keras / from_config round-trip dead. Surfaced by the first test.
+        # DECISION plan_2026-06-14_080e7636/D-003: get_config must return config;
+        # a version that built it but returned None broke .keras round-trip. See decisions.md.
         return config
-
-# ---------------------------------------------------------------------

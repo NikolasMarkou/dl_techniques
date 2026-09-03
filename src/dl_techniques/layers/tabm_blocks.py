@@ -1,71 +1,25 @@
-"""
-Deep Ensembling is a powerful technique for improving model robustness, accuracy, and
-uncertainty estimation. The standard approach involves training multiple independent
-models and averaging their predictions. However, this can be computationally expensive
-and slow. This module implements several building blocks for creating "implicit" or
-"batched" ensembles, where all `k` ensemble members are represented and trained
-simultaneously within a single model, using an additional dimension.
+"""TabM-style batched-ensemble building blocks: ``ScaleEnsemble``, ``LinearEfficientEnsemble``,
+``NLinear``, and the ``TabMMLPBlock`` / ``TabMBackbone`` layers that assemble them into MLPs.
 
-The key to this module's efficiency is its clever use of weight sharing and
-specialized tensor operations (`einsum`) to perform parallel computations across all
-ensemble members with minimal overhead.
+Training ``k`` independent models and averaging their predictions improves accuracy
+and uncertainty estimates, but costs ``k`` times the parameters and compute. This
+module represents all ``k`` members inside one model instead, sharing most weights
+and giving each member only a small per-member perturbation. ``LinearEfficientEnsemble``
+shares one kernel across members and multiplies it by rank-1 input/output scaling
+vectors (`r`, `s`) per member; ``NLinear`` is the alternative with ``k`` fully
+independent kernels via a single batched ``einsum``, used where true independence
+matters more than parameter savings.
 
-The module contains the following key components:
-
-1.  **`ScaleEnsemble` (Learnable Member Scaling):**
-    -   A simple but powerful layer that applies a learnable, per-feature scaling
-        factor to each ensemble member.
-    -   This allows the model to learn the relative importance of different features
-        for each individual member of the ensemble, providing a simple mechanism for
-        each member to specialize.
-
-2.  **`LinearEfficientEnsemble` (The Core Ensemble Layer):**
-    -   This is the workhorse of the module. It implements an efficient linear
-        transformation for `k` ensemble members.
-    -   **Weight Sharing:** It uses a single, shared `kernel` (weight matrix) for the
-        main linear projection across all ensemble members. This is a massive saving
-        in parameters compared to having `k` separate weight matrices.
-    -   **Rank-1 Perturbations:** To allow each ensemble member to learn a unique
-        function, it applies learnable, rank-1 scaling factors (`r` for input, `s` for
-        output) to the shared kernel. This is equivalent to applying a unique diagonal
-        matrix transformation to the input and output for each member, providing
-        diversity without the full cost of independent weights.
-
-3.  **`NLinear` (Fully Independent Parallel Layers):**
-    -   This layer provides an alternative to the efficient, weight-sharing approach.
-        It implements `n` truly independent linear layers that are processed in parallel.
-    -   It uses a single weight tensor of shape `(n, input_dim, output_dim)` and
-        `einsum` to perform `n` independent matrix multiplications in one operation.
-    -   This is useful for the final output heads of an ensemble, where each member needs
-        its own independent classifier.
-
-4.  **`TabMMLPBlock` and `TabMBackbone` (High-Level Abstractions):**
-    -   These are convenience layers that assemble the lower-level components into
-        standard MLP blocks and a full MLP backbone.
-    -   They can operate in either a "plain" mode (a single model) or an "ensemble"
-        mode (with `k` members) by simply setting the `k` parameter, making it easy
-        to switch between standard and ensemble architectures.
-    -   In ensemble mode `ensemble_type` chooses which of the two mechanisms above
-        realizes the members: `'efficient'` (shared kernel + rank-1 scaling) or
-        `'packed'` (`NLinear`, `k` independent kernels). The packed form is what
-        the efficient form is supposed to approximate, so it belongs in the same
-        switch rather than only in the output head.
-
-A note on the scaling-vector initialization, since it decides whether the members
-are different functions at all: `LinearEfficientEnsemble` and `ScaleEnsemble` take
-an `init_distribution` of `'random-signs'` (draw from {-1, +1}, the paper's choice),
-`'normal'` (N(1, 0.1)) or `'ones'`. Under `'ones'` every member's effective weight
-matrix is identical at initialization — a legitimate setting for a variant whose
-diversity comes from elsewhere, and a silent degeneracy if it is not.
+Every layer here can also run in plain (non-ensemble) mode by leaving ``k`` unset.
+The scaling-vector `init_distribution` controls whether ensemble members start as
+different functions at all: `'random-signs'` (the paper's choice) and `'normal'`
+both break symmetry between members; `'ones'` makes every member's effective
+weight matrix identical at initialization.
 """
 
 import keras
 from keras import ops
 from typing import Dict, List, Literal, Optional, Tuple, Union, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -73,11 +27,8 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 EnsembleInitDistribution = Literal['ones', 'normal', 'random-signs']
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class RandomSigns(keras.initializers.Initializer):
@@ -96,9 +47,8 @@ class RandomSigns(keras.initializers.Initializer):
 
     def __init__(self, seed: Optional[int] = None) -> None:
         self.seed = seed
-        # Delegate the draw to a stock initializer rather than calling
-        # `keras.random.*` directly: inside `add_weight` the global seed
-        # generator has no variable to update and the direct call raises.
+        # Draws through a stock initializer: inside `add_weight` there is no
+        # seed-generator variable for a direct `keras.random.*` call to update.
         self._uniform = keras.initializers.RandomUniform(
             minval=-1.0, maxval=1.0, seed=seed
         )
@@ -137,7 +87,6 @@ def _ensemble_scaling_initializer(
         f"got {init_distribution!r}"
     )
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class ScaleEnsemble(keras.layers.Layer):
@@ -149,7 +98,7 @@ class ScaleEnsemble(keras.layers.Layer):
     relative importance of different features. The operation is
     ``output = input * weight`` with broadcasting over the batch dimension.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -192,9 +141,8 @@ class ScaleEnsemble(keras.layers.Layer):
         self.k = k
         self.input_dim = input_dim
         self.init_distribution = init_distribution
-        # The scaling weights have exactly one job — differ per member — so the
-        # initializer is fully determined by ``init_distribution``; there is no
-        # separate ``kernel_initializer`` knob to contradict it.
+        # The initializer is fully determined by `init_distribution`; there is
+        # no separate `kernel_initializer` knob to contradict it.
         self.kernel_initializer = _ensemble_scaling_initializer(init_distribution)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -236,7 +184,6 @@ class ScaleEnsemble(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class LinearEfficientEnsemble(keras.layers.Layer):
@@ -249,7 +196,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
     diagonal transformations to the shared kernel for each member, providing
     ensemble diversity without the cost of ``k`` independent weight matrices.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -385,19 +332,14 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         """
         x = inputs
 
-        # Apply input scaling if enabled
         if self.ensemble_scaling_in:
             x = ops.multiply(x, ops.expand_dims(self.r, axis=0))
 
-        # Apply main linear transformation efficiently
-        # Use einsum for better performance and clarity
         x = ops.einsum('bki,iu->bku', x, self.kernel)
 
-        # Apply output scaling if enabled
         if self.ensemble_scaling_out:
             x = ops.multiply(x, ops.expand_dims(self.s, axis=0))
 
-        # Add bias if enabled
         if self.use_bias:
             x = ops.add(x, ops.expand_dims(self.bias, axis=0))
 
@@ -424,7 +366,6 @@ class LinearEfficientEnsemble(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class NLinear(keras.layers.Layer):
@@ -436,7 +377,7 @@ class NLinear(keras.layers.Layer):
     and ``einsum``. Useful for final output heads of an ensemble where each
     member needs its own independent classifier.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -500,9 +441,8 @@ class NLinear(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the parallel linear layer weights."""
-        # ``input_dim=None`` defers the fan-in to build time, which is what lets
-        # a packed TabMMLPBlock construct its NLinear in __init__ (where the input
-        # width is not yet known) instead of lazily inside build().
+        # `input_dim=None` defers the fan-in to build time, so a packed
+        # TabMMLPBlock can construct its NLinear in __init__, before the input width is known.
         if self.input_dim is None:
             self.input_dim = input_shape[-1]
 
@@ -534,7 +474,7 @@ class NLinear(keras.layers.Layer):
             :return: Output tensor of shape (batch_size, n, output_dim).
             :rtype: keras.KerasTensor
         """
-        # Efficient parallel matrix multiplication using einsum
+        # One batched einsum computes all n independent matmuls at once.
         outputs = ops.einsum('bni,nio->bno', inputs, self.kernels)
 
         if self.use_bias:
@@ -561,15 +501,9 @@ class NLinear(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: the ``TabM`` prefix is load-bearing. The
-# registry's legacy alias namespace is keyed by the bare class name alone, so a generic name
-# already claimed by another registered class must be prefixed with its package rather than
-# registered twice. Do NOT simplify this back to ``MLPBlock``: that name belongs to
-# ``layers/ffn/mlp.py``, which is also the FFN factory's ``'mlp'`` key, and re-taking it
-# re-creates the collision this rename removed (before the rename a saved TabM could
-# deserialize into the FFN block, whichever module imported last).
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the ``TabM`` prefix; do not rename to
+# ``MLPBlock``, which is ``layers/ffn/mlp.py``'s bare class name and FFN factory key. See decisions.md.
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class TabMMLPBlock(keras.layers.Layer):
     """
@@ -579,7 +513,7 @@ class TabMMLPBlock(keras.layers.Layer):
     dropout) that can operate in plain mode (single model) or ensemble mode
     (with ``k`` members using ``LinearEfficientEnsemble``).
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -678,10 +612,9 @@ class TabMMLPBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # CREATE sub-layers in __init__ (units/k are config-known) so weights
+        # Create sub-layers in __init__ (units/k are config-known) so weights
         # are reliably created/restored across serialization.
         if self.k is None:
-            # Plain linear layer
             self.linear = keras.layers.Dense(
                 self.units,
                 use_bias=self.use_bias,
@@ -705,7 +638,6 @@ class TabMMLPBlock(keras.layers.Layer):
                 name='linear'
             )
         else:
-            # Efficient ensemble layer
             self.linear = LinearEfficientEnsemble(
                 self.units,
                 self.k,
@@ -782,7 +714,6 @@ class TabMMLPBlock(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.tabm_blocks")
 class TabMBackbone(keras.layers.Layer):
@@ -793,7 +724,7 @@ class TabMBackbone(keras.layers.Layer):
     It can operate in plain mode (single model) or ensemble mode by setting the
     ``k`` parameter.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -877,7 +808,7 @@ class TabMBackbone(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # CREATE all MLP blocks in __init__ (hidden_dims are config-known) so
+        # Create all MLP blocks in __init__ (hidden_dims are config-known) so
         # weights are reliably created/restored across serialization.
         self.blocks = [
             TabMMLPBlock(
@@ -951,5 +882,4 @@ class TabMBackbone(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 

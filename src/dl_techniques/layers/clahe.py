@@ -1,73 +1,26 @@
-"""
-Local image contrast using a trainable CLAHE algorithm.
+"""``CLAHE``, a trainable Contrast Limited Adaptive Histogram Equalization layer
+for single-channel images.
 
-This layer implements Contrast Limited Adaptive Histogram Equalization (CLAHE),
-an advanced image enhancement technique designed to improve local contrast and
-bring out detail in an image. It is particularly effective in contexts where
-global contrast adjustments are insufficient, such as medical imaging,
-satellite imagery, or photos taken in challenging lighting conditions.
+Standard histogram equalization remaps pixel intensities through one global
+cumulative distribution function (CDF), which over-amplifies contrast in some
+regions of an image while washing out others. CLAHE instead equalizes each
+tile of the image separately and clips each tile's histogram at `clip_limit *
+mean(hist)` before building its CDF, redistributing the clipped mass evenly
+across the other bins; this bounds the CDF's slope and keeps histogram
+equalization from amplifying noise in near-uniform tiles. This layer adds a
+learnable sigmoid gate on top of the normalized CDF, `cdf_mapped = cdf_norm *
+sigmoid(mapping_kernel)`, so the enhancement strength per intensity level can
+be tuned end-to-end with the rest of the model.
 
-Architectural and Mathematical Foundations:
-CLAHE is an evolution of standard Histogram Equalization (HE). The core idea
-of HE is to remap the intensity values of an image to achieve a more uniform
-distribution, thereby stretching the dynamic range. This is done by using the
-Cumulative Distribution Function (CDF) of the image's pixel intensities as a
-transfer function: `output_pixel = CDF(input_pixel)`.
-
-However, global HE often fails on images with diverse content, as it can
-over-amplify contrast in some areas while washing out details in others.
-CLAHE addresses this through two key innovations:
-
-1.  **Adaptive Histogram Equalization (AHE)**: Instead of computing a single
-    global histogram, the image is first divided into a grid of smaller,
-    non-overlapping regions called "tiles". Histogram equalization is then
-    applied independently to each tile. This allows the enhancement to adapt
-    to the local characteristics of the image, preserving detail that would be
-    lost with a global approach.
-
-2.  **Contrast Limiting (CL)**: A major drawback of AHE is that it can
-    drastically amplify noise in relatively homogeneous tiles (e.g., a patch
-    of clear sky). In such regions, the histogram is concentrated in a few
-    bins. Standard HE would stretch this narrow range across the entire
-    dynamic range, making minor noise variations highly visible. To prevent
-    this, CLAHE "clips" the histogram of each tile at a predefined value
-    (the `clip_limit`) before computing the CDF. The excess pixel count from
-    the clipped bins is then redistributed uniformly across all other bins.
-    This limits the slope of the CDF, which in turn constrains the contrast
-    amplification factor and mitigates noise amplification.
-
-This implementation introduces a novel, **trainable component**. After the
-standard, normalized CDF is computed for a tile, it is modulated by a
-learnable weight vector (the `mapping_kernel`) passed through a sigmoid gate:
-    `cdf_mapped = cdf_norm * sigmoid(mapping_kernel)`
-This allows the enhancement effect to be fine-tuned during end-to-end model
-training. The network can learn to selectively boost or suppress the contrast
-enhancement for specific intensity ranges, tailoring the preprocessing step
-to optimize performance on a specific downstream task.
+This layer runs only on the TensorFlow backend and only eagerly: tile
+histograms use `tf.histogram_fixed_width`, which has no `keras.ops`
+equivalent, and the tile count depends on the runtime image size, which a
+graph `while_loop` cannot trace cleanly. Apply it outside a `@tf.function`,
+or per-image with known shapes.
 
 References:
-    - Pizer, S. M., Amburn, E. P., Austin, J. D., Cromartie, R., Geselowitz,
-      A., Greer, T., ... & Zimmerman, J. B. "Adaptive Histogram Equalization
-      and Its Variations". This is the foundational paper on CLAHE.
-      https://doi.org/10.1016/0734-189X(87)90186-X
-
-ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe forward path):
--------------------------------------------------------------------
-This layer is **TensorFlow-backend-only** by design. The forward path uses raw
-TensorFlow operations that have **no ``keras.ops`` equivalent**:
-
-- ``tf.histogram_fixed_width`` (in ``_process_tile``, reached from ``call``) —
-  per-tile histogram binning; ``keras.ops`` exposes no histogram primitive.
-
-The forward pass runs **eagerly**: the tile count is data-dependent (a function
-of the runtime ``H``/``W``), so the nested Python tile loop cannot be cleanly
-traced into a graph ``while_loop`` (an earlier ``@tf.function`` wrapper raised
-``InaccessibleTensorError`` from the nested-loop ``keras.ops.take``). Apply this
-layer eagerly (or wrap per-image with known shapes).
-
-This is a documented, accepted exception to the "only ``keras.ops`` in the
-forward path" rule (see the production roadmap §5). Do NOT "fix" it by forcing a
-broken ``keras.ops`` rewrite.
+    - Pizer et al., 1987. Adaptive Histogram Equalization and Its Variations.
+      (https://doi.org/10.1016/0734-189X(87)90186-X)
 """
 
 import keras
@@ -75,7 +28,6 @@ import tensorflow as tf
 from typing import Dict, Any, Optional, Union, Tuple
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.clahe")
 class CLAHE(keras.layers.Layer):
@@ -88,7 +40,7 @@ class CLAHE(keras.layers.Layer):
     ``cdf_mapped = cdf_norm * sigmoid(mapping_kernel)`` allows end-to-end
     fine-tuning of the enhancement for a downstream task.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -297,6 +249,4 @@ class CLAHE(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         """
         return input_shape
-
-# ---------------------------------------------------------------------
 

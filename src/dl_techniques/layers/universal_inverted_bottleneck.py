@@ -1,113 +1,23 @@
-"""
-A `Universal Inverted Bottleneck` (UIB), a highly flexible
-and configurable Keras layer that serves as a unified building block for a variety
-of modern, efficient convolutional neural network architectures.
+"""``UniversalInvertedBottleneck`` (UIB), a configurable Keras layer that unifies
+several efficient CNN block designs under one expand-process-project structure.
 
-The UIB is not a new, distinct architecture itself, but rather a generalization that
-can be configured to exactly replicate several successful designs, including the
-Inverted Bottleneck (IB) from MobileNetV2, the ConvNeXt block, the Feed-Forward
-Network (FFN) block from Transformers, and a variant with an extra depthwise
-convolution (ExtraDW). This unification allows for easy architectural experimentation
-and searching within a single, consistent framework.
-
-Core Architectural Pattern:
-
-The UIB follows a general "expand-process-project" pattern, common to many efficient
-network designs, with an optional depthwise convolution on EITHER side of the
-expansion:
-
-0.  **Pre-expansion ("start") Depthwise — `use_start_dw`:**
-    -   An optional `DepthwiseConv2D` applied to the input BEFORE the expansion,
-        so it mixes space at the *unexpanded* channel count. This is the position
-        that makes a ConvNeXt-style block expressible: ConvNeXt spatially mixes
-        first, with a large kernel, and only then goes wide. It carries its own
-        `start_dw_kernel_size` rather than sharing `kernel_size`, because the
-        convention is a large start kernel (7) against a small middle one (3);
-        a single shared knob would force them equal.
-
-    -   The channel count it operates on is what distinguishes it from the two
-        depthwise convolutions below, which are otherwise identical in kind. A
-        block with one middle DW and a block with one start DW have the same
-        number of depthwise layers and nearly the same parameter count, and are
-        different architectures.
-
-1.  **Expansion Phase:**
-    -   The input feature map, which has a relatively small number of channels, is
-        first "expanded" to a much higher-dimensional space using a `1x1 Conv2D`
-        layer. The degree of this expansion is controlled by the `expansion_factor`
-        or by specifying the exact `expanded_channels`.
-
-2.  **Processing Phase (Depthwise Convolutions):**
-    -   Further processing happens in this high-dimensional space using one or two
-        efficient `DepthwiseConv2D` layers. Depthwise convolutions process each
-        channel independently, capturing spatial patterns without the high
-        computational cost of standard convolutions.
-    -   The UIB can be configured to use zero, one (`use_dw1=True`), or two
-        (`use_dw1=True` and `use_dw2=True`) of these MIDDLE depthwise layers.
-        Two middle depthwise convolutions is this implementation's own extra
-        axis; it is not one of the paper's four named structures.
-
-    -   Spatial downsampling is a property of the BLOCK, not of any one of these
-        optional layers. The `stride` is carried by the first spatial operator
-        that actually exists — `start_dw`, else `dw1`, else `dw2`, else the `1x1`
-        projection — so the output resolution is the same whichever depthwise
-        convolutions are enabled. It used to sit on `dw1` alone, which meant a
-        block built with `use_dw1=False` silently returned the input resolution
-        while its `compute_output_shape` reported the strided one.
-
-3.  **Projection Phase:**
-    -   After the spatial processing, the high-dimensional feature map is projected
-        back down to the desired number of output channels using another `1x1 Conv2D`
-        layer.
-
-4.  **Residual Connection:**
-    -   If the input and output dimensions match (i.e., `stride=1` and `input_filters=output_filters`),
-        a residual "skip" connection adds the original input to the output of the
-        block. This is crucial for enabling the training of very deep networks.
-
-Emulating Other Architectures:
-
-The paper's four named structures are selected by which of the two OPTIONAL
-depthwise POSITIONS are occupied — start (`use_start_dw`) and middle (`use_dw1`) —
-not by how many depthwise layers exist in total. Two of them own exactly one
-depthwise convolution and differ only in where it sits:
-
--   **Inverted Bottleneck (IB) / MobileNetV2 block — middle only:**
-    -   `use_start_dw=False`, `use_dw1=True`, `use_dw2=False`. The classic
-      expand -> depthwise -> project structure.
-
--   **ConvNeXt block — start only:**
-    -   `use_start_dw=True`, `start_dw_kernel_size=7`, `use_dw1=False`,
-      `use_dw2=False`. Spatial mixing happens first, with a large kernel, on the
-      unexpanded channels; the rest of the block is then two `1x1` convolutions.
-      Note this implementation uses a standard BN-ReLU order, not ConvNeXt's
-      LN-GELU.
-
--   **Transformer Feed-Forward Network (FFN) — neither:**
-    -   `use_start_dw=False`, `use_dw1=False`, `use_dw2=False`. Reduces the block
-      to two `1x1` convolutions (expand and project), the convolutional
-      equivalent of the two `Dense` layers in a Transformer's FFN. It has no
-      spatial operator at all, so a strided FFN block decimates rather than
-      filters — see the `project_conv` note below.
-
--   **Extra Depthwise (ExtraDW) — both:**
-    -   `use_start_dw=True`, `use_dw1=True`, `use_dw2=False`. Spatial mixing both
-      before and after the expansion.
-
-`use_dw2` is outside this table on purpose: a SECOND middle depthwise is an extra
-degree of freedom this implementation offers, not one of the paper's structures.
-Setting `use_dw1=True, use_dw2=True` does not make an ExtraDW block — it makes an
-IB with two stacked middle depthwise convolutions, which is what this docstring
-used to claim ExtraDW was.
+Rather than picking one fixed block shape, the UIB exposes two optional
+depthwise-convolution positions, a pre-expansion "start" DW and a post-expansion
+"middle" DW, whose presence or absence selects which published block the layer
+becomes: neither gives a Transformer FFN (two ``1x1`` convs only), middle-only
+gives the MobileNetV2 inverted bottleneck, start-only gives a ConvNeXt-style
+block (though with this implementation's BN-ReLU order, not ConvNeXt's LN-GELU),
+and both gives ExtraDW. A second middle depthwise (``use_dw2``) is an extra
+degree of freedom this layer adds beyond those four named structures. Spatial
+stride is applied by whichever spatial operator exists first in the block
+(start DW, then middle DW1, then DW2, then the final ``1x1`` projection), so
+every configuration downsamples correctly, including the FFN case where a
+strided ``1x1`` projection decimates rather than filters.
 """
 
 import keras
 from typing import Tuple, Optional, Any, Dict, Union
 from keras import ops, layers, initializers, regularizers
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer, NormalizationType
 from dl_techniques.layers.activations import create_activation_layer, ActivationType
@@ -116,8 +26,6 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.universal_inverted_bottleneck")
@@ -131,7 +39,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     expand-process-project pattern with an optional depthwise convolution on
     either side of the expansion, SE attention, and residual connections.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -263,11 +171,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate parameters
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
-        # --- CHANGE START ---
-        # Added validation for the new expanded_channels parameter.
         if expansion_factor <= 0 and expanded_channels is None:
             raise ValueError(
                 "Either expansion_factor must be positive or "
@@ -277,7 +182,6 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             raise ValueError(
                 f"expanded_channels must be positive, got {expanded_channels}"
             )
-        # --- CHANGE END ---
         if stride <= 0:
             raise ValueError(f"stride must be positive, got {stride}")
         if kernel_size <= 0:
@@ -300,10 +204,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         # Store all configuration parameters
         self.filters = filters
         self.expansion_factor = expansion_factor
-        # --- CHANGE START ---
-        # Storing the new parameter.
         self.expanded_channels = expanded_channels
-        # --- CHANGE END ---
         self.stride = stride
         self.kernel_size = kernel_size
         self.use_start_dw = use_start_dw
@@ -341,20 +242,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             "use_bias": self.use_bias
         }
 
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-010
-        # The stride belongs to the BLOCK, not to one optional sub-layer. It used
-        # to live only on `dw1`, so `use_dw1=False, stride=2` returned the input
-        # resolution while `compute_output_shape` claimed the strided one, with
-        # no error anywhere (MEASURED: call() (1,16,16,16) vs declared (1,8,8,16)).
-        # Do NOT move the stride to a single always-present site such as
-        # `expand_conv` or `project_conv` unconditionally: that would change what
-        # every currently-shipped block computes. Instead the stride is handed to
-        # the FIRST spatial op that exists, walking this fixed precedence, so the
-        # `use_dw1=True` blocks every shipped variant builds stay bit-identical.
-        # Step 6b inserted `start_dw` at the HEAD of this list, as foreseen: it is
-        # the first spatial op the tensor meets, so downsampling anywhere later
-        # would make the start DW filter at a resolution the block does not keep.
-        # See decisions.md D-010 and D-011.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-010: stride belongs to the block, applied
+        # to the first spatial op that exists (start_dw, dw1, dw2, project_conv), never fixed to one. See decisions.md.
         if self.use_start_dw:
             self._stride_owner = 'start_dw'
         elif self.use_dw1:
@@ -364,18 +253,8 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         else:
             self._stride_owner = 'project_conv'
 
-        # CREATE all sub-layers in __init__ (they remain unbuilt)
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-011
-        # The paper's UIB is `(start DW) -> expand 1x1 -> (middle DW) -> project
-        # 1x1`, and its START depthwise is defined by operating on the UNEXPANDED
-        # input channels. `dw1` and `dw2` are BOTH post-expansion, so neither can
-        # stand in for it: do NOT "implement ConvNext/ExtraDW" by remapping
-        # `use_dw1`/`use_dw2`, which only varies how many MIDDLE depthwise convs
-        # exist (0/1/2) — a different axis, and the shape this package's README
-        # was already flagged for describing. That is why this is a third,
-        # genuinely new depthwise slot rather than a reuse of the two that exist,
-        # and why it carries its own kernel-size knob (the convention is a larger
-        # start kernel against a smaller middle one). See decisions.md D-011.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-011: start_dw operates on unexpanded
+        # channels and is a distinct slot from dw1/dw2 (both post-expansion); never remap use_dw1/use_dw2 to emulate it. See decisions.md.
         if self.use_start_dw:
             self.start_dw = layers.DepthwiseConv2D(
                 kernel_size=self.start_dw_kernel_size,
@@ -514,17 +393,11 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         """Build the layer's weights and sub-layers."""
         input_filters = input_shape[-1]
 
-        # --- CHANGE START ---
-        # Logic now prioritizes `expanded_channels` if provided, otherwise it
-        # falls back to the original `expansion_factor` calculation. This makes
-        # the change fully backward-compatible.
         if self.expanded_channels is not None:
             expanded_filters = self.expanded_channels
         else:
             expanded_filters = input_filters * self.expansion_factor
-        # --- CHANGE END ---
 
-        # Set the actual number of filters for expansion
         self.expand_conv.filters = expanded_filters
 
         # Build sub-layers sequentially, propagating shape information
@@ -678,10 +551,7 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
         config.update({
             "filters": self.filters,
             "expansion_factor": self.expansion_factor,
-            # --- CHANGE START ---
-            # Added expanded_channels to the config for proper serialization.
             "expanded_channels": self.expanded_channels,
-            # --- CHANGE END ---
             "stride": self.stride,
             "kernel_size": self.kernel_size,
             "use_start_dw": self.use_start_dw,
@@ -709,5 +579,3 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
                 regularizers.serialize(self.depthwise_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
