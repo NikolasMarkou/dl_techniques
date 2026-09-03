@@ -1,56 +1,28 @@
-"""
-A Gated Linear Unit feed-forward network.
+"""Gated Linear Unit feed-forward network.
 
-This is a drop-in replacement for the position-wise FFN of a transformer
-block. A standard FFN projects the input up, applies one fixed non-linearity,
-and projects back down. A GLU splits the up-projection into two branches. One
-branch is the value and carries the content. The other is the gate and, after
-an activation, multiplies the value element-wise. The gate is computed from
-the same input, so the layer can suppress or amplify a feature per token
-rather than per weight.
-
-The layer runs three projections:
-
-1. ``gate_proj`` -- a Dense to ``hidden_dim``, followed by ``activation``.
-2. ``value_proj`` -- a second, independent Dense to ``hidden_dim``.
-3. ``output_proj`` -- a Dense from ``hidden_dim`` to ``output_dim``, applied
-   to the product of the two branches.
-
-The maths, for an input vector ``x``:
-
-    g = W_g @ x + b_g          (gate)
-    v = W_v @ x + b_v          (value)
-    h = activation(g) * v      (element-wise product)
-    y = W_out @ h + b_out
-
-``W_g`` and ``W_v`` are separate matrices; nothing ties them. The choice of
-``activation`` names the variant: ``'swish'`` is SwiGLU, ``'gelu'`` is GeGLU,
-``'sigmoid'`` is the original GLU, ``'linear'`` is the bilinear variant.
-
-``GLUFFN`` is registered in ``ffn/factory.py`` under three keys -- ``glu``
-(``activation='swish'``), ``reglu`` (``'relu'``) and ``bilinear``
-(``'linear'``). They are the same class with different defaults.
+A drop-in replacement for a transformer block's position-wise FFN. A
+standard FFN projects up, applies one fixed non-linearity, and projects
+back down; a GLU instead splits the up-projection into a value branch and
+a gate branch, and multiplies them element-wise after the gate's
+activation, so the layer can suppress or amplify a feature per token
+rather than per weight. ``GLUFFN`` backs three ``ffn/factory.py`` keys
+with different activation defaults: ``glu`` (swish), ``reglu`` (relu), and
+``bilinear`` (linear, no gate non-linearity).
 
 References:
--   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
-    arXiv:2002.05202. (the Transformer-FFN analysis of the GLU family)
--   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
-    Modeling with Gated Convolutional Networks. ICML. (the original GLU)
-
+    - Shazeer, N., 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Dauphin, Y. N. et al., 2017. Language Modeling with Gated
+      Convolutional Networks. (ICML)
 """
 
 import keras
 from typing import Callable, Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, activations
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.glu_ffn")
 class GLUFFN(keras.layers.Layer):
@@ -70,7 +42,7 @@ class GLUFFN(keras.layers.Layer):
     This class backs three ``FFN_REGISTRY`` keys. See the block-internals
     diagram below for the activation each key supplies.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -106,7 +78,7 @@ class GLUFFN(keras.layers.Layer):
         graph; at dropout_rate=0.0 it is a no-op, so it is not
         drawn as a conditional stage.
 
-    **Gate / value split and variant selection:**
+    Gate / value split and variant selection:
 
     .. code-block:: text
 
@@ -149,7 +121,7 @@ class GLUFFN(keras.layers.Layer):
         Defaults to True.
     :type use_bias: bool
     :param kernel_initializer: Initializer for the kernels of all three Dense
-        layers. Each layer receives its OWN clone of it, never the resolved
+        layers. Each layer receives its own clone of it, never the resolved
         instance itself. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
     :param bias_initializer: Initializer for the biases of all three Dense
@@ -270,24 +242,8 @@ class GLUFFN(keras.layers.Layer):
 
 
         # Create every sub-layer here, unbuilt. build() builds them.
-        # DECISION plan-2026-08-29T043546-e97b34d8/D-008 -- clone_initializer
-        # per Dense, and the reason the whole ffn package now does this.
-        # MECHANISM: keras.initializers.get('glorot_uniform') returns an
-        # INSTANCE that has already drawn a concrete seed (measured
-        # seed=369497522). One such instance handed to two weights therefore
-        # draws the SAME numbers twice; clone_initializer rebuilds it from
-        # get_config(), which drops that seed, so each clone draws fresh.
-        # A raw STRING is safe -- Keras resolves it once per sub-layer -- so
-        # only the resolve-once-share-twice spelling is affected. Here it was
-        # fatal: gate_proj and value_proj are both Dense(hidden_dim) off the
-        # same input and call() computes activation(gate) * value, so with
-        # one shared instance the two were the same function and the gating
-        # did not exist (MEASURED max|delta| = 0.0 for kernels AND biases, at
-        # every configuration -- no shape precondition). Do NOT put
-        # self.kernel_initializer / self.bias_initializer back into
-        # dense_kwargs. A SEEDED initializer defeats the clone by design and
-        # is why the guard for this uses an unseeded one.
-        # See decisions.md D-008.
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-008: clone_initializer per
+        # Dense, never the resolved instance -- a shared instance gave gate_proj and value_proj identical weights, deleting the gate. See decisions.md.
         dense_kwargs = {
             "use_bias": self.use_bias,
             "kernel_regularizer": self.kernel_regularizer,
@@ -426,5 +382,3 @@ class GLUFFN(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

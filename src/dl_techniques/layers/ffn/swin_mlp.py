@@ -1,56 +1,24 @@
-"""
-The MLP block from the Swin Transformer.
+"""The MLP block from the Swin Transformer.
 
-This is the position-wise feed-forward network that runs after windowed
-attention in every Swin block. It transforms each token on its own, with the
-same weights at every position.
-
-The name is historical. This is the ordinary Transformer FFN, the same shape
-almost every Transformer uses. What sets this implementation apart from
-``MLPBlock`` in the same package is two dropouts instead of one, and an
-``output_dim`` that may be left as ``None`` to match the input width.
-
-The forward path:
-
-1.  ``fc1`` projects each token from its input width up to ``hidden_dim``.
-    The usual expansion is 4x. This is an inverted bottleneck: wide in the
-    middle, narrow at both ends.
-2.  An activation (GELU by default) runs element-wise. This is the only
-    non-linearity. Without it the two Dense layers would collapse into a
-    single linear map.
-3.  ``drop1``.
-4.  ``fc2`` projects back down to the output width.
-5.  ``drop2``.
-
-The maths, for one token vector ``x``:
-
-    FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2
-
-``W_1`` is ``(input_dim, hidden_dim)`` and ``W_2`` is
-``(hidden_dim, output_dim)``. GELU is ``x * Phi(x)``, where ``Phi`` is the
-standard Gaussian CDF.
-
-This layer holds no residual add and no normalization. The caller owns both.
+The position-wise feed-forward network that runs after windowed attention
+in every Swin block, transforming each token on its own with the same
+weights at every position. It is the ordinary transformer FFN; what sets
+it apart from ``MLPBlock`` in the same package is two dropouts instead of
+one, and an ``output_dim`` that may be left as ``None`` to match the input
+width.
 
 References:
--   Liu, Z., et al. (2021). Swin Transformer: Hierarchical Vision Transformer
-    using Shifted Windows. ICCV. (the block this MLP sits in)
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
-    (the same FFN, introduced first)
-
+    - Liu, Z. et al., 2021. Swin Transformer: Hierarchical Vision
+      Transformer using Shifted Windows. (ICCV)
+    - Vaswani, A. et al., 2017. Attention Is All You Need. (NIPS)
 """
 
 import keras
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.swin_mlp")
 class SwinMLP(keras.layers.Layer):
@@ -61,14 +29,14 @@ class SwinMLP(keras.layers.Layer):
     ``FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2``. Each token is
     transformed on its own, with the same weights at every position.
 
-    Two things separate this from ``MLPBlock``. There are TWO dropouts, one
+    Two things separate this from ``MLPBlock``. There are two dropouts, one
     after the activation and one after ``fc2``. And ``output_dim`` may be
     ``None``, which means "match the input width", resolved at build time.
 
     Despite the name, this is the plain Transformer FFN. Swin uses it, but so
     does nearly every other Transformer.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -121,7 +89,7 @@ class SwinMLP(keras.layers.Layer):
     :param activation: Activation applied after ``fc1``. A Keras name
         ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
     :type activation: Union[str, Callable]
-    :param dropout_rate: Rate for BOTH dropouts, in ``[0.0, 1.0]``. Defaults
+    :param dropout_rate: Rate for both dropouts, in ``[0.0, 1.0]``. Defaults
         to 0.0. The two layers always exist; at 0.0 they pass their input
         through.
     :type dropout_rate: float
@@ -148,7 +116,7 @@ class SwinMLP(keras.layers.Layer):
     :vartype hidden_dim: int
     :ivar use_bias: Whether the projections carry a bias.
     :vartype use_bias: bool
-    :ivar output_dim: The output width as REQUESTED, possibly ``None``. This
+    :ivar output_dim: The output width as requested, possibly ``None``. This
         is what ``get_config()`` stores. The resolved width is not kept as an
         attribute; it lives in ``fc2.units``.
     :vartype output_dim: Optional[int]
@@ -169,7 +137,7 @@ class SwinMLP(keras.layers.Layer):
     :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar activity_regularizer: The resolved activity regularizer, or
         ``None``. This is the attribute of the same name on
-        ``keras.layers.Layer``, and it is the ONLY site that charges the
+        ``keras.layers.Layer``, and it is the only site that charges the
         penalty; neither Dense receives it.
     :vartype activity_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar fc1: ``Dense(hidden_dim)``, the expansion.
@@ -209,7 +177,7 @@ class SwinMLP(keras.layers.Layer):
         ``activity_regularizer`` is charged exactly once, on this layer's
         own output. It is stored only as ``self.activity_regularizer``, the
         attribute ``keras.layers.Layer.__call__`` reads when it adds an
-        activity loss; it is NOT forwarded to ``fc1`` or to ``fc2``.
+        activity loss; it is not forwarded to ``fc1`` or to ``fc2``.
         Measured on Keras 3 with ``activity_regularizer='l2'``:
         ``len(layer.losses) == 1``, and that one value equals the
         regularizer evaluated on the tensor ``call()`` returns. If you want
@@ -297,24 +265,10 @@ class SwinMLP(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
 
-        # DECISION plan-2026-08-29T043546-e97b34d8/D-009
-        # `activity_regularizer` is NOT passed to fc1 or to fc2, unlike
-        # `kernel_regularizer` and `bias_regularizer` right beside it. Do not
-        # "restore" it for symmetry with the other two: Keras charges an
-        # activity penalty once per layer that carries one, so forwarding it
-        # to either Dense adds a second and a third penalty on tensors the
-        # caller never named. MEASURED at BASE with all three sites live:
-        # len(layer.losses) == 3, values [0.19189, 0.68476, 0.19189], where
-        # 0.19189 is L2 on this layer's output and 0.68476 is L2 on fc1's.
-        # A penalty on the hidden projection is not reachable through this
-        # constructor by design. See decisions.md D-003, D-009.
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        # These are unbuilt at creation time.
-        # Each Dense takes its OWN clone of both initializers; the rule and
-        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
-        # fc1 and fc2 collide in kernel shape at input_dim = hidden_dim =
-        # output_dim and in bias shape whenever hidden_dim == output_dim --
-        # MEASURED max|delta| = 0.0 at 16/16/16.
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-009: activity_regularizer
+        # is never passed to fc1/fc2 -- Keras charges it once per carrying layer, so forwarding it would add a second and third penalty. See decisions.md D-003, D-009.
+        # Sub-layers are created here, unbuilt; each Dense gets its own
+        # initializer clone (see glu_ffn.py's D-008 for the mechanism).
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
@@ -357,7 +311,7 @@ class SwinMLP(keras.layers.Layer):
         """
         # Guard against re-build (functional reuse / deserialization). Without
         # this, fc2 is re-created below and the previously-built weights are
-        # dropped. Must be the FIRST line of build().
+        # dropped. Must be the first line of build().
         if self.built:
             return
 
@@ -383,8 +337,8 @@ class SwinMLP(keras.layers.Layer):
             name="fc2"
         )
 
-        # CRITICAL: Explicitly build all sub-layers in computational order
-        # This ensures weight variables exist before serialization/deserialization
+        # Sub-layers are built explicitly, in the order call() uses them, so
+        # every weight exists before a save or a restore.
         self.fc1.build(input_shape)
 
         # Compute intermediate shape for subsequent layers
@@ -487,5 +441,3 @@ class SwinMLP(keras.layers.Layer):
             "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

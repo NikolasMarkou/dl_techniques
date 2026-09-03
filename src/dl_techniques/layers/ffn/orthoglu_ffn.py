@@ -1,61 +1,28 @@
-"""
-An orthogonally-regularized Gated Linear Unit FFN.
+"""Gated linear unit FFN with orthogonally-regularized projections.
 
-This layer is a GLU whose two Dense projections are replaced by
-``OrthoBlock``, a Dense layer carrying a soft orthonormality penalty on its
-kernel. The gating decides which features pass; the penalty keeps the space
-they are gated in well conditioned.
-
-The layer runs in three stages:
-
-1. **Project.** An ``OrthoBlock`` maps the input to ``2 * hidden_dim``.
-2. **Gate.** The projection is split in half. The first half goes through the
-   activation and multiplies the second half element-wise. This is the plain
-   GLU mechanism.
-3. **Project out.** A second ``OrthoBlock`` maps the product to
-   ``output_dim``.
-
-The maths, for an input vector ``x``:
-
-    [g, v] = O_in(x)
-    h = activation(g) * v
-    y = O_out(h)
-
-The penalty pushes each block's kernel ``W`` towards ``W^T W = I``. An exactly
-orthogonal ``W`` would give three things:
-
--   **Norm preservation.** ``||Wx||_2 == ||x||_2``, so activation magnitudes
-    neither explode nor vanish through the layer.
--   **Gradient stability.** The backward pass preserves gradient norm too,
-    since ``||W^T g|| == ||g||``.
--   **Feature decorrelation.** Orthonormal rows cannot be redundant, so the
-    block is pushed to learn distinct filters.
-
-The penalty is a loss term, not a hard constraint, so these hold only
-approximately. ``ortho_reg_factor`` sets how hard it pulls.
+The two Dense projections of a GLU are replaced by ``OrthoBlock``, a Dense
+layer carrying a soft orthonormality penalty on its kernel. The gate decides
+which features pass; the penalty pulls each kernel ``W`` towards
+``W^T W = I``, which keeps activation and gradient norms from drifting and
+pushes the block to learn non-redundant filters. The penalty is a loss term,
+not a hard constraint, so these effects hold only approximately;
+``ortho_reg_factor`` sets how hard it pulls.
 
 References:
--   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
-    arXiv:2002.05202. (the GLU mechanism and its variants)
--   Bansal, N., et al. (2018). Can We Gain More from Orthogonality
-    Regularizations in Training Deep Networks? NeurIPS.
--   Cisse, M., et al. (2017). Parseval Networks: Improving Robustness to
-    Adversarial Examples. ICML.
-
+    - Shazeer, N., 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Bansal, N. et al., 2018. Can We Gain More from Orthogonality
+      Regularizations in Training Deep Networks? (NeurIPS)
+    - Cisse, M. et al., 2017. Parseval Networks: Improving Robustness to
+      Adversarial Examples. (ICML)
 """
 
 import keras
 from keras import ops, layers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..orthoblock import OrthoBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.orthoglu_ffn")
@@ -75,7 +42,7 @@ class OrthoGLUFFN(keras.layers.Layer):
     gradient norms from drifting and pushes the block to learn non-redundant
     filters.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -86,7 +53,7 @@ class OrthoGLUFFN(keras.layers.Layer):
               │   input_proj_ortho    │
               │   OrthoBlock(2H)      │
               │   use_bias always     │
-              │   False here          │
+              │   false here          │
               └───────────┬───────────┘
                           │  [..., 2H]
                           ▼
@@ -121,7 +88,7 @@ class OrthoGLUFFN(keras.layers.Layer):
         graph; at dropout_rate=0.0 it is a no-op, so it is not
         drawn as a conditional stage.
 
-    **Inside one OrthoBlock, and where the penalty enters:**
+    Inside one OrthoBlock, and where the penalty enters:
 
     .. code-block:: text
 
@@ -146,7 +113,7 @@ class OrthoGLUFFN(keras.layers.Layer):
                                              ▼
                                       block output
 
-        The regularizer is ALWAYS attached. `ortho_reg_factor`
+        The regularizer is always attached. `ortho_reg_factor`
         only sets its lambda. At 0.0 the orthonormal term
         vanishes and the fixed l1 term remains, so 0.0 does not
         turn the penalty off.
@@ -168,7 +135,7 @@ class OrthoGLUFFN(keras.layers.Layer):
     :param dropout_rate: Dropout rate applied to the gated tensor, in
         ``[0.0, 1.0]``. Active only when ``training=True``. Defaults to 0.0.
     :type dropout_rate: float
-    :param use_bias: Whether the OUTPUT ``OrthoBlock`` carries a bias. The
+    :param use_bias: Whether the output ``OrthoBlock`` carries a bias. The
         input block is constructed with ``use_bias=False`` whatever this says.
         Defaults to True.
     :type use_bias: bool
@@ -409,5 +376,3 @@ class OrthoGLUFFN(keras.layers.Layer):
             }
         )
         return config
-
-# ---------------------------------------------------------------------

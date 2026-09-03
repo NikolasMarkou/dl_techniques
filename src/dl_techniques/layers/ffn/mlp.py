@@ -1,59 +1,25 @@
-"""
-The position-wise feed-forward network from the Transformer.
+"""The position-wise feed-forward network from the Transformer.
 
-This is the second sub-block of a Transformer layer, the one that runs after
-attention. It transforms each token on its own. No token reads another, so
-the whole sequence goes through in parallel as two matmuls.
-
-The shape is expand-then-contract:
-
-1.  ``fc1`` projects each token from its input width up to ``hidden_dim``.
-    The usual expansion is 4x. The wider space gives the activation more
-    room to separate features.
-2.  An activation (GELU by default) runs element-wise on the wide tensor.
-    This is the only non-linearity. Without it the two Dense layers would
-    collapse into a single linear map.
-3.  ``fc2`` projects back down to ``output_dim``. Set ``output_dim`` to the
-    model width so the result can be added to the residual stream.
-
-The maths, for one token vector ``x``:
-
-    FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2
-
-``W_1`` is ``(input_dim, hidden_dim)`` and ``W_2`` is
-``(hidden_dim, output_dim)``. GELU is ``x * Phi(x)``, where ``Phi`` is the
-standard Gaussian CDF. The same weights apply at every position.
-
-This layer holds no residual add and no normalization. The caller owns both.
+Runs after attention in a transformer layer and transforms each token on
+its own, so the whole sequence goes through in parallel as two matmuls:
+an expansion to ``hidden_dim`` (default 4x the model width), an
+element-wise activation, and a contraction back to ``output_dim``. The
+layer holds no residual add and no normalization; the caller owns both.
 
 References:
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
-    (introduced this FFN as a Transformer sub-block)
-
+    - Vaswani, A. et al., 2017. Attention Is All You Need. (NIPS)
 """
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple, Callable
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
-
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose. When
-# the 2026-09-01 ``MLPBlock`` collision was resolved, the tabm copy was the one renamed
-# (``TabMMLPBlock``) because THIS name is API: it is the FFN factory's ``'mlp'`` key
-# (``layers/ffn/factory.py``), so renaming the class here would change a public construction path
-# as well as a live ``Custom>MLPBlock`` alias that pre-migration archives read. Do NOT rename this
-# to ``FFNMLPBlock`` for symmetry with ``TabMMLPBlock``: the bare name is unique again, so every
-# arm of ``tests/test_the_legacy_alias_namespace_has_no_collisions.py`` would stay green while the
-# rename broke both contracts. See decisions.md D-001.
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the bare class name --
+# it is the FFN factory's 'mlp' key and a live legacy alias. See decisions.md.
 @register_dl_technique("dl_techniques.layers.ffn.mlp")
 class MLPBlock(keras.layers.Layer):
     """
@@ -63,13 +29,13 @@ class MLPBlock(keras.layers.Layer):
     ``FFN(x) = activation(x @ W_1 + b_1) @ W_2 + b_2``. Each token is
     transformed on its own, with the same weights at every position.
 
-    The input width does NOT have to equal ``output_dim``. ``fc1`` is built
+    The input width does not have to equal ``output_dim``. ``fc1`` is built
     from whatever width arrives, and ``output_dim`` sets only the output.
 
-    Dropout runs in ONE place, after the activation. There is no dropout on
+    Dropout runs in one place, after the activation. There is no dropout on
     the output of ``fc2``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -109,7 +75,7 @@ class MLPBlock(keras.layers.Layer):
         be positive. Transformers usually set it to 4x the model width.
     :type hidden_dim: int
     :param output_dim: Width of the output, the ``units`` of ``fc2``. Must be
-        positive. It does NOT constrain the input width.
+        positive. It does not constrain the input width.
     :type output_dim: int
     :param activation: Activation applied after ``fc1``. A Keras name
         ('gelu', 'relu', 'swish') or a callable. Defaults to 'gelu'.
@@ -124,7 +90,7 @@ class MLPBlock(keras.layers.Layer):
         ('glorot_uniform', 'he_normal') or an Initializer instance. Each
         Dense layer gets its own clone of it. Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param output_kernel_initializer: Initializer for the OUTPUT projection
+    :param output_kernel_initializer: Initializer for the output projection
         (``fc2``) only. ``None`` (the default) means ``fc2`` gets a clone of
         ``kernel_initializer``, which is the historical behaviour. Pass one
         to give the residual-path projection a different scale from the
@@ -257,7 +223,6 @@ class MLPBlock(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs immediately
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim <= 0:
@@ -265,7 +230,6 @@ class MLPBlock(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store ALL configuration parameters
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.activation_name = activation
@@ -283,15 +247,9 @@ class MLPBlock(keras.layers.Layer):
         # Get activation function once
         self.activation_fn = keras.activations.get(activation)
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
-        # They will be unbuilt until build() is called
-        # fc1 takes its own kernel clone for the same reason fc2 already
-        # does, and BOTH biases are cloned too: the bias half of this defect
-        # is invisible at the 'zeros' default, and with an unseeded
-        # RandomNormal() instance fc1.bias == fc2.bias at
-        # hidden_dim == output_dim (MEASURED max|delta| = 0.0 at 16/16).
-        # The rule and the mechanism are written out at glu_ffn.py,
-        # decisions.md D-008.
+        # Sub-layers are created here, unbuilt; build() builds them.
+        # fc1 and fc2 each get their own kernel and bias clones, never a
+        # shared instance -- see glu_ffn.py's D-008 for the mechanism.
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
@@ -450,5 +408,3 @@ class MLPBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,65 +1,25 @@
-"""
-A low-rank factorized Feed-Forward Network.
+"""Low-rank factorized feed-forward network.
 
-This layer has the same shape as the standard Transformer MLP
-("expand-then-contract"), but each of its two dense projections is factorized.
-Instead of one full-rank weight matrix `W` of shape `(d_in, d_out)`, the layer
-learns `U` of shape `(d_in, rank)` and `V` of shape `(rank, d_out)` and uses
-their product `U @ V` in place of `W`. When `rank << min(d_in, d_out)` this
-cuts both the parameter count and the compute of the projection.
-
-**Architecture Overview:**
-The expand/contract shape is unchanged. Each projection becomes a bottleneck:
-
-1.  Expansion (factorized). The input `(..., input_dim)` reaches `hidden_dim`
-    through a bottleneck of width `rank`:
-    `U1: Dense(rank, no bias) -> V1: Dense(hidden_dim)`.
-
-2.  Non-linear activation. A configurable activation (default GELU) is applied
-    element-wise, followed by dropout.
-
-3.  Contraction (factorized). The activated tensor returns to `output_dim`
-    through a second bottleneck of the same width `rank`:
-    `U2: Dense(rank, no bias) -> V2: Dense(output_dim)`.
-
-The `U` projections carry no bias. A bias there is redundant: the next linear
-map `V` consumes it immediately, so it can be folded into `V`'s own bias. Only
-the `V` projections carry the optional bias.
-
-**Mathematics:**
-For an input vector `x` at a single position the layer computes:
-
-`FFN(x) = V_2(U_2(activation(V_1(U_1(x)))))`
-
-(with biases on the `V` maps when `use_bias=True`). A dense FFN costs
-`input_dim*hidden_dim + hidden_dim*output_dim` kernel parameters. The low-rank
-form costs `rank*(input_dim + hidden_dim) + rank*(hidden_dim + output_dim)`.
-The expansion is cheaper whenever
-`rank < (input_dim*hidden_dim)/(input_dim + hidden_dim)`; the contraction
-follows the same rule with `hidden_dim` and `output_dim` in place of
-`input_dim` and `hidden_dim`.
+Has the same expand-then-contract shape as a standard transformer MLP, but
+each of its two dense projections is factorized: instead of one full-rank
+weight matrix ``W`` of shape ``(d_in, d_out)``, the layer learns ``U`` of
+shape ``(d_in, rank)`` and ``V`` of shape ``(rank, d_out)`` and uses their
+product in place of ``W``. When ``rank`` is small relative to the layer
+widths this cuts both the parameter count and the compute of each
+projection; the ``U`` bottleneck carries no bias since the following ``V``
+map absorbs it.
 
 References:
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS. (the base
-    FFN structure this layer specializes).
--   Hu, E. J., et al. (2021). LoRA: Low-Rank Adaptation of Large Language
-    Models. arXiv:2106.09685. (the low-rank factorization principle, used
-    here as the layer's core structure rather than as an adapter).
-
+    - Vaswani, A. et al., 2017. Attention Is All You Need. (NIPS)
+    - Hu, E. J. et al., 2021. LoRA: Low-Rank Adaptation of Large Language
+      Models. (https://arxiv.org/abs/2106.09685)
 """
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple, Callable
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.lowrank_ffn")
@@ -74,7 +34,7 @@ class LowRankFFN(keras.layers.Layer):
     the layer widths, this costs far fewer kernel parameters than a dense MLP
     with the same hidden and output widths.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -110,7 +70,7 @@ class LowRankFFN(keras.layers.Layer):
         Dropout is always in the graph. At dropout_rate=0.0
         it is a no-op, not absent.
 
-    **One factorized projection (the rank bottleneck):**
+    One factorized projection (the rank bottleneck):
 
     .. code-block:: text
 
@@ -180,9 +140,9 @@ class LowRankFFN(keras.layers.Layer):
     :vartype hidden_dim: int
     :ivar output_dim: The stored output width.
     :vartype output_dim: int
-    :ivar rank: The RESOLVED bottleneck width, always a positive int.
+    :ivar rank: The resolved bottleneck width, always a positive int.
     :vartype rank: int
-    :ivar _rank_arg: The rank as REQUESTED, possibly ``None``. This is what
+    :ivar _rank_arg: The rank as requested, possibly ``None``. This is what
         ``get_config()`` stores.
     :vartype _rank_arg: Optional[int]
     :ivar activation_fn: The resolved activation callable.
@@ -235,7 +195,7 @@ class LowRankFFN(keras.layers.Layer):
         ``kernel_initializer`` and ``bias_initializer``, so ``u1``/``u2`` and
         ``v1``/``v2`` start as different functions at the shapes where they
         coincide - ``u1``/``u2`` when ``hidden_dim`` equals the input width,
-        ``v1``/``v2`` when ``hidden_dim`` equals ``output_dim``. A SEEDED
+        ``v1``/``v2`` when ``hidden_dim`` equals ``output_dim``. A seeded
         initializer still gives them the same weights, which is what asking
         for a seed means.
 
@@ -302,12 +262,8 @@ class LowRankFFN(keras.layers.Layer):
 
         # Sub-layers are created here, per the Keras 3 pattern. The u1/u2
         # bottlenecks are always bias-free; only v1/v2 carry the optional bias.
-        # DECISION plan-2026-08-29T043546-e97b34d8/D-006 -- clone_initializer
-        # per Dense. Do NOT hand the shared ``self.kernel_initializer`` /
-        # ``self.bias_initializer`` instances to these four layers: one
-        # seedless instance drew bit-identical kernels for u1/u2 and for
-        # v1/v2 whenever their shapes coincide (MEASURED max|delta| = 0.0 at
-        # hidden_dim=output_dim=16, rank=4, over a 16-wide input).
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-006: clone_initializer per
+        # Dense, never the shared instance -- a shared instance gave u1/u2 and v1/v2 identical kernels wherever their shapes coincide. See decisions.md.
         self.u1 = keras.layers.Dense(
             units=self.rank,
             use_bias=False,
@@ -443,5 +399,3 @@ class LowRankFFN(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
