@@ -1,52 +1,26 @@
 """
-A residual block: a two-layer MLP plus a learnable projection shortcut.
+A residual block, built by :class:`ResidualBlock`: a two-layer MLP plus a
+learnable projection shortcut.
 
-The block adds two paths. The main path is a two-layer MLP. The shortcut is a
-single Dense layer applied to the same input. The two results are added
-element-wise.
+The main path computes ``F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2``,
+learning the residual rather than the full mapping, so the gradient gets a
+short route back through the shortcut. The shortcut is a Dense layer, not a
+bare identity: it costs ``input_dim * output_dim`` extra parameters, and in
+exchange the block works when the input and output widths differ. Output is
+``y = F(x) + S(x)``.
 
-ResNet's idea is to have the main path learn `F(x) = H(x) - x` rather than
-`H(x)` itself. Two things follow. The gradient gets a short route back through
-the shortcut, so it does not have to survive every layer of the main path. And
-a block that should do nothing is easy to reach: drive the main path's weights
-to zero.
-
-The shortcut here is a Dense layer, not a bare identity. That is a projection
-shortcut. It costs `input_dim * output_dim` extra parameters, and in exchange
-the block works when the input width and the output width differ. When they are
-equal the shortcut still has to learn the identity; it does not get it for free.
-
-Main path, with an optional dropout between the two Dense layers:
-
-    F(x) = W_2 @ activation(W_1 @ x + b_1) + b_2
-
-Shortcut path:
-
-    S(x) = W_s @ x + b_s
-
-Output:
-
-    y = F(x) + S(x)
-
-The bias terms exist only when `use_bias` is True. The dropout layer is created
-only when `dropout_rate > 0`.
+The bias terms exist only when ``use_bias`` is True. The dropout layer is
+created only when ``dropout_rate > 0``.
 
 References:
-    - He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
-      Image Recognition. CVPR.
+    - He et al., 2016. Deep Residual Learning for Image Recognition.
 """
 
 import keras
 from typing import Optional, Union, Any, Tuple, Callable
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.residual_block")
 class ResidualBlock(keras.layers.Layer):
@@ -59,7 +33,7 @@ class ResidualBlock(keras.layers.Layer):
     Because the shortcut is a Dense layer rather than an identity, the input
     width and the output width may differ.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -96,7 +70,7 @@ class ResidualBlock(keras.layers.Layer):
         │   Output (..., output_dim)   │
         └──────────────────────────────┘
 
-    **Width arithmetic (block internals):**
+    Width arithmetic (block internals):
 
     .. code-block:: text
 
@@ -155,7 +129,7 @@ class ResidualBlock(keras.layers.Layer):
     :vartype output_dim: int
     :ivar dropout_rate: The stored dropout rate.
     :vartype dropout_rate: float
-    :ivar activation: The RESOLVED activation callable, not the name that was
+    :ivar activation: The resolved activation callable, not the name that was
         passed. ``get_config()`` serializes it back to a name.
     :vartype activation: Callable
     :ivar use_bias: Whether every Dense layer carries a bias.
@@ -247,13 +221,9 @@ class ResidualBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Create all sub-layers here; build() builds them.
-        # Main path, first Dense: the activation runs inside it.
-
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 -- clone_initializer per layer.
-        # Do NOT restore the shared instance: the skip PROJECTION and the main-path
-        # output layer had bit-identical kernels (MEASURED max|delta| = 0.0), which
-        # makes the residual branch a copy of the transform it is supposed to bypass.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200: clone_initializer per
+        # layer, never a shared instance -- a shared one gave the shortcut
+        # projection and main-path output layer bit-identical kernels (max|delta|=0.0).
         self.hidden_layer = keras.layers.Dense(
             units=self.hidden_dim,
             activation=self.activation,
@@ -394,5 +364,3 @@ class ResidualBlock(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

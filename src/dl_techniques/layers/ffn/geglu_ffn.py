@@ -1,54 +1,33 @@
 """
-A GELU-gated linear unit feed-forward network.
+A GELU-gated linear unit feed-forward network, built by :class:`GeGLUFFN`.
 
-This is a replacement for the position-wise FFN of a transformer block. A
-standard FFN applies one fixed non-linearity to every feature. A GeGLU
-computes a gate from the same input and multiplies the features by it, so it
-can suppress or amplify a feature per token rather than per weight.
+This replaces the position-wise FFN of a transformer block. A standard FFN
+applies one fixed non-linearity to every feature. A GeGLU instead computes a
+gate from the same input and multiplies the features by it, so it can
+suppress or amplify a feature per token rather than per weight. For an input
+vector ``x``:
 
-The layer runs in three stages:
-
-1. **Project and split.** One Dense maps the input to ``2 * hidden_dim``. The
-   result is split in half along the last axis: the first half is the gate,
-   the second is the value. This is equivalent to two separate Dense layers of
-   width ``hidden_dim`` and is usually faster.
-2. **Gate.** The gate half goes through the activation (GELU by default) and
-   multiplies the value half element-wise.
-3. **Project out.** A second Dense maps the product to ``output_dim``.
-
-The maths, for an input vector ``x``:
-
-    [g, v] = W @ x + b         (W is (input_dim, 2 * hidden_dim))
-    h = GELU(g) * v            (element-wise product)
+    [g, v] = W @ x + b     (W is (input_dim, 2 * hidden_dim))
+    h = GELU(g) * v
     y = W_out @ h + b_out
 
-Compare a standard FFN, ``y = W_out @ GELU(W_in @ x + b_in) + b_out``. There
-the non-linearity acts on the same tensor it filters. Here the filter comes
-from a separate projection of the input.
+One wide Dense to ``2 * hidden_dim`` followed by a split is equivalent to two
+separate Dense layers of width ``hidden_dim``, and is usually faster.
 
 References:
--   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
-    arXiv:2002.05202. (introduces GeGLU)
--   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
-    Modeling with Gated Convolutional Networks. ICML. (the original GLU)
-
-GeGLU FFNs are used in several large language models, including PaLM.
-
+    - Shazeer, 2020. GLU Variants Improve Transformer.
+      (https://arxiv.org/abs/2002.05202)
+    - Dauphin et al., 2017. Language Modeling with Gated Convolutional
+      Networks. (the original GLU)
 """
 
 import keras
 from keras import ops, layers, initializers, regularizers, activations
 from typing import Optional, Union, Any, Dict, Callable, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.geglu_ffn")
@@ -69,7 +48,7 @@ class GeGLUFFN(keras.layers.Layer):
     ``activation`` defaults to ``'gelu'``, which is what makes this GeGLU, but
     it is a constructor argument and any Keras activation works.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -112,7 +91,7 @@ class GeGLUFFN(keras.layers.Layer):
         graph; at dropout_rate=0.0 it is a no-op, so it is not
         drawn as a conditional stage.
 
-    **The GeGLU gate path:**
+    The GeGLU gate path:
 
     .. code-block:: text
 
@@ -272,13 +251,8 @@ class GeGLUFFN(keras.layers.Layer):
         # A failure below is re-raised as ValueError so callers see one
         # exception type from this constructor.
         try:
-            # Each Dense takes its OWN clone of both initializers; the rule
-            # and the mechanism are written out at glu_ffn.py, decisions.md
-            # D-008. The two kernels collide at hidden_dim=8, output_dim=16
-            # over an 8-wide input (both (8, 16)) and the two biases collide
-            # whenever output_dim == 2 * hidden_dim -- MEASURED max|delta| =
-            # 0.0 in both cases. Do NOT move the initializers back into
-            # dense_kwargs.
+            # Each Dense takes its own clone of both initializers, never a
+            # shared instance (glu_ffn.py, decisions.md D-008): shapes collide at hidden_dim=8, output_dim=16, measured max|delta|=0.0 shared.
             dense_kwargs = {
                 "use_bias": self.use_bias,
                 "kernel_regularizer": self.kernel_regularizer,
@@ -406,5 +380,3 @@ class GeGLUFFN(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,13 +1,11 @@
 """
 Feed-forward network layers, and one factory that builds any of them.
 
-This package holds 19 FFN / MLP layer classes plus the factory that constructs
-them from a string. ``__all__`` exports **26** names: those 19 classes and 7
-factory-interface names (``FFNType``, ``create_ffn_layer``,
-``create_ffn_from_config``, ``assemble_ffn_config``, ``validate_ffn_config``,
-``get_ffn_info``, ``STRICT_DROPPED_KEY_MARKER``).
-
-The normal way in is the factory:
+This package holds 19 FFN / MLP layer classes plus a factory that constructs
+them from a string key. The factory maps 21 keys onto the 19 classes —
+``'glu'``, ``'reglu'`` and ``'bilinear'`` are three configurations of one
+class, ``GLUFFN``. It is strict: a keyword the chosen type does not declare
+raises ``ValueError`` rather than being silently dropped.
 
 .. code-block:: python
 
@@ -15,52 +13,34 @@ The normal way in is the factory:
 
     ffn = create_ffn_layer('swiglu', output_dim=512)
 
-``FFN_REGISTRY`` in ``factory.py`` maps **21** type keys onto those 19
-classes. There are two more keys than classes because ``'glu'``, ``'reglu'``
-and ``'bilinear'`` are three configurations of one class, ``GLUFFN``; every
-other class has exactly one key. The factory is strict: a keyword the chosen
-type does not declare raises ``ValueError``, it is never dropped.
+Importing a class directly also works, and is the right move when the choice
+is fixed rather than config-driven.
 
-Importing a class directly also works, and is the right move when you already
-know which layer you want and are not driving the choice from a config.
-
-**Architecture Overview:**
+Architecture:
 
 .. code-block:: text
 
     caller
       │
-      ├──────────────────────────┐
-      │ config-driven            │ direct import
-      ▼                          ▼
-    create_ffn_layer(key, **kw)  SwiGLUFFN(output_dim=512)
-      │                          │
-      ▼                          │
-    validate_ffn_config(...)     │
-      │   unknown key      ─► ValueError
-      │   missing required ─► ValueError
-      │   bad value/name   ─► ValueError
-      ▼                          │
-    FFN_REGISTRY[key]['class']   │
-      │                          │
-      ▼                          │
-    strict dropped-key check     │
-      │   undeclared kwarg ─► ValueError
-      ▼                          │
-    ffn_class(**final_params)    │
-      │                          │
-      └────────────┬─────────────┘
-                   ▼
-           keras.layers.Layer
+      ├─────────────────────────┐
+      │ config-driven           │ direct import
+      ▼                         ▼
+    create_ffn_layer(key, **kw) SwiGLUFFN(output_dim=512)
+      │                         │
+      ▼                         │
+    validate_ffn_config(...)    │
+      ▼                         │
+    FFN_REGISTRY[key]['class']  │
+      ▼                         │
+    strict dropped-key check    │
+      ▼                         │
+    ffn_class(**final_params)   │
+      └───────────┬─────────────┘
+                  ▼
+          keras.layers.Layer
 
-    create_ffn_from_config(cfg) pops cfg['type'] and then calls
-    create_ffn_layer. assemble_ffn_config() builds the kwargs
-    dict for a wrapper layer that has generic defaults to push
-    down into whichever FFN the user picked.
-
-``factory.py``'s module docstring carries the full 21-row registry table and
-the dispatch flow in detail. ``README.md`` documents each layer's own
-parameters.
+``factory.py``'s module docstring carries the full registry table and
+dispatch flow. ``README.md`` documents each layer's own parameters.
 """
 
 from .mlp import MLPBlock
@@ -92,10 +72,6 @@ from .factory import (
     get_ffn_info,
     validate_ffn_config
 )
-
-# ---------------------------------------------------------------------
-# Export public interface
-# ---------------------------------------------------------------------
 
 __all__ = [
     # Layer classes

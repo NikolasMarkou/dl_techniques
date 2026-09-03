@@ -1,62 +1,30 @@
 """
-A dual-branch MLP layer: a ReLU-k branch plus a Swish branch, summed.
+A dual-branch MLP layer, built by :class:`PowerMLPLayer`: a ReLU-k branch
+plus a Swish branch, summed.
 
-The layer runs the input through two parallel branches and adds their outputs.
-Both branches end at `units` wide, so the sum is element-wise.
-
-Main branch, `Dense -> ReLUK`:
-
-    y_main = (max(0, W_m @ x + b_m))^k
-
-`ReLUK` is `max(0, x)^k` with an integer `k`. At `k = 1` it is a plain ReLU.
-At `k > 1` the positive half becomes a polynomial of degree `k`, which damps
-small activations and amplifies large ones.
-
-Basis branch, `BasisFunction -> Dense`:
-
-    y_basis = W_b @ swish(x),   swish(x) = x / (1 + exp(-x))
-
-Output:
-
-    y = y_main + y_basis
-
-Two facts about the basis branch are easy to get wrong.
-
-`BasisFunction` (`dl_techniques.layers.activations.basis_function`) is the
-Swish activation and nothing more. It is element-wise, it holds no weights,
-and its output shape equals its input shape. It is NOT a bank of basis
-functions, NOT a sinusoidal or Fourier expansion, and NOT an RBF projection --
-an earlier version of this docstring claimed all three. Read `y_basis` as "one
-linear layer over a smoothly rectified copy of the input", not as a series
-expansion.
-
-The basis Dense layer has no bias. Only the main branch's Dense has one, and
-only when `use_bias` is True.
-
-What the two branches buy you is one sharp, polynomial-tailed rectifier and
-one smooth, everywhere-differentiable one over the same input, added together.
-ReLU-k is zero and flat for negative inputs; Swish is not, so the basis branch
-still passes a signal where the main branch is dead.
+The main branch is ``Dense -> ReLUK``, computing
+``y_main = (max(0, W_m @ x + b_m))^k``; at ``k = 1`` it is a plain ReLU, and
+at ``k > 1`` the positive half becomes a degree-``k`` polynomial. The basis
+branch is ``BasisFunction -> Dense``, computing ``y_basis = W_b @ swish(x)``.
+``BasisFunction`` is the Swish activation and nothing more -- element-wise,
+no weights, not a basis expansion of any kind. The two branches sum to a
+sharp polynomial-tailed rectifier plus a smooth one: ReLU-k is zero and flat
+for negative inputs, so the basis branch still carries a signal there. Only
+the main branch's Dense has a bias.
 
 References:
-    - Ramachandran, P., Zoph, B., & Le, Q. V. (2017). Searching for
-      Activation Functions. arXiv:1710.05941. (Swish, the basis branch.)
+    - Ramachandran et al., 2017. Searching for Activation Functions.
+      (https://arxiv.org/abs/1710.05941)
 """
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from ..activations.relu_k import ReLUK
 from ..activations.basis_function import BasisFunction
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.power_mlp_layer")
@@ -71,7 +39,7 @@ class PowerMLPLayer(keras.layers.Layer):
     ``BasisFunction`` is the Swish activation. It is element-wise and holds no
     weights. It is not a basis expansion of any kind; see the module docstring.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -101,7 +69,7 @@ class PowerMLPLayer(keras.layers.Layer):
         │    Output (..., units)       │
         └──────────────────────────────┘
 
-    **The two branches (block internals):**
+    The two branches (block internals):
 
     .. code-block:: text
 
@@ -116,9 +84,9 @@ class PowerMLPLayer(keras.layers.Layer):
         sum: [.., units] + [.., units] ─► [.., units]
 
         The branches differ only in their non-linearity and in
-        where it sits. The main branch rectifies AFTER the
+        where it sits. The main branch rectifies after the
         projection, so its output is >= 0 before the sum. The
-        basis branch rectifies BEFORE the projection, so its
+        basis branch rectifies before the projection, so its
         output is signed. relu_k is exactly 0 for every negative
         pre-activation; swish is not, so the basis branch still
         carries a signal there. relu_k with k=1 skips the power
@@ -163,7 +131,7 @@ class PowerMLPLayer(keras.layers.Layer):
         uses it.
     :vartype bias_initializer: keras.initializers.Initializer
     :ivar kernel_regularizer: The resolved kernel regularizer, or ``None``.
-        The SAME object goes to both branches.
+        The same object goes to both branches.
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``. Only
         ``main_dense`` gets it, because only it has a bias.
@@ -271,14 +239,8 @@ class PowerMLPLayer(keras.layers.Layer):
 
         # Basis branch projection. Never has a bias.
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-057: clone the initializer
-        # for basis_dense. Sharing one instance with main_dense made the two
-        # kernels identical at init, max|delta| exactly 0.000000e+00.
-        # Do NOT pass self.kernel_initializer here, and do NOT move the clone
-        # into keras.initializers.get. A SEEDED initializer gives 0.0 either
-        # way -- that is the caller's intent, not this guard failing; check it
-        # with an unseeded one (measured 1.3751793 with the clone in place).
-        # See decisions.md D-057.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-057: clone_initializer for
+        # basis_dense, never self.kernel_initializer directly -- sharing gave main_dense and basis_dense identical kernels (max|delta|=0.0). See decisions.md.
         self.basis_dense = keras.layers.Dense(
             units=self.units,
             use_bias=False,
@@ -399,5 +361,3 @@ class PowerMLPLayer(keras.layers.Layer):
         :rtype: str
         """
         return f"PowerMLPLayer(units={self.units}, k={self.k}, name='{self.name}')"
-
-# ---------------------------------------------------------------------

@@ -1,55 +1,32 @@
 """
-The Squared-ReLU feed-forward network from the Primer architecture.
+The Squared-ReLU feed-forward network from the Primer architecture, built by
+:class:`SquaredReLUFFN`.
 
 This is the standard transformer MLP with one change: the intermediate
-non-linearity is fixed to ``relu(x) ** 2`` instead of being configurable. The
-Primer architecture search (So et al. 2021) found this to be one of its most
-effective and most transferable changes to the vanilla FFN.
-
-The block keeps the usual expand-then-contract shape:
-
-1. **Expand.** ``fc1`` projects from ``input_dim`` up to ``hidden_dim``,
-   typically a 4x expansion.
-2. **Square the ReLU.** ``relu`` clamps the negative half to zero and the
-   square sharpens the positive response. There is no ``activation``
-   constructor argument; this non-linearity is the point of the layer.
-3. **Contract.** ``fc2`` projects from ``hidden_dim`` down to ``output_dim``,
-   usually equal to ``input_dim`` so the block can sit inside a residual
-   connection.
-
-The maths, at a single sequence position:
+non-linearity is fixed to ``relu(x) ** 2`` instead of being configurable.
+The Primer architecture search found this one of its most transferable
+changes to the vanilla FFN. At a single sequence position:
 
     FFN(x) = W_2 @ relu(W_1 @ x + b_1)**2 + b_2
 
-where ``W_1``, ``b_1`` go from ``input_dim`` to ``hidden_dim``,
-``relu(z)**2 = max(z, 0)**2`` is element-wise, and ``W_2``, ``b_2`` go from
-``hidden_dim`` to ``output_dim``.
-
-The squared ReLU rises faster than ReLU on the positive half-line and keeps
-exact sparsity on the negative half-line. The Primer search found this
-improves training efficiency.
+The squared ReLU rises faster than plain ReLU on the positive half-line and
+keeps exact sparsity on the negative half-line, which the Primer search found
+improves training efficiency. There is no configurable activation; use
+``MLPBlock`` if the architecture needs one.
 
 References:
--   So, D. R., Mańke, W., Liu, H., Dai, Z., Shazeer, N., & Le, Q. V. (2021).
-    Primer: Searching for Efficient Transformers for Language Modeling.
-    arXiv preprint arXiv:2109.08668.
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS. (the base FFN
-    structure this layer specializes)
-
+    - So et al., 2021. Primer: Searching for Efficient Transformers for
+      Language Modeling. (https://arxiv.org/abs/2109.08668)
+    - Vaswani et al., 2017. Attention Is All You Need. (base FFN structure
+      this layer specializes)
 """
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.squared_relu_ffn")
@@ -65,7 +42,7 @@ class SquaredReLUFFN(keras.layers.Layer):
     the squared ReLU is the one thing that distinguishes this layer from a
     plain MLP block. Use ``MLPBlock`` if you need a configurable activation.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -108,7 +85,7 @@ class SquaredReLUFFN(keras.layers.Layer):
         a residual connection.
     :type output_dim: int
     :param dropout_rate: Dropout rate applied after the squared ReLU. Must be
-        in ``[0.0, 1.0)`` -- the upper bound is EXCLUSIVE here, unlike the
+        in ``[0.0, 1.0)`` -- the upper bound is exclusive here, unlike the
         other FFN layers in this package, so ``1.0`` raises. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether both Dense layers carry a bias. Defaults to True.
@@ -223,12 +200,9 @@ class SquaredReLUFFN(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Create every sub-layer here, unbuilt. build() builds them.
-        # Each Dense takes its OWN clone of both initializers; the rule and
-        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
-        # fc1 and fc2 collide in kernel shape at input_dim = hidden_dim =
-        # output_dim and in bias shape whenever hidden_dim == output_dim --
-        # MEASURED max|delta| = 0.0 at 16/16/16.
+        # Each Dense takes its own clone of both initializers (see
+        # glu_ffn.py, decisions.md D-008): a shared instance replays the
+        # identical draw when shapes collide, measured max|delta|=0.0.
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,

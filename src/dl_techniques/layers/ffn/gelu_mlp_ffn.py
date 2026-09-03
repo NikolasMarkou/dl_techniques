@@ -1,50 +1,32 @@
 """
-The Stable Diffusion 3 feed-forward block, with tanh-approximate GELU.
+The Stable Diffusion 3 feed-forward block, built by :class:`GELUMLPFFN`,
+with tanh-approximate GELU.
 
-This is the SD3 ``FeedForward`` block ported into the dl_techniques FFN
-family. It is the ordinary Transformer expand-then-contract MLP with one
-thing pinned: the activation is the *tanh* approximation of GELU, not the
-exact erf form. That is the whole difference from ``MLPBlock`` with
-``activation='gelu'`` and from ``GeGLUFFN``.
-
-The forward path, applied to each position with shared weights:
-
-1.  ``fc1`` projects from the input width up to ``hidden_dim``.
-2.  ``keras.ops.gelu(x, approximate=True)``, which computes
-    ``0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`` instead of
-    the exact ``x * Phi(x)``.
-3.  Dropout. The layer is always present; at rate 0.0 it is the identity.
-4.  ``fc2`` projects from ``hidden_dim`` down to the output width.
-
-The maths, for one token vector ``x``:
+This is the ordinary transformer expand-then-contract MLP with one thing
+pinned: the activation is the tanh approximation of GELU, not the exact erf
+form. That is the whole difference from ``MLPBlock`` with
+``activation='gelu'`` and from ``GeGLUFFN``. At a single position:
 
     FFN(x) = gelu_tanh(x @ W_1 + b_1) @ W_2 + b_2
 
 ``output_dim`` defaults to ``None``, which means "take the input width",
-resolved in ``build``. The block is then residual-ready with no extra
+resolved in ``build()``. The block is then residual-ready with no extra
 argument, matching SD3's ``FeedForward(dim, dim_out=dim)``.
 
 References:
--   Esser, P., et al. (2024). Scaling Rectified Flow Transformers for
-    High-Resolution Image Synthesis (Stable Diffusion 3). arXiv:2403.03206.
--   Hendrycks, D., & Gimpel, K. (2016). Gaussian Error Linear Units (GELUs).
-    arXiv:1606.08415. (both GELU forms, exact and tanh)
--   Vaswani, A., et al. (2017). Attention Is All You Need. NIPS.
-
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis. (https://arxiv.org/abs/2403.03206)
+    - Hendrycks and Gimpel, 2016. Gaussian Error Linear Units.
+      (https://arxiv.org/abs/1606.08415)
+    - Vaswani et al., 2017. Attention Is All You Need.
 """
 
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.ffn.gelu_mlp_ffn")
@@ -65,7 +47,7 @@ class GELUMLPFFN(keras.layers.Layer):
     dropped straight onto a residual stream. This mirrors SD3's
     ``FeedForward(dim, dim_out=dim)``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -94,12 +76,12 @@ class GELUMLPFFN(keras.layers.Layer):
                          ▼
             Output [..., output width]
 
-        `dropout` is NOT conditional here. The Dropout layer is
+        `dropout` is not conditional here. The Dropout layer is
         always created and always called; at dropout_rate=0.0 it
         is the identity. This differs from MLPBlock, where the
         attribute is None at 0.0.
 
-    **How the output width is resolved:**
+    How the output width is resolved:
 
     .. code-block:: text
 
@@ -108,10 +90,10 @@ class GELUMLPFFN(keras.layers.Layer):
             _resolved_output_dim = 512 from the start.
 
         output_dim = None (the default)
-            __init__ builds a PLACEHOLDER fc2 with hidden_dim
+            __init__ builds a placeholder fc2 with hidden_dim
             units, purely so the attribute exists.
             build() sets _resolved_output_dim = input_shape[-1]
-            and REPLACES fc2 with Dense(that width). No weights
+            and replaces fc2 with Dense(that width). No weights
             exist yet, so nothing is lost.
 
         get_config() stores output_dim, never the resolved
@@ -136,7 +118,7 @@ class GELUMLPFFN(keras.layers.Layer):
 
     :ivar hidden_dim: The stored expansion width.
     :vartype hidden_dim: int
-    :ivar output_dim: The output width as REQUESTED, possibly ``None``. This
+    :ivar output_dim: The output width as requested, possibly ``None``. This
         is what ``get_config()`` stores.
     :vartype output_dim: Optional[int]
     :ivar dropout_rate: The stored dropout rate.
@@ -222,7 +204,6 @@ class GELUMLPFFN(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs immediately
         if hidden_dim <= 0:
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if output_dim is not None and output_dim <= 0:
@@ -230,7 +211,6 @@ class GELUMLPFFN(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store ALL configuration parameters
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.dropout_rate = dropout_rate
@@ -239,7 +219,6 @@ class GELUMLPFFN(keras.layers.Layer):
         # Resolved at build() when output_dim is None.
         self._resolved_output_dim: Optional[int] = output_dim
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern).
         self.fc1 = keras.layers.Dense(
             units=self.hidden_dim,
             use_bias=self.use_bias,
@@ -313,7 +292,7 @@ class GELUMLPFFN(keras.layers.Layer):
         Run the block: ``fc1`` -> GELU-tanh -> dropout -> ``fc2``.
 
         The activation is ``keras.ops.gelu(x, approximate=True)``, the tanh
-        form. It is NOT the exact-erf GELU that ``MLPBlock`` uses.
+        form, not the exact-erf GELU that ``MLPBlock`` uses.
 
         :param inputs: Input tensor of shape ``(..., input_dim)``.
         :type inputs: keras.KerasTensor
@@ -324,7 +303,7 @@ class GELUMLPFFN(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         x = self.fc1(inputs)
-        # SD3-faithful: tanh approximation of GELU (NOT the exact-erf form).
+        # Tanh approximation of GELU, not the exact-erf form.
         x = ops.gelu(x, approximate=True)
         x = self.dropout(x, training=training)
         x = self.fc2(x)
@@ -374,5 +353,3 @@ class GELUMLPFFN(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
-
-# ---------------------------------------------------------------------
