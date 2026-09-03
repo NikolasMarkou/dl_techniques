@@ -1,48 +1,23 @@
-"""
-Ideogram4 DiT transformer block + final layer (4-stream tanh-gated AdaLN).
+"""``Ideogram4TransformerBlock`` and ``Ideogram4FinalLayer``, the Ideogram4 DiT
+block and output head, both conditioned by 4-stream tanh-gated AdaLN.
 
-This module ports the Ideogram4 ``Ideogram4TransformerBlock`` and
-``Ideogram4FinalLayer`` to Keras 3. The block is structurally distinct from the
-repository's existing ``AdaLNZeroConditionalBlock`` (which is 6-stream,
-shift+scale, SiLU-gated, pre-norm-only); see decisions D-002.
+A single ``Dense(4 * hidden_size)`` maps the conditioning vector to
+``(scale_msa, gate_msa, scale_mlp, gate_mlp)``. Gates pass through ``tanh``;
+scales are ``1 + x`` with no shift term, unlike standard DiT AdaLN-zero:
 
-Block conditioning (the structurally-novel bits, ported exactly):
+``x = x + tanh(gate_msa) * norm2(attn(norm1(x) * (1 + scale_msa)))``
+``x = x + tanh(gate_mlp) * norm2(ffn(norm1(x) * (1 + scale_mlp)))``
 
-- ``adaln_modulation`` is a single ``Dense(4 * hidden_size, use_bias=True)``
-  applied to ``adaln_input``; its output is split along the last axis into four
-  equal chunks ``(scale_msa, gate_msa, scale_mlp, gate_mlp)``.
-- **Gates** are passed through ``tanh``; **scales** are ``1 + x``. This is
-  *scale-only* AdaLN (NO shift) -- unlike standard DiT AdaLN-zero which also has
-  a shift term. Do NOT add a shift.
-- ``adaln_input`` may be ``(B, 1, adaln_dim)`` (per-sample, broadcast over L) or
-  ``(B, L, adaln_dim)``. The four modulation tensors are kept rank-3 and
-  broadcast over L accordingly.
-- **Four RMSNorms** form a sandwich: ``norm1`` is the PRE-norm (on the sublayer
-  input) and ``norm2`` is a POST-norm applied to the sublayer *output* before the
-  gate and the residual add::
+Each sublayer sandwiches a pre-norm on its input and a post-norm on its
+output, inside the residual. The final layer applies an affine-free
+LayerNorm, the same scale-only modulation, then a linear head.
 
-      x = x + tanh(gate_msa) * attn_norm2(attn(attn_norm1(x) * (1 + scale_msa)))
-      x = x + tanh(gate_mlp) * ffn_norm2(ffn(ffn_norm1(x) * (1 + scale_mlp)))
-
-  The post-norm-inside-the-residual is unusual but replicated exactly.
-
-Final layer:
-
-- ``LayerNormalization(center=False, scale=False, epsilon=1e-6)`` (no affine),
-  then ``* (1 + adaln_modulation(c))``, then ``Dense(out_channels,
-  use_bias=True)``.
-- ``c`` is the SAME already-SiLU'd ``adaln_input`` the blocks consume; the
-  final layer does NOT apply its own SiLU (D-040). The reference applies SiLU
-  once per modulation Dense and this port hoists that single SiLU into
-  ``Ideogram4Transformer.call``.
+The conditioning vector arriving at both classes must already carry its
+SiLU activation; neither applies its own.
 """
 
 import keras
 from typing import Any, Dict, Optional, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
@@ -50,12 +25,34 @@ from dl_techniques.layers.ffn.swiglu_ffn import SwiGLUFFN
 from dl_techniques.layers.attention.ideogram4_attention import Ideogram4Attention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.transformers.ideogram4_block")
 class Ideogram4TransformerBlock(keras.layers.Layer):
     """Ideogram4 DiT block: 4-stream tanh-gated AdaLN with an RMSNorm sandwich.
+
+    Architecture:
+
+    .. code-block:: text
+
+        x [B, L, hidden]        adaln_input [B, 1|L, adaln_dim]
+        │                                │
+        │                        Dense(4*hidden) -> split 4
+        │                    scale_msa gate_msa scale_mlp gate_mlp
+        ▼                                │
+        norm1 -> * (1+scale_msa)         │
+        ▼                                │
+        attention(cos, sin, segment_ids) │
+        ▼                                │
+        norm2 -> * tanh(gate_msa) -> + x │
+        │                                │
+        ▼                                │
+        norm1 -> * (1+scale_mlp)         │
+        ▼                                │
+        SwiGLU feed_forward              │
+        ▼                                │
+        norm2 -> * tanh(gate_mlp) -> + x◄┘
+        ▼
+        output [B, L, hidden]
 
     :param hidden_size: Model / embedding dimensionality. Must be divisible by
         ``num_heads``.
@@ -423,17 +420,9 @@ class Ideogram4FinalLayer(keras.layers.Layer):
         :return: ``(B, L, out_channels)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-18T140459-7991552f/D-040: `c` arrives ALREADY
-        # SiLU'd. Do NOT re-apply `keras.ops.silu` here. In the PyTorch
-        # reference each modulation Dense sees `silu(c)` exactly once; this port
-        # hoists that single SiLU up to the caller
-        # (`Ideogram4Transformer.call`: `adaln_input = silu(adaln_proj(t_cond))`,
-        # which its module docstring calls what "every block and the output head
-        # consume"), and `Ideogram4TransformerBlock.call` consumes it raw. This
-        # site used to apply a SECOND SiLU, so the velocity head alone was
-        # conditioned on `silu(silu(c))` -- a strictly flatter function of `t`
-        # for every negative component (-2 -> -0.238 -> -0.105) than the trunk
-        # it sits on top of.
+        # DECISION plan-2026-08-18T140459-7991552f/D-040: `c` arrives already
+        # SiLU'd -- do not re-apply keras.ops.silu here.
+        # A second SiLU flattened the velocity head's conditioning relative to the trunk it sits on. See decisions.md.
         scale = 1.0 + self.adaln_modulation(c)
         normed = self.norm_final(x, training=training)
         return self.linear(normed * scale)

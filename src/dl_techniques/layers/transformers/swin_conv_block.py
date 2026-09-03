@@ -1,27 +1,23 @@
-"""
-SwinConvBlock: A hybrid Keras layer that synergistically combines the strengths
-of convolutional neural networks (CNNs) and the Swin Transformer architecture.
+"""``SwinConvBlock``, a layer that splits its input channels into a
+convolutional path and a Swin-attention path, processes each separately, and
+fuses the results.
 
-This block is designed to capture both local and global dependencies in image-like
-data by processing features through two parallel pathways, which are then fused back
-together. The core idea is to leverage the inductive biases and efficiency of
-convolutions for local feature extraction, while simultaneously using the powerful,
-long-range modeling capabilities of window-based self-attention.
+A plain Swin block covers long-range dependencies well but has no local
+inductive bias; a plain conv block is the opposite. Instead of choosing one,
+this block runs both on disjoint channel slices and merges them with a 1x1
+convolution, so the same layer carries both a local receptive field and a
+window-attention receptive field at every stage.
+
+Input and output channels must equal ``conv_dim + trans_dim``.
 """
 
 import keras
 from keras import ops
 from typing import Tuple, Optional, Dict, Any, Union
 
-# ---------------------------------------------------------------------
-# Local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from .swin_transformer_block import SwinTransformerBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.swin_conv_block")
@@ -29,18 +25,16 @@ class SwinConvBlock(keras.layers.Layer):
     """
     Hybrid Swin-Conv block combining transformer and convolutional paths.
 
-    Processes input through parallel convolutional and Swin Transformer
-    pathways that specialize in complementary feature extraction (local
-    patterns vs. long-range context), then fuses results with a 1x1
-    convolution and a main residual connection.
+    Splits its input into a convolutional pathway and a Swin Transformer
+    pathway, processes each, and fuses the results with a 1x1 convolution
+    and a main residual connection:
 
-    The mathematical operations are:
     ``x1 = Conv1x1(x)``, split into ``x_conv, x_trans``,
     ``x_conv' = Conv3x3(ReLU(Conv3x3(x_conv))) + x_conv``,
     ``x_trans' = SwinTransformerBlock(x_trans)``,
     ``output = Conv1x1(Concat[x_conv', x_trans']) + x``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -87,14 +81,10 @@ class SwinConvBlock(keras.layers.Layer):
     :type drop_path_rate: float
     :param block_type: ``'W'`` for regular or ``'SW'`` for shifted windows.
     :type block_type: str
-    :param input_resolution: Optional spatial resolution hint. **Advisory
-        only** — it is stored and serialized but changes nothing. It used to
-        force regular windows when ``<= window_size``; that was removed because
-        the hint is never cross-checked against the real feature map, so a hint
-        smaller than the tensor silently dropped SW-MSA. Whether the shift
-        applies is decided per call by
-        :meth:`SwinTransformerBlock._resolve_shift_size` from the actual
-        ``(H, W)``. See the ``D-004`` block in ``__init__``.
+    :param input_resolution: Optional spatial resolution hint. Advisory only:
+        it is stored and serialized but does not change which windows shift.
+        That decision is made per call from the actual ``(H, W)`` by
+        :meth:`SwinTransformerBlock._resolve_shift_size`.
     :type input_resolution: Optional[int]
     :param mlp_ratio: MLP expansion ratio. Default: 4.0.
     :type mlp_ratio: float
@@ -181,39 +171,8 @@ class SwinConvBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
-        # `input_resolution` is ADVISORY. It is stored, serialized and logged,
-        # and it decides NOTHING about the attention geometry.
-        #
-        # WHAT WAS HERE, and why it is gone: this block used to downgrade
-        # `block_type` "SW" -> "W" whenever `input_resolution <= window_size`.
-        # Two measurements retired it (CPU, HEAD `c5d8ad7e`):
-        #   * REDUNDANT in the honest case. Weight-matched against a plain
-        #     `block_type="W"` block at `(res, ws)` in `(4,8) (8,8) (3,4)
-        #     (4,4)`: `maxdiff 0.000000e+00` at 4 of 4. The base block's
-        #     `SwinTransformerBlock._resolve_shift_size(x)` already drops the
-        #     shift on the SAME rule -- evaluated on the REAL tensor.
-        #   * WRONG when the hint LIES. `input_resolution` is never
-        #     cross-checked against `x.shape`. At `input_resolution=4,
-        #     window_size=8` on a real 16x16 map (2 windows wide) the shift was
-        #     dropped anyway: `maxdiff 6.526413e-01` against the honest block.
-        #     Shipped consequence: `SCUNet._create_stage_blocks` forwards the
-        #     hint blind, halved per stage, so `SCUNet(input_resolution=64,
-        #     window_size=8)` fed 128x128 lost SW-MSA at its bottleneck --
-        #     `maxdiff 1.562450e+00` on the model output.
-        #
-        # WHAT NOT TO DO:
-        #   * Do NOT re-add the downgrade, here or anywhere else. A
-        #     construction-time geometry hint cannot decide a runtime geometry
-        #     question; only `x.shape` can.
-        #   * Do NOT "fix" it by cross-checking `input_resolution` against
-        #     `x.shape` in `call()` and raising. That RELOCATES a guard into a
-        #     forward path for a value that is already unnecessary -- the
-        #     runtime rule is total without it.
-        #   * Do NOT delete `input_resolution` from the signature or from
-        #     `get_config()`. `SCUNet` passes it at 7 sites and it is a live
-        #     serialized key; removing it breaks round-trip on saved models.
-        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004: input_resolution never downgrades block_type here.
+        # A construction-time hint, never cross-checked against the real tensor, silently dropped SW-MSA. See decisions.md.
         self.effective_block_type = self.block_type
         if self.input_resolution is not None and self.input_resolution <= self.window_size:
             logger.debug(
@@ -223,9 +182,6 @@ class SwinConvBlock(keras.layers.Layer):
                 f"decided per call from the real feature map by "
                 f"SwinTransformerBlock._resolve_shift_size."
             )
-
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Following Pattern 2: Composite Layer from the Keras 3 guide
 
         # Initial 1x1 conv to process input
         self.conv1_1 = keras.layers.Conv2D(
@@ -377,57 +333,22 @@ class SwinConvBlock(keras.layers.Layer):
         if len(ops.shape(x)) != 4:
             raise ValueError(f"Expected 4D input tensor, got shape {ops.shape(x)}")
 
-        # Store shortcut for main residual connection
         shortcut = x
 
-        # =============================================
-        # Phase 1: Initial Feature Processing
-        # =============================================
-
-        # Initial 1x1 conv to process and prepare features
         x = self.conv1_1(x, training=training)
 
-        # =============================================
-        # Phase 2: Split into Parallel Pathways
-        # =============================================
-
-        # Split along channel dimension for parallel processing
-        # conv_x: [B, H, W, conv_dim], trans_x: [B, H, W, trans_dim]
+        # conv_x: (B, H, W, conv_dim), trans_x: (B, H, W, trans_dim)
         conv_x, trans_x = ops.split(x, [self.conv_dim], axis=-1)
 
-        # =============================================
-        # Phase 3a: Convolutional Pathway (Local)
-        # =============================================
-
-        # Process through residual conv block for local pattern extraction
         conv_out = self.conv_block(conv_x, training=training)
-
-        # Add internal residual connection for better gradient flow
         conv_x = conv_out + conv_x
 
-        # =============================================
-        # Phase 3b: Transformer Pathway (Global)
-        # =============================================
-
-        # Process through Swin Transformer block for long-range dependencies
-        # (includes its own internal residual connections)
+        # SwinTransformerBlock carries its own internal residual.
         trans_x = self.trans_block(trans_x, training=training)
 
-        # =============================================
-        # Phase 4: Merge and Fusion
-        # =============================================
-
-        # Concatenate pathway outputs along channel dimension
         x = ops.concatenate([conv_x, trans_x], axis=-1)
-
-        # Final 1x1 conv to mix and fuse features from both pathways
         x = self.conv1_2(x, training=training)
 
-        # =============================================
-        # Phase 5: Main Residual Connection
-        # =============================================
-
-        # Add main skip connection combining with original input
         x = x + shortcut
 
         return x

@@ -1,123 +1,28 @@
-"""
-Swin Transformer Block Implementation
+"""``SwinTransformerBlock``, one block of windowed self-attention plus an MLP,
+the unit the Swin Transformer stacks into stages.
 
-This module implements the core SwinTransformerBlock layer, which forms the fundamental
-building block of the Swin Transformer architecture - a hierarchical vision_heads transformer
-that has revolutionized computer vision_heads by achieving state-of-the-art performance across
-multiple tasks including image classification, object detection, and semantic segmentation.
+Full self-attention over an ``(H, W)`` feature map costs ``O((HW)^2)``.
+Windowed attention runs it independently inside non-overlapping ``M x M``
+windows instead, at ``O(M^2 * H * W)`` — linear in image area. Alternating
+regular and shifted windows (``shift_size = window_size // 2``) between
+blocks lets information cross window boundaries: the shift rolls the feature
+map before partitioning, so each shifted window mixes tokens from four
+windows of the previous layer, and a pairwise keep mask stops attention
+between tokens the roll brought together from unrelated regions.
 
-Architecture Overview
---------------------
+``(H, W)`` need not be a multiple of ``window_size``: the block pads
+bottom/right internally, excludes the padding from attention, and crops back
+before the residual add. A statically-known feature map at most one window
+across drops the shift entirely, matching the reference implementation.
 
-The Swin Transformer introduces a paradigm shift from traditional Vision Transformers (ViTs)
-by replacing global self-attention with a more computationally efficient windowed attention
-mechanism. The name "Swin" stands for "Shifted Windows", which refers to the key innovation
-that enables the model to capture both local and global dependencies effectively.
-
-Key Innovations:
-
-1. **Windowed Multi-Head Self-Attention (W-MSA)**: Divides input feature maps into
-   non-overlapping windows and computes self-attention within each window, reducing
-   computational complexity from O((HW)²) to O(M²HW), where M is the fixed window size.
-
-2. **Shifted Window Multi-Head Self-Attention (SW-MSA)**: Shifts windows by ⌊M/2⌋ pixels
-   in both horizontal and vertical directions, enabling cross-window connections and
-   information exchange between neighboring windows.
-
-3. **Hierarchical Architecture**: Uses a pyramid-like structure with patch merging layers
-   that progressively reduce spatial resolution while increasing feature dimensions,
-   similar to CNNs but maintaining transformer capabilities.
-
-4. **Linear Computational Complexity**: Achieves O(HW) complexity with respect to input
-   size, making it suitable for high-resolution images and dense prediction tasks.
-
-Mathematical Formulation
------------------------
-
-Each SwinTransformerBlock performs the following operations:
-
-```
-ẑˡ = W-MSA(LN(zˡ⁻¹)) + zˡ⁻¹                    (for regular blocks)
-ẑˡ = SW-MSA(LN(zˡ⁻¹)) + zˡ⁻¹                   (for shifted blocks)
-zˡ = MLP(LN(ẑˡ)) + ẑˡ
-```
-
-Where:
-- zˡ represents the output features of block l
-- LN denotes LayerNormalization
-- W-MSA/SW-MSA are (shifted) windowed multi-head self-attention
-- MLP is a two-layer feed-forward network with GELU activation
-
-Window Partitioning and Merging
--------------------------------
-
-The attention computation operates on windows of size M×M:
-1. **Partition**: Input (H, W, C) → (⌈H/M⌉×⌈W/M⌉, M, M, C)
-2. **Attention**: Applied within each M×M window independently
-3. **Merge**: Reconstruct to original spatial dimensions (H, W, C)
-
-For shifted windows, cyclic shifts are applied before partitioning and reversed after
-attention computation, enabling cross-window communication.
-
-Performance Characteristics
---------------------------
-
-Computational Complexity:
-- Traditional ViT: O(4hwC² + 2(hw)²C) per block
-- Swin Transformer: O(4hwC² + 2M²hwC) per block
-- Memory efficient for large images due to fixed window size M
-
-Typical configurations:
-- Swin-T: embed_dim=96, depths=[2,2,6,2], num_heads=[3,6,12,24]
-- Swin-S: embed_dim=96, depths=[2,2,18,2], num_heads=[3,6,12,24]
-- Swin-B: embed_dim=128, depths=[2,2,18,2], num_heads=[4,8,16,32]
-- Swin-L: embed_dim=192, depths=[2,2,18,2], num_heads=[6,12,24,48]
-
-Usage Example
-------------
-
-```python
-# Basic Swin Transformer block
-block = SwinTransformerBlock(
-    dim=96,
-    num_heads=3,
-    window_size=7,
-    shift_size=0,  # Regular window attention
-    mlp_ratio=4.0
-)
-
-# Shifted window variant (typical for odd-numbered layers)
-shifted_block = SwinTransformerBlock(
-    dim=96,
-    num_heads=3,
-    window_size=7,
-    shift_size=3,  # Shifted window attention
-    drop_path=0.1  # Stochastic depth
-)
-
-# Process 4D image tensor
-inputs = keras.Input(shape=(224, 224, 96))
-outputs = block(inputs)
-```
-
-References
-----------
-
-- Liu, Z., Lin, Y., Cao, Y., Hu, H., Wei, Y., Zhang, Z., Lin, S. and Guo, B., 2021.
-  "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
-  arXiv preprint arXiv:2103.14030.
-  https://arxiv.org/abs/2103.14030
-
-- ICCV 2021 Best Paper Award Winner
+References:
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
+      using Shifted Windows. (https://arxiv.org/abs/2103.14030)
 """
 
 import keras
 from keras import ops, initializers, regularizers
 from typing import Tuple, Optional, Dict, Any, Union, Callable
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import window_reverse, window_partition
@@ -127,18 +32,9 @@ from ..stochastic_depth import StochasticDepth
 from ..attention.window_attention import WindowAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
-#: Value written into the bottom/right padding that
-#: :meth:`SwinTransformerBlock.call` adds when ``(H, W)`` is not a multiple of
-#: ``window_size``. It is deliberately a MODULE-LEVEL name rather than a literal
-#: so the padded-position isolation guard
-#: (``tests/test_layers/test_transformers/test_swin_shift_mask.py``,
-#: ``TestPaddedPositionIsolation``) can monkeypatch it to a large garbage value
-#: and assert the block's output is BIT-IDENTICAL either way. That is the only
-#: way to observe "no real token attends into padding" from outside the layer:
-#: the padding is manufactured internally, so a caller can never perturb it.
-#: Do NOT inline this constant back into the ``ops.pad`` call.
+#: Fill value for the bottom/right padding :meth:`SwinTransformerBlock.call`
+#: adds. A module-level name, not inlined, so ``TestPaddedPositionIsolation``
+#: can monkeypatch it to garbage and assert the output is unchanged.
 _PADDING_FILL_VALUE: float = 0.0
 
 
@@ -165,7 +61,7 @@ class SwinTransformerBlock(keras.layers.Layer):
     ``x' = x + DropPath(W-MSA(LN(x)))``
     ``y  = x' + DropPath(MLP(LN(x')))``
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -322,9 +218,6 @@ class SwinTransformerBlock(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
         self.activity_regularizer = regularizers.get(activity_regularizer)
-
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Following Pattern 2: Composite Layer from the guide
 
         # Layer normalization layers
         self.norm1 = keras.layers.LayerNormalization(
@@ -501,53 +394,11 @@ class SwinTransformerBlock(keras.layers.Layer):
         """
         ws = self.window_size
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-012
-        # `shift` is a PARAMETER, never `self.shift_size`, because the effective
-        # shift can be decided at RUNTIME (see `_resolve_shift_size`). Reading
-        # `self.shift_size` here would rebuild the region bands for a shift the
-        # roll did not apply -- a mask/roll desynchronization, which is silent.
-        #
-        # A runtime `shift == 0` yields an ALL-ONES predicate, structurally:
-        # `rows >= height - 0` is false for every row in `0..H-1`, so the second
-        # band term vanishes and `row_id = cast(rows >= H - ws)`. Because
-        # `window_partition` requires `H % ws == 0`, the `H - ws` boundary always
-        # lands on a window edge, so every window is uniform in `row_id` (and
-        # likewise in `col_id`) and `equal(m_i, m_j)` is 1 everywhere. An
-        # all-ones keep predicate is bit-identical to `attention_mask=None`
-        # (`apply_attention_mask` builds its bias with `ops.where`, so an
-        # all-kept row receives no bias at all) -- measured, not assumed.
-        # See decisions.md D-012 (plan-2026-07-31T042809-ddc92265).
+        # DECISION plan-2026-07-31T042809-ddc92265/D-012: read `shift` (the
+        # parameter), never `self.shift_size` -- the effective shift can differ at runtime. See decisions.md.
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-002
-        # The mask is built HERE, per call, from the DYNAMIC `(B, H, W)` of the
-        # incoming tensor — not in `build()` from static dims.
-        #
-        # WHY: `models/vision/thera/tails.py` builds every one of its Swin blocks with
-        # `(B, None, None, embed_dim)` on purpose, and its `call()` reflect-pads
-        # H and W up to a window-size multiple using SYMBOLIC `ops.mod` amounts.
-        # The spatial extent is therefore unknown at build time AND varies per
-        # call by design (THERA's hypernetwork feeds arbitrary crop sizes).
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT move this to `build()` and read `input_shape[1:3]`. They are
-        #     `None` for the only production consumer with a shifted block, so
-        #     the mask would be built from `None` — a `TypeError` at best and a
-        #     wrong-geometry mask at worst.
-        #   * Do NOT copy `progressive_focused_attention.py`'s build-time
-        #     `ValueError` on dynamic `H`/`W`. That layer has no dynamic-shape
-        #     consumer; this one does, and the raise would make `thera/pro` and
-        #     `thera/plus` dead on forward — trading a silent correctness bug for
-        #     a loud outage. `_resolve_shift_size` deliberately skips a `None`
-        #     dim -- it neither raises nor downgrades -- for exactly this reason.
-        #   * Do NOT cache the mask on `self` keyed by nothing. The geometry
-        #     changes per call; a stale cache is a silent wrong-geometry mask.
-        #   * Do NOT re-derive the window order with an index formula instead of
-        #     calling `window_partition` below. A mismatch between the mask's
-        #     window order and the data's is SILENT: no shape error, finite
-        #     output, wrong attention.
-        # ACCEPTED COST: a handful of cheap elementwise ops per forward pass,
-        # negligible next to the attention matmul.
-        # See decisions.md D-002 (plan-2026-07-31T042809-ddc92265).
+        # DECISION plan-2026-07-31T042809-ddc92265/D-002: build the mask here, per
+        # call, from the dynamic (B, H, W) -- thera builds blocks with (B, None, None, C), so build() cannot see the shape. See decisions.md.
         rows = ops.arange(height, dtype="int32")
         cols = ops.arange(width, dtype="int32")
 
@@ -568,39 +419,9 @@ class SwinTransformerBlock(keras.layers.Layer):
         )
 
         if valid_height is not None or valid_width is not None:
-            # DECISION plan-2026-07-31T132403-b3f540cb/D-010
-            # Padded rows/cols get their own label PARITY so no real token can
-            # attend into padding and no padded token can attend into real
-            # data. `region` is doubled and the "is padding" bit is added, so
-            # the existing `ops.equal` comparison below does the whole job:
-            # two slots match iff they share a region AND share validity.
-            #
-            # The validity image is expressed in ROLLED coordinates, exactly
-            # like the data. The roll by `-shift` means the token sitting at
-            # pre-partition index `a` came from index `(a + shift) mod H`, so
-            # validity must be sampled at `(a + shift) mod H` -- NOT at `a`.
-            # (`_build_swmsa_keep_mask` deliberately does not roll the region
-            # image itself: the `rows >= H - shift` band IS the wrap-status
-            # relation, oracle-verified twice in test_swin_shift_mask.py.)
-            #
-            # WHAT NOT TO DO, and why:
-            #   * Do NOT reuse the region formula on the PADDED `H, W` and stop
-            #     there. Padding then simply receives a region id like any real
-            #     band, and real tokens attend into it. That is a SILENT LEAK
-            #     -- no shape error, finite output, wrong attention (G-05).
-            #   * Do NOT sample validity at `a` instead of `(a + shift) mod H`.
-            #     It is a no-op at `shift == 0` and silently mislabels a
-            #     `shift`-wide band of rows/cols at every shifted block.
-            #   * Do NOT mark padded slots as "attend to nothing". A padded
-            #     query row would then be FULLY masked and hand live work to
-            #     the fully-masked-row rescue in `layers/attention/common.py`;
-            #     letting padding attend to padding keeps every row non-empty,
-            #     and those outputs are cropped away before the residual add.
-            #   * Do NOT skip this when `shift == 0`. Unshifted windows on a
-            #     padded feature map leak just as badly; `call()` therefore
-            #     builds a mask whenever padding is (or may be) present, not
-            #     only when the block is shifted.
-            # See decisions.md D-010 (plan-2026-07-31T132403-b3f540cb).
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-010: give padded rows/cols
+            # their own label parity so no real token attends into padding and vice versa.
+            # Validity is sampled at (a + shift) mod H, in rolled coordinates like the data. See decisions.md.
             v_h = height if valid_height is None else valid_height
             v_w = width if valid_width is None else valid_width
             rows_src = ops.mod(rows + shift, height)
@@ -666,87 +487,11 @@ class SwinTransformerBlock(keras.layers.Layer):
 
         ws = self.window_size
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-006
-        # At a statically-known `H == window_size` (or `W == window_size`) the
-        # feature map is a SINGLE window, and this block follows the reference
-        # Swin rule: `if min(input_resolution) <= window_size: shift_size = 0`.
-        # The shift is dropped entirely -- no roll, no mask, plain full W-MSA.
-        #
-        # The single return value is deliberate: `call()` derives BOTH the roll
-        # and the mask from it, so they cannot desynchronize. A roll without a
-        # mask is exactly the F-01 bug this plan fixes; a mask without a roll is
-        # equally wrong.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT restore a `H < 2 * window_size` guard. Its premise -- that
-        #     the 3x3 region bands "degenerate" below that size -- was FALSIFIED
-        #     by measurement: `_build_swmsa_keep_mask` is array-equal to two
-        #     independent oracles at `(8,8,8,4)` and `(7,7,7,3)`. The guard
-        #     rejects provably correct geometry, and it crashed 9 passing tests
-        #     across `models/vision/image_restoration/scunet` (8x8 bottleneck, ws=8) and
-        #     `models/vision/swin_transformer` (7x7 stage 4, ws=7 -- canonical Swin-T
-        #     at 224x224). Because `window_partition` requires `H % ws == 0`, a
-        #     static `H < 2*ws` can only ever mean `H == ws`.
-        #   * Do NOT region-mask the single full window instead. It is a legal
-        #     mask, but it is not what upstream Swin does, and this block is
-        #     meant to be checkpoint-compatible with that lineage.
-        #   * Do NOT raise on a dynamic (`None`) dim. `models/vision/thera/tails.py`
-        #     builds every Swin block with `(B, None, None, C)` on purpose; a
-        #     raise there trades a silent correctness bug for a dead model
-        #     (D-002, assumption A2).
-        #   * Do NOT push this into `models/vision/image_restoration/scunet` / `models/vision/swin_transformer`
-        #     by passing `shift_size=0` there. That widens the blast radius and
-        #     leaves every future caller exposed to the same trap.
-        # ACCEPTED COST: not numerically neutral. `use_relative_position_bias`
-        # defaults to True, so dropping the roll changes which token sits at
-        # which within-window position and therefore changes the RPB pairing.
-        # `scunet` and `swin_transformer` numerics move at their `H == ws`
-        # stages. Accepted as an extension of invariant I5 (F-01 is
-        # deliberately not output-neutral).
-        # See decisions.md D-006 (plan-2026-07-31T042809-ddc92265).
+        # DECISION plan-2026-07-31T042809-ddc92265/D-006: a statically-known
+        # H or W == window_size is a single window -- drop the shift entirely (roll and mask must never desync). See decisions.md.
 
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-011
-        # D-006 (re-derived) — the rule is evaluated against the UNPADDED dims,
-        # and its `H < ws` raise is GONE.
-        #
-        # D-006's stated premise was: "because `window_partition` requires
-        # `H % ws == 0`, a static `H < 2*ws` can only ever mean `H == ws`".
-        # That premise is FALSIFIED by this block's own padding (D-001/F-05):
-        # an unpadded `H` in the OPEN interval `(ws, 2*ws)` -- 5, 6, 7 at
-        # `ws=4` -- used to crash inside `window_partition` before the rule was
-        # ever exercised on it, and is now a legitimate MULTI-window geometry
-        # (it pads up to `2*ws`). The conclusion the premise was used to reach
-        # nevertheless still holds, for a different reason: the reference rule
-        # is `min(input_resolution) <= window_size`, so `ws < H < 2*ws` keeps
-        # the shift either way. The CODE is therefore unchanged for every
-        # `H >= ws`, and no geometry any shipped consumer reaches resolves to a
-        # different shift than it did before (re-verified by executing
-        # `models/vision/image_restoration/scunet`, `models/vision/swin_transformer` and `models/vision/thera`).
-        #
-        # The `H < ws` RAISE, by contrast, does NOT survive: padding makes such
-        # an `H` legally paddable up to exactly `ws`, which is one window, and
-        # the rule's own `<=` covers it. Keeping the raise would leave the
-        # block accepting `H=3, ws=4` at `shift_size=0` while refusing the
-        # identical geometry at `shift_size=2` -- an asymmetry with no
-        # justification once padding exists.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT evaluate this against the PADDED dims. `H = 3` pads to
-        #     `ws`, and `H = 6` (`ws=4`) pads to `8 == 2*ws`; testing the padded
-        #     extent would keep the shift on a feature map whose REAL content
-        #     is one window wide, diverging from upstream Swin and from every
-        #     checkpoint trained against it.
-        #   * Do NOT restore the `H < ws` raise "for safety". It is now dead
-        #     surface that only fires for `shift_size > 0`, and it rejects a
-        #     geometry the very same block handles fine at `shift_size == 0`.
-        #   * Do NOT restore an `H < 2*ws` guard either -- see the D-006 text
-        #     above; it was already refuted by measurement and crashed 9
-        #     passing tests across two shipped models.
-        # ACCEPTED COST: `SwinTransformerBlock(shift_size>0)` no longer raises
-        # on a sub-window feature map; it silently degrades to plain W-MSA over
-        # one padded window. A caller who passed a too-small map by mistake now
-        # gets a result instead of an error.
-        # See decisions.md D-011 (plan-2026-07-31T132403-b3f540cb).
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-011: rule evaluated against
+        # UNPADDED dims; the old H < ws raise is gone -- padding makes that size legally one window. See decisions.md.
         single_window = False
         has_dynamic_dim = False
         for axis_index in (1, 2):
@@ -762,43 +507,9 @@ class SwinTransformerBlock(keras.layers.Layer):
         if not has_dynamic_dim:
             return self.shift_size
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-012
-        # A dynamic (`None`) spatial dim gets the SAME single-window rule, but
-        # evaluated at RUNTIME rather than at trace time.
-        #
-        # WHY: without this the block is SHAPE-DEPENDENT. The identical layer,
-        # with identical weights, on the identical tensor, returned two
-        # different answers depending only on whether `H` was statically known:
-        # traced against `TensorSpec([None, None, None, C])` at `H == W == ws`
-        # the loop above could not see the geometry, the static fallback could
-        # not fire, and the block kept the roll + region mask while an eager
-        # call on the same tensor dropped both. Measured at
-        # `(dim=32, heads=4, ws=4, shift=2)`, `(1,4,4,32)`, seeded weights:
-        # 512/512 elements differed, max |diff| 251.4 (97% relative).
-        # `models/vision/thera/tails.py` is the one consumer that builds every block
-        # with `(B, None, None, C)`, so it took the opposite branch from
-        # `models/vision/swin_transformer` at identical geometry.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT "fix" this by making the dynamic path region-mask a single
-        #     window instead. That is a legal mask but it is NOT the reference
-        #     rule, so it would leave the two paths disagreeing anyway (the RPB
-        #     pairing differs the moment the roll is applied).
-        #   * Do NOT branch in Python on `ops.shape(x)[1] > ws`. Inside a trace
-        #     that is a symbolic bool; `if` on it either raises or silently
-        #     picks whichever branch the tracer folded, which is precisely the
-        #     shape-dependence being removed here.
-        #   * Do NOT hoist this to `build()`. The dim is `None` there by
-        #     construction for the only dynamic consumer (D-002).
-        #   * Do NOT return a float or a bool. The value is multiplied into
-        #     `ops.arange` band comparisons and fed to `ops.roll`; int32 is what
-        #     both accept.
-        # ACCEPTED COST: `ops.roll` now receives a tensor shift on the dynamic
-        # path (measured to work eagerly, under `tf.function` and under
-        # `jit_compile=True`), and the mask is built unconditionally on that
-        # path — an all-ones predicate when the runtime shift is 0, which is
-        # bit-identical to `attention_mask=None` (measured).
-        # See decisions.md D-012 (plan-2026-07-31T042809-ddc92265).
+        # DECISION plan-2026-07-31T042809-ddc92265/D-012: a dynamic spatial dim
+        # gets the same single-window rule evaluated at runtime, as an int32 tensor -- without it the
+        # block gives different answers for a static vs dynamic shape of the identical tensor. See decisions.md.
         runtime_shape = ops.shape(x)
         multi_window = ops.logical_and(
             ops.greater(runtime_shape[1], ws),
@@ -867,42 +578,12 @@ class SwinTransformerBlock(keras.layers.Layer):
         B, H, W, C = input_shape[0], input_shape[1], input_shape[2], input_shape[3]
         shortcut = x
 
-        # =============================================
-        # Multi-head Self-Attention Block
-        # =============================================
-
         # Layer Norm 1 (pre-attention normalization)
         x = self.norm1(x, training=training)
 
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-001
-        # Pad bottom/right up to a `window_size` multiple INSIDE the block, run
-        # windowed attention on the padded map, and crop back to the caller's
-        # `(H, W)` before the residual add. `window_partition` hard-requires
-        # `H % ws == 0` (`utils/tensors.py::window_partition`), and without this
-        # the block was a hard crash on any other geometry (F-05).
-        #
-        # This is the `(ws - H % ws) % ws` idiom already shipped inside
-        # `layers/attention/window_attention.py`'s `'grid'` partition mode --
-        # reused rather than re-invented, and dtype/shape-agnostic across static
-        # Python ints and runtime int32 scalars.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT pad BEFORE `norm1`. `shortcut` is captured on the unpadded
-        #     input and LayerNormalization is per-token; padding first would
-        #     normalize manufactured zeros into non-zero garbage for no reason.
-        #   * Do NOT crop AFTER the residual add. `shortcut` has the unpadded
-        #     shape, so the add would broadcast-fail (or, worse, broadcast).
-        #   * Do NOT pad unconditionally. The `pad_h == pad_w == 0` fast path
-        #     below skips the `ops.pad` entirely, which is what keeps the two
-        #     CPU-pinned golden-value modules (`test_scunet`,
-        #     `test_swin_transformer`, both on divisible geometry) bit-identical.
-        #   * Do NOT push the padding out to the callers instead. Three
-        #     callers already solve this three different ways
-        #     (`models/vision/image_restoration/scunet` at model level, `models/vision/thera` at stack level,
-        #     `swin_conv_block.py` by refusing at construction); a fourth
-        #     convention inside the block is the deliberate cost of making the
-        #     block itself total. See decisions.md D-001 for that trade-off.
-        # See decisions.md D-001 (plan-2026-07-31T132403-b3f540cb).
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-001: pad bottom/right to a
+        # window_size multiple inside the block (after norm1, before the residual add), never at the caller.
+        # window_partition hard-requires H % ws == 0; without this the block crashed on any other geometry. See decisions.md.
         ws = self.window_size
         static_h, static_w = x.shape[1], x.shape[2]
         if static_h is not None and static_w is not None:
@@ -1001,10 +682,6 @@ class SwinTransformerBlock(keras.layers.Layer):
             x = shortcut + self.drop_path_layer(x, training=training)
         else:
             x = shortcut + x
-
-        # =============================================
-        # MLP Block
-        # =============================================
 
         shortcut = x
 

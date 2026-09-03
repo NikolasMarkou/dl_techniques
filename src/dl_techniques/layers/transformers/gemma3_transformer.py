@@ -1,42 +1,21 @@
-"""
-The Gemma 3 transformer block: sandwich-normalized grouped-query attention and a
-GeGLU feed-forward network, with the attention window selected per block.
+"""``Gemma3TransformerBlock``, sandwich-normalized grouped-query attention plus
+a GeGLU feed-forward network, with the attention window chosen per block.
 
-The block's distinguishing feature is that normalization brackets each sublayer
-rather than merely preceding it — `x = x + PostNorm(Attn(PreNorm(x)))`, and likewise
-for the FFN, four RMSNorm layers in all. The pre-norm half is the familiar
-conditioning fix. The post-norm half addresses something pre-norm alone does not: in
-a pure pre-norm transformer nothing ever rescales what a branch contributes, so the
-residual stream's variance accumulates monotonically with depth. Normalizing the
-branch *output* before the addition bounds each block's contribution while leaving
-the residual path itself free of any normalization, so gradients still reach layer
-zero unattenuated.
+Each sublayer is bracketed by RMSNorm rather than only preceded by it —
+``x = x + PostNorm(Sublayer(PreNorm(x)))`` for both attention and the FFN,
+four norms per block. The post-norm half bounds each branch's contribution
+to the residual stream, which a pure pre-norm transformer leaves unbounded
+as depth grows, while the residual path itself stays unnormalized so
+gradients still reach layer zero.
 
-Masking is built here rather than at the model, because it depends on this block's
-own `attention_type`. `_create_attention_mask` works in *block* semantics
-(`True` = suppress): `j > i` for causality, OR-ed with `(i - j) >= sliding_window_size`
-when the block is windowed, so a windowed block sees a band rather than a full
-triangle. The result is inverted once to the *attend* semantics the attention layer
-expects, and then explicitly expanded to `(1, q, k)`. That leading axis is
-load-bearing and not decorative broadcasting: a rank-2 mask is interpreted
-downstream as a padding mask rather than a full attention bias, which would
-silently discard causality. A caller-supplied `attention_mask` (1 = attend,
-0 = pad) is cast to boolean and AND-ed in as `(batch, 1, k)`, masking padded *keys*
-only — padded query rows still produce output, which the loss is expected to ignore.
-
-Attention and the FFN come from the library factories (`group_query` and `geglu`)
-rather than being implemented here. Two consequences follow that a reader comparing
-against the published model should know. The grouped-query layer supports
-`qk_norm_type`, but this block does not pass it, so there is no QK normalization.
-And `rope_theta` is left at the attention layer's default for every block, whereas
-the report uses a much larger RoPE base in the global-attention layers specifically
-so they stay usable at long context; the interleaved pattern here therefore does not
-reproduce the paper's long-context behaviour.
-
-Sub-layers are created in `__init__` and built explicitly in `build`, the Modern
-Keras 3 composite-layer pattern: every weight variable exists before any weight
-restoration runs, so a saved block reloads into the same variable tree it was
-serialized from rather than into a half-materialized one.
+The causal (and, when windowed, banded) mask is built inside the block
+because it depends on this block's own ``attention_type``, then inverted to
+the attend-semantics the attention layer expects and expanded to rank 3 so
+it is not read as a padding mask. Attention and the FFN come from the
+``group_query`` and ``geglu`` factories; this block does not pass
+``qk_norm_type`` (no QK normalization) and leaves ``rope_theta`` at the
+attention layer's default for every block, so its long-context behaviour
+differs from the published model's raised RoPE base in global layers.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
@@ -53,14 +32,8 @@ References:
       (https://arxiv.org/abs/1910.07467)
 """
 
-
-
 import keras
 from typing import Any, Dict, Literal, Optional, Tuple, Union
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.activations import gelu_tanh
@@ -87,7 +60,7 @@ class Gemma3TransformerBlock(keras.layers.Layer):
     inverted to the attend-semantics the attention layer expects and expanded to
     rank 3 so it is not mistaken for a padding mask.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -130,11 +103,11 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         │   Output [B, T, hidden_size]         │
         └──────────────────────────────────────┘
 
-    **Masking:**
+    Masking:
 
     .. code-block:: text
 
-        internal (True = SUPPRESS)          full_attention   sliding_window
+        internal (True = suppress)          full_attention   sliding_window
           causal:      j > i                    ■ □ □ □          ■ □ □ □
           far past:    (i - j) >= W             ■ ■ □ □          ■ ■ □ □
           (OR-ed when windowed)                 ■ ■ ■ □          □ ■ ■ □
@@ -142,11 +115,11 @@ class Gemma3TransformerBlock(keras.layers.Layer):
                                                              (W = 2, ■ = attend)
 
         logical_not  →  attend semantics
-        [None, :, :] →  (1, q, k)   rank 3 is REQUIRED: a rank-2 mask is read
+        [None, :, :] →  (1, q, k)   rank 3 is required: a rank-2 mask is read
                                     downstream as a padding mask, dropping causality
         AND padding  →  (batch, q, k) from attention_mask[:, None, :]
 
-    **Mathematical Operations:**
+    Mathematical operations:
 
     .. code-block:: text
 
@@ -264,7 +237,6 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         self.norm_eps = norm_eps
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
-        # CREATE all sub-layers in __init__ (Modern Keras 3 pattern)
         self.input_layernorm = create_normalization_layer(
             "rms_norm", epsilon=norm_eps, name="input_layernorm"
         )
@@ -291,18 +263,9 @@ class Gemma3TransformerBlock(keras.layers.Layer):
             name="attention",
         )
 
-        # Create GeGLU FFN using framework factory
-        # DECISION plan-2026-08-23T091307-9a110062/D-501
-        # The activation is the TANH APPROXIMATION, not the string "gelu".
-        # HuggingFace's Gemma3TextConfig.hidden_activation defaults to
-        # "gelu_pytorch_tanh" (= functools.partial(F.gelu, approximate="tanh")):
-        #   https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/configuration_gemma3.py
-        # Keras' "gelu" string is approximate=False (exact/erf), so the bare
-        # string was silently the WRONG form. Do NOT revert to "gelu": that is
-        # inference-changing (max|erf - tanh| = 4.732e-04 per call), not a
-        # cosmetic difference. The callable is a registered serializable, so
-        # GeGLUFFN.get_config()'s keras.activations.serialize round-trips it.
-        # See decisions.md D-501.
+        # DECISION plan-2026-08-23T091307-9a110062/D-501: use the tanh-approximate
+        # GELU callable, never the "gelu" string -- Keras' string is exact/erf, HF's Gemma3 default is tanh.
+        # Do not revert: max|erf - tanh| = 4.732e-04 per call, inference-changing. See decisions.md.
         self.ffn = create_ffn_layer(
             "geglu",
             hidden_dim=self.ffn_hidden_size,
@@ -325,7 +288,6 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         :param input_shape: Shape of the input to ``call``.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Build all sub-layers, ensuring weights are created
         self.input_layernorm.build(input_shape)
         self.post_attention_layernorm.build(input_shape)
         self.pre_feedforward_layernorm.build(input_shape)
@@ -333,7 +295,6 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         self.attention.build(input_shape)
         self.ffn.build(input_shape)
 
-        # ALWAYS call parent build at the end
         super().build(input_shape)
 
     def compute_output_spec(
@@ -362,7 +323,7 @@ class Gemma3TransformerBlock(keras.layers.Layer):
         return keras.KerasTensor(shape=inputs.shape, dtype=inputs.dtype)
 
     def _create_attention_mask(self, seq_len: int) -> keras.KerasTensor:
-        """Build this block's attention mask in SUPPRESS semantics.
+        """Build this block's attention mask in suppress semantics.
 
         ``True`` means MASK, the inverse of what the attention layer consumes;
         ``call`` performs the single inversion. Causality is ``j > i``; a
@@ -410,30 +371,18 @@ class Gemma3TransformerBlock(keras.layers.Layer):
 
         seq_len = keras.ops.shape(inputs)[1]
 
-        # The internal mask generation creates a boolean mask where True means
-        # MASK. The underlying attention layer expects a mask where True
-        # means ATTEND. So, we create our internal mask and then invert it.
+        # Internal mask is True = mask; the attention layer wants True = attend.
         internal_mask_to_hide = self._create_attention_mask(seq_len)
         final_mask_to_attend = keras.ops.logical_not(internal_mask_to_hide)
 
-        # Expand dims to make the mask shape unambiguous for the attention
-        # layer. It must be at least 3D to avoid being misinterpreted as a
-        # padding mask. Shape becomes (1, q_len, k_len) for broadcasting
-        # across the batch dim.
+        # Rank 3, (1, q_len, k_len), so it broadcasts and is never read as a padding mask.
         final_mask_to_attend = final_mask_to_attend[None, :, :]
 
-        # The `attention_mask` argument is a padding mask (e.g., from a
-        # tokenizer). Conventionally, it's 1 for tokens to attend to,
-        # 0 for padding (mask).
+        # attention_mask is the tokenizer padding convention: 1 = attend, 0 = pad.
         if attention_mask is not None:
-            # Cast to boolean where True means ATTEND.
             padding_mask_to_attend = keras.ops.cast(attention_mask, "bool")
 
-            # Combine masks. A position is attended if it's not a future/
-            # sliding token AND it's not a padding token.
-            # Broadcasting:
-            # final_mask_to_attend:   (1,     q_len, k_len)
-            # padding_mask_to_attend: (batch, 1,     k_len)
+            # (1, q, k) AND (batch, 1, k) -> (batch, q, k).
             # Result:                 (batch, q_len, k_len)
             final_mask_to_attend = keras.ops.logical_and(
                 final_mask_to_attend, padding_mask_to_attend[:, None, :]
