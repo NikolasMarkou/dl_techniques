@@ -1,55 +1,16 @@
-"""
-MothNet: Bio-Mimetic Feature Generation for Few-Shot Learning.
+"""Three Keras layers modeling the insect olfactory network for few-shot learning.
 
-This module provides an implementation of MothNet, a computational
-model of the insect olfactory network designed to excel at machine learning
-tasks with limited training data. Its primary function is to serve as a
-powerful, automatic feature generator that can be prepended to any standard
-ML classifier, creating a hybrid "insect cyborg" model with significantly
-enhanced performance.
-
-Core Concept: The "Insect Cyborg"
-----------------------------------
-The central idea is to address the "limited data" problem by leveraging the
-remarkable data efficiency of biological neural networks. Moths can learn to
-identify new odors from just a few exposures. MothNet mimics the key
-architectural principles that enable this rapid learning, extracting rich,
-"orthogonal" class-relevant information that conventional ML methods often miss.
-
-When these bio-mimetic features are concatenated with the original data and
-fed into a standard classifier (like an SVM or a simple Neural Net), the
-resulting "cyborg" model demonstrates a dramatic reduction in test error
-(20-60% reported in original research) and a significant decrease in data
-requirements (e.g., matching 100-sample performance with only 30 samples).
-
-Key Architectural Components
-----------------------------
-The MothNet architecture is a feed-forward cascade of three specialized layers,
-each inspired by a specific region of the insect brain:
-
-1.  **AntennalLobeLayer (AL)**: Contrast Enhancement
-    -   **Biological Analogy**: The Antennal Lobe, the first olfactory
-        processing center.
-    -   **Mechanism**: Implements competitive inhibition, where neurons suppress
-        each other's activity. This creates a "winner-take-more" dynamic that
-        sharpens the input signal, enhances contrast, and suppresses noise.
-
-2.  **MushroomBodyLayer (MB)**: High-Dimensional Sparse Coding
-    -   **Biological Analogy**: The Mushroom Body, a center for associative
-        learning and memory.
-    -   **Mechanism**: Projects the sharpened signal from the AL into a much
-        higher-dimensional space using sparse, random connections. It then
-        enforces sparse firing via a top-k winner-take-all mechanism. This
-        transformation untangles complex patterns and creates unique, robust,
-        and highly discriminative combinatorial codes for each input.
-
-3.  **HebbianReadoutLayer**: Associative Learning
-    -   **Biological Analogy**: Synaptic plasticity in readout neurons.
-    -   **Mechanism**: Uses a local, correlation-based Hebbian learning rule
-        ("fire together, wire together") instead of backpropagation. Weights
-        are strengthened based on the co-occurrence of pre-synaptic (MB) and
-        post-synaptic (target class) activity. This forms direct associations
-        between the sparse MB codes and their corresponding classes.
+``AntennalLobeLayer``, ``MushroomBodyLayer`` and ``HebbianReadoutLayer`` form a
+feed-forward cascade that generates features to prepend to a standard
+classifier. Instead of backpropagation throughout, the design copies three
+mechanisms from moth olfaction: a linear layer with global competitive
+inhibition sharpens the input; a fixed sparse random projection expands it
+into a much higher-dimensional space and keeps only the top-k active units,
+producing a combinatorial code; and a readout layer updates its weights with
+a local Hebbian rule, ``dW = alpha * (x^T * y) / batch_size``, rather than
+gradient descent. Concatenating the resulting features with the original
+input before a normal classifier is reported to reduce test error and the
+amount of training data needed.
 """
 
 import keras
@@ -75,7 +36,7 @@ class AntennalLobeLayer(keras.layers.Layer):
     then ``y = activation(h - alpha * mu)`` (competitive response), where
     ``alpha`` controls inhibition strength.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -251,7 +212,7 @@ class MushroomBodyLayer(keras.layers.Layer):
     both robust to noise and highly discriminative, providing massive
     representational capacity (e.g., ``C(4000, 400) ~ 10^459`` patterns).
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -465,7 +426,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
     codes is critical -- it ensures selective associations between specific
     neuron patterns and their corresponding classes.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 

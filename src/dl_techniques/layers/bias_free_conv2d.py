@@ -10,10 +10,10 @@ Dropping beta is necessary but NOT sufficient for degree-1 homogeneity
 ``BatchNormalization(center=False)``, which still subtracts a ``moving_mean``
 that training moves off zero (an additive constant), and ``'layernorm'`` divides
 by a per-input std, making it scale-*invariant* (degree-0) rather than
-equivariant. The ``'batchnorm'`` spelling is kept as-is here on purpose: it is
-the name every ``.keras`` config written before ``'bias_free_batchnorm'`` existed
-carries, so redefining it would change the layer class those checkpoints reload
-into. Bias-free denoiser *models* therefore map the name at the model level via
+equivariant. The ``'batchnorm'`` spelling stays as-is: it is the name every
+``.keras`` config written before ``'bias_free_batchnorm'`` existed carries, so
+redefining it would change the layer class those checkpoints reload into.
+Bias-free denoiser models map the name at the model level via
 :func:`resolve_denoiser_normalization` below, not here.
 
 Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
@@ -36,9 +36,9 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 def resolve_denoiser_normalization(normalization_type: str) -> str:
-    """Resolve a bias-free *denoiser model's* normalization name to a layer name.
+    """Resolve a bias-free denoiser model's normalization name to a layer name.
 
-    This is the MODEL-level policy for the bias-free denoiser family
+    This is the model-level policy for the bias-free denoiser family
     (``models/vision/bias_free_denoisers/``): inside a model whose entire reason to exist
     is degree-1 homogeneity ``f(a*x) = a*f(x)``, the name ``'batchnorm'`` means the
     homogeneous variance-only :class:`~dl_techniques.layers.norms.bias_free_batch_norm.BiasFreeBatchNorm`,
@@ -46,14 +46,11 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
     unchanged, so the function is idempotent and the set of reachable layer types is
     unchanged.
 
-    It exists so that the ``'batchnorm'`` -> ``BiasFreeBatchNorm`` decision has exactly
-    ONE home. Call it from a model builder, never from a layer: the LAYER vocabulary of
-    :class:`BiasFreeConv2D` / :class:`BiasFreeResidualBlock` is deliberately left intact
+    Call it from a model builder, never from a layer: the layer vocabulary of
+    :class:`BiasFreeConv2D` / :class:`BiasFreeResidualBlock` stays intact
     (there, ``'batchnorm'`` still builds stock BN), which is what keeps every ``.keras``
     checkpoint saved before this function existed reloading byte-identically -- layers
     deserialize from their own serialized ``normalization_type``, never through a builder.
-
-    Interface contract:
 
     :param normalization_type: A layer-level normalization name. Any string is accepted;
         validation is the caller's job (the builders and the layers both already raise on
@@ -71,22 +68,9 @@ def resolve_denoiser_normalization(normalization_type: str) -> str:
         >>> resolve_denoiser_normalization('layernorm')
         'layernorm'
     """
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' is resolved to
-    # BiasFreeBatchNorm HERE, at the bias-free denoiser MODEL level, and nowhere else.
-    #   * Do NOT push this mapping down into BiasFreeConv2D / BiasFreeResidualBlock. Their
-    #     'batchnorm' branch must keep building stock BatchNormalization(center=False):
-    #     that is the layer vocabulary a saved config names, so redefining it would silently
-    #     change the layer class every pre-existing .keras denoiser reloads into.
-    #   * Do NOT re-add the mapping to `src/train/bfunet/train_unet_denoiser.py` or
-    #     `train_bfcnn_denoiser.py`. Those two copies (plan_2026-07-05_2199bb8e D-006/D-007,
-    #     deleted here) were correct compensations placed one level too high: a caller using
-    #     `create_bfunet_denoiser` / `create_bfcnn_denoiser` directly never went through them
-    #     and got stock BN. Their "Do NOT revert" guarantee -- never stock BN -- is preserved,
-    #     and now holds for the model API too.
-    #   * Do NOT raise on an unrecognized value here; the builders validate before calling.
-    # Measured (CPU, one fit() step, model factory at defaults): stock BN gives a relative
-    # homogeneity error of 6.8e-03 (bfunet) / 1.3e-02 (bfcnn); BiasFreeBatchNorm gives
-    # 0.0 at c=0.5 and 1.1e-06 at c=3.0 (float32 round-off). See decisions.md D-020.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: map 'batchnorm' here only, at the
+    # model level; keep BiasFreeConv2D/BiasFreeResidualBlock's own 'batchnorm' branch as stock BN.
+    # Stock BN gives homogeneity error 6.8e-03/1.3e-02 vs 0.0/1.1e-06 for BiasFreeBatchNorm. See decisions.md.
     if normalization_type == 'batchnorm':
         return 'bias_free_batchnorm'
     return normalization_type
@@ -106,7 +90,7 @@ class BiasFreeConv2D(keras.layers.Layer):
     The mathematical formulation is ``y = activation(BN(Conv2D(x)))`` where BN
     has no beta term and Conv2D has ``use_bias=False``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -177,10 +161,8 @@ class BiasFreeConv2D(keras.layers.Layer):
             raise TypeError(f"kernel_size must be int or tuple of 2 ints, got {type(kernel_size)}")
         if not isinstance(use_batch_norm, bool):
             raise TypeError(f"use_batch_norm must be boolean, got {type(use_batch_norm)}")
-        # DECISION plan_2026-07-04_58ac8e73/D-002: normalization_type / dropout_rate are
-        # ADDITIVE — defaults ('batchnorm', 0.0) reproduce the original layer byte-for-byte
-        # (same BatchNormalization(center=False), no Dropout sublayer). Do NOT change the
-        # default branch; ~30 existing bfunet tests + bfunet_conditional.py depend on it.
+        # DECISION plan_2026-07-04_58ac8e73/D-002: normalization_type/dropout_rate are additive;
+        # defaults ('batchnorm', 0.0) must reproduce the original layer byte-for-byte. See decisions.md.
         if normalization_type not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
             raise ValueError(
                 "normalization_type must be 'batchnorm', 'layernorm' or "
@@ -188,7 +170,6 @@ class BiasFreeConv2D(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation = activation
@@ -198,13 +179,12 @@ class BiasFreeConv2D(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.dropout_rate = dropout_rate
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        # Bias-free convolution
+        # Convolution has no bias so the output stays scale-equivariant.
         self.conv = layers.Conv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
             padding='same',
-            use_bias=False,  # Key: no bias terms for scaling invariance
+            use_bias=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name=f'{self.name}_conv'
@@ -216,22 +196,21 @@ class BiasFreeConv2D(keras.layers.Layer):
         if self.use_batch_norm:
             if self.normalization_type == 'layernorm':
                 self.batch_norm = layers.LayerNormalization(
-                    center=False,  # Key: no bias/beta parameter
-                    scale=True,    # Keep gamma/scale parameter for feature scaling
+                    center=False,
+                    scale=True,
                     name=f'{self.name}_bn'
                 )
             elif self.normalization_type == 'bias_free_batchnorm':
-                # DECISION plan_2026-07-05_2199bb8e/D-006: 'bias_free_batchnorm' is an
-                # ADDITIVE third option -> the variance-only BiasFreeBatchNorm (degree-1
-                # homogeneous at inference); default 'batchnorm' (stock keras BN) unchanged.
+                # DECISION plan_2026-07-05_2199bb8e/D-006: 'bias_free_batchnorm' is an additive
+                # third option (degree-1 homogeneous at inference); default 'batchnorm' unchanged. See decisions.md.
                 self.batch_norm = BiasFreeBatchNorm(
                     use_scale=True,  # Keep gamma/scale parameter for feature scaling
                     name=f'{self.name}_bn'
                 )
             else:
                 self.batch_norm = layers.BatchNormalization(
-                    center=False,  # Key: no bias/beta parameter
-                    scale=True,    # Keep gamma/scale parameter for feature scaling
+                    center=False,
+                    scale=True,
                     name=f'{self.name}_bn'
                 )
         else:
@@ -289,7 +268,6 @@ class BiasFreeConv2D(keras.layers.Layer):
         if self.activation_layer is not None:
             logger.debug(f"Activation layer ready: {self.activation}")
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -344,10 +322,8 @@ class BiasFreeConv2D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            # DECISION plan_2026-07-04_58ac8e73/D-002: serialize a layer-instance
-            # activation (e.g. LeakyReLU(0.1)) so it round-trips through .keras; the
-            # string/function path stays byte-identical to the prior form (mirrors
-            # ConvUNextStem D-005). Do NOT emit a dict for a plain string activation.
+            # DECISION plan_2026-07-04_58ac8e73/D-002: serialize a layer-instance activation
+            # (e.g. LeakyReLU(0.1)) so it round-trips; string/function path stays byte-identical. See decisions.md.
             'activation': (
                 keras.layers.serialize(self.activation)
                 if isinstance(self.activation, keras.layers.Layer)
@@ -384,7 +360,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
     where ``F(x) = BiasFreeConv2D(BiasFreeConv2D(x))``. All paths are bias-free
     to preserve scaling invariance essential for robust blind denoising.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -457,10 +433,8 @@ class BiasFreeResidualBlock(keras.layers.Layer):
                 raise ValueError(f"kernel_size tuple must contain 2 positive integers, got {kernel_size}")
         else:
             raise TypeError(f"kernel_size must be int or tuple of 2 ints, got {type(kernel_size)}")
-        # DECISION plan_2026-07-04_58ac8e73/D-002: additive kwargs; defaults reproduce
-        # the original residual block byte-for-byte. normalization_type applies to BOTH
-        # inner convs; dropout is applied INSIDE the block after conv1's activation only
-        # (conv2 is linear, pre-addition), mirroring "MLP dropout inside the block".
+        # DECISION plan_2026-07-04_58ac8e73/D-002: additive kwargs; defaults reproduce the
+        # original block byte-for-byte. dropout applies only after conv1's activation, not conv2. See decisions.md.
         if normalization_type not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
             raise ValueError(
                 "normalization_type must be 'batchnorm', 'layernorm' or "
@@ -468,7 +442,6 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
-        # Store configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation = activation
@@ -478,8 +451,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        # First conv layer with batch norm and activation (+ dropout after activation)
+        # First conv layer applies activation; dropout follows it when enabled.
         self.conv1 = BiasFreeConv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
@@ -555,7 +527,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',
-                use_bias=False,  # Key: no bias for scaling invariance
+                use_bias=False,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'{self.name}_shortcut'
@@ -566,7 +538,6 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         # Addition and activation layers don't need explicit build
         logger.debug("Built residual block components")
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -625,7 +596,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             'filters': self.filters,
             'kernel_size': self.kernel_size,
             # DECISION plan_2026-07-04_58ac8e73/D-002: layer-instance activation round-trip
-            # (mirrors BiasFreeConv2D + ConvUNextStem D-005); string path byte-identical.
+            # mirrors BiasFreeConv2D; string path stays byte-identical. See decisions.md.
             'activation': (
                 keras.layers.serialize(self.activation)
                 if isinstance(self.activation, keras.layers.Layer)

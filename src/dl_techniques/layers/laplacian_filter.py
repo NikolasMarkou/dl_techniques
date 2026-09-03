@@ -1,49 +1,15 @@
-"""
-This module provides Keras layers for applying Laplacian filters to image data,
-a fundamental technique in classical image processing for edge detection.
+"""Keras layers for Laplacian edge filters and an invertible Laplacian pyramid level.
 
-The Laplacian operator is a second-order derivative filter that is highly sensitive
-to rapid changes in intensity. In the context of images, this makes it an excellent
-tool for edge detection, as it highlights regions like edges, corners, and lines
-where pixel values change abruptly. The output of a Laplacian filter is typically
-zero in areas of constant intensity, positive on one side of an edge, and negative on
-the other side, creating a characteristic 'zero-crossing' at the edge itself.
-
-Since the second derivative is very sensitive to noise, the Laplacian operator is
-almost always combined with a Gaussian smoothing filter first to reduce noise before
-edge detection. This module implements this concept through several common approximations:
-
--   **Difference of Gaussians (DoG):** A simple and efficient approximation where a
-    Gaussian-blurred version of the image is subtracted from the original.
--   **Laplacian of Gaussian (LoG):** A more direct approach where a single kernel that
-    combines both the Gaussian smoothing and the Laplacian differentiation is convolved
-    with the image.
--   **Discrete Kernel:** The use of a small, fixed integer kernel (e.g., a 3x3 matrix)
-    that directly approximates the Laplacian operator.
-
-This module offers two layers to leverage these techniques:
-
-1.  **`LaplacianFilter`:** A straightforward implementation based exclusively on the
-    Difference of Gaussians (DoG) method. It uses an internal `GaussianFilter` layer
-    and is simple to use for general-purpose edge detection.
-
-2.  **`AdvancedLaplacianFilter`:** A more flexible and powerful layer that allows the user
-    to explicitly choose between the three different implementation methods ('dog', 'log',
-    or 'kernel'). This enables experimentation with different trade-offs between
-    computational efficiency, filter accuracy, and kernel size.
-
-It's important to note that these layers implement fixed, non-trainable filters. Their
-parameters (the kernel shapes) are determined by mathematical formulas, not learned
-from data. They serve as classical feature extractors that can be seamlessly integrated
-into a modern deep learning pipeline.
-
-Beyond these single-scale DoG edge-detector filters, this module also provides
-``LaplacianPyramidLevel``, an exactly-invertible multi-scale split/merge pyramid LEVEL.
-This is a distinct operation from the edge-detector filters above: rather than producing
-a single edge map, it downsamples a low-frequency residual to the next pyramid level and
-keeps the complementary high-frequency band, such that ``merge(split(x)) == x`` to float
-precision. It is channel-preserving and signal-level (no learnable channel change), which
-is exactly what makes its reconstruction identity hold.
+``LaplacianFilter`` finds edges with a Difference of Gaussians: it blurs the
+input and subtracts the blur from the original. ``AdvancedLaplacianFilter``
+adds two more ways to compute the same operator: convolving with a Laplacian
+of Gaussian kernel, or with a small fixed discrete kernel such as the classic
+3x3 stencil. All three modes are non-trainable; the kernel comes from a
+formula, not from training. ``LaplacianPyramidLevel`` is a different
+operation: it splits an image into a downsampled low-frequency band and a
+same-resolution high-frequency residual, and merging the two reconstructs the
+input to float precision, since the residual is defined as the difference
+rather than estimated.
 """
 
 import keras
@@ -73,7 +39,7 @@ class LaplacianFilter(keras.layers.Layer):
     approximation of the Laplacian of Gaussian operator. The filter is
     non-trainable with parameters determined by mathematical formulas.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -153,8 +119,7 @@ class LaplacianFilter(keras.layers.Layer):
         else:
             raise ValueError(f"Invalid sigma value: {sigma}")
 
-        # CREATE sub-layer in __init__ (following modern Keras 3 pattern)
-        # Strides must be (1, 1) to preserve shape for the subtraction operation.
+        # Strides fixed to (1, 1) so the blurred output matches the input shape.
         self.gaussian_filter = GaussianFilter(
             kernel_size=self.kernel_size,
             strides=(1, 1),
@@ -246,7 +211,7 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
     Each method trades off between computational efficiency and filter accuracy.
     All filters are non-trainable with fixed mathematical kernels.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -311,7 +276,6 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         if method not in ['dog', 'log', 'kernel']:
             raise ValueError(f"Method '{method}' not supported. Use 'dog', 'log', or 'kernel'.")
 
-        # Store ALL configuration parameters
         self.method = method
         self.kernel_size = kernel_size
         self.strides = tuple(strides) if isinstance(strides, list) else strides
@@ -327,7 +291,6 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
         else:
             raise ValueError(f"Invalid sigma value: {sigma}")
 
-        # CREATE sub-layer in __init__ for 'dog' method (following modern Keras 3 pattern)
         if self.method == 'dog':
             # For DoG, strides must be (1, 1) to ensure blurred image has the
             # same shape as the input for the subtraction operation.
@@ -496,44 +459,46 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
 class LaplacianPyramidLevel(keras.layers.Layer):
     """Explicit, signal-level Laplacian pyramid split/merge for one level.
 
-    **Intent**: Provide an exactly-invertible, auditable multi-scale frequency
-    decomposition for a single pyramid level. Unlike :class:`LaplacianFilter`
-    (a single-scale edge detector), this layer splits an input into a
-    downsampled low-frequency band and a same-resolution high-frequency
-    residual, such that merging them reconstructs the input to float precision.
-    The split is purely signal-level (channel-preserving, NO learnable channel
-    change), which is exactly what makes the reconstruction identity hold.
+    Splits an input into a downsampled low-frequency band and a
+    same-resolution high-frequency residual, and merges them back exactly.
+    Unlike :class:`LaplacianFilter`, which produces one edge map with no
+    inverse, this layer's split is channel-preserving and defines the high
+    band as the residual ``x - up(low)``, so ``merge(split(x)) == x`` holds to
+    float precision regardless of blur quality.
 
-    **Architecture**:
-    ```
-    split(x):
-        x (B, H, W, C)
-           |
-           +-----------------------------+
-           |                             |
-           v                             |
-        blur = GaussianFilter(x)         |
-           |                             |
-           v                             |
-        low  = BlurPool2D(blur)          |  (B, H/2, W/2, C)
-           |                             |
-           v                             |
-        up   = UpSampling2D(low)         |  (B, H, W, C)
-           |                             |
-           +------------> high = x - up(low)   (B, H, W, C)
+    Architecture:
 
-    merge(low, high):
-        x_rec = high + up(low)  ==  x   (exact reconstruction identity)
-    ```
+    .. code-block:: text
 
-    Args:
-        blur_kernel_size: Height/width of the Gaussian blur kernel as a
-            length-2 sequence of positive ints. Defaults to ``(5, 5)``.
-        blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
-            Defaults to ``-1``.
-        blur_trainable: If ``True`` the blur kernel is learnable; the default
-            ``False`` keeps the split a fixed, auditable signal operation.
-        **kwargs: Additional keyword arguments for the Layer base class.
+        split(x):
+            x (B, H, W, C)
+               |
+               +-----------------------------+
+               |                             |
+               v                             |
+            blur = GaussianFilter(x)         |
+               |                             |
+               v                             |
+            low  = BlurPool2D(blur)          |  (B, H/2, W/2, C)
+               |                             |
+               v                             |
+            up   = UpSampling2D(low)         |  (B, H, W, C)
+               |                             |
+               +------------> high = x - up(low)   (B, H, W, C)
+
+        merge(low, high):
+            x_rec = high + up(low)  ==  x   (exact reconstruction)
+
+    :param blur_kernel_size: Height/width of the Gaussian blur kernel as a
+        length-2 sequence of positive ints. Defaults to ``(5, 5)``.
+    :type blur_kernel_size: Tuple[int, int]
+    :param blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
+        Defaults to ``-1``.
+    :type blur_sigma: float
+    :param blur_trainable: If ``True`` the blur kernel is learnable; the
+        default ``False`` keeps the split a fixed, auditable signal operation.
+    :type blur_trainable: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
 
     Input shape:
         4D tensor: `(batch_size, height, width, channels)`.
@@ -542,18 +507,6 @@ class LaplacianPyramidLevel(keras.layers.Layer):
         Tuple of two 4D tensors ``(low, high)`` where
         ``low`` is `(batch_size, height / 2, width / 2, channels)` and
         ``high`` is `(batch_size, height, width, channels)`.
-
-    The decomposition is channel-preserving and operates at the raw signal
-    level, so ``merge(split(x)) == x`` holds to float precision independent of
-    blur quality (``high`` is DEFINED as the residual ``x - up(low)``).
-
-    See Also:
-        :class:`LaplacianFilter` -- a single-scale Difference-of-Gaussians edge
-        detector. It produces one same-resolution edge map (no downsampling and
-        no inverse). ``LaplacianPyramidLevel`` is a different operation: a
-        multi-scale, exactly-invertible split/merge that downsamples a
-        low-frequency residual to the next level and keeps the complementary
-        high-frequency band.
 
     :raises ValueError: If ``blur_kernel_size`` is not a length-2 sequence of
         positive ints, ``blur_sigma`` is not a number, or ``blur_trainable`` is
@@ -612,7 +565,6 @@ class LaplacianPyramidLevel(keras.layers.Layer):
         self.up = keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
 
     def build(self, input_shape) -> None:
-        # Build sublayers in computational order; super().build() LAST.
         self.blur.build(input_shape)
         blur_out = self.blur.compute_output_shape(input_shape)
         self.down.build(blur_out)
