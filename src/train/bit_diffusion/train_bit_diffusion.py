@@ -77,6 +77,7 @@ from train.common import (
     build_optimizer,
     config_values_from_args,
     create_callbacks,
+    default_experiment_name,
     prepare_run_dir,
     resolved_run_dir,
     set_seeds,
@@ -171,7 +172,10 @@ class TrainingConfig:
     :param seed: Seed for every RNG source.
     :param output_dir: Results root. A RELATIVE path resolves against the REPO
         ROOT via ``resolved_run_dir``, never the working directory.
-    :param experiment_name: Run directory name under ``output_dir``.
+    :param experiment_name: Run directory name under ``output_dir``. ``None``
+        (the default) is filled by ``__post_init__`` with a TIMESTAMPED name,
+        so two runs never write into the same directory; pass
+        ``--experiment-name`` to pin one.
     :param smoke: Shrink the run to a wiring proof.
     """
 
@@ -220,7 +224,7 @@ class TrainingConfig:
 
     # -- output ---------------------------------------------------------
     output_dir: str = "results"
-    experiment_name: str = "bit_diffusion"
+    experiment_name: Optional[str] = None
     smoke: bool = False
 
     def __post_init__(self) -> None:
@@ -263,6 +267,22 @@ class TrainingConfig:
         if self.warmup_epochs < 0:
             raise ValueError(
                 f"warmup_epochs must be non-negative, got {self.warmup_epochs}"
+            )
+
+        if self.experiment_name is None:
+            # The default used to be the CONSTANT "bit_diffusion", and
+            # `prepare_run_dir` appends NO timestamp of its own (it is just
+            # `Path(output_dir) / experiment_name`), so every default run wrote
+            # into `results/bit_diffusion/` and the second run OVERWROTE the
+            # first run's config.json, best_model.keras, final_model.keras,
+            # training_history.json and training_log.csv in place -- silently,
+            # since nothing errors on an existing run directory. Do NOT restore
+            # a constant default. The bridge preset and the variant are in the
+            # name because they are the fields that change what the artifacts
+            # MEAN: a checkpoint is not loadable under a different preset
+            # (different token/bridge shapes) or a different variant.
+            self.experiment_name = default_experiment_name(
+                "bit_diffusion", self.bridge_preset, self.variant
             )
 
     @property
@@ -481,8 +501,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Relative paths resolve against the REPO ROOT, "
                              "never the current directory, so a run from "
                              "anywhere writes to <repo>/results/.")
-    output.add_argument("--experiment-name", type=str,
-                        default=defaults.experiment_name)
+    output.add_argument("--experiment-name", type=str, default=None,
+                        help="Run directory under --output-dir. Default: a "
+                             "TIMESTAMPED name, so a second run never "
+                             "overwrites the first run's artifacts.")
     output.add_argument("--gpu", type=int, default=None,
                         help="GPU index for setup_gpu (process-level; not a "
                              "config field).")
