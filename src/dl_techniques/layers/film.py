@@ -1,72 +1,54 @@
-"""
-Feature-wise Linear Modulation (FiLM) Layer.
+"""FiLMLayer, a Feature-wise Linear Modulation layer.
 
-Applies learned affine transformations to feature maps based on conditioning
-vectors, enabling conditional generation, style transfer, and multi-modal
-learning. The FiLM transformation is FiLM(x, z) = (lambda + gamma) * x + beta,
-where gamma, beta = f(z) are learned projections from the conditioning vector z.
+A style vector is projected to a per-channel scale (gamma) and shift (beta),
+and the content tensor is transformed as output = content * (scale_factor +
+gamma) + beta. Instead of a fixed conditioning path, gamma and beta each get
+their own configurable projection, so multiplicative-only, additive-only, or
+combined modulation can be selected per instance, with optional layer
+normalization and dropout on the style vector before projection.
 
 References:
-    1. Perez, E., et al. (2018). "FiLM: Visual reasoning with a general
-       conditioning layer." AAAI. https://doi.org/10.1609/aaai.v32i1.11671
-    2. De Vries, H., et al. (2017). "Modulating early visual processing by
-       language." NeurIPS. https://papers.nips.cc/paper/7237
-    3. Dumoulin, V., et al. (2018). "Feature-wise transformations." Distill.
-       https://doi.org/10.23915/distill.00011
+    - Perez et al., 2018. FiLM: Visual reasoning with a general conditioning
+      layer. (https://doi.org/10.1609/aaai.v32i1.11671)
+    - De Vries et al., 2017. Modulating early visual processing by language.
+      (https://papers.nips.cc/paper/7237)
+    - Dumoulin et al., 2018. Feature-wise transformations.
+      (https://doi.org/10.23915/distill.00011)
 """
 
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.film")
 class FiLMLayer(keras.layers.Layer):
     """
-    Highly configurable Feature-wise Linear Modulation (FiLM) Layer.
+    Configurable Feature-wise Linear Modulation (FiLM) layer.
 
-    Applies an affine transformation to content tensors based on style/condition
-    vectors. Learns projections from style vectors to generate per-channel scaling
-    (gamma) and shifting (beta) parameters: output = content * (scale_factor + gamma)
-    + beta. Supports multiplicative-only, additive-only, or combined modulation modes,
-    with optional layer normalization and dropout on the conditioning vector.
+    Projects a style vector to per-channel gamma and beta, then applies
+    ``output = content * (scale_factor + gamma) + beta``. Multiplicative-only,
+    additive-only, or combined modulation is selected via ``modulation_mode``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌──────────────────────┐  ┌──────────────────────┐
-        │Content [B, H, W, C]  │  │Style Vector [B, S]   │
-        └──────────┬───────────┘  └──────────┬───────────┘
-                   │                         ▼
-                   │              ┌──────────────────────┐
-                   │              │ LayerNorm (optional) │
-                   │              │ Dropout (optional)   │
-                   │              └──────────┬───────────┘
-                   │                 ┌───────┴───────┐
-                   │                 ▼               ▼
-                   │          ┌───────────┐   ┌───────────┐
-                   │          │Dense_gamma│   │Dense_beta │
-                   │          │(act, bias)│   │(act, bias)│
-                   │          └─────┬─────┘   └─────┬─────┘
-                   │                ▼               ▼
-                   │          Gamma [B,1,1,C]  Beta [B,1,1,C]
-                   │                │               │
-                   ▼                ▼               ▼
-        ┌─────────────────────────────────────────────────┐
-        │  Output = Content * (lambda + Gamma) + Beta     │
-        └──────────────────────┬──────────────────────────┘
-                               ▼
-        ┌─────────────────────────────────────────────────┐
-        │  Output [B, H, W, C]                            │
-        └─────────────────────────────────────────────────┘
+        content [B,H,W,C]        style [B,S]
+              |                     |
+              |              LayerNorm (optional)
+              |              Dropout (optional)
+              |               /            \\
+              |         Dense_gamma    Dense_beta
+              |         gamma[B,1,1,C] beta[B,1,1,C]
+              |               \\            /
+              v                v          v
+        output = content * (scale_factor + gamma) + beta
+              |
+              v
+          output [B,H,W,C]
 
     :param gamma_units: Output units for gamma projection. If None, uses content
         channels.

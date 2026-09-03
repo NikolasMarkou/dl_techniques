@@ -1,75 +1,30 @@
-"""
-Projects visual features into a language model's embedding space.
+"""ModalityProjection, mapping visual features into a language embedding space.
 
-This layer serves as a critical bridge in Vision-Language Models (VLMs),
-transforming visual representations from an image encoder into a format
-compatible with a language model's textual embedding space. Its design
-addresses two fundamental challenges: aligning the distinct statistical
-properties of visual and textual modalities, and managing the computational
-burden imposed by long sequences of visual tokens.
-
-Architectural and Mathematical Underpinnings:
-
-The layer employs a two-stage process that prioritizes both information
-preservation and computational efficiency.
-
-1.  **Information-Preserving Token Reduction**: The primary computational
-    bottleneck in processing visual features with a Transformer-based
-    language model is the quadratic complexity of the self-attention
-    mechanism with respect to sequence length. High-resolution images
-    produce a large number of visual tokens, making direct processing
-    infeasible.
-
-    To mitigate this, the layer first reduces the number of tokens using a
-    space-to-depth transformation, commonly known as `PixelShuffle`.
-    Unlike pooling or strided convolutions which discard spatial
-    information, this operation is a lossless rearrangement. For a given
-    `scale_factor` `s`, it reshapes `s x s` blocks of spatial tokens into a
-    single, more descriptive token by folding the spatial dimensions into
-    the channel dimension. This reduces the sequence length by a factor of
-    `s²` while preserving all the original information, concentrating it
-    into a richer, more compact sequence of tokens.
-
-2.  **Cross-Modal Linear Projection**: After the sequence is shortened, the
-    resulting tokens are passed through a `Dense` layer. This is the core
-    projector that learns an affine transformation to map the (reshaped)
-    visual feature space into the target language embedding space. The
-    weights of this projection, `y = xW + b`, are learned end-to-end,
-    allowing the model to discover the optimal alignment between visual
-    concepts and their corresponding representations in the language model's
-    semantic space. Optional GELU activation and Layer Normalization are
-    applied to stabilize training and match the architectural conventions of
-    modern Transformers.
-
-This design provides an efficient and effective mechanism for cross-modal
-grounding, enabling language models to seamlessly integrate and reason about
-visual information.
+Vision-language models need visual tokens reduced before a text Transformer
+can attend over them, since self-attention costs grow quadratically with
+sequence length. The layer first applies a `PixelShuffle` space-to-depth
+transform, folding `s x s` blocks of spatial tokens into one wider token
+(a lossless rearrangement, not pooling), which shortens the sequence by
+`s^2` while keeping every value. A `Dense` layer then learns the affine map
+`y = xW + b` from the reshaped visual space into the language embedding
+space, with optional GELU activation and layer normalization.
 
 References:
-    - Shi, W., et al. (2016). Real-Time Single Image and Video
-      Super-Resolution Using an Efficient Sub-Pixel Convolutional Neural
-      Network. *CVPR*. (Introduced the concept of Pixel Shuffle).
-    - Radford, A., et al. (2021). Learning Transferable Visual Models From
-      Natural Language Supervision. *ICML*. (Established the pattern for
-      projecting modalities in CLIP).
-    - Alayrac, J., et al. (2022). Flamingo: a Visual Language Model for
-      Few-Shot Learning. *NeurIPS*. (Demonstrates advanced projection
-      architectures in VLMs).
+    - Shi et al., 2016. Real-Time Single Image and Video Super-Resolution
+      Using an Efficient Sub-Pixel Convolutional Neural Network.
+    - Radford et al., 2021. Learning Transferable Visual Models From
+      Natural Language Supervision.
+    - Alayrac et al., 2022. Flamingo: a Visual Language Model for Few-Shot
+      Learning.
 """
 
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .pixel_shuffle import PixelShuffle
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.modality_projection")
@@ -85,41 +40,22 @@ class ModalityProjection(keras.layers.Layer):
     then learns an affine transformation ``y = xW + b`` to align the visual
     feature space with the target language embedding space.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌────────────────────────────────────┐
-        │  Input [B, num_tokens, input_dim]  │
-        └────────────────┬───────────────────┘
-                         │
-                         ▼
-        ┌────────────────────────────────────┐
-        │  PixelShuffle (scale_factor)       │
-        │  tokens: N → N/s^2                 │
-        │  channels: C → C*s^2               │
-        └────────────────┬───────────────────┘
-                         │
-                         ▼
-        ┌────────────────────────────────────┐
-        │  Dense(output_dim)                 │
-        └────────────────┬───────────────────┘
-                         │
-                         ▼
-        ┌────────────────────────────────────┐
-        │  GELU activation (optional)        │
-        └────────────────┬───────────────────┘
-                         │
-                         ▼
-        ┌────────────────────────────────────┐
-        │  LayerNormalization (optional)     │
-        └────────────────┬───────────────────┘
-                         │
-                         ▼
-        ┌────────────────────────────────────┐
-        │  Output [B, reduced_tokens,        │
-        │          output_dim]               │
-        └────────────────────────────────────┘
+        input [B, num_tokens, input_dim]
+              |
+        PixelShuffle (scale_factor)
+        tokens: N -> N/s^2, channels: C -> C*s^2
+              |
+        Dense(output_dim)
+              |
+        GELU activation (optional)
+              |
+        LayerNormalization (optional)
+              |
+        output [B, reduced_tokens, output_dim]
 
     :param input_dim: Input feature dimension. Must be positive.
     :type input_dim: int
@@ -183,7 +119,6 @@ class ModalityProjection(keras.layers.Layer):
         self.projection_kernel_regularizer = keras.regularizers.get(projection_kernel_regularizer)
         self.projection_bias_regularizer = keras.regularizers.get(projection_bias_regularizer)
 
-        # FIX: Instantiate sublayers in __init__ for proper serialization
         self.pixel_shuffle = PixelShuffle(
             scale_factor=self.scale_factor,
             name='pixel_shuffle'
@@ -259,7 +194,7 @@ class ModalityProjection(keras.layers.Layer):
             f"pixel_shuffle_output_shape={pixel_shuffle_output_shape}"
         )
 
-        # Always call parent build at the end (MUST be last)
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -348,4 +283,3 @@ class ModalityProjection(keras.layers.Layer):
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
-# ---------------------------------------------------------------------

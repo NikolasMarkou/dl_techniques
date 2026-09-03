@@ -1,56 +1,27 @@
-"""
-A hierarchical, non-overlapping convolutional stem for ViTs.
+"""HierarchicalMLPStem, a hierarchical non-overlapping convolutional ViT stem.
 
-This layer serves as a patch embedding module for Vision Transformers (ViTs),
-converting an input image into a sequence of patch tokens. It replaces the
-standard ViT stem's direct linear projection of flattened patches with a more
-expressive, multi-stage convolutional architecture. The design enhances local
-feature learning within each patch before the tokens are processed by the main
-transformer body.
-
-Architectural and Mathematical Foundations:
-The stem is constructed dynamically as a series of non-overlapping 2D
-convolutional stages. It begins with a `4x4` convolution with a stride of 4,
-which processes the image into an initial set of `4x4` patch features.
-Subsequently, `2x2` convolutions with a stride of 2 are progressively stacked.
-Each additional stage doubles the effective patch size of the receptive field
-(e.g., `4x4` -> `8x8` -> `16x16`), allowing features to be built
-hierarchically within what will become the final patch token.
-
-The core mathematical principle is the use of non-overlapping convolutions,
-where `stride = kernel_size`. This ensures that the computation for each
-output patch is exclusively dependent on the pixels within its corresponding
-input region. There is no information leakage across patch boundaries within
-the stem.
-
-This property of **patch independence** is the primary motivation for this
-design over a standard convolutional network stem (like that of a ResNet).
-It makes the stem fully compatible with masked image modeling (MIM)
-pre-training paradigms such as Masked Autoencoders (MAE) and BEiT. In MIM,
-a subset of input patches is masked (e.g., zeroed out). With this stem, a
-masked input patch maps directly to a predictable (e.g., zero) output token
-without affecting the representations of any other visible patches. This clean
-separation is critical for the reconstruction-based self-supervision task.
+Replaces the standard ViT stem's single linear projection of flattened
+patches with a stack of non-overlapping convolutions (`stride = kernel_size`
+at every stage), so local features build up hierarchically inside each patch
+before the tokens reach the transformer body. Because each stage never
+overlaps, every output patch depends only on the pixels in its own input
+region, with no leakage across patch boundaries. That patch independence is
+what makes the stem compatible with masked image modeling (MAE, BEiT): a
+masked input patch maps to a predictable output token without touching any
+other patch's representation. The stem starts with one `4x4`, stride-4
+convolution, then stacks `2x2`, stride-2 convolutions until the target patch
+size is reached.
 
 References:
-    - Liu et al. "h-MLP: Vision MLP with Hierarchical Rearrangement". The
-      hierarchical stem architecture using stacked non-overlapping convolutions
-      is derived from this work.
-      https://arxiv.org/abs/2203.09716
-
-    - He et al. "Masked Autoencoders Are Scalable Vision Learners" (MAE). This
-      paper exemplifies the masked image modeling paradigm for which the
-      patch-independent property of this stem is essential.
-      https://arxiv.org/abs/2111.06377
+    - Liu et al., 2022. h-MLP: Vision MLP with Hierarchical Rearrangement.
+      (https://arxiv.org/abs/2203.09716)
+    - He et al., 2021. Masked Autoencoders Are Scalable Vision Learners.
+      (https://arxiv.org/abs/2111.06377)
 """
 
 import keras
 from keras import ops
 from typing import Tuple, Optional, Union, Any, Dict, Callable, Literal
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
@@ -59,54 +30,32 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.hierarchical_mlp_stem")
 class HierarchicalMLPStem(keras.layers.Layer):
     """Hierarchical MLP stem for Vision Transformers with patch-independent processing.
 
-    This layer implements a flexible hMLP stem that processes image patches through
-    a sequence of hierarchical, non-overlapping convolutional stages without
-    cross-patch information leakage. It dynamically creates stages to support
-    various patch sizes (e.g., 8, 16, 32), making it compatible with diverse
-    Vision Transformer architectures and masked self-supervised learning methods
-    like MAE and BEiT. The non-overlapping property (``stride = kernel_size``)
-    ensures that each output patch token depends exclusively on the pixels
-    within its corresponding input region.
+    Processes image patches through a sequence of hierarchical, non-overlapping
+    convolutional stages with no cross-patch information leakage. Stages are
+    created dynamically to support various patch sizes (8, 16, 32, ...),
+    compatible with masked self-supervised learning methods like MAE and BEiT.
+    The non-overlapping property (``stride = kernel_size``) ensures each
+    output patch token depends exclusively on the pixels in its own input
+    region.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌─────────────────────────────────────────┐
-        │  Input [batch, H, W, in_channels]       │
-        └────────────────┬────────────────────────┘
-                         │
-                         ▼
-        ┌─────────────────────────────────────────┐
-        │  Stage 0: Conv2D(dim1, k=4, s=4) → Norm │
-        │           → Activation                  │
-        │  (processes 4x4 patches independently)  │
-        └────────────────┬────────────────────────┘
-                         │
-                         ▼
-        ┌─────────────────────────────────────────┐
-        │  Stage 1: Conv2D(dim1, k=2, s=2) → Norm │
-        │           → Activation                  │
-        │  (processes 8x8 patches hierarchically) │
-        └────────────────┬────────────────────────┘
-                         │
-                         ▼
-        ┌─────────────────────────────────────────┐
-        │  Stage N: Conv2D(embed_dim, k=2, s=2)   │
-        │           → Norm  (final stage, no act) │
-        └────────────────┬────────────────────────┘
-                         │
-                         ▼
-        ┌─────────────────────────────────────────┐
-        │  Reshape [batch, num_patches, embed_dim]│
-        └─────────────────────────────────────────┘
+        input [batch, H, W, in_channels]
+              |
+        stage 0: Conv2D(dim1, k=4, s=4) -> Norm -> Activation
+              |     (processes 4x4 patches independently)
+        stage 1: Conv2D(dim1, k=2, s=2) -> Norm -> Activation
+              |     (8x8 patches, hierarchically)
+        stage N: Conv2D(embed_dim, k=2, s=2) -> Norm
+              |     (final stage, no activation)
+        reshape [batch, num_patches, embed_dim]
 
     :param embed_dim: Final embedding dimension for each patch. Must be positive
         and divisible by 4. Defaults to 768.
@@ -175,22 +124,13 @@ class HierarchicalMLPStem(keras.layers.Layer):
         if in_channels <= 0:
             raise ValueError(f"in_channels must be positive, got {in_channels}")
 
-        # Store ALL configuration parameters for serialization
         self.embed_dim = embed_dim
         self.img_size = img_size
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.norm_layer = norm_layer
-        # DECISION plan-2026-08-23T091307-9a110062/D-401
-        # This site did NOT merely store the activation raw -- it stored the
-        # literal string ``'custom'`` for every non-string value, so a callable
-        # activation was silently DISCARDED at ``get_config`` time and the
-        # reload then died in ``keras.activations.get('custom')``. Do NOT
-        # "restore" an ``activation_name`` placeholder here: a name is not a
-        # value, and the round-trip needs the value. The real activation is kept
-        # and (de)serialized symmetrically through
-        # ``dl_techniques.utils.activation_serialization`` -- see decisions.md
-        # D-400 for why the string branch must pass through untouched.
+        # DECISION plan-2026-08-23T091307-9a110062/D-401: keep the real
+        # activation value, not an 'activation_name' placeholder -- a prior version stored the literal string 'custom' and silently dropped callables. See decisions.md D-400.
         self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)

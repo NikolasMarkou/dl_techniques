@@ -1,93 +1,68 @@
-"""
-A recursive fractal block from the FractalNet architecture.
+"""FractalBlock, a recursive block from the FractalNet architecture.
 
-This layer constructs a deep, self-similar network structure by recursively
-applying a simple expansion rule, providing an alternative to residual
-connections for training ultra-deep networks. A FractalBlock of depth k
-joins a DEEP branch that COMPOSES two depth-(k-1) FractalBlocks with a SHALLOW
-branch that is a single base block applied to the same input --
-F_1(x) = block(x), F_k(x) = join(F_{k-1}(F_{k-1}(x)), block(x)) -- under local
-drop-path. Composition, not parallelism, is what makes the longest path
-2^(k-1) base blocks long while the shortest stays 1. The base case F_1(x) is a
-standard computational unit such as a ConvBlock.
+Builds a deep, self-similar structure by recursive expansion, as an
+alternative to residual connections for training very deep networks. A
+FractalBlock of depth k joins a deep branch that composes two depth-(k-1)
+FractalBlocks with a shallow branch that applies a single base block to the
+same input: ``F_1(x) = block(x)``, ``F_k(x) = join(F_{k-1}(F_{k-1}(x)),
+block(x))``, under local drop-path. Composition, not parallel branches, is
+what makes the longest path ``2^(k-1)`` base blocks long while the shortest
+stays 1; a parallel form over the same input collapses every path to length
+1 regardless of depth. The base case ``F_1(x)`` is a standard computational
+unit such as a ConvBlock.
 
 References:
-    - Larsson, G., et al. (2017). FractalNet: Ultra-Deep Neural Networks
-      without Residuals. *ICLR*.
+    - Larsson et al., 2017. FractalNet: Ultra-Deep Neural Networks without
+      Residuals. (ICLR)
 """
 
 import keras
 from typing import Tuple, Optional, Any, Dict
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..utils.logger import logger
 from .standard_blocks import ConvBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.fractal_block")
 class FractalBlock(keras.layers.Layer):
     """
-    Recursive fractal block implementing the fractal expansion rule for FractalNet.
+    Recursive fractal block implementing the fractal expansion rule.
 
-    Implements the paper's expansion rule f_{C+1}(z) = [f_C(f_C(z))] join
-    [conv(z)]: at depth k the DEEP branch COMPOSES two depth-(k-1)
-    ``FractalBlock``s (the second consumes the first's OUTPUT) and the SHALLOW
-    branch is a single base block applied to the same input; the two are joined
-    under local drop-path. Do NOT "restore consistency" by rewriting this as two
-    PARALLEL depth-(k-1) branches over the same input,
-    ``F_k(x) = 0.5 * (DP(F_{k-1}(x)) + DP(F_{k-1}(x)))`` -- that was this
-    layer's shipped defect until 2026-08-14, and because the recursion then
-    terminates with every leaf receiving the block's own input, every path
-    traversed exactly ONE convolution at any ``depth``. Parameter count, layer
-    count and output shape are IDENTICAL under both rules, so only the
-    RECEPTIVE FIELD detects it (pinned by
-    ``tests/test_layers/test_fractal_block.py::TestFractalExpansionRule``).
+    Implements ``f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]``: at depth k the
+    deep branch composes two depth-(k-1) ``FractalBlock``s, feeding the
+    second the first's output, and the shallow branch applies a single base
+    block to the same input. The two are joined under local drop-path.
 
-    At depth 1 the block is a single base block. At depth k the structure holds
-    ``2^k - 1`` leaf base blocks -- the recurrence is ``L(1) = 1``,
-    ``L(k) = 2 * L(k-1) + 1``, counting both halves of the deep branch plus the
-    shallow one, NOT ``2^(k-1)`` -- with a longest path of ``2^(k-1)`` blocks, a
-    shortest path of 1, and an exponential number of distinct input-to-output
-    paths forming an implicit ensemble of sub-networks. Uses configuration-based
-    design with serializable dictionaries for full model save/load capability.
+    At depth 1 the block is a single base block. At depth k it holds
+    ``2^k - 1`` leaf base blocks (``L(1) = 1``, ``L(k) = 2*L(k-1) + 1``),
+    with a longest path of ``2^(k-1)`` blocks, a shortest path of 1, and an
+    exponential number of distinct input-to-output paths forming an implicit
+    ensemble of sub-networks.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌────────────────────────────────────────────────┐
-        │  Input [batch, height, width, channels]        │
-        └──────────────────┬─────────────────────────────┘
-             ┌─────────────┴─────────────┐
-             │ DEEP branch               │ SHALLOW branch
-             ▼                           ▼
-        ┌──────────────┐         ┌──────────────┐
-        │  deep_first  │         │  shallow     │
-        │  FractalBlock│         │  ONE base    │
-        │  depth = k-1 │         │  block       │
-        └──────┬───────┘         └──────┬───────┘
-               ▼                        │
-        ┌──────────────┐                │
-        │  deep_second │  COMPOSED:     │
-        │  FractalBlock│  consumes      │
-        │  depth = k-1 │  deep_first's  │
-        └──────┬───────┘  OUTPUT        │
-               └─────────┬──────────────┘
-                         ▼
-        ┌────────────────────────────────────────────────┐
-        │  Local drop-path join: mean over the SURVIVING │
-        │  branches. If both draws drop, one is revived  │
-        │  by a fair coin, so the join is never zero.    │
-        └──────────────────┬─────────────────────────────┘
-                           ▼
-        ┌────────────────────────────────────────────────┐
-        │  Output                                        │
-        └────────────────────────────────────────────────┘
+        input [B, H, W, C]
+              |
+        +-----+------+
+        |             |
+        deep_first    shallow
+        FractalBlock  (one base block)
+        depth k-1     |
+        |             |
+        deep_second   |     (composed: consumes
+        FractalBlock  |      deep_first's output)
+        depth k-1     |
+        |             |
+        +-----+------+
+              |
+        local drop-path join: mean over surviving
+        branches; both-dropped is rescued by a fair
+        coin, so the join is never zero
+              |
+        output
 
     :param block_config: Dictionary containing the configuration for the base
         block. Should be the output of ``get_config()`` from a Keras layer
@@ -132,7 +107,7 @@ class FractalBlock(keras.layers.Layer):
         # A composed deep path applies its base block 2^(depth-1) times, so a
         # stride > 1 inside the block would downsample the deep and shallow
         # branches by different factors and the join would receive mismatched
-        # shapes. FractalNet downsamples BETWEEN blocks, not inside them; the
+        # shapes. FractalNet downsamples between blocks, not inside them; the
         # caller is responsible for that (see FractalNet._build_fractal_stage).
         block_stride = self.block_config.get("strides", 1)
         if block_stride not in (1, (1, 1), [1, 1]):
@@ -144,7 +119,6 @@ class FractalBlock(keras.layers.Layer):
                 f"shallow branch's once. Downsample between blocks instead."
             )
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         if self.depth == 1:
             # Base case: a single base block; the fractal bottoms out here.
             self.block = self._create_block_from_config()
@@ -153,26 +127,8 @@ class FractalBlock(keras.layers.Layer):
             self.shallow = None
             logger.debug("Created FractalBlock base case with depth=1")
         else:
-            # DECISION plan-2026-08-18T140459-7991552f/D-057
-            # Paper's expansion rule, f_{C+1}(z) = [f_C(f_C(z))] join [conv(z)]:
-            # the DEEP branch COMPOSES two depth-(C) fractals, and the SHALLOW
-            # branch is a single base block applied to the same input. That
-            # composition is what makes the longest path 2^(depth-1) blocks long
-            # while the shortest stays 1, which is the entire point of the
-            # architecture -- the short path is what trains, the long path is
-            # what the short path teaches.
-            #
-            # Do NOT rewrite this as two PARALLEL depth-(C) branches over the
-            # same input, F_k(x) = 0.5*(DP(F_{k-1}(x)) + DP(F_{k-1}(x))). That
-            # form shipped until 2026-08-14 and made every path traverse exactly
-            # ONE convolution at any depth, because the recursion then terminates
-            # with every leaf receiving the block's own input. Parameter count,
-            # layer count and output shape are IDENTICAL under both rules, so the
-            # suite stayed green for months; only the RECEPTIVE FIELD sees it
-            # (test_fractal_block.py::TestFractalExpansionRule). The docstrings
-            # above stated the parallel rule until 2026-08-19, which is why this
-            # note exists: a maintainer restoring doc/code consistency reverts
-            # the repair.
+            # DECISION plan-2026-08-18T140459-7991552f/D-057: the deep branch
+            # composes two depth-(C) fractals; never rewrite as two parallel branches over the same input -- that collapses every path to length 1 regardless of depth, invisible to shape/param-count tests. See decisions.md.
             self.block = None
             self.deep_first = FractalBlock(
                 block_config=self.block_config,
@@ -214,8 +170,8 @@ class FractalBlock(keras.layers.Layer):
         if self.depth == 1:
             self.block.build(input_shape)
         else:
-            # The deep branch is COMPOSED, so the second half is built on the
-            # first half's OUTPUT shape, not on the block's input shape.
+            # The deep branch is composed: the second half builds on the
+            # first half's output shape, not on the block's input shape.
             self.deep_first.build(input_shape)
             intermediate_shape = self.deep_first.compute_output_shape(input_shape)
             self.deep_second.build(intermediate_shape)
@@ -223,7 +179,7 @@ class FractalBlock(keras.layers.Layer):
 
         logger.debug(f"Built FractalBlock with input_shape={input_shape}, depth={self.depth}")
 
-        # Always call parent build at the end (MUST be last)
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -235,7 +191,7 @@ class FractalBlock(keras.layers.Layer):
 
         Implements the fractal expansion rule recursively. For the base case
         (depth=1), applies the block function directly. For recursive cases,
-        runs the COMPOSED deep branch (``deep_second(deep_first(x))``) and the
+        runs the composed deep branch (``deep_second(deep_first(x))``) and the
         single-block shallow branch on the same input, then mean-joins the
         surviving branches under local drop-path (see :meth:`_join`).
 
@@ -268,15 +224,12 @@ class FractalBlock(keras.layers.Layer):
         of the two branches.
 
         During training each branch is dropped by its own per-sample Bernoulli
-        draw and the join averages only the SURVIVORS, which is what makes the
-        join a mean over a varying number of paths rather than a fixed one. The
-        previous implementation instead scaled each branch by a fixed ``0.5``
-        after an independent :class:`StochasticDepth`, so when both draws
-        dropped -- which happens at rate ``drop_path_rate ** 2``, about 2.3% at
-        the 0.15 default -- the block emitted EXACTLY ZERO and destroyed the
-        signal for that sample. Here the both-dropped case is explicitly
-        rescued: one branch is revived by a fair coin, so at least one path is
-        always live and the block is never a zero map.
+        draw and the join averages only the survivors, so the mean is over a
+        varying number of paths rather than a fixed one. Both branches drop
+        together at rate ``drop_path_rate ** 2`` (about 2.3% at the 0.15
+        default); that case is rescued by reviving one branch with a fair
+        coin, so at least one path is always live and the block never emits
+        a zero map.
 
         :param deep: Output of the composed deep branch.
         :type deep: keras.KerasTensor
@@ -351,5 +304,3 @@ class FractalBlock(keras.layers.Layer):
             "drop_path_rate": self.drop_path_rate,
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,145 +1,60 @@
-"""
-Model long-range dependencies using hierarchical context aggregation.
+"""HANCBlock, a hierarchical-context building block from ACC-UNet.
 
-This block is the core component of the ACC-UNet architecture, designed to
-bridge the gap between the efficiency of Convolutional Neural Networks (CNNs)
-and the global context modeling capabilities of Transformers. It addresses the
-inherent limitation of standard convolutions—their restricted receptive
-field—by introducing a novel mechanism to efficiently aggregate multi-scale
-contextual information.
-
-Architecturally, the HANC block synthesizes several successful design
-principles from modern deep learning into a coherent structure. It adopts the
-inverted bottleneck from MobileNetV2, expanding the channel dimension with a
-1x1 convolution to create a richer feature space for processing. Spatial
-feature extraction is then performed efficiently using a depthwise separable
-convolution. The block's central innovation, however, is the Hierarchical
-Aggregation of Neighborhood Context (HANC) layer, which is subsequently
-followed by a projection 1x1 convolution, a Squeeze-and-Excitation (SE)
-module for channel recalibration, and a residual connection for stable
-gradient flow.
-
-The foundational mathematical concept is a convolutional approximation of the
-self-attention mechanism found in Transformers. Standard self-attention
-computes a pixel's relationship to every other pixel, incurring a quadratic
-computational cost `O(N^2)` with respect to the number of pixels `N`. The
-HANC mechanism circumvents this by reformulating the problem: instead of
-all-to-all comparisons, each pixel's feature representation is enriched by
-comparing it to statistical summaries of its surrounding neighborhoods at
-multiple scales. The process is as follows:
-
-1.  **Hierarchical Pooling:** For `k` different scales (e.g., corresponding
-    to 2x2, 4x4, 8x8 receptive fields), the feature map is downsampled using
-    both average and max pooling to create a set of low-resolution context
-    maps. These maps summarize the feature statistics at different levels of
-    granularity.
-
-2.  **Context Concatenation:** These multi-scale context maps are concatenated
-    with the original, full-resolution feature map along the channel axis. This
-    creates an augmented representation where each pixel is now explicitly
-    aware of not just its own features, but also the average and maximum
-    feature values in its local, medium, and large-scale neighborhoods.
-
-3.  **Learned Aggregation:** A final 1x1 convolution processes this augmented
-    tensor. This step acts as a learned, weighted aggregator, allowing the
-    model to determine the optimal way to combine local information with the
-    multi-scale contextual signals.
-
-This approach provides a powerful proxy for global context with computational
-complexity that is linear with respect to the number of scales `k`, making it
-far more efficient than true self-attention for high-resolution inputs.
+Standard self-attention scores every pixel pair, costing O(N^2) in the pixel
+count N. HANCBlock approximates that global comparison at O(k) instead: at
+k scales, the feature map is average- and max-pooled down, concatenated back
+onto the full-resolution map along the channel axis, and a learned 1x1
+convolution aggregates the result. Around that hierarchical-context step sit
+an inverted-bottleneck expansion, a depthwise 3x3 convolution, a projection
+back to the output channel count, a residual connection when input and
+output channels match, and Squeeze-and-Excitation recalibration.
 
 References:
     - Yan et al., 2023. ACC-UNet: An adaptive context and contrast-aware UNet
-      for seismic facies identification. (Inspired this architecture)
+      for seismic facies identification.
     - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
-      Bottlenecks. (Inverted bottleneck concept)
-    - Hu et al., 2018. Squeeze-and-Excitation Networks. (Channel attention)
-
+      Bottlenecks.
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
 """
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .hanc_layer import HANCLayer
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.hanc_block")
 class HANCBlock(keras.layers.Layer):
-    """Hierarchical Aggregation of Neighborhood Context (HANC) Block.
+    """Hierarchical Aggregation of Neighborhood Context (HANC) block.
 
-    This block implements the main building block from ACC-UNet, providing
-    long-range dependencies through hierarchical pooling operations while
-    maintaining efficiency through depthwise separable convolutions. It
-    approximates self-attention by aggregating multi-scale statistics with
-    linear computational complexity ``O(k)``, where ``k`` is the number of
-    hierarchical levels. The block combines an inverted bottleneck expansion,
-    depthwise spatial processing, hierarchical context aggregation, residual
-    connections, and Squeeze-and-Excitation channel recalibration into a
-    single cohesive unit.
+    Combines an inverted-bottleneck expansion, depthwise spatial processing,
+    hierarchical context aggregation at ``k`` scales, an optional residual
+    connection, and Squeeze-and-Excitation recalibration.
 
-    The core mathematical operations are:
-    ``X_exp = sigma(BN(W_exp * X))``,
-    ``X_dw = sigma(BN(W_dw * X_exp))``,
-    ``X_ctx = Agg({P_s(X_dw)} for s=1..k)`` where ``P_s`` are pooling
-    operations at scale ``s``,
-    ``Y = SE(sigma(BN(W_proj * X_ctx)))``.
+    ``X_exp = sigma(BN(W_exp * X))``, ``X_dw = sigma(BN(W_dw * X_exp))``,
+    ``X_ctx = Agg({P_s(X_dw)} for s=1..k)``, ``Y = SE(sigma(BN(W_proj * X_ctx)))``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌─────────────────────────────────┐
-        │         Input [H, W, C_in]      │
-        └───────────────┬─────────────────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │  Conv1x1 → BN → LeakyReLU       │
-        │  (Expand: C_in → C_in*inv)      │
-        └───────────────┬─────────────────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │  DepthwiseConv3x3 → BN → ReLU   │
-        │  (Spatial feature extraction)   │
-        └───────────────┬─────────────────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │  HANCLayer (k hierarchical      │
-        │  pooling levels)                │
-        └───────────────┬─────────────────┘
-                        │
-                ┌───────┴───────┐
-                │   if C_in==F  │
-                │   + Input     │
-                │   → BN        │
-                └───────┬───────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │  Conv1x1 → BN → LeakyReLU       │
-        │  (Project: C_in → filters)      │
-        └───────────────┬─────────────────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │  Squeeze-and-Excitation         │
-        └───────────────┬─────────────────┘
-                        │
-                        ▼
-        ┌─────────────────────────────────┐
-        │       Output [H, W, filters]    │
-        └─────────────────────────────────┘
+        input [H, W, C_in]
+              |
+        Conv1x1 -> BN -> LeakyReLU   (expand: C_in -> C_in*inv)
+              |
+        DepthwiseConv3x3 -> BN -> ReLU
+              |
+        HANCLayer (k hierarchical pooling levels)
+              |
+        + input -> BN   (only if C_in == filters)
+              |
+        Conv1x1 -> BN -> LeakyReLU   (project: C_in -> filters)
+              |
+        Squeeze-and-Excitation
+              |
+        output [H, W, filters]
 
     :param filters: Number of output filters. Must be positive.
     :type filters: int
@@ -191,7 +106,6 @@ class HANCBlock(keras.layers.Layer):
         if inv_factor <= 0:
             raise ValueError(f"inv_factor must be positive, got {inv_factor}")
 
-        # Store ALL configuration parameters
         self.filters = filters
         self.input_channels = input_channels
         self.k = k
@@ -205,11 +119,6 @@ class HANCBlock(keras.layers.Layer):
         self.expanded_channels = self.input_channels * self.inv_factor
         self.use_residual = (self.input_channels == self.filters)
 
-        # ---------------------------------------------------------------------
-        # CREATE sub-layers (Golden Rule: Create in __init__)
-        # ---------------------------------------------------------------------
-
-        # 1. Expansion layers
         self.expand_conv = keras.layers.Conv2D(
             filters=self.expanded_channels,
             kernel_size=1,
@@ -287,10 +196,6 @@ class HANCBlock(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # ---------------------------------------------------------------------
-        # BUILD sub-layers (Golden Rule: Build in build)
-        # ---------------------------------------------------------------------
-
         # 1. Expansion
         self.expand_conv.build(input_shape)
         expand_output_shape = self.expand_conv.compute_output_shape(input_shape)
@@ -310,8 +215,7 @@ class HANCBlock(keras.layers.Layer):
             self.residual_bn.build(hanc_output_shape)
 
         # 5. Output Projection
-        # Note: Shape is same as HANC output (concatenation logic is handled inside HANCLayer
-        # or it preserves spatial dims, input_channels was restored by HANCLayer out_channels)
+        # HANCLayer restores input_channels, so its output shape feeds output_conv directly.
         output_input_shape = hanc_output_shape
         self.output_conv.build(output_input_shape)
         output_conv_shape = self.output_conv.compute_output_shape(output_input_shape)
