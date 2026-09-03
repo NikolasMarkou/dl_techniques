@@ -1,217 +1,26 @@
-"""
-Byte Latent Transformer (BLT) Core Layer Components
+"""Seven layers that make up the Byte Latent Transformer (BLT): ByteTokenizer,
+EntropyModel, DynamicPatcher, PatchPooling, LocalEncoder, GlobalTransformer,
+and LocalDecoder.
 
-This module implements the fundamental building blocks of the Byte Latent Transformer
-architecture, providing a tokenization-free approach to language modeling that operates
-directly on raw UTF-8 bytes with dynamic compute allocation.
+BLT replaces a fixed subword vocabulary with entropy-driven patching over raw
+UTF-8 bytes. A small causal EntropyModel scores each byte's next-byte
+surprise; DynamicPatcher opens a new patch wherever that surprise crosses a
+threshold, so predictable stretches merge into large patches and hard-to-predict
+stretches get finer-grained compute. LocalEncoder attends over bytes within
+their patch and pools each patch to one vector; GlobalTransformer attends
+across patches; LocalDecoder generates next-byte logits by combining local
+byte context with the preceding patch's global representation.
 
-Architecture Components Overview
-================================
+Every stack here is causal only because each layer is given an explicit
+attention mask (`causal_attend_mask`) at every call site; passing no mask lets
+a position attend to the byte it is meant to predict. `DynamicPatcher` needs
+its `seq_len` passed explicitly when used inside a traced or XLA-compiled
+graph, since the alternative (deriving it from the data) makes the layer's
+output shape data-dependent.
 
-The BLT architecture consists of seven core layer components that work together to
-achieve efficient byte-level language modeling:
-
-1. **ByteTokenizer**: Converts raw text to byte token sequences and back
-2. **EntropyModel**: Small causal transformer for computing next-byte entropy
-3. **DynamicPatcher**: Segments bytes into patches based on entropy thresholds
-4. **PatchPooling**: Reduces byte sequences to patch representations
-5. **LocalEncoder**: Processes bytes within their patches with causal attention
-6. **GlobalTransformer**: Models long-range dependencies across patch representations
-7. **LocalDecoder**: Generates next-byte predictions with global context
-
-Technical Innovation: Dynamic Patching
-=====================================
-
-Unlike traditional tokenization with fixed vocabularies, BLT uses entropy-driven
-dynamic patching that:
-
-- **Adapts to Content Complexity**: High-entropy regions (unpredictable) get more
-  compute via new patch boundaries, while low-entropy regions (predictable) are
-  grouped into larger patches
-
-- **Preserves Byte-Level Information**: No information loss through heuristic
-  tokenization, maintaining access to character-level patterns
-
-- **Enables Flexible Scaling**: Patch size can be adjusted independently of model
-  size, allowing simultaneous scaling of both dimensions
-
-Hierarchical Processing Pipeline
-===============================
-
-The BLT processing pipeline follows this flow:
-
-```
-Raw Text → ByteTokenizer → Byte Tokens
-                              ↓
-EntropyModel → Entropy Values → DynamicPatcher → Patch Boundaries
-                                                      ↓
-Byte Tokens + Patch IDs → LocalEncoder → Patch Representations
-                                              ↓
-                          GlobalTransformer → Contextual Patches
-                                              ↓
-Byte Tokens + Global Context → LocalDecoder → Next-Byte Logits
-```
-
-Key Technical Features
-=====================
-
-**Entropy-Based Segmentation**:
-- Uses Shannon entropy H(x_i) = -Σ p(x_i|context) * log(p(x_i|context))
-- Global threshold: H(x_t) > θ_g creates new patch boundary
-- Approximate monotonic: H(x_t) - H(x_t-1) > θ_r for trend breaks
-
-**Cross-Attention Mechanisms**:
-- Encoder: Patches query, bytes provide keys/values for pooling
-- Decoder: Bytes query, patches provide keys/values for context
-- Masked attention ensures bytes only attend to their patch context
-
-**Hash N-gram Embeddings**:
-- Rolling polynomial hash for n-grams (n=3-8): Hash(g_i,n) = Σ b_i * a^j
-- 500K hash functions map arbitrary n-grams to embedding space
-- Captures multi-scale byte context without explicit vocabulary
-
-**Causal Attention Patterns**:
-- Local models use windowed causal attention within patches
-- Global model uses standard causal attention across patches
-- Maintains autoregressive properties for generation
-
-Performance Characteristics
-==========================
-
-**Computational Efficiency**:
-- Reduces inference FLOPs by up to 50% through larger patch sizes
-- Dynamic compute allocation: O(patches) vs O(tokens) complexity
-- Lightweight local models (6-8 layers) vs heavy global model (12+ layers)
-
-**Memory Efficiency**:
-- No large embedding matrices for fixed vocabularies
-- Hash embeddings provide compact n-gram representation
-- Variable-length patches reduce sequence processing overhead
-
-**Scaling Properties**:
-- Enables simultaneous model and patch size scaling
-- Better scaling trends beyond compute-optimal training regimes
-- Crossover points typically at 2-3x compute-optimal budgets
-
-Robustness Advantages
-====================
-
-**Noise Resilience**:
-- Direct byte processing handles character-level corruptions
-- 8+ point advantage on noisy input benchmarks
-- Maintains performance with case changes, character drops, repetitions
-
-**Linguistic Capabilities**:
-- 99.9% accuracy on character manipulation tasks
-- Superior orthographic and phonological understanding
-- Better multilingual performance, especially low-resource languages
-
-**Long-tail Generalization**:
-- No out-of-vocabulary issues with fixed tokenizers
-- Handles arbitrary character sequences and scripts
-- Improved performance on rare byte combinations
-
-Implementation Details
-=====================
-
-**Layer Architecture**:
-- All transformers use SwiGLU activations and RMSNorm
-- RoPE positional embeddings in self-attention layers
-- Flash Attention for standard masks, Flex Attention for dynamic masks
-
-**Training Considerations**:
-- Entropy model requires separate pre-training on byte sequences
-- Patch-aware batching to maintain consistent compute per batch
-- Gradient accumulation across variable patch sizes
-
-**Memory Management**:
-- Efficient cross-attention implementation with patch masking
-- Dynamic tensor shapes handled through careful padding strategies
-- Context length normalization to maintain fair comparisons
-
-Usage Patterns
-==============
-
-**Research Applications**:
-```python
-# Study entropy-based segmentation
-entropy_model = EntropyModel(vocab_size=260, hidden_dim=256)
-patcher = DynamicPatcher(entropy_threshold=1.5)
-
-# Analyze dynamic patching behavior
-entropy = entropy_model(byte_tokens)
-patch_lengths = patcher(entropy)
-```
-
-**Production Deployment**:
-```python
-# Create efficient BLT model
-encoder = LocalEncoder(local_dim=512, global_dim=768)
-global_transformer = GlobalTransformer(global_dim=768, num_layers=12)
-decoder = LocalDecoder(vocab_size=260, local_dim=512)
-
-# Process with automatic patching
-patches = encoder(tokens, patch_ids)
-context = global_transformer(patches)
-logits = decoder(tokens, context, patch_ids)
-```
-
-**Custom Patching Strategies**:
-```python
-# Implement custom pooling method
-pooling = PatchPooling(
-    pooling_method='attention',
-    output_dim=768,
-    num_queries=4
-)
-
-# Use with different entropy thresholds
-patcher = DynamicPatcher(entropy_threshold=2.0)  # Larger patches
-```
-
-Integration with dl-techniques Framework
-=======================================
-
-These layers integrate seamlessly with the broader dl-techniques ecosystem:
-
-- **Optimizers**: Use with advanced scheduling from `optimization` module
-- **Regularizers**: Apply weight decay and dropout from `regularizers`
-- **Losses**: Compatible with standard language modeling objectives
-- **Metrics**: Works with perplexity and custom byte-level metrics
-
-The modular design allows for easy experimentation with different:
-- Entropy models and thresholds
-- Pooling strategies for patch creation
-- Cross-attention mechanisms
-- Local vs global architecture balance
-
-Future Extensions
-=================
-
-The layer design supports extension for:
-- **Multimodal Processing**: Extend entropy models to handle image/audio bytes
-- **Sparse Attention**: Implement more efficient attention patterns
-- **Adaptive Thresholding**: Learn entropy thresholds during training
-- **Hierarchical Patches**: Multi-level patch hierarchies for longer contexts
-
-References
-==========
-
-Implementation based on:
-"Byte Latent Transformer: Patches Scale Better Than Tokens"
-Pagnoni et al., 2024
-arXiv:2412.09871v1 [cs.CL]
-
-Key innovations:
-- Dynamic entropy-based patching algorithm
-- Hierarchical byte-patch-global processing
-- Cross-attention pooling mechanisms
-- Hash n-gram embeddings for byte context
-
-These layers represent a fundamental shift from tokenization-based language
-modeling toward more flexible, robust, and efficient byte-level processing
-that maintains competitive performance while offering significant advantages
-in efficiency, robustness, and multilingual capabilities.
+References:
+    - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better
+      Than Tokens. (https://arxiv.org/abs/2412.09871)
 """
 
 import keras
@@ -243,12 +52,12 @@ def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
     what they are handed. Position ``i`` therefore attended to the very byte it
     was asked to predict.
 
-    The mask is built in the masking factory's BLOCK semantics (``True`` means
-    "mask out") and inverted once to the ATTEND semantics the attention layers
-    expect. It is returned at rank 3 on purpose: a rank-2 mask is interpreted
-    by the attention layers as a ``(batch, seq_len)`` *padding* mask, not as a
+    The mask is built in the masking factory's block semantics (``True`` means
+    "mask out") and inverted once to the attend semantics the attention layers
+    expect. It is returned at rank 3: a rank-2 mask is interpreted by the
+    attention layers as a ``(batch, seq_len)`` padding mask, not as a
     ``(seq_len, seq_len)`` score mask, so a rank-2 causal mask would be
-    silently misread.
+    misread.
 
     :param hidden_states: Sequence tensor of shape ``(batch, seq_len, dim)``.
     :type hidden_states: keras.KerasTensor
@@ -268,27 +77,33 @@ def causal_attend_mask(hidden_states: keras.KerasTensor) -> keras.KerasTensor:
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class ByteTokenizer(keras.layers.Layer):
-    """
-    Converts text to byte tokens for BLT processing.
+    """Converts text strings to and from byte token sequences.
 
-    This layer handles the conversion of text strings to byte sequences,
-    with proper handling of special tokens and padding. It operates at the
-    byte level to achieve true language-agnostic processing.
+    Operates at the byte level, so there is no fixed subword vocabulary and no
+    out-of-vocabulary case: any UTF-8 text round-trips through
+    ``text_to_bytes`` / ``tokens_to_text``.
 
-    **Intent**: Provide byte-level tokenization that maintains full character
-    information without vocabulary limitations, enabling robust processing of
-    any UTF-8 text input.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Text String → UTF-8 Encoding → Byte Values + Offset → Special Tokens
-    "Hello" → [72, 101, 108, 108, 111] → [76, 105, 112, 112, 115] → [1, 76, ..., 2]
-    ```
-        :param vocab_size: Size of the vocabulary including special tokens.
-        :param byte_offset: Offset added to raw byte values for special tokens.
-            **kwargs: Additional layer arguments.
+        "Hello" (text)
+              |
+              v
+        UTF-8 encode -> raw bytes
+              |
+              v
+        + byte_offset, + BOS/EOS ids
+              |
+              v
+        [1, 76, 105, 112, 112, 115, 2]  (token ids)
+
+    :param vocab_size: Size of the vocabulary including special tokens.
+    :type vocab_size: int
+    :param byte_offset: Offset added to raw byte values, reserving IDs below
+        it for special tokens (pad, BOS, EOS, sep).
+    :type byte_offset: int
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -308,14 +123,16 @@ class ByteTokenizer(keras.layers.Layer):
         self.sep_id = 3
 
     def text_to_bytes(self, text: str, add_bos: bool = True, add_eos: bool = True) -> List[int]:
-        """
-        Convert text string to byte token sequence.
+        """Convert a text string to a byte token sequence.
 
-            :param text: Input text string.
-            :param add_bos: Whether to add begin-of-sequence token.
-            :param add_eos: Whether to add end-of-sequence token.
-
-            :return: List of byte token IDs.
+        :param text: Input text string.
+        :type text: str
+        :param add_bos: Whether to prepend the begin-of-sequence token.
+        :type add_bos: bool
+        :param add_eos: Whether to append the end-of-sequence token.
+        :type add_eos: bool
+        :return: List of byte token IDs.
+        :rtype: List[int]
         """
         # Convert to UTF-8 bytes
         byte_sequence = text.encode('utf-8', errors='ignore')
@@ -332,12 +149,12 @@ class ByteTokenizer(keras.layers.Layer):
         return tokens
 
     def tokens_to_text(self, tokens: List[int]) -> str:
-        """
-        Convert byte token sequence back to text.
+        """Convert a byte token sequence back to text.
 
-            :param tokens: List of byte token IDs.
-
-            :return: Decoded text string.
+        :param tokens: List of byte token IDs.
+        :type tokens: List[int]
+        :return: Decoded text string.
+        :rtype: str
         """
         # Filter out special tokens and convert back to bytes
         byte_values = []
@@ -357,15 +174,15 @@ class ByteTokenizer(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """Compute output shape.
+        """Compute the output shape.
 
-        ByteTokenizer processes text strings to byte sequences.
-        Output shape depends on the text length, so the sequence
-        dimension is dynamic (None).
+        The sequence dimension is dynamic, since output length depends on
+        text length.
 
-            :param input_shape: Input shape tuple (ignored for this utility layer).
-
-            :return: Output shape tuple: (batch_size, None) for variable-length byte sequences.
+        :param input_shape: Input shape tuple (ignored for this utility layer).
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(batch_size, None)``.
+        :rtype: Tuple[Optional[int], ...]
         """
         if isinstance(input_shape, (list, tuple)) and len(input_shape) >= 1:
             return (input_shape[0], None)
@@ -384,38 +201,43 @@ class ByteTokenizer(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class EntropyModel(keras.layers.Layer):
-    """
-    Small causal transformer for computing next-byte entropy.
+    """Small causal transformer predicting next-byte entropy for patching.
 
-    This model predicts the probability distribution of the next byte
-    at each position, which is used for dynamic patching. The entropy
-    computed from these distributions indicates information density.
+    Predicts the next-byte probability distribution at every position; the
+    Shannon entropy of that distribution (`compute_entropy`) is what
+    `DynamicPatcher` thresholds to place patch boundaries.
 
-    **Intent**: Provide lightweight entropy computation for dynamic patch
-    boundary detection, enabling adaptive compute allocation based on
-    information content.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Byte Tokens → Embedding → Positional → Transformer Layers → LayerNorm → Dense → Logits
-    [B,S] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,H] → [B,S,V] → Shannon Entropy
-    ```
+        byte tokens [B, S]
+              |
+              v
+        token embedding + positional embedding
+              |
+              v
+        causal TransformerLayer x num_layers
+              |
+              v
+        LayerNorm -> Dense(vocab_size)
+              |
+              v
+        logits [B, S, V] -> Shannon entropy [B, S]
 
-    **Mathematical Operations**:
-    1. **Token Embedding**: E(x) ∈ ℝ^(V×H)
-    2. **Position Encoding**: PE(pos, 2i) = sin(pos/10000^(2i/H))
-    3. **Causal Self-Attention**: Att(Q,K,V) with lower triangular mask
-    4. **Entropy Calculation**: H(x) = -Σ p(x) log p(x)
-
-        :param vocab_size: Size of byte vocabulary.
-        :param hidden_dim: Hidden dimension of the transformer.
-        :param num_layers: Number of transformer layers.
-        :param num_heads: Number of attention heads.
-        :param max_seq_len: Maximum sequence length.
-        :param dropout_rate: Dropout rate.
-            **kwargs: Additional layer arguments.
+    :param vocab_size: Size of the byte vocabulary.
+    :type vocab_size: int
+    :param hidden_dim: Hidden dimension of the transformer.
+    :type hidden_dim: int
+    :param num_layers: Number of transformer layers.
+    :type num_layers: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param max_seq_len: Maximum sequence length.
+    :type max_seq_len: int
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -497,13 +319,14 @@ class EntropyModel(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the entropy model.
+        """Run the entropy model forward.
 
-            :param inputs: Input token tensor of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
-
-            :return: Logits tensor of shape (batch_size, seq_len, vocab_size).
+        :param inputs: Input token tensor, shape ``(batch_size, seq_len)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Logits, shape ``(batch_size, seq_len, vocab_size)``.
+        :rtype: keras.KerasTensor
         """
         # Token embedding
         x = self.embedding(inputs)
@@ -525,12 +348,12 @@ class EntropyModel(keras.layers.Layer):
         return logits
 
     def compute_entropy(self, logits: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Compute Shannon entropy from logits.
+        """Compute Shannon entropy ``H = -sum(p * log(p))`` from logits.
 
-            :param logits: Logits tensor of shape (batch_size, seq_len, vocab_size).
-
-            :return: Entropy tensor of shape (batch_size, seq_len).
+        :param logits: Logits, shape ``(batch_size, seq_len, vocab_size)``.
+        :type logits: keras.KerasTensor
+        :return: Entropy in nats, shape ``(batch_size, seq_len)``.
+        :rtype: keras.KerasTensor
         """
         # Apply softmax to get probabilities
         probs = keras.activations.softmax(logits, axis=-1)
@@ -564,56 +387,56 @@ class EntropyModel(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class DynamicPatcher(keras.layers.Layer):
-    """
-    Creates dynamic patches based on entropy thresholding.
+    """Segments a byte sequence into patches by thresholding entropy.
 
-    This layer implements the core dynamic patching algorithm that segments
-    byte sequences based on information density measured by entropy. When
-    entropy exceeds a threshold, it indicates an unpredictable transition
-    where a new patch boundary should be created.
+    A position ``t`` opens a new patch when ``H(x_t) > entropy_threshold``.
+    Each byte is assigned the number of boundaries at or before it, saturated
+    at ``max_patches - 1``; the returned patch lengths are the occupancy
+    counts of that assignment.
 
-    **Intent**: Enable adaptive sequence segmentation based on information
-    content, allowing more compute for complex regions while grouping
-    predictable content efficiently.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Entropy Values → Threshold Detection → Boundary Creation → Patch Lengths
-    [B,S] → Compare > θ → Boundary Mask → [B,max_patches]
-    ```
+        entropy [B, S]
+              |
+              v
+        is_boundary = entropy > threshold
+              |
+              v
+        cumsum, saturate at max_patches - 1
+              |
+              v
+        one-hot occupancy -> sum
+              |
+              v
+        patch_lengths [B, max_patches]
 
-    **Patching Algorithm**:
+    Rows sum to ``seq_len`` by construction, since every byte is counted into
+    exactly one patch; ``compute_patch_ids`` does not re-validate this sum. The
+    cap truncates by position, not by entropy magnitude — everything after the
+    ``(max_patches - 1)``-th boundary merges into the final patch. A
+    magnitude-based cap (keeping the highest-entropy boundaries via top-k)
+    would let a late high-entropy byte displace an earlier boundary, making an
+    earlier byte's patch id depend on a later byte — measured to move
+    pre-perturbation logits by 4.85e-01 under
+    ``test_future_byte_does_not_change_the_past``, which the position-ordered
+    cap keeps exactly unchanged.
 
-    A position ``t`` opens a new patch when ``H(x_t) > entropy_threshold``.
-    Each byte is then assigned the number of boundaries at or before it,
-    saturated at ``max_patches - 1``; the patch lengths are the occupancy
-    counts of that assignment. Two consequences are deliberate, not
-    incidental:
+    A leading zero-length patch is legal when position 0 is itself a
+    boundary; trailing patches are zero-length whenever a sequence produces
+    fewer boundaries than ``max_patches - 1``. Both leave patch ids
+    non-decreasing, which ``LocalDecoder``'s preceding-patch gather requires.
 
-    - Rows sum to ``seq_len`` **by construction** — every byte is counted
-      into exactly one patch. This matters because ``compute_patch_ids``
-      does not validate the sum; a row that summed to less would silently
-      misassign ids rather than raise.
-    - The cap is a POSITION-ordered truncation, not a magnitude ranking.
-      Everything after the ``(max_patches - 1)``-th boundary merges into
-      the final patch. See the ``call`` anchor for why the alternative is
-      inadmissible rather than merely worse.
-
-    A leading zero-length patch is legal and occurs whenever position 0 is
-    itself a boundary; trailing patches are zero-length whenever a sequence
-    produces fewer boundaries than ``max_patches - 1``. Both leave the patch
-    ids non-decreasing, which is what ``LocalDecoder``'s preceding-patch
-    gather requires.
-
-        :param entropy_threshold: Entropy (in nats) above which a byte opens a
-            new patch. Note the scale: for a vocabulary of size ``V`` the
-            entropy of a uniform distribution is ``ln(V)``, so a threshold at
-            or below the model's typical entropy makes EVERY position a
-            boundary and a threshold above ``ln(V)`` makes none.
-        :param max_patches: Maximum number of patches to create.
-            **kwargs: Additional layer arguments.
+    :param entropy_threshold: Entropy in nats above which a byte opens a new
+        patch. For a vocabulary of size ``V`` the entropy of a uniform
+        distribution is ``ln(V)``; a threshold at or below the model's
+        typical entropy makes every position a boundary, and one above
+        ``ln(V)`` makes none.
+    :type entropy_threshold: float
+    :param max_patches: Maximum number of patches to create.
+    :type max_patches: int
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -631,59 +454,22 @@ class DynamicPatcher(keras.layers.Layer):
             entropy: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
+        """Derive patch lengths from entropy values, per row.
+
+        Each row is segmented independently, so sequences with different
+        content get different boundaries.
+
+        :param entropy: Entropy, shape ``(batch_size, seq_len)``, in nats (as
+            produced by ``EntropyModel.compute_entropy``).
+        :type entropy: keras.KerasTensor
+        :param training: Unused — the segmentation is deterministic.
+        :type training: Optional[bool]
+        :return: Patch lengths, shape ``(batch_size, max_patches)``,
+            ``int32``, non-negative, each row summing to exactly ``seq_len``.
+        :rtype: keras.KerasTensor
         """
-        Derive patch lengths from the entropy values, per row.
-
-        Each row is segmented independently: sequences with different content
-        get different boundaries. This is what makes the shipped
-        ``EntropyModel`` and the trainer's entropy-pretraining stage
-        load-bearing — before this, only ``ops.shape(entropy)`` was read and
-        every row of the batch received the same equal-length partition.
-
-            :param entropy: Entropy tensor of shape (batch_size, seq_len), in
-                the same units as ``entropy_threshold`` (nats, as produced by
-                ``EntropyModel.compute_entropy``).
-            :param training: Whether in training mode. Unused — the
-                segmentation is deterministic.
-
-            :return: Patch lengths tensor of shape (batch_size, max_patches),
-                ``int32``, non-negative, each row summing to exactly
-                ``seq_len``.
-        """
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-012
-        # ---------------------------------------------------------------
-        # The cap is applied BY POSITION (`ops.minimum` on a running count),
-        # never by entropy MAGNITUDE. DO NOT "improve" this into an
-        # `ops.top_k` over the entropy values to keep the max_patches-1
-        # "most informative" boundaries. That variant is INADMISSIBLE, not
-        # merely a different trade-off: a late high-entropy position would
-        # displace an earlier boundary, so an EARLIER byte's patch id would
-        # depend on a LATER byte. BLT is trained under a next-byte
-        # objective, and
-        # tests/test_models/test_byte_latent_transformer/test_model.py
-        # ::TestCausality::test_future_byte_does_not_change_the_past
-        # requires the logits before the perturbed byte to be EXACTLY
-        # unchanged. The top-k variant was written and measured: it moves
-        # them by 4.85e-01. The price paid here is real and accepted — a
-        # sequence whose most informative positions are all late gets one
-        # long final patch — but it buys causality structurally rather than
-        # by test.
-        #
-        # Two further spellings are load-bearing:
-        #  * The count runs in INT32, not in the compute dtype. A float
-        #    count reduction is the failure `activations/sparsemax.py`'s
-        #    D-017 anchor records as Defect E (an fp16 tree reduction
-        #    counted 2049 as 2048 and 2051 as 2052), and this count is the
-        #    patch id itself.
-        #  * The lengths are OCCUPANCY COUNTS of a per-byte assignment, not
-        #    differences of boundary positions. That is what makes the row
-        #    sum exactly `seq_len` structurally: every byte is counted into
-        #    exactly one patch, for any threshold, including the degenerate
-        #    ends (no boundary at all, or a boundary at every position).
-        #    `compute_patch_ids` does NOT validate the sum, so a
-        #    construction that merely usually sums correctly would fail
-        #    silently.
-        # ---------------------------------------------------------------
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-012: cap by position, not entropy
+        # magnitude (no top-k) -- a magnitude cap breaks causality (measured: moves logits 4.85e-01). See decisions.md.
         is_boundary = ops.cast(entropy > self.entropy_threshold, 'int32')
 
         # Patch id of byte t = number of boundaries at positions <= t,
@@ -704,82 +490,52 @@ class DynamicPatcher(keras.layers.Layer):
             entropy: keras.KerasTensor,
             mask: Optional[keras.KerasTensor] = None,
     ) -> bool:
-        """Report a degenerate segmentation MEASURED on a concrete batch.
+        """Warn if a concrete batch's segmentation is degenerate.
 
-        **Contract**: pure except for the log record; returns ``True`` iff a
-        warning was emitted, so a caller (or a test) asserts on the decision
-        rather than on log text. Never raises and never changes behaviour.
-        Requires an EAGER tensor — it reads the entropy values.
+        Pure except for the log record; returns ``True`` only if a warning
+        was emitted, so a caller or test can assert on the decision rather
+        than on log text. Never raises. Requires an eager tensor, since it
+        reads the entropy values.
 
-        **Pass a ``mask`` whenever the batch is padded.** The rate is a MEAN
-        over positions, so padding dilutes it toward the padding's own
-        behaviour and can put the informative end structurally out of reach: a
-        batch that is 87.5% right-padding (a 256-byte cap padded to a
-        2048-position window — the shipped ``large`` BLT preset) caps the
-        observed rate at ~0.125 even when EVERY real byte is a boundary, so the
-        ``rate == 1.0`` arm can never fire. Measured on that shape with
-        all-boundary real content: **0.1250 unmasked** (silent) against
-        **1.0000 masked** (warns). A trained entropy model drives pad-after-pad
-        to near-zero entropy, which is why the dilution is systematic rather
-        than incidental.
+        Pass ``mask`` whenever the batch is padded: the rate is a mean over
+        positions, and padding dilutes it toward the padding's own behavior.
+        A trained entropy model drives padding to near-zero entropy, so a
+        batch that is mostly padding can hide a fully-degenerate real region —
+        measured on a 256-real-byte sequence padded to 2048 with every real
+        byte a boundary: rate 0.1250 unmasked (silent) versus 1.0000 masked
+        (warns).
 
-        Degenerate means one of the two ends, and only those:
+        Degenerate means one of two ends:
 
-        - **boundary rate 1.0** — every position opens a patch, so patch 0 is
-          empty, one byte lands in each patch after it, and the whole remaining
-          tail merges into the final patch. This is what an untrained entropy
-          model produces (its output sits near the uniform ceiling
-          ``ln(vocab_size)``) against any threshold below that ceiling.
-        - **boundary rate 0.0** — no position opens a patch, so the entire
+        - boundary rate 1.0 — every position opens a patch, so patch 0 is
+          empty, one byte lands in each patch after it, and the remaining
+          tail merges into the final patch. An untrained entropy model
+          (output near the uniform ceiling ``ln(vocab_size)``) produces this
+          against any threshold below that ceiling.
+        - boundary rate 0.0 — no position opens a patch, so the whole
           sequence is one patch and ``max_patches`` is inert.
 
-        Both are legal, silent, and worse than the fixed equal-length split
-        this layer replaced. Rates strictly between the ends are NOT reported:
-        that is an ordinary segmentation, and how coarse or fine it should be
-        is a modelling choice this layer has no basis to second-guess.
+        Rates strictly between the ends are not reported — that is an
+        ordinary segmentation.
 
         :param entropy: Concrete (eager) entropy tensor, ``(batch, seq_len)``,
             in nats — the same tensor ``call`` consumes.
+        :type entropy: keras.KerasTensor
         :param mask: Optional concrete (eager) tensor broadcastable to
-            ``entropy``, non-zero at REAL positions and zero at padding. When
-            given, the rate is computed over the non-zero positions only. When
-            omitted, every position counts — correct only for an unpadded
-            batch.
-        :return: ``True`` if a warning was logged. Note this includes the
-            no-real-positions case (an all-zero ``mask``), which is a defect in
-            the CALLER's probe rather than a degenerate segmentation, and is
-            reported as such.
+            ``entropy``, non-zero at real positions and zero at padding. When
+            omitted, every position counts, which is correct only for an
+            unpadded batch.
+        :type mask: Optional[keras.KerasTensor]
+        :return: ``True`` if a warning was logged. This includes the
+            no-real-positions case (an all-zero ``mask``), reported as a
+            defect in the caller's probe rather than a degenerate
+            segmentation.
+        :rtype: bool
         """
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-018
-        # This is an EXPLICIT, opt-in diagnostic and it is deliberately NOT
-        # called from `call()`. Two reasons, the second measured:
-        #  * `call()` is `keras.ops`-only with a static `max_patches` (I-1/I-2/
-        #    I-3). A Python-level branch on a tensor value is not expressible
-        #    there without raw `tf`.
-        #  * A once-per-instance warning inside `call()` cannot observe the
-        #    rate at all under tracing: reading it raises
-        #    `NotImplementedError: Cannot convert a symbolic tf.Tensor
-        #    (Mean:0) to a numpy array`, and a Python side effect in a traced
-        #    `call` fires once per RETRACE regardless of the data.
-        # It replaces `warn_if_entropy_threshold_is_degenerate`, which compared
-        # the threshold to `0.5 * ln(vocab_size)` — vocabulary arithmetic that
-        # never looked at the entropy and therefore fired on 100% of shipped
-        # configurations (1.5 and 1.3 against a 2.78-nat floor at
-        # vocab_size=260), including the one D-015 argues is probably right.
-        # Do NOT reintroduce a construction-time variant: at construction there
-        # is no entropy to measure. See decisions.md D-018.
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-024
-        # The rate is computed over REAL positions when a mask is supplied, and
-        # the only shipped caller supplies one. Do NOT drop the mask parameter
-        # "because the unmasked mean is the same thing": it is not. Padding is
-        # not a neutral filler here -- a trained entropy model predicts
-        # pad-after-pad with near-zero entropy, so padded positions are
-        # systematically NON-boundaries, and the mean over them is an average of
-        # the signal with a constant. MEASURED on the shipped `large` shape
-        # (256 real bytes padded to 2048) with every real byte a boundary:
-        # unmasked 0.1250 -> silent; masked 1.0000 -> warns. The informative arm
-        # of this diagnostic was unreachable at its own call site. See
-        # decisions.md D-024.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-018: opt-in, not called from call() --
+        # call() is keras.ops-only with static shapes; a Python branch on a tensor value needs eager data. See decisions.md.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-024: rate is computed over real positions when
+        # mask is given -- unmasked mean hides degenerate content behind padding (measured 0.1250 vs 1.0000). See decisions.md.
         is_boundary = ops.cast(entropy > self.entropy_threshold, 'float32')
 
         if mask is None:
@@ -833,41 +589,22 @@ class DynamicPatcher(keras.layers.Layer):
             patch_lengths: keras.KerasTensor,
             seq_len: Optional[int] = None
     ) -> keras.KerasTensor:
-        """
-        Convert patch lengths to patch IDs for each position.
+        """Convert patch lengths to a patch id for each byte position.
 
-            :param patch_lengths: Patch lengths tensor of shape (batch_size, max_patches).
-            :param seq_len: The sequence length to expand to. PASS THIS from the
-                caller's own byte tensor whenever it is known -- see the
-                D-034 anchor below. When ``None``, it is recovered from the data
-                as ``max(sum(patch_lengths))``, which makes the layer's OUTPUT
-                SHAPE data-dependent and therefore XLA-incompatible.
-
-            :return: Patch IDs tensor of shape (batch_size, seq_len).
+        :param patch_lengths: Patch lengths, shape ``(batch_size, max_patches)``.
+        :type patch_lengths: keras.KerasTensor
+        :param seq_len: Sequence length to expand to. Pass this from the
+            caller's own byte tensor whenever known. When ``None``, it is
+            recovered from the data as ``max(sum(patch_lengths))``, which
+            makes the layer's output shape data-dependent and XLA-incompatible.
+        :type seq_len: Optional[int]
+        :return: Patch ids, shape ``(batch_size, seq_len)``.
+        :rtype: keras.KerasTensor
         """
         max_patches = ops.shape(patch_lengths)[1]
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-034
-        # PASS `seq_len` IN. Do NOT delete this parameter and go back to
-        # `ops.max(ops.sum(patch_lengths, axis=1))` unconditionally: that value
-        # is a TENSOR whose contents are only known at run time, it feeds
-        # `ops.arange` below, and so THIS LAYER'S OUTPUT SHAPE DEPENDS ON ITS
-        # INPUT DATA. XLA rejects that outright --
-        #   `InvalidArgumentError: Input 1 to node .../range with op Range must
-        #    be a compile-time constant. XLA compilation requires that operator
-        #    arguments that represent shapes ... be evaluated to concrete
-        #    values`
-        # -- so `model.fit()` could not run on GPU at Keras' default
-        # `jit_compile="auto"`, i.e. the shipped `src/train/blt/` pipeline was
-        # broken. The `arange` is merely where XLA notices FIRST; the defect is
-        # the data-dependent shape, which is why the remedy supplies the length
-        # rather than rewriting the `arange`.
-        # The value is not a guess: `PatchingLayer` builds patch lengths as
-        # OCCUPANCY COUNTS of a per-byte assignment, so the row sum is exactly
-        # `seq_len` STRUCTURALLY, for any threshold, including the degenerate
-        # ends (see the anchor in `call`). The caller's byte tensor already
-        # carries that number as a static dimension.
-        # See decisions.md D-034.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-034: pass seq_len in; deriving it from
+        # patch_lengths makes output shape data-dependent, which XLA rejects (broke src/train/blt/). See decisions.md.
         if seq_len is None:
             max_seq_len = ops.max(ops.sum(patch_lengths, axis=1))
         else:
@@ -909,33 +646,35 @@ class DynamicPatcher(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class PatchPooling(keras.layers.Layer):
-    """
-    Pools byte representations within patches to create patch representations.
+    """Pools byte hidden states within each patch into one patch vector.
 
-    This layer reduces the sequence of byte hidden states to patch hidden states
-    using various pooling strategies. The attention-based pooling method uses
-    learnable query vectors to extract the most relevant information from each patch.
+    Architecture (attention pooling):
 
-    **Intent**: Aggregate byte-level information within patches into compact
-    representations while preserving the most important features for global
-    processing.
+    .. code-block:: text
 
-    **Architecture** (Attention Pooling):
-    ```
-    Byte Hidden States + Patch IDs → Patch Grouping → Query Attention → Patch Representations
-    [B,S,H] + [B,S] → {Patch_i} → Q @ {K,V}_i → [B,P,D]
-    ```
+        byte hiddens [B, S, H], patch_ids [B, S]
+              |
+              v
+        group bytes by patch id
+              |
+              v
+        learnable queries attend to each patch's bytes
+              |
+              v
+        patch representations [B, P, D]
 
-    **Pooling Methods**:
-    1. **Max Pooling**: max(h_bytes) per patch; an EMPTY patch pools to a zero
-       vector, NOT to the internal `-1e9` masking sentinel (D-039).
-    2. **Mean Pooling**: mean(h_bytes) per patch
-    3. **Attention Pooling**: Learnable queries attend to patch bytes
+    Three pooling methods: ``max`` (per-patch max, an empty patch pools to a
+    zero vector, not to the internal ``-1e9`` masking sentinel), ``mean``
+    (per-patch mean), and ``attention`` (learnable queries attend to each
+    patch's bytes).
 
-        :param pooling_method: Method for pooling ('max', 'mean', 'attention').
-        :param output_dim: Output dimension for patch representations.
-        :param num_queries: Number of query vectors for attention pooling.
-            **kwargs: Additional layer arguments.
+    :param pooling_method: One of ``'max'``, ``'mean'``, ``'attention'``.
+    :type pooling_method: str
+    :param output_dim: Output dimension of the patch representations.
+    :type output_dim: int
+    :param num_queries: Number of query vectors for attention pooling.
+    :type num_queries: int
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -1001,14 +740,18 @@ class PatchPooling(keras.layers.Layer):
             patch_ids: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Pool byte representations into patch representations.
+        """Pool byte hidden states into patch representations.
 
-            :param byte_hiddens: Byte hidden states of shape (batch_size, seq_len, hidden_dim).
-            :param patch_ids: Patch IDs of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
-
-            :return: Patch representations of shape (batch_size, num_patches, output_dim).
+        :param byte_hiddens: Byte hidden states, shape ``(batch_size,
+            seq_len, hidden_dim)``.
+        :type byte_hiddens: keras.KerasTensor
+        :param patch_ids: Patch ids, shape ``(batch_size, seq_len)``.
+        :type patch_ids: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Patch representations, shape ``(batch_size, num_patches,
+            output_dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(byte_hiddens)[0]
         seq_len = ops.shape(byte_hiddens)[1]
@@ -1047,20 +790,9 @@ class PatchPooling(keras.layers.Layer):
             masked_hiddens = ops.where(mask_expanded, byte_hiddens, -1e9)
             patch_max = ops.max(masked_hiddens, axis=1)  # (batch_size, hidden_dim)
 
-            # DECISION plan-2026-08-18T140459-7991552f/D-039: EMPTY patches are
-            # the NORM here, not an edge case -- `DynamicPatcher` always emits
-            # `max_patches` slots and fills only as many as there were entropy
-            # crossings (~120 of 128 empty for a 16-byte sequence at `micro`).
-            # For an empty patch `mask` is all-False, so the `-1e9` sentinel
-            # above SURVIVES the max and the slot becomes `[-1e9] * hidden_dim`,
-            # which the output `Dense` turns into O(1e9) activations and the
-            # downstream `GlobalTransformer`'s LayerNorm then normalizes almost
-            # entirely against, annihilating the real patches. Do NOT drop this
-            # `where` and do NOT "fix" it by making the sentinel smaller (a
-            # finite sentinel is still an arbitrary non-zero constant in every
-            # empty slot). The neutral value is 0.0, matching `_mean_pooling`
-            # (which divides a zero sum by `max(count, 1)`) and
-            # `_attention_pooling` (zeroed keys/values).
+            # DECISION plan-2026-08-18T140459-7991552f/D-039: rescue empty patches to zero,
+            # not the -1e9 sentinel -- most patch slots are empty by construction; the sentinel would
+            # dominate downstream LayerNorm and annihilate the real patches. See decisions.md.
             has_any = ops.any(mask, axis=1, keepdims=True)  # (batch_size, 1)
             patch_max = ops.where(has_any, patch_max, ops.zeros_like(patch_max))
 
@@ -1179,42 +911,49 @@ class PatchPooling(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class LocalEncoder(keras.layers.Layer):
-    """
-    Local Encoder for BLT that processes bytes within their patches.
+    """Processes bytes within patches with causal attention, then pools to patches.
 
-    This encoder applies causal self-attention to bytes within patches,
-    learning local patterns and dependencies. It then pools the byte
-    representations to create a single representation for each patch.
-
-    **Intent**: Process byte sequences with local causal attention to capture
-    short-range dependencies, then aggregate into patch representations for
-    hierarchical global processing.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Byte Tokens → Embedding → Positional → Local Transformers → Patch Pooling
-    [B,S] → [B,S,D_l] → [B,S,D_l] → [B,S,D_l] → [B,P,D_g]
-    ```
+        byte tokens [B, S]
+              |
+              v
+        byte embedding + positional embedding
+              |
+              v
+        causal TransformerLayer x num_local_layers
+              |
+              v
+        LayerNorm
+              |
+              v
+        PatchPooling (patch_ids) -> patch representations [B, P, D_g]
 
-    **Processing Flow**:
-    1. **Byte Embedding**: Map tokens to dense vectors
-    2. **Position Encoding**: Add positional information
-    3. **Local Attention**: Causal self-attention within patches
-    4. **Cross-Attention Pooling**: Aggregate bytes to patch representations
-
-        :param vocab_size: Size of byte vocabulary (typically 256 + special tokens).
-        :param local_dim: Hidden dimension for local encoder.
-        :param num_local_layers: Number of transformer layers in local encoder.
-        :param num_heads_local: Number of attention heads for local transformer.
-        :param max_sequence_length: Maximum sequence length in bytes.
-        :param max_patches: Maximum number of patches per sequence.
-        :param dropout_rate: Dropout rate for all layers.
-        :param patch_pooling_method: Method for patch pooling ('max', 'mean', 'attention').
-        :param global_dim: Hidden dimension for global transformer (output dimension).
-        :param cross_attention_queries: Number of queries for patch representation.
-            **kwargs: Additional layer arguments.
+    :param vocab_size: Size of the byte vocabulary (typically 256 plus
+        special tokens).
+    :type vocab_size: int
+    :param local_dim: Hidden dimension of the local encoder.
+    :type local_dim: int
+    :param num_local_layers: Number of transformer layers in the local encoder.
+    :type num_local_layers: int
+    :param num_heads_local: Number of attention heads in the local transformer.
+    :type num_heads_local: int
+    :param max_sequence_length: Maximum sequence length in bytes.
+    :type max_sequence_length: int
+    :param max_patches: Maximum number of patches per sequence.
+    :type max_patches: int
+    :param dropout_rate: Dropout rate for all layers.
+    :type dropout_rate: float
+    :param patch_pooling_method: One of ``'max'``, ``'mean'``, ``'attention'``.
+    :type patch_pooling_method: str
+    :param global_dim: Output dimension, matching the global transformer's
+        hidden dimension.
+    :type global_dim: int
+    :param cross_attention_queries: Number of queries for attention pooling.
+    :type cross_attention_queries: int
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -1312,14 +1051,17 @@ class LocalEncoder(keras.layers.Layer):
             patch_ids: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of local encoder.
+        """Run the local encoder forward.
 
-            :param byte_tokens: Byte token tensor of shape (batch_size, seq_len).
-            :param patch_ids: Patch ID tensor of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
-
-            :return: Patch representations of shape (batch_size, num_patches, global_dim).
+        :param byte_tokens: Byte tokens, shape ``(batch_size, seq_len)``.
+        :type byte_tokens: keras.KerasTensor
+        :param patch_ids: Patch ids, shape ``(batch_size, seq_len)``.
+        :type patch_ids: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Patch representations, shape ``(batch_size, num_patches,
+            global_dim)``.
+        :rtype: keras.KerasTensor
         """
         # Embed byte tokens
         x = self.byte_embedding(byte_tokens)
@@ -1366,36 +1108,37 @@ class LocalEncoder(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class GlobalTransformer(keras.layers.Layer):
-    """
-    Global Transformer for BLT that processes patch sequences.
+    """Applies causal self-attention across patch representations.
 
-    This transformer applies self-attention across patch representations
-    to model long-range dependencies in the hierarchical structure.
+    Models long-range dependencies between patches, over a sequence that is
+    much shorter than the underlying byte sequence.
 
-    **Intent**: Model long-range dependencies between patches using standard
-    causal self-attention, enabling global context understanding while
-    maintaining computational efficiency through reduced sequence length.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Patch Representations → Positional → Global Transformers → Contextualized Patches
-    [B,P,D_g] → [B,P,D_g] → [B,P,D_g] → [B,P,D_g]
-    ```
+        patch representations [B, P, D_g]
+              |
+              v
+        patch positional embedding
+              |
+              v
+        causal TransformerLayer x num_global_layers
+              |
+              v
+        LayerNorm -> contextualized patches [B, P, D_g]
 
-    **Global Processing**:
-    1. **Patch Positions**: Add positional encoding to patch sequence
-    2. **Causal Attention**: Standard transformer self-attention across patches
-    3. **Deep Processing**: Multiple layers for complex dependency modeling
-    4. **Context Integration**: Rich patch representations with global awareness
-
-        :param global_dim: Hidden dimension for global transformer.
-        :param num_global_layers: Number of transformer layers in global processor.
-        :param num_heads_global: Number of attention heads for global transformer.
-        :param max_patches: Maximum number of patches per sequence.
-        :param dropout_rate: Dropout rate for all layers.
-            **kwargs: Additional layer arguments.
+    :param global_dim: Hidden dimension of the global transformer.
+    :type global_dim: int
+    :param num_global_layers: Number of transformer layers.
+    :type num_global_layers: int
+    :param num_heads_global: Number of attention heads.
+    :type num_heads_global: int
+    :param max_patches: Maximum number of patches per sequence.
+    :type max_patches: int
+    :param dropout_rate: Dropout rate for all layers.
+    :type dropout_rate: float
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -1458,13 +1201,15 @@ class GlobalTransformer(keras.layers.Layer):
             patch_representations: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of global transformer.
+        """Run the global transformer forward.
 
-            :param patch_representations: Patch representations of shape (batch_size, num_patches, global_dim).
-            :param training: Whether in training mode.
-
-            :return: Contextual patch representations of shape (batch_size, num_patches, global_dim).
+        :param patch_representations: Patch representations, shape
+            ``(batch_size, num_patches, global_dim)``.
+        :type patch_representations: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Contextualized patch representations, same shape as input.
+        :rtype: keras.KerasTensor
         """
         # Add patch positional embeddings
         x = self.patch_positional_embedding(patch_representations, training=training)
@@ -1500,43 +1245,45 @@ class GlobalTransformer(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.blt_blocks")
 class LocalDecoder(keras.layers.Layer):
-    """
-    Local Decoder for BLT that generates next byte predictions.
+    """Generates next-byte logits from causal self-attention and patch context.
 
-    This decoder processes byte sequences with causal self-attention
-    and uses cross-attention to incorporate global patch context.
+    Each decoder layer alternates causal self-attention over bytes with
+    cross-attention to the preceding patch's global representation, so a
+    prediction combines local byte history with global context without
+    leaking the future.
 
-    **Intent**: Generate next-byte predictions by combining local causal
-    modeling with global patch context, enabling both local coherence
-    and global consistency in generation.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Byte Tokens + Global Context → Self-Attention → Cross-Attention → Output Logits
-    [B,S] + [B,P,D_g] → [B,S,D_l] → [B,S,D_l] → [B,S,V]
-    ```
+        byte tokens [B, S], global context [B, P, D_g]
+              |
+              v
+        byte embedding + positional embedding
+              |
+              v
+        (self-attention -> cross-attention to preceding patch -> norm)
+              x num_local_layers
+              |
+              v
+        LayerNorm -> Dense(vocab_size) -> logits [B, S, V]
 
-    **Decoder Flow**:
-    1. **Byte Embedding**: Map input tokens to local dimension
-    2. **Causal Self-Attention**: Model local byte dependencies
-    3. **Cross-Attention**: Incorporate global patch context
-    4. **Output Projection**: Generate vocabulary logits
-
-    **Cross-Attention Mechanism**:
-    - Bytes query their corresponding patch representations
-    - Masked to ensure bytes only see relevant patch context
-    - Combines local patterns with global understanding
-
-        :param vocab_size: Size of byte vocabulary (typically 256 + special tokens).
-        :param local_dim: Hidden dimension for local decoder.
-        :param global_dim: Hidden dimension for global transformer.
-        :param num_local_layers: Number of transformer layers in local decoder.
-        :param num_heads_local: Number of attention heads for local transformers.
-        :param max_sequence_length: Maximum sequence length in bytes.
-        :param dropout_rate: Dropout rate for all layers.
-            **kwargs: Additional layer arguments.
+    :param vocab_size: Size of the byte vocabulary (typically 256 plus
+        special tokens).
+    :type vocab_size: int
+    :param local_dim: Hidden dimension of the local decoder.
+    :type local_dim: int
+    :param global_dim: Hidden dimension of the global transformer's output.
+    :type global_dim: int
+    :param num_local_layers: Number of transformer layers in the local decoder.
+    :type num_local_layers: int
+    :param num_heads_local: Number of attention heads.
+    :type num_heads_local: int
+    :param max_sequence_length: Maximum sequence length in bytes.
+    :type max_sequence_length: int
+    :param dropout_rate: Dropout rate for all layers.
+    :type dropout_rate: float
+    :param kwargs: Additional ``keras.layers.Layer`` arguments.
     """
 
     def __init__(
@@ -1674,15 +1421,19 @@ class LocalDecoder(keras.layers.Layer):
             patch_ids: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of local decoder.
+        """Run the local decoder forward.
 
-            :param byte_tokens: Byte token tensor of shape (batch_size, seq_len).
-            :param global_context: Global patch representations of shape (batch_size, num_patches, global_dim).
-            :param patch_ids: Patch ID tensor of shape (batch_size, seq_len).
-            :param training: Whether in training mode.
-
-            :return: Logits tensor of shape (batch_size, seq_len, vocab_size).
+        :param byte_tokens: Byte tokens, shape ``(batch_size, seq_len)``.
+        :type byte_tokens: keras.KerasTensor
+        :param global_context: Global patch representations, shape
+            ``(batch_size, num_patches, global_dim)``.
+        :type global_context: keras.KerasTensor
+        :param patch_ids: Patch ids, shape ``(batch_size, seq_len)``.
+        :type patch_ids: keras.KerasTensor
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Logits, shape ``(batch_size, seq_len, vocab_size)``.
+        :rtype: keras.KerasTensor
         """
         # Embed byte tokens
         x = self.byte_embedding(byte_tokens)
@@ -1727,26 +1478,39 @@ class LocalDecoder(keras.layers.Layer):
             cross_attention: keras.layers.Layer,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply cross-attention to the PRECEDING patch's global representation.
+        """Cross-attend to the preceding patch's global representation.
 
         Byte ``i`` reads the contextualized representation of patch
         ``patch_ids[i] - 1``, not of its own patch, and the attention is
         additionally masked causally over the gathered byte-length key
         sequence. Both restrictions are needed for the decoder to be causal:
+        gathering a byte's own patch leaks the future, since that patch's
+        representation is pooled over every byte in it including the target
+        byte itself; and even with the previous-patch gather, a later key
+        ``j`` may carry a patch index at or after ``patch_ids[i]``, so the
+        causal mask over the key axis is not redundant.
 
-        * gathering the byte's *own* patch leaks the future, because a patch
-          representation is pooled over every byte of that patch, including
-          the bytes after ``i`` -- and including the target byte itself;
-        * even with the previous-patch gather, key ``j`` for ``j > i`` may
-          carry patch ``patch_ids[j] - 1``, which can be ``patch_ids[i]`` or
-          later, so the causal mask over the key axis is not redundant.
+        Bytes in patch 0 have no preceding patch. Their gather index is
+        clamped to 0 and the gathered vector is then zeroed, so they receive
+        no global context at all rather than reading their own patch. Zeroing
+        the key rather than masking the query row also avoids a
+        fully-masked softmax row.
 
-        Bytes in patch 0 have no preceding patch. Their gather index is clamped
-        to 0 and the gathered vector is then zeroed, so they receive no global
-        context at all rather than reading their own patch. Zeroing the key
-        rather than masking the query row also avoids a fully-masked softmax
-        row.
+        :param decoder_hidden: Decoder hidden states, shape ``(batch_size,
+            seq_len, local_dim)``.
+        :type decoder_hidden: keras.KerasTensor
+        :param global_context: Global patch representations, shape
+            ``(batch_size, num_patches, local_dim)``.
+        :type global_context: keras.KerasTensor
+        :param patch_ids: Patch ids, shape ``(batch_size, seq_len)``.
+        :type patch_ids: keras.KerasTensor
+        :param cross_attention: The ``MultiHeadAttention`` layer to apply.
+        :type cross_attention: keras.layers.Layer
+        :param training: Whether in training mode.
+        :type training: Optional[bool]
+        :return: Cross-attended output, shape ``(batch_size, seq_len,
+            local_dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(decoder_hidden)[0]
         seq_len = ops.shape(decoder_hidden)[1]
