@@ -1,68 +1,25 @@
 """
-Wave field attention: information propagated through a shared 1-D field by damped
-wave convolution, in place of a dot-product score matrix.
+WaveFieldAttention, an attention layer that propagates information through
+a shared 1-D field by damped-wave convolution instead of a dot-product
+score matrix.
 
-Dot-product attention decides how much token ``i`` reads from token ``j`` by
-scoring the pair directly, which is why it costs ``O(N^2)`` — every pair must be
-formed. This layer replaces the pairwise question with a spatial one. Tokens are
-placed at absolute positions on a 1-D field grid, each deposits its value vector
-onto the field weighted by the magnitude of its key, a damped-wave kernel is
-convolved along the field, and each token reads back whatever has arrived at its
-own position. Interaction is then a consequence of propagation rather than of
-enumeration: two tokens influence each other to the extent that a wave launched at
-one reaches the other before it damps out. The convolution is done by FFT, so cost
-is ``O(N*D + G*log(G)*H*D_h)`` — linear in sequence length, with the ``G log G``
-term paid on the field rather than on the tokens.
+Dot-product attention scores every token pair directly, costing ``O(N^2)``.
+This layer instead has each token deposit its value onto a 1-D field grid,
+weighted by its key's magnitude, convolves the field with a learned
+per-head damped-wave kernel via FFT, and lets each token gather back
+whatever arrived at its position. Two tokens interact only to the extent
+that a wave launched at one reaches the other before damping out; cost is
+``O(N*D + G*log(G)*H*D_h)``, linear in sequence length. A learned
+``(H, H)`` coupling matrix, softmaxed, mixes heads at each field position;
+there is no softmax over tokens anywhere.
 
-The kernel is what encodes the interaction structure, and it is learned per head:
-``k(t) = exp(-alpha*t) * cos(omega*t + phi)``. The damping ``alpha`` sets an
-effective range, so a head can specialize in local or long-range propagation; the
-frequency ``omega`` gives the kernel sign structure, so a head can subtract distant
-content rather than only accumulate it; and the phase ``phi`` shifts where the
-first lobe lands. Initializing the heads on a spread of frequencies and dampings is
-what gives the layer a bank of range scales rather than one. Kernels are
-L1-normalized so a head's total influence does not depend on how fast it damps.
-
-There is no softmax over tokens anywhere. The only softmax is over a learned
-``(H, H)`` coupling matrix, applied at each field position, which lets heads read
-each other's fields — the field analogue of head mixing. Selectivity instead comes
-from two multiplicative gates, and they are gates on different things: the query
-modulation ``act(Q / scale)`` decides which DIMENSIONS of the arrived field each
-token reads, while the content gate ``act(gate_proj(x))`` decides how much of the
-result survives at all, computed from the raw input rather than from a projection
-of the field.
-
-Causality is the part to read before using this layer autoregressively. The kernel
-is left-aligned, so convolution output at field position ``g`` depends only on
-positions ``<= g``, and the coupling mixes heads at the same position — the
-FIELD-GRID computation is causal. TOKEN-level causality does not follow and must
-not be relied on. Token indices map monotonically to field positions
-(``token i -> i * field_stride``), but the bilinear scatter and gather each span two
-adjacent cells, and measurement shows some configurations clean and others leaking
-badly. The mechanism is not characterised and no sufficient condition on
-``field_size`` / ``max_seq_len`` is offered.
-
-Measured leak, randomly initialized layer, one perturbed token of magnitude 100
-appended to an 8-token input; the value is the change induced on the OTHER tokens'
-outputs::
-
-    field_size=12, max_seq_len=11  ->  O(1e2)-O(1e3)
-    field_size=13, max_seq_len=11  ->  O(1e2)-O(1e3)
-    field_size=16, max_seq_len=11  ->  O(1e-4)   (float noise)
-    field_size=22, max_seq_len=11  ->  O(1e-4)   (float noise)
-    field_size=16, max_seq_len=16  ->  O(1e-4)   (float noise)
-
-Do NOT rely on this layer for autoregressive decoding.
-
-Changes from the V3.5 Keras port:
-    - **Q is now used**: query-dependent gather modulation via
-      ``sigmoid(Q / sqrt(d_h))`` element-wise on the gathered field output. Q acts
-      as a learned per-token feature selector on propagated information, distinct
-      from the input-based gate.
-    - **Padding mask support**: an ``attention_mask`` of shape ``(B, N)`` zeros out
-      deposits from padded tokens and masks the final output.
-    - **coupling_noise_stddev fixed**: now actually used in ``field_coupling``
-      initialisation (identity + Gaussian noise), matching the PyTorch original.
+The convolution is causal on the field grid (a left-aligned kernel), but
+that does not imply token-level causality: bilinear scatter and gather
+each span two adjacent field cells, and some ``field_size``/
+``max_seq_len`` configurations leak across that boundary while others do
+not. Do not rely on this layer for autoregressive decoding without
+verifying the configuration; see the class docstring's measured leak
+table.
 
 References:
     - Vaswani et al., 2017. Attention Is All You Need. (the dot-product mechanism
@@ -112,15 +69,25 @@ class WaveFieldAttention(keras.layers.Layer):
     The damped-wave kernel ``k_h(t) = exp(-alpha*t) * cos(omega*t + phi)``
     for ``t >= 0`` is causal (left-aligned), so the convolution output at
     field position ``g`` depends only on field positions ``<= g``. That is
-    causality **on the field grid only**: token-level (autoregressive)
-    causality is NOT guaranteed and must not be relied on. Some
-    configurations measure clean and others leak badly; no sufficient
-    condition is offered — see the module docstring's Causality section
-    for the measured table.
+    causality on the field grid only: token-level (autoregressive)
+    causality is not guaranteed. Some configurations measure clean and
+    others leak badly; no sufficient condition is offered.
     Complexity is ``O(N*D + G*log(G)*H*D_h)`` where ``G`` is the field
     grid size.
 
-    **Architecture Overview:**
+    Measured leak, randomly initialized layer, one perturbed token of
+    magnitude 100 appended to an 8-token input, value = change induced on
+    the other tokens' outputs:
+
+    .. code-block:: text
+
+        field_size=12, max_seq_len=11  ->  O(1e2)-O(1e3)
+        field_size=13, max_seq_len=11  ->  O(1e2)-O(1e3)
+        field_size=16, max_seq_len=11  ->  O(1e-4)   (float noise)
+        field_size=22, max_seq_len=11  ->  O(1e-4)   (float noise)
+        field_size=16, max_seq_len=16  ->  O(1e-4)   (float noise)
+
+    Architecture:
 
     .. code-block:: text
 
@@ -135,7 +102,7 @@ class WaveFieldAttention(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  deposit = V · ‖K‖                                           │
-        │    the key MAGNITUDE replaces the score; an optional (B, N)  │
+        │    the key magnitude replaces the score; an optional (B, N)  │
         │    mask zeroes whole deposits                                │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
@@ -146,19 +113,16 @@ class WaveFieldAttention(keras.layers.Layer):
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  FFT damped-wave convolution, ONE KERNEL PER HEAD:           │
+        │  FFT damped-wave convolution, one kernel per head:           │
         │    k_h(t) = exp(−softplus(a_h)·t) · cos(w_h·t + p_h)         │
-        │    L1-normalised, LEFT-ALIGNED → causal ON THE FIELD GRID    │
-        │    ONLY. TOKEN-level causality is NOT guaranteed and must    │
-        │    NOT be relied on: some configs measure clean, others      │
-        │    leak badly. Mechanism not characterised, and no           │
-        │    sufficient condition is offered — see the module          │
-        │    docstring's Causality section.                            │
+        │    L1-normalised, left-aligned -> causal on the field grid   │
+        │    only. Token-level causality is not guaranteed; some       │
+        │    configs measure clean, others leak badly.                 │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  cross-head coupling: einsum with softmax(field_coupling)    │
-        │    a softmax over a LEARNED (H, H) matrix, never over token  │
+        │    a softmax over a learned (H, H) matrix, never over token  │
         │    scores                                                    │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
@@ -167,13 +131,13 @@ class WaveFieldAttention(keras.layers.Layer):
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  GATE 1 — query modulation:  × act(Q / scale)                │
-        │    WHICH DIMENSIONS of the arrived field each token reads    │
+        │  gate 1, query modulation:  × act(Q / scale)                 │
+        │    which dimensions of the arrived field each token reads    │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  GATE 2 — content gate:      × act(gate_proj(x))             │
-        │    HOW MUCH survives; computed from the raw INPUT            │
+        │  gate 2, content gate:      × act(gate_proj(x))              │
+        │    how much survives; computed from the raw input             │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
@@ -184,7 +148,7 @@ class WaveFieldAttention(keras.layers.Layer):
         │  Output [B, N, D]                                            │
         └──────────────────────────────────────────────────────────────┘
 
-    **Per-head kernel bank at initialization:**
+    Per-head kernel bank at initialization:
 
     .. code-block:: text
 
@@ -286,20 +250,31 @@ class WaveFieldAttention(keras.layers.Layer):
         tokens alias onto the last field cells, and ``call`` logs a warning when
         the length is statically known. Raise ``max_seq_len`` for full resolution.
 
-    Attributes:
-        qkv_proj: Fused Q/K/V projection, ``3 * dim`` wide.
-        output_proj: Output projection back to ``dim``.
-        gate_proj: Content-gate projection; zero kernel and ``gate_bias_init``
-            bias, so the gate starts open and input-independent.
-        query_modulation_activation: GATE 1's activation.
-        gate_activation: GATE 2's activation.
-        dropout_layer: Output dropout, or ``None`` at rate 0.
-        wave_frequency, wave_damping, wave_phase: Per-head kernel parameters.
-        field_coupling: The learned ``(H, H)`` head-mixing matrix.
-        scale: ``sqrt(head_dim)``, which is the INVERSE of every sibling's
-            convention in this package. ``call`` DIVIDES by it, at
-            ``q / self.scale``, where a sibling would multiply. Read the
-            division before assuming the usual meaning.
+    :ivar qkv_proj: Fused Q/K/V projection, ``3 * dim`` wide.
+    :vartype qkv_proj: keras.layers.Dense
+    :ivar output_proj: Output projection back to ``dim``.
+    :vartype output_proj: keras.layers.Dense
+    :ivar gate_proj: Content-gate projection; zero kernel and
+        ``gate_bias_init`` bias, so the gate starts open and input-independent.
+    :vartype gate_proj: keras.layers.Dense
+    :ivar query_modulation_activation: Gate 1's activation.
+    :vartype query_modulation_activation: keras.layers.Layer
+    :ivar gate_activation: Gate 2's activation.
+    :vartype gate_activation: keras.layers.Layer
+    :ivar dropout_layer: Output dropout, or ``None`` at rate 0.
+    :vartype dropout_layer: keras.layers.Dropout or None
+    :ivar wave_frequency: Per-head kernel frequency parameter.
+    :vartype wave_frequency: keras.Variable
+    :ivar wave_damping: Per-head kernel damping parameter.
+    :vartype wave_damping: keras.Variable
+    :ivar wave_phase: Per-head kernel phase parameter.
+    :vartype wave_phase: keras.Variable
+    :ivar field_coupling: The learned ``(H, H)`` head-mixing matrix.
+    :vartype field_coupling: keras.Variable
+    :ivar scale: ``sqrt(head_dim)`` — the reciprocal of every sibling
+        layer's convention in this package; ``call`` divides by it at
+        ``q / self.scale``, where a sibling would multiply.
+    :vartype scale: float
     """
 
     def __init__(
@@ -592,9 +567,9 @@ class WaveFieldAttention(keras.layers.Layer):
         Per-head FFT convolution on the field grid.
 
         Both operands are zero-padded to ``2G`` so the circular FFT convolution
-        yields the LINEAR one; the result is then truncated back to ``G``, which is
-        what preserves the kernel's left-alignment (and hence field-grid
-        causality). The pipeline runs in float32 regardless of policy.
+        yields the linear one; the result is then truncated back to ``G``, which
+        preserves the kernel's left-alignment and hence field-grid causality.
+        The pipeline runs in float32 regardless of policy.
 
         :param field: Field tensor of shape ``(B, H, G, D_h)``.
         :type field: keras.KerasTensor
@@ -634,8 +609,8 @@ class WaveFieldAttention(keras.layers.Layer):
     def _apply_field_coupling(self, field: keras.KerasTensor) -> keras.KerasTensor:
         """Apply row-softmax coupling across heads at each spatial position.
 
-        This is the layer's ONLY softmax, and it is over a learned ``(H, H)``
-        matrix — never over token scores. Mixing happens at the SAME field
+        This is the layer's only softmax, and it is over a learned ``(H, H)``
+        matrix — never over token scores. Mixing happens at the same field
         position, so it cannot move information along the grid and does not
         disturb field-grid causality.
 
@@ -696,11 +671,8 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 1. QKV projection -> (B, H, N, D_h) each
         qkv = self.qkv_proj(inputs)
-        # DECISION plan_2026-05-07_47199c68/D-001
-        # The originating plan directory is gone, so this comment is the record.
-        # Use keras.ops.split here. Don't go back to a 5-D reshape plus
-        # transpose plus tensor[0]/[1]/[2] indexing: split is the form that
-        # behaves the same across Keras 3 backends.
+        # DECISION plan_2026-05-07_47199c68/D-001: use keras.ops.split, not a
+        # 5-D reshape plus transpose plus indexing -- split behaves the same across Keras 3 backends. See decisions.md.
         q, k, v = keras.ops.split(qkv, 3, axis=-1)
         # Split heads and move the head axis forward: (B, H, N, D_h) each.
         q = keras.ops.transpose(keras.ops.reshape(q, (batch_size, seq_len, H, D_h)), (0, 2, 1, 3))
@@ -717,7 +689,7 @@ class WaveFieldAttention(keras.layers.Layer):
 
         # 3. Deposit = V * ||K||
         k_mag = keras.ops.sqrt(keras.ops.sum(keras.ops.square(k), axis=-1, keepdims=True) + 1e-8)
-        # The key MAGNITUDE replaces the pairwise score. Shape (B, H, N, D_h).
+        # The key magnitude replaces the pairwise score. Shape (B, H, N, D_h).
         deposit = v * k_mag
 
         # Mask the deposits, so padded tokens emit nothing onto the field.
@@ -741,15 +713,14 @@ class WaveFieldAttention(keras.layers.Layer):
         # 6. Gather from field
         gathered = keras.ops.einsum("ng,bhgd->bhnd", gather_mat, field)
 
-        # 7. GATE 1, query modulation. Q chooses WHICH DIMENSIONS of the
-        #    arrived field each token reads. Note the DIVISION by self.scale:
-        #    self.scale is sqrt(head_dim), not its reciprocal.
+        # Gate 1, query modulation: which dimensions of the arrived field each
+        # token reads. self.scale is sqrt(head_dim), not its reciprocal, so this divides.
         # Shape: (B, H, N, D_h)
         q_mod = self.query_modulation_activation(q / self.scale, training=training)
         gathered = gathered * q_mod
 
-        # 8. GATE 2, content gate. This one decides HOW MUCH survives, and it
-        #    is computed from the RAW INPUT, not from a projection of the field.
+        # Gate 2, content gate: how much survives, computed from the raw
+        # input, not from a projection of the field.
         # Shape: (B, N, D)
         gate = self.gate_activation(self.gate_proj(inputs), training=training)
         gate = keras.ops.reshape(gate, (batch_size, seq_len, H, D_h))

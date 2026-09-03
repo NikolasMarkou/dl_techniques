@@ -1,49 +1,18 @@
 """
-Grouped Query Attention: many query heads sharing few key/value heads, with
-rotary position embeddings.
+GroupedQueryAttention, an attention layer where many query heads share few
+key/value heads, with optional rotary position embeddings.
 
-Autoregressive decoding is bound by memory bandwidth, not arithmetic. Every
-generated token re-reads the entire KV cache, and that cache scales with the
-number of key/value heads, so multi-head attention spends most of a decode step
-moving keys and values rather than computing with them. Multi-query attention
-takes the extreme fix — one K,V head for all queries — and pays for it in
-quality: the heads lose their ability to look for different things, because they
-can no longer disagree about what a key IS, only about how much to weight it.
+Multi-head attention's KV cache scales with the number of key/value heads,
+the main memory cost of autoregressive decoding. This layer interpolates
+toward multi-query attention: ``num_heads`` query projections share
+``num_kv_heads`` key/value projections, with
+``group_size = num_heads // num_kv_heads`` queries per K,V pair. K and V
+stay in their native, smaller shape and are repeated to ``num_heads`` only
+at score time, so the cache never holds the expanded copy.
 
-Grouped query attention is the interpolation. ``num_heads`` query projections are
-kept, but only ``num_kv_heads`` key/value projections, with
-``group_size = num_heads // num_kv_heads`` query heads sharing each K,V pair. The
-cache shrinks by exactly ``num_heads / num_kv_heads`` while each group retains its
-own query subspace, and the published result is that a grouped model interpolates
-smoothly between MHA quality and MQA speed rather than falling off a cliff.
-
-The sharing is a repeat, not a projection. K and V are computed in their native
-``num_kv_heads`` shape and expanded along the head axis at score time, so what is
-STORED is ``num_kv_heads`` heads and what is COMPUTED against is ``num_heads`` — the
-expansion is never materialized in the cache, which is the whole point. The
-optional QK-norm follows the same discipline: K is normalized in its native
-``num_kv_heads`` shape, before grouping, so a group's members see identical
-normalized keys.
-
-Three responsibilities are delegated rather than reimplemented — rotary position
-embeddings, score normalization (so `probability_type` selects softmax, sparsemax
-or adaptive with no branching in `call`), and the optional QK-norms. Mask handling
-is NOT shared: this is the third of three broadcasting variants in the
-package and the most different, because 4D vision inputs arrive with a flattened
-``H*W`` sequence axis and the head axis is materialized by an explicit repeat
-rather than broadcast. The reasons are anchored at `_apply_mask`.
-
-Both 3D sequence inputs and 4D vision inputs are accepted; for 4D the spatial axes
-are flattened before attention and restored afterwards. `mobile_mqa.MobileMQA`
-subclasses this layer and overrides only `call`, so the attribute names it reads
-are part of the contract.
-
-Foundational mathematics, with ``d_k = dim // num_heads``::
-
-    Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
-
-with RoPE optionally applied to Q and K before scoring, and K, V repeated from
-``num_kv_heads`` to ``num_heads`` immediately before the score matmul.
+Accepts 3D ``(B, S, D)`` or 4D ``(B, H, W, D)`` input; 4D is flattened for
+attention and restored after. ``mobile_mqa.MobileMQA`` subclasses this
+layer and reuses its attribute names.
 
 References:
     - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer
@@ -100,7 +69,7 @@ class GroupedQueryAttention(keras.layers.Layer):
     accepted; 4D inputs are flattened to ``S = H*W`` for attention and restored
     afterwards.
 
-    **[REUSE]** Three responsibilities are delegated rather than reimplemented:
+    Three responsibilities are delegated rather than reimplemented:
 
     -   Rotary position embeddings come from the shared
         :class:`~dl_techniques.layers.embedding.rotary_position_embedding.RotaryPositionEmbedding`.
@@ -114,9 +83,9 @@ class GroupedQueryAttention(keras.layers.Layer):
     ``mobile_mqa.MobileMQA`` subclasses this layer. It reuses ``w_q``/``w_k``/
     ``w_v``/``w_o``, ``self.scale``, ``self.attn_prob``, ``self.dropout`` and this
     class's ``compute_output_shape()``, and overrides only ``call()``. Changing
-    any of those attribute NAMES is a breaking change for the subclass.
+    any of those attribute names is a breaking change for the subclass.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -139,13 +108,13 @@ class GroupedQueryAttention(keras.layers.Layer):
         ┌─────────────────────────────────────────────────┐  │
         │  optional RoPE(Q), RoPE(K)                      │  │
         │  optional q_norm(Q), k_norm(K)                  │  │
-        │    K is normalized in its NATIVE                │  │
-        │    num_kv_heads shape, BEFORE grouping          │  │
+        │    K is normalized in its native                │  │
+        │    num_kv_heads shape, before grouping          │  │
         └───────┬─────────────────────┬───────────────────┘  │
                 │                     ▼                      ▼
                 │        ┌─────────────────────────────────────────────┐
                 │        │ keras.ops.repeat(K, num_groups); V likewise │
-                │        │   num_kv_heads → num_heads, at SCORE time.  │
+                │        │   num_kv_heads → num_heads, at score time.  │
                 │        │   Never stored in the KV cache. That is     │
                 │        │   where the memory saving lives.            │
                 │        └──────────────────────┬──────────────────────┘
@@ -157,7 +126,7 @@ class GroupedQueryAttention(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
         │  [+ attention_mask]  rank 2/3/4, keep-predicate; the head    │
-        │  axis is REPEATED, not broadcast (see _apply_mask)           │
+        │  axis is repeated, not broadcast (see _apply_mask)           │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
@@ -174,7 +143,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         │  return_attention_weights=True → (output, weights)           │
         └──────────────────────────────────────────────────────────────┘
 
-    **Grouping:**
+    Grouping:
 
     .. code-block:: text
 
@@ -276,23 +245,37 @@ class GroupedQueryAttention(keras.layers.Layer):
         ... )
 
     Note:
-        The KV-cache saving comes from what is STORED, not from what is computed:
+        The KV-cache saving comes from what is stored, not from what is computed:
         K and V exist in ``num_kv_heads`` shape everywhere except the score matmul,
         where ``ops.repeat`` expands them. Materializing the repeat earlier — in a
         cache, or before the QK-norm — gives up the entire benefit.
 
-    Attributes:
-        w_q, w_k, w_v: Query and (narrower) key/value projections; each gets a
-            CLONED initializer, so the four roles do not start identical.
-        w_o: Output projection back to ``dim``.
-        dropout: Attention-weight dropout.
-        rope: Shared ``RotaryPositionEmbedding``, or ``None``.
-        attn_prob: Shared ``ProbabilityOutput`` score normalizer.
-        q_norm, k_norm: Optional QK-norms, or ``None``.
-        head_dim: ``dim // num_heads``.
-        num_groups: ``num_heads // num_kv_heads``.
-        scale: The ``1 / sqrt(head_dim)`` temperature, a Python float. Read by
-            ``MobileMQA``.
+    :ivar w_q: Query projection.
+    :vartype w_q: keras.layers.Dense
+    :ivar w_k: Key projection, narrower than ``w_q``; each of the four
+        projections gets its own cloned initializer.
+    :vartype w_k: keras.layers.Dense
+    :ivar w_v: Value projection, same width as ``w_k``.
+    :vartype w_v: keras.layers.Dense
+    :ivar w_o: Output projection back to ``dim``.
+    :vartype w_o: keras.layers.Dense
+    :ivar dropout: Attention-weight dropout.
+    :vartype dropout: keras.layers.Dropout
+    :ivar rope: Shared ``RotaryPositionEmbedding``, or ``None``.
+    :vartype rope: RotaryPositionEmbedding or None
+    :ivar attn_prob: Shared ``ProbabilityOutput`` score normalizer.
+    :vartype attn_prob: ProbabilityOutput
+    :ivar q_norm: Optional Q-norm, or ``None``.
+    :vartype q_norm: keras.layers.Layer or None
+    :ivar k_norm: Optional K-norm, or ``None``.
+    :vartype k_norm: keras.layers.Layer or None
+    :ivar head_dim: ``dim // num_heads``.
+    :vartype head_dim: int
+    :ivar num_groups: ``num_heads // num_kv_heads``.
+    :vartype num_groups: int
+    :ivar scale: The ``1 / sqrt(head_dim)`` temperature, a Python float,
+        read by ``MobileMQA``.
+    :vartype scale: float
     """
 
     def __init__(
@@ -340,7 +323,7 @@ class GroupedQueryAttention(keras.layers.Layer):
                 f"Use one of: 'softmax', 'sparsemax', 'adaptive', etc."
             )
 
-        # Store ALL configuration parameters
+        # Store configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -362,23 +345,12 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.head_dim = self.dim // self.num_heads
         self.num_groups = self.num_heads // self.num_kv_heads
 
-        # DECISION plan_2026-06-14_ab855e7e/D-001
-        # The originating plan directory is gone, so this comment is the record.
-        # Keep the attention scale a static Python float, computed here in
-        # `__init__` and never in `call()`. Don't revert to `keras.ops.sqrt` on a
-        # cast scalar. `MobileMQA` inherits this attribute and reads it in its own
-        # `call()`. The expression now lives in `common.compute_attention_scale`,
-        # whose body is `1.0 / math.sqrt(float(head_dim))` — repr-identical for
-        # every realistic head_dim, so `self.scale` is bit-identical to what it
-        # replaced and the subclass is unaffected.
+        # DECISION plan_2026-06-14_ab855e7e/D-001: scale is a static Python float
+        # computed in __init__, never in call() -- MobileMQA inherits and reads this attribute in its own call(). See decisions.md.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # Create all sub-layers here, in __init__.
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-068 — give each projection its
-        # OWN initializer via `clone_initializer`. Don't hand one `Initializer`
-        # INSTANCE to several `Dense` layers: a seedless instance replays its draw,
-        # measured in `FastVLM` as `w_q == w_k == w_v == w_o` bit-for-bit in all 6
-        # `stage3` attention blocks. See decisions.md D-068.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-068: each projection gets its
+        # own clone_initializer(...), never a shared instance -- a shared one replays the identical draw at every same-shape kernel. See decisions.md.
         self.w_q = keras.layers.Dense(
             self.num_heads * self.head_dim,
             use_bias=self.use_bias,
@@ -468,9 +440,9 @@ class GroupedQueryAttention(keras.layers.Layer):
     ) -> None:
         """Validate initialization parameters.
 
-        Two divisibility invariants are checked, and they are NOT the same: the
-        head split (``dim`` by ``num_heads``) is delegated to the shared validator,
-        while the grouping (``num_heads`` by ``num_kv_heads``) stays local for the
+        Two different divisibility invariants are checked: the head split
+        (``dim`` by ``num_heads``) is delegated to the shared validator, while
+        the grouping (``num_heads`` by ``num_kv_heads``) stays local for the
         reason anchored inline.
 
         :param dim: Model dimension.
@@ -499,18 +471,11 @@ class GroupedQueryAttention(keras.layers.Layer):
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if rope_theta <= 0:
             raise ValueError(f"rope_theta must be positive, got {rope_theta}")
-        # R13: adopts the shared validator. Its message is character-for-character
-        # what stood here, so the regex pinned at test_group_query_attention.py:113
-        # (and, via inheritance, test_mobile_mqa.py:119) still matches.
+        # Shared validator; its message matches the regex pinned at
+        # test_group_query_attention.py:113 and test_mobile_mqa.py:119.
         validate_head_divisibility(dim, num_heads)
-        # The check below is a DIFFERENT invariant and stays local on purpose: it is
-        # about how many query heads share one K,V head (the "grouping" in GQA), not
-        # about splitting a model dimension into heads. `common.
-        # validate_head_divisibility` documents a head-SPLIT precondition
-        # (`(..., dim) -> (..., num_heads, dim // num_heads)`); routing this through
-        # it would make that documented contract untrue for a saved line, and its
-        # `*_name` kwargs would produce the same text anyway. Pinned at
-        # test_group_query_attention.py:117.
+        # A separate, local invariant: how many query heads share one K,V head,
+        # not how dim splits into heads. Pinned at test_group_query_attention.py:117.
         if num_heads % num_kv_heads != 0:
             raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
         if not 0.0 <= dropout_rate <= 1.0:
@@ -592,7 +557,7 @@ class GroupedQueryAttention(keras.layers.Layer):
 
         Supports 3D ``(B, S, D)`` and 4D ``(B, H, W, D)`` inputs. For 4D inputs,
         spatial dimensions are flattened before attention and restored afterward.
-        RoPE and the QK-norms run BEFORE the grouping repeat, so K is normalized in
+        RoPE and the QK-norms run before the grouping repeat, so K is normalized in
         its native ``num_kv_heads`` shape.
 
         :param inputs: Input tensor of shape ``(B, S, D)`` or ``(B, H, W, D)``.
@@ -695,7 +660,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         """Broadcast and apply the attention mask to the scores.
 
         Rank 2 is reshaped (not expanded) to ``(B, 1, 1, S)`` and rank 3 gains a
-        head axis; a size-1 head axis is then MATERIALIZED to ``num_heads`` by an
+        head axis; a size-1 head axis is then materialized to ``num_heads`` by an
         explicit repeat rather than left to broadcasting. Masking itself is
         delegated to the shared helper, which also performs the fully-masked-row
         rescue at the axis this layer's own ``probability_config`` declares.
@@ -707,25 +672,8 @@ class GroupedQueryAttention(keras.layers.Layer):
         :return: Masked scores tensor, in the scores' own dtype.
         :rtype: keras.KerasTensor
         """
-        # This helper is NOT shared, on purpose.
-        #
-        # It is the THIRD variant of mask broadcasting in this package and the
-        # most different of the three:
-        #   * `multi_head_cross_attention.py::_apply_attention_mask` — casts first,
-        #     then a double `ops.expand_dims` for the 2D case, and relies on
-        #     broadcasting over the head axis;
-        #   * `multi_head_latent_attention.py::_apply_attention_mask` — expands
-        #     first, casts after, probes rank with `len(ops.shape(mask))`;
-        #   * HERE — `ops.reshape` (not `expand_dims`) for the 2D case, and then an
-        #     explicit `ops.repeat` that MATERIALIZES the head axis to `num_heads`
-        #     instead of broadcasting it. That repeat is a real extra op with a real
-        #     memory cost; it exists because 4D inputs arrive with a flattened
-        #     `H*W` sequence axis and broadcast alone proved fragile there.
-        #
-        # Don't unify the three. Any single body has to pick one cast order, one
-        # rank probe, and either broadcast or repeat. That silently rewrites the
-        # traced graph of the two layers it did not come from.
-        #
+        # This helper is not shared with the other two mask-broadcasting variants
+        # in this package: it repeats the head axis to num_heads explicitly (a real memory cost), needed because 4D inputs flatten H*W into the sequence axis.
         mask_shape = keras.ops.shape(mask)
 
         # Handle 2D padding mask (B, S)
@@ -739,36 +687,17 @@ class GroupedQueryAttention(keras.layers.Layer):
         if len(keras.ops.shape(mask)) == 4 and keras.ops.shape(mask)[1] == 1:
             mask = keras.ops.repeat(mask, self.num_heads, axis=1)
 
-        # This site's mask polarity is `1 = keep`, passed through verbatim, so
-        # `mask` already IS the keep predicate the shared helper wants. Don't
-        # "normalize" it with a `> 0` comparison and don't invert it. The helper
-        # infers no polarity, so an inversion raises nothing, changes no shape and
-        # stays finite. The layer would simply attend to the padding.
-        # `TestGroupedQueryAttentionMaskPolarity` is the only guard that sees it.
+        # mask is already a 1=keep predicate, passed through as-is; inverting or
+        # normalizing it here would silently attend to padding instead of raising. TestGroupedQueryAttentionMaskPolarity is the only guard that sees it.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007 — pin `out_dtype` to the
-        # SCORES' own dtype. The form this replaces, `scores + (1.0 - mask) * -1e9`,
-        # is `0 * -inf = NaN` at every UNMASKED position in float16: measured on
-        # unfixed HEAD (B=2, N=64, D=64, H=4, kv=2), an ALL-ONES mask gave 8192/8192
-        # NaN. Don't use `out_dtype=None`; `attn_prob` autocasts a float32 input
-        # back to float16. See decisions.md D-007.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007: pin out_dtype to the
+        # scores' own dtype -- the replaced form (`scores + (1-mask)*-1e9`) gave 8192/8192 NaN on an all-ones float16 mask. See decisions.md.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — the fully-masked-row
-        # rescue IS applied, via the helper's DEFAULT rescue axis, so the all-`-inf`
-        # row is never formed. Don't pass `rescue_axis=None` to get the loud NaN
-        # back: that also restores the NaN GRADIENT. Don't move the rescue after the
-        # softmax either — `ops.where(row_keeps, w, 0)` still contributes `0 * NaN`
-        # backward. See decisions.md D-009 and D-008.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009: fully-masked-row rescue
+        # stays on (the helper's default rescue axis) so no all--inf row forms; disabling it also brings back a NaN gradient. See decisions.md D-008/D-009.
         #
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — DERIVE the rescue axis
-        # from this layer's own `probability_config`, not the helper's `-1` default;
-        # a caller can move the reduction axis. Measured at the sibling
-        # `gated_attention` under `mixed_float16` with `{"axis": -2}` and a dead KEY
-        # COLUMN: 8192/8192 non-finite. Don't restore a bare `-1`, and don't read
-        # this as the rank/shape INFERENCE `common.py` forbids. See decisions.md D-017.
-        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-017: rescue axis is derived
+        # from this layer's own probability_config, not the helper's -1 default -- a caller can move the reduction axis. See decisions.md.
         scores_dtype = getattr(scores.dtype, "name", None) or str(scores.dtype)
         return apply_attention_mask(
             scores,

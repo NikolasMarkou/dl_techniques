@@ -1,111 +1,19 @@
 """
-Modern Hopfield Network Layer with Iterative Updates.
+HopfieldAttention, a modern Hopfield network that retrieves stored patterns
+by refining a query through repeated scaled dot-product attention.
 
-This layer implements a Modern Hopfield Network, as described in the paper
-"Hopfield Networks is All You Need" [1]. It functions as a content-addressable
-associative memory, capable of storing and retrieving a large number of patterns.
-
-The core of the layer is the scaled dot-product attention mechanism from the
-Transformer architecture, which serves as the update rule for the network's
-state. Unlike a standard attention layer, which performs a single, feed-forward
-computation, this layer can apply the attention mechanism iteratively. An
-initial query (a "probe" or noisy pattern) is repeatedly refined toward the
-stored patterns (the "memories"), which are represented by the Key-Value pairs.
-The refinement runs a fixed number of steps (``update_steps_max + 1``); the
-layer never tests for convergence and has no data-dependent early exit.
-
-Architecture:
-    Projections and head-splitting are exactly a standard multi-head attention
-    block. The difference is that the attention step runs in a bounded loop,
-    feeding its own output back in as the next query. The full stage-by-stage
-    drawing is in :class:`HopfieldAttention`'s own docstring; this is the
-    one-screen version.
-
-.. code-block:: text
-
-    ┌────────────────────────────────────────────────────────┐
-    │    HopfieldAttention — bounded query-refinement loop   │
-    │                                                        │
-    │  [Q, K, V] ► Dense x3 ► heads ► optional Q/K norm      │
-    │                    ▼                                   │
-    │  ┌── repeat update_steps_max + 1 times ──────────┐     │
-    │  │   A   = attn_prob(Q · Kᵀ / sqrt(key_dim))     │     │
-    │  │   out = A · V                                 │     │
-    │  │   Q   = A · K   ◄── loop-back onto the query, │     │
-    │  │                     skipped on the last step  │     │
-    │  └───────────────────────────────────────────────┘     │
-    │                    ▼                                   │
-    │  merge heads ► output_dense ► Output (B, N_q, dim)     │
-    └────────────────────────────────────────────────────────┘
-
-    update_steps_max=0 runs the body once and never updates the
-    query — ordinary single-step attention. The loop is a plain
-    bounded Python range(): the count is fixed at trace time and
-    there is no data-dependent exit.
-
-Difference from Standard Transformer Attention:
----------------------------------------------
-The difference is the computational flow:
-
-| Feature      | Standard attention      | This layer                  |
-|:-------------|:------------------------|:----------------------------|
-| **Flow**     | Single-step feed-forward | Iterative, fixed step count |
-| **Goal**     | Contextual weighting    | Associative retrieval       |
-| **Rule**     | `out = attn(Q, K, V)`   | `s_{t+1} = attn(s_t, K, V)` |
-| **Query**    | Static input            | State vector that evolves   |
-
-In essence, a standard transformer attention layer performs a single update
-step (`update_steps_max=0` in this implementation) of a modern Hopfield network.
-This layer generalizes that concept by allowing for multiple (`update_steps_max > 0`)
-iterative updates, enabling it to function as a true associative memory that
-moves toward stable fixed-points (attractors) -- though the layer runs a fixed
-step count and never tests whether such a point has actually been reached.
-
-Iteration Count (there is no convergence test):
-----------------------------------------------
-The update process runs a **fixed** number of steps. `call()` executes a plain
-bounded Python `for update_step in range(update_steps_max + 1)`, so:
-
-1.  **The step count is a Python constant fixed at trace time.** The loop body
-    runs `update_steps_max + 1` times on every forward pass — always, for every
-    input. `update_steps_max=0` therefore means one ordinary attention step with
-    the query never updated.
-
-2.  **There is NO data-dependent early exit.** An earlier version stopped once
-    the Frobenius norm of the change in the attention matrix fell below
-    `update_steps_eps`; that test was removed because it required a Python
-    `bool()` on a traced tensor, which raises under `@tf.function` / jit. See the
-    anchored comment in `call()`. `update_steps_eps` is still accepted and
-    serialized for API/checkpoint compatibility, but nothing on the forward path
-    reads it.
-
-Whether the state has actually settled into a fixed-point attractor is therefore
-not observed by the layer; the caller chooses `update_steps_max` accordingly.
-
-Foundational Mathematics:
-    The update rule is the gradient-descent step of the modern Hopfield energy
-    over continuous states::
-
-        E(xi) = -lse(beta, X^T xi) + 0.5 * xi^T xi + const,   beta = 1/sqrt(d_k)
-
-    whose stationary condition ``dE/dxi = 0`` rearranges into the fixed-point
-    iteration this layer implements::
-
-        xi_{t+1} = X softmax(beta * X^T xi_t)
-
-    i.e. exactly ``attention(Q=xi_t, K=V=X)``. Ramsauer et al. show this converges
-    in one step for well-separated patterns, which is why a single-step
-    transformer attention layer is already a Hopfield retrieval; multiple steps
-    matter only for metastable / clustered memories.
-
-    Caveat specific to this implementation: the loop feeds back ``A K`` (keys),
-    while the returned output is ``A V`` (values). The two coincide in the
-    self-attention case the theory assumes; with distinct K and V the iteration is
-    a heuristic generalization, not the energy descent above.
+A standard attention layer computes ``attn(Q, K, V)`` once. This layer treats
+that computation as one step of a fixed-point iteration: the query is fed
+back as the next query through the same attention, ``update_steps_max + 1``
+times in total, moving it toward the stored patterns (the keys/values) as an
+associative memory. The loop always runs its full fixed length; there is no
+data-dependent convergence test, and ``update_steps_eps`` (kept only for
+serialization compatibility) is never read on the forward path.
+``update_steps_max=0`` reduces to ordinary single-step attention, which is
+exactly one step of Hopfield retrieval.
 
 References:
-    [1] Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need".
-        arXiv:2008.02217.
+    - Ramsauer et al., 2020. Hopfield Networks is All You Need. (https://arxiv.org/abs/2008.02217)
 """
 
 # ---------------------------------------------------------------------
@@ -141,9 +49,17 @@ class HopfieldAttention(keras.layers.Layer):
     ``A_t = attn_prob(xi_t K^T / sqrt(d_k))``, inside a bounded Python ``for``
     loop over ``update_steps_max + 1`` steps. That loop always runs to
     completion: there is no convergence test and no data-dependent early exit
-    (see the ``update_steps_eps`` note below).
+    (see the ``update_steps_eps`` note below). The update rule is the
+    gradient-descent step of the modern Hopfield energy
+    ``E(xi) = -lse(beta, X^T xi) + 0.5 xi^T xi``, ``beta = 1/sqrt(d_k)``,
+    whose stationary point is ``xi_{t+1} = X softmax(beta X^T xi_t)`` —
+    exactly ``attention(Q=xi_t, K=V=X)``. This layer's loop feeds back
+    ``A K`` (keys) while returning ``A V`` (values); the two coincide only
+    in self-attention, where K and V are the same tensor. With distinct K
+    and V the iteration is a heuristic generalization, not the energy
+    descent above.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -168,11 +84,11 @@ class HopfieldAttention(keras.layers.Layer):
                ▼
         ┌── for step in range(update_steps_max + 1) ──────────┐
         │  S = Q · Kᵀ / sqrt(key_dim)                         │
-        │      a DIVIDE, not a reciprocal multiply            │
+        │      a divide, not a reciprocal multiply            │
         │  S = masked with the keep predicate, only if a      │
         │      mask was given, through                        │
         │      common.apply_attention_mask; a row that keeps  │
-        │      NOTHING is rescued, on the axis read from      │
+        │      nothing is rescued, on the axis read from      │
         │      probability_config                             │
         │  A = attn_prob(S)   softmax by default              │
         │  A = dropout(A)     only if dropout_rate > 0        │
@@ -188,13 +104,13 @@ class HopfieldAttention(keras.layers.Layer):
           ┌────┴─────┐
           ▼          ▼
         output    (output, A)
-                  return_attention_scores=True; A is the LAST
+                  return_attention_scores=True; A is the last
                   step's attention matrix
 
-        The step count is FIXED at update_steps_max + 1 and is a
-        Python constant at trace time. update_steps_max=0 (the
-        default) runs the body once, never reaches the loop-back,
-        and is ordinary one-shot attention.
+        The step count is fixed at update_steps_max + 1, a Python
+        constant at trace time. update_steps_max=0 (the default)
+        runs the body once, never reaches the loop-back, and is
+        ordinary one-shot attention.
 
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int
@@ -262,7 +178,7 @@ class HopfieldAttention(keras.layers.Layer):
 
     .. note::
        ``update_steps_eps`` is retained for API and serialization compatibility
-       but is **inert**: the convergence early-exit it controlled was removed as
+       but is inert: the convergence early-exit it controlled was removed as
        graph-unsafe (see the anchored comment in ``call()``). The loop always runs
        the full ``update_steps_max + 1`` steps.
     """
@@ -325,25 +241,16 @@ class HopfieldAttention(keras.layers.Layer):
                 f"context not available here."
             )
 
-        # Store ALL configuration parameters
+        # Store configuration parameters
         self.num_heads = num_heads
         self.key_dim = key_dim
-        # AF1: keep the RAW constructor arg so get_config() round-trips
-        # value_dim=None as None (not the resolved key_dim int). self.value_dim
-        # below stays the resolved value used for all internal compute.
+        # Keeps the raw constructor arg so get_config() round-trips
+        # value_dim=None as None; self.value_dim holds the resolved value.
         self._value_dim_arg = value_dim
         self.value_dim = value_dim if value_dim is not None else key_dim
-        # AF2: precompute the static attention scale once. key_dim is a fixed
-        # Python int, so math.sqrt(float(key_dim)) is the identical scalar value
-        # that ops.sqrt(ops.cast(key_dim, ...)) produced in call() — folding it
-        # into __init__ avoids a per-call op while staying byte-identical.
-        #
-        # R13: NOT `common.compute_attention_scale`, on purpose. This layer
-        # stores sqrt(key_dim) and DIVIDES by it in `_hopfield_update_step`; the
-        # helper returns the reciprocal 1/sqrt(key_dim) for sites that MULTIPLY.
-        # Adopting it would turn a divide into a multiply — a real numerics change
-        # (measured: the two values differ for 26 of 27 probed dims, as they must,
-        # being reciprocals). Same convention split as `wave_field_attention.py`.
+        # Precomputed sqrt(key_dim), matching ops.sqrt(ops.cast(...)) exactly.
+        # Not common.compute_attention_scale's 1/sqrt(key_dim) reciprocal: this
+        # layer divides by the root in _hopfield_update_step, it does not multiply.
         self._sqrt_key_dim = math.sqrt(float(self.key_dim))
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
@@ -359,15 +266,8 @@ class HopfieldAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # CREATE all sub-layers in __init__ (they are unbuilt at this point)
-        # Following Pattern 2: Composite Layer from the Modern Keras 3 guide
-
-        # Projection layers - will be properly dimensioned in build()
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — `clone_initializer` per
-        # projection. Do NOT collapse this back to a bare
-        # `kernel_initializer=self.kernel_initializer`: one Initializer INSTANCE
-        # reused across same-shape weights measured max|delta| = 0.0 across Q, K, V
-        # and proj. `seed=` is not the discriminator. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200: each projection gets its
+        # own clone_initializer(...), never a shared instance -- a shared one replays the identical draw at every same-shape kernel. See decisions.md.
         self.query_dense = keras.layers.Dense(
             self.num_heads * self.key_dim,
             use_bias=self.use_bias,
@@ -409,12 +309,8 @@ class HopfieldAttention(keras.layers.Layer):
         # guard in build() keeps first-build weights/forward exactly as before.
         self.output_dense = None
 
-        # Dropout layer
-        # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
-        # UNCONDITIONALLY and gated in `call()`; it owns no weights. Do NOT extend
-        # the same treatment to `q_norm`/`k_norm` below: `create_normalization_layer`
-        # REJECTS a `None` type, so at `qk_norm_type=None` there is no object to
-        # construct at all. See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016: Dropout is created
+        # unconditionally and gated in call(); q_norm/k_norm below cannot be, since create_normalization_layer rejects a None type. See decisions.md.
         self.dropout_layer = keras.layers.Dropout(
                 self.dropout_rate,
                 name="attention_dropout"
@@ -489,17 +385,8 @@ class HopfieldAttention(keras.layers.Layer):
                 name="output_dense"
             )
 
-        # Build sub-layers explicitly in computational order
-        # This ensures all weight variables exist before weight restoration
-
-        # DECISION plan_2026-06-14_077a2a35/D-001 — the K and V Dense layers are
-        # built from the ACTUAL key/value shapes, so cross-attention with a
-        # different K/V feature dim works. Self-attention passes a flat tuple, so
-        # `isinstance(input_shape[0], (list, tuple))` is False and both fall back
-        # to `query_shape`, byte-identically. Do NOT revert either one to
-        # `query_shape` unconditionally; that breaks cross-attention silently, at
-        # build time, with a wrong-width kernel.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_077a2a35/D-001: key/value Dense layers build
+        # from the actual key/value shapes, not query_shape unconditionally -- that breaks cross-attention silently with a wrong-width kernel. See decisions.md.
         key_shape = (
             input_shape[1]
             if isinstance(input_shape[0], (list, tuple)) and len(input_shape) > 1
@@ -570,9 +457,8 @@ class HopfieldAttention(keras.layers.Layer):
         :return: Tuple of ``(updated_output, attention_weights)``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Scaled dot-product attention. AF2: precomputed static scalar (same
-        # value as ops.sqrt(ops.cast(key_dim, ...))); a Python float divisor
-        # broadcasts against the score tensor unchanged.
+        # Precomputed sqrt(key_dim); a Python float divisor broadcasts
+        # against the score tensor unchanged.
         scale = self._sqrt_key_dim
         attention_scores = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2])) / scale
 
@@ -595,19 +481,10 @@ class HopfieldAttention(keras.layers.Layer):
             if len(ops.shape(mask_tensor)) == 3:
                 mask_tensor = ops.expand_dims(mask_tensor, axis=1)
 
-            # Add large negative values to masked positions.
-            #
-            # THIS SITE'S MASK POLARITY, passed through verbatim: `mask_tensor` is a
-            # `1 = keep` predicate (already cast to the scores dtype above, on its own
-            # untouched line), so it IS the keep predicate `apply_attention_mask`
-            # wants. Do NOT "normalize" it into a `> 0` comparison or invert it — the
-            # helper performs no polarity inference by design, so an inversion here
-            # raises nothing, changes no shape and stays finite; the layer would just
-            # attend to the padding. `TestHopfieldAttentionMaskPolarity` is the only
-            # guard that can see it.
-            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+            # mask_tensor is already a 1=keep predicate, passed through as-is:
+            # apply_attention_mask does no polarity inference, so inverting it here would silently attend to padding instead of raising.
+            # getattr(d, "name", None) or str(d), not keras.backend.standardize_dtype
+            # (a banned Keras-2 residue); see common.py D-007 for the equivalence.
             scores_dtype = getattr(
                 attention_scores.dtype, "name", None
             ) or str(attention_scores.dtype)
@@ -707,24 +584,8 @@ class HopfieldAttention(keras.layers.Layer):
         if self.k_norm is not None:
             key_proj = self.k_norm(key_proj, training=training)
 
-        # Hopfield iterative updates.
-        #
-        # DECISION plan_2026-06-14_0c5d4a21/D-002 — a bounded Python loop, so
-        # nothing on this path takes a Python truth value of a traced tensor. The
-        # previous form was `while True:` with `if diff_norm < update_steps_eps:
-        # break`, and `diff_norm` is a traced tensor. Under `@tf.function` that
-        # construct RAISES whenever `update_steps_max > 0`: AutoGraph reports
-        # `NotImplementedError: The condition of while loop started as non-Tensor,
-        # then changed to Tensor` (re-measured 2026-08-28; a bare tensor `if`
-        # outside AutoGraph gives `OperatorNotAllowedInGraphError` instead — the
-        # exception type depends on the form, the failure does not).
-        # Do NOT reintroduce a data-dependent Python `if` on a traced tensor here,
-        # and do NOT reach for `keras.ops.cond` — a bounded loop is simpler. The
-        # early exit was an optimization, not a numeric contract: running the full
-        # `update_steps_max + 1` steps reaches the same final state. At
-        # `update_steps_max == 0` the loop runs exactly once, `range(1)`, and never
-        # updates the query.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_0c5d4a21/D-002: bounded Python loop, never a
+        # data-dependent `if`/`while` on a traced tensor -- that form raised under @tf.function (AutoGraph NotImplementedError) whenever update_steps_max > 0. See decisions.md.
         current_query = query_proj
         attention_weights = None
         output = None
