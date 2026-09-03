@@ -1,285 +1,25 @@
 """
-Unified windowed multi-head self-attention for sequence processing.
+Unified windowed multi-head self-attention, built by the ``WindowAttention``
+class, with three ``partition_mode`` choices: Swin-style 2-D grid tiles, a
+zigzag reordering of the same grid, and a 1-D symmetric band over the raw
+token sequence.
 
-One layer, three ways of deciding which tokens attend together. The
-``partition_mode`` argument picks between Swin-style 2-D grid tiles, a zigzag
-reordering of the same grid, and a 1-D symmetric band over the raw token
-sequence. Input and output are both 1-D sequences of the same shape; every
-pad, reshape, partition and merge happens inside.
+Input and output are both 1-D sequences of the same shape; padding,
+reshaping, partitioning and merging all happen internally. The three modes
+do not share one cost model. Writing M = window_size ** 2: 'grid' and
+'zigzag' cost O(N*M) for N > M and fall back to O(N**2) below that, never
+worse than global attention; 'band' is always O(N**2), the same order as
+global attention, and never pads.
 
-``'grid'`` and ``'zigzag'`` fold the sequence into a 2-D grid and cut it into
-tiles. ``'band'`` does neither.
-
-Cost model, per mode
---------------------
-
-Read this before reaching for the layer as an "efficient attention", and read
-it per mode: the three modes do not share one cost. Write
-``M = window_size ** 2``.
-
-* ``'band'`` is a dense ``N x N`` banded mask over standard attention, so it
-  is ``O(N^2)`` -- the same order as plain global attention. It never pads
-  and has no ``O(window_size ** 4)`` floor. It is NOT the
-  ``O(N * window_size)`` that "sliding window" usually means. A fused banded
-  kernel is not reachable from ``keras.ops``.
-* ``'grid'`` and ``'zigzag'`` are ``O(N * M)`` for ``N > M``. That is the
-  regime the layer exists for: cheaper than global attention by a factor
-  ``N / M``.
-* For ``1 < N <= M`` the padded grid holds exactly one window, and both grid
-  modes attend the ``N`` REAL tokens instead of ``M`` padded slots. Cost
-  ``O(N^2)``, never worse than global attention.
-* ``N == 1`` is the one exception, in both grid modes. There the layer still
-  pads to ``M`` and costs ``O(M^2)``. ``keras.ops.softmax`` warns on a size-1
-  reduction axis and this repo's pytest config turns warnings into errors, so
-  the padding path is taken instead. It is cheap at the window sizes that
-  reach ``N == 1``.
-
-No partition mode of this layer costs more than plain global attention at any
-``N > 1``. That was not always true. Until 2026-08-25
-(``plan-2026-08-25T053412-0f1fa04f``) both grid modes attended ``M`` padded
-slots to answer a question about ``N`` tokens, and those pad slots entered the
-softmax -- so the ragged regime returned a WRONG answer as well as an
-expensive one. D-007/D-009/D-011 fixed the leak. The ``N < M`` short-circuit
-landed for ``'grid'`` first and for ``'zigzag'`` in step 7.1 (D-014).
-
-Peak RSS on ``(1, 128, 64)`` at ``window_size=128``, CPU, one fresh process
-per mode, re-measured 2026-08-28: ``'grid'`` 0.681 GB, ``'band'`` 0.679 GB,
-``'multi_head'`` 0.675 GB, ``'zigzag'`` 0.678 GB. Bare ``import keras`` in the
-same environment already costs 0.655 GB, so read those four numbers as "no
-mode stands out", not as a cost comparison -- they are mostly the interpreter.
-What they are worth is the contrast: before the short-circuits the same two
-grid modes read 21.695 GB and 17.503 GB on that input.
-
-Architecture:
-    One pipeline, one branch. Stage 3 is where the modes diverge; everything
-    before it prepares the layout and everything after it undoes it.
-
-    1.  **Grid formation** (``'grid'`` and ``'zigzag'`` only). The 1-D
-        sequence ``(B, N, dim)`` is padded up to ``N_grid = H*W`` with
-        ``H = W = ceil(sqrt(N))``. Only ``'grid'`` then RESHAPES to a 2-D
-        grid ``(B, H, W, dim)``; ``'zigzag'`` stays 1-D, because for it the
-        grid exists only inside the precomputed index permutation. The public
-        interface is a 1-D sequence so the layer drops into sequence models;
-        the grid is an internal device for defining locality.
-    2.  **Window padding -- and the two grid modes do NOT share it.**
-        ``'grid'`` pads the 2-D grid so both extents divide by
-        ``window_size``. ``'zigzag'`` never pads in 2-D at all: it pads the
-        REORDERED FLAT sequence up to a multiple of ``window_size ** 2``,
-        after stage 3's reorder rather than before it. Everything either mode
-        adds is stripped again in stage 5, so the layer is shape-preserving
-        end to end.
-    3.  **Partitioning -- the branch point.** ``'grid'`` takes contiguous
-        ``window_size x window_size`` tiles, the Swin convention, so
-        spatially adjacent tokens attend together. ``'zigzag'`` reorders with
-        ``take(x, zigzag_indices, axis=1)``, grouping tokens that are close
-        along a zigzag traversal of the notional grid, which is the useful
-        choice when neighbours in INDEX space matter more than neighbours in
-        the synthetic 2-D layout. ``'band'`` skips stages 1-2 entirely and
-        builds a ``(1, N, N)`` keep predicate instead.
-    4.  **Attention.** Each window is handed to
-        :class:`SingleWindowAttention`, which owns the QKV projection,
-        optional QK-normalization, relative position bias and probability
-        output. This layer contributes no attention math of its own. It is a
-        partitioning wrapper, which is why all three modes share it.
-    5.  **Reverse and unpad.** ``'grid'`` merges the tiles back to the grid,
-        flattens it to a sequence and drops every token stages 1-2 added.
-        ``'zigzag'`` merges, slices back to ``N_grid``, applies
-        ``inverse_zigzag_indices`` and only then slices to ``N``.
-        ``'band'`` has nothing to undo.
-
-    The three flows below trace this concretely, one per mode.
-
-Foundational Mathematics:
-    Full self-attention over ``N`` tokens costs ``O(N^2)``. Restricting it to
-    non-overlapping windows of ``M = window_size ** 2`` tokens leaves
-    ``ceil(N / M)`` independent ``O(M^2)`` problems. The ``ceil`` is the whole
-    story and is not a rounding detail.
-
-    On the padding path ``_call_grid`` pads ``N`` up to ``H * W`` with
-    ``H = W = ceil(sqrt(N))``, then pads ``H`` and ``W`` up to a multiple of
-    ``window_size``. The window count is ``ceil(H / window_size) ** 2``, which
-    has a floor of 1: never zero windows, and never a window holding fewer
-    than ``M`` positions, because the shortfall is made up with padding. The
-    padding path therefore costs
-
-        ``cost(N, M) = ceil(H / window_size)^2 * M^2  =  O(max(N, M) * M)``
-
-    and that ``max`` is the problem. Two regimes follow:
-
-    * ``N > M`` -- the intended regime. ``O(N * M)``, linear in ``N`` for
-      fixed ``M``, cheaper than ``O(N^2)`` by a factor ``N / M``.
-    * ``N <= M`` -- the degenerate regime. Both grid modes look the same
-      here: ``H <= window_size``, the padded grid is exactly one
-      ``window_size x window_size`` tile, and the partition yields a single
-      window holding ``M`` positions of which ``M - N`` are padding. Dense
-      attention over all ``M`` of them costs a constant ``M^2`` whatever
-      ``N`` is, i.e. ``(M / N)^2`` times MORE than global attention over the
-      ``N`` real tokens. At ``window_size = 128`` that is every ``N <=
-      16384``, with a ``16384 x 16384`` score matrix per head per sample
-      whether ``N`` is 128 or 8192.
-
-    Both grid modes short-circuit that regime for ``1 < N < M``, so
-    ``cost(N, M)`` above describes only the path they take outside it. One
-    window means the right answer is dense attention over the ``N`` real
-    tokens, with the relative-position bias gathered at the slots the layout
-    gives them: their grid coordinates under ``'grid'``, their position in
-    the scan under ``'zigzag'``. That is what both now compute, in ``O(N^2)``.
-    The result is bitwise identical to the old code wherever the old code was
-    correct, and the ragged cases where it was not are now correct too -- the
-    pad slots used to enter the softmax, so an all-ones attention mask (a
-    mathematical no-op) moved the output by up to 0.980964.
-
-    Choosing ``window_size`` is choosing a MINIMUM cost, never a maximum one.
-    A generous window used to make the layer strictly more expensive than the
-    global attention it replaces at every length that fits inside one window.
-    Now it merely stops buying anything.
-
-    The other price is that information cannot cross a window boundary within
-    one layer. Both grid modes handle this the way a Swin stack does, by
-    relying on the CALLER to alternate or shift partitions between layers,
-    not by widening any single window.
-
-================================================
-Partition Mode 1: 'grid' (Swin Transformer-style)
-================================================
-
-Complete Architecture Flow (`partition_mode='grid'`)::
-
-    ┌─────────────────────────────────────────────────────────────┐
-    │ WindowAttention — partition_mode='grid' (Swin-style tiles)  │
-    │                                                             │
-    │  INPUT: 1-D sequence  [B, N, dim]                           │
-    │                      ▼                                      │
-    │  1. grid formation — pad N up to N_grid = H*W and reshape   │
-    │     to a 2-D grid.  H = W = ceil(sqrt(N)).                  │
-    │     grid [B, H, W, dim]                                     │
-    │                      ▼                                      │
-    │  2. window padding — pad H and W up to a multiple of        │
-    │     window_size.   padded grid [B, H_pad, W_pad, dim]       │
-    │                      ▼                                      │
-    │  3. window partition — contiguous ws x ws tiles, so         │
-    │     spatially adjacent tokens attend together.              │
-    │     windows [B*num_win, ws^2, dim]                          │
-    │                      ▼                                      │
-    │  4. SingleWindowAttention on every window.  ALL of the      │
-    │     attention math (QKV, QK-norm, relative position         │
-    │     bias, ProbabilityOutput) lives there — this layer       │
-    │     is a partitioning wrapper and owns none of it.          │
-    │                      ▼                                      │
-    │  5. window reverse — merge the tiles back to the grid       │
-    │                      ▼                                      │
-    │  6. unpad — slice [:H, :W], reshape to [B, N_grid, dim],    │
-    │     slice to N                                              │
-    │                      ▼                                      │
-    │  OUTPUT: 1-D sequence  [B, N, dim]                          │
-    │                                                             │
-    │  an optional RANK-2 (B, N) key mask takes the identical     │
-    │  pad ► reshape ► pad ► partition path and rides into each   │
-    │  window with its tokens.  A RANK-3 (B, ws^2, ws^2) PAIRWISE │
-    │  mask is already in window coordinates and is forwarded     │
-    │  verbatim to stage 4 — only valid when N == ws^2 (one       │
-    │  window), which is how SwinTransformerBlock calls this      │
-    │  layer; any other N raises.                                 │
-    └─────────────────────────────────────────────────────────────┘
-
-================================================
-Partition Mode 2: 'zigzag' (Frequency Locality)
-================================================
-
-Complete Architecture Flow (`partition_mode='zigzag'`)::
-
-    ┌─────────────────────────────────────────────────────────────┐
-    │ WindowAttention — partition_mode='zigzag' (freq. locality)  │
-    │                                                             │
-    │  INPUT: 1-D sequence  [B, N, dim]                           │
-    │                      ▼                                      │
-    │  1. grid formation — pad N up to N_grid = H*W.  This        │
-    │     path stays 1-D: there is no reshape to a 2-D map.       │
-    │                      ▼                                      │
-    │  2. zigzag reorder — take(x, zigzag_indices, axis=1),       │
-    │     grouping tokens that are proximate along a zigzag       │
-    │     traversal of the notional grid.                         │
-    │                      ▼                                      │
-    │  3. window partition — pad to a multiple of the window      │
-    │     length ws^2, then reshape.                              │
-    │     windows [B*num_win, ws^2, dim]                          │
-    │                      ▼                                      │
-    │  4. SingleWindowAttention on every window (relative         │
-    │     position bias is usually disabled on this path).        │
-    │                      ▼                                      │
-    │  5. merge windows, slice back to N_grid                     │
-    │                      ▼                                      │
-    │  6. inverse zigzag — take(x, inverse_zigzag_indices),       │
-    │     then slice to N                                         │
-    │                      ▼                                      │
-    │  OUTPUT: 1-D sequence  [B, N, dim]                          │
-    │                                                             │
-    │  an optional mask is padded, reordered and partitioned      │
-    │  the same way and rides into each window with its           │
-    │  tokens.                                                    │
-    └─────────────────────────────────────────────────────────────┘
-
-================================================
-Partition Mode 3: 'band' (1-D symmetric band)
-================================================
-
-Complete Architecture Flow (`partition_mode='band'`)::
-
-    ┌─────────────────────────────────────────────────────────────┐
-    │ WindowAttention — partition_mode='band' (1-D, no tiles)     │
-    │                                                             │
-    │  INPUT: 1-D sequence  [B, N, dim]                           │
-    │                      ▼                                      │
-    │  1-2. SKIPPED.  No grid formation and no square padding.    │
-    │       window_size is a HALF-WIDTH IN TOKENS here, not an    │
-    │       edge length.                                          │
-    │                      ▼                                      │
-    │  3. band predicate — keep[i, j] = abs(i - j) <= window_size │
-    │     built as (1, N, N) int32, symmetric and non-causal.     │
-    │     A caller mask is AND-ed with it, never substituted.     │
-    │                      ▼                                      │
-    │  4. SingleWindowAttention(pad_to_window=False) over all N   │
-    │     real tokens.  The relative position bias is REFUSED     │
-    │     on this path: it is indexed by 2-D tile coordinates     │
-    │     that a 1-D band does not have.                          │
-    │                      ▼                                      │
-    │  5. nothing to undo — no pad was added                      │
-    │                      ▼                                      │
-    │  OUTPUT: 1-D sequence  [B, N, dim]                          │
-    └─────────────────────────────────────────────────────────────┘
-
-Complexity Analysis
--------------------
-
-``M = window_size²`` is the number of token slots in one window; ``N`` is the
-sequence length. On the padding path windows are padded to ``M`` positions, so
-``M`` -- not ``N`` -- sets the floor there.
-
-============== ================== ==============================================
-Operation      Complexity         Notes
-============== ================== ==============================================
-Partitioning   O(max(N, M))       Reshape/reorder over the PADDED grid
-Attention      O(max(N, M) × M)   ceil(N/M) windows, each an M×M score matrix
-Padding path   O(max(N, M) × M)   Linear in N only for N > M
---             --                 --
-N > M          O(N × M)           The intended regime; beats O(N²) by N/M
-1 < N < M      O(N²)              ONE window, attended over the N REAL tokens
-                                  (short-circuit, 2026-08-25 -- 'grid' first,
-                                  'zigzag' in step 7.1). Never worse than
-                                  plain global attention, in EITHER mode.
-N == M         O(M²) = O(N²)      ONE window with nothing to pad; the ordinary
-                                  partition path, and how Swin calls this
-                                  layer. Identical cost, kept bitwise.
-N == 1         O(M²)              The one length that still inflates: the
-                                  short-circuit is skipped so the softmax
-                                  axis is never size 1.
-'band', any N  O(N²)              Dense banded mask, no padding, no M floor
-============== ================== ==============================================
+A caller rarely builds ``WindowAttention`` directly -- see
+:func:`create_grid_window_attention`, :func:`create_zigzag_window_attention`
+and :func:`create_band_window_attention`, which set each mode's own relative
+position bias default. Full behavior and diagrams are on the class and on
+each factory function.
 
 References:
-    - Liu, Z., et al. (2021). "Swin Transformer: Hierarchical Vision
-      Transformer using Shifted Windows". ICCV.
-      (https://arxiv.org/abs/2103.14030)
+    - Liu, Z., et al. (2021). Swin Transformer: Hierarchical Vision
+      Transformer using Shifted Windows. (https://arxiv.org/abs/2103.14030)
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
 """
@@ -330,48 +70,38 @@ class WindowAttention(keras.layers.Layer):
     class:
 
     * ``'grid'`` -- Swin Transformer-style 2-D spatial tiles. ``window_size``
-      is an EDGE LENGTH.
+      is an edge length.
     * ``'zigzag'`` -- the same tiles over a zigzag scan of the grid, grouping
       frequency-proximate tokens.
-    * ``'band'`` -- a 1-D SYMMETRIC band over the token sequence.
-      ``window_size`` is a HALF-WIDTH IN TOKENS: query ``i`` attends key ``j``
-      iff ``abs(i - j) <= window_size``. No grid folding, no square padding.
+    * ``'band'`` -- a 1-D symmetric band over the token sequence.
+      ``window_size`` is a half-width in tokens: query ``i`` attends key
+      ``j`` iff ``abs(i - j) <= window_size``. No grid folding, no square
+      padding.
 
     All padding, reshaping, partitioning and merging happen internally, and
     the output has the input's shape.
 
-    **Cost, per mode -- they do not share one.** With ``M = window_size ** 2``:
+    Cost, per mode -- they do not share one. With ``M = window_size ** 2``:
 
     * ``'band'`` never pads. A dense ``N x N`` banded mask over standard
-      attention is ``O(N^2)``, the same order as plain global attention. NOT
+      attention is ``O(N^2)``, the same order as plain global attention, not
       the ``O(N * window_size)`` a "sliding window" usually means.
     * ``'grid'`` and ``'zigzag'`` are ``O(N * M)`` for ``N > M``, and
       ``O(N^2)`` for ``1 < N <= M``, where a short-circuit attends the ``N``
-      REAL tokens instead of ``M`` padded slots. ``'grid'`` got that
-      short-circuit on 2026-08-25 and ``'zigzag'`` later the same day, in
-      step 7.1, so neither mode has an ``O(window_size ** 4)`` floor any more.
-    * ``N == 1`` still pads to ``M`` in both grid modes, so it costs
-      ``O(M^2)``. The short-circuit is skipped there because
-      ``keras.ops.softmax`` warns on a size-1 reduction axis and pytest turns
-      that warning into an error.
+      real tokens instead of ``M`` padded slots, so neither mode has an
+      ``O(window_size ** 4)`` floor.
+    * ``N == 1`` still pads to ``M`` in both grid modes, because
+      ``keras.ops.softmax`` warns on a size-1 reduction axis and this repo's
+      pytest config turns that warning into an error.
 
     Peak RSS on ``(1, 128, 64)`` at ``window_size=128``, CPU, one fresh
-    process per mode, re-measured 2026-08-28: ``'grid'`` 0.681 GB, ``'band'``
-    0.679 GB, ``'multi_head'`` 0.675 GB, ``'zigzag'`` 0.678 GB. A bare
-    ``import keras`` in the same environment costs 0.655 GB, so those four
-    numbers are mostly the interpreter -- they say "no mode stands out", not
-    "this mode is cheaper". Before the two short-circuits the two grid modes
-    read 21.695 GB and 17.503 GB on that same input. See the module
-    docstring's "Foundational Mathematics" section.
+    process per mode, measured 2026-08-28: ``'grid'`` 0.681 GB, ``'band'``
+    0.679 GB, ``'multi_head'`` 0.675 GB, ``'zigzag'`` 0.678 GB -- a bare
+    ``import keras`` in the same environment already costs 0.655 GB, so no
+    mode stands out; before the two short-circuits above, the two grid modes
+    read 21.695 GB and 17.503 GB on that same input.
 
-    The guard that used to pin the degeneracy at ModernBERT's shipped
-    ``window_size = 128``
-    (``tests/test_models/test_modern_bert/test_shipped_window_size.py``) was
-    deleted on 2026-08-25, per its own docstring's instruction, because
-    ModernBERT no longer uses this layout at all. Its local layers are
-    ``'band'``.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -424,13 +154,13 @@ class WindowAttention(keras.layers.Layer):
               Output: 1-D sequence  (B, N, dim)
 
     ``'band'`` never enters stages 1-3, so it has no tile and refuses the
-    relative position bias. The two grid modes do NOT pad the same way:
-    ``'grid'`` pads the sequence and then pads H and W, while
-    ``'zigzag'`` pads the sequence, reorders it, and then pads the flat
-    result up to a multiple of ``window_size ** 2``. Each builder's own
-    diagram below repeats its own path.
+    relative position bias. The two grid modes do not pad the same way:
+    ``'grid'`` pads the sequence and then pads H and W, while ``'zigzag'``
+    pads the sequence, reorders it, and then pads the flat result up to a
+    multiple of ``window_size ** 2``. Each builder's own diagram below
+    repeats its own path.
 
-    **Partition modes, and the builders that reach them:**
+    Partition modes, and the builders that reach them:
 
     .. code-block:: text
 
@@ -440,7 +170,7 @@ class WindowAttention(keras.layers.Layer):
                   'window'                  LENGTH
         'zigzag'  create_zigzag_window_...  tile EDGE      False
                   'window_zigzag'           LENGTH         (overridable)
-        'band'    create_band_window_...    HALF-WIDTH     False
+        'band'    create_band_window_...    half-width     False
                   'window_band'             IN TOKENS      (True raises)
 
         grid folding + square padding:  'grid' yes, 'zigzag' yes,
@@ -458,15 +188,15 @@ class WindowAttention(keras.layers.Layer):
     :param partition_mode: The partitioning strategy. One of `'grid'`,
         `'zigzag'` or `'band'`. Default: 'grid'.
 
-        * ``'grid'`` — Swin-style 2-D tiles. ``window_size`` is an EDGE
-          LENGTH: the sequence is folded into a ``ceil(sqrt(N))``-square grid
+        * ``'grid'`` — Swin-style 2-D tiles. ``window_size`` is an edge
+          length: the sequence is folded into a ``ceil(sqrt(N))``-square grid
           and cut into ``window_size x window_size`` tiles.
         * ``'zigzag'`` — the same tiles over a zigzag reordering of the grid.
-        * ``'band'`` — a 1-D SYMMETRIC band over the token sequence, with NO
-          grid folding and NO square padding. ``window_size`` is a HALF-WIDTH
-          IN TOKENS: query ``i`` attends key ``j`` iff
+        * ``'band'`` — a 1-D symmetric band over the token sequence, with no
+          grid folding and no square padding. ``window_size`` is a
+          half-width in tokens: query ``i`` attends key ``j`` iff
           ``abs(i - j) <= window_size``. Non-causal (both directions), which
-          is what a text ENCODER such as ModernBERT specifies — upstream's
+          is what a text encoder such as ModernBERT specifies — upstream's
           ``local_attention`` is a full span, and its half-width is
           ``local_attention // 2``. Requires
           ``use_relative_position_bias=False``; see that parameter.
@@ -499,7 +229,7 @@ class WindowAttention(keras.layers.Layer):
     :param use_relative_position_bias: If True, add a learnable relative
         position bias to the attention scores. Recommended for `'grid'` mode.
         For `'zigzag'` mode, this is often set to `False` as the spatial
-        relationship is already altered. For `'band'` mode it is REFUSED, not
+        relationship is already altered. For `'band'` mode it is refused, not
         silently disabled: the bias is indexed by 2-D coordinates inside a
         ``window_size x window_size`` tile and a 1-D band has no tile, so
         ``partition_mode='band'`` with ``use_relative_position_bias=True``
@@ -595,11 +325,8 @@ class WindowAttention(keras.layers.Layer):
                 f"{list(_VALID_PARTITION_MODES)}; got {partition_mode!r}."
             )
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 — the relative-position
-        # bias is REFUSED under `partition_mode='band'`, not quietly turned off: a
-        # 1-D band has no tile to index, so the gathered rows are arbitrary yet pass
-        # every shape/dtype/finiteness check. Do NOT `setdefault` it to False on the
-        # CLASS, and do NOT downgrade this to a warning. See decisions.md D-010.
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010: refuse RPB under 'band'
+        # (raise), never quietly turn it off -- a 1-D band has no tile to index, so the gathered rows would be arbitrary. See decisions.md.
         if partition_mode == "band":
             if use_relative_position_bias:
                 raise ValueError(
@@ -683,11 +410,8 @@ class WindowAttention(keras.layers.Layer):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-081 — the name is EXPLICIT,
-            # spelled as the auto-name Keras gives the first instance in a process.
-            # Do NOT drop it: `auto_name` counts per process, so two instances of
-            # one builder disagree by weight path. MEASURED: the paths moved for
-            # `swin_transformer`, `scunet` and `modern_bert`. See decisions.md D-081.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-081: name spelled explicitly
+            # (matches Keras' per-process auto-name) -- dropping it moved weight paths for swin_transformer, scunet, modern_bert. See decisions.md.
             name="single_window_attention",
         )
 
@@ -700,11 +424,8 @@ class WindowAttention(keras.layers.Layer):
             self.zigzag_indices = None
             self.inverse_zigzag_indices = None
 
-    # DECISION plan-2026-08-25T053412-0f1fa04f/D-014 — the zigzag layout is NUMPY,
-    # giving exactly ONE representation. Do NOT put it back on `keras.ops`:
-    # `build()` can run in a `tf.function` trace and `set_window_slots` needs a
-    # Python-visible numpy inverse (D-015). Do NOT hand-write a SECOND permutation:
-    # a wrong one is INVISIBLE on all-ones vectors. See decisions.md D-014.
+    # DECISION plan-2026-08-25T053412-0f1fa04f/D-014: zigzag layout stays numpy,
+    # not keras.ops -- build() can trace inside tf.function and needs a Python-visible inverse (D-015). See decisions.md.
 
     @staticmethod
     def _generate_zigzag_indices(H: int, W: int) -> np.ndarray:
@@ -750,7 +471,7 @@ class WindowAttention(keras.layers.Layer):
         ``self.attention``, and every partition path goes through it:
 
         * ``window_slots`` is a concrete numpy array (the static layout) or
-          ``None``. It is handed over by ``set_window_slots()``, NOT as a call
+          ``None``. It is handed over by ``set_window_slots()``, not as a call
           keyword, and is cleared in a ``finally`` so it can never survive into
           the next call. See the D-015 anchor in
           ``SingleWindowAttention.__init__`` for why the keyword channel is
@@ -794,7 +515,7 @@ class WindowAttention(keras.layers.Layer):
         ``H x W`` grid with ``H = W = ceil(sqrt(seq_len))``, pads that grid up to
         ``window_size x window_size`` and flattens it row-major, so token ``i``
         lands at tile slot ``(i // W) * window_size + (i % W)``. That mapping --
-        NOT the identity, whenever ``W < window_size`` -- is what the
+        not the identity, whenever ``W < window_size`` -- is what the
         relative-position bias must be gathered at.
 
         :param seq_len: Number of real tokens, ``< window_size ** 2``.
@@ -971,7 +692,7 @@ class WindowAttention(keras.layers.Layer):
         :param attention_mask: Optional keep predicate (``1 = attend``), either
             rank-2 ``(B, N)`` (a key mask over the UNPARTITIONED sequence, which
             is re-partitioned here alongside the data) or rank-3
-            ``(B, ws**2, ws**2)`` (a PAIRWISE mask already expressed in
+            ``(B, ws**2, ws**2)`` (a pairwise mask already expressed in
             partitioned window coordinates, forwarded verbatim — see the
             ``ValueError`` below).
         :type attention_mask: Optional[keras.KerasTensor]
@@ -986,39 +707,8 @@ class WindowAttention(keras.layers.Layer):
         """
         ws = self.window_size
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-007 — when
-        # `N < window_size ** 2` the grid below is EXACTLY ONE window, so this
-        # branch attends the N REAL tokens and hands `SingleWindowAttention` each
-        # token's tile slot, which makes the relative-position bias gather the SAME
-        # table rows. MEASURED at `N=128, window_size=128`, the padding path
-        # inflated 128 real tokens to 16,384 slots (`H_pad * W_pad / N == 128.0`)
-        # and built a `(1, 4, 16384, 16384)` float32 score matrix of 4.0 GiB, with
-        # 3-4 live copies through clip / mask / softmax.
-        #
-        #   * Do NOT widen this to `N <= window_size ** 2`. That is exactly the `N`
-        #     at which `SwinTransformerBlock` calls this layer with a rank-3
-        #     pairwise mask in already-partitioned coordinates; leaving it on the
-        #     original path is what keeps the D-001 verbatim-mask contract and Swin
-        #     bit-for-bit unchanged. It would save nothing anyway — the slots there
-        #     are `arange(N)` and the sub-index IS the full index.
-        #   * Do NOT take this branch when the length is not statically known: the
-        #     slot vector is a numpy constant derived from `N`.
-        #   * Do NOT drop the `N > 1` guard. `keras.ops.softmax` warns on a size-1
-        #     reduction axis and this repo's pytest config escalates warnings to
-        #     errors, so `N == 1` stays on the padding path. It is the one length
-        #     at which this layer still inflates, and it is cheap there.
-        #   * Do NOT "simplify" to plain dense attention. That drops the
-        #     relative-position bias, which is indexed by GRID COORDINATE — token
-        #     `i` sits at tile slot `(i // W) * ws + (i % W)`, not at `i`.
-        #
-        # ACCEPTED COST, and it is a VALUE change: on the old path the
-        # `window_size ** 2 - N` zero-filled pad slots were never masked, so they
-        # fed keys and values into every real token's softmax. MEASURED on the
-        # pre-fix code, no mask versus an explicit all-ones `(B, N)` mask: max
-        # |delta| 0.350777 at `ws=4, N=9`, 0.0903779 at `ws=8, N=50`, and exactly
-        # 0.0 at `ws=8, N=64`, where there is nothing to pad. Removing those slots
-        # is the fix, and it necessarily moves the ragged-`N` output.
-        # See decisions.md D-007 (plan-2026-08-25T053412-0f1fa04f).
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-007: when N < ws**2, attend the
+        # N real tokens as one window instead of padding to ws**2 -- the old path inflated N=128,ws=128 to a 4.0 GiB score matrix. Value-changing fix; see decisions.md.
         static_n = inputs.shape[1]
         degenerate = (
             static_n is not None
@@ -1059,22 +749,8 @@ class WindowAttention(keras.layers.Layer):
         window_mask = None
         key_mask = None
         if attention_mask is not None and len(attention_mask.shape) == 3:
-            # DECISION plan-2026-07-31T042809-ddc92265/D-001 — a rank-3 mask is
-            # already expressed in PARTITIONED WINDOW coordinates,
-            # `(num_windows, ws**2, ws**2)`, the layout `SwinTransformerBlock`
-            # builds, so it is forwarded VERBATIM and must NOT go through the
-            # re-partition path below.
-            #
-            #   * Do NOT run it through the rank-2 pipeline (pad -> reshape to
-            #     (B,H,W) -> window_partition). That pipeline reads its input as an
-            #     UNPARTITIONED (B, N) image mask, so it re-partitions the KEY axis
-            #     as if it were spatial: a silent wrong-geometry mask, not an error.
-            #   * Do NOT skip the guard below. The verbatim forward is only
-            #     meaningful when this layer's own grid is DEGENERATE — exactly one
-            #     window per batch element — because only then do the caller's
-            #     window index and this layer's batch index coincide. On any other
-            #     `N` the mask lands on the wrong windows, silently.
-            # See decisions.md D-001 (plan-2026-07-31T042809-ddc92265).
+            # DECISION plan-2026-07-31T042809-ddc92265/D-001: forward a rank-3 mask
+            # verbatim (already in partitioned window coordinates from SwinTransformerBlock) -- never re-partition it, and only when the grid is degenerate. See decisions.md.
             static_n = inputs.shape[1]
             if static_n is None or int(static_n) != ws * ws:
                 raise ValueError(
@@ -1091,22 +767,8 @@ class WindowAttention(keras.layers.Layer):
                 )
             window_mask = attention_mask
         else:
-            # DECISION plan-2026-08-25T053412-0f1fa04f/D-011 —
-            # `attention_mask=None` means "every token is real", so an all-ones key
-            # mask is SYNTHESIZED and the sequence and tile pads travel the same
-            # zero-padding pipeline the caller's own mask would. MEASURED on
-            # 8435dcc2f, max |delta| between `None` and an explicit all-ones
-            # `(B, N)` mask (a mathematical no-op): 1.0258900 at `ws=8, N=100`, and
-            # exactly 0.0 wherever there is nothing to pad.
-            #   * Do NOT synthesize it UNCONDITIONALLY — the `_pads_exist` guard is
-            #     what keeps every exactly-tiling `N` on the byte-identical path.
-            #   * Do NOT "fix" this inside `SingleWindowAttention`: down there
-            #     `N_actual == N_target == ws**2` and the pads are indistinguishable
-            #     from real tokens. The geometry is only known HERE.
-            #   * Do NOT build the ones with `keras.ops.ones((B, N_actual), ...)` —
-            #     those are TENSORS under a trace; `ones_like` on a rank-2 slice
-            #     carries the dynamic shape without materializing it.
-            # See decisions.md D-011 (plan-2026-08-25T053412-0f1fa04f).
+            # DECISION plan-2026-08-25T053412-0f1fa04f/D-011: synthesize an all-ones
+            # key mask when attention_mask is None, gated by _pads_exist -- unmasked pads leaked into softmax (max delta 1.0259 at ws=8,N=100). See decisions.md.
             key_mask = attention_mask
             if key_mask is None and self._pads_exist(inputs.shape[1], ws):
                 key_mask = keras.ops.ones_like(inputs[:, :, 0], dtype="int32")
@@ -1146,34 +808,15 @@ class WindowAttention(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional keep predicate (``1 = attend``), either
             rank-2 ``(B, N)`` (a key mask) or rank-3 ``(B, N, N)`` (pairwise).
-            It is COMPOSED with the band, never substituted for it.
+            It is composed with the band, never substituted for it.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training mode flag.
         :type training: Optional[bool]
         :return: Output tensor ``(B, N, dim)``.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010 — the band is built as a
-        # KEEP predicate (`1 = attend`) and handed to `SingleWindowAttention` on its
-        # rank-3 PAIRWISE branch, which routes it through `apply_attention_mask`.
-        #   * Do NOT copy `gemma3_transformer.py:_create_attention_mask` verbatim —
-        #     that one is CAUSAL and in SUPPRESS semantics; this band is SYMMETRIC
-        #     and already in keep polarity, so gemma's expression would blind every
-        #     token to its own future neighbours, invisibly.
-        #   * Do NOT hand-roll an additive `-1e9` sentinel: `-1e9` is `-inf` in
-        #     float16 and `0 * -inf = NaN`.
-        #   * Do NOT REPLACE the caller's `attention_mask` with the band; the two
-        #     are composed multiplicatively so a padded key stays masked.
-        #   * Do NOT reuse `window_slots` to suppress the internal padding — slots
-        #     are validated into `[0, window_size ** 2)`, capping ModernBERT's
-        #     `window_size=64` at 4096 tokens. `pad_to_window=False` is the
-        #     layout-free spelling.
-        #
-        # ACCEPTED COST: a dense `N x N` banded mask is `O(N^2)`, the SAME
-        # asymptotics as full attention, NOT the `O(N * W)` that "sliding window"
-        # suggests. What it buys over `'grid'` is that `N` real tokens are never
-        # inflated to `window_size ** 2` slots.
-        # See decisions.md D-010 (plan-2026-08-25T053412-0f1fa04f).
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-010: band is a keep predicate,
+        # composed (never substituted) with the caller's mask; not gemma3's causal/suppress expression, and no hand-rolled -1e9 (NaN under float16). See decisions.md.
         n_tokens = keras.ops.shape(inputs)[1]
         positions = keras.ops.arange(n_tokens, dtype="int32")
         distance = keras.ops.absolute(
@@ -1232,31 +875,8 @@ class WindowAttention(keras.layers.Layer):
         """
         ws = self.window_size
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-014 — the SAME
-        # degenerate-single-window short-circuit `_call_grid` has carried since
-        # D-007, on the path that never got it: at `N < window_size ** 2` the zigzag
-        # layout is ALSO exactly one window, so all the padding path adds is
-        # `win_len - N` zero slots that D-011 must mask back out, and their cost.
-        #
-        # THE FIGURE BELOW IS A COUNTERFACTUAL. Do NOT re-run it, get a small number
-        # and delete this branch: the branch is why the number is small. BEFORE the
-        # short-circuit, `(1, 128, 64)` at `window_size=128` measured a CPU peak RSS
-        # of 21.695 GB; re-measured 2026-08-28 with it in place, 0.678 GB.
-        #
-        #   * Do NOT reuse `_single_window_slots` — that is the GRID row-major map;
-        #     zigzag's slot for token `i` is `inverse_zigzag_indices[i]`, which is
-        #     what keeps the relative-position bias bit-for-bit unchanged.
-        #   * Do NOT widen this to `N <= ws ** 2`: at `N == ws ** 2` both pads are
-        #     zero, so it would only move 8 harness cells off the bitwise path.
-        #   * Do NOT drop the `N > 1` guard — `keras.ops.softmax` warns on a size-1
-        #     reduction axis and this repo's pytest escalates warnings to errors.
-        #   * Do NOT take this branch on a rank-3 mask: this method's mask pipeline
-        #     is rank-2-only, so a rank-3 mask must reach the code below and fail.
-        #
-        # ACCEPTED COST, as D-007 ruled for grid: the short-circuit sums in token
-        # rather than zigzag order, so the two differ at float32 REDUCTION ORDER.
-        # MEASURED worst case over the six affected harness cells: 2.086e-07, one
-        # to two float32 ulps. See decisions.md D-007, D-009 and D-014.
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-014: the same single-window
+        # short-circuit as _call_grid's D-007, for zigzag -- cut CPU peak RSS from 21.695 GB to 0.678 GB at N=128,ws=128. See decisions.md.
         static_n = inputs.shape[1]
         degenerate = (
             static_n is not None
@@ -1284,16 +904,8 @@ class WindowAttention(keras.layers.Layer):
             padded_inputs, self.zigzag_indices, axis=1
         )
 
-        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011 — the SAME synthesized-mask
-        # fix as `_call_grid`, on a path that never had the D-007 short-circuit.
-        # This method pads twice, and at `attention_mask=None` neither pad was ever
-        # masked. MEASURED on 8435dcc2f, max |delta| vs an all-ones `(B, N)` mask:
-        # 0.3826489 at `ws=4, N=9`; exactly 0.0 where both pads are zero. Do NOT
-        # gate on `self.pad_len_seq` alone — `ws=4, N=9` has `pad_len_seq == 0` and
-        # still leaks 0.38, entirely through `pad_len_win`. Do NOT permute the
-        # synthesized mask by hand; it rides the data's own `pad -> take -> pad`
-        # pipeline, so the layout keeps exactly one copy.
-        # See decisions.md D-011 (plan-2026-08-25T053412-0f1fa04f).
+        # DECISION plan-2026-08-25T053412-0f1fa04f/D-011: same synthesized-mask fix
+        # as _call_grid, gated on EITHER pad (pad_len_seq alone missed a 0.38 leak from pad_len_win at ws=4,N=9). See decisions.md.
         key_mask = attention_mask
         if key_mask is None and (self.pad_len_seq > 0 or pad_len_win > 0):
             key_mask = keras.ops.ones_like(inputs[:, :, 0], dtype="int32")
@@ -1409,56 +1021,26 @@ class WindowAttention(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 """
-Utility functions for creating common variations of the WindowAttention layer.
+Factory functions that pre-configure ``WindowAttention`` for common cases.
+Each wraps the class, setting ``partition_mode`` and its mode's own
+``use_relative_position_bias`` default; other parameters can still be
+overridden.
 
-This module provides factory functions that simplify the creation of specialized
-WindowAttention layers by pre-configuring them for common use cases. This
-promotes code readability and reduces boilerplate when experimenting with
-different attention architectures.
+``create_grid_window_attention``, ``create_zigzag_window_attention`` and
+``create_band_window_attention`` are the public surface, backing the
+``'window'``, ``'window_zigzag'`` and ``'window_band'`` keys in
+``attention/factory.py`` -- the factory dispatches through these wrappers,
+not through ``WindowAttention`` directly, because each key's
+``use_relative_position_bias`` default is not encoded on the class itself.
+Do not add a second spelling for a mode that already has one.
 
-Each function wraps the core `WindowAttention` layer, setting specific
-parameters like `partition_mode`, `attention_mode`, or `normalization`
-to sensible defaults for that particular variant. All other parameters can
-still be overridden via keyword arguments.
-
-Available Factories:
---------------------
-- `create_grid_window_attention`:
-    Standard Swin Transformer-style spatial windowing.
-
-- `create_zigzag_window_attention`:
-    Windowing on a zigzag-reordered sequence for frequency locality.
-
-- `create_band_window_attention`:
-    A 1-D symmetric band over the token sequence (`window_size` is a HALF-WIDTH
-    in tokens), which is what text encoders such as ModernBERT specify. No grid
-    folding, no square padding. Defaults `use_relative_position_bias=False`.
-
-- `create_kan_key_window_attention`:
-    Window attention using a non-linear KAN layer for the Key projection.
-
-- `create_adaptive_softmax_window_attention`:
-    Window attention with adaptive temperature softmax for better calibration.
-
-Public vs. internal surface:
-----------------------------
-Only the first THREE are public. `create_grid_window_attention`,
-`create_zigzag_window_attention` and `create_band_window_attention` back the `'window'`,
-`'window_zigzag'` and `'window_band'` keys in `attention/factory.py` — the factory
-dispatches through these wrappers, NOT through the `WindowAttention` class directly,
-because each key carries a different `use_relative_position_bias` default that the class
-itself does not encode. One key per partition mode over ONE shared implementation is the
-convention here; do not add a second spelling (a `partition_mode` entry in `'window'`'s
-`optional_params`, or a `'sliding_window'` key) for a mode that already has one.
-
-`create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are
-INTENTIONALLY NOT public: they are neither exported from `attention/__init__.py` nor
-registered in `factory.py`, and their only callers in the repository are
-`tests/test_layers/test_attention/test_window_attention.py`. They exist as convenience
-constructors for the `attention_mode='kan_key'` and `probability_type='adaptive'`
-configurations. Do NOT register them in `factory.py` to "fix the inconsistency" — the
-registry surface is frozen, and adding keys changes the public API. Either configuration
-is reachable today by passing those kwargs to `WindowAttention` directly.
+``create_kan_key_window_attention`` and ``create_adaptive_softmax_window_attention``
+are intentionally not public: not exported from ``attention/__init__.py``,
+not registered in ``factory.py``, called only from
+``tests/test_layers/test_attention/test_window_attention.py``. Either
+configuration is reachable today by passing those kwargs to
+``WindowAttention`` directly; do not register them to "fix the
+inconsistency" -- the registry surface is frozen.
 """
 
 # ---------------------------------------------------------------------
@@ -1473,13 +1055,13 @@ def create_grid_window_attention(
     Configures :class:`WindowAttention` for ``partition_mode='grid'``: the
     sequence is folded into a ``ceil(sqrt(N))``-square grid and cut into
     contiguous ``window_size x window_size`` tiles, so spatially adjacent
-    tokens attend together. ``window_size`` is an EDGE LENGTH here. This is
+    tokens attend together. ``window_size`` is an edge length here. This is
     the ``'window'`` factory key.
 
     Relative position bias defaults to ``True``, which is standard for this
     architecture, and a caller can still pass ``False``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -1533,14 +1115,14 @@ def create_zigzag_window_attention(
     Configures :class:`WindowAttention` for ``partition_mode='zigzag'``: the
     sequence is reordered along a 2-D zigzag path before windowing, which
     groups frequency-proximate tokens and gives a locality bias sensitive to
-    frequency bands. ``window_size`` is an EDGE LENGTH here. This is the
+    frequency bands. ``window_size`` is an edge length here. This is the
     ``'window_zigzag'`` factory key.
 
     Relative position bias defaults to ``False``, because the zigzag scan
     breaks the spatial grid the bias is indexed by. A caller can still pass
     ``True``; the class accepts it on this path.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -1594,7 +1176,7 @@ def create_band_window_attention(
     Create a 1-D symmetric sliding-band attention layer.
 
     Configures :class:`WindowAttention` for ``partition_mode='band'``. Here
-    ``window_size`` is a HALF-WIDTH IN TOKENS: query ``i`` attends key ``j``
+    ``window_size`` is a half-width in tokens: query ``i`` attends key ``j``
     iff ``abs(i - j) <= window_size``. The band is symmetric and non-causal,
     which is what a text ENCODER specifies. Upstream ModernBERT's
     ``local_attention`` is a FULL span, so the value to pass here is
@@ -1605,7 +1187,7 @@ def create_band_window_attention(
     outright: the bias is indexed by 2-D tile coordinates that a 1-D band does
     not have, so ``use_relative_position_bias=True`` raises.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -1624,8 +1206,8 @@ def create_band_window_attention(
     See :class:`WindowAttention` for the full three-mode diagram and for the
     table comparing this key with ``'window'`` and ``'window_zigzag'``.
 
-    **Cost, measured rather than asserted.** A dense ``N x N`` banded mask is
-    ``O(N^2)``: the SAME asymptotics as full attention. It is not the
+    Cost: a dense ``N x N`` banded mask is
+    ``O(N^2)``, the same asymptotics as full attention. It is not the
     ``O(N * W)`` that "sliding window" suggests; that needs a fused kernel this
     repo has no path to. What the band buys over ``'grid'`` is that ``N`` real
     tokens are never inflated to ``window_size ** 2`` slots. To measure::
@@ -1638,7 +1220,7 @@ def create_band_window_attention(
 
     :param dim: Dimension of the input tokens.
     :type dim: int
-    :param window_size: The band HALF-WIDTH, in tokens. ``window_size=64``
+    :param window_size: The band half-width, in tokens. ``window_size=64``
         means each query sees 64 tokens either side, a 129-token span
         including itself.
     :type window_size: int
