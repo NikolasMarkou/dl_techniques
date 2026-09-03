@@ -1,72 +1,24 @@
 """
-Implement a Squeeze-and-Excitation block for channel-wise feature recalibration.
+Squeeze-and-Excitation block, built by the ``SqueezeExcitation`` class.
 
-This layer introduces a mechanism for adaptive, channel-wise feature
-recalibration. It enhances the representational power of a convolutional
-network by explicitly modeling the interdependencies between channels. The core
-idea is to use global information from the entire feature map to selectively
-emphasize informative feature channels and suppress less useful ones, allowing
-the network to learn what to "pay attention to."
-
-Architectural and Mathematical Underpinnings:
-
-The Squeeze-and-Excitation (SE) block is a lightweight computational unit that
-can be integrated into any standard convolutional block. It operates in three
-distinct stages:
-
-1.  **Squeeze (Global Information Embedding)**: The first step aggregates global
-    spatial information into a channel descriptor. This is achieved by applying
-    Global Average Pooling (GAP) to the input feature map `X ∈ ℝ^(H×W×C)`,
-    producing a vector `z ∈ ℝ^(1×1×C)`. Each element `z_c` is the mean
-    activation for the c-th channel across all spatial locations:
-
-        z_c = (1 / (H * W)) * Σ_{i=1 to H} Σ_{j=1 to W} X_c(i, j)
-
-    This operation effectively creates a compact summary of the global receptive
-    field for each channel.
-
-2.  **Excitation (Adaptive Recalibration)**: This stage learns a non-linear,
-    non-mutually-exclusive relationship between channels. The channel
-    descriptor `z` is passed through a simple gating mechanism, typically a
-    two-layer bottleneck MLP implemented with 1x1 convolutions. This network
-    first reduces the channel dimension by a `reduction_ratio` `r` and then
-    restores it, followed by a sigmoid activation to produce a set of channel
-    weights `s ∈ ℝ^(1×1×C)`:
-
-        s = σ(W₂ * δ(W₁ * z))
-
-    Here, `W₁ ∈ ℝ^((C/r)×C)` and `W₂ ∈ ℝ^(C×(C/r))` are the weights of the two
-    convolutional layers, `δ` is a ReLU activation, and `σ` is the sigmoid
-    function. The sigmoid ensures that the learned weights are normalized
-    between 0 and 1, representing the relative importance of each channel.
-
-3.  **Scale (Feature Recalibration)**: The final step applies the learned channel
-    weights to the original input feature map. The output of the SE block is
-    obtained by rescaling the input `X` with the activations `s`:
-
-        X_scaled_c = s_c * X_c
-
-    This is an element-wise multiplication where the scalar `s_c` (the c-th
-    element of `s`) is broadcast across the entire spatial extent of the
-    corresponding input channel `X_c`. This operation adaptively modulates the
-    activations of each feature channel based on the global context captured
-    by the squeeze-and-excitation mechanism.
+A convolutional block treats every channel equally regardless of how useful
+its content is for the task. This layer instead computes a per-channel gate:
+it squeezes each channel's spatial extent down to one number with global
+average pooling, passes that channel vector through a small bottleneck MLP
+(1x1 convolutions) to produce a sigmoid weight per channel, then rescales the
+original input by those weights. The bottleneck width is controlled by
+``reduction_ratio``. The layer accepts 2D, 3D or 4D input, internally
+expanding to 4D for the convolutional gate and squeezing back afterward.
 
 References:
-    - Hu, J., et al. (2018). Squeeze-and-Excitation Networks. *CVPR*.
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
 """
 
 import keras
 from typing import Dict, Optional, Tuple, Union, Callable, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.squeeze_excitation")
@@ -83,7 +35,7 @@ class SqueezeExcitation(keras.layers.Layer):
     and 4D inputs by internally expanding to 4D for the convolutional
     infrastructure.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -141,13 +93,11 @@ class SqueezeExcitation(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if not 0 < reduction_ratio <= 1.0:
             raise ValueError(
                 f"reduction_ratio must be in range (0, 1], got {reduction_ratio}"
             )
 
-        # Store ALL configuration parameters
         self.reduction_ratio = reduction_ratio
         self.activation = activation
         self.use_bias = use_bias
@@ -156,14 +106,11 @@ class SqueezeExcitation(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Get activation function
         self.reduction_activation = keras.activations.get(activation)
 
-        # Shape-dependent attributes (set during build)
+        # Set in build(), since they depend on input_shape.
         self.input_channels: Optional[int] = None
         self.bottleneck_channels: Optional[int] = None
-
-        # Sub-layers (created during build due to shape dependency)
         self.global_pool: Optional[keras.layers.GlobalAveragePooling2D] = None
         self.conv_reduce: Optional[keras.layers.Conv2D] = None
         self.conv_restore: Optional[keras.layers.Conv2D] = None
@@ -186,7 +133,6 @@ class SqueezeExcitation(keras.layers.Layer):
         if self.input_channels is None:
             raise ValueError("Last dimension (channels) of input must be defined")
 
-        # Calculate bottleneck channels
         self.bottleneck_channels = max(1, int(round(
             self.input_channels * self.reduction_ratio
         )))
@@ -196,7 +142,6 @@ class SqueezeExcitation(keras.layers.Layer):
             f"bottleneck_channels={self.bottleneck_channels}"
         )
 
-        # CREATE all sub-layers (necessary exception to general Keras 3 pattern)
         self.global_pool = keras.layers.GlobalAveragePooling2D(
             keepdims=True,
             name='global_pool'
@@ -224,28 +169,22 @@ class SqueezeExcitation(keras.layers.Layer):
             name='conv_restore'
         )
 
-        # BUILD all sub-layers explicitly for robust serialization
-        # Determine internal shape seen by sublayers after expansion
         if len(input_shape) == 2:
-            # (B, C) -> (B, 1, 1, C)
             internal_shape = (input_shape[0], 1, 1, self.input_channels)
         elif len(input_shape) == 3:
-            # (B, S, C) -> (B, S, 1, C)
             internal_shape = (input_shape[0], input_shape[1], 1, self.input_channels)
         else:
-            # (B, H, W, C)
             internal_shape = input_shape
 
         self.global_pool.build(internal_shape)
 
-        # The output of GAP is always (B, 1, 1, C)
+        # GAP output is always (B, 1, 1, C).
         pooled_shape = (input_shape[0], 1, 1, self.input_channels)
         self.conv_reduce.build(pooled_shape)
 
         reduced_shape = (pooled_shape[0], 1, 1, self.bottleneck_channels)
         self.conv_restore.build(reduced_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -263,7 +202,6 @@ class SqueezeExcitation(keras.layers.Layer):
         :return: Output tensor with same shape as input after SE recalibration.
         :rtype: keras.KerasTensor
         """
-        # Ensure layer is built
         if (self.global_pool is None or
             self.conv_reduce is None or
             self.conv_restore is None):
@@ -272,35 +210,24 @@ class SqueezeExcitation(keras.layers.Layer):
                 "This usually happens automatically on first call."
             )
 
-        # Handle dimension expansion for 2D/3D inputs
         x = inputs
         input_rank = len(inputs.shape)
 
         if input_rank == 2:
-            # (B, C) -> (B, 1, 1, C)
             x = keras.ops.expand_dims(x, axis=1)
             x = keras.ops.expand_dims(x, axis=1)
         elif input_rank == 3:
-            # (B, S, C) -> (B, S, 1, C)
             x = keras.ops.expand_dims(x, axis=2)
 
-        # Squeeze: Global average pooling to capture channel statistics
-        # Input to global_pool is effectively 4D
         squeezed = self.global_pool(x)
 
-        # Excitation: Two-step channel recalibration
-        # Step 1: Dimensionality reduction with activation
         excited = self.conv_reduce(squeezed, training=training)
         excited = self.reduction_activation(excited)
-
-        # Step 2: Dimensionality restoration with sigmoid gating
         excited = self.conv_restore(excited, training=training)
         attention_weights = keras.activations.sigmoid(excited)
 
-        # Scale: Apply learned attention weights to original features
         output = keras.ops.multiply(x, attention_weights)
 
-        # Restore original dimensions
         if input_rank == 2:
             output = keras.ops.squeeze(output, axis=[1, 2])
         elif input_rank == 3:
@@ -337,5 +264,3 @@ class SqueezeExcitation(keras.layers.Layer):
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

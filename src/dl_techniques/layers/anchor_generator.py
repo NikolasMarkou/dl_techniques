@@ -1,76 +1,19 @@
 """
-Generate a multi-scale grid of anchor points for object detection.
+Anchor point grid generator, built by the ``AnchorGenerator`` class.
 
-This layer serves a critical, albeit simple, role in modern anchor-based
-object detection models. It pre-computes and stores the spatial center
-coordinates (x, y) of every grid cell across multiple feature map scales.
-By embedding these coordinates as non-trainable weights, it provides a highly
-efficient mechanism for downstream prediction heads to access this spatial
-information without re-computing it on every forward pass.
-
-Architecture and Core Concepts:
-
-The design of this layer is rooted in the principles of modern object
-detection architectures that use feature pyramids to detect objects of
-varying sizes. A deep neural network backbone produces feature maps at
-different levels of spatial resolution. Deeper feature maps are smaller and
-have a larger "stride" relative to the input image, making them suitable for
-detecting large objects. Conversely, shallower feature maps have a smaller
-stride and are better for detecting small objects.
-
-This layer takes the dimensions of the input image and a list of these
-strides to perform its core function:
-
-1.  **Grid Generation:** For each stride level, it calculates the
-    corresponding feature map's height and width. It then generates a 2D
-    grid of points representing the center of each cell in that feature map.
-    For example, a 640x640 image with a stride of 8 results in an 80x80
-    feature map. This layer generates the 6,400 center points for that grid.
-
-2.  **Coordinate Scaling:** The grid coordinates are scaled back to the
-    input image's coordinate space. This means that each anchor point's
-    (x, y) value corresponds to a specific location on the original image.
-
-3.  **Static Storage:** The crucial architectural choice is to compute this
-    entire multi-level grid only once, during the model's construction phase
-    (the `build` method). The resulting tensor of anchor points is stored as a
-    non-trainable layer weight. This makes the anchor grid a static, baked-in
-    part of the model graph, ensuring zero computational overhead during
-    training or inference. The `call` method simply retrieves these stored
-    weights and tiles them to match the batch size of the input.
-
-This layer's output provides the fundamental spatial scaffolding upon which
-the model's prediction heads operate. The heads learn to predict offsets
-from these fixed anchor points to determine the final bounding box locations.
-
-Mathematical Foundation:
-
-The calculation for the center coordinate of a grid cell `(i, j)` on a
-feature map with a given `stride` is straightforward:
--   `x_center = (j + 0.5) * stride`
--   `y_center = (i + 0.5) * stride`
-
-Here, `i` and `j` are the row and column indices of the cell in the feature
-grid. The `+ 0.5` term is critical for shifting the coordinate from the top-left
-corner of the grid cell to its exact center. This process is repeated for
-all cells across all specified stride levels, and the results are
-concatenated into a single comprehensive tensor of anchor points.
+An anchor-based detection head needs a fixed spatial grid of candidate
+center points for every scale it predicts at, recomputing that grid on
+every forward pass otherwise wastes work. This layer computes the grid once
+at build time, for every stride in a feature pyramid, and stores it as a
+non-trainable weight; each forward pass only tiles the stored grid to the
+batch size. Grid cell centers are placed at ``x = (j + 0.5) * stride``,
+``y = (i + 0.5) * stride``, so a 640x640 image at stride 8 gives an 80x80
+grid of centers on the original image's coordinate space.
 
 References:
-
-The concept of using a grid and predicting relative to its cells is a
-foundational idea in single-shot object detectors. This approach was
-popularized by:
--   Redmon, J., et al. (2016). "You Only Look Once: Unified, Real-Time
-    Object Detection." (YOLOv1), which introduced the idea of dividing the
-    image into a grid and having cells predict object properties.
-
-The use of multiple grids from a feature pyramid to handle objects at
-different scales is a direct application of the principles from:
--   Lin, T. Y., et al. (2017). "Feature Pyramid Networks for Object
-    Detection." (FPN), which established the feature pyramid as a standard,
-    effective component for multi-scale detection.
-
+    - Redmon et al., 2016. You Only Look Once: Unified, Real-Time Object
+      Detection.
+    - Lin et al., 2017. Feature Pyramid Networks for Object Detection.
 """
 
 import keras
@@ -78,7 +21,6 @@ from keras import ops
 from typing import Tuple, Any, Dict, List, Optional
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.anchor_generator")
 class AnchorGenerator(keras.layers.Layer):
@@ -92,7 +34,7 @@ class AnchorGenerator(keras.layers.Layer):
     match the input batch size, providing zero-cost spatial scaffolding for
     detection heads.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -134,7 +76,6 @@ class AnchorGenerator(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate input parameters
         if (len(input_image_shape) != 2 or
             any(dim <= 0 for dim in input_image_shape)):
             raise ValueError(
@@ -142,17 +83,15 @@ class AnchorGenerator(keras.layers.Layer):
                 f"got {input_image_shape}"
             )
 
-        # Store ALL configuration parameters
         self.input_image_shape = input_image_shape
         self.strides_config = strides_config or [8, 16, 32]
 
-        # Validate strides configuration
         if any(stride <= 0 for stride in self.strides_config):
             raise ValueError(
                 f"All strides must be positive integers, got {self.strides_config}"
             )
 
-        # Initialize weight attributes - created in build()
+        # Created in build().
         self.anchors = None
         self.strides = None
 
@@ -167,19 +106,16 @@ class AnchorGenerator(keras.layers.Layer):
         stride_tensors: List[keras.KerasTensor] = []
 
         for stride in self.strides_config:
-            # Calculate feature map dimensions
             feat_h, feat_w = height // stride, width // stride
 
-            # Create coordinate grids (add 0.5 for cell centers)
+            # +0.5 shifts from the cell's top-left corner to its center.
             x_coords = (ops.arange(feat_w, dtype="float32") + 0.5) * stride
             y_coords = (ops.arange(feat_h, dtype="float32") + 0.5) * stride
 
-            # Create meshgrid and flatten
             y_grid, x_grid = ops.meshgrid(y_coords, x_coords, indexing="ij")
             xy_grid = ops.stack([x_grid, y_grid], axis=-1)
             xy_grid = ops.reshape(xy_grid, (-1, 2))
 
-            # Store points and strides
             anchor_points.append(xy_grid)
             stride_tensors.append(
                 ops.full((feat_h * feat_w, 1), float(stride), dtype="float32")
@@ -191,16 +127,11 @@ class AnchorGenerator(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer's anchor and stride weights.
 
-        Computes anchor points once and stores as non-trainable weights for
-        efficient graph-safe access during training and inference.
-
         :param input_shape: Shape tuple indicating the input shape.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Generate anchors and strides
         anchors, strides = self._make_anchors()
 
-        # Create layer's own weights (non-trainable buffers)
         self.anchors = self.add_weight(
             name="anchors",
             shape=ops.shape(anchors),
@@ -235,7 +166,6 @@ class AnchorGenerator(keras.layers.Layer):
         """
         batch_size = ops.shape(inputs)[0]
 
-        # Tile to match batch size
         tiled_anchors = ops.tile(
             ops.expand_dims(self.anchors, axis=0),
             [batch_size, 1, 1]
@@ -294,5 +224,3 @@ class AnchorGenerator(keras.layers.Layer):
             'strides_config': self.strides_config,
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,55 +1,21 @@
 """
-Approximate self-attention by aggregating hierarchical neighborhood context.
+Hierarchical Aggregation of Neighborhood Context (HANC) layer, built by the
+``HANCLayer`` class.
 
-This layer implements a convolutional mechanism to model long-range spatial
-dependencies, serving as an efficient alternative to the self-attention
-modules found in Vision Transformers. The core challenge this layer addresses
-is the trade-off between the local receptive fields of standard convolutions
-and the quadratic computational complexity of true self-attention. It achieves
-this by reformulating the concept of global context from an all-to-all pixel
-comparison to a comparison between each pixel and statistical summaries of its
-surrounding neighborhoods at multiple scales.
-
-The architectural design is a form of dynamic, learned spatial pyramid
-pooling. The process unfolds as follows:
-1.  **Multi-Scale Context Extraction:** For a hierarchy of `k-1` scales
-    (e.g., corresponding to 2x2, 4x4, 8x8 receptive fields), the input
-    feature map is downsampled using two complementary pooling operations:
-    -   **Average Pooling:** Captures the mean feature response, representing
-        the general context or texture of a neighborhood.
-    -   **Max Pooling:** Captures the most salient feature activations,
-        highlighting dominant edges, corners, or object parts.
-2.  **Context Re-Projection:** The downsampled context maps from each scale
-    and pooling type are upsampled back to the original input resolution,
-    ensuring spatial alignment.
-3.  **Hierarchical Feature Fusion:** The original feature map is concatenated
-    with all the upsampled context maps along the channel axis. This creates
-    an enriched representation where each pixel's feature vector is augmented
-    with explicit information about the average and maximum feature values
-    in its local, regional, and global surroundings.
-4.  **Learned Aggregation:** A final 1x1 convolution processes this wide,
-    concatenated tensor. This projection acts as a learned, channel-wise
-    attention mechanism, allowing the model to weigh the importance of the
-    original features against the contextual summaries from each scale to
-    produce the final output.
-
-Mathematically, this layer provides a computationally tractable approximation
-of the self-attention operation. While self-attention has a complexity of
-`O(N^2)`, where `N` is the number of spatial locations, this hierarchical
-aggregation has a complexity linear in `N` (`O(N*k)` where `k` is the number
-of scales). It replaces the expensive all-pairs similarity calculation
-(`QK^T`) with a highly efficient feature fusion that achieves a similar goal:
-making each pixel's representation aware of the broader context in which it
-exists.
+Self-attention gives every pixel a global view of the feature map but costs
+``O(N^2)`` in the number of spatial positions. This layer approximates that
+global view with average- and max-pooling instead: at each of ``k-1`` scales
+it pools the input, upsamples the pooled map back to full resolution, and
+concatenates it onto the original feature map along the channel axis. A
+final 1x1 convolution fuses the original features with these multi-scale
+summaries. Cost is ``O(N*k)``, linear in the number of scales rather than
+quadratic in spatial size.
 
 References:
-    - Yan et al., 2023. ACC-UNet: An adaptive context and contrast-aware UNet
-      for seismic facies identification.
-    - Zhao et al., 2017. Pyramid Scene Parsing Network (PSPNet).
-      (For the concept of spatial pyramid pooling)
+    - Yan et al., 2023. ACC-UNet: An adaptive context and contrast-aware
+      UNet for seismic facies identification.
+    - Zhao et al., 2017. Pyramid Scene Parsing Network.
     - Vaswani et al., 2017. Attention Is All You Need.
-      (For the foundational self-attention concept)
-
 """
 
 import keras
@@ -57,7 +23,6 @@ from keras import ops
 from typing import Optional, Union, Tuple, Any, List, Dict
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.hanc_layer")
 class HANCLayer(keras.layers.Layer):
@@ -74,7 +39,7 @@ class HANCLayer(keras.layers.Layer):
     ``X_concat = [X, C_avg^(1), C_max^(1), ..., C_avg^(k-1), C_max^(k-1)]``,
     and projects through ``Y = sigma(BN(W * X_concat))``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -137,7 +102,6 @@ class HANCLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if in_channels <= 0:
             raise ValueError(f"in_channels must be positive, got {in_channels}")
         if out_channels <= 0:
@@ -145,23 +109,15 @@ class HANCLayer(keras.layers.Layer):
         if k < 1 or k > 5:
             raise ValueError(f"k must be between 1 and 5, got {k}")
 
-        # Store configuration
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.k = k
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # Compute derived parameters
-        # Original (1) + (Avg + Max) * (k-1) scales
+        # Original channels plus (avg + max) for each of the k-1 scales.
         self.total_concat_channels = in_channels * (1 + 2 * (k - 1))
 
-        # ---------------------------------------------------------------------
-        # CREATE sub-layers (Golden Rule: Create in __init__)
-        # ---------------------------------------------------------------------
-
-        # 1. Pooling layers for hierarchical scales
-        # We create exactly the layers needed for the specified k
         self.avg_pooling_layers: List[keras.layers.Layer] = []
         self.max_pooling_layers: List[keras.layers.Layer] = []
 
@@ -186,10 +142,8 @@ class HANCLayer(keras.layers.Layer):
                 )
             )
 
-        # 2. Concatenation
         self.concatenate = keras.layers.Concatenate(axis=-1, name='concat_features')
 
-        # 3. Fusion and Projection
         self.conv = keras.layers.Conv2D(
             filters=self.out_channels,
             kernel_size=1,
@@ -209,7 +163,6 @@ class HANCLayer(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {len(input_shape)}D: {input_shape}")
 
@@ -219,25 +172,13 @@ class HANCLayer(keras.layers.Layer):
                 f"got {input_shape[-1]}"
             )
 
-        # ---------------------------------------------------------------------
-        # BUILD sub-layers (Golden Rule: Build in build)
-        # ---------------------------------------------------------------------
-
-        # 1. Build pooling layers
-        # Pooling layers generally don't have weights, but we build them for completeness
         for avg_pool, max_pool in zip(self.avg_pooling_layers, self.max_pooling_layers):
             avg_pool.build(input_shape)
             max_pool.build(input_shape)
 
-        # 2. Compute shape after concatenation to build the convolution
-        # Shape: (Batch, H, W, total_concat_channels)
         concat_shape = tuple(input_shape[:-1]) + (self.total_concat_channels,)
-
-        # 3. Build Convolution
         self.conv.build(concat_shape)
         conv_output_shape = self.conv.compute_output_shape(concat_shape)
-
-        # 4. Build Batch Norm
         self.batch_norm.build(conv_output_shape)
 
         super().build(input_shape)
@@ -257,20 +198,15 @@ class HANCLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         if self.k == 1:
-            # Even if k=1, we might need to project channels if in != out
-            # However, logic dictates we still proceed through conv/bn logic below
-            # treating inputs as the 'concatenated' tensor.
+            # k=1 has no pooling scales; still route through conv/bn/activation
+            # below so in_channels != out_channels still projects correctly.
             concatenated = inputs
         else:
-            # 1. Gather Multi-scale Context
             features_list = [inputs]
-
-            # Use dynamic shape for resizing
             input_shape = ops.shape(inputs)
             height, width = input_shape[1], input_shape[2]
 
             for avg_pool, max_pool in zip(self.avg_pooling_layers, self.max_pooling_layers):
-                # Average pooling path
                 avg_feat = avg_pool(inputs)
                 avg_resized = ops.image.resize(
                     avg_feat,
@@ -279,7 +215,6 @@ class HANCLayer(keras.layers.Layer):
                 )
                 features_list.append(avg_resized)
 
-                # Max pooling path
                 max_feat = max_pool(inputs)
                 max_resized = ops.image.resize(
                     max_feat,
@@ -288,10 +223,8 @@ class HANCLayer(keras.layers.Layer):
                 )
                 features_list.append(max_resized)
 
-            # 2. Concatenate
             concatenated = self.concatenate(features_list)
 
-        # 3. Fusion & Projection
         x = self.conv(concatenated)
         x = self.batch_norm(x, training=training)
         x = self.activation(x)
@@ -326,5 +259,3 @@ class HANCLayer(keras.layers.Layer):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

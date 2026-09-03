@@ -23,16 +23,11 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from .norms import create_normalization_layer
 from .activations import create_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.depthwise_separable_block")
 class DepthwiseSeparableBlock(keras.layers.Layer):
@@ -47,7 +42,7 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
     channels * (K * K + filters) versus channels * filters * K * K for standard
     convolution.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -118,7 +113,6 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
         if stride <= 0:
@@ -126,7 +120,6 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         if block_id < 0:
             raise ValueError(f"block_id must be non-negative, got {block_id}")
 
-        # Store ALL configuration for get_config()
         self.filters = filters
         self.depthwise_kernel_size = depthwise_kernel_size
         self.stride = stride
@@ -138,52 +131,45 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         self.normalization_kwargs = normalization_kwargs or {}
         self.activation_kwargs = activation_kwargs or {}
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Depthwise convolution pathway
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=depthwise_kernel_size,
             strides=stride,
             padding='same',
-            use_bias=False,  # Normalization makes bias redundant
+            use_bias=False,
             depthwise_initializer=self.kernel_initializer,
             depthwise_regularizer=self.kernel_regularizer,
             name=f'conv_dw_{block_id}'
         )
 
-        # Use factory for configurable normalization
         self.depthwise_norm = create_normalization_layer(
             normalization_type=self.normalization_type,
             name=f'conv_dw_{block_id}_norm',
             **self.normalization_kwargs
         )
 
-        # Use factory for configurable activation
         self.depthwise_activation = create_activation_layer(
             activation_type=self.activation_type,
             name=f'conv_dw_{block_id}_act',
             **self.activation_kwargs
         )
 
-        # Pointwise convolution pathway
         self.pointwise_conv = keras.layers.Conv2D(
             filters=filters,
             kernel_size=1,
             strides=1,
             padding='same',
-            use_bias=False,  # Normalization makes bias redundant
+            use_bias=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name=f'conv_pw_{block_id}'
         )
 
-        # Use factory for configurable normalization
         self.pointwise_norm = create_normalization_layer(
             normalization_type=self.normalization_type,
             name=f'conv_pw_{block_id}_norm',
             **self.normalization_kwargs
         )
 
-        # Use factory for configurable activation
         self.pointwise_activation = create_activation_layer(
             activation_type=self.activation_type,
             name=f'conv_pw_{block_id}_act',
@@ -193,39 +179,24 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all its sub-layers.
 
-        Explicitly builds each sub-layer to ensure proper weight creation
-        before serialization.
-
         :param input_shape: Shape tuple (including batch dimension).
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input (batch, height, width, channels), "
                 f"got shape with {len(input_shape)} dimensions"
             )
 
-        # Build sub-layers in computational order
-        # 1. Depthwise convolution pathway
         self.depthwise_conv.build(input_shape)
-
-        # Compute shape after depthwise conv
         depthwise_output_shape = self.depthwise_conv.compute_output_shape(input_shape)
-
         self.depthwise_norm.build(depthwise_output_shape)
-        # Activation layers don't typically need explicit building, but for consistency
         self.depthwise_activation.build(depthwise_output_shape)
 
-        # Activation preserves shape
         activation_output_shape = depthwise_output_shape
 
-        # 2. Pointwise convolution pathway
         self.pointwise_conv.build(activation_output_shape)
-
-        # Compute shape after pointwise conv
         pointwise_output_shape = self.pointwise_conv.compute_output_shape(activation_output_shape)
-
         self.pointwise_norm.build(pointwise_output_shape)
         self.pointwise_activation.build(pointwise_output_shape)
 
@@ -236,7 +207,6 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             f"act={self.activation_type}"
         )
 
-        # Always call parent build at the end (MUST be last)
         super().build(input_shape)
 
     def call(
@@ -253,12 +223,10 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         :return: Output tensor of shape (batch, new_height, new_width, filters).
         :rtype: keras.KerasTensor
         """
-        # Depthwise convolution pathway
         x = self.depthwise_conv(inputs, training=training)
         x = self.depthwise_norm(x, training=training)
         x = self.depthwise_activation(x)
 
-        # Pointwise convolution pathway
         x = self.pointwise_conv(x, training=training)
         x = self.pointwise_norm(x, training=training)
         x = self.pointwise_activation(x)
@@ -280,8 +248,7 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
 
         batch_size, height, width, _ = input_shape
 
-        # Calculate spatial dimensions after strided convolution
-        # With 'same' padding: output_size = ceil(input_size / stride)
+        # With 'same' padding: output_size = ceil(input_size / stride).
         if height is not None:
             new_height = (height + self.stride - 1) // self.stride
         else:
@@ -315,5 +282,3 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
             'activation_kwargs': self.activation_kwargs,
         })
         return config
-
-# ---------------------------------------------------------------------

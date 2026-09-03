@@ -1,68 +1,19 @@
 """
-Learnable exactly-orthogonal layer via a butterfly of 2x2 Givens rotations.
+Orthogonal butterfly layer, built by the ``OrthogonalButterfly`` class.
 
-A learnable, exactly-orthogonal d x d linear layer built from a log-depth
-butterfly of 2x2 Givens rotations. This is the operator-valued sibling of the
-polar weight reparameterization (layers/norms/polar_weight_norm.py, after
-PolarQuant, Han et al. 2025): the polar transform arranges a vector's angles
-into a log2(d)-level binary tree of coordinate pairs; OrthogonalButterfly uses
-the same hierarchical pairing to parameterize a structured orthogonal d x d
-linear map -- log2(d) stages, each applying d/2 independent 2x2 rotations to
-coordinate pairs separated by a doubling stride (the Cooley-Tukey / FFT
-butterfly access pattern).
-
-A single butterfly block spans only the FFT-structured subset of SO(d);
-num_blocks > 1 composes several blocks to recover expressivity.
-
-Mathematical Foundation:
-    For d = 2^L, the transform is num_blocks butterfly blocks, each of L
-    stages. Stage s uses stride = 2^s and views the flattened vector x as the
-    shape (.., d/(2*stride), 2, stride), pairing partners that are stride apart.
-    Each such pair [a; b] is rotated by its own angle θ:
-
-        [a; b] -> [a·cosθ - b·sinθ ; a·sinθ + b·cosθ]
-
-    so a stage performs d/2 disjoint 2x2 rotations (the Cooley-Tukey / FFT
-    access pattern). Because each 2x2 rotation is orthogonal and the rotations
-    within a stage act on disjoint coordinate pairs, every stage -- and the
-    product of all stages and blocks -- is orthogonal.
-
-Properties:
-    Exactly orthogonal for any angle values: WᵀW = I and ‖layer(x)‖ = ‖x‖
-    (verified to ~1e-7). The construction needs no matrix inverse, no
-    Cayley/expm, and no soft orthogonality penalty.
-
-    Cheap: O(d log d) compute and (d/2)·log2(d) angle parameters per block,
-    versus O(d²) for a dense orthogonal layer.
-
-    Identity at init: with angle_initializer='zeros' (the default) layer(x) = x,
-    making it a stable drop-in / residual building block.
-
-Constraints:
-    Power-of-two feature dimension only. A non-power-of-two d raises a
-    ValueError. Unlike PolarWeightNorm (which zero-pads and renormalizes),
-    padding cannot preserve orthogonality on the original subspace, so it is
-    rejected rather than padded. The map is square: output dim == input dim == d.
-
-Invertibility (Normalizing Flows):
-    The transform is exactly invertible -- W⁻¹ = Wᵀ -- realized by reversing the
-    block/stage order and transposing each 2x2 rotation (R(θ)⁻¹ = R(-θ)). With a
-    bias the forward map is y = Wx + b and the inverse is x = Wᵀ(y - b) (the bias
-    is subtracted before the inverse rotation). call(x, inverse=True) and the
-    convenience alias layer.inverse(x) compute the exact inverse;
-    log_det_jacobian(x) returns 0 (one scalar per vector) -- the
-    change-of-variables contribution of an orthogonal flow step.
-
-When to Use:
-    Normalizing flows -- orthogonality gives a zero log-det Jacobian together
-    with a cheap, exact inverse (inverse=True): a nearly free, expressive
-    linear/rotation flow step.
-
-    Orthogonal RNN recurrence -- norm-preserving recurrent maps avoid exploding
-    and vanishing hidden-state norms.
-
-    Lossless / invertible blocks, structured mixing layers, or a cheap learnable
-    replacement for a fixed orthogonal transform (e.g. a DCT/FFT-like map).
+A dense orthogonal ``d x d`` matrix costs ``O(d^2)`` parameters and needs a
+matrix inverse, Cayley map, or soft penalty to stay orthogonal during
+training. This layer instead composes ``log2(d)`` stages of ``d/2``
+independent 2x2 Givens rotations, in the Cooley-Tukey / FFT butterfly access
+pattern also used by the polar weight reparameterization in
+``norms/polar_weight_norm.py``. Every rotation is orthogonal and acts on a
+disjoint coordinate pair, so the composed map is exactly orthogonal for any
+angle values, at ``O(d log d)`` cost. The transform is exactly invertible
+(``W^-1 = W^T``, via ``call(x, inverse=True)`` or the ``inverse()`` alias)
+and its log-det-Jacobian is exactly zero, which makes it a cheap normalizing-flow
+step. The feature dimension must be a power of two; a non-power-of-two
+dimension raises ``ValueError`` rather than being padded. With the default
+``angle_initializer='zeros'`` the layer starts as the identity map.
 
 References:
     - Butterfly / Givens parameterizations of orthogonal matrices via the
@@ -70,24 +21,16 @@ References:
       Dao et al.).
     - The recursive coordinate-pairing tree of PolarQuant
       (arXiv:2502.02617); see norms/polar_weight_norm.py.
-    - Distinct from OrthoBlock (layers/orthoblock.py), which is a soft
-      orthogonally-regularized Dense, not an exact orthogonal operator.
-    - Tests: tests/test_layers/test_orthogonal_butterfly.py.
 """
 
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.tensors import is_power_of_two
 
-# ---------------------------------------------------------------------
 
 def _butterfly_apply(
     x: keras.KerasTensor,
@@ -99,20 +42,16 @@ def _butterfly_apply(
 ) -> keras.KerasTensor:
     """Apply the butterfly orthogonal transform to ``x`` of shape ``(N, d)``.
 
-    Args:
-        x: ``(N, d)`` input, ``d`` a power of two.
-        angles: ``(num_blocks, levels, d/2)`` rotation angles.
-        d: feature dimension (static).
-        num_blocks: number of stacked butterfly blocks (static).
-        levels: ``log2(d)`` (static).
-        inverse: if True apply the inverse transform ``W^{-1} = W^T``. Since
-            ``W = R_last ... R_first`` (composition of orthogonal stages), the
-            inverse reverses the block/stage order and transposes each 2x2
-            rotation (``R(theta)^{-1} = R(-theta)``).
-
-    Returns:
-        ``(N, d)`` transformed tensor with ``||output|| == ||input||`` per row.
-        ``_butterfly_apply(_butterfly_apply(x, ...), ..., inverse=True) == x``.
+    :param x: ``(N, d)`` input, ``d`` a power of two.
+    :param angles: ``(num_blocks, levels, d/2)`` rotation angles.
+    :param d: Feature dimension (static).
+    :param num_blocks: Number of stacked butterfly blocks (static).
+    :param levels: ``log2(d)`` (static).
+    :param inverse: If True, apply the inverse transform ``W^{-1} = W^T`` by
+        reversing the block/stage order and transposing each 2x2 rotation
+        (``R(theta)^{-1} = R(-theta)``).
+    :return: ``(N, d)`` transformed tensor with ``||output|| == ||input||``
+        per row.
     """
     block_iter = range(num_blocks - 1, -1, -1) if inverse else range(num_blocks)
     for block in block_iter:
@@ -120,63 +59,64 @@ def _butterfly_apply(
         for s in stage_iter:
             stride = 1 << s
             g = d // (2 * stride)
-            xr = ops.reshape(x, (-1, g, 2, stride))  # partners are `stride` apart
-            a = xr[:, :, 0, :]  # (N, g, stride)
+            # Partners are `stride` apart.
+            xr = ops.reshape(x, (-1, g, 2, stride))
+            a = xr[:, :, 0, :]
             b = xr[:, :, 1, :]
-            theta = ops.reshape(angles[block, s, :], (g, stride))  # (g, stride)
+            theta = ops.reshape(angles[block, s, :], (g, stride))
             cos_t = ops.cos(theta)
             sin_t = ops.sin(theta)
-            if inverse:  # R(-theta) = transpose of the forward 2x2 rotation
+            if inverse:
+                # R(-theta): transpose of the forward 2x2 rotation.
                 a_rot = a * cos_t + b * sin_t
                 b_rot = -a * sin_t + b * cos_t
             else:
                 a_rot = a * cos_t - b * sin_t
                 b_rot = a * sin_t + b * cos_t
-            xr = ops.stack([a_rot, b_rot], axis=2)  # (N, g, 2, stride)
+            xr = ops.stack([a_rot, b_rot], axis=2)
             x = ops.reshape(xr, (-1, d))
     return x
 
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.orthogonal_butterfly")
 class OrthogonalButterfly(keras.layers.Layer):
     """Structured, exactly-orthogonal ``d x d`` linear layer (butterfly Givens).
 
-    **Intent**: Provide a cheap (``O(d log d)``), exactly norm-preserving linear
-    transform whose only parameters are rotation angles -- useful for normalizing
-    flows (zero log-det), orthogonal RNN recurrence (no exploding/vanishing
-    norms), and invertible/lossless blocks. It is the operator form of the polar
-    transform's hierarchical angle tree.
+    One block spans only the FFT-structured subset of ``SO(d)``; passing
+    ``num_blocks > 1`` composes several blocks to recover expressivity.
 
-    **Architecture**:
-    ```
-    Input(batch, ..., d)        d = 2^L
-        |
-        for block in [0..num_blocks):
-          for stage s in [0..L):  stride = 2^s
-            reshape -> (.., d/(2*stride), 2, stride)   # pair partners stride apart
-            [a; b] -> [a cosθ - b sinθ ; a sinθ + b cosθ]   # d/2 2x2 rotations
-        |
-        (+ optional bias)
-    Output(batch, ..., d)
-    ```
+    Architecture:
 
-    Exactly orthogonal for any angle values; ``angle_initializer='zeros'`` gives
-    the identity.
+    .. code-block:: text
 
-    Args:
-        num_blocks: Number of stacked butterfly blocks. More blocks => more
-            expressive (one block spans only the FFT-structured subset of SO(d)).
-            Defaults to 1.
-        use_bias: Add a bias after the rotation (breaks pure linearity but not
-            the rotation's orthogonality). Defaults to False.
-        angle_initializer: Initializer for the rotation angles. Defaults to
-            ``'zeros'`` (identity transform).
-        angle_regularizer: Optional regularizer on the angles.
-        bias_initializer: Initializer for the bias. Defaults to ``'zeros'``.
-        bias_regularizer: Optional regularizer on the bias.
-        **kwargs: Passed to ``keras.layers.Layer``.
+        Input [batch, ..., d]          d = 2^L
+            │
+            ▼
+        ┌──────────────────────────────────────┐
+        │ for block in 0..num_blocks:           │
+        │   for stage s in 0..L: stride = 2^s   │
+        │     pair partners `stride` apart      │
+        │     [a;b] -> [a cos0 - b sin0 ;        │
+        │               a sin0 + b cos0]        │
+        │     (d/2 disjoint 2x2 rotations)      │
+        └──────────────────┬─────────────────────┘
+                            ▼
+                    (+ bias, optional)
+                            │
+                            ▼
+        Output [batch, ..., d]
+
+    :param num_blocks: Number of stacked butterfly blocks. Defaults to 1.
+    :type num_blocks: int
+    :param use_bias: Add a bias after the rotation. Breaks pure linearity but
+        not the rotation's orthogonality. Defaults to False.
+    :type use_bias: bool
+    :param angle_initializer: Initializer for the rotation angles. Defaults
+        to ``'zeros'`` (identity transform).
+    :param angle_regularizer: Optional regularizer on the angles.
+    :param bias_initializer: Initializer for the bias. Defaults to ``'zeros'``.
+    :param bias_regularizer: Optional regularizer on the bias.
+    :param kwargs: Passed to ``keras.layers.Layer``.
 
     Input shape:
         N-D tensor ``(batch, ..., d)`` with ``d`` a power of two.
@@ -184,8 +124,7 @@ class OrthogonalButterfly(keras.layers.Layer):
     Output shape:
         Same as input: ``(batch, ..., d)``.
 
-    Raises:
-        ValueError: if the last input dimension is not a power of two.
+    :raises ValueError: If the last input dimension is not a power of two.
     """
 
     def __init__(
@@ -316,5 +255,3 @@ class OrthogonalButterfly(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

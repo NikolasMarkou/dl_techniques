@@ -17,16 +17,10 @@ import keras
 from keras import ops
 from typing import Tuple, Union, Optional, Sequence, List, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..utils.logger import logger
 from .gaussian_filter import GaussianFilter
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.gaussian_pyramid")
 class GaussianPyramid(keras.layers.Layer):
@@ -39,7 +33,7 @@ class GaussianPyramid(keras.layers.Layer):
     level, forming a hierarchical representation for scale-invariant feature
     detection, image registration, and texture analysis.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -103,27 +97,20 @@ class GaussianPyramid(keras.layers.Layer):
     ) -> None:
         super().__init__(trainable=trainable, **kwargs)
 
-        # Validate levels
         if levels < 1:
             raise ValueError(f"levels must be >= 1, got {levels}")
-
-        # Validate kernel size
         if len(kernel_size) != 2:
             raise ValueError("kernel_size must be length 2")
-
-        # Validate scale factor
         if scale_factor < 1:
             raise ValueError(f"scale_factor must be >= 1, got {scale_factor}")
 
-        # Store ALL configuration parameters
         self.levels = levels
         self.kernel_size = kernel_size
         self.scale_factor = scale_factor
 
-        # Process sigma
         if (sigma is None or
                 (isinstance(sigma, (float, int)) and sigma <= 0)):
-            # Default sigma based on kernel size
+            # No explicit sigma: derive it from kernel size.
             self.sigma = ((kernel_size[0] - 1) / 2, (kernel_size[1] - 1) / 2)
         elif isinstance(sigma, Sequence) and len(sigma) == 2:
             self.sigma = (float(sigma[0]), float(sigma[1]))
@@ -136,12 +123,10 @@ class GaussianPyramid(keras.layers.Layer):
         if self.padding not in {"valid", "same"}:
             raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
 
-        # Process data_format
         self.data_format = keras.config.image_data_format() if data_format is None else data_format
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         self.gaussian_filters: List[GaussianFilter] = []
         for i in range(self.levels):
             gaussian_filter = GaussianFilter(
@@ -168,18 +153,13 @@ class GaussianPyramid(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Build sub-layers in computational order with correct shapes
         current_shape = input_shape
 
         for i, gaussian_filter in enumerate(self.gaussian_filters):
-            # Build the gaussian filter with current shape
             gaussian_filter.build(current_shape)
-
-            # Update shape for next level (downsampled)
-            if i < self.levels - 1:  # Don't update for the last level
+            if i < self.levels - 1:
                 current_shape = self._compute_downsampled_shape(current_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def _compute_downsampled_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -218,7 +198,6 @@ class GaussianPyramid(keras.layers.Layer):
         if self.scale_factor == 1:
             return inputs
 
-        # Use average pooling for downsampling
         return ops.nn.average_pool(
             inputs=inputs,
             pool_size=(self.scale_factor, self.scale_factor),
@@ -245,11 +224,9 @@ class GaussianPyramid(keras.layers.Layer):
         x = inputs
 
         for i, gaussian_filter in enumerate(self.gaussian_filters):
-            # Apply Gaussian blur to current level
             x_blurred = gaussian_filter(x, training=training)
             results.append(x_blurred)
 
-            # Downsample for next level (except for the last level)
             if i < self.levels - 1:
                 x = self._downsample(x_blurred)
 
@@ -289,9 +266,6 @@ class GaussianPyramid(keras.layers.Layer):
             "data_format": self.data_format,
         })
         return config
-
-
-# ---------------------------------------------------------------------
 
 
 def gaussian_pyramid(
@@ -339,5 +313,3 @@ def gaussian_pyramid(
         name=name
     )
     return layer(inputs)
-
-# ---------------------------------------------------------------------
