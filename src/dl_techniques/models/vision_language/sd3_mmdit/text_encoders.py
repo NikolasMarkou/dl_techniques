@@ -1,47 +1,28 @@
 """
-Faithful from-scratch SD3 text encoders (Keras 3 port): CLIP / OpenCLIP / T5.
+From-scratch SD3 text encoders, built by ``CLIPTextEncoder``,
+``OpenCLIPTextEncoder`` and ``T5Encoder``: architecture ports of the three
+text towers Stable Diffusion 3 conditions on.
 
-This module provides architecture-faithful, **from-scratch** re-implementations of
-the three text towers Stable Diffusion 3 conditions on:
+``CLIPTextEncoder`` ports the OpenAI CLIP ViT-L/14 text tower: token and
+learned positional embeddings, pre-LN transformer layers with QuickGELU
+MLPs, a causal self-attention mask, and a pooled-EOS text projection.
+``OpenCLIPTextEncoder`` is a real subclass of it with larger dims and
+standard GELU, mirroring the PyTorch ``OpenCLIP(CLIP)`` relationship.
+``T5Encoder`` ports the T5-v1.1 XXL encoder: shared token embedding,
+pre-RMSNorm self-attention with gated-GELU FFN blocks, a relative-position
+bucket attention bias shared from the first block, no ``1/sqrt(d)``
+attention scaling, and bidirectional bucketing.
 
-- :class:`CLIPTextEncoder`      -- the OpenAI CLIP ViT-L/14 text tower
-  (token + learned-absolute positional embedding, a stack of pre-LN transformer
-  encoder layers with QuickGELU MLPs, a CAUSAL self-attention mask, a final
-  LayerNorm, and a pooled-EOS text projection).
-- :class:`OpenCLIPTextEncoder` -- the larger OpenCLIP ViT-bigG text tower
-  (identical structure, larger dims, standard GELU instead of QuickGELU). It is a
-  real subclass of :class:`CLIPTextEncoder` (mirroring the PyTorch
-  ``class OpenCLIP(CLIP)``) that only overrides the constructor defaults and the
-  activation.
-- :class:`T5Encoder`           -- the T5-v1.1 XXL encoder
-  (shared token embedding, a stack of pre-RMSNorm self-attention + gated-GELU FFN
-  blocks, T5 RELATIVE-POSITION-BUCKET attention bias shared from the first block,
-  NO ``1/sqrt(d)`` attention scaling, a final RMSNorm). Bidirectional bucketing
-  (this is an *encoder*).
-
-**Faithfulness scope (DECISION plan_2026-06-12_dfce0712/D-009).** "Faithful" here
-means *architecture + correct forward shapes + serialization round-trip*, NOT
-weight parity: there is no pretrained-weight loading path in this repo, so the
-encoders are randomly initialized. All three consume INTEGER token-id tensors
-``(B, L)`` and an optional ``attention_mask (B, L)`` of 1/0 (1 = keep). No
-tokenizer is provided (out of scope per state.md); callers pass raw ids.
-
-**Return contracts** (consumed by the step-10 pipeline):
-
-- ``CLIPTextEncoder`` / ``OpenCLIPTextEncoder`` return a ``dict``:
-    - ``"pooled"``       ``(B, embed_dim)``  -- ``text_projection`` applied to the
-      EOS-token hidden state (EOS position = ``argmax(token_ids, axis=-1)``, the
-      OpenAI-CLIP convention where the EOS id is the largest id in the vocab).
-    - ``"last_hidden"``  ``(B, L, embed_dim)`` -- the full sequence AFTER the final
-      LayerNorm (pre-projection).
-    - ``"penultimate"``  ``(B, L, embed_dim)`` -- the output of the SECOND-TO-LAST
-      encoder layer (what SD3 actually conditions on, alongside ``pooled``).
-- ``T5Encoder`` returns the sequence tensor ``(B, L, embed_dim)`` directly.
-
-PyTorch references (faithfully ported, structure only):
-``openai/CLIP`` ``model.py`` (``Transformer`` / ``ResidualAttentionBlock``),
-``open_clip`` ``transformer.py``, HuggingFace ``transformers`` ``T5Stack`` /
-``T5Attention`` / ``T5LayerFF`` (gated-GELU ``T5DenseGatedActDense``).
+Faithful here means matching architecture, forward shapes and
+serialization, not weight parity: this repo has no pretrained-weight
+loading path, so every encoder is randomly initialized. All three consume
+integer token-id tensors ``(B, L)`` and an optional ``attention_mask (B, L)``
+of 1s and 0s; no tokenizer is provided, so callers pass raw ids.
+``CLIPTextEncoder``/``OpenCLIPTextEncoder`` return a dict with ``'pooled'``
+``(B, embed_dim)``, ``'last_hidden'`` ``(B, L, embed_dim)`` (after the final
+LayerNorm), and ``'penultimate'`` ``(B, L, embed_dim)`` (the second-to-last
+layer's output, which SD3 actually conditions on). ``T5Encoder`` returns the
+sequence tensor ``(B, L, embed_dim)`` directly.
 
 References:
     - Radford et al., 2021. Learning Transferable Visual Models From Natural
@@ -119,32 +100,31 @@ def _resolve_act(act_fn: str):
 class CLIPTextEncoder(keras.Model):
     """OpenAI-CLIP text tower (from-scratch, token-id input, causal-masked).
 
-    **Intent.** Given integer token ids ``(B, L)`` (and an optional padding
-    ``attention_mask (B, L)`` of 1/0), produce the three tensors SD3's text
-    conditioning needs: a pooled, projected EOS vector ``(B, embed_dim)``, the
-    final-LN sequence ``(B, L, embed_dim)``, and the penultimate-layer sequence
-    ``(B, L, embed_dim)``.
+    Given integer token ids ``(B, L)`` and an optional padding
+    ``attention_mask (B, L)`` of 1s and 0s, produces the three tensors SD3's
+    text conditioning needs: a pooled, projected EOS vector
+    ``(B, embed_dim)``, the final-LayerNorm sequence ``(B, L, embed_dim)``,
+    and the penultimate-layer sequence ``(B, L, embed_dim)``.
 
-    **Architecture.**
+    Architecture:
 
     .. code-block:: text
 
         ids (B, L) int
           token_embedding(ids)  +  position_embedding(arange(L))   -> x (B, L, D)
           for layer in num_layers x:
-              x = x + attn( LN1(x) )      # MHA, CAUSAL + padding mask
+              x = x + attn( LN1(x) )      # MHA, causal + padding mask
               x = x + mlp( LN2(x) )       # Dense(4D) -> act -> Dense(D)
               (capture x after the (num_layers-2)-th layer as `penultimate`)
           last_hidden = final_layer_norm(x)
           eos = last_hidden[ batch, argmax(ids, axis=-1) ]          # (B, D)
           pooled = text_projection(eos)                             # (B, D)
 
-    The self-attention uses a lower-triangular CAUSAL mask (CLIP text is
-    autoregressively masked) combined additively with the padding mask derived
-    from ``attention_mask``. Attention is the standard
-    :class:`keras.layers.MultiHeadAttention` (a manual SDPA would duplicate it
-    for no gain); the causal + padding mask is supplied as a boolean
-    ``attention_mask`` of shape ``(B, L, L)``.
+    The self-attention uses a lower-triangular causal mask, since CLIP text
+    is autoregressively masked, combined additively with the padding mask
+    derived from ``attention_mask``. Attention is the standard
+    :class:`keras.layers.MultiHeadAttention`; the causal and padding mask is
+    supplied as a boolean ``attention_mask`` of shape ``(B, L, L)``.
 
     :param vocab_size: Token vocabulary size.
     :type vocab_size: int
@@ -485,18 +465,18 @@ class OpenCLIPTextEncoder(CLIPTextEncoder):
 class T5Encoder(keras.Model):
     """T5-v1.1 encoder (from-scratch, relative-position-bucket bias).
 
-    **Intent.** Given integer token ids ``(B, L)`` (+ optional padding
-    ``attention_mask (B, L)`` of 1/0), produce a sequence of hidden states
-    ``(B, L, embed_dim)`` -- the T5 conditioning stream SD3 uses.
+    Given integer token ids ``(B, L)`` and an optional padding
+    ``attention_mask (B, L)`` of 1s and 0s, produces a sequence of hidden
+    states ``(B, L, embed_dim)``, the T5 conditioning stream SD3 uses.
 
-    **Architecture.**
+    Architecture:
 
     .. code-block:: text
 
         x = shared_embedding(ids)                          # (B, L, D)
         position_bias = block_0.compute_bias(L) + pad_mask # (1/ B, heads, L, L)
         for block in num_layers x:
-            # self-attention (NO 1/sqrt(d) scaling; T5 omits it):
+            # self-attention, no 1/sqrt(d) scaling (T5 omits it):
             n = RMSNorm(x)
             scores = q @ k^T + position_bias               # (B, heads, L, L)
             x = x + Wo( softmax(scores) @ v )
@@ -505,18 +485,15 @@ class T5Encoder(keras.Model):
             x = x + wo( gelu(wi_0(n)) * wi_1(n) )
         x = final RMSNorm(x)
 
-    **Relative-position bias (shared).** Only the FIRST block owns the
-    ``relative_attention_bias = Embedding(num_buckets, num_heads)`` and computes
-    the ``(1, heads, L, L)`` bias via :meth:`_compute_bias`; that bias is threaded
-    (passed) to every subsequent block. Bucketing is **bidirectional** (this is an
-    encoder): half the buckets cover future positions, half the past; large
-    distances are log-scaled. See :meth:`_relative_position_bucket`.
-
-    **Dynamic vs fixed L (DECISION plan_2026-06-12_dfce0712/D-009).** The bias is
-    built for the dynamic ``L`` from ``ops.shape`` at call time using ``keras.ops``
-    throughout (``arange`` arithmetic + an ``Embedding`` gather), so it handles
-    variable sequence length without a fixed ``max_seq_len`` -- no fixed-length
-    fallback was needed.
+    Only the first block owns the
+    ``relative_attention_bias = Embedding(num_buckets, num_heads)`` and
+    computes the ``(1, heads, L, L)`` bias via :meth:`_compute_bias`; that
+    bias is passed to every later block. Bucketing is bidirectional, since
+    this is an encoder: half the buckets cover future positions, half the
+    past, with large distances log-scaled. See
+    :meth:`_relative_position_bucket`. The bias is built for the dynamic
+    ``L`` from ``ops.shape`` at call time (see D-009), so it handles
+    variable sequence length without a fixed ``max_seq_len``.
 
     :param vocab_size: Token vocabulary size.
     :type vocab_size: int
@@ -732,42 +709,11 @@ class T5Encoder(keras.Model):
         # --- shared relative-position bias (+ additive padding mask) ----
         position_bias = self._compute_bias(L)  # (1, H, L, L)
         if attention_mask is not None:
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-033
-            # SELECT the masked positions with `ops.where`; do NOT go back to
-            # the additive form `position_bias + (1 - mask) * min_val`. That
-            # form has TWO independent fp16 defects, and repairing only the
-            # visible one makes the model SILENTLY WRONG instead of loudly
-            # broken. Both are MEASURED, not assumed:
-            #   1. `np.finfo(np.float32).min` (-3.40e+38) is not representable
-            #      in float16. Under `mixed_float16` the float32 sentinel
-            #      meeting a float16 bias RAISED `InvalidArgumentError` whenever
-            #      a mask was supplied (no-mask green at 2.552734e+00; float32
-            #      green both ways).
-            #   2. The obvious repair -- cast that same sentinel to the bias
-            #      dtype -- makes it `-inf` in float16, and then
-            #      `(1 - keep) * -inf` is `0 * -inf = NaN` on the KEPT
-            #      positions, the ones the mask exists to preserve. MEASURED on
-            #      `bias = [-1.0, 0.5, -3.0, 2.0]`, `keep = [1, 1, 0, 0]`:
-            #        additive, finfo(f32).min cast -> [nan, nan, -inf, -inf],
-            #                                         softmax 4 NaN of 4
-            #        additive, finfo(f16).min      -> [-1.0, 0.5, -65504, -65504]
-            #        ops.where, finfo(f16).min     -> [-1.0, 0.5, -65504, -65504]
-            #      A *fully* dtype-aware additive form would also be NaN-free,
-            #      so `ops.where` is not the only correct answer -- it is chosen
-            #      because it never multiplies by the sentinel at all, so
-            #      neither failure mode is reachable, and because it is the only
-            #      one of the three that survives an ALL-MASKED row
-            #      (additive with -inf: softmax 4 NaN of 4; where: 0 NaN).
-            # See decisions.md D-033.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-033: mask with
+            # ops.where, never the additive `bias + (1-mask)*min_val` form -- under mixed_float16 that form NaNs the kept positions on an all-masked row. See decisions.md.
             keep = ops.cast(attention_mask, "bool")[:, None, None, :]  # (B,1,1,L)
-            # The sentinel is the minimum of the BIAS's OWN dtype, so it is
-            # always representable: -3.40e+38 in float32, -65504.0 in float16.
-            # `getattr(dtype, "name", dtype)` rather than
-            # `keras.backend.standardize_dtype`: the guard in
-            # `tests/test_the_keras2_backend_calls_are_gone.py` forbids any
-            # `keras.backend.*` call across all of `src/` (Keras-2 residue
-            # rule), and
-            # a backend tensor's dtype already carries its own `.name`.
+            # The sentinel is the bias dtype's own minimum, so it is always
+            # representable: -3.40e+38 in float32, -65504.0 in float16.
             bias_dtype = getattr(position_bias.dtype, "name", position_bias.dtype)
             masked_value = ops.cast(
                 float(np.finfo(bias_dtype).min), position_bias.dtype)
@@ -780,16 +726,14 @@ class T5Encoder(keras.Model):
             return ops.transpose(t, (0, 2, 1, 3))  # (B, H, L, hd)
 
         for i in range(self.num_layers):
-            # --- self-attention (NO 1/sqrt(d) scaling) -----------------
+            # --- self-attention, no 1/sqrt(d) scaling -------------------
             residual = x
             n = self.attn_norm[i](x, training=training)
             q = split_heads(self.q[i](n, training=training))
             k = split_heads(self.k[i](n, training=training))
             v = split_heads(self.v[i](n, training=training))
             # DECISION plan_2026-06-12_dfce0712/D-009: T5 omits the 1/sqrt(d)
-            # attention scaling (it is folded into the initializer scale). Do NOT
-            # divide scores by sqrt(head_dim) here -- adding the scale would
-            # break faithfulness with the T5 reference. See decisions.md D-009.
+            # attention scaling -- it is folded into the initializer scale, so adding it here breaks faithfulness with T5. See decisions.md.
             scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))  # (B,H,L,L)
             scores = scores + ops.cast(position_bias, scores.dtype)
             weights = ops.softmax(scores, axis=-1)

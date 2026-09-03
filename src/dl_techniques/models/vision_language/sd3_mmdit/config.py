@@ -1,31 +1,24 @@
 """Configuration dataclass for the SD3 MMDiT Keras port.
 
 Mirrors the Stable Diffusion 3 MMDiT transformer structural parameters
-(diffusers ``SD3Transformer2DModel``) and pairs them with the reused 16-channel
-KL-VAE parameters. The VAE parameter dataclass is **reused** from the ideogram4
-port (:class:`~dl_techniques.models.vision_language.ideogram4.config.AutoEncoderParams`) -- SD3
-sets ``z_channels=16``; it is NOT redefined here (DRY; see D-002).
+(diffusers ``SD3Transformer2DModel``) and pairs them with the 16-channel
+KL-VAE parameters reused from the ideogram4 port
+(:class:`~dl_techniques.models.vision_language.ideogram4.config.AutoEncoderParams`).
 
-All invariants the downstream MMDiT blocks / transformer silently rely on are
-enforced in :meth:`SD3MMDiTConfig.__post_init__` as ``ValueError`` guards:
+``SD3MMDiTConfig.__post_init__`` enforces five invariants the downstream
+blocks rely on: an integer ``head_dim`` (``embedding_size % num_heads == 0``),
+every ``dual_attention_layers`` index inside ``[0, depth)``, ``patch_size >= 1``,
+a positional grid that covers the patch token grid
+(``pos_embed_max_size >= sample_size // patch_size``), and matching
+``in_channels``/``out_channels`` (the rectified-flow velocity has the same
+channel count as the latent it denoises).
 
-1. ``embedding_size % num_heads == 0``          -> integer per-head ``head_dim``.
-2. every ``i`` in ``dual_attention_layers`` satisfies ``0 <= i < depth``.
-3. ``patch_size >= 1``.
-4. ``pos_embed_max_size >= sample_size // patch_size`` -> the 2D sincos
-   positional grid must cover the patchified token grid.
-5. ``in_channels == out_channels`` -> SD3 rectified-flow velocity has the same
-   channel count as the latent it denoises.
-
-Two presets are provided: ``full`` (SD3-medium-ish defaults, defined-not-run)
-and ``tiny`` (small enough to smoke-train on a 12GB GPU while satisfying ALL
-invariants and exercising the dual-attention path in at least one block). Use
-:func:`get_sd3_config` to retrieve a ``(SD3MMDiTConfig, AutoEncoderParams)``
-pair by variant name.
-
-This config is a structural (frozen) dataclass and is intentionally NOT a
-keras-serializable object: it carries construction-time structural parameters,
-not trainable state.
+Two presets are provided: ``full`` (SD3-medium-ish defaults, not run locally)
+and ``tiny`` (small enough to smoke-train on a 12GB GPU while exercising the
+dual-attention path). Use :func:`get_sd3_config` to retrieve a
+``(SD3MMDiTConfig, AutoEncoderParams)`` pair by variant name. This config is a
+frozen dataclass, not a Keras-serializable object: it carries structural
+construction parameters, not trainable state.
 """
 
 from __future__ import annotations
@@ -35,17 +28,8 @@ from typing import Any, Dict, Tuple
 
 from dl_techniques.utils.logger import logger
 
-# Reuse the VAE parameter dataclass from ideogram4 -- do NOT redefine it (D-002).
-# DECISION plan-2026-08-31T175140-a4e0c303/D-018
-# Import `validate_vae_groupnorm` from its ideogram4 owner, never re-declare it
-# here. A shadowing local copy stays green against every test that imports
-# the name from ideogram4 rather than from this module.
-# `validate_vae_groupnorm` was a byte-equivalent local copy until
-# plan-2026-08-31-a4e0c303/iter-1/step-3; ideogram4 owns it now, under a PUBLIC
-# name since step 3.2 (it was `_validate_vae_groupnorm`, and importing an
-# underscored name across a package boundary marks as private something that is
-# really ideogram4's API). Do NOT re-add a local def: a shadowing copy would keep passing every test that imports from
-# ideogram4, which is why the sd3-side guard imports it from THIS module.
+# DECISION plan-2026-08-31T175140-a4e0c303/D-018: import `validate_vae_groupnorm`
+# from ideogram4, never re-declare it here -- a shadowing local copy would still pass every test that imports the ideogram4 name. See decisions.md.
 from dl_techniques.models.vision_language.ideogram4.config import (
     AutoEncoderParams,
     validate_vae_groupnorm,
@@ -60,33 +44,44 @@ from dl_techniques.models.vision_language.ideogram4.config import (
 class SD3MMDiTConfig:
     """Stable Diffusion 3 MMDiT dual-stream transformer configuration.
 
-    Frozen so it can be safely shared/hashed; the tuple-valued
-    ``dual_attention_layers`` round-trips to/from a list via
+    Frozen so it can be shared and hashed; the tuple-valued
+    ``dual_attention_layers`` round-trips to and from a list via
     :meth:`to_dict` / :meth:`from_dict`.
 
-    Args:
-        patch_size: Latent patchification edge (latent grid -> token grid).
-        in_channels: VAE latent channel count fed to the patch embedder
-            (= ``AutoEncoderParams.z_channels``; SD3 uses 16).
-        out_channels: Velocity output channel count. Must equal ``in_channels``.
-        embedding_size: Transformer hidden width (``dim``). Must be divisible by
-            ``num_heads``.
-        num_heads: Attention head count.
-        depth: Number of stacked :class:`MMDiTBlock` blocks.
-        mlp_ratio: FFN hidden expansion ratio (hidden = ``embedding_size *
-            mlp_ratio``).
-        joint_attention_dim: Caption / ``encoder_hidden_states`` feature width;
-            the ``context_embedder`` Dense projects this to ``embedding_size``.
-        pooled_projection_dim: Pooled text-vector width fed to the combined
-            timestep-text embedding.
-        pos_embed_max_size: Maximum grid side for the 2D sincos positional
-            embedding. Must cover ``sample_size // patch_size``.
-        sample_size: Default latent grid side (``H' == W'``).
-        dual_attention_layers: Indices of blocks that use the dual
-            (9-way ``AdaLayerNormZeroX``) self-attention path. Each index must be
-            in ``[0, depth)``.
-        qk_norm: Whether the joint attention applies per-head QK-RMSNorm.
-        eps: RMSNorm / LayerNorm epsilon.
+    :param patch_size: Latent patchification edge (latent grid to token grid).
+    :type patch_size: int
+    :param in_channels: VAE latent channel count fed to the patch embedder
+        (equals ``AutoEncoderParams.z_channels``; SD3 uses 16).
+    :type in_channels: int
+    :param out_channels: Velocity output channel count. Must equal ``in_channels``.
+    :type out_channels: int
+    :param embedding_size: Transformer hidden width. Must be divisible by
+        ``num_heads``.
+    :type embedding_size: int
+    :param num_heads: Attention head count.
+    :type num_heads: int
+    :param depth: Number of stacked :class:`MMDiTBlock` blocks.
+    :type depth: int
+    :param mlp_ratio: FFN hidden expansion ratio.
+    :type mlp_ratio: float
+    :param joint_attention_dim: Caption feature width; ``context_embedder``
+        projects this to ``embedding_size``.
+    :type joint_attention_dim: int
+    :param pooled_projection_dim: Pooled text-vector width fed to the combined
+        timestep-text embedding.
+    :type pooled_projection_dim: int
+    :param pos_embed_max_size: Maximum grid side for the 2D sincos positional
+        embedding. Must cover ``sample_size // patch_size``.
+    :type pos_embed_max_size: int
+    :param sample_size: Default latent grid side.
+    :type sample_size: int
+    :param dual_attention_layers: Indices of blocks using the dual
+        (9-way ``AdaLayerNormZeroX``) self-attention path, each in ``[0, depth)``.
+    :type dual_attention_layers: Tuple[int, ...]
+    :param qk_norm: Whether joint attention applies per-head QK-RMSNorm.
+    :type qk_norm: bool
+    :param eps: RMSNorm / LayerNorm epsilon.
+    :type eps: float
     """
 
     patch_size: int = 2
@@ -99,16 +94,8 @@ class SD3MMDiTConfig:
     joint_attention_dim: int = 4096
     pooled_projection_dim: int = 2048
     pos_embed_max_size: int = 192
-    # DECISION plan-2026-08-23T091307-9a110062/D-461
-    # Every default in this block is quoted from the official
-    # ``SD3Transformer2DModel`` config.json, so ``sample_size`` is quoted data too and
-    # must stay 128 (diffusers ``sample_size: 128``). It was 64 -- exactly half -- which
-    # silently halved ``_pos_base_size`` (= sample_size // patch_size) in
-    # transformer.py, i.e. the positional-grid scale the port is supposed to mirror.
-    # Do NOT lower it back to fit a local VRAM budget: use the ``tiny`` preset, or pass
-    # ``sample_size=`` explicitly, which is what the training script already does.
-    # Source (canonical repo is gated; community re-upload of the same config):
-    #   https://huggingface.co/v2ray/stable-diffusion-3-medium-diffusers/raw/main/transformer/config.json
+    # DECISION plan-2026-08-23T091307-9a110062/D-461: sample_size stays 128,
+    # quoted from the official SD3Transformer2DModel config.json -- 64 silently halved the positional-grid scale. Use the tiny preset instead. See decisions.md.
     sample_size: int = 128
     dual_attention_layers: Tuple[int, ...] = ()
     qk_norm: bool = True
@@ -263,22 +250,19 @@ def get_sd3_config(
 ) -> Tuple[SD3MMDiTConfig, AutoEncoderParams]:
     """Return the ``(SD3MMDiTConfig, AutoEncoderParams)`` pair for a variant.
 
-    Both objects are constructed (so all ``__post_init__`` invariants run) and
-    the VAE GroupNorm-divisibility invariant is asserted. The transformer
-    ``in_channels`` is cross-checked against the AutoEncoder ``z_channels`` (the
-    patch embedder consumes the raw 16-channel latent directly -- SD3 does NOT
-    patchify channels into ``in_channels`` the way ideogram4 does).
+    Both objects are constructed, so their ``__post_init__`` invariants run,
+    and the VAE GroupNorm-divisibility invariant is asserted. The transformer
+    ``in_channels`` is cross-checked against the AutoEncoder ``z_channels`` --
+    the patch embedder consumes the raw 16-channel latent directly, unlike
+    ideogram4's channel patchification.
 
-    Args:
-        variant: One of the keys in :data:`PRESETS` (``"tiny"`` or ``"full"``).
-
-    Returns:
-        A ``(config, ae)`` tuple.
-
-    Raises:
-        ValueError: If ``variant`` is unknown, any config invariant fails, the
-            VAE GroupNorm divisibility fails, or ``in_channels`` disagrees with
-            the AutoEncoder ``z_channels``.
+    :param variant: One of the keys in :data:`PRESETS` (``'tiny'`` or ``'full'``).
+    :type variant: str
+    :return: A ``(config, ae)`` tuple.
+    :rtype: Tuple[SD3MMDiTConfig, AutoEncoderParams]
+    :raises ValueError: If ``variant`` is unknown, a config invariant fails,
+        the VAE GroupNorm divisibility fails, or ``in_channels`` disagrees
+        with the AutoEncoder ``z_channels``.
     """
     if variant not in PRESETS:
         raise ValueError(

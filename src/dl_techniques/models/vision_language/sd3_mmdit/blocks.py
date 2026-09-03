@@ -1,52 +1,23 @@
 """
-SD3 MMDiT dual-stream transformer block + final projection layer.
+SD3 MMDiT dual-stream transformer block, built by ``MMDiTBlock``, plus a
+final projection layer.
 
-Keras 3 port of the Stable Diffusion 3 MMDiT ``DiTBlock`` (the diffusers
-``JointTransformerBlock``) and the final output head. The block is the
-dual-stream container that wires together the three step-1..3 primitives:
+A Keras 3 port of the Stable Diffusion 3 ``JointTransformerBlock``. Given an
+image token stream, a text token stream and a per-sample conditioning
+vector, the block updates both streams via AdaLN-modulated joint attention
+(image and text attend to each other in one call) and per-stream gated FFNs,
+wiring together :class:`~dl_techniques.layers.attention.mmdit_joint_attention.MMDiTJointAttention`,
+the SD3 AdaLN modulation layers, and :class:`~dl_techniques.layers.ffn.gelu_mlp_ffn.GELUMLPFFN`.
+Two constructor flags change the block's shape: ``use_dual_attention`` gives
+the image stream a second self-attention path, and ``context_pre_only``
+marks the final block in a stack, which drops the text output path
+entirely.
 
-- :class:`~dl_techniques.layers.attention.mmdit_joint_attention.MMDiTJointAttention`
-  -- the joint image+text scaled-dot-product attention,
-- the SD3 AdaLN modulation trio
-  (:class:`~dl_techniques.layers.transformers.sd3_adaln.AdaLayerNormZero` /
-  :class:`AdaLayerNormZeroX` / :class:`AdaLayerNormContinuous`),
-- :class:`~dl_techniques.layers.ffn.gelu_mlp_ffn.GELUMLPFFN` -- the
-  GELU-tanh FeedForward.
-
-**Intent**
-
-Provide one stackable MMDiT block that, given an image token stream
-``hidden_states (B, N_img, dim)``, a text token stream
-``encoder_hidden_states (B, N_txt, dim)`` and a per-sample conditioning vector
-``time_emb (B, dim)``, updates both streams via AdaLN-modulated joint attention
-and per-stream gated FFNs. Three structural flavors are selected by constructor
-flags:
-
-- ``use_dual_attention`` -- image stream gets a second (self) attention path
-  (SD3.5-medium); the image AdaLN becomes the 9-way :class:`AdaLayerNormZeroX`.
-- ``context_pre_only`` -- the LAST block discards the text path: the text AdaLN
-  becomes the 2-way :class:`AdaLayerNormContinuous` (no gates), the joint
-  attention drops the text output projection, and :meth:`MMDiTBlock.call`
-  returns ONLY the updated image stream (a single tensor).
-
-**Dual-return contract.** When ``context_pre_only`` is ``False`` the block
-returns ``(hidden_states, encoder_hidden_states)`` -- both ``(B, N, dim)``.
-When ``context_pre_only`` is ``True`` it returns the single image tensor
-``hidden_states (B, N_img, dim)`` (the text stream is final and not propagated).
-This mirrors the PyTorch source where the final block's ``encoder_hidden_states``
-return is ``None``; returning a single tensor (rather than a ``(tensor, None)``
-pair) keeps the contract graph-safe and unambiguous for the model's block stack.
-
-**Architecture** (``context_pre_only=False``, ``use_dual_attention=False``)::
-
-    norm_h, g_msa, sh_mlp, sc_mlp, g_mlp        = norm1([h, t])
-    norm_e, cg_msa, csh_mlp, csc_mlp, cg_mlp    = norm1_context([e, t])
-    attn_h, attn_e = attn([norm_h, norm_e])
-    h = h + g_msa[:,None,:]  * attn_h
-    h = h + g_mlp[:,None,:]  * ff(norm2(h)*(1+sc_mlp[:,None,:]) + sh_mlp[:,None,:])
-    e = e + cg_msa[:,None,:] * attn_e
-    e = e + cg_mlp[:,None,:] * ff_context(norm2_context(e)*(1+csc_mlp)+csh_mlp)
-    return (h, e)
+When ``context_pre_only`` is ``False`` the block returns
+``(hidden_states, encoder_hidden_states)``, both ``(B, N, dim)``. When it is
+``True`` the text stream is not propagated further, and the block returns
+the single image tensor ``hidden_states (B, N_img, dim)`` instead of a
+tuple.
 
 PyTorch reference: diffusers ``models/transformers/transformer_sd3.py``
 (``JointTransformerBlock.forward``).
@@ -67,17 +38,8 @@ from dl_techniques.layers.transformers.sd3_adaln import (
     AdaLayerNormZero,
     AdaLayerNormZeroX,
     AdaLayerNormContinuous,
-    # DECISION plan-2026-08-31T175140-a4e0c303/D-017
-    # Import `modulate`, never re-define it here. A local copy would drift
-    # from the owner's broadcast contract while every test in this package
-    # kept passing.
-    # `modulate` was defined identically here until
-    # plan-2026-08-31-a4e0c303/iter-1/step-2; `sd3_adaln` owns it now, under a
-    # PUBLIC name since step 2.1 (it was `_modulate`, and importing an
-    # underscored name across a package boundary marks as private something
-    # that is really this package's API). It expands `(B, dim)` shift/scale to
-    # `(B, 1, dim)` itself -- do NOT swap it for
-    # `AdaLNZeroConditionalBlock._modulate`, which does not.
+    # DECISION plan-2026-08-31T175140-a4e0c303/D-017: import `modulate` from its
+    # owner, never re-define it -- a local copy would drift from the broadcast contract while tests stayed green. See decisions.md.
     modulate,
 )
 from dl_techniques.layers.ffn.gelu_mlp_ffn import GELUMLPFFN
@@ -256,16 +218,8 @@ class MMDiTBlock(keras.layers.Layer):
         )
 
         # --- optional dual self-attention on the image stream ----------
-        # DECISION plan_2026-06-12_dfce0712/D-005: use keras.layers.MultiHeadAttention
-        # for the dual self-attention (attn2) rather than building a 4th custom
-        # QK-normed attention class. The SD3.5-medium dual path is a standard
-        # single-stream self-attention; reusing MHA avoids a speculative 4th
-        # attention abstraction (earned-abstraction / YAGNI) AT THE COST OF
-        # omitting attn2's per-head QK-RMSNorm (a minor SD3.5-medium detail).
-        # Do NOT re-implement a QK-normed attention here just to mirror that
-        # detail -- if exact QK-norm parity on the dual path is ever required it
-        # is a focused follow-up, not a reason to fork a new attention class.
-        # See decisions.md D-005.
+        # DECISION plan_2026-06-12_dfce0712/D-005: attn2 uses plain
+        # keras.layers.MultiHeadAttention, not a 4th custom QK-normed class -- costs attn2's per-head QK-RMSNorm parity. See decisions.md.
         if self.use_dual_attention:
             self.attn2 = keras.layers.MultiHeadAttention(
                 num_heads=num_heads,

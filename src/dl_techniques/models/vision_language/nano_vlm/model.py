@@ -1,89 +1,29 @@
 """
-Compact vision-language model assembled from three interchangeable library
-components — a vision encoder, a causal or bidirectional text tower, and a
-pluggable multi-modal fusion layer — over a shared vocabulary head.
+NanoVLM, built by the ``NanoVLM`` class, combines a vision encoder, a text
+tower, and a multi-modal fusion layer into a vision-language model with one
+shared vocabulary head.
 
-The problem a VLM has to solve is that its two inputs are not commensurate. An
-image arrives as a grid of pixels with no discrete units and no order; a caption
-arrives as a sequence of vocabulary indices whose order is the whole point. The
-standard resolution is to make the image look like text before the language model
-sees it: run a vision transformer, keep its patch tokens rather than a pooled
-summary, and hand the language side a sequence of vectors it can treat exactly
-like word embeddings. Once both modalities are sequences in a single width, any
-mechanism that mixes two sequences becomes a candidate for joining them, and the
-design question stops being "how do we represent an image" and becomes "where and
-how much do the modalities interact".
+An image is a grid of pixels with no order; a caption is a sequence of
+vocabulary indices whose order is the point. This model makes the image look
+like text first: a vision transformer emits a sequence of patch tokens the
+same width as the text embeddings, and a configurable ``MultiModalFusion``
+layer (eight strategies) decides how the two sequences interact, from
+cross-attention that keeps both streams intact down to a plain
+concatenation. Six of the eight strategies require the vision and text
+sequences to be the same length, which this model cannot guarantee, so it
+raises a clear error naming the strategy instead of failing inside a
+concatenation op.
 
-This model keeps that question open rather than answering it once. Both towers
-are required to emit ``embed_dim``-wide sequences — construction fails if the
-vision and text widths disagree, since nothing downstream could reconcile them —
-and everything about the interaction is delegated to a configurable
-``MultiModalFusion`` with eight strategies. Cross-attention lets each modality
-read the other while keeping both streams intact; the pooling and tensor-product
-strategies collapse them more aggressively; concatenation barely interacts them
-at all. The trade is depth of interaction against parameter count and sequence
-length, and it is meant to be swept, not decided in this file. Six of the eight
-carry a precondition this model cannot satisfy by construction: everything except
-``'cross_attention'`` and ``'attention_pooling'`` combines the streams on the
-feature axis or broadcasts them element-wise on the sequence axis, and so needs
-the vision and text lengths to be EQUAL. The vision length is pinned by
-``img_size``/``patch_size``; the text length is the caller's. Those six now raise
-a ``ValueError`` naming the strategy on the first call instead of dying inside a
-backend ``ConcatOp``.
-
-Two consequences of that delegation are not obvious from the call graph. First,
-the vision encoder is forced to ``output_mode='none'`` during config validation
-regardless of what the caller asked for: the default CLS pooling would hand the
-fusion layer a rank-2 tensor, and every strategy expects a rank-3 sequence.
-Second, the fusion layer's output shape is strategy-dependent, so ``call``
-branches on the *type* of what it returns — cross-attention yields a tuple of two
-streams, which are concatenated along the sequence axis with vision first, while
-the other strategies yield a single tensor that is used as-is. The vocabulary
-projection is then applied to the whole combined sequence. **Under
-cross-attention only**, the logits tensor therefore contains one row per vision
-token as well as one per text token, and those leading rows predict nothing:
-``generate`` slices them off, and any loss computed against this model must slice
-the same way or it will train the head to predict tokens for image patches. Under
-every other sequence-preserving strategy the fused tensor is already one row per
-position at the single shared length and there is no vision prefix to slice —
-slicing one off left an EMPTY axis, which ``generate`` then indexed. That is why
-``generate`` now accepts ``'cross_attention'`` and refuses the other seven by
-name: ``'attention_pooling'`` has no per-token row at all (rank 2), and the
-remaining six require both streams at the same length, which autoregression
-breaks the moment it appends a token to a fixed-length vision stream. The fused
-length itself is asked of ``MultiModalFusion.compute_output_shape`` rather than
-re-derived here, so ``compute_output_shape`` and ``call`` cannot drift apart.
-
-Note that vision tokens are *not* spliced into the text token sequence in the
-LLaVA sense — the text tower runs on text alone and the modalities only meet
-downstream, in the fusion layer. Whatever causal masking applies is therefore
-entirely the text component's business: ``text_component_type='decoder'`` selects
-a causal tower for generation, ``'encoder'`` a bidirectional one, and no mask is
-constructed here.
-
-Input/output embedding tying is performed at call time, as a
-``matmul(x, transpose(word_embeddings.embeddings))``, and never by reassigning a
-weight. The straightforward implementation — pointing the output ``Dense``'s
-kernel at the embedding matrix — is doubly wrong under Keras 3: reassigning a
-built layer's kernel raises outright, and the embedding matrix is
-``(vocab, dim)``, the transpose of the Dense kernel's ``(dim, vocab)``, so the
-shapes never matched either. The ``output_projection`` layer is still created and
-built, because it is the live path when tying is disabled and because a
-half-built layer would break serialization, but it is simply unused when tying is
-on.
-
-The fusion configuration has a signature hazard worth stating explicitly.
-``MultiModalFusion`` takes ``dim`` plus ``attention_config={'num_heads': N}``; it
-does *not* take ``embed_dim`` or a top-level ``num_heads``. Because the config
-dict is splatted into the constructor, a stale key is not ignored — it is
-forwarded to the base ``Layer`` and raises. Both factories in this module write
-the current spelling; the older ``embed_dim``/``num_heads`` form was removed from
-``create_modern_nanovlm`` in commit ``fd35976cb``.
-
-Generation is a plain sampling loop with no KV cache: the image is encoded once
-and reused, but the text tower re-reads the entire prefix at every step, so cost
-grows quadratically in the number of generated tokens. It is adequate for
-smoke-testing a trained model and not intended as a serving path.
+The vision encoder is always forced to ``output_mode='none'`` so it returns
+a sequence rather than a pooled vector. Input/output embedding tying happens
+at call time via a matrix multiply against the transposed embedding table,
+not by reassigning a layer's weight, which Keras 3 forbids after build.
+``generate()`` only supports the ``'cross_attention'`` fusion strategy — the
+other seven either lose the per-token axis or cannot keep the vision and
+text streams at matching lengths once generation starts appending tokens.
+Generation itself is a plain sampling loop with no key-value cache, so cost
+grows with the square of the number of generated tokens; it is meant for
+evaluating a trained model, not for serving.
 
 References:
     - Alayrac et al., 2022. Flamingo: a Visual Language Model for Few-Shot
@@ -124,83 +64,100 @@ TextComponentType = Literal['decoder', 'encoder']
 @register_dl_technique("dl_techniques.models.nano_vlm.model")
 class NanoVLM(keras.Model):
     """
-    NanoVLM: Modern Compact Vision-Language Model using existing dl-techniques components.
+    Vision-language model combining a vision encoder, a text tower, and a
+    multi-modal fusion layer under one vocabulary head.
 
-    A completely rewritten vision_heads-language model that follows modern Keras 3 patterns
-    and leverages existing components from the dl-techniques framework. This model
-    combines configurable vision_heads encoding, flexible multi-modal fusion, and robust
-    text processing through a unified, serializable architecture.
+    Architecture:
 
-    **Intent**: Provide a configurable vision_heads-language model that
-    demonstrates proper integration of existing framework components while following
-    modern Keras 3 design patterns for robust serialization and deployment.
+    .. code-block:: text
 
-    **Architecture Components**:
-    1. **VisionEncoder**: Configurable vision_heads transformer with multiple architectural options
-    2. **TextDecoder/TextEncoder**: Flexible text processing with multiple embedding strategies
-    3. **MultiModalFusion**: Advanced cross-modal fusion with 8 different strategies
-    4. **Output Projection**: Final vocabulary prediction layer with optional weight tying
+        images [B,H,W,C]          text_tokens [B,T]
+              │                          │
+              ▼                          ▼
+        ┌───────────────┐        ┌───────────────────┐
+        │ VisionEncoder  │        │ TextDecoder /      │
+        │ output_mode=   │        │ TextEncoder         │
+        │ 'none'         │        │                     │
+        └───────┬────────┘        └──────────┬──────────┘
+                │ [B,Sv,D]                    │ [B,St,D]
+                └───────────┬─────────────────┘
+                            ▼
+                ┌───────────────────────┐
+                │ MultiModalFusion        │  8 strategies
+                └───────────┬─────────────┘
+                            │
+              ┌─────────────┴─────────────┐
+              ▼ 'cross_attention'          ▼ other 7 strategies
+        (vision_fused, text_fused)     single tensor [B,S,D]
+              │
+        concat on sequence axis
+              ▼
+        combined [B, Sv+S or S, D]
+                            │
+                            ▼
+              ┌───────────────────────┐
+              │ output_projection or   │  tied to word
+              │ tied embedding matmul  │  embeddings if
+              └───────────┬─────────────┘  use_shared_embedding
+                            ▼
+              logits [B, combined_len, vocab_size]
 
-    **Modern Keras 3 Patterns**:
-    - All sub-layers created in `__init__()` following the "create vs build" principle
-    - Explicit sub-layer building in `build()` for robust serialization
-    - Complete configuration management with all parameters preserved
-    - Proper weight restoration lifecycle support
-    - Full type safety with comprehensive validation
-
-    Args:
-        vision_config: Dictionary containing configuration for the VisionEncoder.
-            Should include keys like 'img_size', 'patch_size', 'embed_dim', 'depth',
-            'num_heads', and optionally advanced configuration like 'attention_type',
-            'normalization_type', 'ffn_type', etc.
-        text_config: Dictionary containing configuration for the text component.
-            Should include keys like 'vocab_size', 'embed_dim', 'depth', 'num_heads',
-            'max_seq_len', and optionally 'embedding_type', 'positional_type', etc.
-        fusion_config: Dictionary containing configuration for MultiModalFusion.
-            Should include 'fusion_strategy' and strategy-specific parameters like
-            'num_fusion_layers', 'attention_type', 'num_tensor_projections', etc.
-        vocab_size: Integer, size of the vocabulary for text embeddings and output
-            projection. Must be positive. Defaults to 32000.
-        text_component_type: TextComponentType, whether to use 'decoder' for causal
-            generation or 'encoder' for bidirectional encoding. Defaults to 'decoder'.
-        use_shared_embedding: Boolean, whether to tie input and output embeddings
-            for memory efficiency. Only applicable when text_component_type='decoder'.
-            Defaults to True.
-        output_dropout_rate: Float, dropout rate for the final output projection layer.
-            Must be between 0.0 and 1.0. Defaults to 0.1.
-        initializer_range: Float, standard deviation for weight initialization.
-            Must be positive. Defaults to 0.02.
-        kernel_initializer: String or Initializer, kernel weight initializer.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: String or Initializer, bias weight initializer.
-            Defaults to 'zeros'.
-        kernel_regularizer: Optional regularizer for kernel weights. Defaults to None.
-        bias_regularizer: Optional regularizer for bias weights. Defaults to None.
-        **kwargs: Additional keyword arguments for the Model base class.
+    :param vision_config: Configuration for the vision encoder. Must include
+        ``img_size``, ``patch_size``, ``embed_dim``, ``depth``, ``num_heads``.
+    :type vision_config: Dict[str, Any]
+    :param text_config: Configuration for the text component. Must include
+        ``vocab_size``, ``embed_dim``, ``depth``, ``num_heads``, ``max_seq_len``.
+    :type text_config: Dict[str, Any]
+    :param fusion_config: Configuration for :class:`MultiModalFusion`. Must
+        include ``fusion_strategy``.
+    :type fusion_config: Dict[str, Any]
+    :param vocab_size: Vocabulary size for embeddings and the output
+        projection. Must be positive. Defaults to ``32000``.
+    :type vocab_size: int
+    :param text_component_type: ``'decoder'`` for causal generation or
+        ``'encoder'`` for bidirectional encoding. Defaults to ``'decoder'``.
+    :type text_component_type: TextComponentType
+    :param use_shared_embedding: Tie input and output embeddings. Only
+        applies when ``text_component_type='decoder'``. Defaults to ``True``.
+    :type use_shared_embedding: bool
+    :param output_dropout_rate: Dropout before the output projection, in
+        ``[0, 1]``. Defaults to ``0.1``.
+    :type output_dropout_rate: float
+    :param initializer_range: Standard deviation for weight initialization.
+        Must be positive. Defaults to ``0.02``.
+    :type initializer_range: float
+    :param kernel_initializer: Kernel weight initializer. Defaults to
+        ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_initializer: Bias weight initializer. Defaults to ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kwargs: Forwarded to ``keras.Model``.
 
     Input shape:
-        Dictionary with keys:
-        - 'images': 4D tensor of shape (batch_size, height, width, channels)
-        - 'text_tokens': 2D tensor of shape (batch_size, sequence_length) with token IDs
+        Dict with:
 
-        Optional keys:
-        - 'attention_mask': 2D tensor for padding mask
-        - 'token_type_ids': 2D tensor for segment embeddings (encoder only)
+        - ``'images'``: ``(batch_size, height, width, channels)``
+        - ``'text_tokens'``: ``(batch_size, sequence_length)`` token IDs
+
+        Optional: ``'attention_mask'``, ``'token_type_ids'`` (encoder only).
 
     Output shape:
-        3D tensor of shape (batch_size, combined_sequence_length, vocab_size)
-        where combined_sequence_length includes both vision_heads and text tokens.
+        ``(batch_size, combined_sequence_length, vocab_size)``.
 
-    Attributes:
-        vision_encoder: VisionEncoder instance for image processing.
-        text_component: TextDecoder or TextEncoder instance for text processing.
-        fusion_layer: MultiModalFusion instance for cross-modal integration.
-        output_projection: Dense layer for vocabulary prediction.
-        final_dropout: Dropout layer applied before output projection.
+    :ivar vision_encoder: Vision encoder producing patch-token sequences.
+    :ivar text_component: TextDecoder or TextEncoder producing text features.
+    :ivar fusion_layer: MultiModalFusion instance joining both streams.
+    :ivar output_projection: Dense layer for vocabulary prediction.
+    :ivar final_dropout: Dropout applied before the output projection.
 
     Example:
-        ```python
-        # Standard configuration
+
+    .. code-block:: python
+
         model = NanoVLM(
             vision_config={
                 'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
@@ -216,39 +173,21 @@ class NanoVLM(keras.Model):
             },
             vocab_size=32000
         )
-
-        # Forward pass
         inputs = {
             'images': keras.ops.random.normal((2, 224, 224, 3)),
             'text_tokens': keras.ops.random.randint(0, 32000, (2, 128))
         }
         logits = model(inputs, training=True)
-        print(f"Output shape: {logits.shape}")  # (2, vision_seq_len + text_seq_len, 32000)
-        ```
 
-    Raises:
-        ValueError: If configuration dictionaries are missing required keys.
-        ValueError: If dimension parameters are incompatible between components.
-        ValueError: If vocab_size doesn't match between text and model configuration.
-        ValueError: If any numeric parameter is outside valid range.
-
-    Note:
-        This implementation follows the modern Keras 3 patterns documented in the
-        "Complete Guide to Modern Keras 3 Custom Layers and Models" and demonstrates
-        proper integration of existing framework components for production deployment.
+    :raises ValueError: If a configuration dict is missing a required key,
+        if the vision and text embedding dimensions disagree, or if a
+        numeric parameter is out of range.
     """
 
-    #: Public-name registry of the three named nanoVLM sizes (models/CLAUDE.md
-    #: Axis 2). Hoisted out of ``create_nanovlm``'s body on 2026-08-19, where it
-    #: was a local ``variants`` dict that nothing outside the function could
-    #: enumerate.
-    #:
-    #: Two keys the local table carried are DELIBERATELY absent here, because
-    #: they are caller arguments and not properties of the variant:
-    #: ``text_config['vocab_size']`` and ``fusion_config['fusion_strategy']``.
-    #: ``create_nanovlm`` injects both into a ``copy.deepcopy`` of the entry it
-    #: selects -- deep-copied, never mutated in place, so this class attribute
-    #: cannot be corrupted by a call (the shared-mutable-default failure mode).
+    #: Public-name registry of the three named nanoVLM sizes.
+    #: ``vocab_size`` and ``fusion_strategy`` are caller arguments, not
+    #: variant properties, so they are absent here; ``create_nanovlm``
+    #: injects both into a deep copy of the selected entry.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         'mini': {
             'vision_config': {
@@ -428,10 +367,9 @@ class NanoVLM(keras.Model):
 
     def _create_fusion_layer(self) -> MultiModalFusion:
         """Create MultiModalFusion using existing component."""
-        # DECISION plan_2026-06-15_39a31d4a/D-002: MultiModalFusion takes dim +
-        # attention_config={'num_heads':N}, NOT embed_dim/num_heads (caller was coded
-        # against a ghost API). Every fusion_config source must use the new keys or the
-        # **splat re-injects the ghost kwarg. Correct form: layers/heads/vlm/factory.py:121.
+        # DECISION plan_2026-06-15_39a31d4a/D-002: MultiModalFusion takes `dim` +
+        # `attention_config={'num_heads': N}`, not `embed_dim`/`num_heads`.
+        # A stale key is forwarded by the **splat and raises. See decisions.md.
         return MultiModalFusion(**self.fusion_config, name='multimodal_fusion')
 
     def _create_output_projection(self) -> layers.Layer:
@@ -524,14 +462,9 @@ class NanoVLM(keras.Model):
         self.output_projection.build(combined_shape)
         logger.debug(f"Built output projection with shape: {combined_shape}")
 
-        # NOTE (plan_2026-06-15_39a31d4a/D-002 cascade): Keras 3 forbids reassigning a
-        # built layer's `.kernel` (raises "cannot add new elements of state ... already
-        # built"), and `word_embeddings.embeddings` is (vocab, dim) — the transpose of the
-        # Dense kernel (dim, vocab) — so the old tie was both illegal AND shape-wrong. The
-        # output_projection keeps its own built kernel; weight-tying is dropped (was
-        # dead-on-forward code, never executed). Re-add via a proper tied-Dense layer if
-        # memory-sharing is later required.
-
+        # Keras 3 forbids reassigning a built layer's kernel, and the embedding
+        # matrix's (vocab, dim) shape is the transpose of the Dense kernel's
+        # (dim, vocab) shape anyway, so output_projection keeps its own kernel.
         logger.info("NanoVLM build completed successfully")
 
         # Always call parent build at the end
@@ -544,17 +477,16 @@ class NanoVLM(keras.Model):
             **kwargs
     ) -> keras.KerasTensor:
         """
-        Forward pass through NanoVLM.
+        Run the forward pass.
 
-        Args:
-            inputs: Input dictionary with 'images' and 'text_tokens' keys, or tuple
-                of (images, text_tokens). Additional optional keys: 'attention_mask',
-                'token_type_ids'.
-            training: Boolean indicating training mode.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            Language model logits of shape [batch, combined_seq_len, vocab_size].
+        :param inputs: Dict with ``'images'`` and ``'text_tokens'``, or a tuple
+            ``(images, text_tokens)``. Optional keys: ``'attention_mask'``,
+            ``'token_type_ids'``.
+        :type inputs: Union[Dict[str, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Logits of shape ``(batch, combined_seq_len, vocab_size)``.
+        :rtype: keras.KerasTensor
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -567,12 +499,8 @@ class NanoVLM(keras.Model):
             attention_mask = None
             token_type_ids = None
 
-        # 1. Process images through vision_heads encoder
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-084: no logging on the
-        # forward path (R-033/R-041). The four `logger.debug` shape lines that
-        # stood in this `call` each ran `ops.shape(...)` for the log line only;
-        # under `tf.function` they emit a symbolic tensor once at trace time and
-        # never again. Print shapes from a test or `model.summary()`, not here.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-084: no logging in call().
+        # A `logger.debug` shape line under tf.function logs once at trace time only. See decisions.md.
         vision_features = self.vision_encoder(images, training=training)
 
         # 2. Process text through text component
@@ -603,10 +531,8 @@ class NanoVLM(keras.Model):
         if self.final_dropout is not None:
             combined_features = self.final_dropout(combined_features, training=training)
 
-        # DECISION plan_2026-06-15_2a23a001/D-001: tie input/output embeddings at CALL
-        # time via matmul(x, transpose(word_embeddings.embeddings)); NEVER reassign another
-        # layer's weight post-build (that broke in plan_2026-06-15_39a31d4a). output_projection
-        # stays built (serialization / use_shared_embedding=False) but is unused on this path.
+        # DECISION plan_2026-06-15_2a23a001/D-001: tie embeddings at call time via
+        # matmul against the transposed embedding table, never by reassigning a built layer's weight. See decisions.md.
         if (self.use_shared_embedding and
                 self.text_component_type == 'decoder' and
                 hasattr(self.text_component, 'word_embeddings')):
@@ -629,42 +555,27 @@ class NanoVLM(keras.Model):
             **kwargs
     ) -> keras.KerasTensor:
         """
-        Generate text autoregressively given images and prompt.
+        Generate text tokens autoregressively from images and a prompt.
 
-        Args:
-            images: Input images tensor of shape [batch_size, height, width, channels]
-            prompt_tokens: Initial prompt tokens of shape [batch_size, prompt_length]
-            max_length: Maximum number of tokens to generate
-            temperature: Sampling temperature for controlling randomness
-            top_k: Number of highest probability tokens for sampling
-            eos_token_id: Token ID that signals end of sequence
-            **kwargs: Additional generation parameters
-
-        Returns:
-            Generated token sequence of shape [batch_size, total_length]
-
-        Raises:
-            ValueError: If the configured fusion strategy is anything other than
-                ``'cross_attention'``. See the D-025 anchor below.
+        :param images: Input images, shape ``(batch_size, height, width, channels)``.
+        :type images: keras.KerasTensor
+        :param prompt_tokens: Initial prompt tokens, shape ``(batch_size, prompt_length)``.
+        :type prompt_tokens: keras.KerasTensor
+        :param max_length: Maximum number of tokens to generate.
+        :type max_length: int
+        :param temperature: Sampling temperature.
+        :type temperature: float
+        :param top_k: Number of highest-probability tokens to sample from.
+        :type top_k: int
+        :param eos_token_id: Token ID that ends generation.
+        :type eos_token_id: int
+        :param kwargs: Unused, reserved for future generation parameters.
+        :return: Generated token sequence, shape ``(batch_size, total_length)``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If the fusion strategy is not ``'cross_attention'``.
         """
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-025
-        # `generate()` supports 'cross_attention' and nothing else, and says so.
-        #
-        # WHAT NOT TO DO: do NOT re-open this loop to the other seven strategies
-        # by "handling" their output shape. The loop is structurally incompatible
-        # with them, and each fails differently:
-        #   * 'attention_pooling' returns rank 2 — there is no per-text-token
-        #     logit row to sample from at all.
-        #   * the other six require the vision and text streams to have EQUAL
-        #     sequence lengths (they combine on the feature axis or broadcast on
-        #     the sequence axis). Autoregression appends one token per step while
-        #     the vision length is fixed by img_size/patch_size, so the
-        #     precondition can hold for at most ONE step. Measured 2026-08-15:
-        #     with the prompt padded to the vision length, step 2 raises
-        #     "requires all modality inputs to share the same sequence length".
-        # Before this guard the loop ran for every strategy and sliced a
-        # vision-length prefix off a tensor that had none, leaving an EMPTY axis
-        # that `text_logits[:, -1, :]` then indexed. See decisions.md D-025.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-025: generate() supports only
+        # 'cross_attention'; the other 7 strategies break mid-loop (rank-2 output, or unequal stream lengths once tokens append). See decisions.md.
         strategy = self.fusion_config['fusion_strategy']
         if strategy != 'cross_attention':
             raise ValueError(
@@ -765,7 +676,15 @@ class NanoVLM(keras.Model):
         return next_tokens
 
     def compute_output_shape(self, input_shape: Union[Dict, Tuple]) -> Tuple[Optional[int], ...]:
-        """Compute output shape given input shape."""
+        """
+        Compute the output shape for a given input shape.
+
+        :param input_shape: Dict with ``'images'``/``'text_tokens'`` shapes, or
+            a tuple of ``(image_shape, text_shape)``.
+        :type input_shape: Union[Dict, Tuple]
+        :return: Output shape ``(batch_size, combined_seq_len, vocab_size)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
         if isinstance(input_shape, dict):
             batch_size = input_shape['images'][0]
             text_seq_len = input_shape['text_tokens'][1]
@@ -779,18 +698,8 @@ class NanoVLM(keras.Model):
         )
         vision_seq_len = vision_output_shape[1]
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-026
-        # The fused length is asked of the fusion layer; it is not re-derived.
-        #
-        # WHAT NOT TO DO: do NOT restore `combined_seq_len = vision_seq_len +
-        # text_seq_len` for every non-'attention_pooling' strategy. That
-        # contradicted `MultiModalFusion.compute_output_shape`, which returns a
-        # per-modality tuple for 'cross_attention' and `input_shape[0][1]` — the
-        # VISION length alone — for all six sequence-preserving strategies. Only
-        # 'cross_attention' sums, and only because this model concatenates the
-        # tuple on axis 1 itself; the sum was wrong for the other six and the
-        # hard-coded 1 was wrong for 'attention_pooling', which pools to rank 2.
-        # See decisions.md D-026.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-026: ask the fusion layer for
+        # the fused length rather than re-deriving vision_seq_len + text_seq_len — only 'cross_attention' actually sums. See decisions.md.
         text_feature_dim = self.fusion_config.get('dim', self.text_config['embed_dim'])
         fused_shape = self.fusion_layer.compute_output_shape([
             (batch_size, vision_seq_len, vision_output_shape[-1]),
@@ -814,9 +723,10 @@ class NanoVLM(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """
-        Get model configuration for serialization.
+        Get the model configuration for serialization.
 
-        CRITICAL: Must include ALL constructor parameters for complete reconstruction.
+        :return: Constructor arguments needed to reconstruct this model.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -848,39 +758,37 @@ def create_nanovlm(
         **kwargs
 ) -> NanoVLM:
     """
-    Factory function to create NanoVLM with predefined configurations.
+    Build a NanoVLM from a named size preset.
 
-    Args:
-        variant: Model size variant ('mini', 'base', 'large')
-        vocab_size: Vocabulary size for text processing
-        fusion_strategy: Strategy for multi-modal fusion
-        text_component_type: Whether to use 'decoder' or 'encoder'
-        **kwargs: Additional model parameters
+    Only ``'cross_attention'`` and ``'attention_pooling'`` can fuse streams of
+    different sequence length. The other six strategies combine on the
+    feature axis or broadcast element-wise on the sequence axis, so they need
+    matching vision and text lengths. Every variant here fixes the vision
+    length from ``img_size``/``patch_size`` (197 tokens for ``'mini'``/
+    ``'base'``, 577 for ``'large'``), so those six raise a ``ValueError`` on
+    the first call unless the caller's text length happens to match; the
+    text length is not known until a batch arrives, so this cannot be
+    checked at construction. All eight strategies can be trained at matched
+    lengths, but ``generate()`` accepts only ``'cross_attention'``.
 
-    Returns:
-        Configured NanoVLM instance
+    :param variant: Model size, one of ``'mini'``, ``'base'``, ``'large'``.
+    :type variant: str
+    :param vocab_size: Vocabulary size for text processing.
+    :type vocab_size: int
+    :param fusion_strategy: Strategy for multi-modal fusion.
+    :type fusion_strategy: FusionStrategy
+    :param text_component_type: ``'decoder'`` or ``'encoder'``.
+    :type text_component_type: TextComponentType
+    :param kwargs: Forwarded to :class:`NanoVLM`.
+    :return: A configured model.
+    :rtype: NanoVLM
+    :raises ValueError: If ``variant`` is not a known preset.
 
     Example:
-        ```python
-        # Create different variants
-        mini_model = create_nanovlm('mini', fusion_strategy='cross_attention')
-        base_model = create_nanovlm('base', fusion_strategy='cross_attention')
-        large_model = create_nanovlm('large', fusion_strategy='cross_attention')
-        ```
 
-        Only `'cross_attention'` and `'attention_pooling'` can fuse streams of
-        DIFFERENT sequence length. The other six — `'concatenation'`,
-        `'tensor_fusion'`, `'addition'`, `'multiplication'`, `'gated'` and
-        `'bilinear'` — combine on the feature axis or broadcast element-wise on
-        the sequence axis, so they require the vision and text lengths to be
-        equal. Every variant here fixes the vision length from
-        `img_size`/`patch_size` (197 tokens for `'mini'`/`'base'`, 577 for
-        `'large'`) against a caller-chosen text length, so those six raise a
-        `ValueError` naming the strategy and the requirement on the first call
-        unless the two happen to match. (Construction cannot decide it: the text
-        length is not known until a batch arrives.) All eight strategies can be
-        TRAINED at matched lengths, but `generate()` accepts `'cross_attention'`
-        alone and refuses the rest by name — see its own docstring.
+    .. code-block:: python
+
+        model = create_nanovlm('base', fusion_strategy='cross_attention')
     """
     if variant not in NanoVLM.MODEL_VARIANTS:
         raise ValueError(
@@ -911,26 +819,29 @@ def create_modern_nanovlm(
         **kwargs
 ) -> NanoVLM:
     """
-    Create NanoVLM with modern architectural components.
+    Build a NanoVLM using modern components: RMSNorm, SwiGLU, differential
+    attention, RoPE.
 
-    Uses advanced components like RMSNorm, SwiGLU, differential attention, etc.
+    The fusion default is ``'cross_attention'``. ``'tensor_fusion'`` needs
+    equal vision and text sequence lengths, but this factory's vision stream
+    is fixed at 197 tokens (``img_size=224``, ``patch_size=16``) against a
+    caller-chosen text length, so passing ``fusion_strategy='tensor_fusion'``
+    explicitly raises a ``ValueError`` naming the requirement.
 
-    The fusion default is `'cross_attention'`, matching `create_nanovlm`. It used to
-    be `'tensor_fusion'`, which could not run on any input this factory accepts:
-    `tensor_fusion` concatenates the modalities on the feature axis and therefore
-    needs equal sequence lengths, while this factory's vision stream is fixed at 197
-    tokens (`img_size=224`, `patch_size=16`) against a caller-chosen text length.
-    Passing `fusion_strategy='tensor_fusion'` explicitly is still allowed; it now
-    raises a `ValueError` naming the length requirement instead of dying inside a
-    `ConcatOp`.
+    :param vocab_size: Vocabulary size.
+    :type vocab_size: int
+    :param embed_dim: Shared embedding width for both towers.
+    :type embed_dim: int
+    :param kwargs: Forwarded to :class:`NanoVLM`; ``fusion_strategy`` may
+        override the ``'cross_attention'`` default.
+    :return: A configured model.
+    :rtype: NanoVLM
 
     Example:
-        ```python
-        model = create_modern_nanovlm(
-            vocab_size=50000,
-            embed_dim=1024
-        )
-        ```
+
+    .. code-block:: python
+
+        model = create_modern_nanovlm(vocab_size=50000, embed_dim=1024)
     """
     return NanoVLM(
         vision_config={
@@ -952,12 +863,8 @@ def create_modern_nanovlm(
             'ffn_type': 'swiglu'
         },
         fusion_config={
-            # DECISION plan-2026-08-14T183218-f4c612aa/D-007
-            # Do NOT restore 'tensor_fusion' here for symmetry with the docstring
-            # example or with MultiModalFusion's own richer strategy: this factory
-            # hardcodes a 197-token vision stream, so tensor_fusion's equal-length
-            # requirement is violated by EVERY call, not by an edge case. See
-            # decisions.md D-007.
+            # DECISION plan-2026-08-14T183218-f4c612aa/D-007: default stays
+            # 'cross_attention', not 'tensor_fusion' -- this factory's fixed 197-token vision stream violates tensor_fusion's equal-length need on every call. See decisions.md.
             'fusion_strategy': kwargs.get('fusion_strategy', 'cross_attention'),
             'dim': embed_dim,
             'attention_config': {'num_heads': embed_dim // 64},

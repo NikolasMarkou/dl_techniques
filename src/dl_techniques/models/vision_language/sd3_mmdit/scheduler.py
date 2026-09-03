@@ -1,38 +1,18 @@
-"""Rectified-flow Euler scheduler for SD3-style MMDiT training and sampling.
+"""Rectified-flow Euler scheduler, built by ``FlowMatchEulerScheduler``, for
+SD3-style MMDiT training and sampling.
 
-Faithful port of the Stable-Diffusion-3 ``FlowMatchEulerDiscreteScheduler``
-semantics (rectified-flow / straight-line interpolation) plus the SD3 logit-
-normal time sampling and the Eq.(19) loss weighting from the PyTorch reference.
-
-Design note (framework-light, NOT a Keras layer)
-------------------------------------------------
-This is a plain Python object, NOT a ``keras.layers.Layer`` (nothing here is
-trainable or serialized into a ``.keras`` graph). Two classes of methods:
-
-* **In-graph tensor math** (``add_noise``, ``velocity_target``, ``euler_step``).
-  Written with :mod:`keras.ops` so the trainer can call them inside a
-  ``tf.function`` / on backend tensors. They are also valid on NumPy arrays
-  (``keras.ops`` accepts array-likes), so the unit tests drive them with NumPy.
-* **Host-side scheduling** (``sample_logit_normal_t``, ``logit_normal_weight``,
-  ``timesteps``). These need the inverse standard-normal CDF (``ndtri``) and
-  the logistic sigmoid (``expit``), which ``keras.ops`` has no backend-agnostic
-  form of, so they run in NumPy via :mod:`scipy.special` (matching the PyTorch
-  ``torch.special`` ops), in float64 internally and cast to float32 on return.
-
-Convention (rectified flow / SD3)
----------------------------------
-``t`` lives in ``[0, 1]``. ``t = 0`` is clean data ``x0``; ``t = 1`` is pure
-noise ``x1``. The forward interpolation is the straight line::
-
-    x_t = (1 - t) * x0 + t * noise
-
-so the (constant-in-t) velocity target of the path ``dx/dt`` is::
-
-    v = d/dt [ (1 - t) * x0 + t * noise ] = noise - x0
-
-Reverse sampling integrates ``dx/dt = v`` from ``t = 1`` (noise) DOWN to
-``t = 0`` (data); the Euler step uses ``dt = t_next - t`` which is NEGATIVE
-during sampling. See :class:`FlowMatchEulerScheduler.euler_step` and D-007.
+Ports the Stable Diffusion 3 ``FlowMatchEulerDiscreteScheduler``: a straight-
+line interpolation between clean data and noise, ``x_t = (1-t)*x0 + t*noise``,
+whose velocity target ``dx/dt`` is the constant ``noise - x0``. Reverse
+sampling integrates that velocity from ``t=1`` (noise) down to ``t=0`` (data)
+with a negative Euler step. This is a plain frozen dataclass, not a Keras
+layer, since nothing here is trainable. Its in-graph tensor math
+(``add_noise``, ``velocity_target``, ``euler_step``) uses ``keras.ops`` so a
+trainer can call it inside a ``tf.function``; its host-side scheduling
+(``sample_logit_normal_t``, ``logit_normal_weight``, ``timesteps``) needs the
+inverse normal CDF and logistic sigmoid, which ``keras.ops`` has no
+backend-agnostic form of, so it runs in NumPy/SciPy in float64 and casts to
+float32 on return.
 """
 
 from __future__ import annotations
@@ -54,17 +34,20 @@ class FlowMatchEulerScheduler:
     interpolation is a straight line between clean data (``t=0``) and pure
     noise (``t=1``); the velocity target is the constant ``noise - x0``.
 
-    Args:
-        num_train_timesteps: Number of discrete training timesteps (the
-            continuous ``t`` is conceptually ``step / num_train_timesteps``).
-            Used only by :meth:`timesteps` framing. Defaults to ``1000``.
-        shift: SD3 static time-shift applied to the logit-normal samples and
-            the inference time grid: ``t -> shift * t / (1 + (shift - 1) * t)``.
-            ``shift = 1`` disables the warp. Defaults to ``3.0``.
-        logit_mean: Mean of the logit-normal time-sampling distribution
-            (pre-shift). Defaults to ``0.0``.
-        logit_std: Standard deviation of the logit-normal time-sampling
-            distribution. Defaults to ``1.0``.
+    :param num_train_timesteps: Number of discrete training timesteps; the
+        continuous ``t`` is conceptually ``step / num_train_timesteps``.
+        Defaults to ``1000``.
+    :type num_train_timesteps: int
+    :param shift: SD3 static time-shift applied to the logit-normal samples
+        and the inference time grid: ``t -> shift * t / (1 + (shift - 1) * t)``.
+        ``shift = 1`` disables the warp. Defaults to ``3.0``.
+    :type shift: float
+    :param logit_mean: Mean of the logit-normal time-sampling distribution
+        (pre-shift). Defaults to ``0.0``.
+    :type logit_mean: float
+    :param logit_std: Standard deviation of the logit-normal time-sampling
+        distribution. Defaults to ``1.0``.
+    :type logit_std: float
     """
 
     num_train_timesteps: int = 1000
@@ -78,58 +61,44 @@ class FlowMatchEulerScheduler:
     def add_noise(self, x0, noise, t):
         """Rectified-flow forward interpolation ``x_t = (1 - t) * x0 + t * noise``.
 
-        Args:
-            x0: Clean data tensor (any shape).
-            noise: Noise tensor broadcastable to ``x0`` (typically same shape).
-            t: Time in ``[0, 1]``; a scalar or a tensor broadcastable to ``x0``
-                (e.g. ``(B, 1, 1, 1)`` for a per-sample time against ``(B,...)``).
-
-        Returns:
-            The noised sample ``x_t`` with the broadcast shape of the inputs.
-            At ``t = 0`` this is ``x0``; at ``t = 1`` this is ``noise``.
+        :param x0: Clean data tensor, any shape.
+        :param noise: Noise tensor broadcastable to ``x0``.
+        :param t: Time in ``[0, 1]``, a scalar or a tensor broadcastable to
+            ``x0`` (e.g. ``(B, 1, 1, 1)`` for a per-sample time).
+        :return: The noised sample ``x_t``, at the broadcast shape of the
+            inputs. Equals ``x0`` at ``t=0`` and ``noise`` at ``t=1``.
         """
         return (1.0 - t) * x0 + t * noise
 
     def velocity_target(self, x0, noise):
         """Rectified-flow velocity target ``noise - x0`` (constant in ``t``).
 
-        This is the single source of truth for the straight-line velocity that
-        the model is trained to predict. The trainer's MSE target and the
-        sampler's Euler integrand both use this quantity.
+        The trainer's MSE target and the sampler's Euler integrand both use
+        this quantity.
 
-        Args:
-            x0: Clean data tensor.
-            noise: Noise tensor broadcastable to ``x0``.
-
-        Returns:
-            The velocity ``noise - x0`` (same broadcast shape as the inputs).
+        :param x0: Clean data tensor.
+        :param noise: Noise tensor broadcastable to ``x0``.
+        :return: The velocity ``noise - x0``, at the broadcast shape of the inputs.
         """
         return noise - x0
 
     def euler_step(self, x_t, v_pred, t, t_next):
         """One reverse Euler integration step of ``dx/dt = v``.
 
-        Integrates ``x_next = x_t + v_pred * (t_next - t)``. During sampling the
-        loop runs from ``t = 1`` (noise) DOWN to ``t = 0`` (data), so
-        ``t_next < t`` and ``dt = t_next - t`` is NEGATIVE. For a straight-line
-        rectified-flow path with the TRUE velocity this single step is exact:
-        starting at ``x1`` and stepping ``t=1 -> t=0`` recovers ``x0`` exactly.
+        Integrates ``x_next = x_t + v_pred * (t_next - t)``. Sampling runs
+        from ``t=1`` (noise) down to ``t=0`` (data), so ``t_next < t`` and
+        ``dt`` is negative. With the true velocity this single step is exact
+        for a straight-line path: stepping ``t=1 -> t=0`` recovers ``x0``.
 
-        Args:
-            x_t: Current sample at time ``t``.
-            v_pred: Predicted (or true) velocity at ``t`` (same shape as ``x_t``).
-            t: Current time scalar/tensor in ``[0, 1]``.
-            t_next: Next time scalar/tensor in ``[0, 1]`` (``< t`` when sampling).
-
-        Returns:
-            The integrated sample ``x_next`` at time ``t_next``.
+        :param x_t: Current sample at time ``t``.
+        :param v_pred: Predicted (or true) velocity at ``t``, same shape as ``x_t``.
+        :param t: Current time, scalar or tensor in ``[0, 1]``.
+        :param t_next: Next time, scalar or tensor in ``[0, 1]``, less than
+            ``t`` when sampling.
+        :return: The integrated sample ``x_next`` at time ``t_next``.
         """
-        # DECISION plan_2026-06-12_dfce0712/D-007: dt = t_next - t (signed),
-        # NOT |t_next - t| and NOT t - t_next. Sampling descends t=1 -> t=0 so dt
-        # is negative; with v = noise - x0 this makes one full step recover x0
-        # exactly (x1 + (noise - x0)*(0 - 1) = noise - (noise - x0) = x0). A
-        # positive/abs dt would integrate the wrong direction and diverge. See
-        # decisions.md D-007.
+        # DECISION plan_2026-06-12_dfce0712/D-007: dt = t_next - t stays signed,
+        # never abs() -- sampling descends t=1->t=0 so dt is negative, which recovers x0 exactly in one step. See decisions.md.
         return x_t + v_pred * (t_next - t)
 
     # ------------------------------------------------------------------ #
@@ -152,12 +121,9 @@ class FlowMatchEulerScheduler:
             t = sigmoid(logit_mean + logit_std * ndtri(u))
             t = shift * t / (1 + (shift - 1) * t)
 
-        Args:
-            batch_size: Number of times to draw.
-            seed: Optional RNG seed for reproducibility.
-
-        Returns:
-            A float32 ``np.ndarray`` of shape ``(batch_size,)`` with values in
+        :param batch_size: Number of times to draw.
+        :param seed: Optional RNG seed for reproducibility.
+        :return: A float32 array of shape ``(batch_size,)`` with values in
             the open interval ``(0, 1)``.
         """
         rng = np.random.default_rng(seed)
@@ -180,16 +146,12 @@ class FlowMatchEulerScheduler:
             w     = term1 * term2
 
         where ``logit(t) = log(t / (1 - t))``. ``t`` is clamped to
-        ``(eps, 1 - eps)``. This method only COMPUTES the weight; the trainer
-        is responsible for multiplying it into the per-sample loss (the HARD
-        constraint keeps weighting out of the loss object).
+        ``(eps, 1 - eps)``. This method only computes the weight; the trainer
+        multiplies it into the per-sample loss.
 
-        Args:
-            t: Time(s) in ``(0, 1)``; a python float or a NumPy array-like.
-
-        Returns:
-            A float32 ``np.ndarray`` of weights (same shape as ``t``), positive
-            and finite for ``t`` away from the boundaries.
+        :param t: Time(s) in ``(0, 1)``, a Python float or array-like.
+        :return: A float32 array of weights, same shape as ``t``, positive
+            and finite away from the boundaries.
         """
         t_arr = np.asarray(t, dtype=np.float64)
         eps = 1e-7
@@ -203,23 +165,17 @@ class FlowMatchEulerScheduler:
         return w.astype(np.float32)
 
     def timesteps(self, num_inference_steps: int) -> np.ndarray:
-        """Descending sampling time grid from ~1 down to 0.
+        """Descending sampling time grid from close to 1 down to 0.
 
         Builds ``num_inference_steps`` values linearly spaced on ``(0, 1]`` in
-        DESCENDING order (start near 1, the noise end), applies the SD3 static
-        shift warp, then APPENDS a trailing ``0.0`` (the clean-data endpoint).
-        The sampling loop consumes consecutive pairs ``(t[i], t[i+1])`` as
-        ``(t, t_next)`` for :meth:`euler_step`.
+        descending order, applies the SD3 static shift warp, then appends a
+        trailing ``0.0`` (the clean-data endpoint) -- so the length is
+        ``num_inference_steps + 1``. The sampling loop consumes consecutive
+        pairs ``(t[i], t[i+1])`` as ``(t, t_next)`` for :meth:`euler_step`.
 
-        Length is ``num_inference_steps + 1`` (the extra entry is the appended
-        terminal ``0.0``).
-
-        Args:
-            num_inference_steps: Number of Euler integration steps.
-
-        Returns:
-            A float32 ``np.ndarray`` of shape ``(num_inference_steps + 1,)``,
-            strictly descending, starting near ``1.0`` and ending at ``0.0``.
+        :param num_inference_steps: Number of Euler integration steps.
+        :return: A float32 array of shape ``(num_inference_steps + 1,)``,
+            strictly descending from near ``1.0`` to ``0.0``.
         """
         # Linspace on (0, 1] descending: 1, ..., 1/num (exclude 0 here; it is
         # appended after the shift warp so the terminal stays exactly 0.0).

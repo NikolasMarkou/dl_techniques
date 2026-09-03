@@ -1,58 +1,23 @@
-"""SD3 end-to-end text-to-image inference pipeline (Keras 3 port).
+"""SD3 end-to-end text-to-image inference pipeline, built by ``SD3Pipeline``.
 
-Integrates the four already-built, separately-tested pieces -- the dual-stream
+Integrates four already-built, separately-tested pieces -- the dual-stream
 :class:`~dl_techniques.models.vision_language.sd3_mmdit.transformer.SD3MMDiT`, the rectified-flow
 :class:`~dl_techniques.models.vision_language.sd3_mmdit.scheduler.FlowMatchEulerScheduler`, the
-16-channel :class:`~dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder` (SD3 wrapper),
-and the three from-scratch text encoders (CLIP / OpenCLIP / T5) -- into a single
-plain-Python (NOT ``keras.Model``) inference object that runs prompt-conditioned
-generation.
+16-channel :class:`~dl_techniques.models.vision_language.ideogram4.vae.AutoEncoder`, and three
+from-scratch text encoders (CLIP, OpenCLIP, T5) -- into a plain Python
+inference object, not a ``keras.Model``, that adds no new weights of its own.
 
-This file adds NO new Keras weights: it only orchestrates the existing
-components. The riskiest part is the prompt-feature assembly (faithful to SD3's
-``HandlePrompt`` / the diffusers ``SD3 encode_prompt``), whose dim contract must
-line up exactly with the ``SD3MMDiTConfig``.
-
-Prompt feature assembly (faithful to SD3 HandlePrompt / encode_prompt)
-----------------------------------------------------------------------
-SD3 conditions on three text towers:
-
-- ``encoder_hidden_states`` (the SEQUENCE stream the joint attention attends to):
-
-    1. concat the CLIP **penultimate** hidden states with the OpenCLIP
-       **penultimate** along the FEATURE axis
-       -> ``(B, L_clip, clip_dim + openclip_dim)``;
-    2. zero-pad that on the feature axis up to the T5 feature dim
-       -> ``(B, L_clip, t5_dim)``;
-    3. concat with the T5 sequence along the SEQUENCE axis
-       -> ``(B, L_clip + L_t5, t5_dim)``.
-
-  ``t5_dim`` MUST equal ``config.joint_attention_dim`` (the MMDiT
-  ``context_embedder`` consumes exactly this width).
-
-- ``pooled_projections`` (the pooled vector summed into every block's
-  conditioning): concat the CLIP **pooled** and OpenCLIP **pooled** along the
-  feature axis -> ``(B, clip_pooled_dim + openclip_pooled_dim)``. This MUST
-  equal ``config.pooled_projection_dim``.
-
-Dim contract (fail-loud)
-------------------------
-For a runnable pipeline the encoder dims MUST satisfy::
-
-    t5.embed_dim                      == config.joint_attention_dim
-    clip.embed_dim + openclip.embed_dim == config.pooled_projection_dim
-
-(The CLIP/OpenCLIP pooled width equals their ``embed_dim`` -- the
-``text_projection`` is a square ``Dense(embed_dim)``.) :func:`assemble_prompt_features`
-and :class:`SD3Pipeline.__init__` raise a clear ``ValueError`` when these do not
-hold.
-
-Timestep scaling (documented)
------------------------------
-The transformer's ``ScalarSinusoidalEmbedding`` uses ``input_range=(0, 1000)``
-(SD3 convention), but the scheduler's continuous ``t`` lives in ``[0, 1]``. The
-denoise loop therefore passes ``timestep = t * 1000`` to the transformer. See
-:meth:`SD3Pipeline.generate`.
+Prompt features come from three text towers. ``encoder_hidden_states``
+concatenates the CLIP and OpenCLIP penultimate hidden states on the feature
+axis, zero-pads that up to the T5 feature width, then concatenates the T5
+sequence on the sequence axis; the T5 width must equal
+``config.joint_attention_dim``. ``pooled_projections`` concatenates the CLIP
+and OpenCLIP pooled vectors on the feature axis and must equal
+``config.pooled_projection_dim``. Both :func:`assemble_prompt_features` and
+``SD3Pipeline.__init__`` raise ``ValueError`` when an encoder's dims do not
+satisfy this contract. The transformer's sinusoidal time embedding expects
+``[0, 1000]`` while the scheduler's continuous ``t`` lives in ``[0, 1]``, so
+the denoise loop passes ``timestep = t * 1000``.
 """
 
 from __future__ import annotations
@@ -93,12 +58,12 @@ def assemble_prompt_features(
     Faithful to SD3's ``HandlePrompt`` / diffusers ``encode_prompt``:
 
     1. ``clip_penult`` ``(B, L_clip, clip_dim)`` and ``openclip_penult``
-       ``(B, L_clip, openclip_dim)`` are concatenated on the FEATURE axis to
+       ``(B, L_clip, openclip_dim)`` are concatenated on the feature axis to
        ``(B, L_clip, clip_dim + openclip_dim)``.
-    2. That is zero-padded on the FEATURE axis up to the T5 feature dim ``t5_dim``
+    2. That is zero-padded on the feature axis up to the T5 feature dim ``t5_dim``
        -> ``(B, L_clip, t5_dim)``.
     3. It is concatenated with the T5 sequence ``(B, L_t5, t5_dim)`` on the
-       SEQUENCE axis -> ``encoder_hidden_states (B, L_clip + L_t5, t5_dim)``.
+       sequence axis -> ``encoder_hidden_states (B, L_clip + L_t5, t5_dim)``.
     4. ``pooled_projections`` = concat of the CLIP pooled ``(B, clip_dim)`` and
        OpenCLIP pooled ``(B, openclip_dim)`` on the feature axis.
 
@@ -145,7 +110,7 @@ def assemble_prompt_features(
             clip_context, [[0, 0], [0, 0], [0, pad]]
         )  # (B, L_clip, t5_dim)
 
-    # 3. concat with the T5 sequence along the SEQUENCE axis.
+    # 3. concat with the T5 sequence along the sequence axis.
     encoder_hidden_states = ops.concatenate(
         [clip_context, t5_out], axis=1
     )  # (B, L_clip + L_t5, t5_dim)
@@ -359,16 +324,17 @@ def create_sd3_pipeline(
     Constructs all five components so the dim contract holds for ``variant``:
 
     - transformer + VAE come from :func:`get_sd3_config` / the SD3 factories.
-    - The three text encoders are built TINY with dims picked to satisfy the
+    - The three text encoders are built small, with dims picked to satisfy the
       contract. For the ``"tiny"`` config (``joint_attention_dim=512``,
       ``pooled_projection_dim=256``): T5 ``embed_dim=512``, CLIP ``embed_dim=128``,
       OpenCLIP ``embed_dim=128`` (so ``128 + 128 = 256``). For ``"full"`` the
       encoders are built at the SD3 reference widths (T5 4096, CLIP 768,
       OpenCLIP 1280 -> ``768 + 1280 = 2048``).
 
-    The encoders are intentionally shallow (few layers / small vocab) here -- the
-    pipeline adds NO trained weights and exists to exercise the integration; a
-    real deployment would supply the full-depth, weight-loaded towers.
+    The encoders here are shallow, with few layers and a small vocabulary,
+    since this pipeline adds no trained weights and exists to exercise the
+    integration; a real deployment would supply full-depth, weight-loaded
+    towers.
 
     :param variant: Config preset (``"tiny"`` or ``"full"``).
     :param seed: Optional seed forwarded to the VAE ``Sampling`` layer.

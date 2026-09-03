@@ -1,97 +1,33 @@
 """
-Stable Diffusion 3 MMDiT: a dual-stream text-and-image diffusion transformer that
-predicts a rectified-flow velocity field over a VAE latent, with an optional
-second self-attention path on selected blocks (the SD3.5-medium variant).
+Stable Diffusion 3 MMDiT, built by ``SD3MMDiT``, a dual-stream text-and-image
+diffusion transformer that predicts a rectified-flow velocity field over a
+VAE latent, with an optional second self-attention path on selected blocks
+(the SD3.5-medium variant).
 
-The generative principle is rectified flow rather than the usual noise-prediction
-diffusion. Training draws a clean latent `x0` and a noise sample `x1` and defines
-the transport path as the straight line `x_t = (1 - t) * x0 + t * x1`. Because the
-path is a line, its velocity `dx/dt = x1 - x0` is *constant in t*, and that constant
-is what the network regresses. Straightness is the whole point: with the true
-velocity a single Euler step from `t = 1` to `t = 0` recovers `x0` exactly, so the
-number of sampling steps is limited by how well the network approximates the
-velocity, not by curvature of the probability-flow path. This package's
-`scheduler.py` pins the convention -- `t = 0` is clean data, `t = 1` is pure noise,
-and reverse sampling descends `t: 1 -> 0` with a *signed* step `dt = t_next - t`
-that is therefore negative (D-007). The model itself sees the time rescaled to
-`[0, 1000]` (`ScalarSinusoidalEmbedding(input_range=(0.0, 1000.0))`), so the trainer
-must pass `t * 1000`; a raw `[0, 1]` value would land in the flattest corner of the
-sinusoidal basis and make the network effectively time-blind.
+Training draws a clean latent ``x0`` and noise ``x1`` and defines the
+transport path as the straight line ``x_t = (1-t)*x0 + t*x1``, whose
+velocity ``dx/dt = x1 - x0`` is constant in ``t`` and is what the network
+regresses; a single Euler step from ``t=1`` to ``t=0`` then recovers ``x0``
+exactly. Text and image tokens get separate weights everywhere -- their own
+AdaLN modulation, projections and FFN -- but their queries, keys and values
+are concatenated along the sequence axis before the softmax, so one joint
+attention lets image and text attend to each other with no cross-attention
+layer and no shared representation space forced on either. Diffusion time
+and a pooled caption summary are not sequence-shaped, so they enter by
+modulation instead: both are summed into one conditioning vector that an
+AdaLN layer projects to per-stream shift/scale/gate groups inside each
+block, with the residual branch gated (not the pre-norm input) so a
+zero-initialized gate makes a fresh block an identity.
 
-The conditioning problem MMDiT solves is that text tokens and image patch tokens are
-different modalities that nevertheless have to interact at every depth. A
-single-stream DiT forces both through the same projection, normalization and FFN
-weights; a cross-attention UNet keeps them apart and lets them interact only through
-a narrow one-directional bottleneck. MMDiT takes the third option: the two streams
-get *separate weights everywhere* -- their own AdaLN modulation, their own Q/K/V
-projections, their own output projection, their own FFN -- but their Q, K and V are
-concatenated along the sequence axis before the softmax, so a single joint attention
-spans both. Image tokens therefore attend to text and text attends back to image
-inside one attention operation, with no cross-attention layer anywhere in the model,
-while neither modality is forced to share a representation space with the other.
-
-Conditioning that is not sequence-shaped -- the diffusion time and a pooled summary
-of the caption -- enters by modulation instead. The scalar timestep goes through a
-sinusoidal embedding and the pooled text vector through a Dense-SiLU-Dense
-projection; the two are *summed* into one `(B, embedding_size)` vector that every
-block and the output head consumes. Inside a block an AdaLN projects that vector to
-per-stream `(shift, scale, gate)` groups. The LayerNorms are affine-free
-(`center=False, scale=False`) precisely so the conditioning vector supplies the only
-affine parameters: the attention branch is normalized and shifted/scaled inside the
-AdaLN layer and then gated on the residual, while the MLP branch is modulated by the
-block itself as `x * (1 + scale) + shift` and gated on its residual. Gating the
-residual branch (rather than the pre-norm input) is what allows a zero-initialized
-gate to make a fresh block an exact identity, so depth can be added without
-destabilizing an already-trained trunk.
-
-Two structural flags vary across the stack, and both exist for a concrete reason.
-The LAST block is built with `context_pre_only=True`: nothing downstream ever reads
-the text stream again, so its AdaLN degrades to the gate-free
-`AdaLayerNormContinuous`, the joint attention never creates a text output
-projection, and the block returns a single tensor rather than a pair. The model's
-call loop mirrors that with an explicit `i < depth - 1` branch, since the block's
-return arity -- not just its value -- changes. Separately, block indices listed in
-`dual_attention_layers` gain a second, plain self-attention over the image stream
-whose gate comes from the 9-way `AdaLayerNormZeroX`.
-
-Positional information is absolute and fixed, not learned. At `build()` a
-non-trainable weight of shape `(pos_embed_max_size**2, embedding_size)` is filled
-with a numpy 2D sin-cos grid; at call time it is reshaped to
-`(max, max, embedding_size)` and CENTER-cropped to the actual `(h, w)` patch grid
-before being flattened row-major and added to the tokens. Center-cropping a single
-oversized grid, rather than generating a fresh grid per resolution, is what lets one
-checkpoint run at several latent sizes while a given image region keeps roughly the
-same positional code; the coordinate normalization by
-`base_size = sample_size // patch_size` keeps the absolute scale of the signal
-independent of the grid actually being used. The row-major flatten is load-bearing:
-it must match the token order `PatchEmbedding2D` produces, or every token receives
-another token's position. Config invariant 4 (`pos_embed_max_size >=
-sample_size // patch_size`) guards the crop from running off the grid.
-
-Deliberate choices and divergences from the reference:
-
-- The 2D sin-cos table is a non-trainable `add_weight` computed in numpy rather
-  than a reuse of `PositionEmbeddingSine2D`, whose NCHW output would need an
-  error-prone reshape/transpose to `(B, N, dim)` (D-006). The non-trainable-weight
-  form also survives a `.keras` round-trip, which a plain stored tensor would not.
-- The dual self-attention path uses `keras.layers.MultiHeadAttention` rather than a
-  fourth bespoke attention class, which OMITS the per-head QK-RMSNorm that
-  SD3.5-medium applies on that path (D-005). The main joint attention does apply
-  QK-RMSNorm when `qk_norm` is set. This is a knowing fidelity gap, not an oversight.
-- The joint attention accepts NO attention mask on any code path, and the PyTorch
-  source's paging / KV-cache machinery is dropped. Padded caption tokens are
-  therefore attended to as ordinary content; callers must supply text features whose
-  padding is already neutral rather than expecting a mask to suppress it.
-- The timestep is reshaped to `(B, 1)` before the sinusoidal embedding.
-  `ScalarSinusoidalEmbedding` squeezes a trailing size-1 axis, so passing the raw
-  `(B,)` tensor would be ambiguous at `B == 1`, where the batch axis itself would be
-  squeezed away to a scalar.
-- `SD3MMDiTConfig` is a plain frozen dataclass, not a Keras-serializable object, so
-  `from_config` reconstructs it via `SD3MMDiTConfig.from_dict` rather than
-  `deserialize_keras_object`.
-- This is an architecture port. No pretrained SD3 weights are distributed with
-  `dl_techniques` and there is no torch-to-Keras parameter map, so a model built
-  here is randomly initialized and must be trained.
+The final block is built with ``context_pre_only=True``, since nothing
+downstream reads the text stream again, and returns a single tensor instead
+of a pair. Positional information is absolute and fixed: a non-trainable
+sin-cos grid is center-cropped to the active patch grid at call time, so one
+checkpoint can run at several latent sizes. The joint attention accepts no
+attention mask, so padded caption tokens must already be neutral before they
+reach this model. This is an architecture port with no pretrained weights
+and no torch-to-Keras parameter map; a model built here is randomly
+initialized and must be trained.
 
 References:
     - Esser et al., 2024. Scaling Rectified Flow Transformers for High-Resolution
@@ -208,8 +144,8 @@ def _1d_sincos(dim: int, pos: np.ndarray) -> np.ndarray:
 class SD3MMDiT(keras.Model):
     """Stable Diffusion 3 MMDiT dual-stream velocity predictor.
 
-    Consumes a DICT of inputs and returns a rectified-flow velocity field with
-    the same spatial shape as the latent.
+    Consumes a dict of inputs and returns a rectified-flow velocity field
+    with the same spatial shape as the latent.
 
     Call inputs (a single ``dict`` -- keeps the multi-input model serializable):
 
@@ -338,16 +274,8 @@ class SD3MMDiT(keras.Model):
         # --- final head -------------------------------------------------
         self.final_layer.build([token_shape, cond_shape])
 
-        # --- fixed 2D sin-cos positional grid (D-006) ------------------
-        # DECISION plan_2026-06-12_dfce0712/D-006: store the 2D sin-cos
-        # positional grid as a NON-TRAINABLE weight (numpy-computed here) of
-        # shape (pos_embed_max_size**2, dim) and CROP-center it to the actual
-        # patch grid at call time -- mirroring SD3's PatchEmbed.cropped_pos_embed.
-        # Do NOT reuse PositionEmbeddingSine2D: its NCHW output needs an
-        # error-prone reshape/transpose to (B, N, dim) (pre-mortem risk 5 /
-        # assumption-2 fallback). The non-trainable add_weight form (like
-        # ScalarSinusoidalEmbedding's freq) is serialization-safe.
-        # See decisions.md D-006.
+        # DECISION plan_2026-06-12_dfce0712/D-006: store the sin-cos grid as a
+        # non-trainable add_weight, not a reuse of PositionEmbeddingSine2D -- its NCHW output needs an error-prone reshape to (B, N, dim). See decisions.md.
         table = _build_2d_sincos_pos_embed(
             grid_size=self.pos_embed_max_size,
             dim=self.dim,

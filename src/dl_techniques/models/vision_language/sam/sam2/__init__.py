@@ -1,81 +1,34 @@
 """
 SAM 2 (Segment Anything in Images and Videos): the image and streaming paths.
-=============================================================================
 
-Fifteen public classes across eight implementation modules: a Hiera trunk with
-an FPN neck, a
-streaming memory (memory attention, memory encoder, memory bank) and a mask
-decoder that additionally emits an object score and an object pointer. No
-pretrained weights ship here, and this package makes NO accuracy claim --
-nothing here has been trained to any quality and no released SAM 2 checkpoint
-has ever been loaded in this repository.
+A Hiera trunk with an FPN neck, a streaming memory (memory attention, memory
+encoder, memory bank), and a mask decoder that also emits an object score and
+an object pointer. No pretrained weights ship here and no released SAM 2
+checkpoint has been loaded in this repository, so this package makes no
+accuracy claim. ``SAM2.call`` is the traceable image path and
+``SAM2.stream_step`` the streaming video path; ``SAM2TrainingModel``, in the
+``training_model`` submodule, is the traceable multi-frame wrapper ``fit()``
+can train.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+This ``__init__`` imports ``memory_bank`` and ``model`` only, never
+``training_model``, so importing this package does not register
+``SAM2TrainingModel`` under either its current or legacy key. Loading a
+``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an
+explicit ``import dl_techniques.models.vision_language.sam.sam2.training_model``
+first. The mask head does not learn under joint training; see
+``training_model``'s docstring and ``README.md`` section 7 for the measured
+constraint.
 
-Key Features:
-------------
-- Two entry points, deliberately different in kind: ``SAM2.call`` is the
-  traceable image path, ``SAM2.stream_step`` the untraced streaming video path.
-- ``SAM2MemoryBank`` is a plain-Python state container the caller constructs
-  and drives itself; it owns no weights and is not a Keras layer.
-- ``SAM2TrainingModel``, in the ``training_model`` submodule, is the traceable
-  multi-frame wrapper stock ``fit()`` can train.
-- The exported surface is three names, mirroring ``SAM1``'s. Every component
-  stays behind its own submodule.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 
-Architecture Overview:
----------------------
-1. **Hiera** -- hierarchical window-attention trunk, four feature levels out.
-2. **SAM2FpnNeck** / **SAM2ImageEncoder** -- ``d_model``-wide levels plus one
-   sine positional encoding each, then the ``scalp`` level drop.
-3. **SAM2MemoryAttention** -- self- then cross-attention against the memory
-   sequence, 2D axial RoPE on both.
-4. **SAM2MaskDecoder** -- masks, IoU predictions, object score, object pointer.
-5. **SAM2MemoryEncoder** -- compresses mask and pixel features to ``mem_dim``.
-6. **SAM2MemoryBank** -- frame selection, temporal slots, memory assembly.
+Example:
 
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
-from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera
-model = create_sam2("tiny")
-outputs = model({"image": images, "points": (coords, labels)})
-```
+.. code-block:: python
 
-Measured caveats:
-----------------
-- Widening ``__all__`` is a deliberate act, not a convenience. Its exact
-  contents are asserted in both directions -- nothing missing, nothing extra --
-  by ``tests/test_models/test_sam2/test_package_surface.py``, so the surface
-  cannot drift open one re-export at a time.
-- **Importing this package does NOT register** ``SAM2TrainingModel`` under
-  EITHER of its keys -- neither the current
-  ``dl_techniques.models.sam2.training_model>SAM2TrainingModel`` nor the legacy
-  ``Custom>SAM2TrainingModel`` alias that a pre-2026-08-29 archive names.
-  RE-MEASURED 2026-08-29 in a fresh process: after ``import
-  dl_techniques.models.vision_language.sam.sam2``,
-  ``keras.saving.get_registered_object`` returns ``None`` for both keys. This is
-  a statement about import SIDE EFFECTS, not about how the key is spelled, and
-  the registration migration did not change it.
-  This ``__init__`` imports ``memory_bank`` and ``model`` only, never
-  ``training_model``; SAM 1's and SAM 3's inits both import theirs. So a
-  ``.keras`` file whose top-level class is ``SAM2TrainingModel`` needs an
-  explicit ``import dl_techniques.models.vision_language.sam.sam2.training_model`` BEFORE the
-  ``load_model`` call. MEASURED at commit ``96c6a460b`` with the package import
-  alone: ``TypeError: Could not deserialize class 'SAM2TrainingModel' because
-  its parent module <the pre-move dotted path>.training_model cannot be
-  imported`` -- Keras looks the class up in the registry first and, finding it
-  absent, falls back to importing the module string the checkpoint recorded.
-  Every SAM checkpoint written before this package moved recorded a path that
-  no longer exists; that path is deliberately not spelled here, because a
-  repo-wide grep asserts it survives nowhere under ``src/``.
-- **SAM 2's mask head does not learn under joint training, the cause is known,
-  and it is UNFIXED.** ``training_model``'s docstring names the arms that were
-  measured and the constraint that binds; ``README.md`` section 7 is the single
-  home of the frozen-encoder / joint IoU pair that settles it.
+    from dl_techniques.models.vision_language.sam.sam2 import SAM2, SAM2MemoryBank, create_sam2
+    model = create_sam2("tiny")
+    outputs = model({"image": images, "points": (coords, labels)})
 """
 
 from .memory_bank import SAM2MemoryBank
