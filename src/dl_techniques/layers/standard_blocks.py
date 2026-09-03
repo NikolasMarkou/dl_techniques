@@ -14,10 +14,6 @@ their dense-layer analogue.
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .norms import create_normalization_layer
 from .activations import create_activation_layer, resolve_activation_layer
 from .activations.factory import ACTIVATION_REGISTRY
@@ -144,12 +140,9 @@ class ConvBlock(keras.layers.Layer):
         if groups <= 0:
             raise ValueError(f"groups must be positive, got {groups}")
 
-        # DECISION plan-2026-09-01T055648-e6d380a5/D-001
-        # `activation_type` is resolved by `resolve_activation_layer`, whose Keras
-        # fallback path SILENTLY DROPS kwargs. Do NOT relax this raise into a
-        # warning or delete it: an `activation_kwargs` typo aimed at a plain Keras
-        # name would then become a no-op with no signal at all. See decisions.md
-        # D-001/D-004 (I6, "no silent factory drops").
+        # DECISION plan-2026-09-01T055648-e6d380a5/D-001: raise here, not a
+        # warning -- resolve_activation_layer's Keras fallback path silently
+        # drops kwargs, so a typo would otherwise be a silent no-op. See decisions.md.
         if activation_kwargs and activation_type not in ACTIVATION_REGISTRY:
             raise ValueError(
                 f"activation_kwargs={activation_kwargs} was given for "
@@ -247,7 +240,7 @@ class ConvBlock(keras.layers.Layer):
         if self.pool is not None:
             self.pool.build(conv_output_shape)
 
-        # Always call parent build at the end
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -467,7 +460,7 @@ class DenseBlock(keras.layers.Layer):
         if self.dropout is not None:
             self.dropout.build(dense_output_shape)
 
-        # Always call parent build at the end
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -678,7 +671,7 @@ class ResidualDenseBlock(keras.layers.Layer):
         # Build add layer
         self.add.build([input_shape, dense_output_shape])
 
-        # Always call parent build at the end
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -803,11 +796,8 @@ class BasicBlock(keras.layers.Layer):
         self.use_projection = use_projection
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.normalization_type = normalization_type
-        # DECISION plan_2026-05-18_6776f8ba/D-003
-        # Optional, additive `normalization_kwargs` -> `create_normalization_layer`.
-        # Default `None` -> `{}` is byte-identical to the pre-plumbing factory call,
-        # preserving bit-exactness for every existing ResNet/BasicBlock checkpoint
-        # (multi-flag-plumbing pattern, LESSONS L72).
+        # DECISION plan_2026-05-18_6776f8ba/D-003: default None -> {} keeps
+        # this byte-identical to the pre-plumbing factory call. See decisions.md.
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
 
@@ -906,7 +896,7 @@ class BasicBlock(keras.layers.Layer):
         add_output_shape = conv2_output_shape  # Add preserves shape
         self.act_final.build(add_output_shape)
 
-        # Always call parent build at the end
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -1168,7 +1158,7 @@ class BottleneckBlock(keras.layers.Layer):
         add_output_shape = conv3_output_shape  # Add preserves shape
         self.act_final.build(add_output_shape)
 
-        # Always call parent build at the end
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
