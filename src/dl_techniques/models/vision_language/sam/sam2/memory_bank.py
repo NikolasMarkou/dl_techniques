@@ -1,69 +1,21 @@
-"""
-SAM 2 memory bank: the per-video streaming state container.
-===========================================================
+"""SAM 2 memory bank (:class:`SAM2MemoryBank`), the per-video streaming
+state container SAM 2's online tracker carries from frame to frame.
 
-:class:`SAM2MemoryBank` holds the state SAM 2's online tracker carries from
-frame to frame -- the conditioning-frame store, the non-conditioning frame
-FIFO, and the object-pointer store. It implements the temporal frame-selection
-policy and assembles the memory sequence ``SAM2MemoryAttention`` reads as keys
-and values.
+It holds the conditioning-frame store, the non-conditioning frame FIFO, and
+the object-pointer store, implements the temporal frame-selection policy,
+and assembles the memory sequence that memory attention reads as keys and
+values. This is a plain Python object, not a Keras layer: it carries no
+weights. Everything learned (the per-slot temporal embedding, the
+no-object mechanisms) lives on the top-level ``SAM2`` model; the bank
+returns the slot indices that select rows of that weight rather than
+adding the embedding itself, which is what keeps the spatial and temporal
+position mechanisms separately testable. Object-pointer tokens sit at the
+tail of the assembled memory sequence, and conditioning frames always
+occupy temporal slot ``t_pos = 0`` regardless of how long ago they were
+added.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
-
-Key Features:
-------------
-- **This is NOT a Keras layer.** It is a plain-Python object: no weights, no
-  ``@register_dl_technique`` registration decorator, no ``get_config``.
-- Everything learned lives on the top-level ``SAM2`` model:
-  ``maskmem_tpos_enc``, the ``(num_maskmem, 1, 1, mem_dim)`` learned per-slot
-  temporal embedding, and the ``no_mem_embed`` / ``no_obj_ptr`` no-object
-  mechanisms.
-- The bank returns the SLOT INDICES ``num_maskmem - t_pos - 1`` that select
-  rows of that weight; it never adds the embedding itself.
-
-Architecture Overview:
----------------------
-1. ``add_conditioning_frame`` / ``add_frame`` -- the two stores plus the FIFO.
-2. ``select_frames`` / ``select_object_pointer_frames`` -- the temporal policy.
-3. ``assemble`` -- the memory sequence, with object pointers appended.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2 import SAM2MemoryBank
-bank = SAM2MemoryBank(num_maskmem=7, mem_dim=64)
-memory, memory_pos, num_obj_ptr_tokens = bank.assemble(frame_index=3)
-```
-
-Measured caveats:
-----------------
-- The weightless/stateful split is deliberate, and it is what makes the spatial
-  / temporal separation testable at all. RoPE inside memory attention carries
-  SPATIAL position only, broadcast identically across every memory frame; the
-  temporal distinction is carried EXCLUSIVELY by the additive per-slot
-  embedding whose indices this bank hands back. If the bank added the embedding
-  itself, no test could tell the two mechanisms apart.
-- **Not to be confused with** ``src/dl_techniques/models/memory_bank/``. That
-  package is ``WaveFieldMemoryLLM``'s keyed read/write store for language
-  modelling -- a different data structure with a colliding name. It was
-  reviewed and REJECTED as a reuse target here; nothing in this file derives
-  from it.
-- Two mechanisms are SILENT when ported wrong -- shapes are identical either
-  way -- and both are guarded behaviourally in
-  ``tests/test_models/test_sam2/test_memory_bank.py``:
-
-  1. **Object-pointer tokens sit at the TAIL of the memory sequence.** Memory
-     attention excludes exactly ``num_obj_ptr_tokens`` TRAILING key rows from
-     rotary embedding. Prepending them instead would exclude the wrong rows:
-     the pointers would get spatial rotation they must not have, and the oldest
-     spatial frame would lose the rotation it needs. No shape changes.
-  2. **Conditioning frames always occupy temporal slot ``t_pos = 0``**, however
-     far away in time they are -- they are always maximally relevant, unlike
-     the recency-decayed non-conditioning slots. Deriving ``t_pos`` from the
-     temporal distance yields a plausible model that quietly forgets the
-     prompt.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 """
 
 from keras import ops
@@ -546,13 +498,8 @@ class SAM2MemoryBank:
         """
         t_rel = self.num_maskmem - t_pos
         if t_rel == 1:
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-018
-            # SPECIAL CASE, not an instance of the general formula: the most
-            # recent slot ALWAYS takes the immediately preceding frame,
-            # regardless of stride. Do NOT "simplify" this away -- at stride 1
-            # the general formula happens to agree, so a stride-1 test proves
-            # nothing; at stride >= 2 it silently returns an older frame and the
-            # tracker loses its most informative memory with no shape error.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-018: the most recent
+            # slot always takes the immediately preceding frame regardless of stride -- the general formula only agrees at stride 1, so a stride-1 test can't catch a regression. See decisions.md.
             return frame_idx + t_rel if track_in_reverse else frame_idx - t_rel
         if not track_in_reverse:
             anchor = ((frame_idx - 2) // stride) * stride
@@ -592,15 +539,8 @@ class SAM2MemoryBank:
                 return float((frame_idx - other) * sign)
             return float(abs(frame_idx - other))
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-041
-        # Conditioning pointers are filtered to the PAST (to the future when
-        # tracking in reverse). Do NOT drop this filter: a conditioning frame
-        # is kept indefinitely and may sit anywhere in the video, so without it
-        # a prompt given at frame 50 contributes its object pointer to the
-        # memory assembled for frame 10. Nothing about that is observable from
-        # outside -- same token count, same shapes, same loss -- it simply
-        # leaks future information into an earlier frame's prediction. See
-        # decisions.md D-041.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-041: conditioning pointers
+        # filter to the past (future when reversed) -- without it a later prompt leaks its pointer into an earlier frame with no shape or loss symptom. See decisions.md.
         def in_the_past(other: int) -> bool:
             if not self.only_obj_ptrs_in_the_past_for_eval:
                 return True

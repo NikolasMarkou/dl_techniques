@@ -1,65 +1,22 @@
-"""
-SAM 2 mask decoder: masks, IoU predictions, an object score and a pointer.
-==========================================================================
+"""SAM 2 mask decoder, built by :class:`SAM2MaskDecoder`: masks, IoU
+predictions, an object score and an object pointer.
 
-:class:`SAM2MaskDecoder` is a NEW SIBLING of
-:class:`dl_techniques.models.vision_language.sam.sam1.mask_decoder.MaskDecoder`, not an
-extension of it. SAM 1's decoder bakes its token layout into positional slices
-inside method bodies (``hs[:, 0, :]``, ``hs[:, 1:1 + N, :]``), has no
-skip-connection argument in its signature at all, and returns a 2-tuple; none
-of the SAM 2 deltas below can be expressed as a defaulted ``__init__`` kwarg.
-SAM 1 is imported from, never edited, by this file.
+This is a new sibling of
+:class:`dl_techniques.models.vision_language.sam.sam1.mask_decoder.MaskDecoder`,
+not an extension of it: SAM 1's decoder has no skip-connection argument and
+returns a 2-tuple, so the SAM 2 deltas do not fit as a defaulted kwarg.
+Tokens and the image embedding pass through a two-way transformer, then two
+transposed-convolution upscaling steps each add one high-resolution skip
+from the image encoder before the per-mask hypernetwork MLPs dot against
+the upscaled embedding. The token block is
+``concat([obj_score_token, iou_token, mask_tokens])``, so every later token
+index is shifted by one; the object score reads the obj-score token's own
+output, not a slice off the IoU token. The stability score is a
+self-consistency measure between two logit thresholds, not an IoU against
+ground truth, and the unstable-case fallback selects per batch element.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
-
-Key Features:
-------------
-- A token block of ``concat([obj_score_token, iou_token, mask_tokens])``.
-- Two high-resolution skip connections from the image encoder's finer levels.
-- A stability score per mask, and a per-batch-element fallback that uses it.
-
-Architecture Overview:
----------------------
-1. Tokens and image embedding go through the two-way transformer.
-2. -> two transposed-convolution upscaling steps, each taking one skip.
-3. -> per-mask hypernetwork MLPs dotted against the upscaled embedding.
-4. -> the IoU head, the object-score head, and the stability-based selection.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.mask_decoder import SAM2MaskDecoder
-decoder = SAM2MaskDecoder(transformer_dim=256)
-low_res_logits, iou_predictions, object_score_logits, object_pointer = (
-    decoder(image_embeddings, image_pe, sparse, dense, multimask_output=True))
-```
-
-Measured caveats:
-----------------
-Four mechanisms are SILENT when ported wrong -- the layer builds,
-forward-passes, trains and serializes either way. All four are guarded
-behaviourally in ``tests/test_models/test_sam2/test_mask_decoder.py``:
-
-- **The object-score token is PREPENDED**, so every subsequent token index
-  shifts by ``s = 1``. The block is
-  ``concat([obj_score_token, iou_token, mask_tokens])``; the IoU token is
-  ``hs[:, s, :]`` and the mask tokens are ``hs[:, s + 1 : s + 1 + N, :]``. The
-  object score is read from ``hs[:, 0, :]`` -- the obj-score token's OWN
-  transformer output, not a separate branch off the IoU token. Reading index 1
-  yields the same shapes and a plausible score.
-- **The high-resolution skips are ADDED**, before the norm/activation, never
-  concatenated: ``act1(ln1(dc1(src) + feat_s1))`` then
-  ``act2(dc2(upscaled) + feat_s0)``. A coherent concat port keeps every output
-  SHAPE and changes only the DECLARED widths, which is why the guard asserts
-  the width and not merely that the value moved.
-- **The stability score is a self-consistency measure**, not an IoU against
-  ground truth: ``area_i = sum(logits > +delta)``,
-  ``area_u = sum(logits > -delta)``. Swapping the two deltas produces a
-  perfectly finite score in ``[1, inf)`` and never raises.
-- **The unstable-case fallback is PER BATCH ELEMENT.** A single global
-  ``argmax`` over the batch is shape-identical and is invisible at batch 1.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 """
 
 import keras
@@ -269,15 +226,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
 
         self.num_mask_tokens = num_multimask_outputs + 1
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-021
-        # `token_offset` is `s` from the reference: the number of tokens sitting
-        # BEFORE the IoU token. Do NOT hardcode 0 "because that is what SAM 1
-        # does", and do NOT hardcode 1 "because SAM 2 always predicts object
-        # scores". Both are silently wrong for the other configuration: every
-        # downstream slice (`hs[:, s, :]`, `hs[:, s + 1 : s + 1 + N, :]`) keeps
-        # its shape under an off-by-one, so the decoder reads the IoU head off a
-        # mask token and every test that only checks shapes stays green. See
-        # decisions.md D-021.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-021: token_offset must track
+        # pred_obj_scores, never hardcode 0 or 1 -- the wrong offset keeps every downstream slice's shape, so shape-only tests stay green while the IoU head reads a mask token. See decisions.md.
         self.token_offset = 1 if pred_obj_scores else 0
 
         # CREATE all sub-layers in __init__, UNCONDITIONALLY.
@@ -321,15 +271,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
         # `dc2`) and `transformer_dim -> transformer_dim // 4` (the 2x level,
         # added after `dc1`).
         #
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-022
-        # These convolutions are APPLIED HERE, inside `predict_masks`. The
-        # reference declares them on the decoder but applies them from the
-        # top-level model, which makes the decoder silently dependent on its
-        # caller having done half of its own forward pass -- a reach-in that
-        # step 8 would have had to reproduce, and that makes the decoder
-        # untestable in isolation. Do NOT "restore fidelity" by moving them out;
-        # the weights, their shapes and their names are identical either way.
-        # See decisions.md D-022.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-022: these convs are applied
+        # here inside predict_masks, not from the caller as the reference does -- keeps the decoder testable in isolation with identical weights either way. See decisions.md.
         self.conv_s0 = layers.Conv2D(
             transformer_dim // 8, kernel_size=1, name="conv_s0"
         )
@@ -337,15 +280,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
             transformer_dim // 4, kernel_size=1, name="conv_s1"
         )
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-035
-        # The hypernetwork MLPs are FIXED at 3 layers and are deliberately NOT
-        # tied to `iou_head_depth`. Do NOT "deduplicate" the two by passing
-        # `self.iou_head_depth` here: the reference hardcodes
-        # `MLP(dim, dim, dim // 8, 3)` for the hypernetworks while exposing the
-        # IoU head's depth as a parameter. The two agree at the default
-        # `iou_head_depth=3`, so the coupling is invisible at every shipped
-        # configuration and silently restructures the mask heads at any other.
-        # See decisions.md D-035.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-035: hypernetwork MLPs stay
+        # fixed at 3 layers, never tied to iou_head_depth -- the reference hardcodes this while iou_head_depth is a separate parameter that only coincides at its default of 3. See decisions.md.
         self.output_hypernetworks_mlps: List[keras.Sequential] = []
         for i in range(self.num_mask_tokens):
             self.output_hypernetworks_mlps.append(
@@ -458,15 +394,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
             masks = masks[:, 0:1, :, :]
             iou_pred = iou_pred[:, 0:1]
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-023
-        # The object pointer comes from mask token 0 -- the SINGLE-mask token --
-        # unless BOTH `multimask_output` and `use_multimask_token_for_obj_ptr`
-        # hold. Do NOT "simplify" this to follow `multimask_output` alone so it
-        # agrees with the mask selection above. Training always runs the
-        # single-mask token (after the first click multimask degenerates to
-        # single), so a pointer sourced from a multimask token at test time is
-        # fed to a memory bank that never saw one during training. Shapes and
-        # dtypes are unaffected. See decisions.md D-023.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-023: object pointer needs
+        # BOTH multimask_output and use_multimask_token_for_obj_ptr, never multimask_output alone -- training always runs the single-mask token, so a mismatched pointer source feeds the memory bank something it never trained on. See decisions.md.
         if multimask_output and self.use_multimask_token_for_obj_ptr:
             object_pointer = mask_tokens_out[:, 1:, :]
         else:
@@ -641,18 +570,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
         :return: ``(B, M)`` stability scores in ``[0, 1]``, always float32.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-034
-        # The two areas are summed in float32, NEVER in `mask_logits.dtype`.
-        # Do NOT "simplify" this back to the input dtype: at the shipped
-        # `image_size=1024` this head sees 256 x 256 = 65,536 logits per mask,
-        # and float16's largest finite value is 65,504. MEASURED under
-        # `mixed_float16` at that exact size: an all-positive mask gives
-        # `stability = [nan nan nan nan]`, `NaN >= 0.98` evaluates False, and a
-        # maximally-confident single mask is therefore SILENTLY replaced by a
-        # multimask token on the default `training=None` path -- a behaviour
-        # INVERSION, not merely a NaN. A toy grid cannot reproduce it; the arm
-        # in `test_mask_decoder.py` that guards this runs at the shipped
-        # 256x256. See decisions.md D-034.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-034: sum the two areas in
+        # float32, never mask_logits.dtype -- at the shipped 256x256=65536 logits/mask, float16 overflows (max 65504), turning a confident mask's stability into NaN. See decisions.md.
         delta = self.dynamic_multimask_stability_delta
         shape = ops.shape(mask_logits)
         flat = ops.reshape(mask_logits, (shape[0], shape[1], -1))
@@ -682,13 +601,8 @@ class SAM2MaskDecoder(keras.layers.Layer):
         multimask_logits = all_mask_logits[:, 1:, :, :]
         multimask_iou = all_iou_scores[:, 1:]
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-024
-        # The argmax is PER BATCH ELEMENT and the gather is
-        # `take_along_axis(..., axis=1)`. Do NOT replace it with a single
-        # `ops.argmax(multimask_iou)` over the whole tensor followed by a
-        # slice: the output shape is identical, and at batch size 1 the two are
-        # numerically indistinguishable, so a batch-1 fixture proves nothing.
-        # See decisions.md D-024.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-024: argmax must be per
+        # batch element (take_along_axis(axis=1)), never a single argmax over the whole tensor -- shapes match and batch-1 fixtures can't tell the two apart. See decisions.md.
         best_idx = ops.argmax(multimask_iou, axis=-1)
         idx_masks = ops.reshape(best_idx, (-1, 1, 1, 1))
         best_multimask_logits = ops.take_along_axis(

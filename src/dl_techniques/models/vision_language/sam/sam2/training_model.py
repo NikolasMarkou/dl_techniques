@@ -1,92 +1,28 @@
-"""
-``SAM2TrainingModel``: the trainable, traceable multi-frame wrapper.
+"""``SAM2TrainingModel``, a traceable ``keras.Model`` that drives SAM 2's
+submodules through a fixed number of frames under one traced graph.
 
-:meth:`SAM2.stream_step` is the video path and is deliberately NOT traceable:
-it mutates a Python object (the memory bank), branches on whether that object
-is empty, and reads Python integers out of its selection policy. It therefore
-cannot be the inner operation of a ``fit()`` step, and a custom ``train_step``
-is forbidden by standing instruction. This wrapper takes the other route.
+``SAM2.stream_step`` is the video inference path and cannot be traced: it
+mutates a Python memory-bank object and branches on Python state. This
+wrapper takes a different route for training: the image encoder runs once
+over a flattened ``(B * T, ...)`` batch, then a Python loop over a static
+``num_frames`` unrolls calls to SAM 2's submodules
+(``memory_attention -> prompt_encoder -> mask_decoder -> memory_encoder``
+per frame), all of which traces under ``fit()``. The memory bank is built
+fresh inside :meth:`~SAM2TrainingModel.call` so it never carries a tensor
+across traces.
 
-Key Features:
-------------
-- The image encoder runs ONCE over a flattened ``(B * T, ...)`` batch, then an
-  explicit UNROLLED Python loop over a STATIC ``num_frames`` drives SAM 2's
-  submodules directly. The whole loop traces under stock graph-mode ``fit()``.
-- The memory bank is constructed FRESH inside :meth:`call`, as a local
-  variable, so it holds no symbolic tensor across traces and the shipped
-  selection policy (``select_frames``, ``select_object_pointer_frames``, the
-  ``t_pos`` slots) is reused verbatim rather than re-derived.
-- ``SAM2.call`` / ``SAM2.__call__`` is never invoked -- pinned by a spy in
-  ``tests/test_models/test_sam2/test_training_model.py``, not by inspection.
-
-Architecture Overview:
----------------------
-Per frame, in order:
-``image_encoder -> memory_attention -> prompt_encoder -> mask_decoder ->
-memory_encoder``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.training_model import SAM2TrainingModel
-trainer = SAM2TrainingModel(sam2_model, num_frames=4)
-trainer.compile(optimizer="adam", loss=loss, jit_compile=False)  # MANDATORY
-trainer.fit(dataset)
-```
-
-Measured caveats:
-----------------
-- **``compile(jit_compile=False)`` IS MANDATORY.** Keras 3.8's ``fit()``
-  defaults to ``jit_compile='auto'``, which selects XLA on a GPU. ``Hiera``'s
-  stem interpolates its learned positional embedding with a BICUBIC
-  ``ops.image.resize``, and MEASURED on this stack that op has no XLA GPU
-  kernel::
-
-      InvalidArgumentError: Detected unsupported operations when trying to
-      compile graph ... on XLA_GPU_JIT: ResizeBicubic (No registered
-      'ResizeBicubic' OpKernel for XLA_GPU_JIT devices ...)
-
-  The failure is at the FIRST ``fit()`` step, is loud, and is not a defect in
-  this wrapper -- the same graph traces and runs perfectly under a plain
-  ``tf.function``. Pinned in both directions by ``TestXLARefusal``.
-- **The gradient policy is TRUNCATED BPTT, with exactly one truncation point.**
-  Upstream backpropagates through the entire T-frame memory chain -- it has no
-  ``detach()`` or ``no_grad()`` anywhere in ``sam2/modeling/`` or
-  ``training/model/`` (verified at ``2b90b9f5``; the only
-  ``@torch.no_grad()`` decorators are on the non-parametric sin/cos
-  position-encoding cache) -- and pays the memory cost with
-  ``torch.utils.checkpoint.checkpoint`` (``training/model/sam2.py:495``). This
-  wrapper does not have that budget, so it truncates, at the memory encoder's
-  INPUTS in :meth:`_store` and nowhere else: ``features`` / ``high_res`` into
-  ``memory_encoder`` are DETACHED (this is the truncation, and it is what
-  bounds the graph); ``readout.memory`` / ``readout.memory_pos`` in
-  :meth:`_condition` stay LIVE; the per-call :class:`SAM2MemoryBank` runs at
-  ``stop_gradient=False``; ``object_score_logits`` into ``_mark_occlusion`` is
-  DETACHED, since it would otherwise reconstruct the full recursion through the
-  score head; ``object_pointer`` into the bank is DETACHED. The backward pass
-  therefore reaches ``memory_encoder`` and stops there -- one extra hop per
-  read, never a T-deep recursion -- and ``memory_encoder``'s 40 variables
-  train.
-- **Known limitation: ``obj_ptr_proj`` (6 variables) still ships FROZEN.** The
-  object pointer bypasses the memory encoder, so leaving it live would rebuild
-  the whole T-deep graph, and its only usable truncation point is its own
-  input, computed inside ``SAM2._decode``. Stated rather than left looking
-  fixed.
-- **The mask head does NOT learn under joint training, the cause is known, and
-  it is UNFIXED.** Every objective arm failed -- plain BCE, the shipped
-  focal+dice, upstream's ``alpha_t``, and dice-only -- and the binding
-  constraint is the JOINTLY-TRAINED IMAGE ENCODER, not the loss family and not
-  the step budget. The frozen-encoder / joint IoU pair that settles it, and the
-  two earlier diagnoses it SUPERSEDES, have ONE home: ``README.md`` section 7.
-  They are deliberately not restated here -- a measured pair restated in two
-  places is a hand-maintained lockstep invariant, i.e. a latent defect. Read
-  that section before reading any training run of this wrapper as a result.
-- This module makes **no accuracy claim**. It proves the multi-frame training
-  path runs with live gradients; no Meta SAM 2 checkpoint has ever been loaded
-  in this repository.
+Gradients use truncated backpropagation-through-time: the memory encoder's
+inputs are detached in :meth:`~SAM2TrainingModel._store`, so the backward
+pass reaches ``memory_encoder`` and stops there rather than recursing
+through the whole clip. ``compile(jit_compile=False)`` is required --
+``Hiera``'s stem uses a bicubic resize with no XLA GPU kernel, and the mask
+head does not learn under this wrapper's joint training (see README.md
+section 7 for the diagnosis). This module proves the training path runs
+with live gradients; it makes no accuracy claim and no SAM 2 checkpoint has
+been loaded in this repository.
 
 References:
-    Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -203,19 +139,8 @@ class SAM2TrainingModel(keras.Model):
                 f"num_frames must be >= 1 (1 degenerates to the image path); "
                 f"got {num_frames}."
             )
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-051
-        # `multimask_output=True` is REFUSED, not supported. Do NOT "add
-        # support" by widening the mask axis: this wrapper folds the FRAME axis
-        # into the mask axis, so at M > 1 `low_res_logits` would be `(B, T*M,
-        # h, w)` interleaved frame-major (f0m0, f0m1, f0m2, f1m0, ...) while
-        # `match_mask_axis` repeats the ground truth ROUND-major
-        # ([f0..fT, f0..fT, f0..fT]). The two orders do not align, every shape
-        # still checks out, and nothing anywhere raises -- the loss simply
-        # supervises frame 1's mask against frame 0's ground truth. Upstream
-        # additionally selects the supervised multimask slice by
-        # `argmin(20 * loss_mask + loss_dice)` against the GT, not by predicted
-        # IoU, so a correct multimask training path needs a different selector
-        # entirely. See decisions.md D-051.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-051: multimask_output=True is
+        # refused, not supported -- the frame axis folds into the mask axis, and at M>1 the two orders (frame-major vs round-major) misalign with no shape check catching it. See decisions.md.
         if bool(sam2.multimask_output):
             raise ValueError(
                 "SAM2TrainingModel refuses multimask_output=True. The frame "
@@ -268,20 +193,11 @@ class SAM2TrainingModel(keras.Model):
     ) -> Any:
         """Condition one frame's features on the bank, or on ``no_mem_embed``.
 
-        This mirrors :meth:`SAM2._condition_on_memory` exactly, differing only
-        in reading a CALLER-SUPPLIED bank instead of ``self.sam2.memory_bank``.
+        This mirrors :meth:`SAM2._condition_on_memory`, differing only in
+        reading a caller-supplied bank instead of ``self.sam2.memory_bank``.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-054
-        # This method is a deliberate near-duplicate of
-        # `SAM2._condition_on_memory`, and the duplication cannot be removed
-        # from this side. That method reads `self.memory_bank` -- the per-VIDEO
-        # streaming instance -- while training needs a bank that is local to
-        # one traced `call()`. Do NOT "de-duplicate" by assigning a fresh bank
-        # onto `self.sam2.memory_bank` before the loop: that mutates shared
-        # model state from inside a traced forward pass, so two concurrent
-        # traces, or an interleaved `stream_step`, would silently share one
-        # bank. The tail of the decode is NOT duplicated -- `_decode` is called
-        # directly. See decisions.md D-054.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-054: this near-duplicates
+        # `SAM2._condition_on_memory`, kept separate because that method reads the per-video streaming bank while training needs one local to a single traced call. See decisions.md.
 
         :param bank: The per-call memory bank.
         :type bank: SAM2MemoryBank
@@ -318,20 +234,8 @@ class SAM2TrainingModel(keras.Model):
             )
             num_ptr_tokens = 0
         else:
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-074
-            # The READ side is deliberately NOT detached -- this is truncated
-            # BPTT, and the truncation happens one hop upstream in `_store`
-            # (see the anchor there), never here. Do NOT "restore symmetry" by
-            # re-adding `ops.stop_gradient` around `readout.memory` /
-            # `readout.memory_pos`: combined with the bank's own detach it
-            # leaves `memory_encoder`'s 40 variables with NO path to any loss,
-            # which is exactly how this trainer shipped its first round --
-            # MEASURED 38 of 40 gradients `None`, and a green test asserting
-            # that as intended. Removing this detach costs nothing in graph
-            # depth because `_store` detaches the memory encoder's INPUTS, so
-            # the backward pass reaches memory_encoder and stops there: one
-            # extra hop per read, never a T-deep recursion.
-            # See decisions.md D-074.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-074: the read side stays
+            # live, not detached -- the truncation happens one hop upstream in `_store`. Detaching here too leaves memory_encoder with no gradient path (measured 38/40 None). See decisions.md.
             memory = readout.memory
             memory_pos = readout.memory_pos
             memory_pos = memory_pos + self.sam2._temporal_embedding(
@@ -382,37 +286,8 @@ class SAM2TrainingModel(keras.Model):
         high_res = ops.image.resize(
             logits, (size, size), interpolation="bilinear")
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-074
-        # THIS is the truncation point of the truncated BPTT, and it is the
-        # ONLY one. `features` and `high_res` are the memory encoder's INPUTS;
-        # detaching them bounds the backward pass to a single hop, so a T-frame
-        # clip is T decodes plus T one-hop memory writes, never one T-deep
-        # recurrent graph (which is what H-4 exists to avoid, and what upstream
-        # pays for with `torch.utils.checkpoint.checkpoint`,
-        # `training/model/sam2.py:495` -- VERIFIED: upstream has NO `detach()`
-        # or `no_grad()` anywhere in `sam2/modeling/` or `training/model/`
-        # except the non-parametric sin/cos position-encoding cache).
-        #
-        # Do NOT also detach the memory encoder's OUTPUT (here, or via the
-        # bank's `stop_gradient=True` default, or on the read side in
-        # `_condition`). Detaching both sides leaves this module with no path
-        # to any loss at all: that is how the first round shipped, MEASURED as
-        # 38 of 40 `memory_encoder` gradients `None`.
-        #
-        # `object_score_logits` MUST be detached before `_mark_occlusion`. It
-        # comes from THIS frame's `_decode`, whose input is the memory-read
-        # features of this frame -- so leaving it live re-opens exactly the
-        # T-deep recursion the truncation removes, through the score head. The
-        # score head is trained by its own BCE on the `object_score_logits`
-        # output key, not through the memory.
-        #
-        # LIMITATION, stated rather than hidden: `obj_ptr` stays detached, so
-        # `obj_ptr_proj` (6 variables) STILL ships frozen. Its only usable
-        # truncation point is its own input, which is computed inside
-        # `SAM2._decode` -- a byte-frozen iteration-1 file. Leaving it live
-        # instead is not an option: the object pointer bypasses the memory
-        # encoder entirely, so it would reconstruct the full T-deep graph.
-        # See decisions.md D-074.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-074: this is the sole BPTT
+        # truncation point -- detach memory_encoder's inputs (features, high_res) here only, never its output or the read side, or the gradient path to memory_encoder vanishes entirely (measured 38/40 None). See decisions.md.
         memory, memory_pos = self.sam2.memory_encoder(
             [ops.stop_gradient(features), ops.stop_gradient(high_res)],
             training=training,
@@ -434,25 +309,8 @@ class SAM2TrainingModel(keras.Model):
     ) -> Any:
         """Pack one frame's ``(predicted, achieved)`` IoU pair, gated.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-052
-        # BOTH channels are zeroed on a GT-absent row, and `SAMIoULoss` is
-        # reused UNCHANGED. Do NOT "fix" this by packing a third presence
-        # channel and writing a `SAM2IoULoss`: `SAMIoULoss` computes
-        # `mean(square(predicted - achieved))`, so zeroing both sides makes an
-        # absent row contribute exactly 0 to the mean AND exactly 0 to the
-        # gradient -- which is upstream's `loss_iou * target_obj` exactly, not
-        # an approximation of it (plan assumption A-5, hand-verified in
-        # `tests/test_losses/test_sam2_video_loss.py`).
-        #
-        # The hazard this carries, named here because it is invisible at the
-        # call site: zeroing both sides of a comparison makes `zero == zero`
-        # always agree, so NO liveness probe on this output can discriminate a
-        # correct gate from a dead one. Any guard over it must assert the loss
-        # VALUE against a hand-computed gated number. And the gate must come
-        # from `gt_frame` -- gating on `outputs["object_score_logits"]` would
-        # be self-fulfilling and would additionally couple the IoU head's
-        # supervision to a head that is itself being trained.
-        # See decisions.md D-052.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-052: both channels are
+        # zeroed on a GT-absent row so `SAMIoULoss` reused unchanged reproduces upstream's `loss_iou * target_obj` exactly. The gate must come from `gt_frame`, never from the score head being trained. See decisions.md.
 
         :param outputs: :meth:`SAM2._decode`'s output dict for this frame.
         :type outputs: Dict[str, Any]
@@ -543,14 +401,8 @@ class SAM2TrainingModel(keras.Model):
         vision_pos = [self._unflatten(p) for p in encoded["vision_pos_enc"]]
         backbone_fpn = [self._unflatten(f) for f in encoded["backbone_fpn"]]
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-053
-        # The bank is constructed FRESH here, as a local, on every call. Do NOT
-        # hoist it to `__init__` or reuse `self.sam2.memory_bank`: a bank that
-        # outlives one `call()` holds tensors from a previous trace, so every
-        # frame > 0 would attend to a stale graph's memory -- with no shape,
-        # dtype or finiteness symptom. That it traces at all as a per-call
-        # local was PROBED before this file existed (outcome (a): one trace,
-        # no retrace, outputs vary with inputs). See decisions.md D-053.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-053: the bank is built fresh
+        # here as a local on every call, never hoisted to __init__ or reused from self.sam2.memory_bank, or frame>0 attends to a stale trace's memory with no visible symptom. See decisions.md.
         bank = SAM2MemoryBank(
             num_maskmem=self.sam2.num_maskmem,
             mem_dim=self.sam2.mem_dim,
@@ -558,13 +410,8 @@ class SAM2TrainingModel(keras.Model):
             memory_temporal_stride_for_eval=(
                 self.sam2.memory_temporal_stride_for_eval),
             max_obj_ptrs_in_encoder=self.sam2.max_obj_ptrs_in_encoder,
-            # D-074: the bank must NOT detach on insertion here. This is a
-            # plain constructor keyword the bank has always accepted
-            # (`memory_bank.py:236`), so `models/vision_language/sam/sam2/memory_bank.py` -- an
-            # iteration-1 file this iteration must leave byte-unchanged -- is
-            # not touched. The STREAMING bank built by `SAM2` keeps the
-            # `True` default, which is correct there: inference has no
-            # backward pass and the detach saves the tape.
+            # D-074: this per-call bank must not detach on insertion, unlike the
+            # streaming bank's True default, which is correct for inference (no backward pass).
             stop_gradient=False,
         )
 
@@ -713,24 +560,8 @@ def compile_sam2_video_trainer(
         first ``fit()`` step raise on a GPU; see the module docstring.
     :type compile_kwargs: Any
     """
-    # DECISION plan-2026-08-04T044628-4c240b4c/D-052
-    # The object-score term is MANDATORY, not optional, and it is stock
-    # `BinaryCrossentropy(from_logits=True)` -- upstream's `loss_class` is
-    # `sigmoid_focal_loss(..., focal_gamma_obj_score=0.0,
-    # focal_alpha_obj_score=-1.0)` at `loss_class: 1`, which IS a plain BCE.
-    # Do NOT drop this key to "train the masks first", and do NOT write a
-    # bespoke loss class for it (one call site, no behaviour of its own).
-    # Dropping it is silent and total: every consumer of `object_score_logits`
-    # in this package thresholds it HARD at `> 0` (`_suppress_absent_object`
-    # D-043, `_mark_occlusion`, `_blend_object_pointer` at the shipped
-    # `soft_no_obj_ptr=False`), so the score head has NO differentiable
-    # consumer. A mask-only loss can neither train it nor re-open the mask path
-    # it has closed -- `ops.where` passes no gradient through the suppressed
-    # branch -- and at random init every score is negative, so the whole mask
-    # output is the constant -1024 with a finite, falling, meaningless loss.
-    # Likewise `jit_compile=False` is MANDATORY (D-055): `Hiera`'s stem bicubic
-    # resize has no XLA GPU kernel and Keras 3.8 defaults `fit()` to
-    # `jit_compile='auto'`. See decisions.md D-052 and D-055.
+    # DECISION plan-2026-08-04T044628-4c240b4c/D-052: the object-score BCE term
+    # is mandatory, since every consumer thresholds object_score_logits hard at >0 -- a mask-only loss can't train or reopen that head. D-055: jit_compile=False is mandatory too (Hiera's bicubic resize has no XLA GPU kernel). See decisions.md.
     compile_kwargs.setdefault("jit_compile", False)
     model.compile(
         optimizer=optimizer,

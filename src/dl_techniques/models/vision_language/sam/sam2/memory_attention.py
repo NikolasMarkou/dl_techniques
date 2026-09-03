@@ -1,57 +1,22 @@
-"""
-SAM 2 memory attention: the stack that conditions a frame on its memory bank.
-=============================================================================
+"""SAM 2 memory attention, the stack that conditions a frame on its memory
+bank: :class:`SAM2MemoryAttentionLayer` (one block) and
+:class:`SAM2MemoryAttention` (``num_layers`` of them, plus a final norm).
 
-Two public classes -- :class:`SAM2MemoryAttentionLayer` and
-:class:`SAM2MemoryAttention` -- plus the private rotary attention primitive
-they are composed from.
+Each pre-norm block runs self-attention over the frame's own tokens, then
+cross-attention over the memory sequence, then a feed-forward sub-block.
+2D axial RoPE is applied after the head split on both attention sub-blocks;
+cross-attention keys and values stay at the compressed memory width while
+queries stay at ``d_model``, with one spatial angle table broadcast across
+the stacked memory frames. Positional encoding can be added at four
+independently configurable points, and the shipped setting is asymmetric
+between queries and keys. RoPE here carries no temporal signal: a memory
+frame's temporal identity comes from a per-slot embedding folded into
+``memory_pos`` before it reaches this module.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
-- Su, J. et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position
-  Embedding."
-
-Key Features:
-------------
-- Pre-norm blocks, each running self-attention (the frame's own tokens), then
-  cross-attention (the memory sequence), then a feed-forward sub-block.
-- 2D axial RoPE applied AFTER the head split, on both attention sub-blocks, via
-  :class:`~dl_techniques.layers.embedding.axial_rope_2d.AxialRoPE2D`.
-- Cross-attention consumes keys and values of width ``kv_in_dim`` (SAM 2's
-  compressed ``mem_dim=64`` memory channels) while queries stay at
-  ``d_model=256``, and enables ``repeat_k``, broadcasting ONE spatial angle
-  table across the ``r`` memory frames stacked along the key axis.
-
-Architecture Overview:
----------------------
-1. **SAM2MemoryAttentionLayer** -- self-attention -> cross-attention -> MLP.
-2. **SAM2MemoryAttention** -- ``num_layers`` identical blocks, then a final
-   layer normalization.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.memory_attention import SAM2MemoryAttention
-attention = SAM2MemoryAttention(d_model=256, num_layers=4)
-conditioned = attention(tokens, memory, memory_pos, num_obj_ptr_tokens=4)
-```
-
-Measured caveats:
-----------------
-- **Positional encoding is re-added at four independently configurable points,
-  and the shipped SAM 2.1 setting is ASYMMETRIC between queries and keys.**
-  ``pos_enc_at_input=True``, ``pos_enc_at_attn=False``,
-  ``pos_enc_at_cross_attn_queries=False``, ``pos_enc_at_cross_attn_keys=True``.
-  Every combination runs without a shape error, which is why these are four
-  explicit configuration fields rather than one assumed-uniform "add positional
-  encoding everywhere".
-- **RoPE here is SPATIAL ONLY.** The same angle table is reused for every
-  memory frame. A memory frame's temporal identity is carried exclusively by an
-  additive per-slot embedding owned by the top-level ``SAM2`` model and folded
-  into ``memory_pos`` before it reaches this module. Nothing in this file may
-  introduce a temporal term; if it did, no test could tell a spatial mechanism
-  from a temporal one.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding.
 """
 
 import math
@@ -90,47 +55,15 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # "simplification" to 1.0.
 _INPUT_POS_ENC_SCALE = 0.1
 
-# DECISION plan-2026-08-22T035419-a11304c8/D-090
-#: The SHIPPED memory-attention dropout rate, and the single home of the
-#: number. Every class below takes it as its constructor default and
-#: ``SAM2.MODEL_VARIANTS`` reads it from here rather than restating ``0.1``.
-#: Do NOT write a bare ``0.1`` into the variant table or into any of the three
-#: signatures below: a rate restated in two homes drifts silently, and this
-#: file already had one hard-wired copy per class with no way to reach it. The
-#: model-level knob (``SAM2.from_variant(dropout_rate=...)``, D-090) overrides
-#: this per construction; the default stays 0.1 so shipped behaviour is
-#: bit-identical. The constructor PARAMETER on all three classes below is now
-#: ``dropout_rate`` too (D-130, the `*_dropout_rate` convention wave), so the
-#: constant, the parameter, the attribute and the ``get_config`` key all carry
-#: one spelling. The old ``dropout`` spelling is gone with no alias: the user
-#: ruled that no checkpoint depends on it.
+# DECISION plan-2026-08-22T035419-a11304c8/D-090: this constant is the single
+# home of the shipped dropout rate -- every class default and SAM2.MODEL_VARIANTS read it, never a restated bare 0.1. See decisions.md.
 DEFAULT_DROPOUT_RATE: float = 0.1
 
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-08-04T044628-4c240b4c/D-008
-# This class is deliberately PRIVATE and deliberately UNREGISTERED.
-#
-# Do NOT "promote" it to a public, `@keras.saving.register_keras_serializable()`
-# sibling of the two classes below. Two reasons, in order of force:
-#   1. It would take the plan's public-class count from 15 to 16, which is that
-#      budget's hard STOP trigger -- with six components still unbuilt. A
-#      registered key is public surface whether or not the name has a leading
-#      underscore.
-#   2. Registration buys nothing here. It is constructed unconditionally by its
-#      owner's `__init__` from the owner's own config, so it never appears in a
-#      serialized config dict and is never rebuilt from one. Its weights are
-#      saved and restored by attribute path like any other sub-layer.
-#
-# Updated 2026-08-29: the ruling is unchanged; only the
-# spelling of the decorator it forbids has moved. The prohibition now reads "do NOT
-# promote it to a public `@register_dl_technique(...)` sibling" -- the bare stock
-# decorator named above no longer appears anywhere in `src/`, and adding EITHER form
-# here would mint the public registry key this anchor exists to refuse.
-# It still carries a full `get_config()` / `compute_output_shape()` so that
-# promoting it later, if a second owner ever appears, is a one-line change.
-# See decisions.md D-008.
+# DECISION plan-2026-08-04T044628-4c240b4c/D-008: this class stays private and
+# unregistered -- it is always built unconditionally from its owner's config, so registration buys nothing and would add public surface. See decisions.md.
 class _SAM2RoPEAttention(keras.layers.Layer):
     """Multi-head attention with 2D axial RoPE applied post-head-split.
 

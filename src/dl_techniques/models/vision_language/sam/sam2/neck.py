@@ -1,51 +1,21 @@
-"""
-SAM 2 FPN neck and image encoder.
-=================================
+"""SAM 2 FPN neck (:class:`SAM2FpnNeck`) and image encoder
+(:class:`SAM2ImageEncoder`).
 
-:class:`SAM2FpnNeck` turns the Hiera trunk's four ascending-stage feature
-levels into four ``d_model``-wide levels plus one sine positional encoding per
-level. :class:`SAM2ImageEncoder` wraps trunk and neck and applies the ``scalp``
-level drop.
+The neck turns the Hiera trunk's four ascending-stage feature levels into
+four ``d_model``-wide levels plus one sine positional encoding per level:
+one lateral ``1x1`` convolution per level, then a top-down addition over
+the two coarsest levels. The encoder wraps trunk and neck and applies the
+``scalp`` level drop, reading ``vision_features`` as the last of the
+already-scalped levels.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
+Two index conventions are easy to invert without a shape error surfacing:
+the trunk emits levels finest-first while ``backbone_channel_list`` is
+widest-first, so lateral convolution ``convs[n - i]`` pairs with
+``inputs[i]``; and ``scalp`` drops from the four built levels before
+``vision_features`` is read, not after.
 
-Key Features:
-------------
-- One lateral ``1x1`` convolution per trunk level, all at ``d_model``.
-- Top-down addition over the interpolated levels, at ``fpn_interp_model``
-  (default ``'nearest'``).
-- One :class:`PositionEmbeddingSine2D` map emitted per level.
-
-Architecture Overview:
----------------------
-1. Trunk levels ``xs[0..3]`` (finest first) -> lateral convolutions.
-2. -> top-down addition -> four ``d_model`` levels plus four position maps.
-3. -> ``scalp`` drop -> three levels; ``vision_features`` is the last of those.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.neck import SAM2ImageEncoder
-encoder = SAM2ImageEncoder(trunk=trunk, neck=neck, scalp=1)
-out = encoder(images)                 # vision_features, backbone_fpn, pos_enc
-```
-
-Measured caveats:
-----------------
-Two mechanisms are silent when ported wrong -- they produce a model that
-builds, forward-passes and trains, with no shape error anywhere. Both are
-guarded behaviourally in ``tests/test_models/test_sam2/test_neck.py``:
-
-- **The lateral-convolution index orientation.** The trunk returns levels in
-  ASCENDING stage order (finest first) while ``backbone_channel_list`` is in
-  DESCENDING order (widest first). The lateral convolutions are therefore
-  indexed ``convs[n - i]`` against ``xs[i]``. Reversing either list alone would
-  still line the channel counts up.
-- **The ``scalp`` drop happens BEFORE ``vision_features`` is taken.** The neck
-  builds four levels; the encoder returns three and reads the LAST of the
-  already-scalped list. Dropping the other end keeps the count at three.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 """
 
 import keras
@@ -174,14 +144,8 @@ class SAM2FpnNeck(keras.layers.Layer):
                 f"d_model must be even so the sine positional encoding can "
                 f"split it between the two spatial axes, got {d_model}"
             )
-        # DECISION plan-2026-08-28T181715-3870472c/D-007
-        # The constraint on the DEFAULTED path is `% 4`, NOT `% 2`. Do not
-        # "relax" this back to evenness: `d_model // 2` becomes `num_pos_feats`
-        # and THAT value must itself be even, because
-        # `PositionEmbeddingSine2D` splits it between its sine and cosine
-        # halves. `d_model = 10` passed the old `% 2` check, produced
-        # `num_pos_feats = 5`, and built a position encoder that could never
-        # complete a forward pass. See decisions.md D-007.
+        # DECISION plan-2026-08-28T181715-3870472c/D-007: the defaulted path
+        # needs `% 4`, not `% 2` -- d_model=10 passed the old check but produced num_pos_feats=5, which PositionEmbeddingSine2D cannot split evenly. See decisions.md.
         if num_pos_feats is None and d_model % 4 != 0:
             raise ValueError(
                 f"d_model ({d_model}) must be a positive multiple of 4 when "
@@ -231,14 +195,8 @@ class SAM2FpnNeck(keras.layers.Layer):
             self.fpn_top_down_levels = levels
             self._top_down_levels = levels
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-013
-        # Do NOT "fix" this to `d_model` to match the reference config's
-        # literal `num_pos_feats: 256`. That literal belongs to a class which
-        # halves it internally; this repo's `PositionEmbeddingSine2D` does not,
-        # and emits `2 * num_pos_feats` channels. Passing 256 here yields a
-        # 512-wide encoding that cannot be added to the 256-wide features the
-        # memory attention consumes. The invariant is the OUTPUT width:
-        # `pos_enc_channels == d_model`. See decisions.md D-013.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-013: this stays d_model //
+        # 2, not d_model -- PositionEmbeddingSine2D emits 2*num_pos_feats channels, so the invariant is the OUTPUT width == d_model. See decisions.md.
         self.num_pos_feats = (
             self.d_model // 2 if num_pos_feats is None else int(num_pos_feats)
         )
@@ -276,15 +234,8 @@ class SAM2FpnNeck(keras.layers.Layer):
             normalize=True,
             name="position_encoding",
         )
-        # DECISION plan-2026-08-31T095434-b4829a10/D-002
-        # Create and build this UNCONDITIONALLY, even when
-        # `_top_down_levels` is empty and it is never applied, and build it
-        # ONCE on a representative shape. Do NOT move the construction into
-        # `call()` (the previous `upsample(previous, ...)` helper did exactly
-        # that; "it is weightless" is a claim about weights, not a licence),
-        # and do NOT expand it into a per-level list. Do NOT widen the
-        # accepted spellings back out in `__init__` either -- `from_config`
-        # owns the legacy `'nn'` migration. See decisions.md D-002/D-003.
+        # DECISION plan-2026-08-31T095434-b4829a10/D-002: build this
+        # unconditionally, once, even when _top_down_levels is empty -- never move construction into call() or expand to a per-level list. See decisions.md D-002/D-003.
         self.upsample = keras.layers.UpSampling2D(
             size=(2, 2),
             interpolation=self.fpn_interp_model,
@@ -699,14 +650,8 @@ class SAM2ImageEncoder(keras.layers.Layer):
         levels, positions = self.neck(
             self.trunk(inputs, training=training), training=training)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-014
-        # The drop is applied BEFORE `vision_features` is read. Do NOT
-        # reorder these two lines, and do NOT drop from the finest end
-        # (`levels[self.scalp:]`) -- that keeps the level COUNT at three
-        # while silently handing the mask decoder the wrong skips and the
-        # memory attention a stride-32 grid its rotary tables are not built
-        # for. Neither error produces a shape error here. See decisions.md
-        # D-014 and test_neck.py::TestScalpIdentity.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-014: drop from the coarse
+        # end (levels[:-scalp]) before reading vision_features, never levels[scalp:] -- both keep the count at three but the wrong drop hands downstream the wrong skips with no shape error. See decisions.md.
         if self.scalp > 0:
             levels = levels[: -self.scalp]
             positions = positions[: -self.scalp]
