@@ -1,46 +1,17 @@
-"""
-ConvNext Block Implementation
-===========================
+"""ConvNeXt V1 block: depthwise conv, LayerNorm, and an inverted MLP.
 
-A modern implementation of the ConvNext block architecture as described in:
-"A ConvNet for the 2020s" (Liu et al., 2022)
-https://arxiv.org/abs/2201.03545
+The block runs a depthwise convolution, LayerNorm, a 4x channel expansion,
+GELU, optional dropout, then a channel reduction back to the input width,
+with an optional learnable per-channel gamma scale on the output.
 
-Key Features:
-------------
-- Depthwise convolution with large kernels
-- Inverted bottleneck design
-- Proper normalization strategy (LayerNorm)
-- GELU activation by default
-- Configurable dropout (both standard and spatial)
-- Optional learnable scaling (gamma)
-- Support for various kernel regularization strategies
-
-Architecture:
-------------
-The ConvNext block consists of:
-1. Depthwise Conv (7x7) for local feature extraction
-2. LayerNorm for feature normalization
-3. Two-layer MLP for feature transformation:
-   - Expansion layer (pointwise conv, 4x channels)
-   - GELU activation
-   - Optional dropout
-   - Reduction layer (pointwise conv, back to input channels)
-4. Optional learnable scaling
-
-The computation flow is:
-input -> depthwise_conv -> layer_norm ->
-        pointwise_conv1 -> activation -> dropout ->
-        pointwise_conv2 -> gamma_scale -> output
+References:
+    - Liu et al., 2022. A ConvNet for the 2020s.
+      (https://arxiv.org/abs/2201.03545)
 """
 
 import copy
 import keras
 from typing import Optional, Dict, Union, Tuple, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from .layer_scale import LayerScale
 from ..constraints.value_range_constraint import ValueRangeConstraint
@@ -51,8 +22,6 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.convnext_v1_block")
@@ -65,7 +34,7 @@ class ConvNextV1Block(keras.layers.Layer):
     depthwise convolutions and an inverted bottleneck design with a 4x
     expansion factor in the pointwise MLP.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -106,24 +75,24 @@ class ConvNextV1Block(keras.layers.Layer):
         └───────────────────────────────────┘
 
     .. important::
-        **This block is the residual BRANCH only.** It does NOT add the skip /
-        residual connection and does NOT apply stochastic depth (drop-path). Its
-        ``dropout_rate`` / ``spatial_dropout_rate`` are *regular* dropout inside
-        the inverted-bottleneck MLP — they are NOT drop-path on the residual.
+        This block is the residual branch only. It does not add the skip
+        connection and does not apply stochastic depth. Its
+        ``dropout_rate`` / ``spatial_dropout_rate`` are regular dropout
+        inside the inverted-bottleneck MLP, not drop-path on the residual.
 
-        The CALLER is responsible for the residual + drop-path wiring. The
-        canonical pattern (see ``models/vision/convnext/convnext_v1.py`` and
-        ``models/vision/bias_free_denoisers/bfconvunext.py``) is::
+        The caller adds the residual and drop-path wiring. The pattern used
+        in ``models/vision/convnext/convnext_v1.py`` and
+        ``models/vision/bias_free_denoisers/bfconvunext.py`` is::
 
             from dl_techniques.layers.stochastic_depth import StochasticDepth
             residual = x
             y = ConvNextV1Block(...)(x)
-            y = StochasticDepth(drop_path_rate)(y)   # stochastic depth, per-branch
+            y = StochasticDepth(drop_path_rate)(y)
             x = keras.layers.add([residual, y])
 
-        Using this block standalone (e.g. ``x = ConvNextV1Block(...)(x)``) silently
-        DROPS the residual connection — a bug that hurts gradient flow and removes
-        stochastic-depth regularization. Always wrap it as shown above.
+        Calling this block standalone, e.g. ``x = ConvNextV1Block(...)(x)``,
+        drops the residual connection and the stochastic-depth
+        regularization. Always wrap it as shown above.
 
     :param kernel_size: Size of the depthwise convolution kernel. Must be positive.
     :type kernel_size: Union[int, Tuple[int, int]]
@@ -151,11 +120,11 @@ class ConvNextV1Block(keras.layers.Layer):
         init, pass ``keras.initializers.Orthogonal(gain=1.0)``: a depthwise
         ``(K, K, C, 1)`` kernel flattens to a single column, so "orthonormal" here
         means unit-norm (``||w|| = 1.0``); per-channel mutual orthonormality is not
-        expressible at channel-multiplier 1. The repo
+        expressible at channel-multiplier 1. The repo's
         ``OrthonormalInitializer`` / ``HeOrthonormalInitializer`` are 2D-only and
-        RAISE on a 4-D kernel, and ``OrthogonalHypersphereInitializer`` blows the
-        norm up — all three are UNSUPPORTED for the depthwise conv (use keras
-        ``Orthogonal(gain=1.0)`` instead). See D-002.
+        raise on a 4-D kernel, and ``OrthogonalHypersphereInitializer`` blows the
+        norm up, so none of the three works for the depthwise conv; use keras'
+        ``Orthogonal(gain=1.0)`` instead. See decisions.md D-002.
     :type depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]]
     :param depthwise_regularizer: Optional override for the depthwise convolution's
         kernel regularizer (a string name or a ``keras.regularizers.Regularizer``
@@ -165,18 +134,18 @@ class ConvNextV1Block(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
-    # Important constants - following ConvNeXt paper specifications
-    EXPANSION_FACTOR = 4  # Bottleneck expansion factor (filters * 4)
-    INITIALIZER_MEAN = 0.0  # Mean for TruncatedNormal initializer
-    INITIALIZER_STDDEV = 0.02  # Standard deviation for TruncatedNormal initializer
-    LAYERNORM_EPSILON = 1e-6  # Epsilon for LayerNormalization
-    POINTWISE_KERNEL_SIZE = 1  # Kernel size for pointwise convolutions
-    GAMMA_L2_REGULARIZATION = 1e-5  # L2 regularization for gamma multiplier
-    GAMMA_INITIAL_VALUE = 1.0  # Initial value for gamma multiplier
-    GAMMA_MIN_VALUE = 1e-6  # Minimum value for gamma constraint (floor > 0 so a residual
-    # branch cannot collapse to zero: gamma==0 => zero branch gradient => permanently dead block)
-    GAMMA_MAX_VALUE = 1.0  # Maximum value for gamma constraint
-    STRIDES = (1, 1)  # Strides for depthwise convolution
+    EXPANSION_FACTOR = 4
+    INITIALIZER_MEAN = 0.0
+    INITIALIZER_STDDEV = 0.02
+    LAYERNORM_EPSILON = 1e-6
+    POINTWISE_KERNEL_SIZE = 1
+    GAMMA_L2_REGULARIZATION = 1e-5
+    GAMMA_INITIAL_VALUE = 1.0
+    # Floor keeps gamma from reaching 0, which would zero the branch gradient
+    # and leave the block permanently dead.
+    GAMMA_MIN_VALUE = 1e-6
+    GAMMA_MAX_VALUE = 1.0
+    STRIDES = (1, 1)
 
     def __init__(
             self,
@@ -238,9 +207,6 @@ class ConvNextV1Block(keras.layers.Layer):
         self.depthwise_regularizer = depthwise_regularizer
         self.normalization_type = normalization_type
 
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        # They will be built explicitly in build() method for robust serialization
-
         # Resolve depthwise init/regularizer with fallback to the historical hardcoded values.
         # When both overrides are None the OFF path is byte-identical to the original.
         _dw_init = (
@@ -266,14 +232,9 @@ class ConvNextV1Block(keras.layers.Layer):
             name="depthwise_conv"
         )
 
-        # Normalization layer.
-        # DECISION plan_2026-07-01_8054f023/D-003: STRICTLY-ADDITIVE norm selection.
-        # This is a direct if/elif branch (NOT create_normalization_layer) per D-004 so
-        # the DEFAULT 'layernorm' path stays BYTE-IDENTICAL to the original construction
-        # (same epsilon/center/scale AND the same name="layer_norm" for checkpoint compat).
-        # Do NOT route the default through the factory (param-drop risk) and do NOT rename
-        # the layer. The 'batchnorm' branch swaps in the homogeneity-restoring
-        # BiasFreeBatchNorm (variance-only) under the SAME name. See decisions.md D-003/D-004.
+        # DECISION plan_2026-07-01_8054f023/D-003: direct if/elif, not
+        # create_normalization_layer, so the default 'layernorm' path stays byte-identical
+        # to the original construction. The 'batchnorm' branch swaps in BiasFreeBatchNorm under the same name. See decisions.md.
         if self.normalization_type == "batchnorm":
             from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
             self.norm = BiasFreeBatchNorm(
@@ -385,16 +346,13 @@ class ConvNextV1Block(keras.layers.Layer):
         """
         # Build sub-layers in computational order for proper shape propagation
 
-        # 1. Depthwise convolution
         self.conv_1.build(input_shape)
 
         # Shape after depthwise conv (same as input since stride=1, padding='same')
         post_depthwise_shape = input_shape
 
-        # 2. Layer normalization
         self.norm.build(post_depthwise_shape)
 
-        # 3. First pointwise convolution (expansion)
         self.conv_2.build(post_depthwise_shape)
 
         # Shape after expansion
@@ -402,14 +360,11 @@ class ConvNextV1Block(keras.layers.Layer):
         expansion_shape[-1] = self.filters * self.EXPANSION_FACTOR
         expansion_shape = tuple(expansion_shape)
 
-        # 4. Activation layer
         self.activation_layer.build(expansion_shape)
 
-        # 5. Dropout layers
         self.dropout.build(expansion_shape)
         self.spatial_dropout.build(expansion_shape)
 
-        # 6. Second pointwise convolution (reduction)
         self.conv_3.build(expansion_shape)
 
         # Final shape after reduction
@@ -417,7 +372,6 @@ class ConvNextV1Block(keras.layers.Layer):
         final_shape[-1] = self.filters
         final_shape = tuple(final_shape)
 
-        # 7. Gamma scaling
         self.gamma.build(final_shape)
 
         # Always call parent build at the end
@@ -436,26 +390,19 @@ class ConvNextV1Block(keras.layers.Layer):
 
             :return: Output tensor of shape (batch_size, height, width, filters).
         """
-        # 1. Depthwise convolution
         x = self.conv_1(inputs, training=training)
 
-        # 2. Layer normalization
         x = self.norm(x, training=training)
 
-        # 3. First pointwise convolution (expansion)
         x = self.conv_2(x, training=training)
 
-        # 4. Activation
         x = self.activation_layer(x, training=training)
 
-        # 5. Apply dropout layers
         x = self.dropout(x, training=training)
         x = self.spatial_dropout(x, training=training)
 
-        # 6. Second pointwise convolution (reduction)
         x = self.conv_3(x, training=training)
 
-        # 7. Apply learnable scaling
         x = self.gamma(x, training=training)
 
         return x
@@ -495,10 +442,8 @@ class ConvNextV1Block(keras.layers.Layer):
         config.update({
             "kernel_size": self.kernel_size,
             "filters": self.filters,
-            # DECISION plan_2026-06-21_eb7fd829/D-001: serialize a layer-instance activation
-            # via keras.layers.serialize so LeakyReLU(alpha) round-trips through .keras; the
-            # string path (e.g. "gelu") stays the raw string for backward-compat with existing
-            # checkpoints. Do NOT serialize strings to dicts. See decisions.md D-001.
+            # DECISION plan_2026-06-21_eb7fd829/D-001: serialize a layer-instance
+            # activation via keras.layers.serialize so it round-trips; a string activation stays a raw string for checkpoint compat. See decisions.md.
             "activation": serialize_activation(self.activation_name),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
@@ -548,4 +493,3 @@ class ConvNextV1Block(keras.layers.Layer):
 
         return cls(**config_copy)
 
-# ---------------------------------------------------------------------

@@ -9,13 +9,7 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class ClipLayer(keras.layers.Layer):
@@ -28,7 +22,7 @@ class ClipLayer(keras.layers.Layer):
     The layer is stateless with no trainable parameters. Gradients are 1 for
     values within range and 0 outside.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -115,7 +109,6 @@ class ClipLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class NormalizationLayer(keras.layers.Layer):
@@ -130,7 +123,7 @@ class NormalizationLayer(keras.layers.Layer):
     ``x_norm = (x_clipped - source_min) / (source_max - source_min)``,
     ``output = x_norm * (target_max - target_min) + target_min``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -254,7 +247,6 @@ class NormalizationLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class DenormalizationLayer(keras.layers.Layer):
@@ -269,7 +261,7 @@ class DenormalizationLayer(keras.layers.Layer):
     ``x_norm = (x_clipped - source_min) / (source_max - source_min)``,
     ``output = x_norm * (target_max - target_min) + target_min``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -391,7 +383,6 @@ class DenormalizationLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.io_preparation")
 class TensorPreprocessingLayer(keras.layers.Layer):
@@ -402,7 +393,7 @@ class TensorPreprocessingLayer(keras.layers.Layer):
     combining normalization from source to target range with optional
     additional clipping to ensure outputs stay within specified bounds.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -469,7 +460,6 @@ class TensorPreprocessingLayer(keras.layers.Layer):
         self.final_clip_min = float(final_clip_min)
         self.final_clip_max = float(final_clip_max)
 
-        # CREATE sub-layers in __init__ (they are unbuilt)
         self.normalizer = NormalizationLayer(
             source_min=source_min,
             source_max=source_max,
@@ -555,5 +545,4 @@ class TensorPreprocessingLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 

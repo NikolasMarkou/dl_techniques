@@ -1,88 +1,24 @@
-"""
-A RepMixer block, an efficient feature-mixing architecture.
+"""RepMixerBlock and ConvolutionalStem, convolutional replacements for
+self-attention and patch embedding in FastViT-style vision towers.
 
-This layer serves as a highly efficient, convolution-based alternative to the
-self-attention mechanism found in Vision Transformers. It is designed to model
-the two fundamental types of interactions in feature maps—spatial and
-channel-wise—using separate, specialized components. The core design principle
-is to decouple the mixing of information across spatial locations ("token
-mixing") from the mixing of information across feature channels ("channel
-mixing"), achieving strong performance with a fraction of the computational
-cost of standard self-attention.
-
-Architecture and Core Concepts:
-
-The RepMixer block is a residual block composed of two main sub-layers, each
-preceded by a normalization layer (typically LayerNorm):
-
-1.  **Token Mixing (Spatial Interaction):** This component is responsible for
-    propagating information across the spatial dimensions (height and width) of
-    the feature map. Instead of the computationally expensive all-to-all
-    comparison of self-attention, it employs a simple yet effective sequence
-    of depthwise convolutions. A 3x3 depthwise convolution captures local
-    spatial context, followed by a 1x1 depthwise convolution (equivalent to a
-    per-channel linear layer). This design allows the block to efficiently
-    model spatial relationships within each feature channel independently.
-
-2.  **Channel Mixing (Feature Interaction):** This component operates on a
-    per-pixel basis, mixing information across the feature channels. It uses
-    an MLP structure, implemented with 1x1 convolutions, which is a standard
-    and effective technique for learning complex, non-linear interactions
-    between different feature maps. Typically, this MLP follows an inverted
-    bottleneck design, expanding the channel dimension before projecting it
-    back down.
-
-The separation of these two mixing operations is a key architectural choice.
-It is based on the hypothesis that spatial and feature-wise correlations can
-be learned effectively in a factorized manner, avoiding the quadratic
-complexity of self-attention while retaining much of its representational
-power.
-
-Mathematical Foundation:
-
-The efficiency of the RepMixer block stems from its reliance on
-computationally cheap operations. The token mixer's use of depthwise
-convolutions is particularly important. A depthwise convolution has a
-computational cost that is linear with respect to the number of channels, as
-opposed to a standard convolution whose cost is quadratic.
-
-The overall structure is a direct application of the "mixer" paradigm, where
-the model alternates between operations on spatial dimensions and channel
-dimensions:
--   `Y = X + TokenMixer(Norm(X))`
--   `Z = Y + ChannelMixer(Norm(Y))`
-
-This design avoids the `O(N^2 * C)` complexity of self-attention (where `N` is
-the number of tokens/pixels) and replaces it with operations that are linear in
-`N`, making it highly scalable to high-resolution images.
+RepMixerBlock decouples spatial mixing from channel mixing instead of
+computing full self-attention. Token mixing uses a 3x3 depthwise
+convolution followed by a 1x1 depthwise convolution, at cost linear in
+channel count rather than the quadratic cost of attention; channel mixing
+is an inverted-bottleneck MLP over 1x1 convolutions. ConvolutionalStem
+chains three MobileOne blocks to downsample an image by 4x before the
+first mixer block.
 
 References:
-
-The design of this block is primarily based on:
--   "RepMixer: Representation Mixing for Efficient Vision Transformers" by
-    Che et al.
-
-It belongs to a broader family of "mixer" architectures that have explored
-alternatives to self-attention, including:
--   Tolstikhin, I. O., et al. (2021). "MLP-Mixer: An all-MLP Architecture for
-    Vision." This paper popularized the concept of explicitly separating token
-    and channel mixing.
--   Trockman, A., & Kolter, J. Z. (2022). "Patches Are All You Need? (ConvMixer)"
-    which proposed a similar, purely convolutional approach.
-
-The channel mixer's inverted bottleneck structure is a well-established pattern
-from efficient CNNs:
--   Sandler, M., et al. (2018). "MobileNetV2: Inverted Residuals and Linear
-    Bottlenecks."
-
+    - Tolstikhin et al., 2021. MLP-Mixer: An all-MLP Architecture for
+      Vision.
+    - Trockman & Kolter, 2022. Patches Are All You Need? (ConvMixer)
+    - Sandler et al., 2018. MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks.
 """
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
@@ -93,7 +29,6 @@ from dl_techniques.utils.activation_serialization import (
 from .mobile_one_block import MobileOneBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.repmixer_block")
 class RepMixerBlock(keras.layers.Layer):
@@ -109,7 +44,7 @@ class RepMixerBlock(keras.layers.Layer):
     ``Y = X + TokenMixer(Norm(X))``,
     ``Z = Y + ChannelMixer(Norm(Y))``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -201,7 +136,6 @@ class RepMixerBlock(keras.layers.Layer):
         # Calculate expanded dimension for channel mixing
         self.expanded_dim = int(dim * expansion_ratio)
 
-        # CREATE normalization layers
         if use_layer_norm:
             self.norm1 = keras.layers.LayerNormalization(name='token_norm')
             self.norm2 = keras.layers.LayerNormalization(name='channel_norm')
@@ -209,7 +143,6 @@ class RepMixerBlock(keras.layers.Layer):
             self.norm1 = keras.layers.BatchNormalization(name='token_norm')
             self.norm2 = keras.layers.BatchNormalization(name='channel_norm')
 
-        # CREATE token mixer (spatial mixing with depthwise convolutions)
         self.token_mixer = keras.Sequential([
             keras.layers.DepthwiseConv2D(
                 kernel_size=kernel_size,
@@ -234,7 +167,6 @@ class RepMixerBlock(keras.layers.Layer):
             keras.layers.BatchNormalization(name='token_bn2'),
         ], name='token_mixer')
 
-        # CREATE channel mixer (feature mixing with pointwise convolutions)
         channel_layers = [
             keras.layers.Conv2D(
                 filters=self.expanded_dim,
@@ -374,7 +306,6 @@ class RepMixerBlock(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.repmixer_block")
 class ConvolutionalStem(keras.layers.Layer):
@@ -388,7 +319,7 @@ class ConvolutionalStem(keras.layers.Layer):
     channel refinement. All blocks support structural reparameterisation
     for efficient inference.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -454,7 +385,6 @@ class ConvolutionalStem(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.kernel_regularizer = kernel_regularizer
 
-        # CREATE stem blocks
         self.blocks = [
             MobileOneBlock(
                 out_channels=out_channels,
@@ -570,4 +500,3 @@ class ConvolutionalStem(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
