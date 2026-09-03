@@ -25,9 +25,26 @@ pretraining.
   checkpoint-only EMA-shadow driver (lives in `callbacks/`, not this
   package -- see `decisions.md` D-006); reuses `teacher_ema.py`'s decay
   schedules.
-
-Not yet implemented (later plan steps): the multiview training wrapper
-(`SIGReg` + `add_loss`) and the `src/train/levjepa/` training script.
+- `training.py::LeVJEPATrainingModel` -- the multiview training wrapper
+  (Step 6): shared encoder run on 1 global + N local views, `LeVJEPAProjector`
+  head, `SIGRegLayer(normalize_by_n=True)`, both loss terms added via
+  `self.add_loss(...)` inside `call()` (no custom `train_step`), plus
+  `update_ema_shadow(decay)` for `EMAShadowCallback`'s duck-typed contract.
+  See `decisions.md` D-017 (no ImageNet mean/std normalization -- data
+  already arrives as bounded float32), D-018 (round-trip via nested encoder
+  serialization), D-020 (EMA shadow seeded lazily on first
+  `update_ema_shadow` call, not at `build()` time -- `ops.convert_to_numpy`
+  is not always available under `model.fit()`'s tracing).
+- `dl_techniques/datasets/vision/multi_crop_video.py` -- the video-shaped
+  multi-crop `tf.data` transform (1 global + N local views, same crop box
+  across every frame of one clip via a stateless-RNG replay -- see
+  `decisions.md` D-019). Reuses `multi_crop.py`'s crop/augmentation
+  primitives, does not re-derive them (`decisions.md` D-005).
+- `src/train/levjepa/train_levjepa.py` -- the training CLI (`--dataset
+  {synthetic_drone,bdd100k}`, `--smoke` preset, `optimizer_builder()` +
+  `WarmupSchedule(primary_schedule=FlatSchedule(...))`, `EMAShadowCallback`
+  wired as a callback). Verified with a REAL end-to-end smoke run, not an
+  import check.
 
 ## Usage
 
@@ -64,3 +81,15 @@ with the CLS token at index 0.
 
 See `decisions.md` D-011 through D-013 in this plan's directory for the
 reasoning behind each of these and the LayerScale-removal correction.
+
+## Known pre-existing house-convention gap
+
+`encoder.py` and `blocks.py` (Step 4) import `from keras import ops` rather
+than the house convention `import keras` + qualify at the call site
+(`src/dl_techniques/CLAUDE.md` § Core Conventions). Discovered during Step 6
+via `grep -rn "from keras import ops" src/dl_techniques/models/vision/levjepa/`
+(plan.md Success Criterion 12's own check). Not fixed in Step 6 --
+out of scope for a training-wrapper step, and Step 4 already committed and
+passed its own verification -- but named here rather than silently left. The
+new `training.py` (Step 6) and `src/train/levjepa/` follow the house
+convention.
