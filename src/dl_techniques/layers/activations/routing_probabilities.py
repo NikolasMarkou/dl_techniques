@@ -244,9 +244,6 @@ def _compute_validity_masks(
 # ---------------------------------------------------------------------
 
 
-# One class with a `mode` flag, not two classes and not a base plus two
-# subclasses. The axis handling, the tree build and the slice/renormalize are
-# identical in both modes, so this keeps them in one place.
 @register_dl_technique("dl_techniques.layers.activations.routing_probabilities")
 class RoutingProbabilitiesLayer(keras.layers.Layer):
     """

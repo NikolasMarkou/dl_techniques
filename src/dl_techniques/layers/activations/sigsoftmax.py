@@ -1,18 +1,29 @@
-"""Sigsoftmax: softmax with a sigmoid factor added to the numerator.
+"""
+Sigsoftmax: softmax with a sigmoid factor added to the numerator.
 
-``sigsoftmax`` and ``log_sigsoftmax`` normalise ``exp(z) * sigmoid(z)`` along
-one axis. Softmax normalises ``exp(z)``, whose logarithm is linear in ``z``.
-Sigsoftmax normalises ``exp(z) * sigmoid(z)``, whose logarithm carries a
-softplus term and is not linear, which lifts the output out of the
-rank-limited subspace softmax occupies.
+The problem it solves is the softmax bottleneck. A classifier or language
+model computes its logits as ``z = W h(x)``, an affine map of a
+``d``-dimensional context vector. Softmax normalises ``exp(z)``, and
+``log(exp(z))`` is just ``z``, so the log-probabilities it can produce all
+lie in a vector space of dimension at most ``d + 1``. When the true
+log-probability matrix has higher rank than that, no amount of training
+closes the gap; the output layer itself is the ceiling. Widening ``d`` is the
+usual remedy and it costs parameters in the largest matrix in the model.
+
+``sigsoftmax`` and ``log_sigsoftmax`` normalise ``exp(z) * sigmoid(z)``
+instead. Its logarithm is ``2z - softplus(z)``, which is not linear in ``z``,
+so the reachable log-probabilities are no longer confined to that subspace.
+The paper also shows the range of softmax is a subset of the range of
+sigsoftmax, so nothing representable is lost. No parameters are added.
 
 The computation runs entirely in log space:
 
     log_sigsoftmax(z) = w - logsumexp(w),  where w = z + log_sigmoid(z)
 
 ``sigsoftmax`` is ``exp(log_sigsoftmax)`` and the ``SigSoftmax`` layer wraps
-it. The reduction widens float16 and bfloat16 inputs to float32 and casts
-back, so the output carries the input dtype and sums to 1 along the axis.
+it. Use ``log_sigsoftmax`` directly in a cross-entropy loss. The reduction
+widens float16 and bfloat16 inputs to float32 and casts back, so the output
+carries the input dtype and sums to 1 along the axis.
 
 References:
     - Kanai et al., 2018. Sigsoftmax: Reanalysis of the Softmax Bottleneck.
