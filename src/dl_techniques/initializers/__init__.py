@@ -47,8 +47,11 @@ Available Initializers:
     architectural roles.
 -   `KANInitializer`: variance-controlled init for Kolmogorov-Arnold Network
     residual (`base_scaler`) and spline (`spline_weight`) roles, using the
-    Rigas et al. (2026) per-role variance schemes (`power_law`,
-    `glorot_inspired`, `baseline`); paired via `create_kan_initializers`.
+    Rigas et al. per-role variance schemes (`power_law`, `glorot_inspired`,
+    `baseline`) from arXiv:2509.03417, with exactly-integrated activation and
+    B-spline expectation constants. None of the three schemes is unit-gain --
+    only `glorot_inspired` is width-independent; call `expected_forward_gain`
+    instead of assuming depth stability. Paired via `create_kan_initializers`.
 """
 
 from .haar_wavelet_initializer import (
