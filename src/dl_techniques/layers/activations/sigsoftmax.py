@@ -6,15 +6,16 @@ model computes its logits as ``z = W h(x)``, an affine map of a
 ``d``-dimensional context vector. Softmax normalises ``exp(z)``, and
 ``log(exp(z))`` is just ``z``, so the log-probabilities it can produce all
 lie in a vector space of dimension at most ``d + 1``. When the true
-log-probability matrix has higher rank than that, no amount of training
-closes the gap; the output layer itself is the ceiling. Widening ``d`` is the
-usual remedy and it costs parameters in the largest matrix in the model.
+log-probability matrix has higher rank, no amount of training closes the gap;
+the output layer is the ceiling. Widening ``d`` is the usual remedy and costs
+parameters in the largest matrix in the model.
 
 ``sigsoftmax`` and ``log_sigsoftmax`` normalise ``exp(z) * sigmoid(z)``
 instead. Its logarithm is ``2z - softplus(z)``, which is not linear in ``z``,
-so the reachable log-probabilities are no longer confined to that subspace.
-The paper also shows the range of softmax is a subset of the range of
-sigsoftmax, so nothing representable is lost. No parameters are added.
+so the reachable log-probabilities leave that subspace. The paper also shows
+the range of softmax is a subset of sigsoftmax's when the all-ones vector
+lies in the input space, so nothing representable is lost, and no parameters
+are added.
 
 The computation runs entirely in log space:
 
@@ -23,7 +24,8 @@ The computation runs entirely in log space:
 ``sigsoftmax`` is ``exp(log_sigsoftmax)`` and the ``SigSoftmax`` layer wraps
 it. Use ``log_sigsoftmax`` directly in a cross-entropy loss. The reduction
 widens float16 and bfloat16 inputs to float32 and casts back, so the output
-carries the input dtype and sums to 1 along the axis.
+carries the input dtype and sums to 1 along the axis. The working value is
+``2z``, which bounds the usable logit range; see :func:`log_sigsoftmax`.
 
 References:
     - Kanai et al., 2018. Sigsoftmax: Reanalysis of the Softmax Bottleneck.
@@ -81,11 +83,22 @@ def log_sigsoftmax(
 
     Use this rather than ``log(sigsoftmax(x))`` in a cross-entropy loss: the
     logarithm of an underflowed probability is ``-inf``, while this stays
-    finite wherever the input is finite.
+    finite over the range described below.
+
+    The intermediate is ``2z``, so the finite range is the logits for which
+    ``2z`` is representable in the reduction dtype -- ``|z| < 1.7e38`` in
+    float32, ``|z| < 32752`` in float16. Past it a lane saturates to ``-inf``,
+    which is the correct limit while any other lane is in range. A row whose
+    entries all exceed the bound returns ``nan``.
+
+    Takes a tensor and returns a tensor. It does not validate ``axis`` or
+    coerce its input: an out-of-range ``axis`` surfaces as the backend's own
+    reduction error, and a Python list has no ``dtype``. Use
+    :class:`SigSoftmax` for the validated form.
 
     :param x: Logits, any shape and rank.
     :type x: Any
-    :param axis: Axis to normalise along. Defaults to ``-1``.
+    :param axis: Axis to normalise along. Defaults to ``-1``. Not range-checked.
     :type axis: int
     :return: Log-probabilities, same shape and dtype as ``x``.
     :rtype: Any
@@ -101,11 +114,19 @@ def sigsoftmax(
 ) -> Any:
     """Return the sigsoftmax probabilities along ``axis``.
 
-    Outputs are non-negative and sum to 1 along ``axis``.
+    Outputs are non-negative and sum to 1 along ``axis``. Values below the
+    dtype's smallest subnormal round to zero, and whether that happens is a
+    property of the device: ``exp(-100)`` in float32 is 3.8e-44 on some
+    backends and exactly 0.0 on others. Use :func:`log_sigsoftmax` where the
+    small end matters.
+
+    Takes a tensor and returns a tensor. It does not validate ``axis`` or
+    coerce its input; see :func:`log_sigsoftmax`. Use :class:`SigSoftmax` for
+    the validated form.
 
     :param x: Logits, any shape and rank.
     :type x: Any
-    :param axis: Axis to normalise along. Defaults to ``-1``.
+    :param axis: Axis to normalise along. Defaults to ``-1``. Not range-checked.
     :type axis: int
     :return: Probabilities, same shape and dtype as ``x``.
     :rtype: Any
@@ -173,6 +194,12 @@ class SigSoftmax(keras.layers.Layer):
 
     :raises ValueError: If ``axis`` is not an ``int``, or is a ``bool``.
         Raised from ``__init__``.
+
+    ``supports_masking`` is left at ``False``, matching :class:`Sparsemax`.
+    Propagating a mask unchanged would be right only when ``axis`` is not the
+    masked axis; when it is, masked positions still enter the reduction and
+    the mask would have to zero them first. Applying a mask is the caller's
+    job, before the layer.
 
     Input shape:
         Arbitrary, rank 1 or higher. ``axis`` must address one of its

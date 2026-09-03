@@ -309,8 +309,9 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': [],
         'optional_params': {'axis': -1},
         'use_case': (
-            'Output layer whose Jacobian does not vanish the way softmax\'s '
-            'does, e.g. language-model heads (Kanai et al., 2018).'
+            'Output layer that escapes the rank-(d+1) softmax bottleneck '
+            'without adding parameters, e.g. language-model heads '
+            '(Kanai et al., 2018).'
         )
     },
     'silu': {
