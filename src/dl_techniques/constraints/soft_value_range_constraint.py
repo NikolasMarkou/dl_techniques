@@ -1,46 +1,49 @@
-"""
-Constrain weights to a value range with a smooth projection instead of a hard clip.
+"""Constrain weights to a value range with a smooth projection.
 
-`ValueRangeConstraint` projects a weight tensor onto the box `[min_value, max_value]`
-with `w' = max(min_value, min(w, max_value))`. That projection is exact, and it has
-one structural cost: it is piecewise constant outside the box. A weight the optimizer
-pushed past a bound is snapped back to the bound and every subsequent step sees the
-same value, so the information about how far outside it wanted to be is destroyed.
-In a WGAN critic, whose weights are clipped to a small box after every update, this
-is the documented failure mode: the clipped weights pile up on the two bound values
-and the critic degenerates towards a much simpler function than the box allows.
+Provides :class:`SoftValueRangeConstraint`, a drop-in alternative to
+:class:`~dl_techniques.constraints.value_range_constraint.ValueRangeConstraint`
+that replaces the hard clip with a monotone softplus composition.
+
+``ValueRangeConstraint`` projects onto the box with
+``w' = max(min_value, min(w, max_value))``. That projection is exact, and it is
+piecewise constant outside the box. A weight the optimizer pushed past a bound
+is snapped back to the bound, and every later step sees the same value, so how
+far outside it wanted to be is destroyed. In a WGAN critic, whose weights are
+clipped to a small box after every update, this is the documented failure mode:
+the clipped weights pile up on the two bound values and the critic degenerates
+toward a much simpler function than the box allows.
 
 This constraint applies the softplus composition from
-`dl_techniques.layers.activations.soft_value_range` instead:
+``dl_techniques.layers.activations.soft_value_range`` instead::
 
     sp(u) = softplus(beta * u) / beta
     w'    = lo + sp(w - lo)          # lower bound, always applied
     w'    = hi - sp(hi - w')         # upper bound, only when max_value is given
 
-The map is monotone, never crosses a bound, and is the identity in the interior up to
-a bias of at most `log(2) / beta`. Where the hard clip is flat, this one still moves:
-two weights at different distances outside the box land at different -- if very close
--- values, so their ordering survives the projection. The formula itself lives in one
-place, the activations module; this class is a thin role adapter over it and re-derives
-nothing.
+The map is monotone, never crosses a bound, and is the identity in the interior
+up to a bias of at most ``log(2) / beta``. Where the hard clip is flat, this one
+still moves: two weights at different distances outside the box land at
+different, if very close, values, so their ordering survives the projection.
+The formula lives in one place, the activations module; this class is a thin
+role adapter over it and re-derives nothing.
 
-Architecturally this is still a post-hoc projection, exactly like the hard clip. Keras
-applies it via `variable.assign(variable.constraint(variable))` after the optimizer has
-already applied the gradients, outside any gradient tape
-(`keras/src/optimizers/base_optimizer.py:447-452`). Nothing here is differentiated;
-the class shapes the value that the NEXT forward pass sees, not any gradient of the
-current step. For a differentiable use of the same map inside a forward pass, use
-`SoftValueRange` or `soft_value_range` from the activations module.
+This is still a post-hoc projection, exactly like the hard clip. Keras applies
+it through ``variable.assign(variable.constraint(variable))`` after the
+optimizer has applied the gradients, outside any gradient tape
+(``keras/src/optimizers/base_optimizer.py:447-452``). Nothing here is
+differentiated; the class shapes the value the next forward pass sees, not any
+gradient of the current step. For a differentiable use of the same map inside a
+forward pass, use ``SoftValueRange`` or ``soft_value_range`` from the
+activations module.
 
 References:
     - Arjovsky et al., 2017. Wasserstein GAN
       (https://arxiv.org/abs/1701.07875) -- the weight-clipping critic.
     - Gulrajani et al., 2017. Improved Training of Wasserstein GANs
-      (https://arxiv.org/abs/1704.00028) -- documents the pathologies of the hard
-      weight clip that motivate a smooth projection.
-    - Bertsekas, 1999. Nonlinear Programming (for Projected Gradient Methods, and for
-      the smooth exact-penalty reformulation of a box constraint).
-
+      (https://arxiv.org/abs/1704.00028) -- documents the pathologies of the
+      hard weight clip that motivate a smooth projection.
+    - Bertsekas, 1999. Nonlinear Programming (for Projected Gradient Methods,
+      and for the smooth exact-penalty reformulation of a box constraint).
 """
 
 import keras
@@ -58,62 +61,118 @@ from dl_techniques.layers.activations.soft_value_range import soft_value_range
 
 @register_dl_technique("dl_techniques.constraints.soft_value_range_constraint")
 class SoftValueRangeConstraint(keras.constraints.Constraint):
-    """Constrains weights to a value range with a smooth, monotone projection.
+    """Project weights into a value range with a smooth, monotone map.
 
-    A drop-in alternative to `ValueRangeConstraint` that replaces the hard clip
-    `max(lo, min(w, hi))` with the softplus composition
-    `w' = hi - sp(hi - (lo + sp(w - lo)))`, `sp(u) = softplus(beta * u) / beta`.
-    The projection is monotone and stays inside the box, but unlike the hard clip it
-    is not flat outside it: weights that land at different distances beyond a bound
-    are still mapped to different values, so their ordering is preserved rather than
-    collapsed onto the bound. Typical uses:
+    Replaces the hard clip ``max(lo, min(w, hi))`` with
+    ``w' = hi - sp(hi - (lo + sp(w - lo)))``, where
+    ``sp(u) = softplus(beta * u) / beta``. The projection is monotone and stays
+    inside the box, and unlike the hard clip it is not flat outside it: weights
+    landing at different distances beyond a bound are still mapped to different
+    values, so their ordering is preserved rather than collapsed onto the bound.
 
-    * WGAN critics, where hard clipping is known to pile weights onto the two bound
-      values and degenerate the critic
-    * Any bounded parameter (a slope, a temperature, a gate scale) where saturating
-      exactly at a bound stalls it there
-    * Keeping a positivity floor without a flat region at the floor
+    **Transfer function, against the hard clip:**
 
-    The math is not implemented here. `__call__` delegates to
-    `dl_techniques.layers.activations.soft_value_range`, which is the single
-    definition shared by the plain function, the `SoftValueRange` layer and this
+    .. code-block:: text
+
+            w'
+             |
+          hi +- - - - - - -,---=========   soft: approaches hi, never reaches
+             |           ,'                hard: flat AT hi
+             |          /
+             |         /                   identity for lo <= w <= hi,
+             |        /                    up to a bias of log(2)/beta
+             |      ,'
+          lo +====,'- - - - - - - - - -    soft: still rising below lo
+             |    |            |           hard: flat AT lo
+             +----+------------+---------> w
+                 lo           hi
+
+    **Pipeline:**
+
+    .. code-block:: text
+
+        weights
+           |
+           v
+        ┌────────────────────────────────────────┐
+        │ soft_value_range(...)                  │  the single shared
+        │   w' = lo + sp(w - lo)                 │  definition, in
+        │   w' = hi - sp(hi - w')  (two-sided)   │  layers/activations/
+        └──────────────────┬─────────────────────┘
+                           v
+        ┌────────────────────────────────────────┐
+        │ maximum(w', lo)                        │  ('enforce_hard_bounds')
+        │ minimum(w', hi)   (two-sided only)     │  makes the bounds exact
+        └──────────────────┬─────────────────────┘
+                           v
+                     constrained weights
+
+    Typical uses: WGAN critics, where hard clipping piles weights onto the two
+    bound values and degenerates the critic; any bounded parameter such as a
+    slope, a temperature or a gate scale where saturating exactly at a bound
+    stalls it there; and a positivity floor with no flat region at the floor.
+
+    The math is not implemented here. :meth:`__call__` delegates to
+    ``dl_techniques.layers.activations.soft_value_range``, the single definition
+    shared by the plain function, the ``SoftValueRange`` layer and this
     constraint.
 
+    :param min_value: Minimum allowed value for weights. Always applied.
+    :type min_value: float
+    :param max_value: Maximum allowed value for weights. ``None`` applies only
+        the smooth minimum, leaving no ceiling.
+    :type max_value: float or None
+    :param sharpness: Knee steepness of the softplus. Larger values sit closer
+        to a hard clip and shrink the interior bias, which is bounded by
+        ``log(2) / beta``. Must be strictly positive. The default of 50.0 gives
+        a two-sided interior bias of ``log(2) * (hi - lo) / 50``, for example
+        ``2.8e-04`` on ``[-0.01, 0.01]``.
+    :type sharpness: float
+    :param relative_sharpness: When ``True``,
+        ``beta = sharpness / (hi - lo)``, so ``sharpness`` is expressed in
+        interval widths and transfers unchanged between a ``[-0.01, 0.01]`` box
+        and a ``[-1, 1]`` box. Ignored, not an error, when ``max_value`` is
+        ``None``, where ``beta = sharpness`` in the weights' own units.
+    :type relative_sharpness: bool
+    :param enforce_hard_bounds: When ``True``, an exact ``keras.ops.maximum`` /
+        ``keras.ops.minimum`` guard runs after the smooth map, making
+        ``lo <= w' <= hi`` exact rather than merely bounded. See the note below.
+    :type enforce_hard_bounds: bool
+    :param kwargs: Must be empty. ``keras.constraints.Constraint`` defines no
+        ``__init__``, so any keyword forwarded here reaches ``object.__init__``
+        and raises ``TypeError``.
+
+    :ivar min_value: The coerced lower bound.
+    :vartype min_value: float
+    :ivar max_value: The coerced upper bound, or ``None``.
+    :vartype max_value: float or None
+    :ivar sharpness: The coerced knee steepness.
+    :vartype sharpness: float
+    :ivar relative_sharpness: Whether sharpness is in interval widths.
+    :vartype relative_sharpness: bool
+    :ivar enforce_hard_bounds: Whether the exact guard is applied.
+    :vartype enforce_hard_bounds: bool
+
+    :raises ValueError: If ``sharpness`` is not strictly positive, or if
+        ``min_value`` is greater than ``max_value`` when ``max_value`` is given.
+    :raises TypeError: If any keyword argument is supplied.
+
     Note:
-        This class deliberately does NOT carry a `clip_gradients` parameter.
-        `ValueRangeConstraint` has one, and it is a documented no-op that its own
-        test suite proves inert (`tests/test_constraints/test_value_range_constraint.py`
-        asserts both values give identical output). Constraints are applied outside
-        any gradient tape, so no such flag could do anything.
+        This class carries no ``clip_gradients`` parameter.
+        ``ValueRangeConstraint`` has one, and it is a no-op that its own test
+        suite proves inert. Constraints are applied outside any gradient tape,
+        so no such flag could do anything.
 
-    Args:
-        min_value (float): Minimum allowed value for weights. Always applied.
-        max_value (Optional[float]): Maximum allowed value for weights. If None, only
-            the smooth minimum is applied and there is no ceiling. Defaults to None.
-        sharpness (float): Knee steepness of the softplus. Larger values sit closer to
-            a hard clip and shrink the interior bias, which is bounded by
-            `log(2) / beta`. Must be strictly positive. Defaults to 50.0, which for a
-            two-sided range gives an interior bias of `log(2) * (hi - lo) / 50`, e.g.
-            `2.8e-04` on `[-0.01, 0.01]`.
-        relative_sharpness (bool): When True (the default), `beta = sharpness / (hi - lo)`,
-            so `sharpness` is expressed in interval widths and transfers unchanged
-            between a `[-0.01, 0.01]` box and a `[-1, 1]` box. Ignored -- not an error
-            -- when `max_value` is None, where `beta = sharpness` in the weights' own
-            units. Defaults to True.
-        enforce_hard_bounds (bool): When True (the default), an exact
-            `keras.ops.maximum` / `keras.ops.minimum` guard is applied AFTER the smooth
-            map, making `lo <= w' <= hi` exact rather than merely bounded. See below.
-            Defaults to True.
-        **kwargs: Additional keyword arguments passed to the parent class.
-
-    About `enforce_hard_bounds`:
-        `w' <= hi` is already structural -- `sp` is non-negative, so `hi - sp(...)`
-        cannot exceed `hi`. The LOWER bound is the one that can be missed. The two
-        branches are composed, so the upper branch reads the already-lifted value and
-        pulls it back down by up to `log(1 + exp(-beta * (hi - lo))) / beta`. That
-        undershoot is a property of the real-valued map, not of floating point, and it
-        is only visible at low sharpness. Measured on `[-1, 1]` over 20001 points
-        spanning +-50, maximum undershoot below `lo`:
+    Note:
+        On ``enforce_hard_bounds``: ``w' <= hi`` is already structural, since
+        ``sp`` is non-negative and ``hi - sp(...)`` cannot exceed ``hi``. The
+        lower bound is the one that can be missed. The two branches are
+        composed, so the upper branch reads the already-lifted value and pulls
+        it back down by up to
+        ``log(1 + exp(-beta * (hi - lo))) / beta``. That undershoot is a
+        property of the real-valued map, not of floating point, and it is only
+        visible at low sharpness. Measured on ``[-1, 1]`` over 20001 points
+        spanning +-50, maximum undershoot below ``lo``:
 
         ===================  ==================
         sharpness (relative) measured undershoot
@@ -126,24 +185,17 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
         50.0 (the default)   0.0 (exact)
         ===================  ==================
 
-        So at the default sharpness the guard changes nothing at all, and at
-        `sharpness=1.0` on `[-1, 1]` it changes output bits. Set it to False only if
-        you want the projection to be exactly the smooth map, undershoot included.
+        At the default sharpness the guard changes nothing; at
+        ``sharpness=1.0`` on ``[-1, 1]`` it changes output bits. Set it to
+        ``False`` only to get exactly the smooth map, undershoot included.
 
-        The guard costs nothing in this role. Keras applies a constraint via
-        `variable.assign(variable.constraint(variable))` after `_backend_apply_gradients`
-        and outside any gradient tape (`keras/src/optimizers/base_optimizer.py:447-452`),
-        so no gradient is ever taken through this call and there is no gradient for an
-        exact clamp to zero out. The flag WOULD matter for autodiff if someone called
-        this object inside a forward pass -- an exact clamp is flat outside the box,
-        which is the whole thing this map exists to avoid -- but that is not this
-        class's role. Use `SoftValueRange` (a layer) or `soft_value_range` (a plain
-        function) from `dl_techniques.layers.activations.soft_value_range` for the
-        differentiable forward-pass case.
-
-    Raises:
-        ValueError: If `sharpness` is not strictly positive, or if `min_value` is
-            greater than `max_value` when `max_value` is provided.
+        The guard costs nothing in this role, because no gradient is ever taken
+        through this call and there is no gradient for an exact clamp to zero
+        out. It would matter for autodiff if this object were called inside a
+        forward pass, since an exact clamp is flat outside the box, which is
+        what this map exists to avoid. For that case use ``SoftValueRange`` (a
+        layer) or ``soft_value_range`` (a plain function) from
+        ``dl_techniques.layers.activations.soft_value_range``.
 
     Example:
         >>> # A WGAN critic's weight box, smoothly projected
@@ -167,38 +219,34 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
             enforce_hard_bounds: bool = True,
             **kwargs: Any
     ) -> None:
-        """Initialize the constraint with its range and knee parameters.
+        """Validate the range and knee parameters and store them.
 
-        Args:
-            min_value (float): Minimum allowed value for weights.
-            max_value (Optional[float]): Maximum allowed value for weights, or None
-                for one-sided mode. Defaults to None.
-            sharpness (float): Knee steepness. Must be strictly positive.
-                Defaults to 50.0.
-            relative_sharpness (bool): Whether `sharpness` is expressed in interval
-                widths. Ignored when `max_value` is None. Defaults to True.
-            enforce_hard_bounds (bool): Whether to apply an exact bound guard after
-                the smooth map. Defaults to True.
-            **kwargs: Additional keyword arguments passed to parent class.
-
-        Raises:
-            ValueError: If sharpness is not strictly positive, or if min_value is
-                greater than max_value when max_value is provided.
+        :param min_value: Minimum allowed value for weights.
+        :type min_value: float
+        :param max_value: Maximum allowed value for weights, or ``None`` for
+            one-sided mode.
+        :type max_value: float or None
+        :param sharpness: Knee steepness; must be strictly positive.
+        :type sharpness: float
+        :param relative_sharpness: Whether ``sharpness`` is expressed in
+            interval widths. Ignored when ``max_value`` is ``None``.
+        :type relative_sharpness: bool
+        :param enforce_hard_bounds: Whether to apply the exact bound guard after
+            the smooth map.
+        :type enforce_hard_bounds: bool
+        :param kwargs: Must be empty; see the class docstring.
+        :raises ValueError: If ``sharpness`` is not strictly positive, or if
+            ``min_value`` is greater than ``max_value`` when ``max_value`` is
+            given.
+        :raises TypeError: If any keyword argument is supplied.
         """
         super().__init__(**kwargs)
 
-        # DECISION plan-2026-09-01T175024-5a32e889/D-003
-        # These two checks also exist in `_validated_bounds` in the activations
-        # module, and this class deliberately does NOT import that private sibling --
-        # a constraint reaching into another package's underscore-prefixed helper is
-        # a worse coupling than the copy. The copy is kept honest MECHANICALLY, not
-        # by a comment asking someone to remember: `TestValidation` in this class's
-        # test file parametrizes the invalid parameter sets and asserts that
-        # `SoftValueRangeConstraint(...)` and `soft_value_range(...)` reject exactly
-        # the same ones, so a one-sided edit reddens. Do NOT delete these checks in
-        # favour of letting `__call__` raise later: the house exemplar
-        # (`value_range_constraint.py`) raises at construction, and a constraint that
-        # only fails on the first optimizer step fails deep inside `fit`.
+        # DECISION plan-2026-09-01T175024-5a32e889/D-003: validate at
+        # construction, and keep these checks rather than importing the
+        # activations module's private `_validated_bounds`. TestValidation
+        # asserts this class and soft_value_range reject the same parameter
+        # sets, so a one-sided edit reddens. See D-003.
         if sharpness <= 0.0:
             raise ValueError(
                 f"sharpness must be strictly positive, got {sharpness}. It is the "
@@ -228,14 +276,12 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
     def __call__(self, weights: keras.KerasTensor) -> keras.KerasTensor:
         """Project weights into the value range with the smooth map.
 
-        Args:
-            weights (keras.KerasTensor): Input tensor of weights to be constrained.
-
-        Returns:
-            keras.KerasTensor: Tensor with constrained weights, of the same shape and
-                dtype as the input.
+        :param weights: Weight tensor to constrain.
+        :type weights: keras.KerasTensor
+        :return: The constrained weights, same shape and dtype as the input.
+        :rtype: keras.KerasTensor
         """
-        # The composition is NOT restated here. One definition, three roles.
+        # One definition, three roles: the composition is not restated here.
         constrained = soft_value_range(
             weights,
             min_value=self.min_value,
@@ -244,16 +290,11 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
             relative_sharpness=self.relative_sharpness,
         )
 
-        # DECISION plan-2026-09-01T175024-5a32e889/D-002
-        # The exact guard lives HERE and nowhere else. `soft_value_range` never
-        # clips, because a clamp in a forward pass reintroduces the flat region the
-        # map exists to remove; but a constraint is assigned outside any tape
-        # (base_optimizer.py:447-452), so the clamp is free in this role. What it buys
-        # is an exact lower bound: the composed upper branch can pull the value below
-        # `lo` by up to log(1 + exp(-beta*(hi-lo)))/beta -- measured 6.265e-01 at
-        # relative sharpness 1.0 on [-1, 1], and exactly 0.0 from sharpness 20 upward.
-        # See decisions.md D-002 for why the brief's "reintroduces zero gradients"
-        # framing is wrong: there is no gradient here to reintroduce.
+        # DECISION plan-2026-09-01T175024-5a32e889/D-002: the exact guard lives
+        # here and nowhere else. Do NOT add a clamp to soft_value_range, which
+        # runs in a forward pass and would regain the flat region. Here it is
+        # free (no tape) and buys an exact lower bound: measured undershoot
+        # 6.265e-01 at relative sharpness 1.0 on [-1, 1]. See D-002.
         if self.enforce_hard_bounds:
             constrained = keras.ops.maximum(constrained, self.min_value)
             if self.max_value is not None:
@@ -262,11 +303,11 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
         return constrained
 
     def get_config(self) -> Dict[str, Union[float, None, bool]]:
-        """Return the configuration of the constraint for serialization.
+        """Return the constructor arguments for serialization.
 
-        Returns:
-            Dict[str, Union[float, None, bool]]: Dictionary containing the five
-                configuration parameters needed to recreate this constraint.
+        :return: A dict holding the two bounds, ``sharpness``,
+            ``relative_sharpness`` and ``enforce_hard_bounds``.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -280,23 +321,23 @@ class SoftValueRangeConstraint(keras.constraints.Constraint):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'SoftValueRangeConstraint':
-        """Creates a constraint from its configuration dictionary.
+        """Rebuild a constraint from a config dict.
 
-        Args:
-            config (Dict[str, Any]): Dictionary containing configuration parameters.
-
-        Returns:
-            SoftValueRangeConstraint: A new instance initialized with the provided
-                configuration.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: dict
+        :return: A new constraint.
+        :rtype: SoftValueRangeConstraint
         """
         return cls(**config)
 
     def __repr__(self) -> str:
-        """Return string representation of the constraint.
+        """Return the constructor-like representation.
 
-        Returns:
-            str: String representation showing the constraint parameters. `max_value`
-                is omitted in one-sided mode, matching `ValueRangeConstraint`.
+        ``max_value`` is omitted in one-sided mode, matching
+        ``ValueRangeConstraint``.
+
+        :return: A string naming the bounds and the knee parameters.
+        :rtype: str
         """
         if self.max_value is not None:
             return (f"SoftValueRangeConstraint(min_value={self.min_value}, "

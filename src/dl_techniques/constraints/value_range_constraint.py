@@ -1,44 +1,33 @@
-"""
-Constrain weights to a specified value range after each update.
+"""Constrain weights to a value range with a hard clip.
 
-This constraint implements a hard, element-wise projection of a weight
-tensor onto a predefined feasible interval. It serves as a potent form of
-regularization by directly restricting the hypothesis space of the model's
-parameters. After each gradient update step performed by the optimizer, this
-constraint is applied to ensure that the weights remain within the specified
-bounds `[min_value, max_value]`.
+Provides :class:`ValueRangeConstraint`, which projects a weight tensor
+element-wise onto the interval ``[min_value, max_value]`` after every optimizer
+update.
 
-Architecturally, this operates as a post-hoc projection. If `W` represents
-the weight tensor after an optimizer update, the constraint computes a new
-tensor `W'` where each element `w'` is given by the clipping operation:
+The projection is::
 
-`w' = max(min_value, min(w, max_value))`
+    w' = max(min_value, min(w, max_value))
 
-This operation is equivalent to a projection onto the convex set defined by
-the hyperrectangle `[min_value, max_value]^d`, where `d` is the number of
-weights. This can be viewed as one half of a Projected Gradient Descent
-step, where the projection ensures the updated parameters satisfy the
-required constraints.
+That is a projection onto the convex hyperrectangle
+``[min_value, max_value]^d``, so applying it after each update makes the whole
+step a projected gradient descent step.
 
-The primary motivation for this technique is to enforce stability and
-incorporate prior knowledge. By preventing weights from growing
-indefinitely, it can mitigate the risk of exploding gradients and improve
-numerical stability, especially in deep or recurrent architectures.
-Furthermore, it allows for the direct enforcement of physical or logical
-constraints, such as non-negativity (`min_value=0`), which is crucial in
-models that represent physical quantities or perform tasks analogous to
-Non-negative Matrix Factorization (NMF).
+Restricting the hypothesis space this way keeps weights from growing
+indefinitely, which reduces the risk of exploding gradients and helps numerical
+stability in deep and recurrent architectures. It also encodes prior knowledge
+directly: ``min_value=0`` enforces non-negativity, which is what models of
+physical quantities and Non-negative Matrix Factorization need.
 
-A prominent application of this technique is in the training of Wasserstein
-Generative Adversarial Networks (WGANs), where weight clipping is used to
-enforce a Lipschitz constraint on the critic model, which is a necessary
-condition for the validity of the Wasserstein distance approximation.
+The best-known application is the Wasserstein GAN critic, where clipping the
+weights to a small box enforces the Lipschitz condition that the Wasserstein
+distance approximation requires. For that use see
+:class:`~dl_techniques.constraints.soft_value_range_constraint.SoftValueRangeConstraint`,
+whose smooth projection avoids the weight pile-up a hard clip produces.
 
 References:
     - Arjovsky et al., 2017. Wasserstein GAN
       (https://arxiv.org/abs/1701.07875)
     - Bertsekas, 1999. Nonlinear Programming (for Projected Gradient Methods).
-
 """
 
 import keras
@@ -56,24 +45,59 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.constraints.value_range_constraint")
 class ValueRangeConstraint(keras.constraints.Constraint):
-    """Constrains weights to be within specified minimum and maximum values.
+    """Clip weights element-wise into ``[min_value, max_value]``.
 
-    This constraint ensures that all weights in a layer stay within a specified range
-    by clipping values that fall outside the bounds. It can be used to enforce bounds
-    on weights, which can be helpful for:
+    Keras applies this after each optimizer update, so weights that left the
+    interval are snapped back to the nearest bound. Use it to prevent
+    vanishing or exploding gradients, to meet an architectural requirement, to
+    keep a layer numerically stable, or to enforce non-negative weights for an
+    NMF-like decomposition.
 
-    * Preventing vanishing/exploding gradients
-    * Implementing specific architecture requirements
-    * Ensuring numerical stability
-    * Enforcing non-negative weights (e.g., for NMF-like decompositions)
+    **Transfer function:**
 
-    Args:
-        min_value (float): Minimum allowed value for weights.
-        max_value (Optional[float]): Maximum allowed value for weights. If None,
-            only minimum constraint is applied. Defaults to None.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If min_value is greater than max_value when max_value is provided.
+            w'
+             |
+          hi +- - - - - -*==========      clipped at max_value
+             |          /                 (skipped when max_value is None)
+             |         /
+             |        /                   identity for lo <= w <= hi
+             |       /
+          lo +======*- - - - - - - -      clipped at min_value
+             |      |          |
+             +------+----------+--------> w
+                   lo         hi
+
+        The map is flat outside the interval, so how far a weight went past a
+        bound is discarded. SoftValueRangeConstraint keeps that ordering.
+
+    :param min_value: Minimum allowed value for weights. Always applied.
+    :type min_value: float
+    :param max_value: Maximum allowed value for weights. ``None`` applies only
+        the minimum, leaving no ceiling.
+    :type max_value: float or None
+    :param clip_gradients: Accepted and inert. Clipping is inherent to the
+        constraint operation, and constraints run outside any gradient tape, so
+        neither value changes the result.
+        ``tests/test_constraints/test_value_range_constraint.py`` asserts both
+        give identical output. The parameter is kept so existing configs still
+        deserialize.
+    :type clip_gradients: bool
+    :param kwargs: Must be empty. ``keras.constraints.Constraint`` defines no
+        ``__init__``, so any keyword forwarded here reaches ``object.__init__``
+        and raises ``TypeError``.
+
+    :ivar min_value: The coerced lower bound.
+    :vartype min_value: float
+    :ivar max_value: The coerced upper bound, or ``None``.
+    :vartype max_value: float or None
+    :ivar clip_gradients: The flag as passed, carried into the config.
+    :vartype clip_gradients: bool
+
+    :raises ValueError: If ``min_value`` is greater than ``max_value`` when
+        ``max_value`` is given.
+    :raises TypeError: If any keyword argument is supplied.
 
     Example:
         >>> # Constrain weights between 0.01 and 1.0
@@ -83,8 +107,8 @@ class ValueRangeConstraint(keras.constraints.Constraint):
         ...     kernel_constraint=constraint
         ... )
 
-        >>> # Enforce non-negative weights only with custom gradient clipping
-        >>> constraint = ValueRangeConstraint(min_value=0.0, clip_gradients=False)
+        >>> # Non-negative weights, with no ceiling
+        >>> constraint = ValueRangeConstraint(min_value=0.0)
         >>> layer = keras.layers.Dense(
         ...     units=32,
         ...     kernel_constraint=constraint
@@ -98,20 +122,19 @@ class ValueRangeConstraint(keras.constraints.Constraint):
             clip_gradients: bool = True,
             **kwargs: Any
     ) -> None:
-        """Initialize the constraint with minimum and optional maximum values.
+        """Validate and store the bounds.
 
-        Args:
-            min_value (float): Minimum allowed value for weights.
-            max_value (Optional[float]): Maximum allowed value for weights. If None,
-                only minimum constraint is applied. Defaults to None.
-            clip_gradients (bool): Whether to clip gradients during backpropagation to prevent
-                numerical instability. Defaults to True. Note: This parameter is kept for
-                API compatibility but doesn't affect the constraint behavior as clipping
-                is inherent to the constraint operation.
-            **kwargs: Additional keyword arguments passed to parent class.
-
-        Raises:
-            ValueError: If min_value is greater than max_value when max_value is provided.
+        :param min_value: Minimum allowed value for weights.
+        :type min_value: float
+        :param max_value: Maximum allowed value for weights, or ``None`` for no
+            ceiling.
+        :type max_value: float or None
+        :param clip_gradients: Accepted and inert; see the class docstring.
+        :type clip_gradients: bool
+        :param kwargs: Must be empty; see the class docstring.
+        :raises ValueError: If ``min_value`` is greater than ``max_value`` when
+            ``max_value`` is given.
+        :raises TypeError: If any keyword argument is supplied.
         """
         super().__init__(**kwargs)
 
@@ -130,29 +153,26 @@ class ValueRangeConstraint(keras.constraints.Constraint):
         )
 
     def __call__(self, weights: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply the constraint to weights by clipping values to the specified range.
+        """Clip the weights into the allowed range.
 
-        Args:
-            weights (keras.KerasTensor): Input tensor of weights to be constrained.
-
-        Returns:
-            keras.KerasTensor: Tensor with constrained weights clipped to the valid range.
+        :param weights: Weight tensor to constrain.
+        :type weights: keras.KerasTensor
+        :return: The weights clipped to the valid range, same shape and dtype.
+        :rtype: keras.KerasTensor
         """
-        # Apply minimum constraint
         constrained = ops.maximum(weights, self.min_value)
 
-        # Apply maximum constraint if specified
         if self.max_value is not None:
             constrained = ops.minimum(constrained, self.max_value)
 
         return constrained
 
     def get_config(self) -> Dict[str, Union[float, None, bool]]:
-        """Return the configuration of the constraint for serialization.
+        """Return the constructor arguments for serialization.
 
-        Returns:
-            Dict[str, Union[float, None, bool]]: Dictionary containing the configuration
-                parameters needed to recreate this constraint.
+        :return: A dict holding ``min_value``, ``max_value`` and
+            ``clip_gradients``.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -164,22 +184,22 @@ class ValueRangeConstraint(keras.constraints.Constraint):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'ValueRangeConstraint':
-        """Creates a constraint from its configuration dictionary.
+        """Rebuild a constraint from a config dict.
 
-        Args:
-            config (Dict[str, Any]): Dictionary containing configuration parameters.
-
-        Returns:
-            ValueRangeConstraint: A new instance of ValueRangeConstraint initialized
-                with the provided configuration.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: dict
+        :return: A new constraint.
+        :rtype: ValueRangeConstraint
         """
         return cls(**config)
 
     def __repr__(self) -> str:
-        """Return string representation of the constraint.
+        """Return the constructor-like representation.
 
-        Returns:
-            str: String representation showing the constraint parameters.
+        ``max_value`` is omitted in one-sided mode.
+
+        :return: A string naming the bounds and the inert flag.
+        :rtype: str
         """
         if self.max_value is not None:
             return (f"ValueRangeConstraint(min_value={self.min_value}, "
