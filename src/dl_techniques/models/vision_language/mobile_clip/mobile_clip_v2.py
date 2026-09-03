@@ -49,37 +49,13 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.clip_utils import compute_clip_logits
-# The image tower is a standalone backbone package, not a private component of
-# this model: `models/vision/fastvit/` owns the faithful timm `FastVit` MCi
-# transcription and is usable on its own. Its terminal `Dense(projection_dim)`
-# IS the CLIP image projection — do NOT stack another projection on top of it.
+# fastvit is a standalone backbone package, not private to this model; its
+# terminal Dense(projection_dim) is the CLIP image projection.
 from dl_techniques.models.vision.fastvit import FastVitImageEncoder
 
 # DECISION plan-2026-08-13T183738-24486492/D-001
-# DECISION plan-2026-08-14T135600-mcsplit/D-001  (amends the above: this used to
-# be a CROSS-package import from `models/mobile_clip_v2/`; the packages have
-# since been merged, so it is now an in-package one. The rule below is unchanged.)
-# The text tower is SHARED with v1 (`components.py`) rather than re-implemented.
-#
-# DO NOT re-implement a text transformer in this module, and do not copy
-# `MobileClipTextEncoder` here "so v2 stands on its own". Either move would
-# create a THIRD block->keep causal-mask adapter site, which SYSTEM.md:171
-# records as a mandatory trigger for promoting that adapter into a keep-polarity
-# `MaskFactory` variant — an unrelated refactor with its own blast radius.
-# See decisions.md D-001.
-#
-# WHY A SHARED IMPORT AND NOT A COPY: `MobileClipTextEncoder` owns one of
-# exactly TWO block->keep causal-mask adapter sites in `src/` (the other is
-# `layers/heads/vlm/factory.py`). Re-implementing the text tower here would
-# create that third site for no architectural gain: the layer is already
-# dimension-generic (MEASURED at 768/12/3072 and 512/8/2048) and already carries
-# the graph-safe `MaskFactory.create_causal_mask` path that `ops.tril` cannot
-# provide on this stack.
-#
-# Note that sharing it does NOT make v2 inherit v1's non-fidelity: v1's
-# deliberate `keras.applications` substitution (its own D-001) is confined to
-# the IMAGE branch in `components.py`. The text tower is a plain CLIP
-# transformer and is faithful for both.
+# DECISION plan-2026-08-14T135600-mcsplit/D-001: text tower is shared from
+# .components, never re-implemented or copied here -- a copy would open a third block-keep mask-adapter site. See decisions.md.
 from .components import MobileClipTextEncoder
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -96,10 +72,9 @@ TEXT_TOWER_NAME = "text_encoder"
 #: OpenAI CLIP's initial temperature: ``log(1 / 0.07)``.
 _DEFAULT_LOGIT_SCALE_INIT = math.log(1.0 / 0.07)
 
-#: Upper bound applied to ``exp(logit_scale)`` on every use. This is v1's
-#: convention (`models/vision_language/mobile_clip/mobile_clip_v1.py`) and OpenCLIP's, and it is
-#: NOT cosmetic: without it a diverging temperature produces `inf` logits and a
-#: `nan` contrastive loss with no other symptom.
+#: Upper bound applied to ``exp(logit_scale)`` on every use, matching v1 and
+#: OpenCLIP: without it a diverging temperature produces `inf` logits and a
+#: `nan` loss with no other symptom.
 _LOGIT_SCALE_MAX = 100.0
 
 #: Shared by every row of :attr:`MobileClipV2Model.MODEL_VARIANTS`.
@@ -107,23 +82,20 @@ DEFAULT_VOCAB_SIZE = 49408
 DEFAULT_CONTEXT_LENGTH = 77
 DEFAULT_IMAGE_SIZE = 256
 
-#: The reference text tower's FFN expansion. Used ONLY to fill
-#: ``text_config['intermediate_size']`` when a caller omits it — every tabulated
-#: row states the width as a literal, so the JSON oracle checks a transcription
-#: rather than agreeing with a re-derivation of itself.
+#: Fills ``text_config['intermediate_size']`` when a caller omits it; every
+#: tabulated row states the width as a literal instead.
 _TEXT_MLP_RATIO = 4
 
-#: Sub-dict keys `_validate_config` requires. Absent ones would otherwise
-#: surface as a bare `KeyError` from inside validation, or as a `TypeError`
-#: raised by the encoder several frames away from the mistake.
+#: Sub-dict keys `_validate_config` requires, checked up front so a missing
+#: one raises here rather than as a bare `KeyError` deep in a sub-layer.
 _REQUIRED_IMAGE_CONFIG_KEYS = ('variant', 'input_shape')
 _REQUIRED_TEXT_CONFIG_KEYS = (
     'vocab_size', 'max_seq_len', 'embed_dim', 'num_layers', 'num_heads',
 )
 
 #: `image_config` entries that arrive as tuples but come back from JSON as
-#: lists. Coerced on the way in so `get_config()` is a FIXED POINT and a
-#: restored model compares equal to the one it was saved from.
+#: lists; coerced on the way in so a restored model's config compares equal
+#: to the one it was saved from.
 _IMAGE_CONFIG_SEQUENCE_KEYS = (
     'input_shape', 'layers', 'embed_dims', 'mlp_ratios', 'token_mixers',
     'se_downsamples', 'pos_embs',
@@ -164,82 +136,90 @@ def _resolve_model_variant(variant: str) -> Dict[str, Any]:
 @register_dl_technique("dl_techniques.models.mobile_clip.mobile_clip_v2")
 class MobileClipV2Model(keras.Model):
     """
-    MobileCLIP2 dual encoder — FastViT (MCi) image tower + CLIP text tower.
+    MobileCLIP2 dual encoder: a FastViT (MCi) image tower plus the shared CLIP text tower.
 
-    The faithful MobileCLIP port (Faghri et al., 2025, arXiv:2508.20691). Pairs
-    the FastViT MCi image tower of :mod:`dl_techniques.models.vision.fastvit` with the
-    OpenCLIP-shaped text transformer of :mod:`.components` — the same one v1
-    uses — and adds the CLIP epilogue: L2-normalized features, a learnable
-    temperature, and the symmetric logits matrix.
+    Pairs the FastViT MCi image tower of :mod:`dl_techniques.models.vision.fastvit`
+    with the OpenCLIP-shaped text transformer of :mod:`.components` (the one
+    :class:`~.mobile_clip_v1.MobileClipModel` also uses), and adds the CLIP
+    epilogue: L2-normalized features, a learnable temperature, and the
+    symmetric logits matrix. Unlike v1, which substitutes a
+    ``keras.applications`` backbone for the image tower, this class uses the
+    real FastViT trunk end to end.
 
-    Its sibling :class:`~.mobile_clip_v1.MobileClipModel` is deliberately
-    non-faithful on the image side (it substitutes ``keras.applications``
-    backbones for the MCi tower under its own D-001) and is neither deprecated
-    nor changed by this class. See the package ``README.md`` §17.
+    Architecture:
 
-    **Architecture**:
-    ```
-    {'image': (B, 256, 256, 3)}      {'text': (B, 77)}
-              ↓                            ↓
-     FastVitImageEncoder          MobileClipTextEncoder
-              ↓                            ↓
-        (B, embed_dim)               (B, embed_dim)
-              ↓                            ↓
-        L2 Normalization            L2 Normalization
-              └────────── Similarity ──────┘
-                 scale = clip(exp(logit_scale), 0, logit_scale_max)
-    ```
+    .. code-block:: text
 
-    Model Variants:
-    --------------
-    - MobileCLIP2-S0/S2/S3/S4: the ``mobileclip2_s*`` rows, **non-causal** text
-      towers (their JSON configs set ``"no_causal_mask": true``).
-    - MobileCLIP-S3/S4: the earlier ``mobileclip_s3``/``mobileclip_s4`` rows,
-      **causal** text towers over the same image backbones.
+        {'image': [B,256,256,3]}          {'text': [B,77]}
+               │                                │
+               ▼                                ▼
+        FastVitImageEncoder            MobileClipTextEncoder
+               │                                │
+               ▼                                ▼
+          [B, embed_dim]                   [B, embed_dim]
+               │                                │
+          L2 normalize                     L2 normalize
+               └───────────────┬────────────────┘
+                                ▼
+                     logits = scale * sim(image, text)
+                     scale = clip(exp(logit_scale), 0, logit_scale_max)
 
-    That single flag is the only reason both families are tabulated — do NOT
-    "simplify" it away.
+    Model variants:
+
+    .. code-block:: text
+
+        name              causal text tower
+        mobileclip2_s0..s4      no
+        mobileclip_s3, s4       yes
+
+    That single flag is the only reason both families are tabulated.
 
     .. note::
-        **There is no separate image projection.** The image tower's terminal
-        ``Dense`` IS the CLIP image projection: MobileCLIP's open_clip configs
+        There is no separate image projection. The image tower's terminal
+        ``Dense`` is the CLIP image projection: MobileCLIP's open_clip configs
         set ``"timm_pool": "avg"`` with ``"timm_proj": null``, so the trunk is
-        instantiated at ``num_classes=embed_dim``. ``embed_dim`` is therefore
-        injected as ``projection_dim`` into both sub-configs and must never be
-        tabulated inside them. Stacking another projection on top would be a
-        second, unfaithful one.
+        instantiated at ``num_classes=embed_dim``. ``embed_dim`` is injected as
+        ``projection_dim`` into both sub-configs and must never be tabulated
+        inside them.
 
     .. note::
-        This class is architecture-only. No pretrained weights are ported and it
-        makes **no accuracy claim**; see ``README.md`` §16 (deviations X-1..X-5)
-        before quoting it against any published number.
+        This class is architecture-only. No pretrained weights are ported and
+        it makes no accuracy claim; see ``README.md`` deviations X-1..X-5
+        before quoting it against a published number.
 
-    Args:
-        embed_dim: Integer, width of the joint image-text embedding space. Both
-            towers project into it. Must be positive.
-        image_config: Dictionary of :class:`FastVitImageEncoder` constructor
-            keywords. Requires ``'variant'`` (an MCi name such as ``'mci0'``)
-            and ``'input_shape'``; may carry any tower override such as
-            ``'layers'`` or ``'drop_path_rate'``. ``projection_dim`` is injected
-            from ``embed_dim`` and must not appear here.
-        text_config: Dictionary of :class:`MobileClipTextEncoder` constructor
-            keywords. Requires ``'vocab_size'``, ``'max_seq_len'``,
-            ``'embed_dim'``, ``'num_layers'``, ``'num_heads'``;
-            ``'intermediate_size'`` is filled with ``4 * embed_dim`` when
-            omitted. ``projection_dim`` is injected, as above.
-        logit_scale_init: Float, initial value of the RAW ``logit_scale`` weight
-            (a log temperature). Defaults to ln(1/0.07) ≈ 2.66.
-        output_dict: Boolean, whether to return outputs as a dictionary.
-            Defaults to True.
-        logit_scale_max: Float, upper clip applied to ``exp(logit_scale)`` on
-            use. Defaults to 100.0.
-        image_encoder: An already-constructed image tower to install instead of
-            building one from ``image_config``. Used by :meth:`from_config`;
-            supplying it is what makes a non-default tower round-trip as itself.
-        text_encoder: An already-constructed text tower, as above.
-        variant: Optional variant name recorded for provenance. Set
-            automatically by :meth:`from_variant`.
-        **kwargs: Additional arguments for the Model base class.
+    :param embed_dim: Width of the joint image-text embedding space. Both
+        towers project into it. Must be positive.
+    :type embed_dim: int
+    :param image_config: :class:`FastVitImageEncoder` constructor keywords.
+        Requires ``'variant'`` (an MCi name such as ``'mci0'``) and
+        ``'input_shape'``; may carry any tower override such as ``'layers'``
+        or ``'drop_path_rate'``. ``projection_dim`` is injected from
+        ``embed_dim`` and must not appear here.
+    :type image_config: Dict[str, Any]
+    :param text_config: :class:`MobileClipTextEncoder` constructor keywords.
+        Requires ``'vocab_size'``, ``'max_seq_len'``, ``'embed_dim'``,
+        ``'num_layers'``, ``'num_heads'``; ``'intermediate_size'`` defaults to
+        ``4 * embed_dim`` when omitted. ``projection_dim`` is injected, as above.
+    :type text_config: Dict[str, Any]
+    :param logit_scale_init: Initial value of the raw ``logit_scale`` weight
+        (a log temperature). Defaults to ``ln(1/0.07) ≈ 2.66``.
+    :type logit_scale_init: float
+    :param output_dict: Whether to return outputs as a dictionary. Defaults
+        to ``True``.
+    :type output_dict: bool
+    :param logit_scale_max: Upper clip applied to ``exp(logit_scale)`` on use.
+        Defaults to ``100.0``.
+    :type logit_scale_max: float
+    :param image_encoder: An already-constructed image tower to install
+        instead of building one from ``image_config``. Used by
+        :meth:`from_config` so a non-default tower round-trips as itself.
+    :type image_encoder: Optional[FastVitImageEncoder]
+    :param text_encoder: An already-constructed text tower, as above.
+    :type text_encoder: Optional[MobileClipTextEncoder]
+    :param variant: Optional variant name recorded for provenance. Set
+        automatically by :meth:`from_variant`.
+    :type variant: Optional[str]
+    :param kwargs: Forwarded to the ``keras.Model`` base class.
 
     Input shape:
         Dictionary with keys:
@@ -255,10 +235,12 @@ class MobileClipV2Model(keras.Model):
         If output_dict=False: 5-tuple in that same key order, with None for
         anything absent.
 
-    Attributes:
-        image_encoder: FastVitImageEncoder instance.
-        text_encoder: MobileClipTextEncoder instance.
-        logit_scale: Learnable temperature, created in `build()`.
+    :ivar image_encoder: The FastVitImageEncoder instance.
+    :vartype image_encoder: FastVitImageEncoder
+    :ivar text_encoder: The MobileClipTextEncoder instance.
+    :vartype text_encoder: MobileClipTextEncoder
+    :ivar logit_scale: Learnable temperature, created in :meth:`build`.
+    :vartype logit_scale: keras.Variable
 
     Example:
         ```python
@@ -294,16 +276,9 @@ class MobileClipV2Model(keras.Model):
         expects already-normalized inputs and does not normalize internally.
     """
 
-    # PROVENANCE — one row per SUPPLIED JSON config file, keyed by that file's
-    # own name, so each row is a checkable transcription rather than a
-    # re-derivation. `use_causal_mask` is the NEGATION of the JSON's
-    # `no_causal_mask` field.
-    #
-    # TWO NAMING HAZARDS, both one nesting level apart:
-    #   * `text_config['embed_dim']` is the TEXT WIDTH, not the joint space.
-    #     The joint space is the row's top-level `embed_dim`.
-    #   * `image_config['variant']` ('mci0') is FastViT's kwarg name and is a
-    #     DIFFERENT "variant" from the model-level one ('mobileclip2_s0').
+    # One row per supplied JSON config file. `use_causal_mask` is the negation
+    # of the JSON's `no_causal_mask` field; `text_config['embed_dim']` is the
+    # text width, not the joint space, and `image_config['variant']` is FastViT's own name, not the model-level variant.
     MODEL_VARIANTS = {
         "mobileclip2_s0": {
             "embed_dim": 512,
@@ -424,9 +399,8 @@ class MobileClipV2Model(keras.Model):
             raise TypeError("text_config must be a dictionary")
 
         self.embed_dim = int(embed_dim)
-        # DEEP copies. A shallow `.copy()` would leave the nested sub-dicts
-        # shared with MODEL_VARIANTS, so mutating `model.image_config['layers']`
-        # would rewrite the class table for the whole process.
+        # Deep copies: a shallow one would share the nested sub-dicts with
+        # MODEL_VARIANTS, so mutating one instance would rewrite the class table.
         self.image_config = self._normalize_image_config(image_config)
         self.text_config = copy.deepcopy(dict(text_config))
         self.logit_scale_init = float(logit_scale_init)
@@ -434,9 +408,8 @@ class MobileClipV2Model(keras.Model):
         self.logit_scale_max = float(logit_scale_max)
         self.variant = None if variant is None else str(variant)
 
-        # `text_intermediate`'s old `None` default has no dict equivalent, so
-        # the fill is applied to the STORED copy, before `get_config()` can
-        # observe it. That way it round-trips instead of being re-derived.
+        # Filled on the stored copy, before get_config() can observe it, so it
+        # round-trips instead of being re-derived on load.
         self.text_config.setdefault(
             'intermediate_size',
             _TEXT_MLP_RATIO * int(self.text_config.get('embed_dim', 0)),
@@ -444,13 +417,8 @@ class MobileClipV2Model(keras.Model):
 
         self._validate_config()
 
-        # ---- CREATE both towers in __init__ (unbuilt) --------------------
-        # A tower passed in explicitly is installed as-is. `from_config` uses
-        # this route; the towers are NEVER substituted after construction,
-        # because Keras refuses a post-build sub-layer swap and a pre-build one
-        # leaves the discarded tower's variables reachable through tracking.
-        # Do NOT "simplify" this to always-build-then-swap because the configs
-        # now look self-sufficient — that breaks the reduced-tower round trip.
+        # Both towers are created unbuilt here and never substituted after
+        # construction: Keras refuses a post-build sub-layer swap.
         image_constructor_config = copy.deepcopy(self.image_config)
         text_constructor_config = copy.deepcopy(self.text_config)
 
@@ -480,16 +448,9 @@ class MobileClipV2Model(keras.Model):
             f"use_causal_mask={self.use_causal_mask}"
         )
 
-    # ------------------------------------------------------------------
-    # Read-only views over the two sub-configs.
-    #
-    # v1 has no equivalent; these exist because the scalars they expose are read
-    # by `_validate_config`, `get_build_config`, `compute_output_shape` and
-    # `summary`, and by ~15 test assertions. Without them each of those becomes
-    # a hand-written two-level dict lookup — which is where transcription errors
-    # get in. There is deliberately NO `dropout_rate` property: dropout is
-    # per-tower now, and a single accessor would have to pick one and would lie.
-    # ------------------------------------------------------------------
+    # Read-only views over the two sub-configs, used by validation, shape
+    # computation and summary. No `dropout_rate` property: dropout is
+    # per-tower, so a single accessor would have to pick one and would lie.
 
     @property
     def image_backbone(self) -> str:
@@ -668,13 +629,8 @@ class MobileClipV2Model(keras.Model):
         if text_shape is None:
             text_shape = (None, self.context_length)
 
-        # `built` is checked PER TOWER, not just on self. On a `.keras` load the
-        # towers arrive ALREADY BUILT (each carries its own build config) and
-        # `MobileClipTextEncoder.build` has no idempotence guard of its own —
-        # calling it a second time re-enters `LayerNormalization.build`, which
-        # tries to `add_weight` on a locked tracker and raises
-        # "You cannot add new elements of state to a layer that is already
-        # built". Do NOT "fix" that by editing the v1 text encoder.
+        # Checked per tower, not just on self: a `.keras` load restores each
+        # tower already built, and re-building one raises inside Keras.
         if not self.image_encoder.built:
             self.image_encoder.build(tuple(image_shape))
         if not self.text_encoder.built:

@@ -1,79 +1,24 @@
 """
-Qwen3-style text embedding and reranking towers: a shared transformer trunk read out
-either as a pooled vector or as a two-token relevance judgment.
+Qwen3-style text embedding and reranking towers: :class:`Qwen3EmbeddingModel`
+and :class:`Qwen3RerankerModel`, sharing a transformer trunk read out either
+as a pooled vector or as a two-token relevance judgment.
 
-Retrieval and reranking answer the same question at different budgets. An embedding
-model must reduce a passage to one vector *before* it knows what will be asked of
-it, so every document in a corpus can be encoded once and searched by inner product;
-the compression is the whole point and also the whole limitation. A reranker is
-allowed to read the query and the document together and spend a full forward pass
-per pair, so it can model interactions that no pair of independent vectors can
-represent. The two classes here share a trunk and differ only in the readout, which
-makes the trade explicit: one reads a hidden state, the other reads the language
-modelling head.
+An embedding model reduces a passage to one vector before it knows the
+query, so a corpus can be encoded once and searched by inner product. A
+reranker instead reads the query and document together in one forward pass
+and scores their match directly, at the cost of one pass per pair. The
+embedding tower pools the hidden state at the last non-padding position and
+attends bidirectionally, since nothing is predicted from the pooled vector.
+The reranker instead reads its own next-token distribution at the last
+position, restricted to the "yes"/"no" token ids, and attends causally,
+since it is doing next-token prediction. Position is encoded with learned
+absolute embeddings, not rotary; sequences longer than ``max_seq_len`` have
+no encoding to draw on.
 
-The embedding readout takes the hidden state at the last non-padding position rather
-than a prepended `[CLS]`. In a decoder-only model that position is the only one that
-has seen the entire sequence, which is the argument for the choice. The index is
-computed as `sum(attention_mask) - 1`, and that arithmetic assumes the padding is on
-the *right*: it counts real tokens rather than locating them, so a left-padded batch
-selects a position inside the padding and returns whatever that slot happens to hold.
-The gather itself is written with `take_along_axis` over an index broadcast to
-`(B, 1, D)` because the index rank must match the tensor's, not because a per-row
-scalar would be conceptually different.
-
-Two optional post-processing steps follow. `truncate_dim` slices the leading
-components of the vector, which is only meaningful under Matryoshka training — the
-property that a prefix of the vector is itself a usable embedding is created by the
-loss, not by the slice, so truncating an ordinarily-trained model degrades quality
-arbitrarily. L2 normalization projects to the unit sphere, after which inner product
-and cosine similarity coincide and a maximum-inner-product index answers cosine
-queries exactly. Note the order: truncation happens *before* normalization, so a
-truncated vector is a unit vector in its own subspace rather than a slice of a unit
-vector, which is the behaviour a downstream cosine search expects.
-
-The reranker scores a single prompt containing instruction, query and document, and
-converts the model's own next-token distribution into a probability. It reads the
-logits at the last non-padding position, extracts the two entries for the "yes" and
-"no" token ids, and softmaxes over just that pair:
-
-`score = softmax([logit_no, logit_yes])[1]`
-
-Restricting the softmax to two entries rather than the full vocabulary is what makes
-the number a calibrated binary probability instead of a quantity dominated by
-whatever else the model might have said. It also means the score depends on the
-tokenizer: `yes_token_id` and `no_token_id` default to 9891 and 2201, and pointing
-this model at a different vocabulary without changing them silently scores two
-unrelated tokens.
-
-**The two towers are deliberately masked differently, and the asymmetry is the
-point.** The reranker converts its own language-modelling head into a judgment, so
-it is a next-token prediction and is causal: `Qwen3RerankerLayer.call` builds the
-mask through `components.build_causal_attention_mask` — the same constructor
-`qwen3.py` and `qwen3_next.py` use — which OR-combines a lower-triangular mask with
-the caller's padding mask and returns ATTEND semantics. Before this was wired the
-head scored a position that had already attended to the tokens after it; perturbing
-a token at index 6 of a 12-token sequence moved every hidden state at index < 6 by
-up to 3.42e-01, and now moves them by exactly 0.0 while positions >= 6 still
-respond.
-
-`Qwen3EmbeddingLayer` stays **bidirectional on purpose** and forwards the caller's
-2D padding mask unchanged. Nothing is predicted from the pooled vector, so there is
-no target to leak; bidirectional attention is strictly more informative for an
-encoder, and it is what the strong open embedding models do. The one thing it costs
-is the usual justification for last-token pooling — in a bidirectional trunk every
-position has seen the whole sequence, so reading the last real one is a convention
-carried over from the decoder-only lineage rather than a requirement. It remains a
-reasonable convention (that position is the only one guaranteed to exist and to be
-non-padding for every row), but do not read it as evidence of causality.
-
-Position is encoded with *learned absolute* embeddings (`positional_learned` from
-the embedding factory), not the rotary embeddings used elsewhere in the Qwen family.
-Sequences longer than `max_seq_len` have no encoding to draw on. The trunk's
-attention, FFN and normalization types are all factory keys, so these classes
-describe a configurable transformer in the shape of the published models rather than
-a weight-compatible port; no pretrained weights are distributed and none of the
-published evaluation numbers should be expected from them.
+The trunk's attention, FFN and normalization types are all factory keys, so
+these classes describe a configurable transformer in the shape of the
+published models, not a weight-compatible port. No pretrained weights are
+distributed and no published evaluation number should be expected from them.
 
 References:
     - Zhang et al., 2025. Qwen3 Embedding: Advancing Text Embedding and Reranking
@@ -108,44 +53,68 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3EmbeddingLayer(keras.layers.Layer):
     """
-    Keras implementation of the Qwen3 Text Embedding model using factory components.
+    A bidirectional transformer that pools tokens into one embedding vector.
 
-    This layer implements a modern transformer-based text embedding architecture
-    using configurable components from the dl_techniques framework. It processes
-    tokenized text through multiple transformer layers and applies last-token pooling
-    with optional L2 normalization and Matryoshka Representation Learning (MRL).
+    Architecture:
 
-    **Intent**: Provide a reusable, configurable Keras Layer for text embedding
-    that leverages modern architectural components while maintaining full
-    serialization compatibility.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input Tokens -> Token Embeddings -> Positional Embeddings -> 
-    N × TransformerLayer -> Last Token Pooling -> Optional Truncation -> 
-    L2 Normalization -> Output Embedding
-    ```
+        input_ids, attention_mask   [B, S]
+                  │
+                  ▼
+        token + positional embeddings
+                  │
+                  ▼
+        N x TransformerLayer (bidirectional)
+                  │
+                  ▼
+        last-token pool          [B, hidden_size]
+                  │
+                  ▼
+        truncate to truncate_dim (optional, MRL)
+                  │
+                  ▼
+        L2 normalize (optional)
+                  │
+                  ▼
+        embedding                [B, embedding_dim]
 
-    **Mathematical Operation**:
-        embedding = normalize(hidden_state[:, last_token_idx, :truncate_dim])
+    ``last_token_idx = sum(attention_mask) - 1`` counts real tokens rather
+    than locating them, so it assumes right-padding: a left-padded batch
+    selects a position inside the padding. Truncation happens before
+    normalization, so a truncated vector is a unit vector in its own
+    subspace, which is what a downstream cosine search expects.
 
-    Where `last_token_idx` is determined from the attention mask.
-
-    Args:
-        vocab_size (int): Size of the vocabulary for token embeddings.
-        hidden_size (int): Dimension of the hidden representations throughout the model.
-        num_layers (int): Number of transformer layers to stack.
-        num_heads (int): Number of attention heads in each transformer layer.
-        intermediate_size (int): Size of the intermediate layer in FFN blocks.
-        max_seq_len (int): Maximum sequence length for positional embeddings.
-        normalize (bool): If True, applies L2 normalization to final embeddings.
-        truncate_dim (Optional[int]): If set, truncates embeddings to this dimension
-            for Matryoshka Representation Learning (MRL).
-        dropout_rate (float): Dropout rate applied throughout the model.
-        ffn_type (str): Type of FFN to use ('mlp', 'swiglu', 'geglu', etc.).
-        normalization_type (str): Type of normalization ('layer_norm', 'rms_norm', etc.).
-        attention_type (str): Type of attention mechanism to use.
-        **kwargs: Additional arguments for the base Layer class.
+    :param vocab_size: Size of the token vocabulary.
+    :type vocab_size: int
+    :param hidden_size: Width of the hidden representations throughout the
+        model.
+    :type hidden_size: int
+    :param num_layers: Number of transformer layers to stack.
+    :type num_layers: int
+    :param num_heads: Attention heads per transformer layer.
+    :type num_heads: int
+    :param intermediate_size: Width of the FFN's intermediate layer.
+    :type intermediate_size: int
+    :param max_seq_len: Maximum sequence length the positional embedding
+        supports.
+    :type max_seq_len: int
+    :param normalize: Whether to L2-normalize the final embedding.
+    :type normalize: bool
+    :param truncate_dim: If set, truncate the embedding to this many leading
+        dimensions (Matryoshka Representation Learning). Meaningful only
+        under Matryoshka-trained weights.
+    :type truncate_dim: Optional[int]
+    :param dropout_rate: Dropout rate applied throughout the model.
+    :type dropout_rate: float
+    :param ffn_type: FFN variant (``'mlp'``, ``'swiglu'``, ``'geglu'``, etc.).
+    :type ffn_type: str
+    :param normalization_type: Normalization variant (``'layer_norm'``,
+        ``'rms_norm'``, etc.).
+    :type normalization_type: str
+    :param attention_type: Attention mechanism variant.
+    :type attention_type: str
+    :param kwargs: Forwarded to the base ``Layer`` class.
 
     Input shape:
         A dictionary containing:
@@ -157,29 +126,22 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         `embedding_dimension` is `hidden_size` or `truncate_dim` if specified.
 
     Example:
-        ```python
-        # Create embedding layer
-        embedding_layer = Qwen3EmbeddingLayer(
-            vocab_size=32000,
-            hidden_size=1024,
-            num_layers=12,
-            num_heads=16,
-            intermediate_size=2816,
-            max_seq_len=8192,
-            truncate_dim=256
-        )
+        .. code-block:: python
 
-        # Process tokenized inputs
-        inputs = {
-            'input_ids': tf.constant([[1, 2, 3, 4, 0]]),  # With padding
-            'attention_mask': tf.constant([[1, 1, 1, 1, 0]])
-        }
-        embeddings = embedding_layer(inputs)  # Shape: (1, 256)
-        ```
-
-    Note:
-        This layer builds its sub-layers in the `build()` method following
-        modern Keras 3 patterns for proper serialization support.
+            embedding_layer = Qwen3EmbeddingLayer(
+                vocab_size=32000,
+                hidden_size=1024,
+                num_layers=12,
+                num_heads=16,
+                intermediate_size=2816,
+                max_seq_len=8192,
+                truncate_dim=256,
+            )
+            inputs = {
+                'input_ids': tf.constant([[1, 2, 3, 4, 0]]),
+                'attention_mask': tf.constant([[1, 1, 1, 1, 0]]),
+            }
+            embeddings = embedding_layer(inputs)  # shape (1, 256)
     """
 
     def __init__(
@@ -221,15 +183,8 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-020
-        # `dropout_rate` is forwarded here AND there is deliberately no second
-        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
-        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
-        # to the very same tensor on the next line, so forwarding it without
-        # removing that layer stacks two dropouts and gives an effective rate of
-        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
-        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
-        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
+        # DECISION plan-2026-08-18T140459-7991552f/D-020: forward dropout_rate
+        # here; do not add a second standalone Dropout layer -- stacking both gives an effective rate of 1-(1-p)^2. See decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
@@ -378,39 +333,59 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
 @register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3RerankerLayer(keras.layers.Layer):
     """
-    Keras implementation of the Qwen3 Reranker using factory components.
+    A causal transformer that scores a formatted query-document prompt as a
+    "yes"/"no" relevance judgment.
 
-    This layer implements a causal language model for text reranking by computing
-    the probability of generating "yes" tokens given query-document pairs formatted
-    as special prompts. It uses configurable transformer architecture components.
+    Architecture:
 
-    **Intent**: Provide a core, serializable Keras Layer for text reranking
-    that can be integrated into larger ranking and retrieval systems.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Formatted Prompt -> Token Embeddings -> Positional Embeddings ->
-    N × TransformerLayer (CAUSAL + padding mask) -> Language Modeling Head ->
-    Logits["no", "yes"] -> Softmax -> Score
-    ```
+        formatted prompt          [B, S]
+                  │
+                  ▼
+        token + positional embeddings
+                  │
+                  ▼
+        N x TransformerLayer (causal + padding mask)
+                  │
+                  ▼
+        language modelling head       -> logits [B, S, vocab]
+                  │
+                  ▼
+        logits at last position, [no_id, yes_id] only
+                  │
+                  ▼
+        softmax                       -> score [B]
 
-    **Mathematical Operation**:
-        score = Softmax(logits[last_token_idx, [no_id, yes_id]])[1]
+    Restricting the softmax to the two token ids, rather than the full
+    vocabulary, is what makes the result a calibrated probability instead
+    of a value dominated by whatever else the model might say.
 
-    Args:
-        vocab_size (int): Size of the vocabulary.
-        hidden_size (int): Hidden dimension throughout the model.
-        num_layers (int): Number of transformer layers.
-        num_heads (int): Number of attention heads.
-        intermediate_size (int): Size of the FFN intermediate layer.
-        max_seq_len (int): Maximum sequence length.
-        dropout_rate (float): Dropout rate applied throughout the model.
-        ffn_type (str): Type of FFN to use.
-        normalization_type (str): Type of normalization to use.
-        attention_type (str): Type of attention mechanism.
-        yes_token_id (int): Token ID for "yes" in the vocabulary.
-        no_token_id (int): Token ID for "no" in the vocabulary.
-        **kwargs: Additional arguments for the base Layer class.
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param hidden_size: Hidden dimension throughout the model.
+    :type hidden_size: int
+    :param num_layers: Number of transformer layers.
+    :type num_layers: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: Width of the FFN's intermediate layer.
+    :type intermediate_size: int
+    :param max_seq_len: Maximum sequence length.
+    :type max_seq_len: int
+    :param dropout_rate: Dropout rate applied throughout the model.
+    :type dropout_rate: float
+    :param ffn_type: FFN variant.
+    :type ffn_type: str
+    :param normalization_type: Normalization variant.
+    :type normalization_type: str
+    :param attention_type: Attention mechanism variant.
+    :type attention_type: str
+    :param yes_token_id: Vocabulary id of the "yes" token.
+    :type yes_token_id: int
+    :param no_token_id: Vocabulary id of the "no" token.
+    :type no_token_id: int
+    :param kwargs: Forwarded to the base ``Layer`` class.
 
     Input shape:
         A dictionary containing:
@@ -421,25 +396,29 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         A 1D tensor of shape `(batch_size,)` containing relevance scores
         between 0 and 1.
 
-    Example:
-        ```python
-        # Create reranker layer
-        reranker_layer = Qwen3RerankerLayer(
-            vocab_size=32000,
-            hidden_size=1024,
-            num_layers=12,
-            num_heads=16,
-            yes_token_id=9891,  # "yes" token ID
-            no_token_id=2201    # "no" token ID
-        )
+    Note:
+        Attention here is causal, built by
+        :func:`.components.build_causal_attention_mask`: this layer scores
+        its own next-token prediction, so a position must not attend to
+        tokens after it. :class:`Qwen3EmbeddingLayer` attends bidirectionally
+        instead, since it predicts nothing from the pooled vector.
 
-        # Process formatted prompts
-        inputs = {
-            'input_ids': tf.constant([[1, 2, 3, 4, 5]]),
-            'attention_mask': tf.constant([[1, 1, 1, 1, 1]])
-        }
-        scores = reranker_layer(inputs)  # Shape: (1,)
-        ```
+    Example:
+        .. code-block:: python
+
+            reranker_layer = Qwen3RerankerLayer(
+                vocab_size=32000,
+                hidden_size=1024,
+                num_layers=12,
+                num_heads=16,
+                yes_token_id=9891,
+                no_token_id=2201,
+            )
+            inputs = {
+                'input_ids': tf.constant([[1, 2, 3, 4, 5]]),
+                'attention_mask': tf.constant([[1, 1, 1, 1, 1]]),
+            }
+            scores = reranker_layer(inputs)  # shape (1,)
     """
 
     def __init__(
@@ -481,15 +460,8 @@ class Qwen3RerankerLayer(keras.layers.Layer):
             name='token_embeddings'
         )
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-020
-        # `dropout_rate` is forwarded here AND there is deliberately no second
-        # standalone `embedding_dropout` layer. Do NOT "restore" one: this call
-        # used to omit the kwarg and a separate Dropout(dropout_rate) was applied
-        # to the very same tensor on the next line, so forwarding it without
-        # removing that layer stacks two dropouts and gives an effective rate of
-        # 1-(1-p)^2 (0.19 for the shipped 0.1). Pinned by
-        # tests/test_models/test_qwen/test_embedding_dropout_applied_once.py.
-        # See D-020 in plans/plan-2026-08-18T140459-7991552f/decisions.md.
+        # DECISION plan-2026-08-18T140459-7991552f/D-020: forward dropout_rate
+        # here; do not add a second standalone Dropout layer -- stacking both gives an effective rate of 1-(1-p)^2. See decisions.md.
         self.positional_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=max_seq_len,
@@ -660,51 +632,55 @@ class Qwen3RerankerLayer(keras.layers.Layer):
 @register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3EmbeddingModel(keras.Model):
     """
-    High-level Keras Model for Qwen3 Text Embedding.
+    A `compile()`- and `fit()`-ready Keras Model wrapping :class:`Qwen3EmbeddingLayer`.
 
-    A thin `keras.Model` wrapper around `Qwen3EmbeddingLayer`. It defines
-    `__init__`, `call` and `get_config` and NOTHING ELSE: there are no
-    query/document helper methods, no instruction handling and no tokenizer.
-    Callers pass already-tokenized `input_ids`/`attention_mask` and prefix any
-    task instruction into the token ids themselves.
+    Defines `__init__`, `call` and `get_config` and nothing else: no
+    query/document helper methods, no instruction handling, no tokenizer.
+    Callers pass already-tokenized `input_ids`/`attention_mask` and prefix
+    any task instruction into the token ids themselves.
 
-    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
-    embedding layer. It abstracts nothing about tokenization; that claim stood
-    in this docstring until 2026-08-19 and was never implemented.
-
-    Args:
-        vocab_size (int): Size of the vocabulary for token embeddings.
-        hidden_size (int): Dimension of hidden representations.
-        num_layers (int): Number of transformer layers.
-        num_heads (int): Number of attention heads.
-        intermediate_size (int): Size of FFN intermediate layer.
-        max_seq_len (int): Maximum sequence length.
-        normalize (bool): Whether to L2-normalize embeddings.
-        truncate_dim (Optional[int]): Optional dimension for MRL.
-        dropout_rate (float): Dropout rate throughout the model.
-        ffn_type (str): Type of FFN to use.
-        normalization_type (str): Type of normalization.
-        attention_type (str): Type of attention mechanism.
-        **kwargs: Additional arguments for the base Model class.
+    :param vocab_size: Size of the token vocabulary.
+    :type vocab_size: int
+    :param hidden_size: Width of the hidden representations.
+    :type hidden_size: int
+    :param num_layers: Number of transformer layers.
+    :type num_layers: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: Width of the FFN's intermediate layer.
+    :type intermediate_size: int
+    :param max_seq_len: Maximum sequence length.
+    :type max_seq_len: int
+    :param normalize: Whether to L2-normalize embeddings.
+    :type normalize: bool
+    :param truncate_dim: Optional dimension for Matryoshka Representation
+        Learning.
+    :type truncate_dim: Optional[int]
+    :param dropout_rate: Dropout rate throughout the model.
+    :type dropout_rate: float
+    :param ffn_type: FFN variant.
+    :type ffn_type: str
+    :param normalization_type: Normalization variant.
+    :type normalization_type: str
+    :param attention_type: Attention mechanism variant.
+    :type attention_type: str
+    :param kwargs: Forwarded to the base ``Model`` class.
 
     Example:
-        ```python
-        model = Qwen3EmbeddingModel(
-            vocab_size=32000,
-            hidden_size=1024,
-            num_layers=12,
-            num_heads=16,
-            truncate_dim=256
-        )
+        .. code-block:: python
 
-        # Create sample tokenized inputs
-        inputs = {
-            'input_ids': tf.constant([[1, 2, 3, 4, 0]]),
-            'attention_mask': tf.constant([[1, 1, 1, 1, 0]])
-        }
-
-        embeddings = model(inputs)  # Shape: (1, 256)
-        ```
+            model = Qwen3EmbeddingModel(
+                vocab_size=32000,
+                hidden_size=1024,
+                num_layers=12,
+                num_heads=16,
+                truncate_dim=256,
+            )
+            inputs = {
+                'input_ids': tf.constant([[1, 2, 3, 4, 0]]),
+                'attention_mask': tf.constant([[1, 1, 1, 1, 0]]),
+            }
+            embeddings = model(inputs)  # shape (1, 256)
     """
 
     def __init__(
@@ -788,52 +764,55 @@ class Qwen3EmbeddingModel(keras.Model):
 @register_dl_technique("dl_techniques.models.qwen.qwen3_embeddings")
 class Qwen3RerankerModel(keras.Model):
     """
-    High-level Keras Model for Qwen3 Text Reranking.
+    A `compile()`- and `fit()`-ready Keras Model wrapping :class:`Qwen3RerankerLayer`.
 
-    A thin `keras.Model` wrapper around `Qwen3RerankerLayer`. It defines
-    `__init__`, `call` and `get_config` and NOTHING ELSE: there is no prompt
-    formatter and no method for processing query/document pairs. The caller is
-    responsible for building the "yes"/"no" prompt and tokenizing it, then
-    passing `input_ids`/`attention_mask`.
+    Defines `__init__`, `call` and `get_config` and nothing else: no prompt
+    formatter, no method for processing query/document pairs. The caller
+    builds the "yes"/"no" prompt and tokenizes it, then passes
+    `input_ids`/`attention_mask`.
 
-    **Intent**: To offer a `compile()`- and `fit()`-ready Keras Model around the
-    reranker layer. It is not an end-to-end reranking interface; that claim
-    stood in this docstring until 2026-08-19 and was never implemented.
-
-    Args:
-        vocab_size (int): Size of the vocabulary.
-        hidden_size (int): Hidden dimension throughout the model.
-        num_layers (int): Number of transformer layers.
-        num_heads (int): Number of attention heads.
-        intermediate_size (int): Size of FFN intermediate layer.
-        max_seq_len (int): Maximum sequence length.
-        dropout_rate (float): Dropout rate throughout the model.
-        ffn_type (str): Type of FFN to use.
-        normalization_type (str): Type of normalization.
-        attention_type (str): Type of attention mechanism.
-        yes_token_id (int): Token ID for "yes".
-        no_token_id (int): Token ID for "no".
-        **kwargs: Additional arguments for the base Model class.
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param hidden_size: Hidden dimension throughout the model.
+    :type hidden_size: int
+    :param num_layers: Number of transformer layers.
+    :type num_layers: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param intermediate_size: Width of the FFN's intermediate layer.
+    :type intermediate_size: int
+    :param max_seq_len: Maximum sequence length.
+    :type max_seq_len: int
+    :param dropout_rate: Dropout rate throughout the model.
+    :type dropout_rate: float
+    :param ffn_type: FFN variant.
+    :type ffn_type: str
+    :param normalization_type: Normalization variant.
+    :type normalization_type: str
+    :param attention_type: Attention mechanism variant.
+    :type attention_type: str
+    :param yes_token_id: Vocabulary id of the "yes" token.
+    :type yes_token_id: int
+    :param no_token_id: Vocabulary id of the "no" token.
+    :type no_token_id: int
+    :param kwargs: Forwarded to the base ``Model`` class.
 
     Example:
-        ```python
-        reranker = Qwen3RerankerModel(
-            vocab_size=32000,
-            hidden_size=1024,
-            num_layers=12,
-            num_heads=16,
-            yes_token_id=9891,
-            no_token_id=2201
-        )
+        .. code-block:: python
 
-        # Create sample formatted inputs
-        inputs = {
-            'input_ids': tf.constant([[1, 2, 3, 4, 5]]),
-            'attention_mask': tf.constant([[1, 1, 1, 1, 1]])
-        }
-
-        scores = reranker(inputs)  # Shape: (1,)
-        ```
+            reranker = Qwen3RerankerModel(
+                vocab_size=32000,
+                hidden_size=1024,
+                num_layers=12,
+                num_heads=16,
+                yes_token_id=9891,
+                no_token_id=2201,
+            )
+            inputs = {
+                'input_ids': tf.constant([[1, 2, 3, 4, 5]]),
+                'attention_mask': tf.constant([[1, 1, 1, 1, 1]]),
+            }
+            scores = reranker(inputs)  # shape (1,)
     """
 
     def __init__(

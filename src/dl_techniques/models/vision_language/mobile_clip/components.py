@@ -16,15 +16,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 # Backbone name resolution
 # ---------------------------------------------------------------------
-# DECISION plan_2026-06-16_5a05afc3/D-001: the official MobileCLIP variants name
-# image backbones (`mci0/mci1/mci2/vit_b16`) that DO NOT exist in
-# `keras.applications` (no MCi port, no ViT). The `ImageProjectionHead` begins
-# with `GlobalAveragePooling2D`, so the backbone MUST emit a 4D [B,H,W,C] feature
-# map — which rules out a token-output ViT. We therefore SUBSTITUTE real
-# keras.applications CNN backbones so the model builds and runs forward inference.
-# This is a deliberate semantic fix-forward (functional buildability over
-# weights-faithful MobileCLIP fidelity), NOT a faithful MCi/ViT port. Any string
-# that is already a valid keras.applications class name passes through unchanged.
+# DECISION plan_2026-06-16_5a05afc3/D-001: the real MobileCLIP backbones
+# (mci0/mci1/mci2/vit_b16) don't exist in keras.applications, so this substitutes real CNN backbones that emit a 4D feature map. Not a faithful port. See decisions.md.
 _BACKBONE_ALIASES: Dict[str, str] = {
     "mci0": "MobileNetV3Small",
     "mci1": "MobileNetV2",
@@ -449,24 +442,8 @@ class MobileClipTextEncoder(keras.layers.Layer):
             self.max_seq_len, self.embed_dim, self.dropout_rate,
             name='positional_embedding'
         )
-        # DECISION plan-2026-08-18T140459-7991552f/D-049
-        # `attention_norm_args` / `ffn_norm_args` carry the SAME
-        # `REFERENCE_NORM_EPSILON` as `self.layer_norm` below. Without them,
-        # `TransformerLayer._create_normalization_layer` reaches
-        # `layers/norms/factory.py`, which `setdefault`s `epsilon=1e-6`, so
-        # every one of the `2 * num_layers` norms in this tower ran at 1e-6
-        # while the single `ln_final` ran at torch's 1e-5. MEASURED at
-        # `num_layers=3`: six norms at 1e-06 and one at 1e-05 -- for
-        # `mobileclip2_s3` that is 24 wrong and 1 right, in a tower whose own
-        # D-028 anchor states the reference interface contract "applies to it
-        # at every construction site".
-        # WHAT NOT TO DO: do not fix this by changing
-        # `layers/norms/factory.py`'s 1e-6 default -- that factory is shared by
-        # every transformer in the repository and its default is not this
-        # port's business; and do not re-declare 1e-5 as a literal here, the
-        # constant has ONE definition (`layers/fastvit/reference.py`) on
-        # purpose. These two dicts are the per-site channel the factory already
-        # provides. See decisions.md D-049.
+        # DECISION plan-2026-08-18T140459-7991552f/D-049: pass REFERENCE_NORM_EPSILON
+        # explicitly here; the factory default of 1e-6 left 24 of 25 norms wrong at num_layers=3. See decisions.md.
         _norm_args = {'epsilon': REFERENCE_NORM_EPSILON}
         self.transformer_layers = [
             TransformerLayer(
@@ -481,18 +458,8 @@ class MobileClipTextEncoder(keras.layers.Layer):
                 name=f'transformer_layer_{i}'
             ) for i in range(self.num_layers)
         ]
-        # DECISION plan-2026-08-17T183311-79c63e38/D-028
-        # `epsilon` is EXPLICIT and is imported, not written as a literal.
-        # This is the `ln_final` of the OpenCLIP-shaped text tower that
-        # `mobile_clip_v2.py:229` calls "the faithful MobileCLIP port"'s text
-        # transformer, so it is a normalization layer IN the port and
-        # `layers/fastvit/reference.py`'s interface contract applies to it:
-        # PyTorch's `nn.LayerNorm` defaults to 1e-5, Keras' to 1e-3.
-        # WHAT NOT TO DO: do not drop the argument back (Keras' 1e-3 default is
-        # 100x the reference and is invisible to every shape assertion — it
-        # shipped wrong once already in 86 of 114 layers of the FastViT tower),
-        # and do not re-declare the value as a local `1e-5` literal; the
-        # constant has ONE definition on purpose. See decisions.md D-028.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028: epsilon is explicit and
+        # imported, not a literal; Keras' 1e-3 default is 100x the PyTorch reference and is invisible to every shape assertion. See decisions.md.
         self.layer_norm = layers.LayerNormalization(
             epsilon=REFERENCE_NORM_EPSILON, name='final_layer_norm'
         )
