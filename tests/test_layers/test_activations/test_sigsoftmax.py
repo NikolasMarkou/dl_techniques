@@ -1,18 +1,20 @@
 """Tests for the sigsoftmax activation functions.
 
-This module lands in two parts. Step 2 of plan-2026-09-03T085145-3384c4dc ships
-the independent float64 oracle and three arms: the closed-form comparison, the
-all-negative regression guard, and the not-plain-softmax mechanism arm. The
-``SigSoftmax`` layer arrives in step 3 and the remaining arms (dtype floor in
-both directions, serialization, gradients, XLA, factory, export contract) in
-step 5.
+This module lands in parts. Step 2 of plan-2026-09-03T085145-3384c4dc ships the
+independent float64 oracle and three arms: the closed-form comparison, the
+all-negative regression guard, and the not-plain-softmax mechanism arm. Step 3
+adds the ``SigSoftmax`` layer's construction, axis-validation, shape, config and
+wrapper-identity arms. The remaining arms (dtype floor in both directions,
+serialization, gradients, XLA, factory, export contract) arrive in step 5.
 """
 
 import numpy as np
 import keras
+import pytest
 from scipy.special import expit
 
 from dl_techniques.layers.activations.sigsoftmax import (
+    SigSoftmax,
     log_sigsoftmax,
     sigsoftmax,
 )
@@ -142,3 +144,114 @@ def test_is_not_plain_softmax() -> None:
     plain = keras.ops.convert_to_numpy(keras.ops.softmax(x))
 
     assert np.abs(y - plain).max() > 0.02
+
+
+# ---------------------------------------------------------------------
+# The layer. Step 3 arms only; the rest of the suite lands in step 5.
+# ---------------------------------------------------------------------
+
+
+class TestSigSoftmax:
+    """Construction, axis validation, shape, config and wrapper identity."""
+
+    def test_constructs_with_the_default_axis(self) -> None:
+        """The default axis is -1."""
+        assert SigSoftmax().axis == -1
+
+    def test_constructs_with_a_custom_axis(self) -> None:
+        """A supplied axis is stored unchanged, including a positive one."""
+        assert SigSoftmax(axis=-2).axis == -2
+        assert SigSoftmax(axis=0).axis == 0
+
+    def test_a_bool_axis_raises(self) -> None:
+        """``axis=True`` is rejected rather than silently read as ``axis=1``.
+
+        ``bool`` subclasses ``int``, so a bare ``isinstance(axis, int)`` check
+        accepts ``True`` and the layer normalises along axis 1.
+        """
+        with pytest.raises(ValueError, match="axis must be an integer"):
+            SigSoftmax(axis=True)
+
+    @pytest.mark.parametrize("bad_axis", ["1", 1.5, None])
+    def test_a_non_int_axis_raises(self, bad_axis) -> None:
+        """A non-integer axis is rejected by ``__init__``."""
+        with pytest.raises(ValueError, match="axis must be an integer"):
+            SigSoftmax(axis=bad_axis)
+
+    def test_an_out_of_range_axis_raises_from_call(self) -> None:
+        """``call`` range-checks the axis against the rank it actually sees."""
+        layer = SigSoftmax(axis=3)
+        x = np.zeros((2, 4), dtype="float32")
+
+        with pytest.raises(ValueError, match=r"out of range.*rank 2"):
+            layer(x)
+
+    def test_an_out_of_range_axis_raises_from_compute_output_shape(self) -> None:
+        """``compute_output_shape`` enforces the same range as ``call``.
+
+        Both read ``common.axis_is_in_range``. A symbolic build that skipped
+        this check would be told a shape the forward pass cannot produce.
+        """
+        layer = SigSoftmax(axis=-4)
+
+        with pytest.raises(ValueError, match=r"out of range.*rank 3"):
+            layer.compute_output_shape((2, 4, 5))
+
+    def test_compute_output_shape_answers_on_an_unbuilt_layer(self) -> None:
+        """The shape comes from stored config, with no built attributes read."""
+        layer = SigSoftmax(axis=-2)
+
+        assert not layer.built
+        assert layer.compute_output_shape((2, 4, 5)) == (2, 4, 5)
+
+    def test_compute_output_shape_matches_the_realised_forward_shape(self) -> None:
+        """The declared shape equals the shape the forward pass produces."""
+        layer = SigSoftmax(axis=-2)
+        x = np.random.default_rng(1).standard_normal((3, 4, 5)).astype("float32")
+
+        declared = layer.compute_output_shape(x.shape)
+        realised = keras.ops.convert_to_numpy(layer(x)).shape
+
+        assert declared == realised
+
+    def test_get_config_carries_axis_and_reconstructs(self) -> None:
+        """``axis`` survives ``get_config`` / ``from_config``."""
+        config = SigSoftmax(axis=-2).get_config()
+
+        assert config["axis"] == -2
+
+        rebuilt = SigSoftmax.from_config(config)
+
+        assert rebuilt.axis == -2
+
+    def test_the_layer_is_the_module_function(self) -> None:
+        """The layer output equals ``sigsoftmax``'s exactly, to 0.0.
+
+        Pins the layer as a wrapper. A second derivation inside ``call``
+        would drift from the function at float32 rounding scale and redden
+        here, since the bound is exact equality rather than a tolerance.
+        """
+        x = np.random.default_rng(2).standard_normal((8, 6)).astype("float32")
+
+        from_layer = keras.ops.convert_to_numpy(SigSoftmax()(x))
+        from_function = keras.ops.convert_to_numpy(sigsoftmax(x))
+
+        assert np.abs(from_layer - from_function).max() == 0.0
+
+    def test_axis_minus_two_normalises_along_that_axis(self) -> None:
+        """With ``axis=-2`` the rank-3 output sums to 1 along axis -2 only.
+
+        The last-axis sums are asserted to be away from 1 as well, so the arm
+        cannot pass for a layer that ignored ``axis`` and normalised the last
+        dimension. On this fixture the last-axis sums range over
+        [0.5502415, 1.8734096], so the measured deviation from 1 is 0.8734096
+        against a threshold of 0.1.
+        """
+        x = np.random.default_rng(3).standard_normal((2, 4, 5)).astype("float32")
+
+        y = keras.ops.convert_to_numpy(SigSoftmax(axis=-2)(x))
+
+        np.testing.assert_allclose(
+            y.sum(axis=-2), np.ones((2, 5)), atol=1e-6, rtol=0.0
+        )
+        assert np.abs(y.sum(axis=-1) - 1.0).max() > 0.1
