@@ -10,6 +10,8 @@ chains three MobileOne blocks to downsample an image by 4x before the
 first mixer block.
 
 References:
+    - Che et al. RepMixer: Representation Mixing for Efficient Vision
+      Transformers.
     - Tolstikhin et al., 2021. MLP-Mixer: An all-MLP Architecture for
       Vision.
     - Trockman & Kolter, 2022. Patches Are All You Need? (ConvMixer)
