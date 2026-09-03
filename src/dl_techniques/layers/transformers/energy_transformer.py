@@ -1,60 +1,32 @@
-"""
-Energy Transformer (ET) — Hopfield associative memory module + the ET block.
+"""The Energy Transformer block, its Hopfield memory module, and the optional weighted-
+adjacency projector, built by :class:`EnergyTransformer`, :class:`HopfieldNetwork`, and
+:class:`WeightedAdjacencyProjector`.
 
-Implements the modules of the Energy Transformer, Hoover, Liang, Pham, Panda, Strobelt,
-Zaki, Chau, Krotov, "Energy Transformer", NeurIPS 2023 (https://arxiv.org/abs/2302.07253).
+The block replaces the usual attention-then-FFN stack with explicit gradient descent on
+one scalar energy. Each step normalizes the token state, evaluates the negative gradient
+of `E(g) = E_ATT(g) + E_HN(g)` with respect to that normalized state, and adds it back to
+the token state:
 
-This module holds:
+.. code-block:: text
 
-- :class:`HopfieldNetwork` — the ET Hopfield / associative-memory module (eq. 5, 9). A
-  single tied ``(K, D)`` memory matrix, applied strictly per token.
-- :class:`WeightedAdjacencyProjector` — the optional trainable graph edge reweighting
-  (eq. 25 / App D.1): ``Â = Conv2D(X⊗X) ⊙ A'``, producing a finite per-head ``Ŵ`` that the
-  block hoists once per ``call()`` (Branch A) into ``EnergyAttention``.
-- :class:`EnergyTransformer` — the ``T``-step energy-descent block (eq. 6, alg. 1; eq. 27
-  for the optional noise). It composes :class:`HopfieldNetwork` with ``EnergyLayerNorm``
-  (``layers/norms/energy_layer_norm.py``) and ``EnergyAttention``
-  (``layers/attention/energy_attention.py``).
+    for t in 1..T:
+        g      = EnergyLayerNorm(x)
+        update = attn.update(g) + hopfield.update(g)   # == -dE/dg
+        x      = x + alpha * update
 
-Architecture (the ET block; the Hopfield module is the right-hand branch)::
+Every gradient is hand-coded in closed form with `keras.ops` (no autodiff in this
+package). `HopfieldNetwork` replaces the usual feed-forward block: one tied `(K, D)`
+memory matrix applied per token, with no bias and no independent up/down projections.
+`WeightedAdjacencyProjector` is an optional trainable reweighting of a graph adjacency,
+consumed by `EnergyAttention`.
 
-    x  (B, N, D)
-    |
-    +--> for t in 1..T:
-    |        g = EnergyLayerNorm(x)                     # (B, N, D)
-    |
-    |        E(g) = E_ATT(g)          +   E_HN(g)       # one scalar per sample
-    |                  |                     |
-    |          EnergyAttention          HopfieldNetwork
-    |        (token MIXING; eq. 3-4)   (per-token; eq. 5)
-    |                  |                     |
-    |              -dE_ATT/dg           -dE_HN/dg
-    |                  \\_______   _______/
-    |                          \\ /
-    |                        update  == -dE/dg   (the DESCENT direction)
-    |                          |
-    |        x = x + alpha * update                     # eq. 6: tau dx/dt = -dE/dg
-    |
-    v
-    x  (B, N, D)
-
-**Duck-typed convention (NOT an ABC).** :class:`HopfieldNetwork` and ``EnergyAttention``
-both expose the same trio — ``energy(g, ...) -> (B,)`` / ``update(g, ...) -> (B, N, D)`` /
-``call(...) -> update(...)`` — and the block consumes exactly that. Two implementors and
-one consumer earn the *convention*, not an inheritance hierarchy.
-
-**No autodiff in src/.** Every gradient here is hand-coded in closed form with
-``keras.ops`` only (``keras.ops.grad`` does not exist in keras 3.8, and a backend-specific
-autodiff tape is forbidden in ``src/`` — decisions.md D-001). Correctness rests entirely
-on the autodiff oracle test ``test_gradient_oracle`` in
-``tests/test_layers/test_transformers/test_energy_transformer.py``.
+A caller who wants the energy trace back (`return_energy=True`) gets it in float32 even
+under a mixed-precision policy, because a realistic trace magnitude overflows float16; a
+head consuming that trace must itself be built with `dtype='float32'`.
 
 References:
-    - Hoover et al., "Energy Transformer", NeurIPS 2023, arXiv:2302.07253, eq. (5), (9).
-    - Ramsauer et al., "Hopfield Networks is All You Need", ICLR 2021 (the ``'softmax'``
-      / modern-Hopfield energy). NOTE: this is NOT ``layers/attention/hopfield_attention.py``,
-      which implements Ramsauer's *attention* (separate Q/K/V Dense projections) and is a
-      completely different mechanism.
+    - Hoover et al., "Energy Transformer", NeurIPS 2023. (https://arxiv.org/abs/2302.07253)
+    - Ramsauer et al., "Hopfield Networks is All You Need", ICLR 2021.
 """
 
 import math
@@ -68,57 +40,39 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 
-# DECISION plan_2026-07-13_57c9833e/D-004
-# These are DIRECT imports of the three CONCRETE classes, deliberately NOT
-# `create_normalization_layer(...)` / `create_attention_layer(...)` factory calls. Do NOT
-# "improve" this into factory composition. `EnergyTransformer` does not consume these as
-# generic `keras.layers.Layer`s — it calls their `energy(g, ...)` / `update(g, ...)` pair,
-# which is a duck-typed convention private to this feature and is NOT part of any Keras
-# layer contract and NOT guaranteed by any factory type. A factory returns a generic
-# layer; calling `.energy()` on it is an unchecked duck-type that would raise
-# `AttributeError` at runtime for any of the other 30 registered attention types (or 16
-# norm types). Precedent for reuse-by-direct-import in this package:
-# `ideogram4_block.py:36-46` direct-imports RMSNorm / SwiGLUFFN / Ideogram4Attention.
-# The factory registrations of `EnergyLayerNorm` ('energy_layer_norm') and
-# `EnergyAttention` ('energy') still exist and are still correct — they are there for
-# THIRD-PARTY reuse, not for this block's own composition. See decisions.md D-004.
+# DECISION plan_2026-07-13_57c9833e/D-004: direct imports of the concrete norm/attention
+# classes, not factory calls -- this block calls their energy()/update() duck-typed pair,
+# which a factory-returned generic Layer does not guarantee. See decisions.md.
 from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm
 from dl_techniques.layers.attention.energy_attention import EnergyAttention
 
-# The "reduce in AT LEAST float32" rule (D-009). IMPORTED, not re-implemented: the dtype
-# rule must have exactly ONE definition, or the two ET modules drift apart the first time
-# one of them is fixed. See decisions.md D-009.
+# Imported, not re-implemented, so the "reduce in at least float32" rule has one definition.
 from dl_techniques.layers.attention.energy_attention import _mask_dtype, _token_keep
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# The ONLY supported Hopfield activations. See the D-005 anchor in `__init__` for why
-# `'power'` is deliberately absent.
+# The only supported Hopfield activations. See the D-005 anchor in HopfieldNetwork.__init__.
 _VALID_ACTIVATIONS = ('relu', 'softmax')
 
 
 @register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class HopfieldNetwork(keras.layers.Layer):
-    """Energy Transformer Hopfield / associative-memory module (tied weights, bias-free).
+    """Energy Transformer Hopfield / associative-memory module: tied weights, no bias.
 
-    **Intent**: expose a scalar per-token energy ``E_HN(g)`` together with its exact
-    closed-form negative gradient, so that an ``EnergyTransformer`` block can perform
-    *provable gradient descent* on ``E_ATT + E_HN``. This is the paper's analog of the
-    feed-forward MLP, but it is **not an MLP**.
+    Exposes a scalar per-token energy `E_HN(g)` together with its exact closed-form
+    negative gradient, so an `EnergyTransformer` block can perform gradient descent on
+    `E_ATT + E_HN`. This is the paper's analog of the feed-forward block, but it is not an
+    MLP: one tied `(K, D)` matrix `xi` is used in both directions (up-project, then
+    down-project by its transpose), there is no bias, and the activation is the
+    derivative of the energy's integrand, not a pointwise nonlinearity between two layers.
+    It is not registered in the FFN factory for the same reason.
 
-    # DECISION plan_2026-07-13_57c9833e/D-002
-    This layer is deliberately **NOT registered in the FFN factory** (``ffn/factory.py``),
-    and must not be "helpfully" added to ``create_ffn_layer``. It is not FFN-shaped: there
-    is ONE tied ``(K, D)`` matrix ``xi`` used in BOTH directions (up-project, then
-    down-project by its transpose) — not independent up/down projections — there is **no
-    bias**, and its ``activation`` is not a pointwise nonlinearity applied *between* two
-    layers: it is ``r = G'``, the DERIVATIVE of the energy's integrand ``G``. Registering
-    it as an FFN type would misrepresent an associative memory as an MLP and would invite
-    callers to swap it for a real FFN, silently destroying the descent guarantee (an MLP
-    is not the gradient of any energy this block reports). See decisions.md D-002.
+    # DECISION plan_2026-07-13_57c9833e/D-002: not registered in the FFN factory --
+    # registering an associative memory as an FFN type would invite swapping it for a
+    # real FFN and silently destroying the descent guarantee. See decisions.md.
 
-    **Mathematics** (notation: ``B``=batch, ``N``=tokens, ``D``=``dim``, ``K``=``hopfield_dim``):
+    Mathematics (`B`=batch, `N`=tokens, `D`=`dim`, `K`=`hopfield_dim`):
 
     .. code-block:: text
 
@@ -126,10 +80,9 @@ class HopfieldNetwork(keras.layers.Layer):
         E_HN    = - sum_n sum_k G(h_{n k})       where  G' = r
         -dE_HN/dg_{n d} = sum_k xi_{k d} r(h_{n k})           # (B, N, D)
 
-    Each activation carries **both** an energy and its matching gradient factor ``r``.
-    They are a consistent pair by construction; pairing one activation's energy with the
-    other's gradient is a SILENT correctness break (the layer still runs, still trains,
-    still emits finite outputs — and the energy simply stops descending):
+    Each activation carries a matched energy and gradient factor `r`. Pairing one
+    activation's energy with the other's gradient factor is a silent break: the layer
+    still runs and still trains, but the energy stops descending.
 
     .. code-block:: text
 
@@ -138,62 +91,36 @@ class HopfieldNetwork(keras.layers.Layer):
         'relu'       relu(h)                    -0.5 * sum_{n,k} relu(h_{n k})^2
         'softmax'    softmax_k(beta * h)_{n k}  -(1/beta) * sum_n logsumexp_k(beta*h_{n k})
 
-    Check: ``d/dh [-0.5 relu(h)^2] = -relu(h)``, so ``-dE/dh = relu(h) = r``.
-    Check: ``d/dh [-(1/b) logsumexp_k(b h)] = -softmax_k(b h)``, so ``-dE/dh = r``.
+    In the `'softmax'` case both the energy's `logsumexp` and the gradient's softmax run
+    over the memory axis `k`, never the token axis `n`.
 
-    In the ``'softmax'`` case ``G`` is **not separable per-**``k``: its energy is a
-    ``logsumexp`` over the **MEMORY** axis ``k``, not a sum of per-memory terms. The
-    softmax is likewise over the MEMORY axis ``k``, **never** over the token axis ``n``.
+    Every token is processed independently, so this layer takes no `attention_mask`: a
+    token cannot influence any other token, and only `EnergyAttention` mixes tokens.
 
-    **NO TOKEN MIXING.** Every token is processed independently (``h`` depends only on
-    ``g[:, n, :]``). Consequently this layer takes **no** ``attention_mask``: masking is
-    meaningless here, since a token cannot influence any other token. Only
-    ``EnergyAttention`` mixes tokens, and only it accepts a mask.
+    Note:
+        Standalone use outside `EnergyTransformer` needs manual masking. `call()` takes no
+        `mask` keyword and `supports_masking` is `False`, so a Keras-propagated mask (for
+        example from an upstream `Embedding(mask_zero=True)`) is dropped with a warning,
+        not honoured. A dropped PAD token is not silently harmless here: `mask_zero=True`
+        emits a real, non-zero embedding row for id 0 and marks it as metadata only, so an
+        unmasked PAD token gets a real update of the same order of magnitude as a real
+        token. Call `update(g, mask=keep)` / `energy(g, mask=keep)` with an explicit
+        rank-2 `(B, N)` keep, or use it inside `EnergyTransformer`, which already does.
 
-    **STANDALONE MASKING TRAP — read this before using the layer outside a block.**
-    ``call()`` takes **no** ``mask`` keyword and ``supports_masking`` is **False** (the Keras
-    default; deliberately not raised). ``energy()`` and ``update()`` DO take a ``mask``, but
-    Keras only injects masks into ``call()``. Consequences:
-
-    * **Inside** ``EnergyTransformer``: **SAFE.** The block never relies on Keras injection —
-      it computes the per-token keep itself (``_hopfield_token_mask``) and passes it
-      EXPLICITLY into ``self.hopfield.energy(..., mask=...)`` and ``.update(..., mask=...)``.
-    * **Standalone, e.g. ``Embedding(mask_zero=True) -> HopfieldNetwork``: a TRAP.** Keras
-      emits a ``UserWarning`` (*"was passed an input with a mask attached"*) and **drops the
-      mask**. It is worth being precise about why that MATTERS, because the intuition "PAD
-      tokens are zeros, so they contribute nothing" is FALSE here (mechanism verified;
-      magnitudes are init/seed/width-dependent, so none is quoted): ``mask_zero=True`` does
-      **not** zero the PAD vector — it emits the id-0 embedding row like any other row (a
-      real, NON-zero vector) and attaches the mask as **metadata only**. With the metadata
-      dropped, a PAD token is just a token: it gets a real, non-zero update of the SAME ORDER
-      OF MAGNITUDE as a real token's. Nothing errors; the output is finite and silently
-      polluted. Either **mask by hand** (call ``update(g, mask=keep)`` / ``energy(g,
-      mask=keep)`` yourself with an explicit rank-2 ``(B, N)`` keep), or use the
-      ``EnergyTransformer`` block, which already does. Do NOT "fix" this by flipping
-      ``supports_masking = True`` without ALSO adding a ``mask`` parameter to ``call()`` —
-      that combination silences the warning while still dropping the mask, which is strictly
-      worse than today (F-02).
-
-    **SIGN DISCIPLINE.** :meth:`update` returns ``-dE/dg`` — the **descent direction**,
-    NOT the gradient. A consumer therefore *adds* ``step_size * update``. Do not "fix"
-    this sign: flipping it silently turns the block's dynamics into energy *ascent*, which
-    still runs and still produces finite outputs.
-
-    **Duck-typed convention (NOT an ABC).** This layer and ``EnergyAttention`` both expose
-    the trio ``energy(g) -> (B,)`` / ``update(g) -> (B, N, D)`` / ``call(...) -> update(...)``.
-    Two implementors and one consumer earn the *convention*, not a base class or a
-    ``Protocol``.
+    :meth:`update` returns `-dE/dg`, the descent direction, not the gradient — a consumer
+    adds `step_size * update`. This layer and `EnergyAttention` both expose the same
+    duck-typed trio, `energy(g) -> (B,)` / `update(g) -> (B, N, D)` / `call(...) ->
+    update(...)`, by convention rather than a shared base class.
 
     :param dim: Token embedding dimension ``D``.
     :type dim: int
     :param hopfield_dim: Number of stored memories ``K`` (the rows of ``xi``).
     :type hopfield_dim: int
-    :param activation: Energy/gradient pair to use — ``'relu'`` (default; the paper's
-        config for BOTH its image and graph headline models) or ``'softmax'`` (the modern
-        Hopfield energy).
+    :param activation: Energy/gradient pair — ``'relu'`` (default, the paper's config for
+        both its headline models) or ``'softmax'`` (the modern Hopfield energy).
     :type activation: str
-    :param hopfield_beta: Inverse temperature of the ``'softmax'`` branch. **Read only by
-        that branch**; ignored by ``'relu'``. Defaults to ``1.0``.
+    :param hopfield_beta: Inverse temperature of the ``'softmax'`` branch, ignored by
+        ``'relu'``. Defaults to ``1.0``.
     :type hopfield_beta: float
     :param kernel_initializer: Initializer for ``xi``. Defaults to
         ``TruncatedNormal(stddev=0.02)`` (the paper's ``N(0, 0.02)``).
@@ -208,8 +135,8 @@ class HopfieldNetwork(keras.layers.Layer):
     Output shape:
         Identical to the input shape — ``(batch, num_tokens, dim)``.
 
-    Attributes:
-        xi: The tied, bias-free memory matrix, shape ``(hopfield_dim, dim)`` == ``(K, D)``.
+    :ivar xi: The tied, bias-free memory matrix, shape ``(hopfield_dim, dim)``.
+    :vartype xi: keras.Variable
 
     Example:
         >>> layer = HopfieldNetwork(dim=64, hopfield_dim=256)
@@ -243,15 +170,8 @@ class HopfieldNetwork(keras.layers.Layer):
                 f"hopfield_dim must be a positive integer, got {hopfield_dim}"
             )
 
-        # DECISION plan_2026-07-13_57c9833e/D-005
-        # `'power'` (r = relu(h)^(p-1), G = relu(h)^p / p) is deliberately NOT implemented
-        # and must NOT be added speculatively. It has ZERO call sites, and BOTH of the
-        # paper's headline configurations (image ET-Full, graph ET) use `'relu'`. It is a
-        # ~4-line additive extension (one more `r` branch, one more `E` branch, one more
-        # `power` ctor arg) if a caller ever genuinely needs it — at which point it also
-        # earns a gradient-oracle parametrization. Adding an unexercised third
-        # energy/gradient PAIR now would ship an untested descent guarantee.
-        # See decisions.md D-005.
+        # DECISION plan_2026-07-13_57c9833e/D-005: 'power' has no call sites and no gradient-
+        # oracle coverage; both paper headline configs use 'relu'. See decisions.md.
         if activation not in _VALID_ACTIVATIONS:
             raise ValueError(
                 f"activation must be one of {set(_VALID_ACTIVATIONS)}, got "
@@ -302,9 +222,8 @@ class HopfieldNetwork(keras.layers.Layer):
                 f"Input feature dimension {feature_dim} does not match dim={self.dim}"
             )
 
-        # ONE matrix, used in BOTH directions (up-project via `xi`, down-project via its
-        # transpose). NO BIAS, by construction: the paper's energy E_HN is defined without
-        # one, and a bias would not be expressible in the closed-form gradient below.
+        # One matrix, used in both directions (up-project via xi, down-project via its
+        # transpose). No bias: the closed-form gradient below has no term for one.
         self.xi = self.add_weight(
             name="xi",
             shape=(self.hopfield_dim, self.dim),   # (K, D)
@@ -333,16 +252,16 @@ class HopfieldNetwork(keras.layers.Layer):
             'relu'    : E_HN = -0.5 * sum_n keep_n * sum_k relu(h_{n k})^2
             'softmax' : E_HN = -(1/beta) * sum_n keep_n * logsumexp_k( beta * h_{n k} )
 
-        The ``'softmax'`` ``logsumexp`` is over the **MEMORY** axis ``k`` (axis ``-1``),
-        NOT the token axis ``n``.
+        The ``'softmax'`` ``logsumexp`` runs over the memory axis ``k`` (axis ``-1``), not
+        the token axis ``n``.
 
-        **These formulas are the SPEC.** :meth:`update` must match *these*; never edit
-        this method to make the gradient oracle pass (plan STOP-IF 1).
+        :meth:`update` must match these formulas exactly — they are the spec the gradient
+        oracle checks against.
 
         :param g: Token state ``(B, N, D)``, typically the output of ``EnergyLayerNorm``.
         :type g: keras.KerasTensor
         :param mask: Optional rank-2 ``(B, N)`` per-token validity mask. A masked-out (PAD)
-            token contributes EXACTLY ZERO to the energy — see the D-005 anchor below.
+            token contributes zero to the energy — see the D-005 anchor below.
         :type mask: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``.
@@ -351,61 +270,36 @@ class HopfieldNetwork(keras.layers.Layer):
         if not self.built:
             self.build(g.shape)
 
-        # C-2: this is a PUBLIC method, callable OUTSIDE `__call__` — where Keras has NOT
-        # opened an autocast scope. Without this cast a float32 `g` meets float16 `xi` under
-        # `mixed_float16` and the einsum raises InvalidArgumentError. The duck-typed
-        # energy()/update() convention is the layer's ADVERTISED surface, so it must be safe
-        # to call standalone.
+        # A public method callable outside __call__, where Keras has not opened an autocast
+        # scope, so a float32 g meeting float16 xi would otherwise raise.
         g = ops.cast(g, self.compute_dtype)
 
         h = ops.einsum('kd,bnd->bnk', self.xi, g)        # (B, N, K)
 
-        # The reduction runs in AT LEAST float32: E_HN sums over N tokens x K memories, and
-        # an fp16 accumulator overflows (max 65504) long before the layer itself misbehaves.
-        # Same reasoning as the D-009 anchor in `energy_attention.py`.
+        # Reduces in at least float32: an fp16 accumulator overflows well before the layer
+        # itself misbehaves, summing over N tokens x K memories.
         reduce_dtype = _mask_dtype(self.compute_dtype)
         h = ops.cast(h, reduce_dtype)
 
-        # PER-TOKEN energy first, then the reduction over tokens — so the mask below can gate
-        # the token sum. Mathematically identical to reducing in one shot.
+        # Per-token energy first, then the reduction over tokens, so the mask below can
+        # gate the token sum.
         if self.activation == 'relu':
             r = ops.relu(h)
             per_token = -0.5 * ops.sum(ops.square(r), axis=-1)           # (B, N)
         else:
-            # 'softmax' — G is NOT separable per memory k: logsumexp over the MEMORY axis.
+            # Softmax over the memory axis, not the token axis: G is not separable per k.
             lse = ops.logsumexp(self.hopfield_beta * h, axis=-1)         # (B, N)
             per_token = -(1.0 / self.hopfield_beta) * lse                # (B, N)
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-005
-        # A masked-out (PAD) token contributes EXACTLY ZERO to E_HN. WHAT NOT TO DO:
-        #   * Do NOT restore the unmasked `ops.sum(..., axis=(1, 2))`. Plan assumption A6
-        #     ("HopfieldNetwork is strictly per-token, so it needs no mask") is TRUE for the
-        #     state UPDATE — no token mixing, so a PAD cannot leak into a real token — and
-        #     FALSE for this REDUCTION over tokens: every PAD token added its own energy to the
-        #     public trace, drifting it +74.9% (3 pads) to +224.6% (9 pads) and making the
-        #     energies of a variable-length batch incomparable across rows. EVERY reduction
-        #     over the token axis needs the mask; only the per-token maps do not.
-        #   * Do NOT mask HERE and leave `update()` unmasked. `update()` is `-dE/dg` of THIS
-        #     energy: `dE/dg_n = keep_n * de_n/dg_n`, so the gradient at a masked row is
-        #     exactly zero and `update()` must be zero there too. The pair is masked TOGETHER
-        #     or not at all (`test_gradient_oracle[*-masked]` proves it tensor-wide, PAD rows
-        #     included). The energy is the SPEC and the update follows it — never the reverse.
-        # See decisions.md D-005.
+        # DECISION plan_2026-07-13_ca4f71a2/D-005: a masked-out token contributes zero to
+        # E_HN; masking only here and not in update() would break update() == -dE/dg. See decisions.md.
         if mask is not None:
             per_token = per_token * _token_keep(mask, reduce_dtype)      # (B, N)
 
         energy = ops.sum(per_token, axis=1)                              # (B,)
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-005
-        # Returned in the REDUCE dtype (>= float32) — NOT cast back to the compute dtype.
-        # WHAT NOT TO DO: do NOT re-add `ops.cast(energy, self.compute_dtype)` here. It is the
-        # exact bug fixed in `EnergyAttention.energy()` (same anchor): casting in float32 to
-        # protect the accumulator and then casting the result back into fp16 reintroduces the
-        # overflow on the last op — `E_HN` sums over N tokens x K memories and clears fp16's
-        # 65504 max at N=1024 (measured: `-inf` under `mixed_float16`, both activations).
-        # Safe because `energy()` is a REPORTED DIAGNOSTIC only: the block's state update comes
-        # from `update()`, and nothing in the compute path contracts the energy against fp16
-        # weights. See decisions.md D-005.
+        # DECISION plan_2026-07-13_ca4f71a2/D-005: returned in the reduce dtype, not cast
+        # back to compute dtype -- E_HN overflows fp16 at N=1024 otherwise. See decisions.md.
         return energy                                                     # (B,), >= float32
 
     # -----------------------------------------------------------------
@@ -415,12 +309,11 @@ class HopfieldNetwork(keras.layers.Layer):
         g: keras.KerasTensor,
         mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """Return ``-dE_HN/dg`` — the DESCENT DIRECTION, **not** the gradient.
+        """Return ``-dE_HN/dg``, the descent direction, not the gradient.
 
-        **SIGN DISCIPLINE**: this is the *negative* gradient. The consumer *adds*
-        ``step_size * update`` to the token state. A reader who assumes this returns
-        ``+dE/dg`` and "fixes" the sign at the call site silently inverts the dynamics into
-        energy ASCENT — which still runs, still trains, and still produces finite outputs.
+        This is the negative gradient. The consumer adds ``step_size * update`` to the
+        token state; flipping the sign at the call site inverts the dynamics into energy
+        ascent, which still runs and still produces finite outputs.
 
         .. code-block:: text
 
@@ -429,19 +322,17 @@ class HopfieldNetwork(keras.layers.Layer):
             'relu'    : r(h) = relu(h)                    (pairs with -0.5*sum relu(h)^2)
             'softmax' : r(h) = softmax_k(beta * h)        (pairs with -(1/beta)*logsumexp_k)
 
-        The ``r`` branch below and the energy branch in :meth:`energy` are a matched PAIR
-        per activation. Do NOT cross them (e.g. relu energy + softmax ``r``): the layer
-        would still run, still train and still emit finite output, while ``update`` would
-        no longer be the gradient of the energy this same layer reports and the block's
-        descent guarantee would silently evaporate. It is not verifiable by inspection;
-        the ONLY thing proving this pairing is ``test_gradient_oracle`` (S6b), which is
-        parametrized over BOTH activations for exactly this reason.
+        The ``r`` branch here and the energy branch in :meth:`energy` are a matched pair
+        per activation. Crossing them (relu energy with softmax ``r``, or vice versa)
+        still runs and still trains, but ``update`` stops being the gradient of the
+        reported energy. Only ``test_gradient_oracle`` (parametrized over both
+        activations) proves the pairing.
 
         :param g: Token state ``(B, N, D)``.
         :type g: keras.KerasTensor
-        :param mask: Optional rank-2 ``(B, N)`` per-token validity mask — the SAME mask
+        :param mask: Optional rank-2 ``(B, N)`` per-token validity mask — the same mask
             :meth:`energy` is given. A masked row's update is exactly ``0``, because the
-            masked energy does not depend on that token at all (D-005 anchor below).
+            masked energy does not depend on that token at all.
         :type mask: Optional[keras.KerasTensor]
 
         :return: ``-dE_HN/dg`` of shape ``(B, N, D)``.
@@ -450,7 +341,6 @@ class HopfieldNetwork(keras.layers.Layer):
         if not self.built:
             self.build(g.shape)
 
-        # C-2: cast at the head of the public method — see the note in `energy()`.
         g = ops.cast(g, self.compute_dtype)
 
         h = ops.einsum('kd,bnd->bnk', self.xi, g)        # (B, N, K)
@@ -458,37 +348,15 @@ class HopfieldNetwork(keras.layers.Layer):
         if self.activation == 'relu':
             r = ops.relu(h)                                              # (B, N, K)
         else:
-            # softmax over the MEMORY axis k (axis=-1), NOT the token axis n. Softmaxing
-            # over tokens would (a) introduce token mixing into a strictly per-token layer
-            # and (b) stop being the gradient of the reported energy.
+            # Softmax over the memory axis, not the token axis, to keep this the gradient
+            # of the reported energy and not introduce token mixing.
             r = ops.softmax(self.hopfield_beta * h, axis=-1)             # (B, N, K)
 
-        # Down-project with the SAME matrix, transposed (tied weights).
+        # Down-project with the same matrix, transposed (tied weights).
         update = ops.einsum('kd,bnk->bnd', self.xi, r)   # == -dE_HN/dg, (B, N, D)
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-005
-        # ZERO the masked rows. This is NOT a safety hack and NOT "masking the update because
-        # the energy is masked" — it is the DERIVATIVE of the masked energy: E_HN is a SUM of
-        # per-token terms with NO coupling, so `dE/dg_n = keep_n * de_n/dg_n`, which is exactly
-        # zero wherever `keep_n == 0`. WHAT NOT TO DO:
-        #   * Do NOT drop this multiply while `energy()` keeps its mask. The layer would still
-        #     run and still train, `update()` would silently stop being `-dE/dg` at the PAD
-        #     rows, and the block would descend a function it does not report.
-        #   * Do NOT "fix" a masked-oracle failure by un-masking `energy()` instead: the energy
-        #     is the SPEC (invariant I1), the update follows it.
-        # No mask => byte-identical to the old path.
-        #
-        # SCOPE OF THE "a masked row comes out exactly as it went in" CLAIM: it holds for the
-        # DESCENT (`x = x + alpha * update`), i.e. at `noise_std == 0` OR `training=False`. It
-        # does NOT hold when the eq.-27 Langevin noise is on: `EnergyTransformer.call` adds
-        # that noise to the WHOLE state tensor, PAD rows included (measured `max|y_pad -
-        # x_pad| = 0.127` at `noise_std=0.1, training=True`). That is harmless — a PAD row
-        # cannot leak into a real token (the attention keep mask zeroes every pair it
-        # participates in, and this layer does not mix tokens at all), and the real tokens'
-        # outputs are unchanged — but the passthrough guarantee is a claim about the UPDATE,
-        # not about the noise. Do NOT "fix" a noisy PAD row by masking the noise unless a
-        # caller actually needs bit-exact PAD passthrough during training; it would add a mask
-        # multiply to the hot loop for a value nothing reads. See decisions.md D-005.
+        # DECISION plan_2026-07-13_ca4f71a2/D-005: zero the masked rows -- the derivative
+        # of the masked energy, not a safety hack; must match energy()'s mask. See decisions.md.
         if mask is not None:
             keep = _token_keep(mask, self.compute_dtype)                 # (B, N)
             update = update * ops.expand_dims(keep, axis=-1)             # (B, N, 1)
@@ -528,7 +396,7 @@ class HopfieldNetwork(keras.layers.Layer):
         """Return the output shape (identity — the update lives in the input's space).
 
         Uses only the passed shape and stored config, never a weight shape, so it is valid
-        on an UNBUILT layer.
+        on an unbuilt layer.
 
         :param input_shape: Input shape ``(batch, num_tokens, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -578,38 +446,44 @@ class HopfieldNetwork(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-07-15T053724-78001af1/D-002
-# WHY THIS IS ITS OWN CLASS AND NOT AN INLINE `keras.layers.Conv2D` IN THE BLOCK'S
-# `call()`. The paper's weighted adjacency (eq. 25 / App D.1, `Â = Conv2D(X⊗X) ⊙ A'`) has
-# exactly ONE call site — `EnergyTransformer` with `use_weighted_adjacency=True`. A single
-# call site normally argues AGAINST a new abstraction, but two forces override that here
-# (D-002, "provability, not reuse"):
-#   * SERIALIZATION SAFETY. The Conv2D (and the optional Dense) are TRAINABLE. A lazily
-#     created sub-layer silently DROPS its weights on a `.keras` round-trip (MEMORY:
-#     reference_subclassed_model_lazy_build_serialization). A dedicated Layer with its own
-#     `build`/`get_config` is the golden pattern the rest of this module already follows.
-#   * PROVABILITY. The pairing ORDER of `X⊗X` and the `⊙ A'` non-edge zeroing must be
-#     testable IN ISOLATION and provable RED (a transposed pairing, or a dropped `A'`
-#     factor, is invisible in an inline closure). This is the D-008 precedent.
-# WHAT NOT TO DO: do NOT put `-∞` in `Ŵ` for non-edges — `Ŵ` is FINITE by contract (it is
-# multiplied into the score, `logit = β·(A⊙Ŵ) + M`). The `-∞` non-edge masking is ALREADY
-# done by the existing keep-bias `M` in `EnergyAttention._project`; here `A'` only ZEROS
-# `Ŵ` on non-edges (spec `⊙ A'`), which is spec fidelity, not correctness (the keep-bias
-# kills those pairs regardless). See decisions.md D-002 (and D-001 for the omega_eff use).
+# DECISION plan-2026-07-15T053724-78001af1/D-002: own Layer class, not an inline Conv2D
+# in the block's call() -- a lazily created trainable sub-layer drops its weights on a
+# .keras round-trip, and X⊗X vs A' pairing order needs isolated test coverage. See decisions.md.
 @register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class WeightedAdjacencyProjector(keras.layers.Layer):
-    """Trainable per-head weighted adjacency ``Ŵ`` from tokens + a binary adjacency (eq. 25).
+    """Trainable per-head weighted adjacency ``Ŵ`` from tokens plus a binary adjacency.
 
-    **Intent**: realize the Energy Transformer's *graph* score reweighting (arXiv:2302.07253
-    App D.1): ``Â = Conv2D(X⊗X) ⊙ A'``. For every ordered token pair ``(n, m)`` it forms the
-    outer product of the two token embeddings, runs a small Conv2D over the ``N × N`` "image"
-    of those outer products to produce ``H`` per-head edge weights, and zeros the weight on
-    every NON-edge (``A' = 0``). The result ``Ŵ`` is a FINITE ``(B, H, N, N)`` tensor that
-    :class:`EnergyTransformer` hoists ONCE per ``call()`` and threads into
-    ``EnergyAttention.energy`` / ``.update`` as ``adjacency_weight`` (Branch A — a per-block
-    constant w.r.t. the evolving token state).
+    Realizes the Energy Transformer's graph score reweighting (paper App D.1):
+    ``Â = Conv2D(X⊗X) ⊙ A'``. For every ordered token pair it forms the outer product of
+    the two token embeddings, runs a small Conv2D over the resulting ``N x N`` grid to
+    produce ``H`` per-head edge weights, and zeros the weight on every non-edge. The
+    result is a finite ``(B, H, N, N)`` tensor that :class:`EnergyTransformer` hoists once
+    per ``call()`` and threads into ``EnergyAttention`` as ``adjacency_weight``.
 
-    **Mathematics** (``B``=batch, ``N``=tokens, ``D``=``embed_dim``, ``P``=``proj_dim`` or
+    Architecture:
+
+    .. code-block:: text
+
+        x [B, N, D]         adjacency [B, N, N]
+          │
+          ▼ (proj_dim only)
+        ┌──────────┐
+        │  Dense   │  D -> P
+        └────┬─────┘
+             ▼
+        outer product, per pair            [B, N, N, P, P]
+             │
+             ▼ reshape
+        ┌──────────┐
+        │  Conv2D  │  P^2 -> H channels
+        └────┬─────┘
+             ▼
+        transpose, then multiply by adjacency
+             │
+             ▼
+        Ŵ [B, H, N, N]  (finite)
+
+    Mathematics (``B``=batch, ``N``=tokens, ``D``=``embed_dim``, ``P``=``proj_dim`` or
     ``D``, ``H``=``num_heads``):
 
     .. code-block:: text
@@ -620,17 +494,15 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
         raw_{b n m h} = Conv2D(H, kernel_size, 'same')(outer)        # (B, N, N, H)
         Ŵ_{b h n m}  = transpose(raw) * A'_{b n m}                   # (B, H, N, N), finite
 
-    **The ``proj_dim`` OOM escape hatch (A5).** The Conv2D sees ``P^2`` input channels. At
-    the paper's graph width (``D = 128``) that is ``16384`` channels through the conv on an
-    ``N × N`` grid — heavy in both params and the ``(B, N, N, P^2)`` activation. Setting
-    ``proj_dim = P < D`` first projects the tokens ``D -> P`` with a bias-free-agnostic
-    ``Dense`` so the conv sees only ``P^2`` channels. ``None`` (default) keeps the full
-    ``D^2`` (correct for small ``D`` / small ``N``, e.g. MUTAG's ``N ~ 30``).
+    The Conv2D sees ``P^2`` input channels, so at the paper's graph width (``D=128``) that
+    is 16384 channels through the conv. Setting ``proj_dim = P < D`` projects the tokens
+    down first so the conv sees only ``P^2`` channels; ``None`` (default) keeps the full
+    ``D^2``, which is fine for a small ``D`` or small ``N``.
 
-    **``⊙ A'`` is spec fidelity, not correctness.** Zeroing ``Ŵ`` on non-edges matches the
-    paper, but the ACTUAL non-edge suppression is the ``-∞`` keep-bias ``M`` already applied
-    in :meth:`EnergyAttention._project` from the same binary ``A'`` (passed there as the
-    ``attention_mask``). ``Ŵ`` must therefore stay FINITE — never ``-∞``.
+    Zeroing ``Ŵ`` on non-edges matches the paper's ``⊙ A'``, but the actual non-edge
+    suppression is the existing keep-bias already applied in
+    :meth:`EnergyAttention._project` from the same binary adjacency. ``Ŵ`` therefore
+    stays finite; it never carries ``-inf``.
 
     :param num_heads: Number of attention heads ``H`` (the Conv2D output channels). Must
         match the consuming :class:`EnergyAttention`.
@@ -682,7 +554,7 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
         # The channel width the outer product feeds into the conv: P^2.
         self._pair_dim = self.proj_dim if self.proj_dim is not None else self.embed_dim
 
-        # ----- sub-layers: CREATED IN __init__, built in build() (golden pattern) -----
+        # Sub-layers created in __init__, built explicitly in build().
         self.token_proj: Optional[keras.layers.Dense] = (
             keras.layers.Dense(
                 self.proj_dim, name="token_proj", dtype=self.dtype_policy
@@ -733,21 +605,18 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
             ``adjacency`` the binary ``(B, N, N)`` keep (``1`` = edge, ``0`` = non-edge).
         :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
 
-        :return: ``Ŵ`` of shape ``(B, H, N, N)``, FINITE.
+        :return: ``Ŵ`` of shape ``(B, H, N, N)``, finite.
         :rtype: keras.KerasTensor
         """
         x, adjacency = inputs
 
-        # Run in the layer's compute dtype (like every other ET sub-layer) — the block hands
-        # us its compute-dtype `x` on the variable_dtype/mixed path, and `_project` casts the
-        # returned Ŵ up to the mask dtype (>= float32) at the consumption site.
+        # The block hands us its compute-dtype x; the mask-dtype upcast happens at the
+        # consumption site in _project.
         x = ops.cast(x, self.compute_dtype)
 
         x_p = self.token_proj(x) if self.token_proj is not None else x   # (B, N, P)
 
-        # X⊗X: the per-pair outer product `outer[b,n,m,p,q] = x_p[b,n,p]*x_p[b,m,q]`, then
-        # flatten the (p, q) pair axes into P^2 conv channels. NOT `bnd,bme->bnme` (that would
-        # contract the feature axis away); the pair feature is the full outer product.
+        # Per-pair outer product, then flatten the (p, q) axes into P^2 conv channels.
         shp = ops.shape(x_p)
         b, n = shp[0], shp[1]
         outer = ops.einsum("bnp,bmq->bnmpq", x_p, x_p)                   # (B, N, N, P, P)
@@ -756,9 +625,8 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
         raw = self.conv(outer)                                           # (B, N, N, H)
         w_hat = ops.transpose(raw, (0, 3, 1, 2))                        # (B, H, N, N)
 
-        # `⊙ A'` (spec fidelity): zero Ŵ on non-edges. Broadcast the (B, N, N) binary
-        # adjacency over the head axis. Ŵ stays FINITE — the -inf non-edge suppression is the
-        # existing keep-bias in `_project`, NOT here.
+        # Zero Ŵ on non-edges (spec fidelity) -- the -inf non-edge suppression itself is
+        # the existing keep-bias in _project, not this multiply.
         adjacency = ops.cast(adjacency, self.compute_dtype)
         w_hat = w_hat * ops.expand_dims(adjacency, axis=1)              # (B, H, N, N)
 
@@ -770,7 +638,7 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
         self,
         input_shape: Tuple[Tuple[Optional[int], ...], ...],
     ) -> Tuple[Optional[int], ...]:
-        """Return the ``(B, H, N, N)`` output shape (valid on an UNBUILT layer).
+        """Return the ``(B, H, N, N)`` output shape, valid on an unbuilt layer.
 
         :param input_shape: 2-tuple ``((B, N, D), (B, N, N))``.
         :type input_shape: Tuple[Tuple[Optional[int], ...], ...]
@@ -803,12 +671,12 @@ class WeightedAdjacencyProjector(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.layers.transformers.energy_transformer")
 class EnergyTransformer(keras.layers.Layer):
-    """Energy Transformer block — ``T`` steps of gradient descent on ONE scalar energy.
+    """Energy Transformer block: ``T`` steps of gradient descent on one scalar energy.
 
-    **Intent**: replace the standard ``attn -> FFN`` residual stream with an explicit,
-    provable optimization. There is no FFN and no value matrix. The block defines a single
-    scalar energy ``E(g) = E_ATT(g) + E_HN(g)`` and repeatedly steps the token state
-    DOWNHILL on it (paper eq. 6, alg. 1; eq. 27 for the optional noise).
+    Replaces the usual attention-then-FFN residual stream with an explicit optimization.
+    There is no FFN and no value matrix. The block defines one scalar energy
+    ``E(g) = E_ATT(g) + E_HN(g)`` and repeatedly steps the token state downhill on it
+    (paper eq. 6, alg. 1; eq. 27 for the optional noise).
 
     .. code-block:: text
 
@@ -818,87 +686,50 @@ class EnergyTransformer(keras.layers.Layer):
             x      = x + alpha * update                  # == x - alpha * dE/dg
             [+ sqrt(alpha) * noise_std * N(0, 1)   if training and noise_std > 0]
 
-    **TWO THINGS A FUTURE READER WILL TRY TO "FIX". BOTH ARE CORRECT AS WRITTEN.**
+    Every ``update()`` in this feature returns ``-dE/dg``, the descent direction, so
+    :meth:`call` adds it rather than subtracting. The gradient is taken with respect to
+    ``g`` and applied to ``x`` — paper eq. 6, since ``EnergyLayerNorm`` is the map
+    ``g = dL/dx`` of a Lagrangian whose Hessian is positive semidefinite for
+    ``gamma > 0``, which is what makes ``dE/dt <= 0`` hold.
 
-    1. **SIGN DISCIPLINE — the block ADDS.** Every ``update()`` in this feature
-       (:class:`HopfieldNetwork`, ``EnergyAttention``) returns ``-dE/dg``: the **DESCENT
-       DIRECTION**, *not* the gradient. So :meth:`call` performs ``x = x + alpha * update``,
-       which IS ``x = x - alpha * dE/dg``. A reader who assumes ``update()`` returns
-       ``+dE/dg`` will "fix" this to a subtraction and silently invert the dynamics into
-       energy **ASCENT** — which still runs, still trains, and still produces finite,
-       plausible-looking outputs. The only thing that catches it is
-       ``test_energy_is_non_increasing`` (S7).
-    2. **THE GRADIENT IS TAKEN W.R.T.** ``g`` **AND APPLIED TO** ``x``. This is paper
-       eq. 6 (``tau dx/dt = -dE/dg``), **not a typo**. ``EnergyLayerNorm`` is the
-       "activation function" ``g = dL/dx`` of a Lagrangian ``L`` whose Hessian ``dg/dx`` is
-       PSD (for ``gamma > 0``); that is *exactly* what makes the descent provable:
-       ``dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0``. Do NOT "correct" it to ``-dE/dx``.
+    Descent is guaranteed only for ``noise_std == 0``, ``gamma > 0`` and a sufficiently
+    small ``step_size``. With ``noise_std > 0`` this is Langevin sampling (eq. 27) instead
+    of descent, and the energy is expected to fluctuate upward.
 
-    **Descent is claimed only for** ``noise_std == 0``, ``gamma > 0`` and a sufficiently
-    small ``step_size``. With ``noise_std > 0`` this is Langevin sampling (eq. 27), not
-    descent, and the energy is expected to fluctuate upward.
+    The three sub-layers are created in ``__init__`` and explicitly built in :meth:`build`,
+    never lazily in :meth:`build` or :meth:`call`, so their weights survive a ``.keras``
+    round trip.
 
-    **Composition (Keras 3 golden pattern).** The three sub-layers are created in
-    ``__init__`` and EXPLICITLY built in :meth:`build`. They are never created in
-    :meth:`build` or :meth:`call` — a lazily-created sub-layer silently DROPS ITS WEIGHTS
-    on a ``.keras`` round-trip.
+    Note:
+        Cost is mode-dependent; an op-count ratio is not a cost ratio. Figures are a
+        median of 20 runs on an idle RTX 4070 at ``D=768, H=12, head_dim=64, K=3072,
+        N=256, B=8, T=12``:
 
-    **COST — measured, and MODE-DEPENDENT. AN OP-COUNT RATIO IS NOT A COST RATIO.** ``T``
-    descent steps do NOT cost ``T`` transformer blocks. Every figure below is a median of 20
-    on an IDLE RTX 4070 at ET-Full (``D = 768, H = 12, head_dim = 64, K = 3072, N = 256,
-    B = 8, T = 12``), and each is given PER EXECUTION MODE — because on this block the mode
-    moves the answer more than the config does. **Read the jit column: that is the path you
-    train on.** (Ranges are the spread over repeated runs.)
+        .. code-block:: text
 
-    .. code-block:: text
+            return_energy=True, relative to the default False
+                forward        eager 1.68x  | graph 1.44x     | jit 0.9-1.1x
+                fwd+bwd step   eager 1.44x  | graph 1.28x     | jit 1.02x
 
-        `return_energy=True`, relative to the default False
-            forward        eager 1.68x  | graph 1.44x     | jit 0.9-1.1x   <- FREE
-            fwd+bwd step   eager 1.44x  | graph 1.28x     | jit 1.02x      <- FREE
+            ET vs one vanilla TransformerLayer at matched width
+                forward        eager 7.5x   | graph 8.1-8.7x  | jit 6.0-7.6x
+                fwd+bwd step   eager 5.5x   | graph 8.8x      | jit 10.7x
+                params         3.54M  vs  7.09M   (ET has half the parameters)
 
-        ET vs ONE vanilla `TransformerLayer` at matched width
-            forward        eager 7.5x   | graph 8.1-8.7x  | jit 6.0-7.6x
-            fwd+bwd step   eager 5.5x   | graph 8.8x      | jit 10.7x
-            params         3.54 M  vs  7.09 M   (ET has HALF the parameters)
+        ``return_energy=True`` makes ``2T + 1`` internal projection calls instead of
+        ``T``, but under ``jit_compile=True`` XLA eliminates the shared computation
+        ``energy()`` and ``update()`` do at each step, so the trace is close to free on
+        the compiled path even though it costs ~1.7x in eager mode. A step is cheaper
+        than a full transformer block because the block has no value matrix and no
+        separate FFN projections, so ``T=12`` steps land at roughly 6-11x one block
+        rather than 12x. Backward memory is linear in ``T``: the loop is unrolled and
+        every step's activations are held for the backward pass.
 
-    ``return_energy=True`` really does make ``2T + 1`` ``_project()`` calls instead of ``T``
-    (an energy reading before every step, plus the final one). **That op COUNT is not the
-    cost.** Under ``jit_compile=True`` XLA common-subexpression-eliminates the ``_project(g)``
-    that ``energy()`` and ``update()`` share at each step (grappler on the ``return_energy``
-    fwd+bwd graph: **25** mask builds pre-optimization, **1** post), so the energy trace is
-    essentially free on the compiled path. Do NOT switch the diagnostic off on the strength of
-    the eager number — eager pays ~1.7x, jit pays ~nothing. **This is the same lesson as the
-    keep-mask NO-GO below (D-005): an op-count ratio is not a cost ratio — measure the
-    COMPILED path.** (An unqualified "7.6x vs vanilla" previously sat here; it was a
-    forward-only EAGER number. The true spread is 5.5-10.9x, and ET looks RELATIVELY worse
-    under jit not because ET got slower but because a vanilla block compiles better.)
-
-    A step is cheaper than a block because the block is *missing pieces*: **no value matrix,
-    no separate FFN up/down projection, no output projection** — the Hopfield's ``xi`` is ONE
-    tied ``(K, D)`` matrix used in both directions, and attention has only ``w_key`` /
-    ``w_query``. Hence ``T = 12`` steps land at ~6-11x one block, not 12x (eager forward: each
-    step is ~0.63x a block). One more fact a caller should budget for:
-
-    * **Backward memory is LINEAR in** ``T``. The loop is fully unrolled and nothing is
-      recomputed, so every step's activations are held for the backward pass. ``T`` is a
-      memory dial, not just a compute one.
-
-    **DO NOT "OPTIMIZE" THE PER-STEP KEEP-MASK REBUILD — it was measured, and it is free.**
-    ``EnergyAttention._build_keep_mask`` is loop-invariant (it reads ``ops.shape(g)[1]``, the
-    masks and ``attn_self`` — never ``g``'s *values*) yet ``_project()`` rebuilds it on every
-    one of the ``T`` steps. In EAGER profiling this looks like ~27% of the forward pass, which
-    is exactly why it keeps getting re-proposed. **It is not worth hoisting.** In the OPTIMIZED
-    compiled graph it is ELIMINATED either way: **constant-folded out of existence** when there
-    is no user mask (static ``N``), and **CSE-d down to a single build** when a real
-    ``attention_mask`` is a graph INPUT and so cannot be folded (verified: the mask's op count
-    is FLAT at ``T = 4/12/24`` in optimized HLO while positive controls scale with ``T``;
-    grappler independently collapses ``T`` builds to 1). Measured end-to-end
-    fwd+bwd hoist delta on an idle GPU: **-0.09% (jit), -0.06% (graph), +0.25% (dynamic-N)** —
-    i.e. nothing, or worse. The only real win is **+12.9% on ``run_eagerly=True``**, a DEBUG
-    mode that is itself 4.2x slower than jit, so nobody trains on it. Hoisting it would widen
-    three PUBLIC duck-typed signatures (``_project``/``energy``/``update``) and add a fresh way
-    to break ``update() == -dE/dg`` (a half-applied mask has ALREADY shipped once here) to buy
-    zero. See ``plans/plan_2026-07-14_e5955791/decisions.md`` D-005.
+        The per-step keep-mask rebuild in ``EnergyAttention._build_keep_mask`` looks
+        costly in eager profiling (~27% of the forward pass) but is not worth hoisting:
+        the compiled graph either constant-folds it away or common-subexpression-
+        eliminates it down to one build, so the measured end-to-end hoist delta is
+        roughly zero. See ``plans/plan_2026-07-14_e5955791/decisions.md`` D-005.
 
     :param embed_dim: Token embedding dimension ``D``.
     :type embed_dim: int
@@ -912,8 +743,8 @@ class EnergyTransformer(keras.layers.Layer):
     :type num_steps: int
     :param step_size: Descent step ``alpha``. Defaults to ``0.1``.
     :type step_size: float
-    :param beta: Attention inverse temperature. ``None`` -> ``1 / sqrt(head_dim)``, resolved
-        by ``EnergyAttention`` itself (this block does NOT duplicate that default).
+    :param beta: Attention inverse temperature. ``None`` resolves to ``1/sqrt(head_dim)``
+        inside ``EnergyAttention`` itself.
     :type beta: Optional[float]
     :param attn_self: If ``False`` (default, the paper's ET-Full), a token does not attend
         to itself.
@@ -921,21 +752,15 @@ class EnergyTransformer(keras.layers.Layer):
     :param hopfield_activation: ``'relu'`` (default) or ``'softmax'``.
     :type hopfield_activation: str
     :param noise_std: Std-dev of the eq. 27 noise, injected as
-        ``sqrt(step_size) * noise_std * N(0, 1)`` and **only when ``training`` is truthy**.
+        ``sqrt(step_size) * noise_std * N(0, 1)`` only when ``training`` is truthy.
         ``0.0`` (default) disables it.
     :type noise_std: float
     :param return_energy: If ``True``, :meth:`call` returns ``(x, energies)`` with
-        ``energies`` of shape ``(B, num_steps + 1)`` — **PER-SAMPLE, not batch-reduced**: a
-        batch mean would hide a per-sample descent violation. The energy trace is
-        **``float32`` BY DESIGN** even under ``mixed_float16`` (the state output stays
-        ``float16``): the trace is O(-1e5) at a realistic sequence length, which is ``-inf``
-        in fp16. Both the runtime tensor (D-005) and the SYMBOLIC KerasTensor
-        (:meth:`compute_output_spec`, D-006) are ``>= float32``.
-        **Consuming the trace under a mixed_float16 policy: build the head ``float32``** —
-        ``keras.layers.Dense(1, dtype='float32')(energies)``. A default-policy layer
-        autocasts its inputs to its OWN fp16 compute dtype and an O(-1e5) energy overflows to
-        ``nan``/``inf`` there. That is a property of the CONSUMER's policy, not of this
-        layer's output (see the D-006 anchor at :meth:`compute_output_spec`).
+        ``energies`` of shape ``(B, num_steps + 1)``, per sample rather than batch-reduced
+        so a per-sample descent violation stays visible. The energy trace is ``float32``
+        even under ``mixed_float16``, since its magnitude overflows float16 at a realistic
+        sequence length; a head consuming it under a mixed-precision policy must itself be
+        built ``dtype='float32'`` (see :meth:`compute_output_spec`).
     :type return_energy: bool
     :param hopfield_beta: Inverse temperature of the ``'softmax'`` Hopfield branch. See the
         D-007 anchor in ``__init__``.
@@ -955,10 +780,12 @@ class EnergyTransformer(keras.layers.Layer):
         ``(batch, num_tokens, embed_dim)``; or, with ``return_energy=True``, the pair
         ``((batch, num_tokens, embed_dim), (batch, num_steps + 1))``.
 
-    Attributes:
-        norm: The inner ``EnergyLayerNorm`` (scalar gamma, vector delta).
-        attention: The inner ``EnergyAttention`` (token mixing; the ONLY masked module).
-        hopfield: The inner :class:`HopfieldNetwork` (per token).
+    :ivar norm: The inner ``EnergyLayerNorm`` (scalar gamma, vector delta).
+    :vartype norm: EnergyLayerNorm
+    :ivar attention: The inner ``EnergyAttention`` — token mixing, the only masked module.
+    :vartype attention: EnergyAttention
+    :ivar hopfield: The inner :class:`HopfieldNetwork`, applied per token.
+    :vartype hopfield: HopfieldNetwork
 
     Example:
         >>> block = EnergyTransformer(
@@ -988,34 +815,15 @@ class EnergyTransformer(keras.layers.Layer):
         hopfield_activation: str = 'relu',
         noise_std: float = 0.0,
         return_energy: bool = False,
-        # DECISION plan_2026-07-13_57c9833e/D-007
-        # These THREE kwargs are ADDITIVE to the user-approved signature and each one is
-        # FORCED, not speculative. Do NOT drop them as "unused parameters", and do NOT
-        # collapse `hopfield_beta` into `beta`:
-        #   * `hopfield_beta` — a SECOND, INDEPENDENT temperature. `beta` defaults to
-        #     `1/sqrt(head_dim)`, which is the softmax temperature over N TOKENS; that is a
-        #     MEANINGLESS temperature for a softmax over K = `hopfield_dim` MEMORIES.
-        #     Reusing one `beta` for both would silently couple two unrelated temperatures
-        #     and make the Hopfield energy's sharpness a function of `head_dim`.
-        #   * `norm_epsilon` — a pass-through to `EnergyLayerNorm.epsilon`. Without it the
-        #     block cannot configure its own norm, and the norms factory (which forwards an
-        #     `epsilon` via `setdefault`) would be able to express a configuration this
-        #     block cannot.
-        #   * `seed` — `noise_std > 0` makes this layer STOCHASTIC, and an unseeded
-        #     stochastic layer FLAKES the save/load round-trip test (LESSONS [I:4]).
-        # All three default to the approved behavior, so the approved surface is preserved
-        # byte-for-byte. See decisions.md D-007.
+        # DECISION plan_2026-07-13_57c9833e/D-007: hopfield_beta is a second, independent
+        # temperature (not beta, which is meaningless over the hopfield_dim memory axis).
+        # norm_epsilon and seed are both forced, not optional. See decisions.md.
         hopfield_beta: float = 1.0,
         norm_epsilon: float = 1e-5,
         seed: Optional[int] = None,
-        # DECISION plan-2026-07-15T053724-78001af1/D-002
-        # The Branch-A weighted-adjacency flag (paper eq. 25 / App D.1). ADDITIVE and
-        # default-OFF, so the approved surface is byte-identical. When ON, a trainable
-        # `WeightedAdjacencyProjector` is created (below) and its `Ŵ` is hoisted ONCE per
-        # `call()` into the attention's `energy`/`update`. WHAT NOT TO DO: do NOT create the
-        # projector when the flag is off (like `attn_self`, a flag-ON model has a DIFFERENT,
-        # intentionally NON-weight-compatible weight set — creating an unused projector would
-        # add dead weights to every default model's checkpoint). See decisions.md D-002.
+        # DECISION plan-2026-07-15T053724-78001af1/D-002: weighted-adjacency flag, additive
+        # and default-off. A flag-on model has a different, non-weight-compatible weight
+        # set, so the projector is created only when the flag is on. See decisions.md.
         use_weighted_adjacency: bool = False,
         adjacency_kernel_size: int = 1,
         adjacency_proj_dim: Optional[int] = None,
@@ -1081,25 +889,12 @@ class EnergyTransformer(keras.layers.Layer):
         # sqrt(alpha), the eq. 27 noise scaling. Precomputed: `step_size` is a Python float.
         self._sqrt_step_size = math.sqrt(self.step_size)
 
-        # ----- sub-layers: CREATED IN __init__, built in build() -----
-        # The Keras 3 golden pattern. A sub-layer created lazily (in `build()` or `call()`)
-        # is not tracked at serialization time and SILENTLY DROPS ITS WEIGHTS on a `.keras`
-        # round-trip (MEMORY: reference_subclassed_model_lazy_build_serialization).
+        # Sub-layers are created here, not lazily in build()/call(), so their weights are
+        # tracked at serialization time and survive a .keras round trip.
         #
-        # DECISION plan_2026-07-13_ca4f71a2/D-001: pass `self.dtype_policy` (the POLICY
-        # OBJECT) — NOT `self.dtype`, and NOT nothing.
-        #   * Nothing (the bug this replaces): a sub-layer with no `dtype=` reads the
-        #     GLOBAL policy, so `EnergyTransformer(dtype='float64')` built float32
-        #     sub-layers and died at `x = x + self.step_size * update` below with
-        #     `InvalidArgumentError: cannot compute AddV2 ... expected double ... is float`.
-        #   * `self.dtype` (the sibling convention at `free_transformer.py:412`) is the
-        #     VARIABLE dtype, which is 'float32' under ANY mixed policy. It is a PARTIAL
-        #     fix that goes green on float64 while leaving `dtype='mixed_float16'` crashing
-        #     — and, measured in the step-1 probe matrix, it also BREAKS the currently-green
-        #     GLOBAL-mixed_float16 path (it would pin the sub-layers to float32 while the
-        #     block computes in float16). Do NOT "simplify" this to `self.dtype` to match
-        #     the sibling.
-        # Only the policy object (or its `.name`) carries compute AND variable dtype.
+        # DECISION plan_2026-07-13_ca4f71a2/D-001: pass self.dtype_policy (the policy
+        # object), not self.dtype -- self.dtype is the variable dtype only and breaks
+        # mixed_float16 sub-layers under a global mixed policy. See decisions.md.
         self.norm = EnergyLayerNorm(
             epsilon=self.norm_epsilon,
             name="energy_layer_norm",
@@ -1123,13 +918,9 @@ class EnergyTransformer(keras.layers.Layer):
             dtype=self.dtype_policy,
         )
 
-        # DECISION plan-2026-07-15T053724-78001af1/D-002
-        # Branch-A weighted-adjacency projector. Created ONLY when the flag is on — a
-        # flag-ON model is deliberately NOT weight-compatible with a flag-OFF one (same
-        # discipline as `attn_self`), so `None` here keeps every default checkpoint free of
-        # dead projector weights and byte-identical to today. The projector's own weights
-        # train via the outer `fit()` backward pass (no hand-coded gradient for IT — Branch
-        # A). See decisions.md D-002.
+        # DECISION plan-2026-07-15T053724-78001af1/D-002: weighted-adjacency projector
+        # created only when the flag is on, keeping every default checkpoint free of dead
+        # weights. Its own weights train via the outer fit() backward pass. See decisions.md.
         self.adjacency_projector: Optional[WeightedAdjacencyProjector] = (
             WeightedAdjacencyProjector(
                 num_heads=self.num_heads,
@@ -1161,9 +952,9 @@ class EnergyTransformer(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """EXPLICITLY build every sub-layer, then ``super().build()`` LAST.
+        """Explicitly build every sub-layer, then call ``super().build()`` last.
 
-        All three sub-layers see the SAME shape: the block is shape-preserving at every
+        All three sub-layers see the same shape: the block is shape-preserving at every
         stage (``g``, both updates, and ``x`` are all ``(B, N, D)``).
 
         :param input_shape: Input shape ``(batch, num_tokens, embed_dim)``.
@@ -1207,47 +998,27 @@ class EnergyTransformer(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor],
         mask: Optional[keras.KerasTensor],
     ) -> Optional[keras.KerasTensor]:
-        """The per-token ``(B, N)`` keep the HopfieldNetwork must see — from BOTH masks.
+        """The per-token ``(B, N)`` keep the HopfieldNetwork must see, from both masks.
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-006
-        A **rank-2** ``attention_mask`` and the Keras-propagated ``mask`` are THE SAME OBJECT
-        — a per-token validity mask — and this method is what makes that documented
-        equivalence (D-008, and the D-002 anchor in ``EnergyAttention._build_keep_mask``)
-        actually TRUE. Iter-2 forwarded ONLY the Keras ``mask`` to ``self.hopfield``, so the
-        two paths silently forked: measured on the same weights (8 tokens, 3 PAD,
-        ``num_steps=3``), the Keras-mask energy was pad-invariant (0.0000% drift) while the
-        rank-2-``attention_mask`` energy drifted **+27.3%** and the PAD rows kept moving
-        (passthrough 4.73 vs 0.0) — the R2 bug, verbatim, on the path a caller with no
-        ``Embedding(mask_zero=True)`` (e.g. an MIM model) is FORCED to use.
+        # DECISION plan_2026-07-13_ca4f71a2/D-006: a rank-2 attention_mask and the Keras
+        # mask are the same object (a per-token validity mask); forwarding only one of
+        # them drifted the Hopfield energy +27.3% on the attention_mask-only path. See decisions.md.
 
-        WHAT NOT TO DO:
-          * Do NOT derive a token keep from a rank-3 ``(B, N, N)`` or rank-4
-            ``(B, H, N, N)`` ``attention_mask``. Those are PAIR-level (KEY x QUERY) masks:
-            they say "token m may not attend to token n", NOT "position n is not a token".
-            There is no per-token reading (a row can be half-masked), so any reduction —
-            ``any``/``all`` over an axis — would INVENT a semantics the caller never
-            specified, and would silently freeze rows the caller only meant to exclude from
-            attention. They correctly leave the Hopfield energy alone. That is NOT the fork
-            this fixes; it is a genuinely different object, and it is documented as such.
-          * Do NOT mask the Hopfield ENERGY here without masking its UPDATE with the SAME
-            keep. ``E_HN`` is a sum of UNCOUPLED per-token terms, so
-            ``dE/dg_n = keep_n * de_n/dg_n``: masking BOTH IS the derivative of the masked
-            energy (see the D-005 anchors in ``HopfieldNetwork``). Masking one alone makes
-            ``update() != -dE/dg`` and the block descends a function it does not report —
-            ``test_gradient_oracle`` is what catches it.
-          * Do NOT re-implement the rank-2 contract: ``_token_keep`` owns it (D-005).
-        See decisions.md D-006.
+        A rank-3 ``(B, N, N)`` or rank-4 ``(B, H, N, N)`` ``attention_mask`` is a different
+        object — a pair-level key-times-query mask with no per-token reading — and does not
+        reach the Hopfield energy. Masking the energy without masking its update with the
+        same keep would make ``update() != -dE/dg``, since ``E_HN`` is a sum of uncoupled
+        per-token terms and its gradient is exactly ``keep_n * de_n/dg_n``.
 
-        :param attention_mask: Optional KEEP mask of rank 2 / 3 / 4. Only rank 2 has a
+        :param attention_mask: Optional keep mask of rank 2 / 3 / 4. Only rank 2 has a
             per-token reading.
         :type attention_mask: Optional[keras.KerasTensor]
         :param mask: Optional Keras-propagated rank-2 ``(B, N)`` validity mask.
         :type mask: Optional[keras.KerasTensor]
 
-        :return: A ``(B, N)`` 0/1 keep tensor — the LOGICAL AND of whichever of the two
-            carry a per-token reading (D-003) — or ``None`` when neither does (then the
-            Hopfield energy sums over every token, which is correct: nothing declared any
-            token invalid).
+        :return: A ``(B, N)`` 0/1 keep tensor, the logical AND of whichever of the two
+            carry a per-token reading, or ``None`` when neither does (the Hopfield energy
+            then sums over every token, which is correct: nothing declared any invalid).
         :rtype: Optional[keras.KerasTensor]
         """
         keep_dtype = _mask_dtype(self.compute_dtype)
@@ -1258,8 +1029,8 @@ class EnergyTransformer(keras.layers.Layer):
 
         if mask is not None:
             keras_keep = _token_keep(mask, keep_dtype)                    # (B, N), rank-checked
-            # Multiplication IS the logical AND (D-003) — neither mask can resurrect a token
-            # the other hid.
+            # Multiplication is the logical AND -- neither mask resurrects a token the
+            # other hid.
             token_keep = (
                 keras_keep if token_keep is None else token_keep * keras_keep
             )
@@ -1274,7 +1045,7 @@ class EnergyTransformer(keras.layers.Layer):
     ) -> Optional[keras.KerasTensor]:
         """The binary ``(B, N, N)`` adjacency ``A'`` the projector needs, or ``None``.
 
-        The graph model passes its adjacency as the PAIR-level ``attention_mask`` (D-006:
+        The graph model passes its adjacency as the pair-level ``attention_mask`` (D-006:
         rank-3 ``(B, N, N)`` is a key x query keep). Only a pair-level mask carries an
         edge/non-edge reading:
 
@@ -1307,18 +1078,13 @@ class EnergyTransformer(keras.layers.Layer):
         x: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
     ) -> Optional[keras.KerasTensor]:
-        """Compute the per-block-constant ``Ŵ`` from the block INPUT ``x`` (Branch A).
+        """Compute the per-block-constant ``Ŵ`` from the block input ``x``.
 
-        # DECISION plan-2026-07-15T053724-78001af1/D-002
-        Called ONCE per :meth:`call` (before the T-step loop) and NEVER from the evolving
-        ``g_t`` — Branch A holds ``Ŵ`` CONSTANT across the descent, which is exactly what
-        keeps the closed-form gradient in ``EnergyAttention.update`` valid (``dŴ/dg == 0``;
-        see the D-001 anchor there). WHAT NOT TO DO: do NOT recompute this inside the loop
-        from the per-step ``g`` — that would add a ``dŴ/dg`` term the hand-coded gradient
-        does not carry (Branch B1, Tier-3), silently breaking ``update() == -dE/dg``.
-        See decisions.md D-002 (and D-001).
+        # DECISION plan-2026-07-15T053724-78001af1/D-002: called once before the T-step
+        # loop, never from the evolving g -- Ŵ must stay constant for EnergyAttention's
+        # closed-form gradient (dŴ/dg == 0) to hold. See decisions.md.
 
-        :param x: The block INPUT token state ``(B, N, D)`` (not the evolving state).
+        :param x: The block input token state ``(B, N, D)`` (not the evolving state).
         :type x: keras.KerasTensor
         :param attention_mask: Optional KEEP mask — a rank-3/4 one carries the adjacency.
         :type attention_mask: Optional[keras.KerasTensor]
@@ -1345,77 +1111,46 @@ class EnergyTransformer(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """The block's total scalar energy ``E(g) = E_ATT(g) + E_HN(g)``, shape ``(B,)``.
 
-        This is the Lyapunov function the block descends. It is the sum of exactly TWO
-        terms. The ``EnergyLayerNorm`` Lagrangian is deliberately NOT a third term — it is
-        the *potential whose Hessian* ``dg/dx`` makes the descent PSD, not a term in ``E``.
-        Adding it here would make :meth:`call`'s reported energy a quantity the update does
-        not descend, and would silently invalidate S7. See decisions.md
-        ``plan_2026-07-13_57c9833e/D-005`` (a DIFFERENT decision from this plan's D-005,
-        which governs the energy's dtype and its mask — the anchors below).
+        This is the Lyapunov function the block descends, the sum of exactly two terms.
+        ``EnergyLayerNorm``'s Lagrangian is not a third term here — it is the potential
+        whose Hessian makes the descent positive semidefinite, not a quantity in ``E``
+        itself. See decisions.md ``plan_2026-07-13_57c9833e/D-005``.
 
-        :param g: NORMALIZED token state ``(B, N, D)`` — i.e. ``self.norm(x)``, not ``x``.
+        :param g: Normalized token state ``(B, N, D)``, i.e. ``self.norm(x)``, not ``x``.
         :type g: keras.KerasTensor
-        :param attention_mask: Optional KEEP mask. A **rank-2** ``(B, N)`` one is a per-token
-            validity mask and reaches BOTH terms — it is equivalent to ``mask`` (D-006). A
-            rank-3/rank-4 one is a KEY x QUERY PAIR mask with no per-token reading, so it
-            reaches ``EnergyAttention`` only (the Hopfield net has no pairs).
+        :param attention_mask: Optional keep mask. A rank-2 ``(B, N)`` one is a per-token
+            validity mask and reaches both terms (equivalent to ``mask``). A rank-3/rank-4
+            one is a key x query pair mask with no per-token reading, so it reaches
+            ``EnergyAttention`` only — the Hopfield net has no pairs.
         :type attention_mask: Optional[keras.KerasTensor]
         :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean validity mask.
             ANDed with ``attention_mask`` inside ``EnergyAttention`` (decisions.md D-003), and
             ANDed again into the ``HopfieldNetwork`` token keep, whose energy is a SUM over
             tokens and so must exclude the PAD tokens (decisions.md D-005, D-006).
         :type mask: Optional[keras.KerasTensor]
-        :param adjacency_weight: Optional FINITE per-head weighted adjacency ``Ŵ`` (paper
-            eq. 25, Branch A). Forwarded UNCHANGED to ``EnergyAttention.energy`` (the
-            Hopfield term has no pairs and never sees it). It MUST be the SAME tensor the
-            matching ``self.attention.update`` receives in :meth:`call`, or
-            ``update() != -dE/dg``. Hoisted ONCE by :meth:`call` (see
-            :meth:`_weighted_adjacency`), NOT recomputed from ``g`` here.
+        :param adjacency_weight: Optional finite per-head weighted adjacency ``Ŵ``
+            (paper eq. 25), forwarded unchanged to ``EnergyAttention.energy``. Must be the
+            same tensor the matching ``self.attention.update`` receives in :meth:`call`,
+            hoisted once by :meth:`_weighted_adjacency` rather than recomputed here.
         :type adjacency_weight: Optional[keras.KerasTensor]
 
-        :return: Energy of shape ``(B,)``, in the REDUCE dtype (>= ``float32``) — NOT the
-            compute dtype. Under ``mixed_float16`` the trace stays ``float32``; see the
-            D-005 anchors in ``EnergyAttention.energy`` / :meth:`HopfieldNetwork.energy`.
+        :return: Energy of shape ``(B,)``, in the reduce dtype (``>= float32``), never the
+            compute dtype.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-07-13_ca4f71a2/D-005
-        # BOTH terms are returned in the reduce dtype (>= float32), so this sum type-checks
-        # under EVERY policy — including `mixed_float16`, where the compute dtype is float16
-        # and an O(-8e4) energy is `-inf`. Do NOT cast either term (or this sum) down to
-        # `self.compute_dtype`: the energy is a reported diagnostic, consumed ONLY by the
-        # `return_energy=True` trace in `call()`, never by the state update. See decisions.md
-        # D-005.
+        # DECISION plan_2026-07-13_ca4f71a2/D-005: both terms return in the reduce dtype,
+        # never cast down -- an O(-8e4) energy is -inf under mixed_float16. See decisions.md.
         #
-        # DECISION plan_2026-07-13_ca4f71a2/D-002
-        # `mask` MUST be forwarded to `self.attention` HERE and at the `self.attention.update`
-        # site in `call()` below — the SAME mask, through the SAME kwarg. WHAT NOT TO DO:
-        #   * Do NOT forward it to only one of them. `update()` is `-dE/dg` of THIS `energy()`
-        #     ONLY IF both see the same masks; a merge landing in one path leaves the layer
-        #     running, training, and silently NOT descending (plan STOP-IF 2). The autodiff
-        #     oracle `test_gradient_oracle` (run WITH a Keras mask) is what catches that.
-        #   * Do NOT re-implement the merge here. `EnergyAttention._build_keep_mask` ANDs
-        #     `mask` with `attention_mask` (D-003); a second merge site is a second thing to
-        #     get wrong. See decisions.md D-002.
+        # DECISION plan_2026-07-13_ca4f71a2/D-002: mask must reach self.attention here and
+        # at the matching update() call in call() -- a merge landing in only one path breaks
+        # update() == -dE/dg. See decisions.md.
         #
-        # DECISION plan_2026-07-13_ca4f71a2/D-005
-        # `mask` ALSO goes to `self.hopfield` — and it must, for the ENERGY. This CORRECTS the
-        # earlier D-002 bullet (and plan Assumption A6) that said the Hopfield net "needs no
-        # mask because it is strictly per-token": that is true of the state UPDATE (no token
-        # mixing => a PAD cannot leak into a real token) and FALSE of the ENERGY, which is a
-        # REDUCTION over the token axis — so every PAD token was adding its own energy to the
-        # public trace (+74.9% with 3 pads, +224.6% with 9). WHAT NOT TO DO: do not "restore"
-        # `self.hopfield.energy(g)` without the mask; the E_ATT term is already pad-invariant,
-        # so an unmasked E_HN makes exactly HALF the reported energy mask-aware — the worst of
-        # both worlds, and invisible unless you compare padded vs unpadded rows.
-        # See decisions.md D-005.
+        # DECISION plan_2026-07-13_ca4f71a2/D-005: mask also reaches self.hopfield, since
+        # its energy is a reduction over tokens (unlike its update, which needs no mask). See decisions.md.
         #
-        # DECISION plan_2026-07-13_ca4f71a2/D-006
-        # The Hopfield mask comes from `_hopfield_token_mask(attention_mask, mask)` — BOTH
-        # masks — NOT from `mask` alone. Forwarding only the Keras `mask` (iter-2) left the
-        # rank-2 `attention_mask` path summing E_HN over PAD tokens (+27.3% drift), i.e. HALF
-        # the reported energy mask-aware, on the very path the class docstring declares
-        # IDENTICAL to the Keras mask. Do NOT "simplify" this back to `mask=mask`.
-        # See decisions.md D-006.
+        # DECISION plan_2026-07-13_ca4f71a2/D-006: the Hopfield mask comes from BOTH masks
+        # via _hopfield_token_mask, not from mask alone -- the rank-2 attention_mask path
+        # drifted +27.3% otherwise. See decisions.md.
         hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
         return (
             self.attention.energy(
@@ -1436,40 +1171,29 @@ class EnergyTransformer(keras.layers.Layer):
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """Run ``num_steps`` of energy descent on the token state (paper eq. 6, alg. 1).
 
-        **Masking.** ``supports_masking = True``, and this signature DECLARES ``mask`` —
-        which is what makes Keras inject a propagated mask (e.g. from an upstream
-        ``Embedding(mask_zero=True)``). Do NOT remove the parameter: ``supports_masking``
-        alone only suppresses Keras' "layer does not support masking" error; without a
-        ``mask`` parameter here the mask is silently DROPPED and PAD tokens influence every
-        real token (F-02). Declaring it is necessary but NOT sufficient — the block must also
-        FORWARD it to ``self.attention`` (see the D-002 anchor in :meth:`energy`). When BOTH
-        ``mask`` and ``attention_mask`` are supplied the rule is a **logical AND** — a token
-        is attended only if valid under both, and neither mask can un-mask what the other hid
-        (decisions.md D-003).
+        ``supports_masking = True`` and this signature declares ``mask``, which is what
+        makes Keras inject a propagated mask (for example from an upstream
+        ``Embedding(mask_zero=True)``); declaring it is necessary but not sufficient, since
+        the block must also forward it to ``self.attention``. When both ``mask`` and
+        ``attention_mask`` are supplied the rule is a logical AND — a token is attended
+        only if valid under both, and neither mask can un-mask what the other hid.
 
-        **A rank-2** ``attention_mask`` **IS a Keras** ``mask`` (D-006). Both are per-token
-        VALIDITY masks and they now produce the IDENTICAL result: the token is dropped from
-        the attention keep mask (symmetrically, key AND query — D-008) AND from the Hopfield
-        energy's token SUM, so its energy contribution is zero, its gradient is zero, and its
-        row passes through unchanged (at ``noise_std=0``; see the ``HopfieldNetwork.update``
-        D-005 anchor for the eq.-27 noise caveat). Use whichever your pipeline produces.
-
-        **A rank-3** ``(B, N, N)`` **or rank-4** ``(B, H, N, N)`` ``attention_mask`` is a
-        different object: a PAIR-level (KEY x QUERY) keep mask. It says "``m`` may not attend
-        to ``n``", not "``n`` is not a token" — a row can be half-masked — so it has NO
-        per-token reading and it does NOT mask the Hopfield energy. That is a genuine
-        semantic difference, not a fork.
+        A rank-2 ``attention_mask`` is the same object as a Keras ``mask``: both are
+        per-token validity masks, and using either drops the token from the attention keep
+        mask and from the Hopfield energy's token sum, so its row passes through unchanged
+        at ``noise_std=0``. A rank-3 ``(B, N, N)`` or rank-4 ``(B, H, N, N)``
+        ``attention_mask`` is a different object, a pair-level key-times-query keep mask
+        with no per-token reading, and it does not mask the Hopfield energy.
 
         :param inputs: Token state ``(B, N, D)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional KEEP mask (``1`` = attend). Rank-2 ``(B, N)`` = a
-            per-token validity mask, equivalent to ``mask`` (D-006, D-008). Rank-3
-            ``(B, N, N)`` / rank-4 ``(B, H, N, N)`` = a pair-level key x query mask.
+        :param attention_mask: Optional keep mask (``1`` = attend). Rank-2 ``(B, N)`` is a
+            per-token validity mask, equivalent to ``mask``. Rank-3 ``(B, N, N)`` / rank-4
+            ``(B, H, N, N)`` is a pair-level key x query mask.
         :type attention_mask: Optional[keras.KerasTensor]
-        :param training: When truthy AND ``noise_std > 0``, the eq. 27 noise is injected.
-            May be a Python ``bool``/``None`` **or a symbolic scalar bool tensor** (a traced
-            graph function passes the latter): both are honoured, and a tensor is gated
-            without ever calling ``bool()`` on it (decisions.md D-003).
+        :param training: When truthy and ``noise_std > 0``, the eq. 27 noise is injected.
+            Accepts a Python ``bool``/``None`` or a symbolic scalar bool tensor from a
+            traced graph function; a tensor is gated without ever calling ``bool()`` on it.
         :type training: Optional[bool]
         :param mask: Keras-propagated rank-2 ``(B, N)`` boolean per-token validity mask.
             Normally injected by Keras, not passed by hand.
@@ -1482,27 +1206,9 @@ class EnergyTransformer(keras.layers.Layer):
         x = inputs
         energies: List[keras.KerasTensor] = []
 
-        # DECISION plan_2026-07-14_e5955791/D-003: the eq. 27 noise is gated in TWO
-        # stages, and the split is load-bearing. Do NOT collapse it back to
-        # `add_noise = self.noise_std > 0.0 and training`: Python `and` calls
-        # `Tensor.__bool__()`, so the moment a caller wraps this layer in a traced graph
-        # function and `training` arrives as a SYMBOLIC bool tensor, that line raises
-        # `OperatorNotAllowedInGraphError`. (`fit`/`predict`/`jit_compile` resolve
-        # `training` to a Python bool, which is why 247 tests never saw it.)
-        #
-        #   1. `self.noise_std > 0.0` reads a CONFIG FLOAT (the ctor validates it as a
-        #      Python number), so it is a PYTHON bool at trace time and STAYS a Python
-        #      `if`. That is what keeps the DEFAULT (`noise_std == 0.0`) path
-        #      trace-time-eliminated: it never constructs the RNG op, and therefore never
-        #      a cond over it. Do NOT "simplify" this to one uniform `ops.cond` — that
-        #      would put a tensor cond on the path ~100% of users run, for a feature
-        #      almost nobody enables.
-        #   2. Only `training` may be a tensor, and only INSIDE that branch is it
-        #      resolved: a Python bool/`None` short-circuits exactly as before; a tensor
-        #      is gated with `ops.where` below. Do NOT coerce a traced `training` to a
-        #      Python bool via a Keras helper — no stable Keras 3 helper is CORRECT for a
-        #      genuinely-traced flag, and coercion would make a `False` tensor ADD noise
-        #      (or a `True` tensor skip it): a loud crash traded for a silent wrong answer.
+        # DECISION plan_2026-07-14_e5955791/D-003: noise gating is split into two stages
+        # because `self.noise_std > 0.0 and training` calls Tensor.__bool__() the moment
+        # training is a traced symbolic tensor, raising OperatorNotAllowedInGraphError. See decisions.md.
         add_noise = False                                    # unconditional (Python) noise
         noise_gate: Optional[keras.KerasTensor] = None       # tensor-gated noise
         if self.noise_std > 0.0:
@@ -1511,21 +1217,13 @@ class EnergyTransformer(keras.layers.Layer):
             else:
                 noise_gate = ops.cast(training, "bool")
 
-        # The per-token keep the Hopfield module sees: the AND of the Keras `mask` and a
-        # RANK-2 `attention_mask` (D-006). Hoisted out of the loop — it does not depend on the
-        # descent step. It must be the SAME tensor `self.energy()` uses, or `update()` stops
-        # being `-dE/dg` (the D-006 anchor at `_hopfield_token_mask`).
+        # The per-token keep the Hopfield module sees, hoisted out of the loop since it
+        # does not depend on the descent step. Must match what self.energy() uses.
         hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
 
-        # DECISION plan-2026-07-15T053724-78001af1/D-002
-        # Branch A: the weighted adjacency `Ŵ` is computed ONCE here, from the block INPUT
-        # `inputs` (NOT the evolving `x`), and held constant across all T descent steps —
-        # exactly like `hopfield_mask` above. It is `None` unless the flag is on AND a
-        # pair-level (rank-3/4) `attention_mask` is present. The SAME `Ŵ` tensor MUST reach
-        # BOTH `self.energy(...)` (via `self.attention.energy`) and `self.attention.update`
-        # below, or `update() != -dE/dg` (the D-001 discipline; a missed site is invisible
-        # except to the gradient oracle). Do NOT recompute it inside the loop from `g`.
-        # See decisions.md D-002 (and D-001).
+        # DECISION plan-2026-07-15T053724-78001af1/D-002: Ŵ is computed once from the
+        # block input, held constant across all T steps, and must reach both energy() and
+        # update() as the same tensor. See decisions.md.
         adjacency_weight = self._weighted_adjacency(inputs, attention_mask)
 
         for _ in range(self.num_steps):
@@ -1539,19 +1237,12 @@ class EnergyTransformer(keras.layers.Layer):
                     )
                 )
 
-            # `update` == -dE/dg (BOTH sub-layers return the DESCENT DIRECTION, never the
-            # gradient). See the class docstring, point 1.
+            # update == -dE/dg: both sub-layers return the descent direction, never the
+            # gradient. See the class docstring.
             #
-            # DECISION plan_2026-07-13_ca4f71a2/D-005: `mask` goes to BOTH sub-layers' updates
-            # — and it must be the SAME mask the `self.energy()` call above passes to their
-            # `energy()`, or `update() != -dE/dg` (plan STOP-IF 2). The Hopfield update is
-            # masked because the masked ENERGY has zero gradient at a PAD row, not for safety;
-            # see the D-005 anchor in `HopfieldNetwork.update`. (This supersedes the original
-            # D-002 bullet "do NOT pass `mask` to `self.hopfield`", written when Assumption A6
-            # was believed to cover the energy too.) Since D-006 the Hopfield's mask is
-            # `hopfield_mask` (Keras `mask` AND a rank-2 `attention_mask`) — exactly what
-            # `self.energy()` passes it, which is the property that keeps the pair a
-            # (energy, -gradient) pair.
+            # DECISION plan_2026-07-13_ca4f71a2/D-005: mask reaches both sub-layers' updates
+            # here, matching what self.energy() passed their energy() above, or
+            # update() != -dE/dg. See decisions.md.
             update = (
                 self.attention.update(
                     g, attention_mask=attention_mask, mask=mask,
@@ -1560,30 +1251,26 @@ class EnergyTransformer(keras.layers.Layer):
                 + self.hopfield.update(g, mask=hopfield_mask)
             )
 
-            # ADDING alpha * update IS `x = x - alpha * dE/dg`. The gradient is w.r.t. `g`
-            # and applied to `x` — paper eq. 6, NOT a typo. See the class docstring,
-            # point 2. Flipping this sign gives energy ASCENT, which still runs.
+            # Adding alpha * update is x = x - alpha * dE/dg -- paper eq. 6, gradient taken
+            # w.r.t. g and applied to x. See the class docstring.
             x = x + self.step_size * update
 
             if add_noise or noise_gate is not None:
-                # eq. 27 (Langevin). `ops.shape(x)` — NEVER a Python int off the batch or
-                # token axis, or the layer breaks under a symbolic/variable batch size.
+                # eq. 27 (Langevin). ops.shape(x), never a Python int, so this works under
+                # a symbolic/variable batch size.
                 noisy = x + self._sqrt_step_size * self.noise_std * keras.random.normal(
                     shape=ops.shape(x),
                     dtype=self.compute_dtype,
                     seed=self.seed_generator,
                 )
-                # DECISION plan_2026-07-14_e5955791/D-003: the tensor branch draws the
-                # noise and then DISCARDS it when the gate is False. That wasted draw is
-                # the accepted price of a graph-safe `training`, and it is paid ONLY when
-                # `noise_std > 0` AND `training` is a traced tensor — never on the default
-                # path (see the two-stage gate above).
+                # DECISION plan_2026-07-14_e5955791/D-003: the tensor branch draws noise
+                # and discards it when the gate is False -- the accepted price of a
+                # graph-safe training flag. See decisions.md.
                 x = noisy if noise_gate is None else ops.where(noise_gate, noisy, x)
 
         if self.return_energy:
-            # The (T+1)-th reading: the energy AFTER the last step. Without it the caller
-            # cannot see the effect of the final update, and `diff(energies)` would only
-            # cover T-1 of the T steps.
+            # The (T+1)-th reading: the energy after the last step, so the caller sees the
+            # effect of the final update too.
             g = self.norm(x)
             energies.append(
                 self.energy(
@@ -1605,17 +1292,11 @@ class EnergyTransformer(keras.layers.Layer):
         Optional[keras.KerasTensor],
         List[Optional[keras.KerasTensor]],
     ]:
-        """Propagate the token mask — but NEVER onto the energy tensor.
+        """Propagate the token mask, but never onto the energy tensor.
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-002
-        With ``return_energy=True`` this layer emits a TUPLE ``(x, energies)`` of shapes
-        ``(B, N, D)`` and ``(B, T + 1)``. The incoming mask is ``(B, N)`` — a PER-TOKEN
-        validity mask. Do NOT inherit ``Layer.compute_mask``'s default (return the mask
-        unchanged): Keras would then attach the ``(B, N)`` token mask to the ``(B, T + 1)``
-        energy tensor as well, and any downstream mask-consuming layer would receive a
-        mask whose shape does not match its input. The energy is a scalar-per-step
-        REDUCTION over tokens — no token axis survives, so it carries no token mask.
-        See decisions.md D-002.
+        # DECISION plan_2026-07-13_ca4f71a2/D-002: with return_energy=True this layer
+        # emits (x, energies); the (B, N) token mask must not attach to the (B, T+1)
+        # energy tensor, which has no token axis. See decisions.md.
 
         :param inputs: Token state ``(B, N, D)`` (unused; the layer is shape-preserving).
         :type inputs: keras.KerasTensor
@@ -1636,9 +1317,9 @@ class EnergyTransformer(keras.layers.Layer):
         self,
         input_shape: Tuple[Optional[int], ...]
     ) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]:
-        """Return the output shape — valid on an UNBUILT layer.
+        """Return the output shape, valid on an unbuilt layer.
 
-        Uses ONLY the passed shape and stored config ints (``num_steps``), never a weight
+        Uses only the passed shape and stored config ints (``num_steps``), never a weight
         shape, so it works before ``build()``.
 
         :param input_shape: Input shape ``(batch, num_tokens, embed_dim)``.
@@ -1663,43 +1344,16 @@ class EnergyTransformer(keras.layers.Layer):
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None,
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
-        """Symbolic output spec — the ENERGY is ``>= float32``, the state is compute dtype.
+        """Symbolic output spec: the energy is ``>= float32``, the state is compute dtype.
 
-        # DECISION plan_2026-07-13_ca4f71a2/D-006
-        This method exists ONLY to tell the truth about the energy's DTYPE, and it is
-        LOAD-BEARING — do NOT delete it as "redundant with ``compute_output_shape``".
-        Keras' default ``compute_output_spec`` derives the shapes from
-        :meth:`compute_output_shape` and then stamps EVERY output with
-        ``self.compute_dtype``. Under ``mixed_float16`` that made the symbolic ``energies``
-        KerasTensor claim ``float16`` while the tensor actually produced at runtime is
-        ``float32`` (D-005: the energy is returned in the REDUCE dtype so an O(-1e5) trace
-        does not overflow fp16's 65504 limit). ``model.outputs`` therefore reported
-        ``['float16', 'float16']`` for a model whose ``predict`` returns
-        ``['float16', 'float32']`` — the PUBLIC dtype contract, which is what an exporter,
-        a downstream shape/dtype inference, or a reader of ``model.summary()`` believes.
+        # DECISION plan_2026-07-13_ca4f71a2/D-006: exists to tell the truth about the
+        # energy's dtype -- Keras' default compute_output_spec stamps every output with
+        # self.compute_dtype, which under mixed_float16 claims float16 for a tensor that
+        # actually runs float32. See decisions.md.
 
-        WHAT NOT TO DO:
-          * Do NOT let the energy be stamped ``self.compute_dtype``. The graph would again
-            advertise fp16 for a float32 tensor.
-          * Do NOT "fix" the dtype mismatch by casting the energy DOWN in :meth:`energy`
-            instead — that IS the D-005 bug (`-inf` at N >= 512; see the anchors in
-            ``EnergyAttention.energy`` / :meth:`HopfieldNetwork.energy`).
-          * Do NOT drop :meth:`compute_output_shape`: it is still the SHAPE authority, and
-            the shapes here are taken FROM it, never re-derived.
-
-        # DECISION plan_2026-07-13_ca4f71a2/D-007
-        **MEASURED FACT, do not mis-attribute it to this method** (it is why the energy head
-        below must be float32): under a GLOBAL ``mixed_float16`` policy, a downstream layer
-        autocasts its float inputs to its OWN ``compute_dtype`` — ``Layer.__call__`` does
-        this from the layer's policy, NOT from the upstream symbolic dtype. So
-        ``keras.layers.Dense(1)(energies)`` overflows to ``nan``/``inf`` at ``N=1024``
-        (E ~ -8e4) BOTH before and after this method existed; control-proven with a plain
-        float32 ``keras.Input``, no ET involved. This method cannot prevent that, and it does
-        not claim to. **A head consuming the energy trace must be built ``dtype='float32'``**
-        (see the ``return_energy`` docstring). What this method fixes is the LIE — the graph
-        now says float32, so a dtype-aware consumer, an exporter, and
-        ``model.outputs[1].dtype`` all see the tensor that actually flows.
-        See decisions.md D-006.
+        # DECISION plan_2026-07-13_ca4f71a2/D-007: a downstream layer autocasts inputs to
+        # its own compute dtype regardless of the upstream symbolic dtype, so a head
+        # consuming the energy trace must itself be built dtype='float32'. See decisions.md.
 
         :param inputs: Symbolic token state ``(B, N, D)``.
         :type inputs: keras.KerasTensor
@@ -1711,11 +1365,11 @@ class EnergyTransformer(keras.layers.Layer):
         :type mask: Optional[keras.KerasTensor]
 
         :return: ``KerasTensor(B, N, D)`` in the compute dtype; or that plus
-            ``KerasTensor(B, num_steps + 1)`` in the REDUCE dtype (>= ``float32``) when
+            ``KerasTensor(B, num_steps + 1)`` in the reduce dtype (``>= float32``) when
             ``return_energy=True``.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
-        shape = self.compute_output_shape(inputs.shape)   # ONE shape authority
+        shape = self.compute_output_shape(inputs.shape)   # the one shape authority
 
         if not self.return_energy:
             return keras.KerasTensor(shape, dtype=self.compute_dtype)
