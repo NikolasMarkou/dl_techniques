@@ -1,104 +1,29 @@
 """
-Normalized spatial coordinate grids, and sampling a feature map at continuous
-coordinates.
+Normalized spatial coordinate grids (:func:`coordinate_grid`, the
+:class:`SpatialLayer` that wraps it), and sampling a feature map at
+continuous coordinates (:func:`interpolate_grid`).
 
-This module owns one concept -- *where a spatial location sits, expressed as a
-number a network can read* -- and the two operations built on it: constructing a
-coordinate grid, and reading a feature grid at arbitrary continuous coordinates.
+Concatenating a coordinate grid onto a feature map lets a convolution use
+absolute position where it helps, without changing the convolution operator
+itself -- the mechanism CoordConv introduced. The grid convention is three
+independent knobs: pixel-center vs. endpoint alignment (centers keep a
+pixel's coordinate stable as resolution changes, which an arbitrary-scale
+sampler needs), ``'ij'`` vs. ``'xy'`` channel order, and optional z-score
+normalization so raw coordinate channels do not dominate the gradient signal
+early in training.
 
-Coordinate injection breaks translation equivariance on demand, a design
-paradigm that supplies a network with information its architecture is
-structurally incapable of representing. A convolution applies the same kernel at
-every position, so its response depends on what a feature looks like but not on
-where it sits in the grid. That invariance is a valuable inductive bias for
-recognition, and a hard failure mode for any task whose answer is a position:
-coordinate regression, rendering from a latent, spatially conditioned
-generation. Supplying the coordinates as ordinary input channels lets the
-network learn to use absolute position where it helps and ignore it where it
-does not, without altering the convolution operator itself. This is the
-mechanism introduced as CoordConv. The same grids, read at *query* coordinates
-that need not align with any pixel, are what an arbitrary-scale implicit decoder
-consumes.
-
-The grid convention is three independent choices, and this module makes each one
-an explicit knob rather than a hard-coded assumption
--------------------------------------------------------------------------------
-
-**Alignment.** ``'endpoints'`` samples ``linspace(-0.5, 0.5, n)``: the first and
-last samples land exactly on the interval's edges. ``'centers'`` samples
-``linspace(-0.5 + 1/(2n), 0.5 - 1/(2n), n)``: the centers of ``n`` equal cells
-tiling ``[-0.5, 0.5]``. The distinction is not cosmetic. Pixel *centers* are the
-convention under which "the coordinate of pixel ``i``" is stable as ``n``
-changes, which is what an arbitrary-scale sampler requires -- an endpoint grid
-re-scales every interior coordinate when the resolution changes, so a query
-computed at one scale does not name the same point at another.
-
-**Channel order.** ``'ij'`` stacks ``[h_coord, w_coord]``, matching
-``np.meshgrid(..., indexing='ij')`` and array indexing order. ``'xy'`` stacks
-``[w_coord, h_coord]``, matching the cartesian reading of a picture. Both are in
-use in the wild and neither is inferable from a shape, so a wrong choice here is
-a silent transpose: every assertion on rank and extent still passes.
-
-**Normalization.** Concatenating raw coordinates alongside learned activations
-mixes two distributions with unrelated scales, and the coordinate channels,
-being large and perfectly structured, can dominate the gradient signal early in
-training before the network has learned to weight them appropriately.
-``'zscore'`` maps each channel to ``z = (x - mu) / (sigma + eps)``, placing the
-coordinate features on the same statistical footing as typical activations. A
-useful consequence is that the initial interval becomes irrelevant: any affine
-reparameterization of the ``linspace`` span collapses to the same standardized
-values, so ``[-0.5, 0.5]`` is a convention rather than a tuned constant. The
-epsilon guards the degenerate case of a single-element axis, where the
-coordinate has zero variance. ``'none'`` leaves the raw span, which is what a
-sampler needs: the coordinate must remain interpretable as a position, and
-z-scoring destroys that.
-
-History: these three knobs were previously two modules. A
-``layers/grid_sample.py`` implemented the ``('centers', 'ij', 'none')`` corner
-for the THERA neural heat field and carried a docstring explaining that
-``SpatialLayer`` -- hard-coded to ``('endpoints', 'xy', 'zscore')`` -- was "NOT
-equivalent" and so could not be reused. That was true of the code and false of
-the concept. The two are the same generator under different conventions, and
-they are one module now.
-
-Sampling
---------
-:func:`interpolate_grid` reads a feature grid of shape ``(B, H', W', C)`` at
-query coordinates of shape ``(B, Hq, Wq, 2)`` given in ``[-0.5, 0.5]`` with
-channel order ``[h, w]``. The coordinate -> continuous-pixel-index map per axis
-is::
-
-    pix = coord * size + (size - 1) / 2
-
-where ``size`` is ``H'`` for axis 0 and ``W'`` for axis 1. Border handling is
-edge replication (``mode='nearest'``: CLAMP to ``[0, size-1]``). ``order=0``
-rounds to the nearest integer index; ``order=1`` performs a 4-corner bilinear
-lerp. Output shape is ``(B, Hq, Wq, C)``.
-
-The sampler is a bare function, not a Layer, on purpose: it is stateless, and
-its one differentiating consumer (the THERA aliasing-TV Jacobian) must call it
-inside a nested gradient tape, where a Layer's call machinery is an obstacle
-rather than a service.
-
-Differentiability
------------------
-THERA's forward pass uses ``order=0`` (nearest) to sample the phi-params and the
-source coordinates. The aliasing TV Jacobian is the Jacobian of the heat FIELD
-w.r.t. its local spatial input ``rel_coords``, where
-``rel_coords = coords - interpolate_grid(coords, source_coords)``. The nearest
-sampling term has zero gradient almost everywhere, so the coordinate gradient
-flows through the DIRECT ``coords`` term, not through the sampler. Therefore
-``interpolate_grid`` need not be differentiable for THERA's exact-Jacobian
-deliverable. The ``order=1`` path nonetheless is: its lerp weights are computed
-from the UNCLAMPED fractional part, so they stay a smooth function of ``coords``
-and gradients propagate to the query coordinates.
+``interpolate_grid`` reads a grid at query coordinates in ``[-0.5, 0.5]``
+with edge-replicated border handling. ``order=0`` is nearest-neighbour and
+has zero gradient almost everywhere; ``order=1`` is a 4-corner bilinear lerp,
+differentiable in the query coordinates. It is a bare function, not a Layer,
+because its one differentiating consumer calls it inside a nested gradient
+tape, where a Layer's call machinery is an obstacle.
 
 References:
     - Liu et al., 2018. An Intriguing Failing of Convolutional Neural Networks
       and the CoordConv Solution. (https://arxiv.org/abs/1807.03247)
     - Becker et al., 2025. Thera: Aliasing-Free Arbitrary-Scale Super-Resolution
       with Neural Heat Fields. (https://arxiv.org/abs/2311.17643)
-
 """
 
 import keras
@@ -107,7 +32,6 @@ from typing import Tuple, Optional, Any, Literal, Union
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 AlignmentType = Literal["centers", "endpoints"]
 ChannelOrderType = Literal["ij", "xy"]
@@ -121,7 +45,6 @@ _VALID_RESIZE_METHODS = ("nearest", "bilinear")
 #: Guards the zero-variance axis (``n == 1``) in the ``'zscore'`` path.
 ZSCORE_EPSILON = 1e-7
 
-# ---------------------------------------------------------------------
 
 
 def _axis_positions(n: int, alignment: str) -> np.ndarray:
@@ -210,7 +133,6 @@ def coordinate_grid(
     return np.stack(channels, axis=-1).astype(dtype)
 
 
-# ---------------------------------------------------------------------
 
 
 def _gather_hw(
@@ -235,7 +157,8 @@ def _gather_hw(
     grid_shape = keras.ops.shape(grid)
     size_h, size_w, channels = grid_shape[1], grid_shape[2], grid_shape[3]
 
-    lead = keras.ops.shape(idx_h)  # (B, Hq, Wq)
+    # lead: (B, Hq, Wq).
+    lead = keras.ops.shape(idx_h)
     batch_idx = keras.ops.reshape(
         keras.ops.arange(0, lead[0], dtype="int32"), (-1, 1, 1)
     )
@@ -269,29 +192,12 @@ def interpolate_grid(
     if order not in (0, 1):
         raise ValueError(f"order must be 0 or 1, got {order}")
 
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-046
-    # The coordinate arithmetic is INDEX math and always runs in float32; the
-    # sampled VALUES come back in `grid`'s own dtype. This used to be
-    # `tf.convert_to_tensor(coords, dtype=tf.float32)`, which does not convert —
-    # it RAISES `ValueError` on a float16 tensor — so every caller under
-    # `mixed_float16` died here. Do NOT restore the float32-only contract: a
-    # float32 return would then meet a float16 activation in the caller, which is
-    # the same defect one frame later. Do NOT instead run the index math in
-    # float16 either: `pix = coord * size + (size - 1) / 2` is a pixel index and
-    # float16 cannot resolve adjacent integers past 2048.
-    # See decisions.md D-046.
-    #
-    # Ported from raw `tf` to `keras.ops` on 2026-08-31 together with the merge
-    # of `layers/grid_sample.py` into this module. The port was measured
-    # bit-identical to the `tf.gather_nd` original: max abs diff 0.0 over three
-    # shape sets x order 0/1, and 0.0 with a float16 grid at both orders, dtype
-    # preserved. The dtype contract above is unchanged and is what makes that
-    # true.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-046: index math always runs in
+    # float32; sampled values come back in grid's own dtype -- float16 index math can't resolve adjacent integers past 2048. See decisions.md.
     coords = keras.ops.cast(keras.ops.convert_to_tensor(coords), "float32")
     grid = keras.ops.convert_to_tensor(grid)
     # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-    # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
-    # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+    # a `tf.DType` stringifies as "<dtype: 'float32'>", not a bare name. See decisions.md D-007.
     if not (getattr(grid.dtype, "name", None) or str(grid.dtype)).startswith("float"):
         grid = keras.ops.cast(grid, "float32")
     value_dtype = grid.dtype
@@ -302,8 +208,9 @@ def interpolate_grid(
     size_h_f = keras.ops.cast(size_h, "float32")
     size_w_f = keras.ops.cast(size_w, "float32")
 
-    # coord -> continuous pixel index per axis: pix = coord * size + (size - 1) / 2
-    coord_h = coords[..., 0]  # (B, Hq, Wq)
+    # coord -> continuous pixel index per axis: pix = coord * size + (size - 1) / 2.
+    # coord_h, coord_w: (B, Hq, Wq).
+    coord_h = coords[..., 0]
     coord_w = coords[..., 1]
     pix_h = coord_h * size_h_f + (size_h_f - 1.0) / 2.0
     pix_w = coord_w * size_w_f + (size_w_f - 1.0) / 2.0
@@ -319,14 +226,12 @@ def interpolate_grid(
         idx_w = keras.ops.clip(idx_w, 0, max_w)
         return _gather_hw(grid, idx_h, idx_w)
 
-    # order == 1: bilinear. Floor/ceil corners, clamp each, lerp by frac part.
-    # Floor in float, derive fractional weights, THEN clamp integer corners. The
-    # weights are computed from the UNCLAMPED frac so they stay a smooth function
-    # of coords (gradient to coords); clamping only affects which pixel is read,
-    # reproducing mode='nearest' edge replication.
+    # order == 1: bilinear. Weights come from the unclamped fractional part
+    # (differentiable in coords); clamping only picks which pixel is read.
     h0_f = keras.ops.floor(pix_h)
     w0_f = keras.ops.floor(pix_w)
-    frac_h = pix_h - h0_f  # (B, Hq, Wq), differentiable in coords
+    # frac_h, frac_w: (B, Hq, Wq).
+    frac_h = pix_h - h0_f
     frac_w = pix_w - w0_f
 
     h0 = keras.ops.cast(h0_f, "int32")
@@ -339,7 +244,8 @@ def interpolate_grid(
     w0c = keras.ops.clip(w0, 0, max_w)
     w1c = keras.ops.clip(w1, 0, max_w)
 
-    v00 = _gather_hw(grid, h0c, w0c)  # (B, Hq, Wq, C)
+    # v00, v01, v10, v11: (B, Hq, Wq, C).
+    v00 = _gather_hw(grid, h0c, w0c)
     v01 = _gather_hw(grid, h0c, w1c)
     v10 = _gather_hw(grid, h1c, w0c)
     v11 = _gather_hw(grid, h1c, w1c)
@@ -354,25 +260,19 @@ def interpolate_grid(
     return top * (1.0 - fh) + bot * fh
 
 
-# ---------------------------------------------------------------------
-
-
 @register_dl_technique("dl_techniques.layers.spatial_layer")
 class SpatialLayer(keras.layers.Layer):
-    """
-    Spatial coordinate grid generator for injecting positional information into models.
+    """Spatial coordinate grid generator.
 
-    This non-trainable layer emits a coordinate grid shaped like its input's
-    spatial extent. It reads only the input's shape, never its values, and the
-    grid it returns is meant to be concatenated onto the feature map by the
-    caller -- widening the following convolution's input by two channels.
+    A non-trainable layer that emits a coordinate grid shaped like its
+    input's spatial extent. It reads only the input's shape, never its
+    values; the grid it returns is meant to be concatenated onto the feature
+    map by the caller, widening the following convolution's input by two
+    channels. The grid convention is set by three knobs (``alignment``,
+    ``channel_order``, ``normalization``), documented at module level and
+    delegated to :func:`coordinate_grid`.
 
-    The grid convention is set by three knobs (``alignment``, ``channel_order``,
-    ``normalization``) whose meaning is documented at module level and whose
-    construction is delegated to :func:`coordinate_grid`, the single
-    implementation shared with every other consumer in the library.
-
-    **Two build modes:**
+    Two build modes:
 
     .. code-block:: text
 
@@ -489,7 +389,7 @@ class SpatialLayer(keras.layers.Layer):
         else:
             grid_size = self.resolution
 
-        # ONE implementation of the coordinate convention, shared with every
+        # Shares its implementation of the coordinate convention with every
         # other consumer in the library. Built in numpy at graph-construction
         # time: it is a constant, not a weight.
         grid = coordinate_grid(
@@ -586,4 +486,3 @@ class SpatialLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------

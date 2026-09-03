@@ -1,71 +1,21 @@
 """
-Complex-Valued Neural Network Layers Implementation
-================================================
+Complex-valued neural network layers: ``ComplexConv2D``, ``ComplexDense``,
+``ComplexReLU``, and complex-aware pooling and dropout layers.
 
-This module provides a comprehensive implementation of complex-valued neural network layers
-for deep learning models. These layers support complex number operations while maintaining
-numerical stability and efficient computation.
+Each layer keeps a complex tensor as its actual dtype and computes with the
+4-real-multiply expansion of complex arithmetic, rather than threading two
+parallel real tensors through the public API. Weights are initialized with
+magnitude drawn from a Rayleigh distribution and phase drawn uniformly, an
+Xavier/Glorot-style scheme adapted to the complex domain.
 
-Key Features:
-------------
-- Split-complex implementation for better numerical stability
-- Proper complex weight initialization using Rayleigh distribution
-- Efficient complex arithmetic operations
-- Support for complex convolution and dense operations
-- Complex-valued ReLU activation
-- Customizable regularization and initialization
-
-Technical Details:
------------------
-1. Complex Number Representation:
-   - Uses split representation (real/imaginary) for stability
-   - Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
-   - Complex convolution implemented as 4 real convolutions
-   - Complex dense operations use matrix form of complex multiplication
-
-2. Weight Initialization:
-   - Magnitude: Rayleigh distribution for proper scaling
-   - Phase: Uniform distribution in [-π, π]
-   - Fan-in/fan-out scaling for stable gradients
-   - Xavier/Glorot-style initialization adapted for complex domain
-
-3. Numerical Stability:
-   - Epsilon factor for division operations
-   - Split operations to prevent catastrophic cancellation
-   - Proper handling of complex gradients
-   - Stable complex arithmetic implementation
-
-4. Layer Types:
-   - ComplexLayer: Base class with common functionality
-   - ComplexConv2D: Complex-valued convolutional layer
-   - ComplexDense: Complex-valued fully connected layer
-   - ComplexReLU: Split ReLU activation for complex values
-
-ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe ``call``):
---------------------------------------------------------------
-The forward paths of these layers intentionally use raw TensorFlow operations
-and are therefore **TensorFlow-backend-only** by design:
-
-- ``tf.complex`` / ``complex64`` dtype — these layers operate on genuinely
-  complex-valued tensors (complex ``Input``, complex weights, complex outputs).
-  ``keras.ops`` provides ``real``/``imag`` extractors but **no complex-tensor
-  constructor and no complex dtype**, so a complex result cannot be assembled
-  through ``keras.ops``.
-- ``tf.math.real`` / ``tf.math.imag`` / ``tf.cast`` (to/from complex) — split
-  the complex tensors into the real/imag components on which the 4-real-op
-  complex arithmetic is performed.
-
-A backend-agnostic rewrite would require either complex-dtype support in
-``keras.ops`` (absent) or a full re-architecture to thread two parallel
-real-valued (real, imag) tensors through every layer and the public API —
-changing the layers' complex-tensor contract. This is a documented, accepted
-exception to the "only ``keras.ops`` in ``call``" rule (see the production
-roadmap §5). Do NOT "fix" this by forcing a broken ``keras.ops`` rewrite.
+The forward paths use raw TensorFlow operations (``tf.complex``,
+``tf.math.real``/``imag``) instead of ``keras.ops``, because ``keras.ops`` has
+no complex dtype or complex-tensor constructor. These layers are therefore
+TensorFlow-backend-only.
 
 References:
-----------
-1. "Deep Complex Networks" (Trabelsi et al., 2018)
-2. "Unitary Evolution Recurrent Neural Networks" (Arjovsky et al., 2016)
+    - Trabelsi et al., 2018. Deep Complex Networks.
+    - Arjovsky et al., 2016. Unitary Evolution Recurrent Neural Networks.
 """
 
 import keras
@@ -73,54 +23,30 @@ import numpy as np
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..utils.random import rayleigh
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexLayer(keras.layers.Layer):
-    """
-    Base class for complex-valued layers.
+    """Base class for complex-valued layers.
 
-    Provides common functionality for complex-valued operations with improved
-    numerical stability and initialization strategies. This base class handles
-    complex weight initialization using Rayleigh distribution for magnitudes
-    and uniform distribution for phases, ensuring proper scaling for complex
-    neural network training.
+    Handles complex weight initialization: magnitude from a Rayleigh
+    distribution, phase from a uniform distribution over ``[-pi, pi]``.
+    Complex numbers are represented as ``z = x + iy`` throughout, computed
+    with split real/imaginary arithmetic.
 
-    **Intent**: Establish a foundation for complex-valued neural network layers
-    with proper initialization, regularization support, and numerical stability
-    measures. All complex layers in this module inherit from this base class.
-
-    **Mathematical Foundation**:
-    Complex numbers are represented as z = x + iy, where x and y are real numbers
-    and i is the imaginary unit. Operations are performed using split real/imaginary
-    arithmetic to maintain numerical stability and computational efficiency.
-
-        :param epsilon: **INERT.** Accepted, validated (must be positive) and
-            serialized for config compatibility, but read by NO computation in
-            this module. It is kept because existing ``.keras`` files carry it in
-            their layer configs; it is not a numerical-stability knob. MEASURED
-            under a same-weights protocol on ``CoShNet``: ``1e-7`` vs ``1e+3``
-            and ``1e-7`` vs ``1e-30`` both move the output by exactly
-            ``0.000000e+00``, against three live controls on the same model
-            (``dropout_rate`` ``3.54e-01``, ``conv_filters`` ``2.48e-01`` plus a
-            parameter-count change, ``include_top`` structural). Defaults to
-            1e-7. See the ``DECISION`` anchor on ``self.epsilon`` below.
-        :param kernel_regularizer: Optional regularizer instance for kernel weights.
-            Applied to both real and imaginary parts of complex weights.
-            Defaults to None (no regularization).
-        :param kernel_initializer: Optional initializer for kernel weights. When None,
-            uses GlorotUniform initialization. For complex layers, this affects
-            the base scaling before applying complex-specific initialization.
-            Defaults to None.
-            **kwargs: Additional keyword arguments passed to Layer base class.
+    :param epsilon: Accepted and serialized for config compatibility but read
+        by no computation in this module. Measured on CoShNet: values from
+        ``1e-30`` to ``1e+3`` move the output by exactly 0. Kept because
+        existing ``.keras`` files pass it through ``from_config``; removing it
+        would raise a ``TypeError`` loading those checkpoints. Defaults to
+        ``1e-7``.
+    :param kernel_regularizer: Regularizer applied to both real and imaginary
+        parts of complex weights. Defaults to ``None``.
+    :param kernel_initializer: Initializer affecting the base scaling before
+        the complex-specific initialization is applied. Defaults to
+        ``GlorotUniform``.
     """
 
     def __init__(
@@ -132,23 +58,11 @@ class ComplexLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-        # Store configuration
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-053
-        # `epsilon` is an INERT knob and is deliberately left that way. There is
-        # no division anywhere in this module for it to guard: `grep -n
-        # "self.epsilon"` over this file returns exactly this line and the one in
-        # `get_config`. Do NOT "wire it up" to the first division you can find —
-        # inventing a consumer would change the numerics of every existing
-        # `CoShNet` checkpoint to satisfy a docstring. Do NOT delete the
-        # parameter either: `from_config` on every saved complex layer passes
-        # `epsilon=`, so removing it turns every existing `.keras` file into a
-        # `TypeError`. The docstring above now states the measurement instead of
-        # promising a behaviour. See decisions.md D-053.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-053: epsilon is inert -- no
+        # division in this module reads it. Removing it breaks from_config on every saved .keras checkpoint. See decisions.md.
         self.epsilon = epsilon
         self.kernel_regularizer = kernel_regularizer
         self.kernel_initializer = kernel_initializer or keras.initializers.GlorotUniform()
@@ -166,20 +80,20 @@ class ComplexLayer(keras.layers.Layer):
         them into complex numbers. The scaling follows Xavier/Glorot initialization
         principles adapted for the complex domain.
 
-            :param shape: Tuple of integers specifying the shape of weight tensor.
-            :param dtype: TensorFlow data type for complex weights. Defaults to tf.complex64.
-
-            :return: Complex-valued weight tensor with proper initialization.
+        :param shape: Shape of the weight tensor.
+        :type shape: Tuple[int, ...]
+        :param dtype: TensorFlow dtype for the complex weights.
+        :type dtype: tf.DType
+        :return: Complex-valued weight tensor.
+        :rtype: tf.Tensor
         """
         fan_in = int(np.prod(shape[:-1]))
         fan_out = int(shape[-1])
         sigma = keras.ops.sqrt(2.0 / (fan_in + fan_out))
 
-        # Initialize magnitude and phase
         magnitude = rayleigh(shape, sigma, dtype=tf.float32)
         phase = keras.random.uniform(shape, -np.pi, np.pi, dtype=tf.float32)
 
-        # Convert to complex representation
         weights = tf.complex(
             magnitude * keras.ops.cos(phase),
             magnitude * keras.ops.sin(phase)
@@ -188,12 +102,7 @@ class ComplexLayer(keras.layers.Layer):
         return tf.cast(weights, dtype)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
-
-            :return: Dictionary containing all constructor parameters needed for
-            reconstruction during model loading.
-        """
+        """Return the layer configuration for serialization."""
         config = super().get_config()
         config.update({
             'epsilon': self.epsilon,
@@ -202,65 +111,60 @@ class ComplexLayer(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexConv2D(ComplexLayer):
-    """
-    Complex-valued 2D convolution layer with improved numerical stability.
+    """Complex-valued 2D convolution layer.
 
-    Implements complex convolution using split real/imaginary implementation
-    for better numerical stability and performance. The complex convolution
-    is computed using four real convolutions following the mathematical
-    expansion of complex multiplication applied to convolution operations.
+    Computes complex convolution as four real convolutions, following the
+    algebraic expansion of complex multiplication.
 
-    **Intent**: Provide complex-valued convolutional processing for applications
-    requiring phase and magnitude information, such as signal processing,
-    radar, sonar, and certain computer vision_heads tasks where complex representations
-    are natural.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[batch, height, width, channels_complex])
-           ↓
-    Split: real_part, imag_part
-           ↓
-    Complex Convolution:
-      real_out = conv(real_in, real_kernel) - conv(imag_in, imag_kernel)
-      imag_out = conv(real_in, imag_kernel) + conv(imag_in, real_kernel)
-           ↓
-    Combine + Bias: output = complex(real_out + real_bias, imag_out + imag_bias)
-           ↓
-    Output(shape=[batch, new_height, new_width, filters_complex])
-    ```
+        Input [B, H, W, C] (complex)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │ split: real, imag         │
+        └─────────────┬─────────────┘
+                       ▼
+        ┌───────────────────────────┐
+        │ 4 real convolutions       │
+        │  real_out = conv(re,Kre)  │
+        │           - conv(im,Kim)  │
+        │  imag_out = conv(re,Kim)  │
+        │           + conv(im,Kre)  │
+        └─────────────┬─────────────┘
+                       ▼
+        combine + bias, complex(real_out, imag_out)
+                       │
+                       ▼
+        Output [B, H', W', filters] (complex)
 
-    **Mathematical Operation**:
-    For complex input I = I_r + iI_i and complex kernel K = K_r + iK_i:
-    Output = (I_r + iI_i) * (K_r + iK_i) = (I_r*K_r - I_i*K_i) + i(I_r*K_i + I_i*K_r)
+    For complex input ``I = I_r + iI_i`` and kernel ``K = K_r + iK_i``:
+    ``output = (I_r*K_r - I_i*K_i) + i(I_r*K_i + I_i*K_r)``
 
-        :param filters: Integer, number of output filters. Must be positive.
-            Each filter produces one complex-valued output channel.
-        :param kernel_size: Integer or tuple of 2 integers, specifying height and width
-            of the 2D convolution window. If integer, same value for both dimensions.
-        :param strides: Integer or tuple of 2 integers, specifying stride of convolution.
-            If integer, same stride for both dimensions. Defaults to 1.
-        :param padding: String, either 'SAME' or 'VALID' (case-insensitive).
-            'SAME' pads input to preserve spatial dimensions with stride=1.
-            'VALID' performs convolution without padding. Defaults to 'SAME'.
-            **kwargs: Additional keyword arguments for ComplexLayer base class.
+    :param filters: Number of output filters. Each filter produces one
+        complex-valued output channel.
+    :type filters: int
+    :param kernel_size: Height and width of the convolution window.
+    :type kernel_size: int or Tuple[int, int]
+    :param strides: Stride of the convolution. Defaults to ``1``.
+    :type strides: int or Tuple[int, int]
+    :param padding: ``'SAME'`` or ``'VALID'`` (case-insensitive). Defaults to
+        ``'SAME'``.
+    :type padding: str
 
-        # Strided convolution with regularization
+    Example:
+
+    .. code-block:: python
+
         conv = ComplexConv2D(
-            filters=32,
-            kernel_size=(5, 5),
-            strides=(2, 2),
-            padding='VALID',
-            kernel_regularizer=keras.regularizers.L2(0.01)
+            filters=32, kernel_size=(5, 5), strides=(2, 2),
+            padding='VALID', kernel_regularizer=keras.regularizers.L2(0.01),
         )
-        ```
-
     """
 
     def __init__(
@@ -291,10 +195,10 @@ class ComplexConv2D(ComplexLayer):
         self.bias = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create the layer's weights.
+        """Create the layer's weights.
 
-            :param input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexConv2D requires 4D input, got {len(input_shape)}D")
@@ -329,15 +233,15 @@ class ComplexConv2D(ComplexLayer):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Apply complex convolution to input tensor.
+        """Apply complex convolution to the input tensor.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode.
-
-            :return: Complex-valued output tensor after convolution.
+        :param inputs: Complex-valued input tensor.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer is in training mode.
+        :type training: Optional[bool]
+        :return: Complex-valued output tensor.
+        :rtype: keras.KerasTensor
         """
-        # Split real and imaginary parts
         inputs_real = tf.math.real(inputs)
         inputs_imag = tf.math.imag(inputs)
         kernel_real = tf.math.real(self.kernel)
@@ -371,9 +275,9 @@ class ComplexConv2D(ComplexLayer):
         """
         Compute the output shape of the convolution.
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape.
+        :return: Output tensor shape.
         """
         batch_size = input_shape[0]
 
@@ -396,7 +300,7 @@ class ComplexConv2D(ComplexLayer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -407,63 +311,54 @@ class ComplexConv2D(ComplexLayer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexDense(ComplexLayer):
-    """
-    Complex-valued dense layer with improved initialization.
+    """Complex-valued fully connected layer.
 
-    Implements complex dense operations with split real/imaginary parts
-    for stability and efficient computation. The complex multiplication
-    is performed using the mathematical expansion where each complex
-    weight interacts with complex inputs through proper complex arithmetic.
+    Computes complex matrix multiplication as four real matmuls, following
+    the algebraic expansion of complex multiplication.
 
-    **Intent**: Provide fully connected complex-valued transformations for
-    neural networks processing complex-valued data, such as signal processing
-    applications, complex embeddings, or as building blocks in complex
-    neural architectures.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[..., input_dim_complex])
-           ↓
-    Split: real_part, imag_part
-           ↓
-    Complex Matrix Multiplication:
-      real_out = matmul(real_in, real_weights) - matmul(imag_in, imag_weights)
-      imag_out = matmul(real_in, imag_weights) + matmul(imag_in, real_weights)
-           ↓
-    Add Bias: output = complex(real_out + real_bias, imag_out + imag_bias)
-           ↓
-    Output(shape=[..., units_complex])
-    ```
+        Input [..., D] (complex)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │ split: real, imag         │
+        └─────────────┬─────────────┘
+                       ▼
+        ┌───────────────────────────┐
+        │ 4 real matmuls            │
+        │  real_out = re@Wre - im@Wim│
+        │  imag_out = re@Wim + im@Wre│
+        └─────────────┬─────────────┘
+                       ▼
+        combine + bias, complex(real_out, imag_out)
+                       │
+                       ▼
+        Output [..., units] (complex)
 
-    **Mathematical Operation**:
-    For complex input I = I_r + iI_i and complex weights W = W_r + iW_i:
-    Output = (I_r + iI_i) @ (W_r + iW_i) = (I_r@W_r - I_i@W_i) + i(I_r@W_i + I_i@W_r)
+    For complex input ``I = I_r + iI_i`` and weights ``W = W_r + iW_i``:
+    ``output = (I_r@W_r - I_i@W_i) + i(I_r@W_i + I_i@W_r)``
 
-        :param units: Integer, number of output units. Must be positive.
-            Determines the dimensionality of the output space.
-            **kwargs: Additional keyword arguments for ComplexLayer base class.
+    :param units: Number of output units.
+    :type units: int
 
-        # With regularization and custom initialization
+    Example:
+
+    .. code-block:: python
+
         dense = ComplexDense(
-            units=64,
-            kernel_regularizer=keras.regularizers.L2(0.01),
-            kernel_initializer=keras.initializers.HeNormal()
+            units=64, kernel_regularizer=keras.regularizers.L2(0.01),
+            kernel_initializer=keras.initializers.HeNormal(),
         )
-
-        # As part of complex neural network
         inputs = keras.Input(shape=(784,), dtype=tf.complex64)
         x = ComplexDense(256)(inputs)
-        x = ComplexDense(128)(x)
         outputs = ComplexDense(10)(x)
         model = keras.Model(inputs, outputs)
-        ```
-
     """
 
     def __init__(
@@ -487,7 +382,7 @@ class ComplexDense(ComplexLayer):
         """
         Create the layer's weights.
 
-            :param input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -520,10 +415,10 @@ class ComplexDense(ComplexLayer):
         """
         Apply complex dense transformation.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode.
+        :param inputs: Complex-valued input tensor.
+        :param training: Boolean indicating whether in training mode.
 
-            :return: Complex-valued output tensor after transformation.
+        :return: Complex-valued output tensor after transformation.
         """
         # Split computations for numerical stability
         real_output = keras.ops.matmul(
@@ -547,9 +442,9 @@ class ComplexDense(ComplexLayer):
         """
         Compute the output shape of the dense layer.
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape.
+        :return: Output tensor shape.
         """
         output_shape = list(input_shape)
         output_shape[-1] = self.units
@@ -559,7 +454,7 @@ class ComplexDense(ComplexLayer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -567,52 +462,37 @@ class ComplexDense(ComplexLayer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexReLU(keras.layers.Layer):
-    """
-    Complex ReLU activation function.
+    """Complex ReLU activation.
 
-    Applies ReLU activation separately to real and imaginary parts of complex
-    inputs, effectively creating a split complex activation. This preserves
-    the complex structure while introducing non-linearity through element-wise
-    rectification of both components.
+    Applies ReLU to the real and imaginary parts independently: for
+    ``z = x + iy``, ``output = max(0, x) + i*max(0, y)``.
 
-    **Intent**: Provide non-linear activation for complex-valued neural networks
-    while maintaining the complex number structure. The split application ensures
-    that gradients can flow through both real and imaginary components.
-
-    **Mathematical Operation**:
-    For complex input z = x + iy:
-    output = ReLU(x) + i·ReLU(y) = max(0, x) + i·max(0, y)
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[..., complex_features])
-           ↓
-    Split: real_part = Re(z), imag_part = Im(z)
-           ↓
-    Apply ReLU: real_activated = max(0, real_part)
-                imag_activated = max(0, imag_part)
-           ↓
-    Combine: output = complex(real_activated, imag_activated)
-           ↓
-    Output(shape=[..., complex_features])
-    ```
+        Input [..., D] (complex)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │ split: real, imag         │
+        │ relu each independently   │
+        └─────────────┬─────────────┘
+                       ▼
+        Output [..., D] (complex)
 
-            **kwargs: Additional keyword arguments for Layer base class.
+    Example:
 
-        # In a complex neural network
+    .. code-block:: python
+
         inputs = keras.Input(shape=(128,), dtype=tf.complex64)
         x = ComplexDense(64)(inputs)
-        x = ComplexReLU()(x)  # Apply complex activation
+        x = ComplexReLU()(x)
         outputs = ComplexDense(32)(x)
         model = keras.Model(inputs, outputs)
-        ```
-
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -626,10 +506,10 @@ class ComplexReLU(keras.layers.Layer):
         """
         Apply complex ReLU activation.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode.
+        :param inputs: Complex-valued input tensor.
+        :param training: Boolean indicating whether in training mode.
 
-            :return: Complex-valued output tensor with ReLU applied to both components.
+        :return: Complex-valued output tensor with ReLU applied to both components.
         """
         return tf.complex(
             keras.ops.relu(tf.math.real(inputs)),
@@ -640,9 +520,9 @@ class ComplexReLU(keras.layers.Layer):
         """
         Compute the output shape (same as input for activation).
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape (identical to input).
+        :return: Output tensor shape (identical to input).
         """
         return input_shape
 
@@ -650,70 +530,41 @@ class ComplexReLU(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary.
+        :return: Configuration dictionary.
         """
         return super().get_config()
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexAveragePooling2D(keras.layers.Layer):
-    """
-    Complex-valued 2D average pooling layer.
+    """Complex-valued 2D average pooling layer.
 
-    Performs average pooling on complex-valued inputs by applying standard
-    average pooling independently to the real and imaginary components.
-    This downsamples the feature maps while preserving the complex structure.
+    Applies standard average pooling independently to the real and
+    imaginary components: for ``z = x + iy``, ``output = AvgPool(x) + i*AvgPool(y)``.
 
-    **Intent**: To provide a downsampling mechanism for complex-valued
-    convolutional neural networks, analogous to standard AveragePooling2D in
-    real-valued networks. It reduces spatial dimensions, helping to control
-    model complexity and increase receptive field size.
-
-    **Mathematical Operation**:
-    For a complex input tensor z = x + iy, where x and y are the real and
-    imaginary parts:
-    output = AvgPool(x) + i·AvgPool(y)
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[batch, height, width, channels_complex])
-           ↓
-    Split: real_part = Re(z), imag_part = Im(z)
-           ↓
-    Apply Average Pooling:
-      pooled_real = AvgPool(real_part, pool_size, strides, padding)
-      pooled_imag = AvgPool(imag_part, pool_size, strides, padding)
-           ↓
-    Combine: output = complex(pooled_real, pooled_imag)
-           ↓
-    Output(shape=[batch, new_height, new_width, channels_complex])
-    ```
+        Input [B, H, W, C] (complex)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │ split: real, imag         │
+        │ avg-pool each independently│
+        └─────────────┬─────────────┘
+                       ▼
+        Output [B, H', W', C] (complex)
 
-        :param pool_size: Integer or tuple of 2 integers, specifying the dimensions
-            of the pooling window. If an integer, the same value is used for
-            both height and width. Defaults to (2, 2).
-        :param strides: Integer or tuple of 2 integers, specifying the stride of the
-            pooling operation. If None, it defaults to `pool_size`. Defaults to None.
-        :param padding: String, either 'SAME' or 'VALID' (case-insensitive).
-            'SAME' pads the input to preserve spatial dimensions as much as
-            possible. 'VALID' performs pooling without padding. Defaults to 'VALID'.
-            **kwargs: Additional keyword arguments for Layer base class.
-
-        # As part of a complex CNN
-        inputs = keras.Input(shape=(128, 128, 3), dtype=tf.complex64)
-        x = ComplexConv2D(32, 3)(inputs)
-        x = ComplexReLU()(x)
-        x = ComplexAveragePooling2D()(x) # Downsample
-        x = ComplexConv2D(64, 3)(x)
-        x = ComplexReLU()(x)
-        x = ComplexAveragePooling2D()(x) # Downsample again
-        # ... rest of the model
-        model = keras.Model(inputs, x)
-        ```
-
+    :param pool_size: Height and width of the pooling window. Defaults to
+        ``(2, 2)``.
+    :type pool_size: int or Tuple[int, int]
+    :param strides: Stride of the pooling operation. Defaults to
+        ``pool_size``.
+    :type strides: int or Tuple[int, int], optional
+    :param padding: ``'SAME'`` or ``'VALID'`` (case-insensitive). Defaults to
+        ``'VALID'``.
+    :type padding: str
     """
 
     def __init__(
@@ -742,10 +593,10 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Apply complex average pooling.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode (unused).
+        :param inputs: Complex-valued input tensor.
+        :param training: Boolean indicating whether in training mode (unused).
 
-            :return: Complex-valued output tensor after pooling.
+        :return: Complex-valued output tensor after pooling.
         """
         # Split into real and imaginary components
         inputs_real = tf.math.real(inputs)
@@ -776,9 +627,9 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Compute the output shape of the pooling layer.
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape.
+        :return: Output tensor shape.
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexAveragePooling2D requires 4D input, got {len(input_shape)}D")
@@ -802,7 +653,7 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
@@ -812,66 +663,51 @@ class ComplexAveragePooling2D(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexDropout(keras.layers.Layer):
-    """
-    Complex-valued dropout layer for regularization.
+    """Complex-valued dropout layer.
 
-    Applies dropout to complex-valued inputs by generating a single dropout
-    mask and applying it to both the real and imaginary parts. This ensures
-    that entire complex units are dropped out together, preserving the
-    relationship between real and imaginary components.
+    Generates one real-valued dropout mask and applies it to both the real
+    and imaginary parts, so entire complex units drop together rather than
+    their components dropping independently.
 
-    **Intent**: Provide regularization for complex-valued neural networks to
-    prevent overfitting, analogous to the standard dropout layer in
-    real-valued networks.
-
-    **Mathematical Operation**:
-    1. A binary mask `m` is generated, where each element is 0 with probability `rate`.
-    2. During training, the output is `(x + iy) * m / (1 - rate)`.
-    3. During inference, the output is unchanged: `x + iy`.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[..., complex_features])
-           ↓
-    (During Training Only)
-           ↓
-    Generate Real-Valued Mask `m` using a standard Dropout layer on a tensor of ones.
-           ↓
-    Apply Mask: output = input * m
-           ↓
-    Output(shape=[..., complex_features])
-    ```
+        Input [..., D] (complex)
+                    │
+                    ▼ (training only)
+        ┌───────────────────────────┐
+        │ mask = Dropout(ones_like) │
+        │ output = input * mask     │
+        └─────────────┬─────────────┘
+                       ▼
+        Output [..., D] (complex)
 
-        :param rate: Float between 0 and 1. Fraction of the input units to drop.
-            **kwargs: Additional keyword arguments for Layer base class.
+    :param rate: Fraction of the input units to drop, in ``[0, 1)``.
+    :type rate: float
 
-        # In a complex model
+    Example:
+
+    .. code-block:: python
+
         inputs = keras.Input(shape=(256,), dtype=tf.complex64)
         x = ComplexDense(128)(inputs)
         x = ComplexReLU()(x)
-        x = ComplexDropout(0.3)(x) # Regularize after activation
+        x = ComplexDropout(0.3)(x)
         outputs = ComplexDense(64)(x)
         model = keras.Model(inputs, outputs)
-        ```
-
     """
 
     def __init__(self, rate: float, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if not 0 <= rate < 1:
             raise ValueError(f"rate must be in the interval [0, 1), got {rate}")
 
         self.rate = rate
-        # Use a standard Dropout layer internally. This is the correct,
-        # backend-agnostic way to handle dropout logic.
         self.dropout_layer = keras.layers.Dropout(self.rate)
 
     def call(
@@ -882,10 +718,10 @@ class ComplexDropout(keras.layers.Layer):
         """
         Apply complex dropout.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode.
+        :param inputs: Complex-valued input tensor.
+        :param training: Boolean indicating whether in training mode.
 
-            :return: Complex-valued output tensor after dropout.
+        :return: Complex-valued output tensor after dropout.
         """
         # Generate a real-valued mask by applying dropout to a tensor of ones.
         # The internal Dropout layer handles the `training` flag and scaling.
@@ -902,9 +738,9 @@ class ComplexDropout(keras.layers.Layer):
         """
         Compute the output shape (same as input for dropout).
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape (identical to input).
+        :return: Output tensor shape (identical to input).
         """
         return input_shape
 
@@ -912,7 +748,7 @@ class ComplexDropout(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary.
+        :return: Configuration dictionary.
         """
         config = super().get_config()
         config.update({
@@ -920,49 +756,31 @@ class ComplexDropout(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.complex_layers")
 class ComplexGlobalAveragePooling2D(keras.layers.Layer):
-    """
-    Complex-valued global 2D average pooling layer.
+    """Complex-valued global 2D average pooling layer.
 
-    Performs global average pooling on complex-valued inputs by applying the
-    operation independently to the real and imaginary components. This reduces
-    each feature map to a single complex number.
+    Reduces each complex feature map to a single complex number by averaging
+    over the spatial axes, independently on the real and imaginary parts.
 
-    **Intent**: To completely downsample the spatial dimensions of complex
-    feature maps, typically used as a transition from convolutional blocks to
-    fully connected (Dense) layers in a classifier.
-
-    **Mathematical Operation**:
-    For a complex input tensor z = x + iy:
-    output = GlobalAvgPool(x) + i·GlobalAvgPool(y)
-    where GlobalAvgPool computes the mean over the spatial (height, width) axes.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-    Input(shape=[batch, height, width, channels_complex])
-           ↓
-    Split: real_part = Re(z), imag_part = Im(z)
-           ↓
-    Apply Global Average Pooling:
-      pooled_real = mean(real_part, axis=[1, 2])
-      pooled_imag = mean(imag_part, axis=[1, 2])
-           ↓
-    Combine: output = complex(pooled_real, pooled_imag)
-           ↓
-    Output(shape=[batch, channels_complex]) or (if keepdims=True)
-    Output(shape=[batch, 1, 1, channels_complex])
-    ```
+        Input [B, H, W, C] (complex)
+                    │
+                    ▼
+        ┌───────────────────────────┐
+        │ split: real, imag         │
+        │ mean over axes [1, 2]     │
+        └─────────────┬─────────────┘
+                       ▼
+        Output [B, C] (complex), or [B, 1, 1, C] if keepdims
 
-        :param keepdims: Boolean, whether to keep the spatial dimensions or not.
-            If `False` (default), the output has shape `(batch, channels)`.
-            If `True`, the output has shape `(batch, 1, 1, channels)`.
-            **kwargs: Additional keyword arguments for Layer base class.
-
+    :param keepdims: If ``False`` (default), the output has shape
+        ``(batch, channels)``. If ``True``, ``(batch, 1, 1, channels)``.
+    :type keepdims: bool
     """
     def __init__(self, keepdims: bool = False, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -976,10 +794,10 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Apply complex global average pooling.
 
-            :param inputs: Complex-valued input tensor.
-            :param training: Boolean indicating whether in training mode (unused).
+        :param inputs: Complex-valued input tensor.
+        :param training: Boolean indicating whether in training mode (unused).
 
-            :return: Complex-valued output tensor after pooling.
+        :return: Complex-valued output tensor after pooling.
         """
         # Split into real and imaginary components
         inputs_real = tf.math.real(inputs)
@@ -997,9 +815,9 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Compute the output shape of the global pooling layer.
 
-            :param input_shape: Input tensor shape.
+        :param input_shape: Input tensor shape.
 
-            :return: Output tensor shape.
+        :return: Output tensor shape.
         """
         if len(input_shape) != 4:
             raise ValueError(f"ComplexGlobalAveragePooling2D requires 4D input, got {len(input_shape)}D")
@@ -1013,7 +831,7 @@ class ComplexGlobalAveragePooling2D(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-            :return: Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary containing all constructor parameters.
         """
         config = super().get_config()
         config.update({
