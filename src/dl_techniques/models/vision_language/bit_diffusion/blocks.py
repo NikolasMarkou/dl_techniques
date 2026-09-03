@@ -854,7 +854,27 @@ def get_2d_sincos_pos_embed(
     grid_w = np.arange(grid_size, dtype=np.float32)
     # "here w goes first" -- upstream's own annotation, and NumPy's default
     # indexing='xy'. So grid[0] holds the COLUMN index and grid[1] the ROW index.
-    # Passing (grid_h, grid_w) instead transposes the table with no shape change.
+    #
+    # MEASURED, and worth stating because it is the obvious mutation and it is
+    # the WRONG one: passing (grid_h, grid_w) instead is an exact NO-OP here,
+    # not a transposition. `grid_h` and `grid_w` are both `np.arange(grid_size)`
+    # -- this function takes a single `grid_size` and so can only build a SQUARE
+    # grid -- and `meshgrid(a, a)` is argument-order invariant (`np.array_equal`
+    # True on both outputs at grid_size 2, 3, 4, 7, 16). On a non-square grid the
+    # same swap does not produce a same-shape transpose either: it changes the
+    # SHAPE outright ((3, 5) vs (5, 3) for H=3, W=5). Anyone reaching for that
+    # injection to prove a guard works will get a false GREEN.
+    #
+    # The two mutations that DO transpose the table are passing indexing="ij"
+    # here, or swapping grid[0]/grid[1] (equivalently the two output halves) in
+    # get_2d_sincos_pos_embed_from_grid -- and on a square grid they are the same
+    # mutation. Either is a pure permutation: shape, dtype, every norm and every
+    # per-row statistic are IDENTICAL, so only an elementwise comparison against
+    # an independently computed destination index can see it. A model trained on
+    # the transposed table trains fine and is incompatible with every published
+    # checkpoint. Do not "clean up" the w-first meshgrid. The same fact, with the
+    # same measurement, is stated on the DiT-owned copy of these functions in
+    # layers/embedding/sincos_pos_embed_2d.py.
     grid = np.meshgrid(grid_w, grid_h)
     grid = np.stack(grid, axis=0)
 
