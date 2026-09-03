@@ -1,125 +1,67 @@
-"""
-Mix tokens with a parameter-free 2D Discrete Fourier Transform.
+"""FNetFourierTransform, the FNet token-mixing sublayer: a parameter-free 2D
+Discrete Fourier Transform in place of self-attention.
 
-This is the token-mixing sublayer from FNet. It replaces self-attention with a
-fixed, unlearned linear transform. There is nothing to train here: the layer's
-only weights are two constant DFT matrices, and they are created
-``trainable=False``.
+A 1D DFT runs along the sequence axis, then another along the hidden axis,
+and the real part is kept. Every output element is a linear combination of
+every input element, so tokens mix globally through a fixed matrix rather
+than a data-dependent score. The layer holds no queries, keys, values, or
+score matrix, and none of the attention-package conventions (softmax
+temperature, head-divisibility check, additive mask bias) apply to it.
 
-Architecture:
-    Self-attention's main job is to let every position read every other
-    position. FNet's claim is that a 2D DFT does enough of that job to be worth
-    the saving.
-
-    The input of shape ``(sequence_length, hidden_dim)`` is treated as a 2D
-    signal, and two 1D DFTs are applied in turn:
-
-    1.  A 1D DFT along the sequence dimension.
-    2.  A 1D DFT along the hidden (feature) dimension.
-
-    **This is NOT a QKV attention layer.** It lives in ``attention/`` because
-    it drops into a self-attention sublayer's slot. It has no queries, keys or
-    values, no learnable projections and no score matrix. The package's
-    attention-specific rules therefore do not apply here - the
-    ``1 / sqrt(head_dim)`` softmax temperature, the ``dim % num_heads``
-    precondition and the additive ``-1e9`` mask bias have no counterpart. That
-    is why nothing is imported from ``common.py``.
-
-    Masking differs in kind for the same reason. There is no softmax to bias,
-    so ``attention_mask`` MULTIPLIES padded positions to zero AFTER mixing.
-    The consequence: padded tokens still contribute to the mixed values of the
-    real tokens. Only their own outputs are zeroed.
-
-Foundational Mathematics:
-    The DFT decomposes a signal into frequencies. Applying it across both the
-    sequence and hidden axes moves the whole input into the frequency domain,
-    and taking the real part brings it back::
-
-        output = Re( F_S @ X @ F_D ),   (F_N)_{nk} = exp(-2*pi*i*n*k/N) / sqrt(N)
-
-    Each DFT matrix is dense, so every output element is a linear combination
-    of every input element. That is a global receptive field from a fixed
-    mixing matrix rather than a data-dependent one. The ``1/sqrt(N)`` factor
-    (``normalize_dft=True``) makes the transform unitary, so it preserves
-    signal energy and does not amplify activations as the sequence grows.
-
-    Note on complexity. This layer computes the DFT by multiplying with cached
-    DFT matrices, which costs ``O(S^2 * D + S * D^2)`` per mixing step - two
-    complex matmuls. That is NOT the ``O(N log N)`` of a true Fast Fourier
-    Transform, and the FNet paper's ``O(N log N)`` figure refers to an FFT
-    implementation. The matrix path trades the asymptotic for hardware
-    simplicity and for DFT weights that serialize exactly. Passing
-    ``implementation='fft'`` does not get you an FFT; it warns and falls back.
-    The ``__init__`` DECISION anchor says why, and why it must not be turned
-    into a ``NotImplementedError``.
+The DFT runs as two dense matrix multiplications, not a true
+``O(N log N)`` Fast Fourier Transform; passing ``implementation='fft'``
+warns and falls back to the same matrix path rather than raising, since a
+DFT weight this way serializes exactly. Masking is multiplicative and
+applied after mixing, not before a softmax: padded tokens still
+contribute to the real tokens' outputs, and only their own rows are
+zeroed.
 
 References:
-  - "FNet: Mixing Tokens with Fourier Transforms" (Lee-Thorp et al., 2021)
-    https://arxiv.org/abs/2105.03824
-
+    - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms. (https://arxiv.org/abs/2105.03824)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.fnet_fourier_transform")
 class FNetFourierTransform(keras.layers.Layer):
-    """
-    Parameter-free token mixing by a 2D Discrete Fourier Transform.
+    """Mix tokens with a 2D Discrete Fourier Transform.
 
     Applies a 1D DFT along the sequence axis, then another along the hidden
     axis, then takes the real part: ``output = Re(DFT_hidden(DFT_seq(X)))``.
     Every position ends up mixed with every other one, and the layer holds
-    ZERO learnable parameters while doing it.
+    no learnable parameters while doing it: the two DFT matrices are created
+    with ``trainable=False`` and stored only so they round-trip through
+    ``.keras`` serialization instead of being rebuilt on load.
 
-    **[ZERO TRAINABLE PARAMETERS]** The two DFT matrices are created with
-    ``trainable=False``, so ``layer.trainable_weights`` is empty. They are
-    stored as weights only so they round-trip through ``.keras``
-    serialization instead of being rebuilt on load. Nothing here learns.
+    This is a token mixer, not a QKV attention layer: no queries, keys, or
+    values, no learnable projections, no score matrix. The package's
+    attention conventions (the ``1 / sqrt(head_dim)`` temperature, the
+    ``dim % num_heads`` precondition, the additive ``-1e9`` mask bias) have
+    no counterpart here, which is why the module imports nothing from
+    :mod:`~dl_techniques.layers.attention.common`.
 
-    **[NOT A QKV ATTENTION LAYER]** This is a token MIXER. There are no
-    queries, keys or values, no learnable projections and no score matrix. The
-    attention rules applied to its siblings have no counterpart here: the
-    ``1 / sqrt(head_dim)`` temperature, the ``dim % num_heads`` precondition,
-    and the additive ``-1e9`` mask bias with its fp16 hazard. They are not
-    applicable rather than missing, which is why the module imports nothing
-    from :mod:`~dl_techniques.layers.attention.common`.
+    Masking is multiplicative and applied after mixing, since there is no
+    softmax to bias here. Padded positions still contribute to the mixed
+    values of the real tokens; only the padded tokens' own outputs are
+    zeroed.
 
-    **[MASKING SEMANTICS DIFFER]** With no softmax to bias, ``attention_mask``
-    is applied MULTIPLICATIVELY and only AFTER mixing. Padded positions still
-    contribute to the mixed values of the real tokens; only the padded tokens'
-    own outputs are zeroed. Don't assume the usual "masked tokens are
-    invisible" guarantee. It does not hold here.
+    The DFT costs ``O(S^2 * D + S * D^2)`` per call for an input
+    ``(B, S, D)`` — two complex matmuls, not the ``O(N log N)`` of a true
+    FFT. ``numpy`` appears only inside ``_create_dft_matrix``, which runs
+    once at ``build()`` time to produce a constant initializer; ``call()``
+    uses only ``keras.ops``. The complex DFT is carried as a trailing
+    real/imag pair rather than routed through ``keras.ops.fft2``, since
+    ``fft2`` returns a tuple of tensors that cannot be stored as one
+    serializable weight and recomputes the transform on every call instead
+    of reading a cached matrix.
 
-    **[COMPLEXITY]** The DFT is computed by multiplying with cached matrices,
-    costing ``O(S^2 * D + S * D^2)`` per call for an input ``(B, S, D)`` - two
-    complex matmuls. That is NOT the ``O(N log N)`` of a true FFT. No FFT path
-    is implemented; see the ``implementation`` parameter.
-
-    **[FORWARD PATH IS PURE ``keras.ops``]** ``numpy`` appears only inside
-    ``_create_dft_matrix``, which runs once at ``build()`` time to produce a
-    constant initializer. No ``numpy``, ``tf.`` or backend-specific call exists
-    in ``call()``. The complex DFT is hand-rolled over a trailing real/imag
-    pair rather than routed through ``keras.ops.fft2`` for two reasons.
-    ``fft2`` takes and returns a ``(real, imag)`` TUPLE of tensors, which
-    cannot be stored as one serializable weight, and it recomputes the
-    transform on every call instead of reading a cached matrix. This is a
-    design choice, not an unmigrated ``tf.`` exception.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -136,7 +78,7 @@ class FNetFourierTransform(keras.layers.Layer):
           ┌───────────────────────────────────────┐
           │ DFT along the sequence axis           │
           │   X' = F_S @ X    (complex matmul)    │
-          │   F_S: (S, S, 2)  CONSTANT WEIGHT,    │
+          │   F_S: (S, S, 2)  constant weight,    │
           │        trainable=False                │
           └──────────────────┬────────────────────┘
                              │  [B, S, D, 2]
@@ -144,7 +86,7 @@ class FNetFourierTransform(keras.layers.Layer):
           ┌───────────────────────────────────────┐
           │ DFT along the hidden axis             │
           │   X'' = X' @ F_D  (complex matmul)    │
-          │   F_D: (D, D, 2)  CONSTANT WEIGHT,    │
+          │   F_D: (D, D, 2)  constant weight,    │
           │        trainable=False                │
           └──────────────────┬────────────────────┘
                              │  [B, S, D, 2]
@@ -155,7 +97,7 @@ class FNetFourierTransform(keras.layers.Layer):
                              ▼
           ┌───────────────────────────────────────┐
           │ attention_mask (optional)             │
-          │   MULTIPLICATIVE and POST-mix:        │
+          │   multiplicative, applied after mix   │
           │   zeroes only the padded tokens' own  │
           │   rows. Padded tokens still fed every │
           │   real token's mix, upstream.         │
@@ -168,7 +110,7 @@ class FNetFourierTransform(keras.layers.Layer):
 
     :param implementation: Strategy for computing the DFT. Only ``'matrix'``
         (the default) is implemented: it uses cached DFT-matrix
-        multiplication. ``'fft'`` is **accepted but not implemented**. There
+        multiplication. ``'fft'`` is accepted but not implemented. There
         is no true Fast Fourier Transform path here; passing ``'fft'`` logs a
         one-time warning and falls back to the ``'matrix'`` path with
         identical output. Don't reach for ``'fft'`` expecting a speedup.
@@ -178,9 +120,9 @@ class FNetFourierTransform(keras.layers.Layer):
         DFT matrices, which makes the transform unitary and keeps activation
         energy stable. Defaults to ``True``.
     :type normalize_dft: bool
-    :param epsilon: Nominally a small constant for numerical stability. **It is
-        validated, stored and serialized but never read on the forward path**
-        - no division or logarithm in this layer needs a floor. It is kept
+    :param epsilon: Nominally a small constant for numerical stability. It is
+        validated, stored and serialized but never read on the forward path
+        -- no division or logarithm in this layer needs a floor. It is kept
         because it is a ``get_config()`` key and dropping it would break
         existing checkpoints. Defaults to ``1e-12``.
     :type epsilon: float
@@ -246,22 +188,14 @@ class FNetFourierTransform(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         valid_implementations = ['matrix', 'fft']
         if implementation not in valid_implementations:
             raise ValueError(
                 f"implementation must be one of {valid_implementations}, "
                 f"got '{implementation}'"
             )
-        # DECISION plan_2026-06-14_0c5d4a21/D-006
-        # The originating plan directory is gone, so this comment is the record.
-        # 'fft' is accepted but is NOT an FFT path: build() and call() always
-        # use the matrix DFT. Don't raise NotImplementedError here.
-        # `test_fnet_fourier_transform.py::test_different_implementations`
-        # constructs implementation='fft' and asserts a finite forward, so
-        # failing loud turns a green test red. Warn once and fall back instead.
-        # Don't implement a real FFT either: the decision was to guard and
-        # document this, not to re-implement it.
+        # DECISION plan_2026-06-14_0c5d4a21/D-006: 'fft' is accepted but not an
+        # FFT path -- build()/call() always use the matrix DFT. Warn once and fall back rather than raising, since a test constructs 'fft' and expects a finite forward. See decisions.md.
         if implementation == 'fft':
             logger.warning(
                 "FNetFourierTransform(implementation='fft') is not implemented; "
@@ -269,25 +203,20 @@ class FNetFourierTransform(keras.layers.Layer):
                 "DFT path (identical output). Use implementation='matrix' to "
                 "silence this warning."
             )
-        # KNOWN DEAD PARAMETER, left in place on purpose.
-        # `epsilon` is validated, stored and serialized but never read by
-        # build(), call() or any helper. This layer has no division or log that
-        # needs a floor. Don't delete it: it is a `get_config()` key, so
-        # removing it breaks `load_model` on every existing checkpoint.
+        # epsilon is validated, stored and serialized but never read: this
+        # layer has no division or log that needs a floor. Kept because it is
+        # a get_config() key and dropping it breaks load_model on old checkpoints.
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
-        # Store configuration
         self.implementation = implementation
         self.normalize_dft = normalize_dft
         self.epsilon = epsilon
         self.supports_masking = True
 
-        # DFT matrices (created in build())
         self.dft_matrix_seq = None
         self.dft_matrix_hidden = None
 
-        # Track built dimensions for validation
         self._built_seq_len = None
         self._built_hidden_dim = None
 
@@ -445,7 +374,7 @@ class FNetFourierTransform(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional mask of shape
             ``(batch_size, sequence_length)``. It zeroes the padded positions'
-            OWN outputs, AFTER mixing. It does not stop padded tokens from
+            own outputs, after mixing. It does not stop padded tokens from
             contributing to the real tokens' outputs.
         :type attention_mask: keras.KerasTensor or None
         :param training: Whether the layer should behave in training mode
@@ -480,14 +409,9 @@ class FNetFourierTransform(keras.layers.Layer):
         # Shape: (B, S, H, 2) -> (B, S, H)
         output = after_hidden_dft[..., 0]
 
-        # Zero the padded tokens' own rows, after mixing.
-        #
-        # This is MULTIPLICATIVE and post-hoc, unlike the additive `-1e9`
-        # pre-softmax bias used elsewhere in this package. There is no softmax
-        # here to bias, so nothing from `common` applies. Say the consequence
-        # plainly: padded tokens are NOT excluded from the mixing. They
-        # contribute to every real token's output, and only their own outputs
-        # are zeroed. Don't unify this with the additive mask helper.
+        # Multiplicative and applied after mixing, unlike the additive -1e9
+        # pre-softmax bias elsewhere: padded tokens still contribute to every
+        # real token's output here, and only their own outputs are zeroed.
         if attention_mask is not None:
             # Shape: (B, S) -> (B, S, 1), which broadcasts over H.
             mask_expanded = keras.ops.expand_dims(attention_mask, axis=-1)
@@ -544,5 +468,3 @@ class FNetFourierTransform(keras.layers.Layer):
             'epsilon': self.epsilon,
         })
         return config
-
-# ---------------------------------------------------------------------

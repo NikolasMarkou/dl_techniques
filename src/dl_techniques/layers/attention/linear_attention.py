@@ -1,106 +1,41 @@
-"""
-Purely-linear (O(N)) self-attention that is Miyasawa-compliant.
+"""LinearAttention, a purely-linear (O(N)) self-attention layer that is
+bias-free and degree-1 homogeneous, for the bias-free denoiser stack.
 
-This module implements ``LinearAttention``: a multi-head, non-causal linear /
-kernel attention layer designed to satisfy this repo's two operational Miyasawa
-properties so it can drop into the bias-free denoiser stack without breaking the
-additive-Gaussian ``residual = sigma^2 * score`` identity:
+Three bias-free ``Dense`` projections produce Q, K and V. A
+positively-homogeneous non-negative feature map ``phi`` is applied to Q
+and K, then matmul associativity contracts the key side first into a
+``(d, d)`` state, so no ``N x N`` attention matrix is ever formed. A
+mandatory denominator normalizer divides the result, and the heads are
+merged and projected back to ``dim``, again bias-free. There is no
+softmax, no normalization layer, and no additive constant anywhere on
+the path; that absence is what preserves the ``f(alpha x) = alpha f(x)``
+degree-1 property this layer exists to guarantee (the derivation and the
+epsilon design are in ``call``'s ``D-001`` comment and ``decisions.md``).
 
-1. **Bias-free** — every Q/K/V/output projection is ``Dense(use_bias=False)`` by
-   default; there is NO additive constant anywhere on the forward path (no
-   softmax, no LayerNorm/RMSNorm, no beta/center, no learned bias). The only
-   nonlinearity is the positively-homogeneous feature map ``phi``.
-2. **Degree-1 positive homogeneity** — ``f(alpha * x) = alpha * f(x)`` for
-   ``alpha > 0`` (verified numerically by a seq-shaped probe; target rel-err
-   ``< 1e-4``).
-
-Architecture:
-    Three bias-free ``Dense`` projections produce Q, K and V, which are reshaped to
-    ``(B, H, N, head_dim)``. A positively-homogeneous non-negative feature map
-    ``phi`` is applied to Q and K only (V is untouched), after which matmul
-    associativity contracts the key side FIRST into a ``(d, d)`` state, so no
-    ``N x N`` tensor is ever allocated. A mandatory normalizer divides the result,
-    and the heads are merged and projected back to ``dim`` — again bias-free.
-
-    There is **no softmax, no normalization layer, and no additive constant**
-    anywhere on that path, and there is **no masking stage at all**. Neither is
-    an oversight. The first is what preserves degree-1 homogeneity. The second is
-    this layer's principal footgun and carries a warning on the class.
-
-**Foundational Mathematics (the math).** Standard attention
-``softmax(Q K^T / sqrt(d)) V`` is O(N^2) AND
-non-homogeneous (softmax is temperature-sensitive: ``softmax(alpha z) !=
-softmax(z)``). Linear attention replaces the softmax exponential kernel with an
-explicit, non-negative feature map ``phi`` and exploits matmul associativity::
-
-    O_i = phi(Q_i) . (Sum_j phi(K_j) (x) V_j)  /  (phi(Q_i) . Sum_j phi(K_j) + eps_eff)
-          |________ numerator (d x d state) ________|   |____ scalar denominator ____|
-
-Contracting ``Sum_j phi(K_j) (x) V_j`` first yields a ``(d, d)`` state, so the
-whole thing is ``O(N * d^2) = O(N)`` in sequence length: the ``N x N`` attention
-matrix is NEVER materialized. This reuses the non-causal associativity contraction
-STYLE of ``performer_attention.py`` (``phi(K)^T V`` contracted first), but NOT its
-feature map nor its epsilon (see below).
-
-**Degree-1 proof (F-W2).** Let ``x -> c x`` (``c > 0``). With no bias in the
-projections, ``Q -> c Q``, ``K -> c K``, ``V -> c V``. If ``phi`` is positively
-homogeneous of degree ``p`` (``phi(c z) = c^p phi(z)`` for ``c > 0``):
-
-    - numerator  ``Sum_j phi(cQ_i) phi(cK_j) (cV_j) = c^p c^p c . Num = c^(2p+1) Num``
-    - denominator ``Sum_j phi(cQ_i) phi(cK_j)       = c^(2p) Den``
-    - O_i(c x) = c^(2p+1) / c^(2p) . (Num/Den) = c . O_i(x)   -> degree-1, for ANY p.
-
-**The denominator normalizer is what makes the output degree-1.** It is not
-there for numerical stability. An unnormalized linear attention
-``Sum_j phi(Q_i) phi(K_j) V_j`` is degree ``2p+1``, which is degree-1 only in the
-trivial ``p = 0`` case. It is mandatory here, never an optional flag.
-
-**Why not Performer's feature map / epsilon.** Performer's FAVOR+ map
-``cos/sin . exp(-||x||^2 / 2)`` uses a Gaussian factor that is NOT positively
-homogeneous, so it breaks property (2); and Performer adds a bare fixed ``+1e-6``
-denominator floor, an additive constant that also breaks EXACT degree-1 (F-W3).
-Both are rejected here (decisions.md D-003). The eps tension is resolved with an
-**input-scaled epsilon** (decisions.md D-001, see ``call``).
-
-**Scope.** v1 is **non-causal only** (denoising, the target use, is non-causal).
-A causal cumsum variant (per-position prefix state) is future work; cosFormer
-cosine reweighting, PolaFormer polarity split, and Norm x Direction query-norm
-restoration are deferred (decisions.md D-003).
+There is no masking stage. ``mask=`` is accepted, for signature
+compatibility with sibling attention layers, and silently discarded:
+padded tokens still contribute to both the running state and the
+normalizer. This layer is for the fixed-size, fully-populated, non-causal
+denoiser stack, not for variable-length or causal sequences.
 
 References:
-    - Katharopoulos et al. (2020), "Transformers are RNNs: Fast Autoregressive
-      Transformers with Linear Attention" (kernel feature map + associativity).
-    - Choromanski et al. (2020), "Rethinking Attention with Performers"
-      (associativity skeleton reused; FAVOR+ map NOT reused).
-    - "Towards Robust Image Denoising with Scale Equivariance" (arxiv 2508.02967)
-      — softmax-free first-order-homogeneous denoiser via ratio-of-equal-degree.
+    - Katharopoulos et al., 2020. Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention.
+    - Choromanski et al., 2020. Rethinking Attention with Performers.
+    - Towards Robust Image Denoising with Scale Equivariance. (https://arxiv.org/abs/2508.02967)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
-# Feature maps allowed here are exactly the positively-homogeneous, non-negative
-# ones. NON-homogeneous maps are FORBIDDEN and rejected in __init__:
-#   - 'elu_plus_one' (Katharopoulos elu(x)+1): the "+1" is an additive degree-0
-#     constant -> breaks f(alpha x) = alpha f(x)  (F-W2 / F-W3).
-#   - 'exp' / 'softmax': exp is non-homogeneous (exp(alpha z) != alpha^p exp(z))
-#     and softmax is temperature-sensitive (softmax(alpha z) != softmax(z)).
+# Feature maps allowed here are exactly the positively-homogeneous,
+# non-negative ones; 'elu_plus_one'/'exp'/'softmax' break degree-1
+# homogeneity and are rejected in __init__.
 _SUPPORTED_FEATURE_MAPS = ('relu', 'relu_squared', 'abs')
 _FORBIDDEN_FEATURE_MAPS = ('elu_plus_one', 'exp', 'softmax')
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.linear_attention")
@@ -117,42 +52,31 @@ class LinearAttention(keras.layers.Layer):
 
     .. warning::
 
-       **``mask=`` IS ACCEPTED AND SILENTLY IGNORED.** ``call()`` takes a ``mask``
-       argument purely so this layer is drop-in interchangeable with its siblings,
-       then discards it (``del mask`` on the first line). v1 is non-causal and
-       unmasked: there is no masking stage anywhere on the forward path. Padded
-       tokens therefore contribute their full weight to both the ``kv`` state and
-       the normalizer ``z``, so a padded batch produces DIFFERENT outputs for the
-       real tokens than the same batch without padding — silently, with no error
-       and no warning.
+       ``mask=`` is accepted and silently ignored. ``call()`` takes a ``mask``
+       argument only so this layer's signature matches its siblings', then
+       discards it (``del mask`` on the first line). There is no masking stage
+       anywhere on the forward path, so padded tokens contribute their full
+       weight to both the ``kv`` state and the normalizer ``z``: a padded
+       batch produces different outputs for the real tokens than the same
+       batch without padding, silently. Do not use this layer for
+       variable-length or padded sequence data, or where causality is
+       required. Its intended home is the fixed-size, fully-populated,
+       non-causal bias-free denoiser stack.
 
-       This asymmetry is easy to miss because the argument exists and is typed.
-       Concretely: do NOT use this layer for variable-length / padded sequence
-       data, and do NOT use it where causality is required. Its intended home is
-       the fixed-size, fully-populated, non-causal bias-free denoiser stack. If you
-       need masking here, implement it — do not assume the parameter already does.
+    Homogeneity scope and limitations:
 
-    **Homogeneity scope / limitations (honest caveats):**
-
-    - **Feature-map / scale band.** Degree-1 homogeneity is *exact* for ``'relu'``
-      / ``'abs'`` (degree ``p=1``) across a wide input-scale band. ``'relu_squared'``
-      (``p=2``, degree-4 denominator) can *degrade* at extreme small scales
-      (``alpha <= ~1e-6``): the doubled dynamic range underflows and the ``1e-20``
-      floor activates, so the property no longer holds bit-exactly there. Prefer
-      ``'relu'`` for the strongest guarantee; keep ``'relu_squared'`` to realistic
-      scales.
-    - **Masking.** ``mask=`` is currently **IGNORED** (v1 is non-causal and
-      unmasked). Padded tokens still contribute to the ``kv`` state and the
-      normalizer; do not rely on this layer for correct masked/padded results.
-      See the warning above — this is the single most dangerous property of this
-      layer and is stated three times on purpose (here, in the warning, and in
-      ``call()``).
-    - **Training mode.** Homogeneity is a ``training=False`` / ``dropout_rate=0``
+    - Feature-map / scale band. Degree-1 homogeneity is exact for ``'relu'``
+      / ``'abs'`` (degree ``p=1``) across a wide input-scale band.
+      ``'relu_squared'`` (``p=2``) can degrade at extreme small scales
+      (``alpha <= ~1e-6``): the doubled dynamic range underflows and the
+      ``1e-20`` floor activates, so the property no longer holds bit-exactly
+      there. Prefer ``'relu'`` for the strongest guarantee.
+    - Training mode. Homogeneity is a ``training=False`` / ``dropout_rate=0``
       property. With ``dropout_rate>0`` at ``training=True`` the output is
-      stochastic (Dropout is applied after ``output_proj``) and thus not
-      per-sample homogeneous; the default ``dropout_rate=0.0`` is the Miyasawa mode.
+      stochastic (dropout runs after ``output_proj``) and not per-sample
+      homogeneous; the default ``dropout_rate=0.0`` is the exact mode.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -196,7 +120,7 @@ class LinearAttention(keras.layers.Layer):
         │         │        │ input-scaled eps  (D-001)    │            │
         │         │        │ denom = z + eps * mean_j(z)  │            │
         │         │        │ (same degree as z -> exact   │            │
-        │         │        │  degree-1; a FIXED +1e-6     │            │
+        │         │        │  degree-1; a fixed +1e-6     │            │
         │         │        │  would break it)             │            │
         │         │        └──────────────┬───────────────┘            │
         │         └────────────┬──────────┘                            │
@@ -214,8 +138,8 @@ class LinearAttention(keras.layers.Layer):
         │                      ▼                                       │
         │            Output [B, N, dim]                                │
         │                                                              │
-        │   NOTE: `mask=` is accepted and SILENTLY DISCARDED — there   │
-        │   is no masking stage anywhere in this diagram (v1).         │
+        │   mask= is accepted and silently discarded -- there is no   │
+        │   masking stage anywhere in this diagram.                    │
         └──────────────────────────────────────────────────────────────┘
 
     :param dim: Model dimensionality (input and output feature size). Must be
@@ -231,13 +155,13 @@ class LinearAttention(keras.layers.Layer):
     :param dropout_rate: Dropout rate applied to the output, in ``[0, 1]``.
     :type dropout_rate: float
     :param use_bias: Whether the projections use a bias. Default ``False``
-        (**compliant / bias-free mode**). Setting ``True`` breaks bias-freeness
-        and is only for non-Miyasawa callers.
+        (bias-free mode). Setting ``True`` breaks bias-freeness and is only
+        for callers that do not need that property.
     :type use_bias: bool
     :param feature_map: Positively-homogeneous non-negative feature map ``phi``.
-        One of ``'relu'`` (p=1), ``'relu_squared'`` (p=2, FLatten-style focus),
-        ``'abs'`` (p=1). ``'elu_plus_one'``/``'exp'``/``'softmax'`` are rejected
-        (they break degree-1 homogeneity).
+        One of ``'relu'`` (p=1), ``'relu_squared'`` (p=2), ``'abs'`` (p=1).
+        ``'elu_plus_one'``/``'exp'``/``'softmax'`` are rejected (they break
+        degree-1 homogeneity).
     :type feature_map: str
     :param epsilon: Relative denominator floor. The effective floor is
         ``epsilon * mean_over_tokens(z)`` (input-scaled, D-001), keeping degree-1
@@ -290,24 +214,12 @@ class LinearAttention(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # This check does NOT adopt `common.validate_head_divisibility()`, for
-        # two reasons. First, it is CONDITIONAL: divisibility only matters in the
-        # `head_dim is None` branch, because an explicit `head_dim` makes the
-        # inner dim `num_heads * head_dim` and `dim % num_heads` irrelevant. The
-        # shared helper is unconditional, so adopting it would leave this `if`
-        # here anyway and split one rule across two places. Second, the trailing
-        # `"when head_dim is None"` clause is the fix instruction: it tells the
-        # caller they can change `dim`/`num_heads` OR pass an explicit `head_dim`.
-        # The helper's message stops at "...must be divisible by num_heads (H)"
-        # and would drop that cheaper remedy.
-        # `TestValidation::test_invalid_divisibility` matches only
-        # `"must be divisible"`, so the test is not what forces this; the
-        # diagnostic text is. No line number is given because it drifts.
+        # Not common.validate_head_divisibility(): this check is conditional
+        # (only matters when head_dim is None) and names the head_dim escape hatch, which the shared helper's message does not.
         if head_dim is None and dim % num_heads != 0:
             raise ValueError(
                 f"dim ({dim}) must be divisible by num_heads ({num_heads}) "
@@ -319,7 +231,7 @@ class LinearAttention(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
         if feature_map in _FORBIDDEN_FEATURE_MAPS:
             raise ValueError(
-                f"feature_map '{feature_map}' is FORBIDDEN: it breaks degree-1 "
+                f"feature_map '{feature_map}' is forbidden: it breaks degree-1 "
                 f"homogeneity (the '+1' additive constant in elu_plus_one, or the "
                 f"exp/softmax non-homogeneous kernel). Allowed values: "
                 f"{list(_SUPPORTED_FEATURE_MAPS)}"
@@ -332,7 +244,6 @@ class LinearAttention(keras.layers.Layer):
         if epsilon < 0.0:
             raise ValueError(f"epsilon must be >= 0, got {epsilon}")
 
-        # Store configuration
         self.dim = dim
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
@@ -346,18 +257,13 @@ class LinearAttention(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Computed attributes.
         # head_dim==None -> square case (inner == dim); else inner == num_heads*head_dim.
         self._head_dim_arg = head_dim
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.inner_dim = self.num_heads * self.head_dim
 
-        # Create sub-layers in __init__ (unbuilt).
-        # DECISION plan-2026-08-22T035419-a11304c8/D-200 — clone the initializer
-        # per projection. Don't pass `self.kernel_initializer` straight in: one
-        # Initializer INSTANCE reused across same-shape weights gives
-        # bit-identical kernels (measured max|delta| = 0.0 over Q, K, V and
-        # output_proj), so Q and K start equal. See decisions.md D-200.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-200: clone the initializer per
+        # projection, never pass self.kernel_initializer directly -- one shared instance gives bit-identical Q/K kernels. See decisions.md.
         self.query_proj = layers.Dense(
             self.inner_dim,
             use_bias=use_bias,
@@ -395,11 +301,8 @@ class LinearAttention(keras.layers.Layer):
             name='output_proj'
         )
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
-        # UNCONDITIONALLY and gated in `call()`. Don't put it back behind
-        # `if dropout_rate > 0`: that made the object graph and the auto-generated
-        # sub-layer names depend on `dropout_rate`. A Dropout owns no weights.
-        # See decisions.md D-016.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016: Dropout is created
+        # unconditionally and gated in call(), not behind `if dropout_rate > 0` -- that made the object graph depend on dropout_rate. See decisions.md.
         self.dropout = layers.Dropout(dropout_rate, name="dropout")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -411,7 +314,6 @@ class LinearAttention(keras.layers.Layer):
         if self.built:
             return
 
-        # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input (B, N, dim), got shape {input_shape}")
         if input_shape[-1] != self.dim:
@@ -438,11 +340,9 @@ class LinearAttention(keras.layers.Layer):
         (needed so the denominator ``phi(Q).Sum phi(K)`` is non-negative). This is
         what makes the normalized attention degree-1 (F-W2).
 
-        FORBIDDEN maps (rejected in ``__init__``) and WHY:
-          - ``elu(x) + 1``: the ``+1`` is an additive degree-0 constant; it makes
-            ``phi(alpha x) != alpha^p phi(x)`` -> breaks ``f(alpha x) = alpha f(x)``.
-          - ``exp`` / ``softmax``: exponential is non-homogeneous and softmax is
-            temperature-sensitive (``softmax(alpha z) != softmax(z)``).
+        Forbidden maps, rejected in ``__init__``: ``elu(x) + 1`` (the ``+1`` is
+        an additive degree-0 constant, breaking ``f(alpha x) = alpha f(x)``), and
+        ``exp`` / ``softmax`` (non-homogeneous; softmax is temperature-sensitive).
 
         :param x: Input tensor.
         :type x: keras.KerasTensor
@@ -471,11 +371,10 @@ class LinearAttention(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode (affects dropout only).
         :type training: Optional[bool]
-        :param mask: **Accepted and SILENTLY DISCARDED.** Present only so this
-            layer's signature matches its siblings'; v1 has no masking stage, so
+        :param mask: Accepted and silently discarded. Present only so this
+            layer's signature matches its siblings'; there is no masking stage, so
             padded tokens still contribute to the ``kv`` state and to the
-            normalizer ``z``. Passing a mask here does nothing and reports nothing.
-            See the ``warning`` block in the class docstring.
+            normalizer ``z``. See the ``warning`` block in the class docstring.
         :type mask: Optional[keras.KerasTensor]
         :return: Output tensor of shape ``(batch, seq_len, dim)``.
         :rtype: keras.KerasTensor
@@ -527,31 +426,13 @@ class LinearAttention(keras.layers.Layer):
         num = ops.einsum('bhnd,bhde->bhne', phi_q, kv)
         z = ops.einsum('bhnd,bhd->bhn', phi_q, k_sum)
 
-        # 5. Input-scaled epsilon. This is the crux of the layer.
-        # DECISION plan_2026-07-07_1cab8d7a/D-001
-        # The originating plan directory is gone, so this comment is the record.
-        # Scale epsilon by z's OWN degree-2p mean, so the floor carries the same
-        # degree as z. Then num / (z + eps_eff) stays exactly degree-1. Don't
-        # replace it with a fixed additive floor such as Performer's bare +1e-6:
-        # num is degree 2p+1 and z is degree 2p, so a degree-0 constant added to z
-        # does not scale with z, and the quotient stops being degree-1 (F-W3).
-        # The maximum(., 1e-20) is only a NaN guard for a fully dead batch (all
-        # phi zero, so z_mean == 0). It is a negligible degree-0 floor that the
-        # homogeneity probe tolerance absorbs, and it is the one residual
-        # non-homogeneous corner.
-        # fp16 safety: the divide and the 1e-20 floor run in float32, then cast
-        # back. Under a mixed_float16 policy the compute dtype is fp16, where
-        # 1e-20 rounds to 0.0, so the dead-batch guard would fail with 0/0 NaN.
-        # Running it in float32 is numerically identical to a pure fp32 run, so
-        # exact degree-1 on float32 is unchanged. Don't drop the cast: a bare
-        # fp16 divide brings the NaN back.
-        # z_mean is (B, H, 1) degree 2p; eps_eff keeps degree 2p; denom is
-        # (B, H, N) degree 2p.
+        # DECISION plan_2026-07-07_1cab8d7a/D-001: scale epsilon by z's own
+        # degree-2p mean, not a fixed additive floor like Performer's +1e-6 -- a degree-0 constant added to z would break degree-1 exactness. See decisions.md.
         z_mean = ops.mean(z, axis=-1, keepdims=True)
         eps_eff = self.epsilon * z_mean
         denom = z + eps_eff
-        # out_dtype is the compute dtype, fp16 under a mixed policy. out is
-        # (B, H, N, d) and degree 1.
+        # Divide runs in float32 then casts back: under mixed_float16 the
+        # 1e-20 dead-batch guard rounds to 0.0 and 0/0 becomes NaN otherwise.
         out_dtype = num.dtype
         num_f32 = ops.cast(num, 'float32')
         denom_f32 = ops.maximum(ops.cast(denom, 'float32'), 1e-20)
@@ -602,5 +483,3 @@ class LinearAttention(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
