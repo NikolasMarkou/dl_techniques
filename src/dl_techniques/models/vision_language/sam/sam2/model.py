@@ -1,97 +1,38 @@
-"""
-Streaming video segmentation: SAM's promptable decoder conditioned on a memory bank.
+"""``SAM2``, SAM's promptable decoder conditioned on a streaming memory bank
+for video segmentation, plus its ``stream_step`` video path and traceable
+``call`` image path.
 
-SAM 1 segments a frame from a prompt. Tracking that object through a video is a
-different problem, because the thing that identifies the object on frame 200 is
-not a click but frame 0 -- and everything in between. Running SAM 1 per frame
-loses identity the moment the object is occluded, deforms, or leaves and
-re-enters. SAM 2's answer is to keep the promptable decoder and insert a
-learned recurrence in front of it: before the decoder sees a frame's pixel
-features, those features cross-attend to a bounded memory of the recent past.
-The prompt is then optional on every frame after the first, because the memory
-carries what the prompt used to say.
+SAM 1 segments a frame from a prompt but has no way to track that object
+across a video. SAM 2 keeps the promptable decoder and adds a learned
+recurrence in front of it: before the decoder sees a frame's pixel
+features, those features cross-attend to a bounded memory of recent
+frames, so the prompt becomes optional after the first frame. Each
+frame's prediction is compressed by the memory encoder into a narrow
+``mem_dim``-wide spatial map, and the bank additionally stores one
+``hidden_dim``-wide object-pointer vector per remembered frame, taken from
+whichever decoder token the model's own IoU head rated best. Temporal
+order is carried by a single learned per-slot embedding
+(``maskmem_tpos_enc``) added outside memory attention's rotary embedding,
+which is spatial-only and identical across every stacked memory frame.
+Occlusion is marked in three places that all have to agree: a pointer-side
+blend, a separate spatial no-object embedding, and a hard mask erasure
+(``NO_OBJ_SCORE = -1024.0``) on any row the score head calls empty.
 
-That memory is deliberately narrow. A frame's prediction is compressed by the
-memory encoder into a `mem_dim`-wide spatial map -- 8 channels at `tiny`, 64 at
-`hiera_l`, against a `hidden_dim` of 256 for the pixel stream -- so storing
-several frames costs a fraction of storing their features. Memory attention
-therefore runs cross-attention with keys and values at `kv_in_dim = mem_dim`
-while its queries stay at `d_model = hidden_dim`, an asymmetry the component
-agreement check enforces at construction. Alongside the spatial memory the bank
-also carries *object pointers*: single `hidden_dim`-wide vectors, one per
-remembered frame, produced by a 3-layer MLP from whichever decoder output token
-the model's own IoU head rated best. The spatial stream says where the object
-was; the pointer stream says what it looked like.
+``call`` is the image path (encoder, prompt encoder, decoder; no memory)
+and is traceable for ``fit()``; an image-only forward pass is exactly
+SAM 1's shape at SAM 2's weights. ``stream_step`` is the video path,
+plain Python that mutates the memory bank and is never traced.
+:class:`SAM2TrainingModel` supplies a traceable multi-frame path by
+unrolling a static frame loop with a fresh, local memory bank.
 
-The image side is a Hiera trunk -- hierarchical, four stages, window attention,
-width and head count doubling while the grid halves via a max-pool on the
-attention *queries* -- feeding an FPN neck that produces four `d_model` levels
-plus a sine positional map each, of which the coarsest `scalp` levels are
-dropped. The retained stride-16 level is the memory grid; the two finer levels
-are handed to the mask decoder as high-resolution skips, which is why
-`use_high_res_features=True` is required rather than optional. The decoder
-itself is a sibling of SAM 1's, not a subclass: it prepends an object-score
-token to the token block, returns four values instead of two, and can fall back
-between its multimask and single-mask outputs on a stability score.
-
-Temporal order is carried by exactly one mechanism, and this is the constraint
-most likely to be broken by a well-meaning simplification. Memory attention's
-rotary embedding is spatial-only and is broadcast *identically* across every
-stacked memory frame, so it cannot distinguish frame `t-1` from frame `t-6`.
-The distinction comes from `maskmem_tpos_enc`, a learned
-`(num_maskmem, 1, 1, mem_dim)` table that lives on this class while the memory
-bank returns only slot *indices* into it. The object-pointer tail of the memory
-sequence is separate again: it gets a fixed sine encoding of how many frames
-away each pointer is, projected down to `mem_dim` by `obj_ptr_tpos_proj` so it
-cannot collide with the spatial positional encoding. Folding either into the
-rotary embedding, or zeroing the pointer tail, yields a model that trains
-happily and is temporally blind.
-
-Occlusion is likewise marked twice, and both marks are load-bearing.
-`no_obj_ptr` blends into the pointer stream by the object score; the *separate*
-`no_obj_embed_spatial` is added into the encoded spatial memory in proportion to
-`1 - is_appearing`. On top of those two marks, `_suppress_absent_object`
-*erases* the mask itself, overwriting every logit with `NO_OBJ_SCORE = -1024.0`
-on any row the score head calls empty. That value is transcribed, not chosen:
-the memory encoder's `sigmoid(x) * 20 - 10` saturates it to exactly `-10`, and
-`-1024` is representable in float16 so suppression survives `mixed_float16`.
-The threshold is hard (`score > 0`) even when `soft_no_obj_ptr` is set, because
-only the pointer blend may be soft. One consequence a loss must handle:
-`ops.where` passes no gradient through the unselected branch, so a suppressed
-row is gradient-free on the mask path and the score head needs its own explicit
-loss.
-
-The class has two entry points that differ in kind, not just in arguments.
-`call` is the image path: encoder, prompt encoder, decoder, nothing else. It
-never touches the memory bank or memory attention, and it is traceable, which
-is what `fit()` needs. `stream_step` is the video path -- plain Python that
-mutates the bank, branches on whether the bank is empty, and reads Python
-integers out of its selection policy. It is deliberately never traced and never
-routes through `self(...)`. Because `call` is memory-free, an image-only
-inference is exactly SAM 1's shape at SAM 2's weights; `SAM2TrainingModel`
-supplies the traceable multi-frame path by unrolling a static frame loop over
-the submodules with a fresh, local memory bank.
-
-Two defaults are the shipped *configuration* rather than the reference class
-signature, because this port has no YAML layer to carry a config on top of a
-constructor: `fixed_no_obj_ptr` defaults to `True` and `soft_no_obj_ptr` to
-`False`, matching `sam2.1_hiera_l.yaml`. Taking the reference class defaults
-would ship a model no released checkpoint was ever trained as. For the same
-reason `obj_ptr_proj`, `obj_ptr_tpos_proj` and `no_obj_embed_spatial` have no
-enabling flags at all -- every one of them is silent when absent. Relatedly,
-`MODEL_VARIANTS` here stores only the numbers that live nowhere else; trunk and
-neck geometry is read from `Hiera.MODEL_VARIANTS` and
-`SAM2ImageEncoder.MODEL_VARIANTS`, and `from_variant` refuses an `image_size`
-override for that reason. Only `tiny` and `hiera_l` are shipped: the other
-published SAM 2 sizes' numbers were never read by this implementation and are
-not invented.
-
-No pretrained weights ship, and that is the deliberate position of the whole
-`SAM/` package rather than an omission. SAM 2's released code is under the SAM
-License, which is incompatible with this repository's GPL-3.0, so this is a
-reimplementation from the paper and published configuration numbers -- no
-upstream file copied, no upstream checkpoint loaded, and no accuracy or
-tracking-quality claim made anywhere.
+``fixed_no_obj_ptr=True`` and ``soft_no_obj_ptr=False`` are this port's
+shipped configuration, matching ``sam2.1_hiera_l.yaml`` rather than the
+reference class's own defaults. ``MODEL_VARIANTS`` here covers only
+``tiny`` and ``hiera_l``; trunk and neck geometry come from
+``Hiera.MODEL_VARIANTS`` / ``SAM2ImageEncoder.MODEL_VARIANTS``. No
+pretrained weights ship: SAM 2's released code is under the SAM License,
+incompatible with this repository's GPL-3.0, so this is a reimplementation
+from the paper and published configuration numbers with no accuracy claim.
 
 References:
     - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
@@ -342,14 +283,8 @@ class SAM2(keras.Model):
             directly_add_no_mem_embed: bool = True,
             memory_temporal_stride_for_eval: int = 1,
             max_obj_ptrs_in_encoder: int = 16,
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-037
-            # These two defaults are the SHIPPED CONFIGURATION, not the
-            # reference class signature: `sam2.1_hiera_l.yaml` sets
-            # `fixed_no_obj_ptr: true` and leaves `soft_no_obj_ptr` unset (its
-            # reference default is False). This port has no YAML layer, so the
-            # constructor defaults ARE the shipped config and taking the class
-            # signature's values would ship a model no released checkpoint was
-            # trained as. Do NOT "restore" them to True/False. See D-037.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-037: these two defaults
+            # are the shipped configuration (sam2.1_hiera_l.yaml), not the reference class signature -- this port has no YAML layer to carry them separately. See decisions.md.
             soft_no_obj_ptr: bool = False,
             fixed_no_obj_ptr: bool = True,
             **kwargs: Any,
@@ -385,18 +320,8 @@ class SAM2(keras.Model):
         self.mem_dim = int(self.memory_encoder.out_dim)
         self._validate_component_agreement()
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-036
-        # These two projections and `no_obj_embed_spatial` are NOT optional and
-        # deliberately have no config flags. The shipped `sam2.1_hiera_l.yaml`
-        # sets `use_mlp_for_obj_ptr_proj`, `proj_tpos_enc_in_obj_ptrs`,
-        # `add_tpos_enc_to_obj_ptrs` and `no_obj_embed_spatial` all TRUE, and
-        # this port has no YAML layer to carry them. Do NOT "restore
-        # configurability" by adding flags defaulting to the reference class
-        # signature (which turns all four off): every one of them is silent
-        # when absent -- the model builds, trains and serializes without them,
-        # and the only symptom is that every object pointer becomes temporally
-        # indistinguishable. That is exactly how they went missing the first
-        # time. See decisions.md D-036.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-036: obj_ptr_proj,
+        # obj_ptr_tpos_proj, and no_obj_embed_spatial are not optional and have no config flags -- omitting any is silent, and the only symptom is object pointers losing temporal distinction. See decisions.md.
         self.obj_ptr_proj = _build_mlp_head(
             num_layers=_OBJ_PTR_PROJ_DEPTH,
             hidden_dim=self.hidden_dim,
@@ -441,17 +366,8 @@ class SAM2(keras.Model):
         """
         return self.image_size // MEMORY_STRIDE
 
-    # DECISION plan-2026-08-22T035419-a11304c8/D-090
-    # DERIVED, deliberately: `dropout_rate` is NOT an `__init__` parameter and
-    # NOT a `get_config()` key. Every live `Dropout` in a SAM 2 belongs to
-    # `memory_attention`, which already stores and serializes the rate in its
-    # own config; a second copy on the outer model would be a number with two
-    # homes -- and one that can silently DISAGREE, because a caller may pass an
-    # already-constructed `memory_attention` whose rate differs from whatever
-    # the outer `__init__` was told. This property can never disagree, and it
-    # round-trips for free through the nested config, so no pre-existing
-    # `.keras` file gains a required key. Do NOT "complete" this by adding a
-    # stored `self.dropout_rate` + config key. See decisions.md D-090.
+    # DECISION plan-2026-08-22T035419-a11304c8/D-090: dropout_rate is derived,
+    # never an __init__ parameter or get_config key -- memory_attention already owns and serializes it, and a second copy could silently disagree. See decisions.md.
     @property
     def dropout_rate(self) -> float:
         """Dropout rate actually in force on the memory-attention stack.
@@ -606,15 +522,8 @@ class SAM2(keras.Model):
             downsample_rate=table["memory_attention_downsample_rate"],
             feat_sizes=(grid, grid),
             kv_in_dim=table["mem_dim"],
-            # DECISION plan-2026-08-22T035419-a11304c8/D-090
-            # The ONLY path by which a caller-chosen dropout rate reaches the
-            # 12 (tiny) / 24 (hiera_l) live `Dropout` layers. Deleting this
-            # keyword does not fail any shape, any count or any round trip --
-            # the layer default silently takes over and the knob goes dead
-            # exactly as it was before this step. The layer parameter is now
-            # spelled `dropout_rate=` too (D-130 renamed it), so the model-level
-            # knob and the layer knob finally share one name. See decisions.md
-            # D-090 and D-130.
+            # DECISION plan-2026-08-22T035419-a11304c8/D-090: this is the only
+            # path by which a caller-chosen dropout rate reaches the live Dropout layers -- deleting it silently reverts to the layer default with no shape/count symptom. See decisions.md D-090/D-130.
             dropout_rate=dropout_rate,
         )
         memory_encoder = SAM2MemoryEncoder(
@@ -678,15 +587,8 @@ class SAM2(keras.Model):
                 (None, size, size, self.memory_encoder.mask_in_chans),
             ])
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-026
-        # `maskmem_tpos_enc` lives HERE and not in the memory bank, and the bank
-        # returns SLOT INDICES rather than vectors. Do NOT "simplify" by moving
-        # the table into the bank or by folding the temporal signal into the
-        # rotary embedding: memory attention's RoPE table is spatial-only and is
-        # broadcast IDENTICALLY across every memory frame (`repeat_k`), so the
-        # temporal ordering of the memory is carried by this additive table
-        # alone. Merging them yields a model that trains and cannot tell frame
-        # t-1 from frame t-6. See decisions.md D-026 and H-13.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-026: maskmem_tpos_enc lives
+        # here, not in the memory bank (which returns only slot indices) -- the RoPE table is spatial-only, so this table alone carries temporal order. See decisions.md D-026/H-13.
         self.maskmem_tpos_enc = self.add_weight(
             name="maskmem_tpos_enc",
             shape=(self.num_maskmem, 1, 1, self.mem_dim),
@@ -748,20 +650,8 @@ class SAM2(keras.Model):
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """Create this model's own weights before Keras restores them.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-028
-        # There is deliberately NO dummy forward pass here, and adding one
-        # "for safety" would be a real cost: at ``hiera_l`` it is a full
-        # 1024x1024 forward through 221M parameters on EVERY ``load_model``.
-        # SAM 1's own ``build_from_config`` runs one because it measured 138 of
-        # 202 weights restored without it. That does NOT transfer: measured at
-        # this HEAD on Keras 3.8, a ``tiny`` model saved after a forward pass
-        # reloads with **336 of 336** variables present BEFORE the first call —
-        # Keras records a per-layer build config for lazily-built sub-layers
-        # (including SAM 1's ``TwoWayTransformer``, 82 variables) and rebuilds
-        # them itself. Do NOT re-add the forward without first re-running
-        # ``test_weight_count_is_sampled_before_the_first_forward_call``, which
-        # is the instrument that measures whether it is needed. See
-        # decisions.md D-028.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-028: no dummy forward pass
+        # here -- at hiera_l that would be a full forward through 221M params on every load_model, and measurement shows all 336/336 tiny-model variables restore without it. See decisions.md.
 
         :param config: The dict returned by :meth:`get_build_config`.
         :type config: Dict[str, Any]
@@ -906,41 +796,14 @@ class SAM2(keras.Model):
             )
         low_res_logits = self._suppress_absent_object(
             low_res_logits, object_score_logits)
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-047
-        # Do NOT add upstream's `torch.clamp(low_res_masks, -32.0, 32.0)` here
-        # "for parity". Both upstream sites apply it at a mask-PROMPT boundary
-        # -- `sam2_video_predictor.py:262` on the previous frame's `pred_masks`
-        # just before re-feeding them, `sam2_image_predictor.py:434` only on the
-        # copy returned for use as the next call's `mask_input` (the masks it
-        # reports come from `postprocess_masks` at `:425-427`, computed from the
-        # UNCLAMPED logits). Here it would change no segmentation while
-        # overwriting the `-1024` sentinel the line above just wrote, turning
-        # every D-043 guard into an assertion about `-32`. The clamp belongs at
-        # the caller's re-feed, which is where `SAM2.call`'s docstring puts it.
-        # See decisions.md D-047.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-047: no clamp to (-32, 32)
+        # here -- upstream applies that only at the mask-prompt re-feed boundary, and clamping here would overwrite the -1024 sentinel D-043 just wrote. See decisions.md.
         #
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-038
-        # The pointer token is gathered by the model's OWN best-IoU estimate,
-        # never by position. Do NOT "simplify" this back to
-        # `pointer_tokens[:, 0, :]`: under `multimask_output=True` the decoder
-        # has already sliced away the single-mask token, so index 0 is
-        # *multimask token 1* -- an arbitrary one of three. The memory and the
-        # object pointer would then be built from a mask the model did not
-        # judge best, with no shape error and no measurable symptom at batch 1
-        # on the single-mask path (where M == 1 and the two agree exactly).
-        # See decisions.md D-038.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-038: pointer token is
+        # gathered by the model's own best-IoU estimate, never pointer_tokens[:, 0, :] -- under multimask_output that index is an arbitrary token, not the best one, with no shape symptom. See decisions.md.
         #
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-044
-        # The gather is CONDITIONAL on the pointer axis being longer than 1.
-        # Do NOT drop this branch and gather unconditionally: the pointer axis
-        # and the IoU axis are NOT the same length in general. The decoder
-        # emits one pointer token per mask token only when
-        # `use_multimask_token_for_obj_ptr` is set (its own default is False,
-        # D-023), so at `multimask_output=True` with that default the pointer
-        # axis is 1 while `iou` is 3 and an unconditional gather raises
-        # `InvalidArgumentError: indices[0,0] = 1 is not in [0, 1)`. The
-        # reference guards it the same way (`sam2_base.py:387`,
-        # `if sam_output_tokens.size(1) > 1`). See decisions.md D-044.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-044: the gather is
+        # conditional on the pointer axis exceeding length 1 -- an unconditional gather raises when use_multimask_token_for_obj_ptr's default leaves the pointer axis at 1 while iou is 3. See decisions.md.
         if int(pointer_tokens.shape[1]) > 1:
             selected_token = ops.squeeze(
                 _select_best_by_iou(pointer_tokens, iou), axis=1)
@@ -958,21 +821,8 @@ class SAM2(keras.Model):
     def _suppress_absent_object(self, logits: Any, score: Any) -> Any:
         """Replace every mask logit with :data:`NO_OBJ_SCORE` where absent.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-043
-        # This runs BEFORE the best-IoU gather and therefore before the high-
-        # resolution resize, before the memory encoder and before the value is
-        # returned to the caller. Do NOT move it later "so the raw mask is
-        # still available", and do NOT delete it because the occlusion is
-        # already flagged two other ways (`no_obj_ptr` on the pointer stream,
-        # `no_obj_embed_spatial` on the spatial stream). Those two MARK an
-        # occluded frame; this one ERASES its mask. Without it the memory bank
-        # stores the object's real, unsuppressed mask together with an
-        # occlusion flag -- a contradictory state the reference never writes,
-        # and one with no shape, dtype or finiteness symptom. The threshold is
-        # HARD (`score > 0`) even when `soft_no_obj_ptr` is set: the reference
-        # comments that the spatial mask is "always a *hard* choice", and only
-        # the POINTER blend may be soft (`sam2_base.py:358-368`).
-        # See decisions.md D-043.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-043: this erases the mask
+        # before the best-IoU gather, resize, or memory encoder -- the other two occlusion marks (pointer, spatial) only flag it, so skipping this leaves a contradictory unsuppressed mask with no shape symptom. See decisions.md.
 
         :param logits: ``(B, M, h, w)`` mask logits, straight from the decoder.
         :type logits: Any
@@ -989,16 +839,8 @@ class SAM2(keras.Model):
     def _blend_object_pointer(self, pointer: Any, score: Any) -> Any:
         """Interpolate the predicted pointer towards the learned ``no_obj_ptr``.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-039
-        # The `lambda * pointer` multiply happens ONLY under
-        # `fixed_no_obj_ptr`; the `(1 - lambda) * no_obj_ptr` term is added
-        # UNCONDITIONALLY. Do NOT "tidy" this into the symmetric-looking
-        # `lambda * pointer + (1 - lambda) * no_obj`: the two expressions
-        # coincide at lambda in {0, 1} and NOWHERE else, so a guard sited at
-        # saturated object scores (+-30 logits) cannot tell them apart while
-        # every real input lies strictly between. At `score = 0` the reference
-        # returns `ptr + 0.5 * no_obj` and the symmetric form returns
-        # `0.5 * ptr + 0.5 * no_obj`. See decisions.md D-039.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-039: the lambda*pointer
+        # multiply applies only under fixed_no_obj_ptr, while (1-lambda)*no_obj_ptr is always added -- the symmetric-looking form only coincides with this at lambda in {0, 1}. See decisions.md.
 
         :param pointer: ``(B, hidden_dim)`` predicted pointer.
         :type pointer: Any
@@ -1136,16 +978,8 @@ class SAM2(keras.Model):
                         conditioned, (batch, grid_h, grid_w, self.hidden_dim)),
                     0, 0,
                 )
-            # DECISION plan-2026-08-04T044628-4c240b4c/D-027
-            # A ONE-token dummy memory whose
-            # content is zeros and whose position is the learned
-            # `no_mem_pos_enc`. The reference expression
-            # `no_mem_embed.expand(1, B, mem_dim)` cannot be transcribed: that
-            # parameter is `hidden_dim`-wide and an expand cannot NARROW it to
-            # the `mem_dim`-wide memory stream, so upstream's own fallback is
-            # shape-impossible at the shipped widths (it is unreachable there
-            # because `directly_add_no_mem_embed` is True). Do NOT "restore"
-            # the reference expression. See decisions.md D-027.
+            # DECISION plan-2026-08-04T044628-4c240b4c/D-027: this is a one-token
+            # dummy memory (zeros, position from no_mem_pos_enc), not upstream's no_mem_embed.expand -- that parameter is hidden_dim-wide and cannot narrow to mem_dim. See decisions.md.
             memory = ops.zeros((batch, 1, self.mem_dim), dtype=tokens.dtype)
             memory_pos = ops.broadcast_to(
                 ops.cast(self.no_mem_pos_enc, tokens.dtype),
@@ -1189,18 +1023,8 @@ class SAM2(keras.Model):
           ``obj_ptr_tpos`` (how many frames away that pointer is), projected to
           ``mem_dim`` by :attr:`obj_ptr_tpos_proj`.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-040
-        # The pointer tail is NOT zeros. Do NOT "simplify" it back to
-        # `ops.zeros(...)` on the theory that "the temporal signal rides on the
-        # pointer values themselves" -- it does not. The rotary embedding in
-        # memory attention is spatial-only and is broadcast identically across
-        # every memory token, and `maskmem_tpos_enc` is indexed by SPATIAL slot
-        # and never reaches the pointer tail. With zeros here, a pointer from
-        # frame t-1 and a pointer from frame t-15 are numerically
-        # indistinguishable to memory attention, which is the entire mechanism
-        # `add_tpos_enc_to_obj_ptrs: true` exists to provide. The bank was
-        # already computing and returning `obj_ptr_tpos` and NOTHING consumed
-        # it. See decisions.md D-040.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-040: the pointer tail is
+        # not zeros -- maskmem_tpos_enc is indexed by spatial slot only, so zeros here would make pointers from different frames numerically indistinguishable. See decisions.md.
 
         :param readout: The bank's ``_MemoryReadout``.
         :type readout: Any

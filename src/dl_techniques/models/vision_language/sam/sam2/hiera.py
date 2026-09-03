@@ -1,59 +1,24 @@
-"""
-SAM 2 Hiera trunk: the hierarchical, window-attention image backbone.
-=====================================================================
+"""SAM 2 Hiera trunk, the hierarchical window-attention image backbone:
+:class:`HieraPatchEmbed`, :class:`HieraMultiScaleAttention`,
+:class:`HieraBlock`, :class:`Hiera`, and the pure configuration function
+:func:`hiera_block_specs`.
 
-Four public classes -- :class:`HieraPatchEmbed`,
-:class:`HieraMultiScaleAttention`, :class:`HieraBlock` and :class:`Hiera` --
-plus :func:`hiera_block_specs`, a pure configuration function that derives the
-per-block geometry from a stage description without constructing anything.
+A learned background positional embedding plus a tiled window positional
+embedding are added once, at the stem. One flat block list is partitioned
+into four stages; at each boundary the channel width and head count double
+while a query-side max-pool halves the grid. ``Hiera`` returns four
+feature levels, one per stage, in ascending order (finest first) -- the
+reverse of the channel order the FPN neck expects, deliberately on both
+sides. The window size lags one block behind a stage transition (the
+first block of a new stage still uses the previous stage's window), and
+query pooling is asymmetric: only ``q`` is pooled inside attention, while
+``k``/``v`` keep full resolution and the residual shortcut is pooled
+separately by the same factor.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
-- Ryali, C. et al. (2023). "Hiera: A Hierarchical Vision Transformer without
-  the Bells-and-Whistles."
-
-Key Features:
-------------
-- A learned background positional embedding plus a tiled window positional
-  embedding, added ONCE, at the stem.
-- One flat block list partitioned into four stages; at each boundary the
-  channel width and the head count both double while the grid is halved by a
-  max-pool applied to the attention QUERIES.
-- Four feature levels out, one per stage, in ASCENDING stage order:
-  ``outputs[0]`` is finest and narrowest, ``outputs[-1]`` coarsest and widest.
-  That is the REVERSE of the channel list the FPN neck is configured with, and
-  the reversal is deliberate on both sides.
-
-Architecture Overview:
----------------------
-1. **HieraPatchEmbed** -- one overlapping strided convolution, 4x reduction,
-   spatial grid kept as ``(batch, height, width, channels)``.
-2. **HieraMultiScaleAttention** -- windowed attention with query pooling.
-3. **HieraBlock** -- attention and MLP, carrying the stage-boundary projection.
-4. **Hiera** -- the block list, returning one feature map per stage.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.hiera import Hiera, hiera_block_specs
-trunk = Hiera(embed_dim=96, num_heads=1, stages=(1, 2, 7, 2))
-levels = trunk(images)               # four maps, finest first
-```
-
-Measured caveats:
-----------------
-Two details are correctness bugs with NO shape error if ported wrong, so both
-are called out at their code sites and guarded behaviourally by
-``tests/test_models/test_sam2/test_hiera.py``:
-
-- **The window size lags one block behind the stage transition.** The first
-  block of a new stage uses the PREVIOUS stage's window size. See
-  :func:`hiera_block_specs`.
-- **Query pooling is asymmetric.** Inside attention only ``q`` is pooled; ``k``
-  and ``v`` keep the full window resolution, and the residual shortcut is
-  pooled by the same factor on a separate path. See
-  :class:`HieraMultiScaleAttention` and :class:`HieraBlock`.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
+    - Ryali et al., 2023. Hiera: A Hierarchical Vision Transformer without
+      the Bells-and-Whistles.
 """
 
 import keras
@@ -162,13 +127,8 @@ def hiera_block_specs(
     for i in range(depth):
         dim_out = dim
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-010
-        # The window size is read with the OLD `cur_stage`, i.e. BEFORE the
-        # stage-transition block below can advance it. This one-block lag is
-        # upstream's documented behaviour, not an accident. Moving these three
-        # lines after the transition block is a silent correctness bug: shapes
-        # are unaffected because the window size only changes how the grid is
-        # partitioned, never the tensor geometry that leaves the block.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-010: window size reads the
+        # old cur_stage, before the transition block below can advance it -- upstream's documented one-block lag, silent if reordered since shapes are unaffected. See decisions.md.
         window_size = int(window_spec[cur_stage - 1])
         if i in global_blocks:
             window_size = 0
@@ -747,17 +707,8 @@ class HieraBlock(keras.layers.Layer):
             epsilon=self.layer_norm_epsilon, name="norm2")
         self.mlp_fc1 = keras.layers.Dense(self.hidden_dim, name="mlp_fc1")
         self.mlp_fc2 = keras.layers.Dense(self.dim_out, name="mlp_fc2")
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-012
-        # `proj` exists only on stage-transition blocks upstream. It is created
-        # here unconditionally (the repo's authoring rule forbids conditional
-        # sub-layer creation) but is BUILT only when it is used, so an unused
-        # instance contributes zero weights and the parameter count still
-        # matches the reference model.
-        # Do NOT "simplify" either half: creating it conditionally breaks the
-        # authoring rule, and building it unconditionally silently inflates
-        # every non-transition block by `dim * dim_out + dim_out` parameters,
-        # which step 8's `hiera_l` parameter audit would then have to absorb as
-        # a fudge factor. See decisions.md D-012.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-012: proj is created
+        # unconditionally (per the authoring rule) but built only when used, so an unused instance costs zero weights and the parameter count still matches upstream. See decisions.md.
         self.proj = keras.layers.Dense(self.dim_out, name="proj")
         self.drop_path_layer = StochasticDepth(
             drop_path_rate=self.drop_path, name="drop_path")

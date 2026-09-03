@@ -1,57 +1,19 @@
-"""
-SAM 2 memory encoder: mask plus pixel features compressed into ``mem_dim``.
-===========================================================================
+"""SAM 2 memory encoder, compressing a predicted mask plus pixel features
+into ``mem_dim``-wide spatial memory: :class:`SAM2MemoryEncoder`, built
+from :class:`SAM2MaskDownSampler` and :class:`SAM2Fuser`.
 
-:class:`SAM2MemoryEncoder`, with :class:`SAM2MaskDownSampler` and
-:class:`SAM2Fuser`, compresses a predicted high-resolution mask together with
-the image encoder's pixel features into the narrow ``mem_dim``-wide spatial
-memory that memory attention later reads as keys and values.
+The mask passes through ``20 * sigmoid(x) - 10`` (the affine applied after
+the sigmoid, widening a probability into the signed range ``(-10, +10)``),
+then a strided-convolution downsampler at a total stride of 16. Pixel
+features go through a ``1x1`` projection. The two streams are added, not
+concatenated, so the fuser that follows sees ``in_dim`` channels, then a
+final projection maps to ``out_dim``. The downsampler's layer count comes
+from the shipped configuration (four convolutions at ``k=3, s=2, p=1``),
+not the reference signature's default of two at ``k=4, s=4, p=0`` -- both
+give the same total stride, so resolution alone cannot distinguish them.
 
-Based on:
----------
-- Ravi, N. et al. (2024). "SAM 2: Segment Anything in Images and Videos."
-
-Key Features:
-------------
-- A signed mask transform that widens a probability into ``(-10, +10)``.
-- A strided-convolution mask downsampler at a total stride of 16.
-- An ADDITIVE fusion of the two streams, then a projection to ``out_dim``.
-
-Architecture Overview:
----------------------
-1. Mask -> the signed transform -> :class:`SAM2MaskDownSampler`.
-2. Pixel features -> ``pix_feat_proj``, a real ``1x1`` convolution.
-3. -> additive fusion -> :class:`SAM2Fuser` -> ``out_proj``, ``Conv2D(out_dim)``.
-
-Usage Examples:
---------------
-```python
-from dl_techniques.models.vision_language.sam.sam2.memory_encoder import SAM2MemoryEncoder
-encoder = SAM2MemoryEncoder(out_dim=64, in_dim=256)
-memory, memory_pos = encoder(pixel_features, masks, training=False)
-```
-
-Measured caveats:
-----------------
-Three mechanisms are SILENT when ported wrong -- the model builds,
-forward-passes, trains and serializes either way. All three are guarded
-behaviourally in ``tests/test_models/test_sam2/test_memory_encoder.py``:
-
-- **The mask is passed through** ``20 * sigmoid(x) - 10``\\ **, i.e. the affine
-  is applied AFTER the sigmoid, not before it.** The transform rescales a
-  probability in ``(0, 1)`` into the wide SIGNED range ``(-10, +10)``. Two
-  wrong readings produce the same shapes and a plausible loss: a bare
-  ``sigmoid(x)`` (range ``(0, 1)``), and the affine-then-sigmoid
-  ``sigmoid(20 * x - 10)``, which is a near-step function also in ``(0, 1)``
-  and therefore ~20x narrower with no negative half at all.
-- **The downsampler's layer COUNT comes from the shipped configuration, not
-  from the reference class signature.** At ``k=3, s=2, p=1`` it is four
-  convolutions; the signature default ``k=4, s=4, p=0`` is two. **Both give a
-  total stride of 16**, so an assertion on the output resolution alone cannot
-  tell them apart.
-- **The fusion is additive.** The projected pixel features and the downsampled
-  mask are ADDED, never concatenated, so the fuser sees ``in_dim`` channels
-  rather than ``2 * in_dim``.
+References:
+    - Ravi et al., 2024. SAM 2: Segment Anything in Images and Videos.
 """
 
 import math
@@ -185,12 +147,8 @@ class SAM2MaskDownSampler(keras.layers.Layer):
         self.activation = deserialize_activation(activation)
         self.norm_epsilon = float(norm_epsilon)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-016
-        # The channel ladder is DERIVED from `stride ** 2`, never listed. Do
-        # NOT replace this with a hardcoded (4, 16, 64, 256): that literal is
-        # only correct at stride 2, and the whole point of the guard on this
-        # layer is that a wrong `stride` keeps the total stride at 16 while
-        # changing both the layer count and the ladder. See decisions.md D-016.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-016: the channel ladder is
+        # derived from stride ** 2, never a hardcoded (4, 16, 64, 256) -- that literal is only correct at stride 2. See decisions.md.
         channels: List[int] = []
         width = self.mask_in_chans
         for _ in range(num_layers):
@@ -654,14 +612,8 @@ class SAM2MemoryEncoder(keras.layers.Layer):
             raise ValueError(f"in_dim must be positive, got {in_dim}")
         if out_dim <= 0:
             raise ValueError(f"out_dim must be positive, got {out_dim}")
-        # DECISION plan-2026-08-28T181715-3870472c/D-007
-        # The constraint on the DEFAULTED path is `% 4`, NOT `% 2`. Do not
-        # "relax" this back to evenness: `out_dim // 2` becomes `num_pos_feats`
-        # and THAT value must itself be even, because
-        # `PositionEmbeddingSine2D` splits it between its sine and cosine
-        # halves. `out_dim = 10` passed the old `% 2` check, produced
-        # `num_pos_feats = 5`, and built a position encoder that could never
-        # complete a forward pass. See decisions.md D-007.
+        # DECISION plan-2026-08-28T181715-3870472c/D-007: the defaulted path
+        # needs `% 4`, not `% 2` -- out_dim=10 passed the old check but produced num_pos_feats=5, which PositionEmbeddingSine2D cannot split evenly. See decisions.md.
         if num_pos_feats is None and out_dim % 4 != 0:
             raise ValueError(
                 f"out_dim ({out_dim}) must be a positive multiple of 4 when "
@@ -688,14 +640,8 @@ class SAM2MemoryEncoder(keras.layers.Layer):
         self.skip_mask_sigmoid = bool(skip_mask_sigmoid)
         self.pos_enc_temperature = float(pos_enc_temperature)
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-013
-        # Do NOT "fix" this to `out_dim` to match the reference config's
-        # literal `num_pos_feats: 64`. That literal belongs to a class which
-        # halves it internally; this repo's `PositionEmbeddingSine2D` does not.
-        # Passing 64 here yields a 128-wide encoding against a 64-wide memory
-        # stream -- and on a square grid it BROADCASTS rather than raising, so
-        # unlike the neck (D-013, where 512-vs-256 fails loudly) this site is
-        # silent. Assert `pos_enc_channels == out_dim`. See decisions.md D-013.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-013: this stays out_dim //
+        # 2, not out_dim -- unlike the neck's D-013 site, a wrong value here broadcasts silently on a square grid instead of raising. See decisions.md.
         self.num_pos_feats = (
             self.out_dim // 2 if num_pos_feats is None else int(num_pos_feats)
         )
@@ -822,41 +768,18 @@ class SAM2MemoryEncoder(keras.layers.Layer):
     def _affine_sigmoid(self, masks: Any) -> Any:
         """Apply ``sigmoid(masks) * sigmoid_scale + sigmoid_bias``.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-033
-        # SIGMOID FIRST, AFFINE SECOND. Do NOT "simplify" this to
-        # `sigmoid(scale * masks + bias)`: that is a different function
-        # (a near-step map into `(0, 1)` instead of an affine rescale into
-        # `(-10, +10)`), it produces the same shapes, the same dtype and a
-        # plausible loss, and it is exactly the defect this round exists to
-        # repair. The order is fixed by the reference implementation, which
-        # sigmoids the mask itself and then calls the encoder with
-        # `skip_mask_sigmoid=True`. See decisions.md D-033.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-033: sigmoid first, affine
+        # second -- `sigmoid(scale * masks + bias)` is a different, near-step function that produces the same shapes and a plausible loss. See decisions.md.
 
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-045
-        # Do NOT delete the `variable_dtype` cast below. Its ORIGINAL
-        # justification (float16 overflow of `20 * x`) was made false by the
-        # D-033 order fix, and an adversarial review correctly identified the
-        # guard on it as vacuous and proposed removing the machinery. The cast
-        # stays for a DIFFERENT, measured reason -- resolution, stated below --
-        # and it now has a guard that can actually go red. See decisions.md
-        # D-045.
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-045: the variable_dtype
+        # cast stays for precision, not the original overflow reason (D-033 already bounds the product below overflow) -- float16 loses resolution near the +-10 range (measured 3.6x worse max error). See decisions.md.
 
-        Evaluated in the layer's VARIABLE dtype rather than its compute dtype.
-        The reason is PRECISION, not overflow: with the sigmoid taken first
-        (D-033) the product is bounded by 20 and cannot overflow float16, so an
-        overflow probe here is vacuous. What the cast buys is resolution. Under
-        ``mixed_float16`` the intermediate ``sigmoid(x) * 20`` lives near
-        ``+-10``, where float16's spacing is ``7.8e-3``; subtracting 10 then
-        leaves an output near 0 quantized at that coarse spacing rather than at
-        the ``4.9e-4`` its own magnitude would allow. MEASURED over 401 logits
-        in ``[-1, 1]`` against a float64 oracle, with float16 INPUT in both
-        arms and a CORRECTLY-ROUNDED float16 sigmoid in the naive arm (so the
-        comparison is against the best any kernel can do, not against one
-        kernel's error): max error ``2.4318e-3`` computing the intermediate in
-        float32, ``8.696e-3`` computing it in float16 -- a 3.6x loss, strictly
-        worse at 289 of the 401 probed logits and never better at 377 of them.
-        The result is cast back to the compute dtype, so this costs the caller
-        nothing.
+        Evaluated in the layer's variable dtype rather than its compute dtype
+        for that resolution reason: under ``mixed_float16`` the intermediate
+        ``sigmoid(x) * 20`` sits near ``+-10`` where float16's spacing is
+        coarse, so computing there loses precision the output's own
+        magnitude would otherwise keep. The result is cast back to the
+        compute dtype, so this costs the caller nothing.
 
         :param masks: Mask logits.
         :type masks: Any
