@@ -23,9 +23,9 @@ The computation runs entirely in log space:
 
 ``sigsoftmax`` is ``exp(log_sigsoftmax)`` and the ``SigSoftmax`` layer wraps
 it. Use ``log_sigsoftmax`` directly in a cross-entropy loss. The reduction
-widens float16 and bfloat16 inputs to float32 and casts back, so the output
-carries the input dtype and sums to 1 along the axis. The working value is
-``2z``, which bounds the usable logit range; see :func:`log_sigsoftmax`.
+widens float16 and bfloat16 to float32 and casts back, which keeps a float16
+row of large logits off ``nan``; see :func:`log_sigsoftmax` for the two range
+limits.
 
 References:
     - Kanai et al., 2018. Sigsoftmax: Reanalysis of the Softmax Bottleneck.
@@ -67,6 +67,9 @@ def _log_sigsoftmax_widened(
     )
     z = keras.ops.cast(inputs, reduction_dtype)
 
+    # DECISION plan-2026-09-03T085145-3384c4dc/D-008: the widen above is not a precision tweak.
+    # Deleting it returns nan on a float16 row past |z| ~ 32752, since w = 2z. See decisions.md.
+
     # DECISION plan-2026-09-03T085145-3384c4dc/D-001: log space, not sparsemax's max shift.
     # sigmoid(z) does not shift with the max, so an all-negative row is 0/0 = NaN. See decisions.md.
     w = z + keras.ops.log_sigmoid(z)
@@ -85,11 +88,20 @@ def log_sigsoftmax(
     logarithm of an underflowed probability is ``-inf``, while this stays
     finite over the range described below.
 
-    The intermediate is ``2z``, so the finite range is the logits for which
-    ``2z`` is representable in the reduction dtype -- ``|z| < 1.7e38`` in
-    float32, ``|z| < 32752`` in float16. Past it a lane saturates to ``-inf``,
-    which is the correct limit while any other lane is in range. A row whose
-    entries all exceed the bound returns ``nan``.
+    Two separate limits bound the range, and they are not the same limit.
+
+    In float32 and float64 the reduction runs in the input dtype, so the
+    intermediate ``2z`` overflows once ``|z|`` passes half the dtype's
+    maximum, 1.7e38 in float32. One lane past it saturates to ``-inf``, the
+    correct limit while another lane is in range; a row whose entries all pass
+    it returns ``nan``.
+
+    In float16 and bfloat16 the reduction is widened to float32, so ``2z``
+    never overflows and the result is never ``nan``. What saturates is the
+    cast back: an output entry is about ``2 * (z_i - max z)``, so the limit
+    falls on the row's SPREAD, not on ``|z|``. A float16 row spanning more
+    than about 32752 loses its far lane to ``-inf`` while a row of large but
+    close logits, such as ``[-40000, -35000, -33000]``, comes back finite.
 
     Takes a tensor and returns a tensor. It does not validate ``axis`` or
     coerce its input: an out-of-range ``axis`` surfaces as the backend's own
