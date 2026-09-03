@@ -1,18 +1,31 @@
-"""Tests for the sigsoftmax activation functions.
+"""Tests for the sigsoftmax activation functions and the ``SigSoftmax`` layer.
 
-This module lands in parts. Step 2 of plan-2026-09-03T085145-3384c4dc ships the
-independent float64 oracle and three arms: the closed-form comparison, the
-all-negative regression guard, and the not-plain-softmax mechanism arm. Step 3
-adds the ``SigSoftmax`` layer's construction, axis-validation, shape, config and
-wrapper-identity arms. The remaining arms (dtype floor in both directions,
-serialization, gradients, XLA, factory, export contract) arrive in step 5.
+Covers the closed-form comparison against an independent float64 NumPy oracle,
+the all-negative regression guard that the max-shift formulation fails, the
+not-plain-softmax mechanism arm, the layer's construction, axis validation,
+shape and config contract, the ``exp(log_sigsoftmax)`` identity, a ``.keras``
+round trip compared on values, the dtype floor in both directions, gradient
+flow, XLA agreement, the factory, and the package export contract.
+
+``tf`` is imported for the gradient tape only. The package ``__init__`` is
+imported only by the export-contract arms; every other arm imports the subject
+from its defining module.
 """
+
+import os
+import tempfile
 
 import numpy as np
 import keras
 import pytest
+import tensorflow as tf
 from scipy.special import expit
 
+import dl_techniques.layers.activations as activations
+from dl_techniques.layers.activations.factory import (
+    STRICT_DROPPED_KEY_MARKER,
+    create_activation_layer,
+)
 from dl_techniques.layers.activations.sigsoftmax import (
     SigSoftmax,
     log_sigsoftmax,
@@ -255,3 +268,291 @@ class TestSigSoftmax:
             y.sum(axis=-2), np.ones((2, 5)), atol=1e-6, rtol=0.0
         )
         assert np.abs(y.sum(axis=-1) - 1.0).max() > 0.1
+
+
+# ---------------------------------------------------------------------
+# The exp/log identity. Invariant 3: `sigsoftmax` is `exp(log_sigsoftmax)`,
+# never a second derivation.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_sigsoftmax_is_exp_of_log_sigsoftmax(dtype: str) -> None:
+    """``sigsoftmax`` equals ``exp(log_sigsoftmax)`` to exactly 0.0.
+
+    Both functions share ``_log_sigsoftmax_widened``, and for float32 and
+    float64 the reduction dtype equals the input dtype, so the two paths
+    differ only in the position of an ``exp`` that runs on identical bits.
+    Measured max absolute difference on a ``(16, 7)`` fixture: 0.0 in
+    float32 and 0.0 in float64. The bound is exact equality rather than a
+    tolerance, so a future edit that re-derives one function from the other
+    by a different route reddens here.
+    """
+    x = np.random.default_rng(4).standard_normal((16, 7)).astype(dtype)
+
+    direct = keras.ops.convert_to_numpy(sigsoftmax(x))
+    via_log = keras.ops.convert_to_numpy(keras.ops.exp(log_sigsoftmax(x)))
+
+    assert direct.dtype == np.dtype(dtype)
+    assert np.abs(direct.astype(np.float64) - via_log.astype(np.float64)).max() == 0.0
+
+
+def test_the_exp_log_identity_is_approximate_in_float16() -> None:
+    """In float16 the identity holds to 2.44e-04, not to 0.0. Measured.
+
+    The two functions cast at different points. ``sigsoftmax`` exponentiates
+    in the widened float32 reduction dtype and casts the probabilities down;
+    ``exp(log_sigsoftmax(x))`` casts the log-probabilities down to float16
+    first and exponentiates there. The widening is what makes them differ, so
+    the exact-0.0 bound asserted above for float32 and float64 is not
+    available here and is not weakened silently: the measured max absolute
+    difference on the same ``(16, 7)`` fixture is 2.44140625e-04, which is
+    float16's own resolution near 1, and the bound below is one order above
+    it.
+    """
+    x = np.random.default_rng(4).standard_normal((16, 7)).astype("float16")
+
+    direct = keras.ops.convert_to_numpy(sigsoftmax(x)).astype(np.float64)
+    via_log = keras.ops.convert_to_numpy(
+        keras.ops.exp(log_sigsoftmax(x))
+    ).astype(np.float64)
+
+    assert np.abs(direct - via_log).max() < 1e-3
+
+
+# ---------------------------------------------------------------------
+# Serialization.
+# ---------------------------------------------------------------------
+
+
+def test_a_saved_model_reproduces_its_output_values() -> None:
+    """A ``.keras`` round trip preserves the OUTPUT VALUES, not just the shape.
+
+    A shape-only round trip is satisfied by a model that restored zero
+    weights, so the comparison is on values at ``atol=1e-6, rtol=0.0``;
+    measured max absolute difference is exactly 0.0. ``axis=-2`` rather than
+    the default, so a ``get_config`` that dropped ``axis`` would rebuild a
+    last-axis layer and disagree. ``training=False`` is passed explicitly to
+    both arms.
+    """
+    inputs = keras.Input(shape=(4, 5))
+    model = keras.Model(inputs, SigSoftmax(axis=-2)(inputs))
+
+    x = np.random.default_rng(7).standard_normal((3, 4, 5)).astype("float32")
+    before = keras.ops.convert_to_numpy(model(x, training=False))
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "sigsoftmax_model.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+
+    after = keras.ops.convert_to_numpy(restored(x, training=False))
+
+    np.testing.assert_allclose(after, before, atol=1e-6, rtol=0.0)
+
+
+# ---------------------------------------------------------------------
+# The dtype floor (guide rule L-30), both directions.
+#
+# There is no enumerating guard file for SigSoftmax to join:
+# `test_the_dtype_floor_never_narrows.py` is scoped entirely to
+# `RoutingProbabilitiesLayer`. The property is pinned here instead.
+# ---------------------------------------------------------------------
+
+
+def test_a_float64_caller_is_not_narrowed_to_float32(float64_policy) -> None:
+    """Under a genuine float64 policy the reduction stays float64.
+
+    The mutation this is RED against is an unconditional
+    ``reduction_dtype = "float32"`` in ``_log_sigsoftmax_widened``. Measured
+    on this fixture: the shipped path agrees with the float64 NumPy oracle at
+    1.665e-16, roughly one float64 ulp; the mutated path reads 8.810e-08,
+    float32's own floor. The two readings are five orders apart, so the
+    1e-12 bound is not a knife edge -- any threshold in [1e-14, 1e-09] grades
+    them identically.
+
+    The realised dtypes are asserted first. The ``float64_policy`` fixture
+    only makes float64 reachable; without these asserts the arm would agree
+    with float32 to eight digits and could not fail. The layer is built
+    inside the test because ``set_floatx`` does not re-point an
+    already-materialised policy.
+    """
+    x = np.random.default_rng(0).standard_normal((64, 20))
+    assert x.dtype == np.float64
+
+    layer = SigSoftmax()
+    assert layer.compute_dtype == "float64"
+
+    realised_input = keras.ops.convert_to_numpy(keras.ops.convert_to_tensor(x))
+    assert realised_input.dtype == np.float64
+
+    y = keras.ops.convert_to_numpy(layer(x))
+    assert y.dtype == np.float64
+
+    assert np.abs(y - _reference_sigsoftmax(x)).max() < 1e-12
+
+
+def test_the_all_negative_float16_row_stays_finite(mixed_float16_policy) -> None:
+    """A float16 all-negative row is finite and correct on the log scale.
+
+    The float16 analogue of the all-negative regression guard. The max-shift
+    form returns ``nan nan nan`` on this exact row (measured, in float16), so
+    a wrong implementation still fails here.
+
+    The lane-level comparison runs on the log scale, where the information is
+    representable. The true first probability is ``exp(-30) = 9.36e-14`` and
+    float16's smallest subnormal is 6e-08, so that lane is exactly 0.0 for
+    ANY correct implementation and a "no exact zeros" assertion could not be
+    satisfied. In log space the measured reading is
+    ``[-30, -10, -4.5776e-05]`` against the asymptotic ``2 * (z - max z) =
+    [-30, -10, 0]``, i.e. a max absolute deviation of 4.5776e-05.
+    Probability-space assertions are kept to the ones that are true there:
+    finite, non-negative, summing to 1 (measured 1.0000454, which is why the
+    sum bound is 1e-3 and not 1e-6).
+
+    The premise is asserted rather than assumed: the row genuinely underflows
+    in half precision, so the arm cannot pass for free on an input that never
+    exercised the regime.
+    """
+    row = np.array([[-30.0, -20.0, -15.0]], dtype="float16")
+
+    # Anti-vacuity premise, computed in NumPy independently of whatever dtype
+    # `call()` chose: the first lane is unrepresentable in float16.
+    assert np.float16(np.exp(np.float64(-30.0))) == np.float16(0.0)
+    assert np.exp(np.float64(-30.0)) < np.finfo(np.float16).smallest_subnormal
+
+    layer = SigSoftmax()
+    assert layer.compute_dtype == "float16"
+
+    y = keras.ops.convert_to_numpy(layer(row))
+    assert y.dtype == np.dtype("float16")
+
+    y64 = y.astype(np.float64)
+    assert np.all(np.isfinite(y64)), f"sigsoftmax was not finite, observed {y}"
+    assert np.all(y64 >= 0.0)
+    np.testing.assert_allclose(y64.sum(axis=-1), np.ones(1), atol=1e-3, rtol=0.0)
+
+    log_y = keras.ops.convert_to_numpy(log_sigsoftmax(row)).astype(np.float64)
+    assert np.all(np.isfinite(log_y)), (
+        f"log_sigsoftmax was not finite, observed {log_y}"
+    )
+    np.testing.assert_allclose(
+        log_y, _asymptotic_log_sigsoftmax(row), atol=1e-3, rtol=0.0
+    )
+
+
+# ---------------------------------------------------------------------
+# Gradients and XLA.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bias_init", [0.0, -50.0])
+def test_the_upstream_kernel_receives_a_finite_non_zero_gradient(
+    bias_init: float,
+) -> None:
+    """Gradient flows back through the layer to a preceding Dense kernel.
+
+    Parametrized over the bias initializer so that ``bias_init=-50.0`` drives
+    every logit strongly negative -- the regime in which the max-shift form
+    produces NaN outputs and therefore NaN gradients. Measured max absolute
+    kernel gradient: 0.6026 at ``bias_init=0.0`` and 1.1749 at
+    ``bias_init=-50.0``; the logit range in the second case is
+    [-51.94, -48.71], so the all-negative regime is genuinely reached rather
+    than assumed.
+    """
+    keras.utils.set_random_seed(11)
+    x = np.random.default_rng(6).standard_normal((4, 5)).astype("float32")
+
+    dense = keras.layers.Dense(
+        6, bias_initializer=keras.initializers.Constant(bias_init)
+    )
+    layer = SigSoftmax()
+
+    with tf.GradientTape() as tape:
+        logits = dense(keras.ops.convert_to_tensor(x))
+        loss = keras.ops.sum(layer(logits) ** 2)
+
+    logits_np = keras.ops.convert_to_numpy(logits)
+    if bias_init == -50.0:
+        assert logits_np.max() < 0.0, "the all-negative regime was not reached"
+
+    gradient = keras.ops.convert_to_numpy(tape.gradient(loss, dense.kernel))
+
+    assert np.all(np.isfinite(gradient)), (
+        f"the Dense kernel gradient was not finite, observed {gradient}"
+    )
+    assert np.abs(gradient).max() > 0.0
+
+
+def test_xla_matches_eager(assert_xla_matches_eager) -> None:
+    """A traced ``jit_compile=True`` graph agrees with the eager call.
+
+    The regime ``fit()`` runs in is a traced ``tf.function``, not eager. The
+    fixture's call itself asserts that XLA can lower the graph at all.
+    """
+    x = np.random.default_rng(5).standard_normal((4, 3, 6)).astype("float32")
+
+    # atol derived from a measurement, not tuned: max|eager - xla| on this
+    # fixture reads exactly 0.0 (GPU, TF32 enabled). The layer carries no
+    # matmul, so it has no TF32-sensitive stage; 1e-6 leaves float32 headroom
+    # over a reading of zero rather than pinning the bound to it.
+    deviation = assert_xla_matches_eager(
+        SigSoftmax(axis=-2), x, 1e-6, "SigSoftmax(axis=-2)"
+    )
+
+    assert deviation == 0.0
+
+
+# ---------------------------------------------------------------------
+# Factory and package surface.
+# ---------------------------------------------------------------------
+
+
+class TestActivationFactory:
+    """``create_activation_layer('sigsoftmax')`` builds the layer correctly."""
+
+    def test_the_default_axis_survives_the_factory(self) -> None:
+        """The registry's declared default reaches the constructor."""
+        layer = create_activation_layer("sigsoftmax")
+
+        assert isinstance(layer, SigSoftmax)
+        assert layer.axis == -1
+
+    def test_a_supplied_axis_survives_the_factory(self) -> None:
+        """A caller-supplied ``axis`` is not dropped on the way through."""
+        assert create_activation_layer("sigsoftmax", axis=-2).axis == -2
+
+    def test_an_undeclared_keyword_raises(self) -> None:
+        """The factory rejects rather than silently filtering a typo.
+
+        The package's factory contract: a misspelled keyword that is dropped
+        instead of raising has shipped dead configuration repo-wide before.
+
+        The marker is compared as a SUBSTRING, not with ``match=``: it is the
+        literal ``"unsupported parameter(s)"``, whose ``(s)`` is a regex group
+        that never matches the message it was taken from.
+        """
+        with pytest.raises(ValueError) as raised:
+            create_activation_layer("sigsoftmax", bogus_key=1)
+
+        assert STRICT_DROPPED_KEY_MARKER in str(raised.value)
+
+
+class TestExportContract:
+    """The package's public surface after the three new names were added."""
+
+    def test_all_declares_thirty_four_names(self) -> None:
+        """``__all__`` grew from 31 to 34: two functions and one layer."""
+        assert len(activations.__all__) == 34
+
+    def test_every_exported_name_resolves(self) -> None:
+        """Every name in ``__all__`` is actually importable from the package.
+
+        A grep proves a row exists in ``__all__``; it cannot prove the row is
+        true. A documentation-repair pass in this repository once shipped four
+        unimportable names past eyeballing twice, and only a ``hasattr`` sweep
+        caught it.
+        """
+        missing = [n for n in activations.__all__ if not hasattr(activations, n)]
+
+        assert missing == [], f"names in __all__ that do not resolve: {missing}"
