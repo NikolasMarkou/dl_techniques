@@ -1,67 +1,14 @@
 """
-A feed-forward network built from soft logic gates.
+Feed-forward layer built from soft logic gates, implemented by ``LogicFFN``.
 
-This layer replaces the non-linearity of a standard FFN with three
-differentiable logic operations. It gives the model a bias towards
-symbolic-style reasoning: instead of one activation function, it learns how
-much of AND, OR and XOR to apply at each position.
-
-**Architecture Overview:**
-The layer works like a small logic circuit:
-
-1.  **Projection into operands**. A Dense layer maps the input to
-    ``2 * logic_dim`` features, which are split in half into the two
-    operands ``a`` and ``b``.
-
-2.  **Soft bits**. Both operands go through a sigmoid, which puts them in
-    ``(0, 1)``. Read a value as the probability that a feature is true.
-
-3.  **Three operations in parallel**. AND, OR and XOR are computed on the
-    soft bits, using continuous analogues from probability theory. There is
-    no NOT gate; the layer has exactly three operations.
-
-4.  **Dynamic gating**. A second Dense layer maps the SAME input to three
-    logits. A temperature-scaled softmax turns them into weights that sum to
-    one. This decides, per position, how much each operation counts.
-
-5.  **Weighted combination and output**. The three results are combined by
-    the weighted sum, and a final Dense layer maps the combination to
-    ``output_dim``.
-
-**Mathematics:**
-Let ``x`` be the input vector.
-
-1.  The operands are produced and squashed into soft bits:
-    ``[p_a, p_b] = W_logic @ x + b_logic``
-    ``a = sigmoid(p_a)``, ``b = sigmoid(p_b)``
-
-2.  The soft logic operations follow probabilistic rules:
-    - **Soft AND**: ``y_and = a * b``
-      (product rule for independent events: P(A and B) = P(A)P(B))
-    - **Soft OR**: ``y_or = a + b - a * b``
-      (inclusion-exclusion: P(A or B) = P(A) + P(B) - P(A and B))
-    - **Soft XOR**: ``y_xor = (a - b)^2``
-      (squared difference: large when ``a`` and ``b`` disagree, near zero
-      when they agree, which is the XOR truth table for soft values)
-
-3.  The gates come from the input:
-    ``logits = W_gate @ x + b_gate``
-    ``g = softmax(logits / temperature)``
-    with ``g = [g_and, g_or, g_xor]``.
-
-4.  The combination is the weighted sum:
-    ``h = g_and * y_and + g_or * y_or + g_xor * y_xor``
-
-5.  The output is a linear projection: ``y_out = W_out @ h + b_out``
+A standard FFN applies one shared nonlinearity to every unit. This layer
+instead computes three fixed soft logic operations (AND, OR, XOR) from
+continuous probability rules, and learns a per-position softmax gate that
+mixes them. There is no NOT gate and no way to add a fourth operation:
+``num_logic_ops`` is fixed at 3 and is not a constructor argument.
 
 References:
-This architecture comes from neuro-symbolic AI, which tries to combine deep
-learning with symbolic reasoning. The mechanisms are closest to:
-
--   Dong, H., et al. (2019). Neural Logic Machines. ICLR.
--   Probabilistic logic and fuzzy logic, which extend Boolean logic to
-    uncertainty and to continuous values.
-
+    - Dong et al., 2019. Neural Logic Machines. (ICLR)
 """
 
 import keras
@@ -91,7 +38,10 @@ class LogicFFN(keras.layers.Layer):
     There are three operations and no more. ``num_logic_ops`` is set to 3 in
     ``__init__`` and is not a constructor argument. There is no NOT gate.
 
-    **Architecture Overview:**
+    Each soft bit pair ``a, b`` feeds three probability rules:
+    ``and = a * b``, ``or = a + b - a * b``, ``xor = (a - b)^2``.
+
+    Architecture:
 
     .. code-block:: text
 
@@ -134,7 +84,7 @@ class LogicFFN(keras.layers.Layer):
 
         L = logic_dim, T = sequence length.
 
-    **The soft logic gate (block internals):**
+    Block internals:
 
     .. code-block:: text
 
@@ -165,10 +115,10 @@ class LogicFFN(keras.layers.Layer):
               multiply, then sum on axis -2
                        [B, T, L]
 
-        Both projections read the SAME input x, in parallel. The
+        Both projections read the same input x, in parallel. The
         gate does not see the logic results.
 
-        temperature divides the gate LOGITS before the softmax. A
+        temperature divides the gate logits before the softmax. A
         large temperature flattens the mix towards 1/3 each; a
         small one makes the layer pick one operation. It is a
         plain float, not a weight, so it never trains.
@@ -284,7 +234,7 @@ class LogicFFN(keras.layers.Layer):
         if temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")
 
-        # Store ALL configuration parameters
+        # Store configuration parameters
         self.output_dim = output_dim
         self.logic_dim = logic_dim
         self.use_bias = use_bias
@@ -297,13 +247,8 @@ class LogicFFN(keras.layers.Layer):
         # Number of logic operations: AND, OR, XOR
         self.num_logic_ops = 3
 
-        # CREATE all sub-layers in __init__ - Modern Keras 3 pattern.
-        # Each Dense takes its OWN clone of both initializers; the rule and
-        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
-        # gate_projection emits num_logic_ops = 3 and output_projection emits
-        # output_dim, so the two kernels are both (3, 3) at
-        # output_dim = logic_dim = 3 and the biases are both (3,) -- MEASURED
-        # max|delta| = 0.0 there.
+        # Each Dense gets its own clone of both initializers; see glu_ffn.py
+        # decisions.md D-008 for why a shared instance is unsafe here.
         self.logic_projection = keras.layers.Dense(
             # Two operands, a and b, are split out of this one projection.
             units=self.logic_dim * 2,
@@ -399,43 +344,27 @@ class LogicFFN(keras.layers.Layer):
         :return: Output tensor of shape (batch_size, sequence_length, output_dim).
         :rtype: keras.KerasTensor
         """
-        # Step 1: Project to logic space and split into two operands
         projected = self.logic_projection(inputs, training=training)
         operand_a, operand_b = keras.ops.split(projected, 2, axis=-1)
 
-        # Step 2: Convert to soft-bits using sigmoid activation
-        # This creates continuous approximations of binary values
         soft_a = keras.ops.sigmoid(operand_a)
         soft_b = keras.ops.sigmoid(operand_b)
 
-        # Step 3: Perform logic operations using soft logic
-        # AND operation: element-wise multiplication
+        # OR follows inclusion-exclusion, not De Morgan.
         logic_and = soft_a * soft_b
-
-        # OR operation: a + b - a*b (inclusion-exclusion, not De Morgan)
         logic_or = soft_a + soft_b - (soft_a * soft_b)
-
-        # XOR operation: (a - b)^2 gives high values when a and b differ
         logic_xor = keras.ops.square(soft_a - soft_b)
 
-        # Step 4: Stack logic operation results
-        # Shape: (batch_size, sequence_length, num_logic_ops, logic_dim)
+        # (batch_size, sequence_length, num_logic_ops, logic_dim)
         logic_results = keras.ops.stack([logic_and, logic_or, logic_xor], axis=-2)
 
-        # Step 5: Learn dynamic gates to weight logic operations
         gate_weights = self.gate_projection(inputs, training=training)
-        # Apply temperature scaling and softmax for smooth gating
         gate_weights = keras.ops.softmax(gate_weights / self.temperature, axis=-1)
 
-        # Step 6: Apply gates to combine logic operations
-        # Expand dimensions for broadcasting: (batch, seq, num_ops, 1)
+        # Broadcast (batch, seq, num_ops) against (batch, seq, num_ops, logic_dim).
         expanded_gates = keras.ops.expand_dims(gate_weights, axis=-1)
-
-        # Weighted combination of logic operations
-        # Shape: (batch_size, sequence_length, logic_dim)
         combined_logic = keras.ops.sum(logic_results * expanded_gates, axis=-2)
 
-        # Step 7: Project back to output dimension
         output = self.output_projection(combined_logic, training=training)
 
         return output
@@ -458,7 +387,7 @@ class LogicFFN(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns ALL initialization parameters to ensure proper reconstruction.
+        Returns every initialization parameter, for reconstruction.
 
         :return: Dictionary containing complete layer configuration.
         :rtype: Dict[str, Any]
@@ -489,7 +418,7 @@ def create_logic_ffn_standard(output_dim: int, logic_dim: int) -> LogicFFN:
     other LogicFFN argument at its default, so the returned layer has no
     kernel or bias regularizer.
 
-    **Presets:**
+    Presets:
 
     .. code-block:: text
 
@@ -537,9 +466,8 @@ def create_logic_ffn_regularized(
     second one on the biases. The two-row preset table comparing this builder
     with ``create_logic_ffn_standard`` is in that function's docstring.
 
-    This regularizes the BIASES too, which the standard Keras default does
-    not. If you only want the kernels regularized, construct ``LogicFFN``
-    directly.
+    This regularizes the biases too, unlike the standard Keras default. If
+    you only want the kernels regularized, construct ``LogicFFN`` directly.
 
     :param output_dim: Width of the output, passed straight through.
     :type output_dim: int

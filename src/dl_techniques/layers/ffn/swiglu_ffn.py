@@ -1,42 +1,23 @@
 """
-A SwiGLU feed-forward network.
+SwiGLU feed-forward network, implemented by ``SwiGLUFFN``.
 
-SwiGLU is the FFN used by PaLM, LLaMA and most models that followed them. It
-is a member of the Gated Linear Unit family: one projection of the input gates
-another projection of the same input, so the layer can suppress or amplify a
-feature per token rather than per weight.
+SwiGLU is the FFN used by PaLM, LLaMA and most models since. It is a Gated
+Linear Unit: one projection of the input gates another projection of the
+same input, so the layer can suppress or amplify a feature per token rather
+than per weight. Three Dense layers do the work: ``gate_proj`` and
+``up_proj`` read the input in parallel, then ``down_proj`` maps their
+product to ``output_dim``. ``SwiGLU(x) = (SiLU(x @ W_gate) * (x @ W_up)) @ W_down``.
 
-Three projections, not the two a standard FFN uses:
-
-1. ``gate_proj`` -- input to ``hidden_dim``. Its output goes through SiLU.
-2. ``up_proj`` -- input to ``hidden_dim``. This is the value, or content.
-3. ``down_proj`` -- ``hidden_dim`` back to ``output_dim``, applied to the
-   product of the first two.
-
-The maths, for an input vector ``x``:
-
-    SwiGLU(x) = (Swish(x @ W_gate) * (x @ W_up)) @ W_down
-
-``*`` is the element-wise product. ``Swish(z) = z * sigmoid(z)``, also called
-SiLU: smooth, non-monotonic, and generally better than ReLU in deep networks.
-Bias terms are optional and off by default.
-
-**Why the hidden width is not simply 4x.** A standard FFN has two matrices, so
-at a 4x expansion it holds roughly ``2 * d * 4d`` parameters. SwiGLU has three
-matrices, so it holds ``3 * d * h``. Setting those equal gives
-``h = (8/3) d``, which is ``4d * 2/3``. That is where the 2/3 rule comes from:
-it buys the gating for free, at the parameter count of a plain FFN. The result
-is then rounded up to a multiple of ``ffn_multiple_of`` (256 by default) so
-the matmuls tile well. With the defaults, ``output_dim=4096`` gives 11008.
+The hidden width defaults to a 2/3 rule, not the usual 4x expansion, rounded
+up to a multiple of ``ffn_multiple_of``, unless ``hidden_dim`` is given
+directly. Bias terms are optional and off by default.
 
 References:
--   Shazeer, N. (2020). GLU Variants Improve Transformer. arXiv preprint
-    arXiv:2002.05202. (the systematic study of GLU variants)
--   Chowdhery, A., et al. (2022). PaLM: Scaling Language Modeling with
-    Pathways. arXiv preprint arXiv:2204.02311.
--   Touvron, H., et al. (2023). LLaMA: Open and Efficient Foundation Language
-    Models. arXiv preprint arXiv:2302.13971.
-
+    - Shazeer, 2020. GLU Variants Improve Transformer. (https://arxiv.org/abs/2002.05202)
+    - Chowdhery et al., 2022. PaLM: Scaling Language Modeling with
+      Pathways. (https://arxiv.org/abs/2204.02311)
+    - Touvron et al., 2023. LLaMA: Open and Efficient Foundation Language
+      Models. (https://arxiv.org/abs/2302.13971)
 """
 
 import keras
@@ -64,14 +45,14 @@ class SwiGLUFFN(keras.layers.Layer):
     ``output_dim``:
     ``SwiGLU(x) = (SiLU(x @ W_gate) * (x @ W_up)) @ W_down``.
 
-    The input width does NOT have to equal ``output_dim``. ``gate_proj`` and
+    The input width does not have to equal ``output_dim``. ``gate_proj`` and
     ``up_proj`` are built from whatever width arrives, and ``output_dim`` sets
     only the output.
 
     ``hidden_dim`` is derived from ``output_dim`` unless you pass it. The
     derivation, and the two knobs that drive it, are drawn below.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -108,7 +89,7 @@ class SwiGLUFFN(keras.layers.Layer):
         conditional here: at dropout_rate=0.0 the attribute is
         None and no Dropout layer exists in the graph.
 
-    **Gate / up split, and the hidden-dim arithmetic:**
+    Gate/up split and hidden-dim arithmetic:
 
     .. code-block:: text
 
@@ -121,14 +102,14 @@ class SwiGLUFFN(keras.layers.Layer):
                                   h = SiLU(g) * u   [..., H]
 
         Only the gate branch is non-linear. gate_proj and
-        up_proj get SEPARATE initializer instances, so they do
+        up_proj get separate initializer instances, so they do
         not start out as the same function.
 
         H comes from _calculate_hidden_dim() when hidden_dim is
         None. Defaults: ffn_expansion_factor=4, multiple_of=256.
 
           step 1   raw = int(output_dim * factor * 2/3)
-                   (the PaLM 2/3 rule; int() TRUNCATES)
+                   (the PaLM 2/3 rule; int() truncates)
           step 2   H   = multiple_of * ceil(raw / multiple_of)
 
         With the real defaults:
@@ -140,12 +121,12 @@ class SwiGLUFFN(keras.layers.Layer):
           768          2048     2048
           4096         10922    11008
 
-        An explicit hidden_dim is used VERBATIM. Both knobs are
+        An explicit hidden_dim is used verbatim. Both knobs are
         then ignored, and get_config() still stores the None or
         the value you passed, never the computed H.
 
     :param output_dim: Width of the output, and the input to ``down_proj``.
-        Must be positive. It does NOT constrain the input width.
+        Must be positive. It does not constrain the input width.
     :type output_dim: int
     :param hidden_dim: Explicit hidden width. When given it is used verbatim
         and ``ffn_expansion_factor`` / ``ffn_multiple_of`` are ignored. When
@@ -160,7 +141,7 @@ class SwiGLUFFN(keras.layers.Layer):
         this, for hardware efficiency. Must be positive. Defaults to 256.
         Ignored when ``hidden_dim`` is given.
     :type ffn_multiple_of: int
-    :param dropout_rate: Dropout rate applied to the OUTPUT, after
+    :param dropout_rate: Dropout rate applied to the output, after
         ``down_proj``, in ``[0.0, 1.0]``. At 0.0 no Dropout layer is created.
         Defaults to 0.0.
     :type dropout_rate: float
@@ -185,10 +166,10 @@ class SwiGLUFFN(keras.layers.Layer):
 
     :ivar output_dim: Width of the output.
     :vartype output_dim: int
-    :ivar hidden_dim: The RESOLVED hidden width, either the explicit argument
+    :ivar hidden_dim: The resolved hidden width, either the explicit argument
         or the result of the 2/3 rule.
     :vartype hidden_dim: int
-    :ivar _hidden_dim_arg: The hidden width as REQUESTED, possibly ``None``.
+    :ivar _hidden_dim_arg: The hidden width as requested, possibly ``None``.
         This is what ``get_config()`` stores.
     :vartype _hidden_dim_arg: Optional[int]
     :ivar ffn_expansion_factor: The stored expansion factor.
@@ -282,11 +263,9 @@ class SwiGLUFFN(keras.layers.Layer):
 
         # Store every constructor argument; get_config() returns all of them.
         self.output_dim = output_dim
-        # The REQUESTED hidden_dim, which may be None. Kept apart from the
-        # RESOLVED self.hidden_dim below so get_config() round-trips the
-        # caller's intent. Storing the resolved value would turn "let SwiGLU
-        # size itself" into "pin this exact size" on reload, which is a
-        # different layer.
+        # The requested hidden_dim (may be None), kept apart from the
+        # resolved self.hidden_dim so get_config() round-trips the caller's
+        # intent instead of pinning a computed size on reload.
         self._hidden_dim_arg = hidden_dim
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
@@ -297,12 +276,9 @@ class SwiGLUFFN(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # An explicit hidden_dim wins; otherwise size via the 2/3 rule.
-        # SwiGLU used to have no hidden_dim at all, which made it the odd one
-        # out: every other FFN type in the factory is sized by hidden_dim, so
-        # a caller passing one (GatedLinearAttentionBlock's intermediate_size,
-        # for instance) had it SILENTLY DROPPED by the factory's kwarg filter
-        # and got the 2/3-rule default. It now takes the same knob as the rest.
+        # An explicit hidden_dim wins; otherwise size via the 2/3 rule. Every
+        # other FFN type in the factory is sized by hidden_dim, so this one
+        # takes the same knob rather than a SwiGLU-only sizing path.
         self.hidden_dim = (
             hidden_dim if hidden_dim is not None else self._calculate_hidden_dim()
         )
@@ -322,11 +298,8 @@ class SwiGLUFFN(keras.layers.Layer):
                 name='gate_proj'
             )
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-070
-            # up_proj and down_proj take CLONED initializers. With one shared
-            # instance, gate_proj/kernel == up_proj/kernel at (32, 256) in BOTH
-            # CLIP towers, so silu(gate(x))*up(x) starts as silu(u)*u and the
-            # gating does not exist. Do NOT share it. See decisions.md D-070.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-070: cloned
+            # initializers, never shared -- sharing made the gate a no-op. See decisions.md.
             self.up_proj = keras.layers.Dense(
                 self.hidden_dim,
                 use_bias=self.use_bias,
@@ -378,8 +351,8 @@ class SwiGLUFFN(keras.layers.Layer):
         Check the four numeric constructor arguments.
 
         Called from ``__init__`` before anything is stored. ``hidden_dim`` is
-        NOT checked here; ``__init__`` checks it separately, because ``None``
-        is a valid value for it.
+        checked separately in ``__init__``, because ``None`` is a valid value
+        for it.
 
         :param output_dim: Output width. Must be positive.
         :type output_dim: int
@@ -504,24 +477,20 @@ class SwiGLUFFN(keras.layers.Layer):
         """
         Return the input shape with its last axis set to ``output_dim``.
 
-        # DECISION plan-2026-07-30T140922-8af1028f/D-013. See decisions.md D-013.
-        # Return output_dim, not input_shape: down_proj is Dense(output_dim).
-        # The old passthrough LIED -- input width 32 with output_dim=24 gave
-        # [-1]==32 while layer(x).shape[-1]==24. Do NOT restore it; the
-        # BaseVLMHead fusion stack derives its width assertion from this method.
-
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         :return: The same shape with the last axis replaced by ``output_dim``.
         :rtype: Tuple[Optional[int], ...]
         """
+        # DECISION plan-2026-07-30T140922-8af1028f/D-013: return output_dim,
+        # not input_shape -- BaseVLMHead derives its width assertion from this. See decisions.md.
         return tuple(input_shape)[:-1] + (self.output_dim,)
 
     def get_config(self) -> Dict[str, Any]:
         """
         Return the constructor arguments needed to rebuild this layer.
 
-        ``hidden_dim`` is returned as REQUESTED, not as resolved, so a layer
+        ``hidden_dim`` is returned as requested, not as resolved, so a layer
         built with ``hidden_dim=None`` re-sizes itself on reload instead of
         being pinned to whatever width it happened to compute.
 
@@ -531,7 +500,7 @@ class SwiGLUFFN(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "output_dim": self.output_dim,
-            # The REQUESTED value (may be None), not the resolved one.
+            # The requested value (may be None), not the resolved one.
             "hidden_dim": self._hidden_dim_arg,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "ffn_multiple_of": self.ffn_multiple_of,

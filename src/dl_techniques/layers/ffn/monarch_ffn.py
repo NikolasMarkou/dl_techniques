@@ -1,50 +1,16 @@
 """
-A Monarch-structured Feed-Forward Network (order-2 Monarch matrices).
+Order-2 Monarch-structured feed-forward network, implemented by ``MonarchFFN``.
 
-This layer is a drop-in replacement for the standard position-wise
-Feed-Forward Network (FFN) of a Transformer. Each of the two dense projections
-is replaced by an **order-2 Monarch matrix**: a structured (sub-quadratic)
-parameterization written as the product of two block-diagonal matrices with a
-fixed reshape/permute between them, introduced by Dao et al. (2022).
-
-It cuts parameter count and FLOPs from ``O(n^2)`` to ``O(n^1.5)`` at
-``nblocks = sqrt(n)``, and keeps much of a dense matrix's expressivity. The
-same structure covers many fast transforms, including the FFT and the
-Hadamard transform.
-
-**Architecture Overview:**
-The block keeps the familiar expand-then-contract FFN shape. Only the two
-linear maps change: each is a Monarch map instead of a single dense kernel.
-The flow diagram is on ``MonarchFFN`` itself, beside the code that runs it.
-
-**Mathematics:**
-An order-2 Monarch linear map sends a vector of dimension ``n_in`` to a vector
-of dimension ``n_out``. Both dimensions are split into ``nblocks`` blocks
-(``b_in = n_in / nblocks``, ``b_out = n_out / nblocks``). The map is computed in
-five reshape/einsum steps, and no dense ``n x n`` kernel is ever materialized:
-
-1.  reshape ``(..., n_in)`` -> ``(..., nblocks, b_in)``
-2.  first block-diagonal multiply with ``L`` of shape ``(nblocks, b_in, b_out)``
-    contracting the ``b_in`` axis -> ``(..., nblocks, b_out)``
-3.  permutation: transpose the ``(nblocks, b_out)`` axes -> ``(..., b_out, nblocks)``
-    (this transpose IS the Monarch interleaving permutation)
-4.  second block-diagonal multiply with ``R`` of shape ``(b_out, nblocks, nblocks)``
-    contracting the ``nblocks`` axis -> ``(..., b_out, nblocks)``
-5.  reshape back -> ``(..., n_out)``
-
-For the square case (``n_in == n_out``) this is exactly an order-2 Monarch
-matrix. For the non-square case (``n_in != n_out``) the first block-diagonal
-factor is rectangular per block (``b_in -> b_out``). That is the smallest
-generalization that keeps the structure intact without falling back to a dense
-projection. It requires ``nblocks`` to divide **all** of ``input_dim``,
-``hidden_dim`` and ``output_dim`` so the block grids line up; that is checked
-in ``__init__`` and in ``build``.
+Each of the two dense projections of a standard FFN is replaced by an
+order-2 Monarch matrix: a structured, sub-quadratic map written as two
+block-diagonal factors with a fixed reshape/permute between them. This cuts
+parameter count and FLOPs from ``O(n^2)`` to ``O(n^1.5)`` at
+``nblocks = sqrt(n)``, while keeping much of a dense matrix's expressivity.
+``nblocks`` must divide ``input_dim``, ``hidden_dim`` and ``output_dim``.
 
 References:
--   Dao, T., Chen, B., Sohoni, N., Desai, A., Poli, M., Grogan, J., Liu, A.,
-    Rao, A., Rudra, A., & Ré, C. (2022). Monarch: Expressive Structured
-    Matrices for Efficient and Accurate Training. ICML.
-    arXiv preprint arXiv:2204.00595.
+    - Dao et al., 2022. Monarch: Expressive Structured Matrices for
+      Efficient and Accurate Training. (https://arxiv.org/abs/2204.00595)
 """
 
 import keras
@@ -71,10 +37,9 @@ class MonarchFFN(keras.layers.Layer):
     Monarch map: two block-diagonal factors with a reshape/permute between
     them. The computation is
     ``FFN(x) = monarch_contract(dropout(activation(monarch_expand(x))))``, with
-    an optional bias after each Monarch map. The module docstring carries the
-    five-step Monarch math and the reference (Dao et al. 2022).
+    an optional bias after each Monarch map.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -104,7 +69,7 @@ class MonarchFFN(keras.layers.Layer):
         The bias rows exist only when use_bias=True. Dropout
         is always in the graph; at rate 0.0 it is a no-op.
 
-    **One Monarch map (the block arithmetic):**
+    Block internals, one Monarch map:
 
     .. code-block:: text
 
@@ -175,7 +140,7 @@ class MonarchFFN(keras.layers.Layer):
     :vartype output_dim: int
     :ivar nblocks: The stored block count.
     :vartype nblocks: int
-    :ivar activation: The RESOLVED activation callable, not the name that was
+    :ivar activation: The resolved activation callable, not the name that was
         passed. ``get_config()`` serializes it back to a name.
     :vartype activation: Callable
     :ivar dropout_rate: The stored dropout rate, cast to ``float``.
@@ -346,14 +311,9 @@ class MonarchFFN(keras.layers.Layer):
         """
         b_in = n_in // self.nblocks
         b_out = n_out // self.nblocks
-        # Each factor takes its OWN clone of kernel_initializer; the rule and
-        # the mechanism are written out at glu_ffn.py, decisions.md D-008.
-        # This layer reaches them through add_weight(initializer=...) rather
-        # than through a sub-layer, which is the only difference. The four
-        # factors collide in shape at ordinary settings -- expand_l vs
-        # expand_r whenever nblocks == b_in == b_out, and expand_l vs
-        # contract_l at input_dim = hidden_dim = output_dim (MEASURED
-        # max|delta| = 0.0 at 16/16/16 with nblocks=4).
+        # Each factor takes its own clone of kernel_initializer via
+        # add_weight(initializer=...); see glu_ffn.py decisions.md D-008 for
+        # why a shared instance is unsafe here.
         # First block-diagonal factor: per-block (b_in -> b_out) map.
         l = self.add_weight(
             name=f"{prefix}_l",
@@ -388,12 +348,9 @@ class MonarchFFN(keras.layers.Layer):
         if input_dim is None:
             raise ValueError("The last dimension of input_shape must be defined")
 
-        # DECISION plan_2026-06-19_2ea7a9a0/D-003: for the non-square expand and
-        # contract maps, factor L is rectangular per block (nblocks, b_in, b_out)
-        # and factor R stays square (b_out, nblocks, nblocks). Do NOT square them
-        # up with a trailing Dense; that re-adds an unstructured O(n^2) kernel.
-        # The price is this guard: nblocks must divide input_dim as well.
-        # That plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-19_2ea7a9a0/D-003: keep L rectangular per
+        # block rather than squaring it with a trailing Dense (would re-add an
+        # O(n^2) kernel). Source plan is gone; this comment is the record.
         if input_dim % self.nblocks != 0:
             raise ValueError(
                 f"input_dim must be divisible by nblocks, "
@@ -430,7 +387,7 @@ class MonarchFFN(keras.layers.Layer):
         intermediate_shape[-1] = self.hidden_dim
         self.dropout.build(tuple(intermediate_shape))
 
-        # CRITICAL: Always call parent build() at the end.
+        # Parent build() must run last.
         super().build(input_shape)
 
     def _monarch_map(
@@ -547,7 +504,7 @@ class MonarchFFN(keras.layers.Layer):
         """
         Get layer configuration for serialization.
 
-        Returns ALL constructor parameters for perfect reconstruction.
+        Returns every constructor parameter, for reconstruction.
 
         :return: Dictionary containing the complete layer configuration.
         :rtype: Dict[str, Any]

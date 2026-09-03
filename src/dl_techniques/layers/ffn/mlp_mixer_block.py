@@ -1,56 +1,17 @@
 """
-The MLP-Mixer block.
+MLP-Mixer block, implemented by ``MixerBlock``.
 
-This is the mixing block of MLP-Mixer (Tolstikhin et al. 2021), an
-attention-free architecture that processes a sequence of tokens or image
-patches with nothing but multi-layer perceptrons. It takes a rank-3 tensor
-``(B, S, C)``, where ``S`` is the token count and ``C`` the channel count,
-and returns the same shape.
-
-Two mixing operations run in sequence, each inside its own pre-LayerNorm
-residual sub-block:
-
-1.  **Token-mixing** mixes across the token axis ``S``, one channel at a
-    time. The input is normalized, transposed to ``(B, C, S)`` so that an
-    MLP acting on the last axis mixes tokens, transposed back, and added to
-    the residual stream.
-
-2.  **Channel-mixing** mixes across the channel axis ``C``, one token at a
-    time. The input is normalized, an MLP acts on the last axis directly,
-    and the result is added to the residual stream.
-
-Each mixing MLP is a two-layer expand-then-contract perceptron with one
-non-linearity (GELU by default): ``Dense(hidden) -> activation -> Dropout ->
-Dense(restore)``. ``restore`` is ``S`` for the token MLP and ``C`` for the
-channel MLP. Doing both in sequence gives every position a path to every
-other, which is the job attention would otherwise do.
-
-**Mathematics:**
-Let ``X`` be the input of shape ``(B, S, C)``, ``LN`` a per-channel layer
-normalization, ``W_*`` the MLP weight matrices and ``sigma`` the activation:
-
-1.  Token-mixing, along the ``S`` axis, per channel:
-    ``U = X + (sigma(LN(X)^T @ W_1) @ W_2)^T``
-    The transpose moves the token axis last so the Dense layers mix tokens.
-    ``W_1`` is ``(S, tokens_mlp_dim)`` and ``W_2`` is ``(tokens_mlp_dim, S)``.
-
-2.  Channel-mixing, along the ``C`` axis, per token:
-    ``Y = U + sigma(LN(U) @ W_3) @ W_4``
-    ``W_3`` is ``(C, channels_mlp_dim)`` and ``W_4`` is
-    ``(channels_mlp_dim, C)``.
-
-The token MLP's output width is ``S`` and the channel MLP's is ``C``. Neither
-is known until an input shape arrives, so the two Dense layers that need them
-are created in ``build()``, the same deferred pattern ``SwinMLP`` uses. Every
-other sublayer is fully determined by the constructor arguments and is
-created in ``__init__``.
+The mixing block of MLP-Mixer, an attention-free architecture that
+processes tokens or image patches with nothing but multi-layer perceptrons.
+It takes a rank-3 tensor ``(B, S, C)`` and returns the same shape, running
+two mixing MLPs in sequence: one across the token axis ``S``, one across
+the channel axis ``C``, each inside its own pre-norm residual sub-block.
+Both ``S`` and ``C`` must be known at build time, since each MLP's
+back-projection width is a weight shape.
 
 References:
--   Tolstikhin, I., Houlsby, N., Kolesnikov, A., Beyer, L., Zhai, X.,
-    Unterthiner, T., Yung, J., Steiner, A., Keysers, D., Uszkoreit, J.,
-    Lucic, M., & Dosovitskiy, A. (2021). MLP-Mixer: An all-MLP Architecture
-    for Vision. arXiv preprint arXiv:2105.01601.
-
+    - Tolstikhin et al., 2021. MLP-Mixer: An all-MLP Architecture for
+      Vision. (https://arxiv.org/abs/2105.01601)
 """
 
 import keras
@@ -81,7 +42,7 @@ class MixerBlock(keras.layers.Layer):
     every position a path to every other, which is what attention would have
     provided.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -113,7 +74,7 @@ class MixerBlock(keras.layers.Layer):
         inside the branch, and the residual carries the
         unnormalized tensor. `T` is a transpose.
 
-    **Token-mixing sub-block:**
+    Token-mixing sub-block:
 
     .. code-block:: text
 
@@ -144,14 +105,14 @@ class MixerBlock(keras.layers.Layer):
         y, added to x
 
         The two transposes are what people get wrong. Dense
-        always acts on the LAST axis, so S is moved there and
+        always acts on the last axis, so S is moved there and
         moved back. The pair must stay balanced: drop either
         one and the block stops being shape-preserving.
 
-        Dense(S) means units=S. The token count is a WEIGHT
-        SHAPE, which is why S has to be known at build time.
+        Dense(S) means units=S. The token count is a weight
+        shape, which is why S has to be known at build time.
 
-    **Channel-mixing sub-block:**
+    Channel-mixing sub-block:
 
     .. code-block:: text
 
@@ -306,7 +267,7 @@ class MixerBlock(keras.layers.Layer):
         attribute is stored, so a rejected configuration leaves no half-built
         layer behind.
 
-        The two back-projections are NOT created here. Their widths are ``S``
+        The two back-projections are not created here. Their widths are ``S``
         and ``C``, which only ``build()`` can read off the input shape. The
         shared Dense keyword dict is stashed on ``_dense_kwargs`` so
         ``build()`` can construct them the same way. It carries the
@@ -343,7 +304,6 @@ class MixerBlock(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Comprehensive input validation with informative error messages
         if not isinstance(tokens_mlp_dim, int) or tokens_mlp_dim <= 0:
             raise ValueError(f"tokens_mlp_dim must be a positive integer, got {tokens_mlp_dim}")
         if not isinstance(channels_mlp_dim, int) or channels_mlp_dim <= 0:
@@ -351,7 +311,6 @@ class MixerBlock(keras.layers.Layer):
         if not isinstance(dropout_rate, (int, float)) or not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        # Store ALL configuration parameters for serialization
         self.tokens_mlp_dim = tokens_mlp_dim
         self.channels_mlp_dim = channels_mlp_dim
         self.activation = activations.get(activation)
@@ -362,13 +321,9 @@ class MixerBlock(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # The stashed dict carries NO initializer. Each of the four Dense
-        # layers takes its own clone instead; the rule and the mechanism are
-        # written out at glu_ffn.py, decisions.md D-008. The token and
-        # channel MLPs collide pairwise at tokens_mlp_dim == channels_mlp_dim
-        # (hidden kernels and biases) and at S == C (the two back-projections)
-        # -- MEASURED max|delta| = 0.0 at 8/8 over an (8, 8) input, which
-        # made the two mixing directions the same function at init.
+        # The stashed dict carries no initializer. Each of the four Dense
+        # layers takes its own clone instead; see glu_ffn.py decisions.md
+        # D-008 for why a shared instance is unsafe here.
         dense_kwargs = {
             "use_bias": self.use_bias,
             "kernel_regularizer": self.kernel_regularizer,
@@ -376,7 +331,6 @@ class MixerBlock(keras.layers.Layer):
         }
         self._dense_kwargs = dense_kwargs
 
-        # ---- Sublayers whose configuration is fully known from the ctor ----
         # Pre-LN for each residual sub-block.
         self.token_norm = layers.LayerNormalization(name="token_norm")
         self.channel_norm = layers.LayerNormalization(name="channel_norm")
@@ -404,7 +358,6 @@ class MixerBlock(keras.layers.Layer):
         self.token_dropout = layers.Dropout(rate=self.dropout_rate, name="token_dropout")
         self.channel_dropout = layers.Dropout(rate=self.dropout_rate, name="channel_dropout")
 
-        # ---- Sublayers whose units depend on S or C: created in build() ----
         # units = S (tokens) and units = C (channels). Neither is known yet.
         self.token_mlp_out = None
         self.channel_mlp_out = None
@@ -469,7 +422,7 @@ class MixerBlock(keras.layers.Layer):
             **self._dense_kwargs
         )
 
-        # ---- Token-mixing sub-block (operates on transposed (B, C, S)) ----
+        # Token-mixing sub-block, operates on transposed (B, C, S).
         self.token_norm.build(input_shape)
         # After LN + transpose, the token MLP sees (B, C, S).
         transposed_shape = (input_shape[0], channels, seq_len)
@@ -478,7 +431,7 @@ class MixerBlock(keras.layers.Layer):
         self.token_dropout.build(token_hidden_shape)
         self.token_mlp_out.build(token_hidden_shape)
 
-        # ---- Channel-mixing sub-block (operates on (B, S, C)) ----
+        # Channel-mixing sub-block, operates on (B, S, C).
         self.channel_norm.build(input_shape)
         self.channel_mlp_hidden.build(input_shape)
         channel_hidden_shape = self.channel_mlp_hidden.compute_output_shape(input_shape)
@@ -506,7 +459,6 @@ class MixerBlock(keras.layers.Layer):
         :return: Output tensor of shape ``(B, S, C)``.
         :rtype: keras.KerasTensor
         """
-        # ---- Token-mixing sub-block ----
         # Shapes down this branch: (B, S, C) -> (B, C, S) ->
         # (B, C, tokens_mlp_dim) -> (B, C, S) -> (B, S, C).
         y = self.token_norm(inputs)
@@ -519,7 +471,6 @@ class MixerBlock(keras.layers.Layer):
         # Residual add.
         x = inputs + y
 
-        # ---- Channel-mixing sub-block ----
         # Shapes down this branch: (B, S, C) ->
         # (B, S, channels_mlp_dim) -> (B, S, C). No transpose here.
         z = self.channel_norm(x)

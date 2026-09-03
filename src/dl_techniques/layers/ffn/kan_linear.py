@@ -1,42 +1,15 @@
 """
-Kolmogorov-Arnold Network (KAN) linear layer.
+Kolmogorov-Arnold Network (KAN) linear layer, implemented by ``KANLinear``.
 
-A more expressive alternative to the standard `Dense` layer, grounded in the
-Kolmogorov-Arnold representation theorem. The theorem states that any
-multivariate continuous function can be written as a finite composition of
-univariate functions and addition. This layer is a practical, learnable
-approximation of that statement.
-
-A dense layer computes `y = activation(W @ x + b)`: one fixed activation after
-one linear transformation. A KAN layer instead learns a separate univariate
-activation `phi_ij` for every connection between input neuron `i` and output
-neuron `j`, then sums them: `y_j = Σ_i phi_ij(x_i)`. The learning capacity
-moves out of the linear weights and into the activations, which lets the
-network fit richer relationships with fewer parameters and fewer layers.
-
-The open question is how to parameterize `phi_ij(x)` so it stays
-differentiable and cheap. Here each `phi_ij` is a B-spline: a piecewise
-polynomial built as a linear combination of basis splines (`B_k`) over a grid:
-
-`spline_ij(x) = Σ_k c_ijk * B_k(x)`
-
-The coefficients `c_ijk` are the layer's main learnable parameters and set the
-shape of the spline. The basis functions `B_k(x)` come from the Cox-de Boor
-recursion.
-
-To keep the optimization behaviour of a common activation, each `phi_ij` adds
-a fixed base activation `b(x)` (SiLU by default) to the learnable spline, each
-term with its own learnable scalar weight:
-
-`phi_ij(x) = w_base_ij * b(x) + w_spline_ij * spline_ij(x)`
-
-The base term carries global trends and the spline term carries local detail,
-so the layer can adapt its shape to the data distribution.
+A standard Dense layer applies one fixed activation after one linear map.
+This layer instead learns a separate univariate activation for every
+input-output connection, each parameterized as a B-spline plus a scaled
+base activation, and sums the results. The learning capacity moves from
+the linear weights into the activations, letting the layer fit richer
+relationships with fewer parameters.
 
 References:
-    - Liu, Z., Wang, Y., et al. (2024). "KAN: Kolmogorov-Arnold Networks."
-      arXiv preprint arXiv:2404.19756.
-
+    - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks. (https://arxiv.org/abs/2404.19756)
 """
 
 import keras
@@ -62,7 +35,7 @@ class KANLinear(keras.layers.Layer):
     functions ``B_k(x)`` come from the Cox-de Boor recursion on a knot grid
     that can be adapted to the data.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -88,7 +61,7 @@ class KANLinear(keras.layers.Layer):
         Both paths run on every call. There is no branch and no
         flag that removes either one.
 
-    **B-spline grid geometry:**
+    B-spline grid geometry:
 
     .. code-block:: text
 
@@ -117,7 +90,7 @@ class KANLinear(keras.layers.Layer):
           grid           (grid_length,)   non-trainable
 
         The padding gives the recursion a full knot span at both
-        ends. It is generated from the BOUNDARY spacing, not from
+        ends. It is generated from the boundary spacing, not from
         a global step, so a non-uniform interior (the result of
         update_grid_from_samples) still extends consistently.
 
@@ -131,7 +104,7 @@ class KANLinear(keras.layers.Layer):
         are smoother (1=linear, 2=quadratic, 3=cubic). Must be >= 0.
         Defaults to 3.
     :type spline_order: int
-    :param grid_range: ``(min, max)`` range for the INITIAL knot grid. ``min``
+    :param grid_range: ``(min, max)`` range for the initial knot grid. ``min``
         must be strictly less than ``max``. Defaults to ``(-2.0, 2.0)``. The
         live grid can later be adapted to data by
         ``update_grid_from_samples()``, which rewrites the ``grid`` weight and
@@ -166,7 +139,7 @@ class KANLinear(keras.layers.Layer):
     :vartype grid_size: int
     :ivar spline_order: The stored spline degree.
     :vartype spline_order: int
-    :ivar grid_range: The INITIAL range, as passed. Never updated by
+    :ivar grid_range: The initial range, as passed. Never updated by
         ``update_grid_from_samples()``.
     :vartype grid_range: Tuple[float, float]
     :ivar base_activation_name: The activation argument exactly as passed.
@@ -335,12 +308,9 @@ class KANLinear(keras.layers.Layer):
             trainable=self.spline_trainable,
         )
 
-        # DECISION plan_2026-06-12_6cc7c378/D-003: base_scaler, shape
-        # (input_features, features). Its default 'ones' initializer keeps this
-        # weight byte-identical to the historical behaviour while still letting
-        # a residual-path init scheme be wired in. Do NOT hard-code 'ones', and
-        # do NOT route it through kernel_initializer, which is the spline path.
-        # That plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-12_6cc7c378/D-003: use base_scaler_initializer
+        # here, not a hard-coded 'ones' or kernel_initializer (the spline path).
+        # Source plan is gone; this comment is the record.
         self.base_scaler = self.add_weight(
             name="base_scaler",
             shape=(self.input_features, self.features),
@@ -354,20 +324,10 @@ class KANLinear(keras.layers.Layer):
         # Size: grid_size + 1 interior knots + 2 * spline_order of padding
         grid_length = self.grid_size + 2 * self.spline_order + 1
 
-        # The grid's INITIAL knots come from the `initializer` below.
-        # WHAT NOT TO DO: do NOT restore
-        #     self.grid = self.add_weight(..., initializer="zeros")
-        #     self._set_grid_from_range(self.grid_range[0], self.grid_range[1])
-        # Keras 3's StatelessScope records and DISCARDS an `.assign()` issued
-        # during a build reached from a parent layer's call(), which is every
-        # real model. Measured on CPU, keras 3.8.0, 2026-08-29: the shipped
-        # spelling gives grid[0] = -4.399999618530273 on a direct build, a
-        # functional parent and the factory path alike; the rejected spelling
-        # gives 0.0 when built from inside a parent layer's call().
-        # The RUNTIME writers `_set_grid_from_range` / `update_grid_from_samples`
-        # assign from user code in a real scope and are fine; they must keep
-        # working. Measured: `_set_grid_from_range(-1, 1)` moves grid[0] to
-        # -2.1999998. Same DECISION in nbeats_blocks.py D-028.
+        # The grid's initial knots come from `initializer` below, not an
+        # `.assign()` in build() -- Keras 3's StatelessScope discards an
+        # assign issued from a parent layer's call(). Same rule as
+        # nbeats_blocks.py D-028.
         self.grid = self.add_weight(
             name="grid",
             shape=(grid_length,),
@@ -377,11 +337,8 @@ class KANLinear(keras.layers.Layer):
             ),
             trainable=False,
             dtype=self.dtype,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-043: the grid is a
-            # coordinate table, not an activation, so it is autocast=False. Do
-            # NOT drop that: under mixed_float16 the Cox-de Boor recursion would
-            # divide knot differences at half precision, where epsilon's 1e-7
-            # default is subnormal (1.192093e-07). See decisions.md D-043.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-043: autocast=False --
+            # under mixed_float16 the recursion would divide knot differences at half precision, where epsilon=1e-7 is subnormal. See decisions.md.
             autocast=False,
         )
 
@@ -412,7 +369,7 @@ class KANLinear(keras.layers.Layer):
         """Pad an interior knot sequence with ``spline_order`` knots at each end.
 
         The interior sequence does not have to be uniformly spaced. Both
-        extensions are generated from the BOUNDARY spacing (``t_1 - t_0`` on
+        extensions are generated from the boundary spacing (``t_1 - t_0`` on
         the left, ``t_n - t_{n-1}`` on the right), so a non-uniform,
         quantile-matched interior extends consistently at both ends.
 
@@ -463,7 +420,7 @@ class KANLinear(keras.layers.Layer):
         :return: Basis function values of shape ``(..., input_features, num_basis_fns)``.
         :rtype: keras.KerasTensor
         """
-        # The recursion runs in the VARIABLE dtype, which is float32 under
+        # The recursion runs in the variable dtype, which is float32 under
         # `mixed_float16`, never in the compute dtype. `self.grid` is held
         # `autocast=False` and the input is lifted to match it. The basis is
         # cast back to `compute_dtype` at the layer boundary.
@@ -566,7 +523,7 @@ class KANLinear(keras.layers.Layer):
         which is generally non-uniform, into the ``grid`` weight. The interior
         quantiles are kept, so this is a real quantile match and not a min/max
         range update. Everything is tensor-based, so it runs eagerly and under
-        ``@tf.function``. ``grid_range`` is the configured INITIAL range and is
+        ``@tf.function``. ``grid_range`` is the configured initial range and is
         not touched here. The ``grid`` weight is the adapted source of truth,
         and it persists across ``.keras`` save and load.
 
@@ -596,15 +553,12 @@ class KANLinear(keras.layers.Layer):
 
         # Average across features to find a unified knot sequence for the layer.
         # Averaging a monotone-per-column matrix is monotone, so the result is a
-        # valid (generally NON-uniform) knot sequence.
+        # valid (generally non-uniform) knot sequence.
         # Shape: (grid_size + 1,)
         new_grid_points = keras.ops.mean(grid_points_per_feature, axis=1)
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-074: keep the interior
-        # quantiles. This used to call _set_grid_from_range(new[0], new[-1]),
-        # which threw them away and rebuilt a UNIFORM grid between min and max.
-        # Do NOT revert to that: on skewed data a uniform grid leaves most knots
-        # where there are almost no samples. See decisions.md D-074.
+        # quantiles -- rebuilding a uniform grid between min/max leaves most knots where skewed data has few samples. See decisions.md.
         self.grid.assign(self._extend_knots(new_grid_points))
 
     def compute_output_shape(
