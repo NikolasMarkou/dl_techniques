@@ -1,94 +1,41 @@
-"""
-A dynamic routing mechanism for conditional computation.
+"""A dynamic routing mechanism for conditional computation.
 
-This layer introduces adaptive-depth routing into a neural network by
-wrapping a standard computational block, such as a Transformer layer. For
-each input it produces a routing decision -- skip, execute, or repeat the
-wrapped block -- via a lightweight router network, exposing a per-input
-signal for a compute-aware policy that would allocate more depth to complex
-inputs and less to simpler ones.
+``RouterLayer`` wraps a Transformer block and, for each input, chooses to
+skip it, run it once, or run it twice. A small router MLP looks at a
+windowed mean-pooled summary of the input and picks one of the three
+actions; the chosen action selects the corresponding output through a
+one-hot mask.
 
-.. note::
-    **Compute cost as implemented.** This layer does NOT reduce FLOPs at
-    inference. All three paths are computed unconditionally on every forward
-    pass: SKIP is free (identity), EXECUTE runs the wrapped transformer once,
-    and REPEAT runs it a second time on the executed output. The chosen action
-    then selects among the three via a one-hot mask. Because EXECUTE and
-    REPEAT are always materialised, the layer costs approximately 2x a single
-    transformer application on every input. It provides the *routing signal*
-    for a compute-aware policy; realising actual compute savings would require
-    true per-item conditional dispatch (gather/scatter), which is
-    intentionally NOT implemented here -- an accelerator-friendly
-    select-after-compute scheme was chosen instead.
-
-Architectural and Mathematical Underpinnings:
-
-The layer's architecture decouples the decision-making (routing) from the
-primary computation. A small router network operates on a compressed summary
-of the input to make an efficient, low-cost decision. This decision then
-governs the application of the main, computationally expensive transformer
-block on the full, uncompressed input.
-
-1.  **Input Summarization via Windowed Pooling**: To make a routing decision
-    that is independent of sequence length, the input hidden states are
-    first summarized. The sequence of token embeddings is partitioned into a
-    fixed number of contiguous windows. The embeddings within each window are
-    then averaged (mean-pooled). This process transforms a variable-length
-    sequence `H` of shape `(L, D)` into a fixed-size summary tensor `S` of
-    shape `(W, D)`, where `W` is the number of windows. This summary serves as
-    a fixed-dimensional "glance" at the input sequence.
-
-2.  **Routing Policy Network**: The core of the router is a simple two-layer
-    Multi-Layer Perceptron (MLP). This network learns a routing policy `π`
-    that maps the input summary `S` to a probability distribution over the
-    three possible actions: {SKIP, EXECUTE, REPEAT}.
-
-        logits = MLP(S)
-        action = argmax(logits)
-
-    During training, this policy network is typically trained with explicit
-    supervision derived from a search algorithm (like MCTS) that determines
-    the optimal computational path for a given task and budget.
-
-3.  **Select-after-compute execution**: All three candidate outputs are
-    computed for the original input `H`, and the router's decision selects
-    one of them via a one-hot mask:
-    -   **SKIP**: An identity function, `f(H) = H`.
-    -   **EXECUTE**: A single application of the wrapped transformer block,
-        `f(H) = Transformer(H)`.
-    -   **REPEAT**: A sequential double application of the block,
-        `f(H) = Transformer(Transformer(H))`.
-
-    EXECUTE and REPEAT are evaluated on every forward pass regardless of the
-    decision (see the compute-cost note above), so the selection produces the
-    routing behaviour but does not, by itself, yield a reduction in
-    computational cost.
+This layer does not reduce inference FLOPs by itself: all three paths
+(skip, execute, repeat) are computed on every forward pass, and the mask
+only selects among the already-computed results. It produces the routing
+*signal* that a compute-aware policy would use; real compute savings would
+need per-item conditional dispatch (gather/scatter), which this
+accelerator-friendly select-after-compute layer does not implement. The
+router MLP itself is not trained by task loss alone, since argmax is
+non-differentiable — a caller must either supply ``layer_decision`` or
+attach an explicit loss to the returned logits.
 
 References:
-    - Heakl, A., et al. (2025). Dr.LLM: Dynamic Layer Routing in LLMs.
-      *arXiv preprint arXiv:2510.12773*.
+    - Heakl et al., 2025. Dr.LLM: Dynamic Layer Routing in LLMs.
+      (https://arxiv.org/abs/2510.12773)
 """
 
 import keras
 from typing import Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, ops
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .transformers.transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.router")
 class RouterLayer(keras.layers.Layer):
     """Dynamic router wrapping a TransformerLayer for adaptive computation.
 
     This layer adds a lightweight routing MLP that decides, on a
-    per-sequence basis, whether to **skip** (identity), **execute** once,
-    or **repeat** twice the wrapped ``TransformerLayer``. The decision
+    per-sequence basis, whether to skip (identity), execute once, or
+    repeat twice the wrapped ``TransformerLayer``. The decision
     is based on a windowed mean-pooling summary of the input sequence
     passed through a two-layer bottleneck MLP producing logits for
     ``{SKIP=0, EXECUTE=1, REPEAT=2}``. The decision uses the supplied
@@ -100,7 +47,7 @@ class RouterLayer(keras.layers.Layer):
     and does not by itself reduce inference FLOPs.
 
     .. warning::
-        **The router MLP is not trained by task loss alone.** Action
+        The router MLP is not trained by task loss alone. Action
         selection is non-differentiable (``argmax`` -> one-hot), so no
         gradient flows to the router weights from the primary task loss via
         the returned output. The router MLP trains ONLY if the caller attaches
@@ -109,7 +56,7 @@ class RouterLayer(keras.layers.Layer):
         without supplying ``layer_decision`` and without a loss on ``logits``
         -- leaves the router MLP at its initialization.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -175,7 +122,6 @@ class RouterLayer(keras.layers.Layer):
     ):
         super().__init__(**kwargs)
 
-        # --- Input Validation ---
         if not isinstance(transformer_layer, TransformerLayer):
             raise TypeError(
                 f"transformer_layer must be an instance of TransformerLayer, "
@@ -186,8 +132,6 @@ class RouterLayer(keras.layers.Layer):
         if num_windows <= 0:
             raise ValueError(f"num_windows must be positive, got {num_windows}")
 
-        # --- Configuration Storage ---
-        # Store ALL __init__ arguments as attributes
         self.transformer_layer = transformer_layer
         self.hidden_size = transformer_layer.hidden_size
         self.router_bottleneck_dim = router_bottleneck_dim
@@ -197,8 +141,6 @@ class RouterLayer(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # --- Sub-layer Creation (in __init__) ---
-        # Create all sub-layers here; they are unbuilt until the build() method is called.
         self.router_bottleneck = layers.Dense(
             units=self.router_bottleneck_dim,
             activation='gelu',
@@ -222,8 +164,7 @@ class RouterLayer(keras.layers.Layer):
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]"""
-        # --- Build Sub-layers ---
-        # 1. Build the wrapped transformer layer with the main input shape
+        # Build the wrapped transformer layer with the main input shape.
         self.transformer_layer.build(input_shape)
 
         # 2. Build the router's MLP layers by calculating their specific input shapes
@@ -237,7 +178,6 @@ class RouterLayer(keras.layers.Layer):
         router_output_input_shape = (input_shape[0], self.num_windows, self.router_bottleneck_dim)
         self.router_output.build(router_output_input_shape)
 
-        # --- Finalize Build ---
         # Always call parent's build() at the end.
         super().build(input_shape)
 
@@ -253,10 +193,10 @@ class RouterLayer(keras.layers.Layer):
 
         :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask. **Must be
-            multiplicative** (``1``/``True`` = keep, ``0``/``False`` = mask),
-            matching this repo's ``MultiHeadAttention`` convention. **Additive
-            masks are NOT supported**: an additive mask (``0`` / ``-inf`` or
+        :param attention_mask: Optional attention mask. Must be
+            multiplicative (``1``/``True`` = keep, ``0``/``False`` = mask),
+            matching this repo's ``MultiHeadAttention`` convention. Additive
+            masks are not supported: an additive mask (``0`` / ``-inf`` or
             ``0`` / ``-1e9``) inverts the keep/mask sense and is multiplied into
             the windowed sum, silently corrupting the routing summary (garbage
             logits, no error, no NaN) — a caller holding an additive mask
@@ -277,7 +217,7 @@ class RouterLayer(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
 
         .. note::
-            **jit / static-shape caveat.** The static-shape (JAX-``jit`` /
+            jit / static-shape caveat. The static-shape (JAX-``jit`` /
             XLA-safe) windowed-pooling path applies ONLY when the sequence
             length is statically known -- i.e. ``inputs.shape[1]`` is a concrete
             Python int, the normal ``keras.Input(shape=(SEQ, HID))`` case. A
@@ -286,7 +226,6 @@ class RouterLayer(keras.layers.Layer):
             dims and therefore does NOT carry the static-shape jit guarantee
             (it may hit the JAX concretization error / forced XLA recompile that
             the static path avoids)."""
-        # --- 1. Router Logic: Generate decision logits ---
         batch_size = ops.shape(inputs)[0]
 
         # DECISION plan-2026-07-24T091356-f29927b4/D-001
@@ -356,7 +295,6 @@ class RouterLayer(keras.layers.Layer):
         # Aggregate logits by averaging across windows, as per the paper
         logits = ops.mean(logits_per_window, axis=1)
 
-        # --- 2. Decision Making ---
         if layer_decision is not None:
             # Teacher-forcing during training
             decisions = ops.cast(layer_decision, dtype="int32")
@@ -364,9 +302,8 @@ class RouterLayer(keras.layers.Layer):
             # Inference mode: use argmax of the router's logits
             decisions = ops.cast(ops.argmax(logits, axis=-1), dtype="int32")
 
-        # --- 3. Conditional Execution using Batch-wise Selection ---
-        # This approach computes all paths and selects the correct one per batch item,
-        # which is more efficient on hardware accelerators than native conditionals.
+        # All paths are computed and selected per batch item, which is more
+        # efficient on accelerators than native conditionals.
 
         # Path 0: SKIP (output is the same as input)
         output_skip = inputs
@@ -445,4 +382,3 @@ class RouterLayer(keras.layers.Layer):
         config['transformer_layer'] = keras.saving.deserialize_keras_object(config['transformer_layer'])
         return cls(**config)
 
-# ---------------------------------------------------------------------

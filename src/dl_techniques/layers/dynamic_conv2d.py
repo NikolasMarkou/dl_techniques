@@ -38,7 +38,7 @@ class DynamicConv2D(keras.layers.Layer):
     representation power without increasing network depth or width, with only
     approximately 4% additional FLOPs overhead.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -328,49 +328,36 @@ class DynamicConv2D(keras.layers.Layer):
         :return: Output tensor with shape (batch_size, new_height, new_width, filters).
         :rtype: keras.KerasTensor
         """
-        # Step 1: Compute attention weights
-        # Global Average Pooling to compress spatial dimensions
-        pooled = self.gap(inputs, training=training)  # Shape: (batch_size, input_channels)
+        # Global average pooling to (batch_size, input_channels).
+        pooled = self.gap(inputs, training=training)
 
-        # First dense layer with ReLU activation
+        # Squeeze-and-excitation gate down to (batch_size, attention_channels)
+        # then to (batch_size, num_kernels) attention logits.
         attention_hidden = self.attention_dense1(pooled, training=training)
-        # Shape: (batch_size, attention_channels)
-
-        # Second dense layer to get attention logits
         attention_logits = self.attention_dense2(attention_hidden, training=training)
-        # Shape: (batch_size, num_kernels)
 
-        # Apply softmax with temperature to get normalized attention weights
+        # Temperature-scaled softmax gives the per-expert mixing weights.
         attention_weights = keras.ops.softmax(attention_logits / self.temperature)
-        # Shape: (batch_size, num_kernels)
 
-        # Step 2: Apply all convolution kernels in parallel
+        # Run every expert convolution over the same input.
         conv_outputs = []
         for conv_layer in self.conv_layers:
             conv_output = conv_layer(inputs, training=training)
             conv_outputs.append(conv_output)
 
-        # Stack all convolution outputs: (num_kernels, batch_size, H', W', filters)
+        # Stack to (num_kernels, batch_size, H', W', filters).
         stacked_outputs = keras.ops.stack(conv_outputs, axis=0)
 
-        # Step 3: Aggregate outputs using attention weights
-        # Reshape attention weights for broadcasting: (num_kernels, batch_size, 1, 1, 1)
-        # We need to expand dimensions to match spatial and channel dimensions
-        expanded_attention = keras.ops.expand_dims(attention_weights, axis=-1)  # (batch_size, num_kernels, 1)
-        expanded_attention = keras.ops.expand_dims(expanded_attention, axis=-1)  # (batch_size, num_kernels, 1, 1)
-        expanded_attention = keras.ops.expand_dims(expanded_attention, axis=-1)  # (batch_size, num_kernels, 1, 1, 1)
-
-        # Transpose to match stacked_outputs: (num_kernels, batch_size, 1, 1, 1)
+        # Reshape the attention weights to broadcast against the stacked
+        # expert outputs: (batch_size, num_kernels) -> (num_kernels, batch_size, 1, 1, 1).
+        expanded_attention = keras.ops.expand_dims(attention_weights, axis=-1)
+        expanded_attention = keras.ops.expand_dims(expanded_attention, axis=-1)
+        expanded_attention = keras.ops.expand_dims(expanded_attention, axis=-1)
         expanded_attention = keras.ops.transpose(expanded_attention, (1, 0, 2, 3, 4))
 
-        # Element-wise multiplication and sum over kernel dimension
-        # stacked_outputs: (num_kernels, batch_size, ...)
-        # expanded_attention: (num_kernels, batch_size, 1, 1, 1) -> broadcasts
+        # Weighted sum over the kernel dimension is the aggregated output.
         weighted_outputs = stacked_outputs * expanded_attention
-
-        # Sum over kernel dimension to get final aggregated output
         aggregated_output = keras.ops.sum(weighted_outputs, axis=0)
-        # Shape: (batch_size, H', W', filters)
 
         # Apply activation if specified
         if self.activation is not None:

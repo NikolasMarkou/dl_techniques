@@ -41,20 +41,20 @@ class FNetEncoderBlock(keras.layers.Layer):
     selects between the two residual arrangements:
 
     * ``'post'`` (default, and the original FNet/BERT arrangement) —
-      [sublayer -> residual -> norm]: the residual is added FIRST and the sum is
+      [sublayer -> residual -> norm]: the residual is added first and the sum is
       then normalized, ``x = Norm(input + branch(input))``. This is what the
       diagram below draws.
-    * ``'pre'`` — ``x = input + branch(Norm(input))``: the branch INPUT is
+    * ``'pre'`` — ``x = input + branch(Norm(input))``: the branch input is
       normalized and the residual stream is left untouched, so gradients reach
       the input through an unnormalized path. A pre-norm stack needs a final
       normalization after the last block, which :class:`FNet` adds.
 
-    The two arrangements use the SAME two normalization layers and therefore the
+    Both arrangements use the same two normalization layers and therefore the
     same weight tree; only the order of operations differs. Uses factory patterns
     for normalization and FFN layer creation, supporting all dl_techniques
     normalization and FFN types.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -156,21 +156,15 @@ class FNetEncoderBlock(keras.layers.Layer):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.supports_masking = True
 
-        # Create Fourier transform layer
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit and
-        # is the auto-name of the first instance in a process, so the paths do
-        # not move; a caller-supplied `name` in `fourier_config` still wins.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit so it
+        # matches the auto-name of the first instance and the checkpoint path never moves.
+        # A caller-supplied `name` in `fourier_config` still wins.
         self.fourier_transform = FNetFourierTransform(
             **{"name": "f_net_fourier_transform", **self.fourier_config})
 
-        # Stochastic depth (drop-path) layers, one per residual branch.
-        #
-        # TWO INDEPENDENT instances, not one shared instance: this mirrors
-        # `layers/transformers/transformer.py`'s `attention_stochastic_depth` /
-        # `ffn_stochastic_depth` pair, which is the majority pattern in this repo
-        # for a two-residual-branch block. They are built only when the flag is
-        # on, so at the default `use_stochastic_depth=False` the sublayer tree is
-        # unchanged and the block stays bit-identical to the pre-drop-path code.
+        # Two independent stochastic-depth instances, one per residual branch,
+        # mirroring transformer.py's attention/ffn drop-path pair. Built only
+        # when the flag is on, so the default stays bit-identical without it.
         self.fourier_stochastic_depth = None
         self.ffn_stochastic_depth = None
         if self.use_stochastic_depth:
@@ -226,19 +220,8 @@ class FNetEncoderBlock(keras.layers.Layer):
             **self.ffn_kwargs
         }
 
-        # `hidden_dim` is the universal sizing knob -- pass it to any FFN type that takes it.
-        #
-        # This used to carry a hard-coded type whitelist plus a SwiGLU special case that
-        # converted `intermediate_dim` into an expansion factor by INTEGER DIVISION:
-        #     ffn_params['ffn_expansion_factor'] = self.intermediate_dim // hidden_dim
-        # which is lossy twice over -- the division truncates, and SwiGLU then re-applies
-        # the 2/3 rule and rounds to a multiple of 256. Asking for intermediate_dim=1000 at
-        # hidden_dim=512 produced an expansion factor of 1 and an FFN of 512. The whitelist
-        # was the other half of the same problem: `intermediate_dim` was silently ignored
-        # for any ffn_type not named in it.
-        #
-        # `SwiGLUFFN` now accepts an explicit `hidden_dim` like every other FFN, so the
-        # special case and the whitelist are both gone.
+        # `hidden_dim` is the universal sizing knob; pass it to any FFN type
+        # whose registry entry declares it as a required or optional parameter.
         if self.intermediate_dim is not None:
             ffn_info = FFN_REGISTRY.get(self.ffn_type)
             accepts_hidden_dim = ffn_info is not None and "hidden_dim" in (
@@ -251,11 +234,8 @@ class FNetEncoderBlock(keras.layers.Layer):
         if 'dropout_rate' not in ffn_params:
             ffn_params['dropout_rate'] = self.dropout_rate
 
-        # NO SILENT FALLBACK. This used to catch every exception and quietly build an `mlp`
-        # instead -- so a caller who asked for `swiglu` and mistyped a parameter got a
-        # completely DIFFERENT FFN architecture, with only a log line to say so. Logs are
-        # not a failure channel: the model trained, converged, and was never the model that
-        # was asked for. A misconfigured FFN is a caller error; surface it.
+        # A misconfigured `ffn_type` or parameter is a caller error, so raise
+        # rather than silently falling back to a different FFN architecture.
         try:
             self.ffn_layer = create_ffn_layer(self.ffn_type, **ffn_params)
         except Exception as e:
@@ -296,20 +276,12 @@ class FNetEncoderBlock(keras.layers.Layer):
         :return: Output tensor of same shape as input.
         :rtype: keras.KerasTensor
         """
-        # Drop-path wraps the BRANCH output (`fourier_output` / `ffn_output`)
-        # before it enters the add -- never the residual sum and never the
-        # normalized result, in either normalization position. Dropping the sum
-        # would delete the skip path itself, which is the opposite of stochastic
-        # depth.
+        # Drop-path wraps each branch output before the residual add, never the
+        # sum itself -- dropping the sum would delete the skip path.
         if self.normalization_position == 'pre':
-            # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: pre-norm normalizes
-            # the BRANCH INPUT and leaves the residual stream untouched
-            # (`x + branch(Norm(x))`). Do NOT express it as
-            # `Norm(x) + branch(Norm(x))` or by normalizing the sum -- both
-            # reinstate a normalization on the skip path, which is the property
-            # pre-norm exists to remove, and would make a deep stack behave like
-            # post-norm again. `FNet` adds the stack-final norm that this
-            # arrangement requires. See decisions.md D-071.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: normalize the branch
+            # input only (`x + branch(Norm(x))`); normalizing the sum reinstates a
+            # norm on the skip path. `FNet` adds the stack-final norm this needs. See decisions.md.
             fourier_output = self.fourier_transform(
                 self.fourier_layer_norm(inputs, training=training),
                 attention_mask=attention_mask,

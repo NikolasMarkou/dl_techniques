@@ -102,7 +102,7 @@ class MLFCLayer(keras.layers.Layer):
     ``F_compiled = Conv1x1(F_concat)``,
     ``F_merged = Conv1x1(Concat([F_compiled, F_i])) + F_i``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 

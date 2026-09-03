@@ -36,7 +36,7 @@ class BiasFreeConv1D(keras.layers.Layer):
     is ``y = activation(BN(Conv1D(x)))`` where BN has no beta term and Conv1D
     has ``use_bias=False``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -110,21 +110,23 @@ class BiasFreeConv1D(keras.layers.Layer):
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         # Bias-free convolution
+        # No bias, to keep the layer scaling-invariant.
         self.conv = keras.layers.Conv1D(
             filters=self.filters,
             kernel_size=self.kernel_size,
             padding='same',
-            use_bias=False,  # Key: no bias terms for scaling invariance
+            use_bias=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name=f'{self.name}_conv'
         )
 
-        # Bias-free batch normalization (if enabled)
+        # Bias-free batch normalization (if enabled).
+        # No beta term; gamma is kept for feature scaling.
         if self.use_batch_norm:
             self.batch_norm = keras.layers.BatchNormalization(
-                center=False,  # Key: no bias/beta parameter
-                scale=True,    # Keep gamma/scale parameter for feature scaling
+                center=False,
+                scale=True,
                 name=f'{self.name}_bn'
             )
         else:
@@ -247,7 +249,7 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
     where ``F(x) = BiasFreeConv1D(BiasFreeConv1D(x))``. All paths are bias-free
     to preserve scaling invariance.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -387,11 +389,12 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
 
         # Create and build shortcut connection if needed (input filters != output filters)
         if input_filters != self.filters:
+            # No bias, to keep the shortcut scaling-invariant.
             self.shortcut_conv = keras.layers.Conv1D(
                 filters=self.filters,
                 kernel_size=1,
                 padding='same',
-                use_bias=False,  # Key: no bias for scaling invariance
+                use_bias=False,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'{self.name}_shortcut'
@@ -446,8 +449,9 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         :return: Output shape tuple with updated feature dimension.
         :rtype: Tuple[Optional[int], ...]
         """
+        # Feature dimension changes to the block's filter count.
         output_shape = list(input_shape)
-        output_shape[-1] = self.filters  # Update feature dimension
+        output_shape[-1] = self.filters
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:

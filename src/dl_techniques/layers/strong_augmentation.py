@@ -102,7 +102,7 @@ class StrongAugmentation(keras.layers.Layer):
     pasted into the image is also pasted into the target. See the module
     docstring.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
