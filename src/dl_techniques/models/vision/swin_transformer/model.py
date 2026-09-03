@@ -1,78 +1,24 @@
 """
-Hierarchical vision transformer built from shifted-window attention, with four
-stages, patch merging between them, and an optional classification head.
+SwinTransformer builds a hierarchical vision transformer from shifted-window
+attention, with four stages, patch merging between them, and an optional
+classification head.
 
-The architecture exists to resolve a tension between two facts about applying
-transformers to images. Global self-attention costs `O((HW)^2)` in the number of
-tokens, which is unaffordable at the resolutions dense prediction needs; but
-restricting attention to fixed local windows makes the cost `O(M^2 * HW)` — linear
-in image area for a fixed window `M` — at the price of never letting information
-cross a window boundary, which stacks into a network of disconnected columns.
-Swin's answer is to alternate the window partition instead of enlarging it.
-Even-indexed blocks partition the feature map on a regular `MxM` grid; odd-indexed
-blocks shift the whole partition by `M/2` in both axes, so a window in the shifted
-layer straddles four windows of the previous layer. Two consecutive blocks
-therefore connect every token to a neighbourhood strictly larger than one window,
-and stacking them grows the receptive field without ever computing a global
-attention matrix.
+Global self-attention costs `O((HW)^2)` in token count, too expensive at the
+resolutions dense prediction needs. Restricting attention to fixed local
+windows brings that down to `O(M^2 * HW)`, linear in image area, but blocks
+information from crossing a window boundary. Swin alternates the window
+partition instead of enlarging it: even blocks partition the feature map on
+a regular grid, odd blocks shift the partition by half a window, so a
+shifted window straddles four windows of the previous layer. Two
+consecutive blocks connect every token to a neighbourhood larger than one
+window, growing the receptive field without a global attention matrix.
+`PatchMerging` halves resolution and doubles width between stages, the same
+pyramid a CNN builds.
 
-Implementing that shift naively would produce windows of unequal size at the image
-border — `(M/2+1)^2` partitions instead of `(H/M)^2`, which cannot be batched. The
-trick the paper uses, and which lives in `SwinTransformerBlock` rather than here,
-is a cyclic roll: the feature map is rolled by `-M/2` before partitioning and
-rolled back afterwards, which keeps the window count and shape identical to the
-unshifted case. The roll wraps opposite edges of the image into the same physical
-window, so tokens that are not spatially adjacent end up as window-mates, and an
-attention mask must forbid exactly those pairs. Roll and mask are two halves of
-one operation: a roll without its mask lets the left edge attend to the right edge
-as though they touched, and a mask without its roll masks pairs that were never
-brought together. The block derives both from a single resolved shift value for
-that reason, and drops both together when a stage's grid has become smaller than
-the window (at which point one window covers everything and there is nothing to
-shift).
-
-Attention inside a window is position-agnostic on its own, so each head carries a
-learnable relative position bias added to the scores before softmax — indexed by
-the `(2M-1) x (2M-1)` possible relative offsets between two positions in a window
-rather than by absolute coordinates. This is what supplies spatial structure; the
-model adds no absolute positional embedding anywhere.
-
-Between stages, `PatchMerging` concatenates each `2x2` neighbourhood of tokens into
-one and projects `4C -> 2C`. Resolution halves and width doubles, the same
-pyramid a CNN builds, which is what makes the network usable as a detection or
-segmentation backbone rather than only a classifier. Four stages take a `H/4`
-patch grid down to `H/32`.
-
-This module assembles those parts. The stage schedule is the paper's:
-tiny `[2,2,6,2]` at `embed_dim=96`, small `[2,2,18,2]` at 96, base `[2,2,18,2]` at
-128, large `[2,2,18,2]` at 192, giving 28.3M / 49.6M / 87.8M / 196.5M parameters at
-`num_classes=1000` (measured, not quoted). Shift alternates on the block index
-*within* a stage, so every stage begins unshifted. Stochastic depth is scheduled
-linearly across all blocks of all stages, not restarted per stage, so a block's
-drop rate depends on its global depth.
-
-Three things about the code would otherwise mislead. The model is *functional*, not
-subclassed: `__init__` builds a `keras.Input` graph and calls
-`super().__init__(inputs, outputs)` at the end, which is why `get_config()`
-deliberately does not merge `super().get_config()` — the functional config would
-collide with the constructor arguments on reload. Between the patch embedding and
-the first block there is a bare `Reshape`: `PatchEmbedding2D` emits a 3D
-`(B, HW, C)` sequence while `SwinTransformerBlock` requires a 4D `(B, H, W, C)`
-grid, and both contracts are load-bearing for other models, so the seam is
-resolved here in the model rather than by changing either layer. And the
-divisibility checks on input height and width only `logger.warning`; they are
-compute notes, not correctness guards. `PatchMerging` ceil-pads an odd grid
-dimension, so a non-divisible input still produces the declared output shape — it
-just carries zero-padded tokens through at least one merge. The single hard
-requirement, `H % patch_size == 0`, is raised by `PatchEmbedding2D`.
-
-The classification head emits raw logits — layer-norm, global average pooling, a
-dense layer with no activation — so compile with `from_logits=True`.
-No checkpoints ship with this package, so `create_swin_transformer(pretrained=True)`
-raises `NotImplementedError`. It used to log a warning and return a randomly
-initialized model, which made an unavailable checkpoint indistinguishable from a
-successful load at the call site; warm-start from a local file with
-`model.load_weights(path)` instead.
+No absolute positional embedding is used; each head instead learns a
+relative position bias per window. The model is functional, not subclassed,
+so `get_config()` does not merge `super().get_config()`. No checkpoints ship
+with this package, so `pretrained=True` raises `NotImplementedError`.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer using
@@ -103,23 +49,10 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-23T091307-9a110062/D-502
-#: Kernel initializer for every Dense/projection in the model, matching the
-#: official implementation's ``_init_weights``, which applies
-#: ``trunc_normal_(m.weight, std=.02)`` to every ``nn.Linear``:
-#:   https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
-#: Do NOT revert to ``"glorot_uniform"`` (Keras' Dense default, and what this
-#: parameter used to be): that is a DIFFERENT distribution AND a different
-#: scale, fan-dependent rather than fixed. TRAINING-ONLY -- an initializer is
-#: overwritten by any weight load, so no checkpoint changes meaning.
-#:
-#: This is a config DICT, not an ``Initializer`` instance, and that is
-#: load-bearing: a seedless instance bakes its seed at construction and REPLAYS
-#: the identical draw on every call (MEASURED: two calls of one instance at the
-#: same shape differ by exactly 0.0), so an instance used as a default argument
-#: -- evaluated once at import -- would hand every model in the process the same
-#: weights. ``keras.initializers.get`` resolves this dict to a fresh instance
-#: per consumer. Same hazard as D-072 / D-481. See decisions.md D-502.
+# Matches the official implementation's `_init_weights` (trunc_normal_, std=.02),
+# not Keras' glorot_uniform default. Training-only: overwritten by any weight load.
+# DECISION plan-2026-08-23T091307-9a110062/D-502: keep this a config dict, not an
+# Initializer instance — an instance replays the same draw on every use. See decisions.md.
 REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
     "class_name": "TruncatedNormal",
     "config": {"stddev": 0.02},
@@ -130,97 +63,123 @@ REFERENCE_KERNEL_INITIALIZER: Dict[str, Any] = {
 @register_dl_technique("dl_techniques.models.swin_transformer.model")
 class SwinTransformer(keras.Model):
     """
-    Hierarchical Vision Transformer using shifted windows for efficient image classification.
+    Hierarchical vision transformer using shifted windows for image classification.
 
-    This model implements the Swin Transformer architecture featuring windowed self-attention
-    with linear computational complexity relative to image size. The hierarchical design
-    with patch merging enables multi-scale feature learning while maintaining global
-    receptive fields through shifted window mechanisms.
+    Windowed self-attention keeps computation linear in image size. The
+    hierarchical stage structure with patch merging supports multi-scale
+    features while the shift mechanism keeps a global receptive field.
 
-    **Intent**: Provide a production-ready Swin Transformer implementation that efficiently
-    processes images through windowed attention mechanisms, offering better efficiency than
-    standard Vision Transformers while maintaining state-of-the-art performance on image
-    classification and dense prediction tasks.
+    Architecture:
 
-    **Architecture Overview**:
-    ```
-    Input Image (H×W×3)
-           ↓
-    Patch Embedding → (H/4×W/4×embed_dim)
-           ↓
-    Stage 1: depths[0]×SwinBlock (window_size, alternating shifts)
-           ↓
-    Patch Merging → (H/8×W/8×embed_dim×2)
-           ↓
-    Stage 2: depths[1]×SwinBlock
-           ↓
-    Patch Merging → (H/16×W/16×embed_dim×4)
-           ↓
-    Stage 3: depths[2]×SwinBlock
-           ↓
-    Patch Merging → (H/32×W/32×embed_dim×8)
-           ↓
-    Stage 4: depths[3]×SwinBlock
-           ↓
-    LayerNorm → GlobalAvgPool → Classifier (if include_top)
-           ↓
-    Output: (num_classes,) logits or (H/32×W/32×embed_dim×8) features
-    ```
+    .. code-block:: text
 
-    **Key Architectural Features**:
-    - **Hierarchical Processing**: 4-stage pyramid with progressively larger features
-    - **Windowed Attention**: O(H×W) complexity through local window attention
-    - **Shifted Windows**: Cross-window connections via cyclical shifting mechanism
-    - **Stochastic Depth**: Linear drop path scheduling for regularization
-    - **Patch Merging**: Efficient downsampling with feature expansion
+        input [B, H, W, 3]
+          |
+          v
+        +----------------+
+        | patch embed    |  -> [B, H/4, W/4, embed_dim]
+        +----------------+
+          |
+          v
+        +----------------+
+        | stage 1 blocks |  depths[0] x SwinTransformerBlock
+        +----------------+
+          |
+          v
+        +----------------+
+        | patch merge    |  -> [B, H/8, W/8, embed_dim*2]
+        +----------------+
+          |
+          v
+        +----------------+
+        | stage 2 blocks |  depths[1] x SwinTransformerBlock
+        +----------------+
+          |
+          v
+        +----------------+
+        | patch merge    |  -> [B, H/16, W/16, embed_dim*4]
+        +----------------+
+          |
+          v
+        +----------------+
+        | stage 3 blocks |  depths[2] x SwinTransformerBlock
+        +----------------+
+          |
+          v
+        +----------------+
+        | patch merge    |  -> [B, H/32, W/32, embed_dim*8]
+        +----------------+
+          |
+          v
+        +----------------+
+        | stage 4 blocks |  depths[3] x SwinTransformerBlock
+        +----------------+
+          |
+          +-----------------------+------------------------+
+          v (include_top=True)                              v (include_top=False)
+        +------------------------------+                 features
+        | norm -> avg pool -> dense    |                 [B, H/32, W/32, embed_dim*8]
+        +------------------------------+
+          |
+          v
+        logits [B, num_classes]
 
-    **Data Flow**:
-    1. **Patch Embedding**: Converts H×W×3 image to H/4×W/4×embed_dim patches
-    2. **Stage Processing**: Each stage applies multiple Swin blocks with attention
-    3. **Hierarchical Learning**: Patch merging creates multi-scale representations
-    4. **Classification**: Optional global pooling and linear classification head
+    Named variants:
 
-    Args:
-        num_classes: Integer, number of output classes for classification.
-            Must be positive. Only used when include_top=True. Defaults to 1000.
-        embed_dim: Integer, base embedding dimension for first stage features.
-            Must be positive. Subsequent stages use 2^i × embed_dim. Defaults to 96.
-        depths: List[int], number of Swin blocks per stage (exactly 4 elements).
-            Each element must be positive. Controls model depth. Defaults to [2,2,6,2].
-        num_heads: List[int], attention heads per stage (exactly 4 elements).
-            Each element must be positive and divide stage dimension. Defaults to [3,6,12,24].
-        window_size: Integer, size of attention windows (typically 7 or 8).
-            Must be positive. Larger windows increase computation. Defaults to 7.
-        mlp_ratio: Float, expansion ratio for MLP layers in each block.
-            Must be positive. Typical values: 4.0. Defaults to 4.0.
-        qkv_bias: Boolean, whether to use bias in attention QKV projections.
-            True generally improves performance. Defaults to True.
-        dropout_rate: Float, dropout rate for attention projection and MLP.
-            Must be in [0, 1). Applied throughout the model. Defaults to 0.0.
-        attn_dropout_rate: Float, dropout rate specifically for attention weights.
-            Must be in [0, 1). Controls attention sparsity. Defaults to 0.0.
-        drop_path_rate: Float, maximum stochastic depth rate for regularization.
-            Must be in [0, 1). Linearly scheduled across blocks. Defaults to 0.1.
-        patch_size: Integer, patch size for initial patch embedding.
-            Must be positive. Determines initial downsampling. Defaults to 4.
-        use_bias: Boolean, whether to use bias terms in linear layers.
-            False can reduce parameters. Defaults to True.
-        kernel_initializer: String, config dict or Initializer, weight
-            initialization strategy. Defaults to ``TruncatedNormal(stddev=0.02)``,
-            the official implementation's ``_init_weights`` convention
-            (https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py).
-            Controls model parameter initialization. Defaults to "glorot_uniform".
-        bias_initializer: String or Initializer, bias initialization strategy.
-            Only used when use_bias=True. Defaults to "zeros".
-        kernel_regularizer: Optional Regularizer, weight regularization.
-            Helps prevent overfitting in large models. Defaults to None.
-        bias_regularizer: Optional Regularizer, bias regularization.
-            Only applied when use_bias=True. Defaults to None.
-        include_top: Boolean, whether to include classification head.
-            Set False for feature extraction models. Defaults to True.
-        input_shape: Optional[Tuple[int, ...]], input tensor shape (H, W, C).
-            If None, defaults to (224, 224, 3). Must be 3D tuple.
-        **kwargs: Additional arguments for Model base class (name, etc.).
+    .. code-block:: text
+
+        variant  embed_dim  depths         heads
+        tiny     96         [2,2,6,2]      [3,6,12,24]
+        small    96         [2,2,18,2]     [3,6,12,24]
+        base     128        [2,2,18,2]     [4,8,16,32]
+        large    192        [2,2,18,2]     [6,12,24,48]
+
+    :param num_classes: Number of output classes. Used only when ``include_top=True``.
+    :type num_classes: int
+    :param embed_dim: Base embedding dimension for the first stage; later
+        stages use ``2**i * embed_dim``.
+    :type embed_dim: int
+    :param depths: Number of Swin blocks per stage, exactly 4 elements.
+    :type depths: Sequence[int]
+    :param num_heads: Attention heads per stage, exactly 4 elements.
+    :type num_heads: Sequence[int]
+    :param window_size: Attention window size, typically 7 or 8.
+    :type window_size: int
+    :param mlp_ratio: Expansion ratio for each block's MLP.
+    :type mlp_ratio: float
+    :param qkv_bias: Whether to use bias in attention QKV projections.
+    :type qkv_bias: bool
+    :param dropout_rate: Dropout rate for attention projection and MLP.
+    :type dropout_rate: float
+    :param attn_dropout_rate: Dropout rate applied to attention weights.
+    :type attn_dropout_rate: float
+    :param drop_path_rate: Maximum stochastic depth rate, scheduled linearly
+        across all blocks of all stages.
+    :type drop_path_rate: float
+    :param patch_size: Patch size for the initial patch embedding.
+    :type patch_size: int
+    :param use_bias: Whether to use bias terms in linear layers.
+    :type use_bias: bool
+    :param kernel_initializer: Weight initializer. Defaults to
+        ``TruncatedNormal(stddev=0.02)``, the official implementation's convention.
+    :type kernel_initializer: str, dict, or keras.initializers.Initializer
+    :param bias_initializer: Bias initializer, used when ``use_bias=True``.
+    :type bias_initializer: str or keras.initializers.Initializer
+    :param kernel_regularizer: Weight regularizer.
+    :type kernel_regularizer: keras.regularizers.Regularizer or None
+    :param bias_regularizer: Bias regularizer, used when ``use_bias=True``.
+    :type bias_regularizer: keras.regularizers.Regularizer or None
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param input_shape: Input tensor shape ``(H, W, C)``. Defaults to ``(224, 224, 3)``.
+    :type input_shape: tuple or None
+    :param kwargs: Additional arguments for the Keras ``Model`` base class.
+
+    :ivar patch_embed: Patch embedding layer.
+    :ivar patch_embed_norm: Optional normalization after patch embedding.
+    :ivar stages: Nested list of :class:`SwinTransformerBlock` per stage.
+    :ivar patch_merge_layers: :class:`PatchMerging` layers between stages.
+    :ivar head_layers: Classification head layers, when ``include_top=True``.
 
     Input shape:
         4D tensor: `(batch_size, height, width, channels)`
@@ -229,13 +188,6 @@ class SwinTransformer(keras.Model):
     Output shape:
         - If include_top=True: `(batch_size, num_classes)` - classification logits
         - If include_top=False: `(batch_size, H/32, W/32, embed_dim×8)` - feature maps
-
-    Attributes:
-        patch_embed: Patch embedding layer for image tokenization.
-        patch_embed_norm: Optional normalization after patch embedding.
-        stages: List[List[SwinTransformerBlock]], hierarchical transformer blocks.
-        patch_merge_layers: List[PatchMerging], downsampling between stages.
-        head_layers: List of classification head layers (if include_top=True).
 
     Example:
         ```python
@@ -267,9 +219,8 @@ class SwinTransformer(keras.Model):
         )
         ```
 
-    Raises:
-        ValueError: If configuration parameters are invalid (negative values,
-            wrong list lengths, incompatible dimensions).
+    :raises ValueError: If configuration parameters are invalid (negative
+        values, wrong list lengths, incompatible dimensions).
 
     References:
         - "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
@@ -277,9 +228,7 @@ class SwinTransformer(keras.Model):
         - Official implementation: https://github.com/microsoft/Swin-Transformer
 
     Note:
-        This implementation follows modern Keras 3 patterns for robustness and
-        integrates seamlessly with dl-techniques framework components. For optimal
-        performance, ensure input dimensions are multiples of patch_size × 8.
+        For best throughput, keep input dimensions multiples of patch_size × 8.
     """
 
     # Model variant configurations (validated presets)
@@ -365,37 +314,9 @@ class SwinTransformer(keras.Model):
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
 
-        # DECISION plan-2026-07-31T210633-b63a35aa/D-003
-        # These are COMPUTE notes, not correctness warnings, and there is deliberately
-        # NO `window_size` raise or divisibility raise here. Do not "upgrade" either.
-        #
-        # The previous text ("may cause issues in deeper stages") was measured over an
-        # 80-cell (input, patch_size, window_size, depth) sweep and had ZERO true
-        # positives: every geometry that builds reports `model.output_shape[1:] ==
-        # actual[1:]`. `PatchMerging` ceil-pads an odd grid dimension, so a deeper stage
-        # does not break -- it costs padded tokens. Re-verified here with
-        # `include_top=False` (a SPATIAL declared shape, so the check is not vacuous):
-        # declared == actual at 7 of 7 geometries, including the warned 56/ps=4 and
-        # 30/ps=2. The predicate also mis-fires in both directions as a correctness
-        # signal: it is SILENT on 63/ps=2, which raises loudly (and correctly) in
-        # `PatchEmbedding2D`, and it FIRES on 56 and 30, which work.
-        #
-        # The only hard requirement is `H % patch_size == 0`, and it is already enforced
-        # by `PatchEmbedding2D` with a clear message, at construction, in the right
-        # place. That raise is this model's divisibility guard; this is not.
-        #
-        # `window_size` is entirely unconstrained and was never wrong in the sweep
-        # (including ws=5, ws=7 on grids 7/4/2/1, and ws=16 on a 1x1 grid). Its only
-        # residual cost is COMPUTE WASTE at the deepest stage, and it is NOT detectable
-        # from the divisibility predicate below -- measured by instrumenting
-        # `SwinTransformerBlock.call` inside a full forward pass, the worst cells are
-        # NOT warned ones. At `input_shape=(32,32,3), patch_size=4` the deepest stage
-        # grid is 1x1, so the block pads it to the full window: `window_size=8` -> 8x8,
-        # 1 -> 64 tokens (64x) and 1 -> 4096 attention pairs (4096x); `window_size=16`
-        # -> 16x16, 256x tokens and 65536x pairs. Meanwhile the WARNED 56/ps=4/ws=7
-        # cell has a 2x2 deepest grid padded to 7x7 -- only 12x tokens / 150x pairs.
-        # A `window_size` guard would therefore have to key off the deepest stage grid,
-        # not off divisibility; none is added here.
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-003: warn, never raise, on
+        # non-divisible height/width — PatchMerging ceil-pads, output shape still
+        # matches; the hard divisibility guard lives in PatchEmbedding2D. See decisions.md.
         height, width, channels = input_shape
         if height is not None and height % (patch_size * 8) != 0:
             logger.warning(
@@ -417,11 +338,8 @@ class SwinTransformer(keras.Model):
         # Store ALL configuration parameters for serialization
         self.num_classes = num_classes
         self.embed_dim = embed_dim
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: the DEFAULT is a
-        # tuple (R-009 S1) and the STORED attribute is a list. Keeping the
-        # store as `list(...)` is what makes the conversion invisible: it is
-        # the type `get_config` has always emitted, so a saved config's JSON
-        # shape and every `== [..]` assertion in the suites are unchanged.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: store as list, not the
+        # constructor's tuple default. get_config has always emitted a list; changing this breaks that shape. See decisions.md.
         self.depths = list(depths)
         self.num_heads = list(num_heads)
         self.window_size = window_size
@@ -436,9 +354,8 @@ class SwinTransformer(keras.Model):
         self._input_shape = input_shape
 
         # Store serializable initializers and regularizers
-        # A module-level dict is a MUTABLE DEFAULT: bound once at def time and
-        # shared by every caller. Resolved from a None sentinel instead, which
-        # also keeps `initializers.get` producing a FRESH instance per model.
+        # Resolved from a None sentinel rather than a module-level dict default,
+        # so `initializers.get` produces a fresh instance per model.
         if kernel_initializer is None:
             kernel_initializer = REFERENCE_KERNEL_INITIALIZER
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -468,11 +385,10 @@ class SwinTransformer(keras.Model):
         """
         Build the complete Swin Transformer architecture.
 
-        Args:
-            inputs: Input tensor from keras.Input().
-
-        Returns:
-            Output tensor (logits or features).
+        :param inputs: Input tensor from ``keras.Input()``.
+        :type inputs: keras.KerasTensor
+        :return: Output tensor (logits or features).
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -500,17 +416,8 @@ class SwinTransformer(keras.Model):
         self.patch_embed = create_embedding_layer(
             embedding_type="patch_2d",
             patch_size=self.patch_size,
-        # DECISION plan-2026-08-23T091307-9a110062/D-540
-        # Each consumer gets its OWN `clone_initializer(...)` copy. Do NOT pass
-        # `self.kernel_initializer` directly: one seedless initializer INSTANCE
-        # replays its draw, so every same-shape kernel it reaches is
-        # bit-identical. MEASURED at HEAD before this change, on a seeded
-        # 4-stage/2-block-per-stage Swin: all 16 same-shape kernel pairs inside a
-        # stage were `max|delta| = 0.0` -- including
-        # `stage_N_block_0/attn/.../qkv/kernel` vs `stage_N_block_1/...`, whose
-        # blocks differ by `shift_size` (regular vs SHIFTED window) and so play
-        # different architectural roles. `seed=` is not the discriminator;
-        # instance identity is. See decisions.md D-540 and initializers/clone.py.
+            # DECISION plan-2026-08-23T091307-9a110062/D-540: each consumer gets its
+            # own clone_initializer copy, never a shared instance -- a shared one replays the identical draw at every same-shape kernel. See decisions.md.
             embed_dim=self.embed_dim,
             use_bias=self.use_bias,
             kernel_initializer=clone_initializer(self.kernel_initializer),
@@ -531,15 +438,9 @@ class SwinTransformer(keras.Model):
             )
             x = self.patch_embed_norm(x)
 
-        # DECISION plan_2026-06-16_c8f3e9ca/D-004: restore (B,H,W,C) grid between
-        # PatchEmbedding2D (emits 3D (B, H*W, embed_dim)) and SwinTransformerBlock
-        # (requires 4D (B,H,W,C)). Both shared-layer contracts are intentional and
-        # are left UNCHANGED — the seam fix lives here, in the model. Do NOT "fix"
-        # this by making PatchEmbedding2D emit 4D or by relaxing the block's 4D
-        # assertion: other models rely on the 3D patch-embed output. The patch grid
-        # is square and static (H=W=input_size//patch_size), so a Reshape with a
-        # known target shape is graph-safe. PatchMerging and SwinTransformerBlock
-        # both keep the tensor 4D thereafter, so this single reshape suffices.
+        # DECISION plan_2026-06-16_c8f3e9ca/D-004: restore the 4D (B,H,W,C) grid here,
+        # in the model, rather than changing PatchEmbedding2D's 3D output or the
+        # block's 4D input contract — other models rely on both as they are. See decisions.md.
         grid_h = self._input_shape[0] // self.patch_size
         grid_w = self._input_shape[1] // self.patch_size
         x = layers.Reshape(
@@ -664,35 +565,26 @@ class SwinTransformer(keras.Model):
             **kwargs: Any
     ) -> "SwinTransformer":
         """
-        Create Swin Transformer from a predefined variant configuration.
+        Create a Swin Transformer from a predefined variant configuration.
 
-        Args:
-            variant: String, model variant ("tiny", "small", "base", "large").
-            num_classes: Integer, number of output classes.
-            input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
-            **kwargs: Additional arguments passed to constructor.
-
-        Returns:
-            SwinTransformer model instance.
-
-        Raises:
-            ValueError: If variant is not recognized.
+        :param variant: Model variant (``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
+        :type variant: str
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param input_shape: Input shape. Defaults to ``(224, 224, 3)``.
+        :type input_shape: tuple or None
+        :param kwargs: Additional arguments passed to the constructor.
+        :return: Configured :class:`SwinTransformer` instance.
+        :rtype: SwinTransformer
+        :raises ValueError: If ``variant`` is not recognized.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
                 f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
-        # House style (`wave_field/model.py`): copy the preset, drop the
-        # metadata key, then `config.update(kwargs)`. Do NOT go back to
-        # splatting named preset fields alongside `**kwargs` -- every
-        # documented override of one of those fields raised
-        # `TypeError: got multiple values for keyword argument`
-        # (MEASURED at all six sites). The `.copy()` is NOT optional and
-        # NOT cosmetic: `config.update(kwargs)` on the shared
-        # `MODEL_VARIANTS[variant]` dict would permanently poison the
-        # class-level table for every later caller. See decisions.md D-127.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset dict before
+        # updating with kwargs, or a caller's override poisons MODEL_VARIANTS itself. See decisions.md.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
         config.update(kwargs)
@@ -793,21 +685,22 @@ def create_swin_transformer(
         **kwargs: Any
 ) -> SwinTransformer:
     """
-    Factory function to create Swin Transformer models with validation.
+    Build a Swin Transformer from a named variant, with input validation.
 
-    Args:
-        variant: String, model variant ("tiny", "small", "base", "large").
-        num_classes: Integer, number of output classes.
-        input_shape: Optional tuple, input shape. Defaults to (224, 224, 3).
-        pretrained: Boolean, must be False. `True` raises `NotImplementedError` —
-            no Swin checkpoints ship with this package.
-        **kwargs: Additional arguments passed to model constructor.
-
-    Returns:
-        SwinTransformer model instance.
-
-    Raises:
-        ValueError: If variant is invalid or parameters are incompatible.
+    :param variant: Model variant (``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
+    :type variant: str
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param input_shape: Input shape. Defaults to ``(224, 224, 3)``.
+    :type input_shape: tuple or None
+    :param pretrained: Must be ``False``; ``True`` raises ``NotImplementedError``
+        since no Swin checkpoints ship with this package.
+    :type pretrained: bool
+    :param kwargs: Additional arguments passed to the model constructor.
+    :return: Configured :class:`SwinTransformer` instance.
+    :rtype: SwinTransformer
+    :raises ValueError: If ``variant`` is invalid or parameters are incompatible.
+    :raises NotImplementedError: If ``pretrained=True``.
 
     Example:
         ```python
