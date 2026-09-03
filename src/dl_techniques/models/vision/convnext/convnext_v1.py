@@ -61,13 +61,13 @@ class ConvNeXtV1(keras.Model):
     convolution, LayerNorm, inverted-bottleneck MLP (``F -> 4F -> F``) with a
     single GELU, and a learnable per-channel ``gamma`` -- separated by
     LayerNorm + strided-convolution downsample layers rather than a stride
-    inside a block. The block is TRANSFORM-ONLY: it returns ``F(x)``, and the
+    inside a block. The block is transform-only: it returns ``F(x)``, and the
     residual add plus the optional drop-path are owned by :meth:`call`. The
     drop-path ramp is global across ``sum(depths)`` blocks, not per stage. The
     model is fully convolutional and global-pools before the head, so the
     spatial dims of ``input_shape`` may be ``None``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -111,7 +111,7 @@ class ConvNeXtV1(keras.Model):
         └───────────────┬──────────────────────┘
                         │
             ┌───────────┴──────────────────────┐
-            │  Residual wiring (owned HERE,    │
+            │  Residual wiring (owned here,    │
             │  not by the block)               │
             │    residual = x                  │
             │    x = ConvNextV1Block(x)   F(x) │
@@ -132,7 +132,7 @@ class ConvNeXtV1(keras.Model):
         │   num_classes=0     → [B, d₃] pooled │
         └──────────────────────────────────────┘
 
-    **Block internals (ConvNextV1Block -- transform only, returns F(x)):**
+    Block internals (ConvNextV1Block, transform only, returns F(x)):
 
     .. code-block:: text
 
@@ -141,7 +141,7 @@ class ConvNeXtV1(keras.Model):
                         │
                         ▼
               Dense/1×1 → 4F ──► GELU ──► Dense/1×1 → F
-              └─ inverted bottleneck; ONE act, ONE norm per block
+              └─ inverted bottleneck; one act, one norm per block
                         │
                         ▼
               × gamma  (layer scale, use_gamma; floored at 1e-6)
@@ -149,7 +149,7 @@ class ConvNeXtV1(keras.Model):
                         ▼
                       F(x)   ── residual added by the caller
 
-    **Drop-path ramp (GLOBAL, not per stage):**
+    Drop-path ramp (global, not per stage):
 
     .. code-block:: text
 
@@ -162,7 +162,7 @@ class ConvNeXtV1(keras.Model):
         stochastic_mode='depth'    → StochasticDepth (drops branch)
         stochastic_mode='gradient' → StochasticGradient (fwd identity)
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -572,21 +572,12 @@ class ConvNeXtV1(keras.Model):
     def _pretrained_build_shape(self) -> Tuple[int, ...]:
         """Resolve a concrete ``(H, W, C)`` for the pre-load dummy forward.
 
-        DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve the None spatial
-        dims instead of passing ``self.input_shape`` through. Do NOT go back to
-        ``keras.random.normal((1,) + tuple(self.input_shape))``: the DEFAULT
-        ``input_shape`` is ``(None, None, 3)``, so that built ``(1, None, None,
-        3)`` and made the factories' own documented ``pretrained=<local path>``
-        call fail for every caller who did not also pass a concrete
-        ``input_shape``. The channel count is never defaulted -- a ``None``
-        there is a real configuration error and is raised as one. See
-        decisions.md D-067.
-
-        :return: ``(height, width, channels)`` with any ``None`` spatial dim
-            replaced by ``PRETRAINED_BUILD_SPATIAL``.
+        :return: ``(height, width, channels)`` with any ``None`` spatial dim replaced by `PRETRAINED_BUILD_SPATIAL`.
         :rtype: Tuple[int, ...]
-        :raises ValueError: If ``input_shape`` has no channel count.
+        :raises ValueError: If `input_shape` has no channel count.
         """
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve None spatial dims
+        # here rather than pass self.input_shape through — the default (None, None, 3) built (1, None, None, 3) and broke pretrained=<path> loads. See decisions.md.
         height, width, channels = self.input_shape
         if channels is None:
             raise ValueError(
@@ -810,26 +801,13 @@ class ConvNeXtV1(keras.Model):
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the model.
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-069
-        # This method exists because its SIBLING has it. ``ConvNeXtV2`` in the
-        # same package implements ``compute_output_shape`` and returns
-        # ``(None, 4)`` for a 4-class head; ``ConvNeXtV1`` raised
-        # ``NotImplementedError: Layer ConvNeXtV1 does not have a
-        # compute_output_shape method implemented`` for the SAME call on the
-        # SAME geometry -- MEASURED, with both real forwards at ``(1, 4)``.
-        # Two siblings in one package disagreeing about a Keras contract is
-        # the shape a per-package test cannot see, because each package's
-        # tests only ever exercise the sibling they were written for. The body
-        # mirrors ``convnext_v2.py`` deliberately: the two architectures share
-        # a stem/downsample/head skeleton, and diverging implementations of
-        # one shape function would reintroduce the asymmetry in a subtler
-        # form. See decisions.md D-069.
-
         :param input_shape: Input shape, channels-last.
         :type input_shape: Tuple[int, ...]
         :return: The corresponding output shape.
         :rtype: Tuple[int, ...]
         """
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-069: this method exists because
+        # ConvNeXtV2 implements it and ConvNeXtV1 previously raised NotImplementedError for the same call. Mirrors convnext_v2.py's body. See decisions.md.
         current_shape = input_shape
 
         # 1. Stem.
