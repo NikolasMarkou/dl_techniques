@@ -1,58 +1,25 @@
 """
-Hierarchical anchor-based attention over long sequences.
+AnchorAttention, a hierarchical attention layer that bottlenecks long-range
+information through a small set of anchor tokens.
 
-This layer implements an information bottleneck over the standard multi-head
-self-attention mechanism. Its fundamental purpose is to preserve global context
-propagation across a sequence while removing the quadratic cost of letting every
-element attend to every other element. It does so by electing a small, fixed set
-of elements as *anchors* and routing all global information exchange through
-them.
+The all-to-all attention graph is replaced by a two-tier hub-and-spoke graph.
+The first ``K`` tokens are anchors and perform full self-attention among
+themselves, forming a compressed global summary. The remaining ``N - K`` query
+tokens do not attend to each other; each cross-attends only to the anchors,
+reading from the summary instead of reconstructing it. Both tiers share one
+attention call: anchor and query-token queries are concatenated and scored
+against the anchor keys, so the score matrix is ``(N, K)`` rather than
+``(N, N)``, giving ``O(N * K * d)`` cost instead of ``O(N^2 * d)``.
 
-Architecturally, the all-to-all attention graph is replaced by a two-tier,
-hub-and-spoke graph:
-
--   **Anchor tokens** are a small subset of the sequence (the first ``K``
-    positions). They perform full, quadratic self-attention among themselves and
-    therefore act as the hubs: they aggregate information from one another and
-    form a compressed global summary of the sequence.
--   **Query tokens** are the remaining ``N - K`` positions. They do not attend to
-    each other at all. Each one cross-attends only to the anchors, reading from
-    the global summary rather than reconstructing it. This is the spoke half of
-    the graph, and it is where the savings come from.
-
-Both tiers share a single attention call. The anchor queries and the query-token
-queries are concatenated along the sequence axis and scored against the anchor
-keys, so the score matrix is ``(N, K)`` rather than ``(N, N)``. Queries for the
-two tiers come from separate projections, which lets the layer learn a distinct
-"read from summary" behaviour for spokes and a "build the summary" behaviour for
-hubs.
-
-Foundational Mathematics:
-    Write ``A`` for the anchor block (the first ``K`` tokens) and ``Q`` for the
-    remaining ``N - K``. Standard attention factorizes token ``i``'s output as a
-    convex combination over all ``N`` values. Anchor attention restricts the support
-    of that combination to the ``K`` anchor values::
-
-        out_i = sum_{j in A} softmax_j( q_i . k_j / sqrt(d) ) v_j
-
-    with ``q_i = W_q x_i`` for ``i in A`` and ``q_i = W_q' x_i`` for ``i in Q``.
-    Every path between two non-anchor tokens is therefore length 2 through the
-    anchor set, which is exactly the hub-and-spoke structure: the anchors form a
-    rank-``K`` bottleneck through which all long-range information must pass. The
-    layer's expressive limit follows directly — no interaction that cannot be
-    represented in the span of ``K`` value vectors survives.
-
-    The complexity reduction follows just as directly: standard self-attention is
-    ``O(N^2 * d)``, whereas anchor attention is
-    ``O(K^2 * d + (N - K) * K * d) ~ O(N * K * d)`` when ``K << N``. For ``K=32`` and
-    ``N=4096`` this is roughly a 128x reduction in attention computation, at the cost
-    of forcing all long-range interaction through that ``K``-dimensional bottleneck.
+``call()`` takes ``(x, num_anchor_tokens=None, training=None)`` with no
+``attention_mask`` argument; anchors are chosen positionally as the first
+``K`` elements, so a left-padded batch corrupts every spoke's read.
 
 References:
-    - Beltagy, I., et al. (2020). "Longformer: The Long-Document Transformer".
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
       (https://arxiv.org/abs/2004.05150)
-    - Lee, J., et al. (2019). "Set Transformer: A Framework for Attention-based
-      Permutation-Invariant Neural Networks". (https://arxiv.org/abs/1810.00825)
+    - Lee et al., 2019. Set Transformer: A Framework for Attention-based
+      Permutation-Invariant Neural Networks. (https://arxiv.org/abs/1810.00825)
 """
 
 # ---------------------------------------------------------------------
@@ -79,14 +46,14 @@ class AnchorAttention(keras.layers.Layer):
     """
     Hierarchical attention mechanism with an anchor-based information bottleneck.
 
-    This layer implements a memory-efficient attention mechanism that reduces
-    computational complexity for long sequences while retaining global context
-    through a two-tier structure. The mode is selected per call, not per instance:
+    This layer reduces computational complexity for long sequences while
+    retaining global context through a two-tier structure. The mode is
+    selected per call, not per instance:
 
-    - **Standard mode** (``num_anchor_tokens=None``): full self-attention over all
+    - Standard mode (``num_anchor_tokens=None``): full self-attention over all
       tokens with ``O(N^2)`` complexity, using the configured probability
       activation (softmax, sparsemax, etc.).
-    - **Hierarchical mode** (``num_anchor_tokens=K > 0``): anchor tokens perform
+    - Hierarchical mode (``num_anchor_tokens=K > 0``): anchor tokens perform
       full self-attention among themselves while query tokens cross-attend only to
       the anchors, giving ``O(K^2 + N*K)`` complexity.
 
@@ -99,7 +66,7 @@ class AnchorAttention(keras.layers.Layer):
     scores = Q_combined @ K_anchor^T / sqrt(d_k);
     Output = Probability(scores) @ V_anchor @ W_o``
 
-    **Architecture Overview — standard mode (num_anchor_tokens=None):**
+    Architecture, standard mode (num_anchor_tokens=None):
 
     .. code-block:: text
 
@@ -132,7 +99,7 @@ class AnchorAttention(keras.layers.Layer):
                                    ▼
                           output  [B, N, dim]
 
-    **Architecture Overview — hierarchical mode (num_anchor_tokens=K):**
+    Architecture, hierarchical mode (num_anchor_tokens=K):
 
     .. code-block:: text
 
@@ -182,7 +149,7 @@ class AnchorAttention(keras.layers.Layer):
                          ▼
                 output  [B, N, dim]
 
-        The four projections and output_proj are ONE set of weights
+        The four projections and output_proj are one set of weights
         shared by both modes; standard mode skips query_token_proj.
         num_anchor_tokens >= seq_len makes every token an anchor, so
         that case falls back to the standard-mode path above.
@@ -192,25 +159,19 @@ class AnchorAttention(keras.layers.Layer):
     ``dim`` unless ``head_dim`` is set explicitly. ``scale`` is the stored
     ``1/sqrt(head_dim)``.
 
-    **No mask argument, and that is a carve-out rather than an omission.**
     ``call()`` takes ``(x, num_anchor_tokens=None, training=None)`` and has no
-    ``attention_mask`` parameter. This package documents a non-standard
-    ``call()`` signature instead of renaming it, because the factory only
-    constructs layers and a caller holding a direct reference would break.
-    Adding a mask argument here would change the call contract for every
-    consumer. Do NOT bolt one on to "restore parity" with the MHA family.
-    The consequence, stated plainly so no caller is surprised: anchors are
-    chosen POSITIONALLY, as the first ``K`` elements. A right-padded batch is
-    therefore safe, but a left-padded batch promotes padding tokens into the
-    global summary and corrupts every spoke's read. Pre-trim or right-pad. If
-    real masking is needed, that is a new layer, not an in-place edit here.
+    ``attention_mask`` parameter; adding one would change the call contract
+    for every consumer. Anchors are chosen positionally, as the first ``K``
+    elements. A right-padded batch is safe, but a left-padded batch promotes
+    padding tokens into the global summary and corrupts every spoke's read.
+    Pre-trim or right-pad; real masking would need a new layer.
 
-    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
-    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
+    The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)`` temperature
+    come from :mod:`~dl_techniques.layers.attention.common`; score
     normalization is the shared
     :class:`~dl_techniques.layers.activations.ProbabilityOutput`.
 
-    **Known limitations:**
+    Known limitations:
 
     - No ``attention_mask`` support — see the carve-out block above.
     - ``num_anchor_tokens`` is a call argument, not constructor state, and is
@@ -293,16 +254,11 @@ class AnchorAttention(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # ---------------------------------------------------------------------
-        # Parameter validation
-        # ---------------------------------------------------------------------
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # Adopts the shared validator. Its message is character-for-character
-        # what stood here, so a test matching on "must be divisible" still
-        # matches. Checked before the swap, not assumed.
+        # Raises the same "must be divisible" message a caller may match on.
         validate_head_divisibility(dim, num_heads)
         if head_dim is not None and head_dim <= 0:
             raise ValueError(f"head_dim must be positive, got {head_dim}")
@@ -311,9 +267,6 @@ class AnchorAttention(keras.layers.Layer):
                 f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
 
-        # ---------------------------------------------------------------------
-        # Store configuration
-        # ---------------------------------------------------------------------
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
@@ -331,17 +284,10 @@ class AnchorAttention(keras.layers.Layer):
         # use this value, never `dim`, or a custom head_dim silently mis-packs.
         self.inner_dim = self.num_heads * self.head_dim
 
-        # Scaling factor 1/sqrt(head_dim). This was `1.0 / np.sqrt(...)` before
-        # it adopted the shared helper; `.hex()` was compared across 27 realistic
-        # head dims (1..512) with 0 mismatches, so the swap is bit-identical and
-        # not a numerics change. It also removed this file's only numpy import.
-        # Keep it a Python float computed HERE in __init__, never in call(): a
-        # backend tensor built during a symbolic trace leaks out of that scope.
+        # A Python float computed here in __init__, never in call(): a backend
+        # tensor built during a symbolic trace leaks out of that scope.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # ---------------------------------------------------------------------
-        # Create sub-layers
-        # ---------------------------------------------------------------------
         common_kwargs = {
             "use_bias": self.use_bias,
             "kernel_initializer": self.kernel_initializer,
@@ -459,14 +405,14 @@ class AnchorAttention(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """
         .. warning::
-           **This layer accepts no attention mask.** ``call`` takes
+           This layer accepts no attention mask. ``call`` takes
            ``(x, num_anchor_tokens, training)`` and no ``attention_mask``, which
            is why ``TransformerLayer`` lists it in
-           ``_MASKLESS_ATTENTION_TYPES`` and silently discards a caller's mask.
-           Measured 2026-08-27: perturbing a PADDED token moves real-token
-           outputs by 0.458 absolute, about 12.9% of their magnitude, against a
-           45.01 control for perturbing a real token. Small relative to genuine
-           token influence, but not zero -- do not feed a padded batch.
+           ``_MASKLESS_ATTENTION_TYPES`` and discards a caller's mask.
+           Measured: perturbing a padded token moves real-token outputs by
+           0.458 absolute (12.9% of their magnitude) against a 45.01 control
+           for perturbing a real token. Small, but not zero; do not feed a
+           padded batch.
 
         Apply anchor-based attention to the input tensor.
 
@@ -578,13 +524,8 @@ class AnchorAttention(keras.layers.Layer):
         :raises ValueError: If the sequence dimension is not statically known.
         """
         batch_size = keras.ops.shape(x)[0]
-        # DECISION plan_2026-06-14_ab855e7e/D-002: hierarchical mode reads the
-        # sequence length from the STATIC shape. The `num_anchor_tokens >= seq_len`
-        # branch below is a Python bool, and it crashes under @tf.function if
-        # seq_len is a dynamic keras.ops.shape() tensor. Fail loud on None; the
-        # batch dim stays dynamic. Do NOT revert this to keras.ops.shape.
-        # _standard_attention never branches on seq_len, so it stays dynamic-safe.
-        # The originating plan directory is gone, so this comment is the record.
+        # DECISION plan_2026-06-14_ab855e7e/D-002: static shape, not keras.ops.shape
+        # — the num_anchor_tokens >= seq_len branch is a Python bool and crashes under @tf.function on a dynamic tensor. See decisions.md.
         seq_len = x.shape[1]
         if seq_len is None:
             raise ValueError(
@@ -604,10 +545,8 @@ class AnchorAttention(keras.layers.Layer):
         query_tokens = x[:, num_anchor_tokens:, :]
         num_query_tokens = seq_len - num_anchor_tokens
 
-        # -----------------------------------------------------------------
         # Anchor tier: full Q, K, V. Anchors alone supply keys and values, so
         # this is the only tier that writes into the global summary.
-        # -----------------------------------------------------------------
         anchor_q = self.query_proj(anchor_tokens)
         anchor_k = self.key_proj(anchor_tokens)
         anchor_v = self.value_proj(anchor_tokens)
@@ -630,10 +569,8 @@ class AnchorAttention(keras.layers.Layer):
         anchor_k = keras.ops.transpose(anchor_k, (0, 2, 1, 3))
         anchor_v = keras.ops.transpose(anchor_v, (0, 2, 1, 3))
 
-        # -----------------------------------------------------------------
         # Query tier: Q only, from its own projection. No K/V is computed here,
         # which is where the (N-K)^2 term disappears.
-        # -----------------------------------------------------------------
         query_q = self.query_token_proj(query_tokens)
         query_q = keras.ops.reshape(
             query_q,
@@ -641,16 +578,11 @@ class AnchorAttention(keras.layers.Layer):
         )
         query_q = keras.ops.transpose(query_q, (0, 2, 1, 3))
 
-        # -----------------------------------------------------------------
-        # Concatenate queries as [anchors ; queries]. This order matches the
-        # original token order, so the output needs no re-scatter.
-        # Shape: (batch, heads, seq_len, head_dim)
-        # -----------------------------------------------------------------
+        # Concatenate as [anchors ; queries], matching original token order so
+        # the output needs no re-scatter. Shape: (batch, heads, seq_len, head_dim)
         combined_q = keras.ops.concatenate([anchor_q, query_q], axis=2)
 
-        # -----------------------------------------------------------------
         # All tokens attend only to anchors: (batch, heads, seq_len, num_anchors)
-        # -----------------------------------------------------------------
         scores = keras.ops.matmul(
             combined_q,
             keras.ops.transpose(anchor_k, (0, 1, 3, 2))

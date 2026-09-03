@@ -1,51 +1,28 @@
 """
-A robust attention mechanism via Principal Component Pursuit.
+RPCAttention, a robust attention layer that decomposes attention scores with
+Principal Component Pursuit instead of using them raw.
 
-This layer enhances standard scaled dot-product attention by integrating
-Principal Component Pursuit (PCP), a matrix decomposition technique that
-separates the attention matrix into a low-rank component ``L`` (global
-patterns) and a sparse component ``S`` (localized details/outliers) by
-solving ``min_{L,S} ||L||_* + lambda ||S||_1  s.t.  A = L + S``. The
-robust attention is then ``softmax(L + S) V``, providing resilience
-against noise and adversarial perturbations.
+A single ``Dense(3 * dim)`` produces Q, K and V. The scaled score matrix
+``A = Q K^T / sqrt(d_k)`` is split by ``max_pcp_iter`` fixed sweeps of
+alternating minimization into a low-rank component ``L`` (global patterns,
+via singular value thresholding) and a sparse component ``S`` (localized
+outliers, via soft thresholding), solving
+``min_{L,S} ||L||_* + lambda ||S||_1  s.t.  A = L + S``. The recombined
+``L + S`` is normalized and applied to ``V`` in place of a plain softmax, so
+an adversarial perturbation concentrated on a few token pairs is routed into
+``S`` instead of distorting the whole distribution.
 
-Architecture:
-    A single ``Dense(3 * dim)`` produces Q, K and V, reshaped to
-    ``(batch, num_heads, seq_len, head_dim)``. The scaled score matrix is then run
-    through ``max_pcp_iter`` fixed sweeps of alternating minimization — a singular
-    value thresholding step for ``L`` and a soft-thresholding step for ``S`` — and
-    the recombined ``L + S`` is normalized by the shared ``ProbabilityOutput``
-    layer before being applied to ``V``.
-
-    The iteration count is a Python constant, not a convergence test. Early
-    stopping was removed so the loop unrolls identically under graph tracing.
-    Cost is ``max_pcp_iter`` batched SVDs of an ``S x S`` matrix per forward
-    pass. That makes this layer far more expensive than plain scaled dot-product
-    attention, and unsuitable for long sequences.
-
-    ``call()``'s mask parameter is spelled ``mask=``, not ``attention_mask=``; see
-    the ``[FROZEN SIGNATURE]`` note on the class below.
-
-Foundational Mathematics:
-    Principal Component Pursuit recovers a low-rank ``L`` and a sparse ``S`` from
-    their sum by solving the convex relaxation::
-
-        min_{L,S}  ||L||_*  +  lambda ||S||_1     s.t.  A = L + S
-
-    where ``||.||_*`` is the nuclear norm (sum of singular values). The two
-    proximal operators used by the alternating sweeps are::
-
-        L = SVT_tau(A - S) = U diag(max(sigma - tau, 0)) V^H
-        S = soft_lambda(A - L) = sign(A - L) max(|A - L| - lambda, 0)
-
-    Applied to attention logits, ``L`` captures the global, low-rank co-occurrence
-    structure and ``S`` absorbs localized outliers, so an adversarial perturbation
-    concentrated on a few token pairs is routed into ``S`` instead of distorting
-    the whole softmax.
+The iteration count is a Python constant, not a convergence test, and the
+loop has no early stop so it unrolls identically under graph tracing. Cost is
+``max_pcp_iter`` batched SVDs per forward pass, making this layer far more
+expensive than plain attention and unsuitable for long sequences. This layer
+has no float16 SVD kernel outside XLA; see the class docstring's warning.
+``call()``'s mask parameter is spelled ``mask=``, not ``attention_mask=``,
+and is frozen — see the class docstring.
 
 References:
-    - Candes, E. J., Li, X., Ma, Y., & Wright, J. (2011). "Robust
-      Principal Component Analysis?". Journal of the ACM.
+    - Candes et al., 2011. Robust Principal Component Analysis? Journal of
+      the ACM.
 """
 
 # ---------------------------------------------------------------------
@@ -82,68 +59,44 @@ class RPCAttention(keras.layers.Layer):
     ``S = sign(A - L) max(|A - L| - lambda, 0)``. After ``max_pcp_iter``
     iterations, the robust attention output is ``softmax(L + S) V``.
 
-    **[FROZEN SIGNATURE — D-007 carve-out]** ``call()``'s mask parameter is named
-    ``mask``, not ``attention_mask`` as in most siblings. This inconsistency is
-    intentional and is recorded by the standing anchor
-    ``plan_2026-06-14_0c5d4a21/D-007`` in ``factory.py``, which places this
-    spelling (and ``performer_attention.PerformerAttention.call``'s complete
-    absence of a mask argument) out of scope for normalization passes. **Do NOT
-    rename it**: the factory and existing callers pass it by keyword.
+    ``call()``'s mask parameter is named ``mask``, not ``attention_mask`` as
+    in most siblings; this spelling is frozen by the standing anchor
+    ``plan_2026-06-14_0c5d4a21/D-007`` in ``factory.py``, since the factory
+    and existing callers pass it by keyword. The public attribute
+    ``self.attention_scale`` is likewise frozen: it is the only occurrence of
+    that name in the package (every sibling uses ``self.scale``), but it is
+    reachable from user code, so renaming it is an API change.
 
-    The public attribute ``self.attention_scale`` is likewise frozen. It is the
-    only occurrence of that name in the package — every sibling calls the same
-    quantity ``self.scale`` — but it is reachable from user code and from
-    subclasses, so renaming it is an API change, not a style fix.
-
-    **[REUSE]** The ``dim % num_heads`` check, the ``1 / sqrt(head_dim)``
-    temperature and the additive mask bias
-    (:func:`~dl_techniques.layers.attention.common.apply_attention_mask`, which
-    keeps the masked scores in ``>= float32`` so they can reach ``ops.svd``) all
-    come from :mod:`~dl_techniques.layers.attention.common`; score
-    normalization comes from the shared
-    :class:`~dl_techniques.layers.activations.ProbabilityOutput`; the optional Q/K
-    norms come from
+    The ``dim % num_heads`` check, the ``1 / sqrt(head_dim)`` temperature and
+    the additive mask bias
+    (:func:`~dl_techniques.layers.attention.common.apply_attention_mask`,
+    which keeps the masked scores in ``>= float32`` so they can reach
+    ``ops.svd``) come from :mod:`~dl_techniques.layers.attention.common``;
+    score normalization comes from the shared
+    :class:`~dl_techniques.layers.activations.ProbabilityOutput`; the optional
+    Q/K norms come from
     :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
 
     .. warning::
-        **This layer cannot run under a ``mixed_float16`` policy on this backend,
-        and that is a missing backend kernel rather than a defect in this file.**
-        MEASURED on TF 2.18 / CUDA / RTX 4070 (plan-2026-07-27T183600-b4ef45f0,
-        steps 2 and 5b): ``ops.svd`` has NO float16 kernel outside XLA, so the
-        first ``ops.svd`` inside :meth:`_pcp_decomposition` raises::
+        This layer cannot run under a ``mixed_float16`` policy on this
+        backend: ``ops.svd`` has no float16 kernel outside XLA, so the first
+        ``ops.svd`` inside :meth:`_pcp_decomposition` raises
+        ``NotFoundError: Could not find device for node: {{node Svd}} =
+        Svd[T=DT_HALF, ...]``. It raises with or without a mask; a masked
+        fp16 forward happens to survive because the mask bias promotes the
+        scores to float32 before the SVD (see the D-005 note below), but the
+        unmasked path has nothing to promote it. ``float32`` and ``float64``
+        policies are fully supported.
 
-            NotFoundError: Could not find device for node:
-            {{node Svd}} = Svd[T=DT_HALF, ...]
-            All kernels registered for op Svd:
-              device='XLA_CPU_JIT'; T in [DT_FLOAT, DT_DOUBLE, DT_HALF]
-              device='XLA_GPU_JIT'; T in [DT_FLOAT, DT_DOUBLE, DT_HALF]
-              device='CPU';         T in [DT_FLOAT] / [DT_DOUBLE] / complex
-              device='GPU';         T in [DT_DOUBLE] / [DT_FLOAT]
-
-        Specifics, because they are easy to get wrong:
-
-        * It raises **with or without an ``attention_mask``** — this is not a
-          masking bug. A MASKED fp16 forward happens to survive, because the mask
-          bias is applied in ``mask_dtype(...)`` (see the D-005 boundary below) and
-          the promoted scores then have a float32 SVD kernel. The **unmasked** fp16
-          forward has nothing to promote it and dies.
-        * XLA/``jit_compile=True`` is the ONLY path on which an fp16 ``Svd`` kernel
-          exists at all (``XLA_*_JIT`` above).
-        * Promoting the UNMASKED path too would change no-mask numerics for every
-          existing caller, which is why it was not done here.
-
-        ``float32`` and ``float64`` policies are fully supported. Carried to the
-        Tier-4 brief (``research/2026_attention_open_design_questions.md``).
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌─────────────────────────────────────────────────────────┐
         │     RPCAttention — Robust PCA in place of a softmax     │
         │                                                         │
-        │   The score matrix is split into a LOW-RANK L plus a    │
-        │   SPARSE S by iterative Principal Component Pursuit     │
+        │   The score matrix is split into a low-rank L plus a    │
+        │   sparse S by iterative Principal Component Pursuit     │
         │   before any probability is taken. Not softmax(Q Kᵀ) V. │
         │                                                         │
         │                   Input  [B, S, dim]                    │
@@ -172,8 +125,8 @@ class RPCAttention(keras.layers.Layer):
         │                            ▼                            │
         │                   Output  [B, S, dim]                   │
         │                                                         │
-        │   KNOWN DEFECT: return_attention_scores=True re-runs the│
-        │   WHOLE PCP on scores that were never masked, so the    │
+        │   Known defect: return_attention_scores=True re-runs the│
+        │   whole PCP on scores that were never masked, so the    │
         │   returned weights need not match the returned output.  │
         └─────────────────────────────────────────────────────────┘
 
@@ -270,10 +223,7 @@ class RPCAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # R13: adopts the shared validator. `test_invalid_dim_mismatch` pins the FULL
-        # message with a regex (`dim \(63\) must be divisible by num_heads \(8\)`),
-        # and the helper's default `*_name` kwargs reproduce that text
-        # character-for-character, so the pinned regex still matches.
+        # Raises the same message test_invalid_dim_mismatch pins with a regex.
         validate_head_divisibility(dim, num_heads)
         if lambda_sparse <= 0:
             raise ValueError(f"lambda_sparse must be positive, got {lambda_sparse}")
@@ -313,21 +263,9 @@ class RPCAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Computed attributes
         self.head_dim = dim // num_heads
-        # R13: was `1.0 / np.sqrt(self.head_dim)`. Adoption was gated on an explicit
-        # equality probe, not on the two expressions looking alike:
-        # `float(1.0/np.sqrt(d)).hex()` matched `compute_attention_scale(d).hex()`
-        # for 27 realistic head dims (1..512). The probe matters: the sibling
-        # `head_dim ** -0.5` form is NOT bit-identical to either of them.
-        # The only change is the Python-level type, `np.float64` -> `float`.
-        # `np.float64` is a `float` subclass, this value is not a `get_config()` key,
-        # and `keras.ops` converts either to the tensor dtype identically.
-        #
-        # ATTRIBUTE NAME IS FROZEN: it stays `attention_scale`, not `scale`. It is
-        # the only such spelling in the package but it is public-ish surface (see
-        # the frozen-signature note in the class docstring). The D-002 rule still
-        # holds: a Python float computed in `__init__`, never `ops.sqrt` in `call()`.
+        # Attribute name is frozen as attention_scale, not scale (see class docstring);
+        # a Python float computed here, never ops.sqrt in call().
         self.attention_scale = compute_attention_scale(self.head_dim)
 
         # Create sub-layers in __init__
@@ -546,21 +484,11 @@ class RPCAttention(keras.layers.Layer):
         attention_scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
         attention_scores = attention_scores * self.attention_scale
 
-        # The dtype the scores arrive in, captured BEFORE any mask-driven promotion.
-        # This is what the cast-back boundary below restores, which is what makes the
-        # no-mask path a bit-for-bit no-op (`ops.cast` to the dtype a tensor already
-        # has returns the tensor itself).
-        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        # Dtype captured before any mask-driven promotion, restored at the cast-back
+        # boundary below; that is what makes the no-mask path a bit-for-bit no-op.
         scores_dtype = getattr(attention_scores.dtype, "name", None) or str(attention_scores.dtype)
 
-        # Apply mask if provided
         if mask is not None:
-            # Broadcast mask to (batch, num_heads, seq_len, seq_len). The dispatch
-            # below reads the STATIC rank (`len(mask.shape)`); a dynamic `ops.shape`
-            # call here was left dead by the step-2 rewrite and removed at step 10.
-
             # Case 1: Mask is (batch, seq_len) -> Expand to (batch, 1, 1, seq_len)
             if len(mask.shape) == 2:
                 mask = keras.ops.expand_dims(mask, axis=1)
@@ -569,41 +497,21 @@ class RPCAttention(keras.layers.Layer):
             elif len(mask.shape) == 3:
                 mask = keras.ops.expand_dims(mask, axis=1)
 
-            # The keep predicate is spelled `mask != 0` because THIS site spells
-            # masking `mask == 0`. The shared helper infers no polarity, so the
-            # polarity lives here, in one visible line. Inverting it raises nothing,
-            # changes no shape and stays finite: the layer would simply attend to the
-            # padding. `test_rpc_attention.py::TestRPCAttentionMaskPolarity` is the
-            # only guard that can see that.
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009: rescue_axis stays at its
+            # default (degenerate-row rescue on) — before the rescue, one blanked query row gave 64/4096 non-finite under mixed_float16. See decisions.md.
             #
-            # `out_dtype` is left at its default, so the biased scores stay in
-            # `mask_dtype(...)` (>= float32) all the way into the SVD below. The
-            # D-005 anchor at the cast-back boundary says why that is the point.
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-009 — `rescue_axis` is left at its
-            # default, so the degenerate-row rescue is ON. Do NOT pass `rescue_axis=None`.
-            # MEASURED before the rescue, one blanked query row: 64/4096 non-finite under
-            # `mixed_float16`, 0.710 max deviation in float32 — the PCP is GLOBAL.
-            # See decisions.md D-009.
-            #
-            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017 — the softmax axis is DERIVED from
-            # this layer's `probability_config`, not the helper's `-1` default. Do NOT restore
-            # a bare `-1`: at `{"axis": -2}` a dead key column gave 8192/8192 non-finite.
-            # See decisions.md D-017.
+            # DECISION plan-2026-07-27T183600-b4ef45f0/D-017: softmax axis is derived
+            # from probability_config, not a bare -1 — at {"axis": -2} a dead key column gave 8192/8192 non-finite. See decisions.md.
             attention_scores = apply_attention_mask(
                 attention_scores,
                 keras.ops.not_equal(mask, 0),
                 rescue_axis=(self.probability_config or {}).get("axis", -1),
             )
 
-        # Perform PCP decomposition
         L, S = self._pcp_decomposition(attention_scores)
 
-        # DECISION plan-2026-07-27T183600-b4ef45f0/D-005 — THE cast-back boundary. The mask
-        # helper promoted the scores to float32; they stay there through the PCP loop, and
-        # this line brings them back after the SVD. Do NOT move the cast above that loop:
-        # under `mixed_float16` `ops.svd` then dies with `Could not find device for node:
-        # Svd[T=DT_HALF]`. Do NOT use `self.compute_dtype`. See decisions.md D-005.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-005: cast back to scores_dtype
+        # only here, after the SVD — moving it above the PCP loop makes ops.svd die under mixed_float16. See decisions.md.
         robust_attention_scores = keras.ops.cast(L + S, scores_dtype)
 
         # Apply probability activation to get attention weights
@@ -662,27 +570,17 @@ class RPCAttention(keras.layers.Layer):
         v = keras.ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
         v = keras.ops.transpose(v, (0, 2, 1, 3))
 
-        # Optional Q/K normalization (applied BEFORE the robust scoring loop).
+        # Q/K normalization runs before the robust scoring loop.
         if self.q_norm is not None:
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        # Compute robust attention with PCP decomposition
-        # Shape: 3x (B, H, N, head_dim) -> (B, H, N, head_dim)
         attention_output = self._compute_attention(q, k, v, mask)
 
-        # For returning attention scores if requested
         attention_weights = None
         if return_attention_scores:
-            # KNOWN DEFECT, pre-existing and not fixed here — fixing it is a numerics
-            # change plus a restructuring of `_compute_attention`. This branch re-runs
-            # the ENTIRE PCP decomposition, i.e. `max_pcp_iter` more batched SVDs, so
-            # it roughly doubles the cost of the forward pass. Worse, it recomputes the
-            # scores WITHOUT applying `mask`, so whenever a mask is supplied the
-            # weights returned to the caller do not match the weights that produced
-            # `output`.
-            # Recompute attention scores for output
-            # Shape: (B, H, N, head_dim) @ (B, H, head_dim, N) -> (B, H, N, N)
+            # Known defect: re-runs the whole PCP decomposition without applying mask,
+            # so the returned weights need not match the weights that produced output.
             attention_scores = keras.ops.matmul(q, keras.ops.transpose(k, axes=[0, 1, 3, 2]))
             attention_scores = attention_scores * self.attention_scale
             L, S = self._pcp_decomposition(attention_scores)

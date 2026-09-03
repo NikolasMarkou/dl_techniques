@@ -1,59 +1,30 @@
 """
-A parameter-efficient, bidirectional cross-attention mechanism.
+SharedWeightsCrossAttention, a parameter-efficient bidirectional cross-attention
+layer for two modalities.
 
-This layer facilitates information exchange between two distinct sets of
-tokens (modalities) through a cross-attention pattern where the projection
-weights for queries, keys, and values are shared. Given modalities ``X_A``
-and ``X_B``, shared projections compute ``Q_A, K_A, V_A = f_q(X_A), f_k(X_A),
-f_v(X_A)`` and ``Q_B, K_B, V_B = f_q(X_B), f_k(X_B), f_v(X_B)``, then
-cross-attend: ``Out_A = Attention(Q_A, K_B, V_B)`` and
-``Out_B = Attention(Q_B, K_A, V_A)``. This weight sharing forces both
-modalities into a common semantic space, similar to Siamese networks.
+Both modalities arrive concatenated along the sequence axis in one tensor; the
+``split_sizes`` argument of ``call()``, not the layer config, says where the
+boundary falls. A single shared ``Dense(3 * dim)`` produces queries, keys and
+values for every token at once, so the two modalities cross-attend through the
+same projection weights rather than independent ones. Sharing the projections
+forces a common semantic space, the Siamese-network argument applied to
+attention, and halves the projection parameter count.
 
-Architecture:
-    Both modalities arrive **already concatenated** along the sequence axis in a
-    single tensor; the ``split_sizes`` argument of ``call()`` — not the layer
-    config — says where the boundary is. One shared ``Dense(3 * dim)`` produces Q,
-    K and V for every token at once, which is what makes the projections shared by
-    construction rather than by a weight-tying trick. The per-modality slices then
-    cross-attend, and the two results are concatenated back into the original
-    layout before a single output projection.
+Two layouts are selected by the length of ``split_sizes``: length 2 is plain
+bidirectional cross-attention (A attends to B and vice versa, with a
+batch-stacked fast path when the two modalities are equal length); length 4
+splits each modality into anchors and queries, and every token attends only to
+the opposing modality's anchors, turning the cost from ``|A| x |B|`` into
+``|A| x anchors_B + |B| x anchors_A``.
 
-    Two layouts are supported, selected by the LENGTH of ``split_sizes``:
-
-    -   length 2 — plain bidirectional cross-attention, every token of A attends
-        to all of B and vice versa. When the two modalities happen to be the same
-        length, an equivalent batch-stacked fast path is taken.
-    -   length 4 — anchor/query hierarchy, where each modality is split into
-        anchors and queries and ALL tokens attend only to the opposing modality's
-        anchors. This turns the cost from ``|A| x |B|`` into
-        ``|A| x anchors_B + |B| x anchors_A``, i.e. the anchors act as a
-        communication bottleneck.
-
-    Note that ``call()`` accepts an ``attention_mask`` which is currently unused;
-    see the ``[UNUSED ARGUMENT]`` note on the class below.
-
-Foundational Mathematics:
-    With one shared projection triple ``(f_q, f_k, f_v)`` applied to both
-    modalities, the bidirectional cross-attention is::
-
-        Out_A = softmax( f_q(X_A) f_k(X_B)^T / sqrt(d_k) ) f_v(X_B)
-        Out_B = softmax( f_q(X_B) f_k(X_A)^T / sqrt(d_k) ) f_v(X_A)
-
-    Sharing ``f_q``, ``f_k`` and ``f_v`` across modalities is what forces a common
-    semantic space: the score ``f_q(x_a) . f_k(x_b)`` is only large when the two
-    tokens land near each other under a SINGLE learned map, so the two modalities
-    cannot drift into mutually-unintelligible embeddings the way independent
-    per-modality projections allow. This is the Siamese-network argument applied to
-    attention, and it also cuts the projection parameter count in half relative to
-    per-modality projections.
+``call()`` accepts an ``attention_mask`` argument that is never read — see the
+class docstring's note before relying on it.
 
 References:
-    - Vaswani, A., et al. (2017). "Attention Is All You Need".
-    - Bromley, J., et al. (1994). "Signature verification using a Siamese
-      time delay neural network".
-    - Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The
-      Long-Document Transformer".
+    - Vaswani et al., 2017. Attention Is All You Need. (https://arxiv.org/abs/1706.03762)
+    - Bromley et al., 1994. Signature Verification Using a Siamese Time Delay
+      Neural Network.
+    - Beltagy et al., 2020. Longformer: The Long-Document Transformer. (https://arxiv.org/abs/2004.05150)
 """
 
 # ---------------------------------------------------------------------
@@ -88,41 +59,36 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     is split into anchors and queries, and all tokens attend only to the opposing
     modality's anchors for efficient bottleneck communication.
 
-    **[UNUSED ARGUMENT — do not mistake for working masking]** ``call()`` accepts
-    ``attention_mask`` and never reads it: neither ``_two_modality_attention`` nor
-    ``_anchor_query_attention`` takes a mask parameter, so no masking is applied
-    anywhere on the forward path. Padded tokens contribute their full weight to
-    every score. The argument is left in place because removing it is a public
-    ``call()`` signature change (out of scope for a normalization pass), but do NOT
-    read its presence as a masking guarantee. Same class of footgun as
-    ``linear_attention.LinearAttention``'s ignored ``mask=``.
+    ``call()`` accepts an ``attention_mask`` argument that is never read: neither
+    ``_two_modality_attention`` nor ``_anchor_query_attention`` takes a mask
+    parameter, so padded tokens keep their full weight at every score. The
+    argument stays in the signature only because removing it would be a public
+    API change; do not treat its presence as a masking guarantee. The same
+    footgun exists on ``linear_attention.LinearAttention``'s ignored ``mask=``.
 
-    **[STATIC SHAPES]** ``call()`` reads ``inputs.shape[1]`` and compares it
-    against ``sum(split_sizes)``, so the sequence dimension must be statically
-    known. The batch dimension stays dynamic (every reshape uses ``-1`` there).
-
-    **[REUSE]** The ``dim % num_heads`` check and the ``1 / sqrt(head_dim)``
-    temperature come from :mod:`~dl_techniques.layers.attention.common`; score
-    normalization goes through ONE shared
-    :class:`~dl_techniques.layers.activations.ProbabilityOutput` instance reused at
-    all five attention sites (its ``call()`` is purely functional on the score
-    tensor, so a single instance is safe); the optional Q/K norms come from
+    ``call()`` reads ``inputs.shape[1]`` and compares it against
+    ``sum(split_sizes)``, so the sequence dimension must be statically known; the
+    batch dimension stays dynamic. The ``dim % num_heads`` check and the
+    ``1 / sqrt(head_dim)`` temperature come from
+    :mod:`~dl_techniques.layers.attention.common`; score normalization goes
+    through one shared :class:`~dl_techniques.layers.activations.ProbabilityOutput`
+    instance reused at all five attention sites, since its ``call()`` is purely
+    functional on the score tensor; the optional Q/K norms come from
     :func:`~dl_techniques.layers.norms.factory.create_normalization_layer` and are
-    themselves shared across both streams, matching this layer's theme.
+    likewise shared across both streams.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         inputs  [B, total_seq, dim]
-        Both modality streams arrive ALREADY concatenated on the
-        sequence axis. split_sizes is a call() argument, not a config
-        field, and it says where the cuts are.
+        both modalities already concatenated on the sequence axis;
+        split_sizes (a call() argument) says where the cut is
                              │
                              ▼
           ┌───────────────────────────────────────┐
-          │ qkv_dense: ONE Dense(dim * 3), run    │
-          │ over the WHOLE concatenated sequence  │
+          │ qkv_dense: one Dense(dim * 3) over    │
+          │ the whole concatenated sequence       │
           └───────────────────┬───────────────────┘
                               ▼
              reshape + transpose -> Q, K, V
@@ -130,7 +96,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
                               ▼
           ┌───────────────────────────────────────┐
           │ q_norm / k_norm  (optional)           │
-          │ run on the whole Q and K, BEFORE any  │
+          │ on the whole Q and K, before any      │
           │ modality split                        │
           └───────────────────┬───────────────────┘
                               ▼
@@ -144,31 +110,27 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         │ attention            │  │                           │
         │                      │  │ split into A_anchor,      │
         │ split Q,K,V into A|B │  │ A_query, B_anchor, B_query│
-        │ Q_A ► K_B, V_B       │  │ ALL of A ► B's ANCHOR K,V │
-        │ Q_B ► K_A, V_A       │  │ ALL of B ► A's ANCHOR K,V │
+        │ Q_A -> K_B, V_B      │  │ all of A -> B's anchor K,V│
+        │ Q_B -> K_A, V_A      │  │ all of B -> A's anchor K,V│
         │                      │  │                           │
-        │ when the two lengths │  │ so a query token is       │
-        │ are equal, the two   │  │ attended FROM but never   │
-        │ directions stack on  │  │ attended TO               │
-        │ the BATCH axis       │  │                           │
+        │ when the two lengths │  │ a query token is attended │
+        │ are equal, the two   │  │ from but never attended   │
+        │ directions stack on  │  │ to                        │
+        │ the batch axis       │  │                           │
         └──────────┬───────────┘  └─────────────┬─────────────┘
                    └─────────────┬──────────────┘
                                  ▼
-           per direction: scores · scale ► attn_prob ► dropout ► · V
+           per direction: scores · scale -> attn_prob -> dropout -> · V
                                  ▼
-             concat on the seq axis ► merge heads ► proj_dense(dim)
+             concat on the seq axis -> merge heads -> proj_dense(dim)
                                  ▼
                        output  [B, total_seq, dim]
 
-        WHAT IS SHARED: everything. The layer owns no per-modality
-        weight at all. qkv_dense and proj_dense each run once over the
-        concatenated stream, q_norm and k_norm run once before the
-        split, and ONE attn_prob instance plus ONE dropout_layer serve
-        all five attention sites. There is no weight-tying trick here;
-        the sharing is structural.
-
-        attention_mask is accepted and NEVER read. Neither helper takes
-        a mask, so padded tokens keep their full weight.
+    The layer owns no per-modality weight. ``qkv_dense`` and ``proj_dense`` each
+    run once over the concatenated stream; ``q_norm``/``k_norm`` run once before
+    the split; one ``attn_prob`` instance and one ``dropout_layer`` serve all
+    five attention sites. There is no weight-tying trick, the sharing is
+    structural.
 
     :param dim: Input/output dimension. Must be positive and divisible by num_heads.
     :type dim: int
@@ -198,8 +160,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
     :type probability_config: Optional[Dict[str, Any]]
     :param qk_norm_type: Optional normalization type applied per-head to Q and K
         before splitting by modality, forwarded to
-        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`. The
-        SAME two norm layers serve both streams. ``None`` disables QK-norm.
+        :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`.
+        The same two norm layers serve both streams. ``None`` disables QK-norm.
         Defaults to ``None``.
     :type qk_norm_type: Optional[str]
     :param qk_norm_kwargs: Optional keyword arguments forwarded to
@@ -254,9 +216,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # Adopts the shared validator. Its message is character-for-character
-        # what stood here, so a test matching on "must be divisible by
-        # num_heads" still matches and the diagnostic is unchanged.
+        # Raises the same "must be divisible by num_heads" message a caller may match on.
         validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
@@ -286,16 +246,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Scale factor for attention scores. The shared helper IS
-        # `1.0 / math.sqrt(float(head_dim))`, character-for-character the
-        # expression that stood here, so the stored float is unchanged.
-        # Keep it a stdlib Python float computed HERE in __init__, never a
-        # `keras.ops.sqrt` result and never computed in `call()`: an ops result
-        # is a backend tensor even for a static int, and one built inside a
-        # symbolic scratch graph leaks out of that scope on the next trace.
+        # A stdlib float, not a keras.ops result: an ops tensor built here would
+        # leak out of this symbolic scratch graph on the next trace.
         self.scale = compute_attention_scale(self.head_dim)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
+        # Sub-layers are created here, unbuilt.
         self.qkv_dense = keras.layers.Dense(
             self.dim * 3,
             use_bias=self.use_bias,
@@ -316,11 +271,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             name="proj"
         )
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-016 — the Dropout is created
-        # UNCONDITIONALLY and gated in `call()`. Do NOT make creation conditional
-        # on `dropout_rate > 0`: it owns no weights, so always creating it costs
-        # nothing in a checkpoint and keeps the object graph independent of it.
-        # See decisions.md D-016 (plan-2026-08-27T040114-580f8b63).
+        # DECISION plan-2026-08-27T040114-580f8b63/D-016: Dropout is created
+        # unconditionally, not gated on dropout_rate > 0; it owns no weights, so this keeps the object graph independent of the rate. See decisions.md.
         self.dropout_layer = keras.layers.Dropout(self.dropout_rate, name="dropout")
 
         # Shared probability activation reused across all five attention sites.
@@ -369,18 +321,13 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qkv_dense.build(input_shape)
         self.proj_dense.build(input_shape)
 
-        # DECISION plan-2026-08-27T040114-580f8b63/D-018 — the Dropout is built
-        # EXPLICITLY, like every other sub-layer here. Do NOT go back to skipping
-        # it: skipping was harmless only because Dropout owns no weights, which is
-        # a property of Dropout, not of this method, and stops holding the moment
-        # the sub-layer becomes stateful. See decisions.md D-018.
+        # DECISION plan-2026-08-27T040114-580f8b63/D-018: Dropout is built
+        # explicitly like every other sub-layer; skipping was only harmless because Dropout owns no weights, which stops holding if it becomes stateful. See decisions.md.
         self.dropout_layer.build(
             (input_shape[0], self.num_heads, input_shape[1], input_shape[1])
         )
 
-        # Build probability layer with a representative per-stream attention
-        # score shape: (batch, num_heads, q_len, k_len). Concrete lengths vary
-        # by call (and split_sizes), so we use the symbolic seq length here.
+        # Score shape (batch, num_heads, q_len, k_len), using the symbolic seq length.
         batch_size = input_shape[0]
         seq_len = input_shape[1]
         score_shape = (batch_size, self.num_heads, seq_len, seq_len)
@@ -425,11 +372,8 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         :return: Output tensor with cross-attended features, same shape as input.
         :rtype: keras.KerasTensor
         """
-        # NOTE: `attention_mask` is intentionally NOT forwarded to either attention
-        # helper below — it is dead. Do NOT "wire it up" as part of a style pass:
-        # implementing it means deciding how a mask over the CONCATENATED sequence
-        # slices onto each cross-attention pair (and, in anchor/query mode, onto the
-        # anchor sub-slices), which is a behavior change needing its own tests.
+        # attention_mask is not forwarded to either attention helper below; it is dead.
+        # Wiring it up means deciding how a mask over the concatenated sequence maps onto each pair, a behavior change needing its own tests.
         if not isinstance(split_sizes, (list, tuple)):
             raise ValueError("split_sizes must be a list or tuple")
 
@@ -575,13 +519,12 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         mod_a_total = mod_a_anchor + mod_a_query
         mod_b_total = mod_b_anchor + mod_b_query
 
-        # Split by combined modalities
-        # Queries: ALL of each modality, anchors and query tokens alike.
+        # Queries: all of each modality, anchors and query tokens alike.
         q_mod_a = q[:, :, :mod_a_total, :]
         q_mod_b = q[:, :, mod_a_total:, :]
 
-        # Keys and values: ONLY the anchors of each modality. This is what
-        # turns the cost from |A| x |B| into |A| x anchors_B + |B| x anchors_A.
+        # Keys and values: only the anchors, turning the cost from |A|x|B| into
+        # |A| x anchors_B + |B| x anchors_A.
         k_mod_a_anchor = k[:, :, :mod_a_anchor, :]
         k_mod_b_anchor = k[:, :, mod_a_total:mod_a_total + mod_b_anchor, :]
 

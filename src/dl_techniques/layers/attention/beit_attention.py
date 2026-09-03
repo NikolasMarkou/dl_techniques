@@ -1,69 +1,26 @@
 """
-BEiT self-attention: T5-style 2D relative position bias with an asymmetric QKV bias.
+BeitAttention, BEiT's self-attention layer with T5-style 2D relative position
+bias and an asymmetric QKV bias.
 
-This module implements the self-attention block of BEiT (*BERT Pre-Training of Image
-Transformers*, Bao, Dong & Wei, arXiv:2106.08254). It exists as a standalone layer
-because BEiT differs from a generic ViT attention in exactly two structural ways that
-no existing layer in this package can express:
+The query and value projections carry a learnable bias; the key projection has
+no bias parameter at all, structurally absent rather than zero-initialized.
+A learnable, per-head, displacement-indexed bias is added to the attention
+logits before the softmax: ``A_h = softmax(Q_h K_h^T / sqrt(d_h) + B_h)``,
+where ``B_h[i, j] = T[R[i, j], h]`` reads a table ``T`` of shape
+``(M, num_heads)``, ``M = (2Wh-1)(2Ww-1) + 3``, through a static integer index
+``R`` derived from patch-to-patch displacement plus three rows for the
+cls-to-token, token-to-cls and cls-to-cls relations.
 
-1.  **Asymmetric QKV bias.** The query and value projections carry a learnable bias;
-    the key projection has **no bias parameter at all** — structurally absent, not
-    zero-initialized and not frozen. Every other attention class in this package
-    (``MultiHeadAttention``, ``MultiHeadCrossAttention``, ``WindowAttention``,
-    ``SingleWindowAttention``) exposes a single ``use_bias`` / ``qkv_bias`` flag that
-    governs Q, K and V together, and the self-attention path of
-    ``MultiHeadCrossAttention`` fuses them into one ``Dense(dim * 3)``, so the
-    asymmetry is unreachable by subclassing.
-
-2.  **A cls-augmented relative position bias table.** BEiT adds a learnable, per-head,
-    displacement-indexed bias to the attention **logits, before the softmax**. Its
-    table has ``(2*Wh - 1) * (2*Ww - 1) + 3`` rows over a ``(Wh, Ww)`` patch grid: the
-    coordinate-derived rows for every distinct patch-to-patch displacement, plus three
-    dedicated rows for the cls-to-token, token-to-cls and cls-to-cls relations, which
-    have no well-defined 2D displacement. ``SingleWindowAttention``'s table is Swin's
-    ``(2*W - 1) ** 2`` square-window form with no cls slots, so its index arithmetic is
-    a different function of the window size and cannot be shared.
-
-Foundational Mathematics:
-    With queries ``Q``, keys ``K``, values ``V`` and per-head dimension ``d_h``, the
-    attention of head ``h`` over a sequence of ``N + 1`` tokens is::
-
-        A_h = softmax( (Q_h K_h^T) / sqrt(d_h) + B_h )
-        O_h = A_h V_h
-
-    where ``B_h`` is the relative position bias: a **real-valued** matrix, read out
-    of a learnable table ``T`` of shape ``(M, num_heads)`` with
-    ``M = (2Wh-1)(2Ww-1)+3``. The read-out uses a static integer index matrix ``R``
-    of shape ``(N+1, N+1)``::
-
-        B_h[i, j] = T[R[i, j], h]
-
-    For two patch tokens at grid positions ``(y_i, x_i)`` and ``(y_j, x_j)``::
-
-        R[i, j] = ( (y_i - y_j) + Wh - 1 ) * (2*Ww - 1) + ( (x_i - x_j) + Ww - 1 )
-
-    so the bias depends only on the *displacement* between the two patches, and the
-    ``(2Wh-1)(2Ww-1)`` distinct displacements exhaust the coordinate-derived rows. The
-    remaining three rows are assigned to the cls relations::
-
-        R[0, j] = M - 3   (cls attends to a patch)
-        R[i, 0] = M - 2   (a patch attends to cls)
-        R[0, 0] = M - 1   (cls attends to cls)
-
-    Because ``B`` enters *inside* the softmax as an additive term, it re-weights the
-    attention distribution rather than the output values, and it is shared across the
-    batch.
+Operates on ``(batch, Wh*Ww + 1, dim)`` with the cls token first; the
+sequence length is fixed by ``window_size`` and checked in ``build()``.
 
 References:
-    - Bao, H., Dong, L., Piao, S., & Wei, F. (2022). "BEiT: BERT Pre-Training of Image
-      Transformers". ICLR. arXiv:2106.08254. (The q/v-only bias and the cls-augmented
-      relative position bias; ``microsoft/unilm/beit/modeling_finetune.py``.)
-    - Raffel et al. (2020). "Exploring the Limits of Transfer Learning with a Unified
-      Text-to-Text Transformer". JMLR. (The relative-position-bias-as-logit-offset idea
-      BEiT credits.)
-    - Liu et al. (2021). "Swin Transformer". ICCV. (The square-window
-      ``(2W-1)**2`` table this one does *not* reuse, on purpose; see
-      ``single_window_attention.py``.)
+    - Bao et al., 2022. BEiT: BERT Pre-Training of Image Transformers.
+      (https://arxiv.org/abs/2106.08254)
+    - Raffel et al., 2020. Exploring the Limits of Transfer Learning with a
+      Unified Text-to-Text Transformer. (relative-position-bias-as-logit-offset)
+    - Liu et al., 2021. Swin Transformer. (the square-window table this one
+      does not reuse; see single_window_attention.py)
 """
 
 # ---------------------------------------------------------------------
@@ -100,7 +57,7 @@ class BeitAttention(keras.layers.Layer):
     offset and must never be routed through an attention-mask helper, which treats its
     argument as a binary keep predicate.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -111,7 +68,7 @@ class BeitAttention(keras.layers.Layer):
           ┌──────────┐    ┌──────────┐    ┌──────────┐
           │ q Dense  │    │ k Dense  │    │ v Dense  │
           │ (D, D)   │    │ (D, D)   │    │ (D, D)   │
-          │ bias if  │    │ NO bias  │    │ bias if  │
+          │ bias if  │    │ no bias  │    │ bias if  │
           │ qv_bias  │    │ variable │    │ qv_bias  │
           └──────────┘    └──────────┘    └──────────┘
                 │               │               │
@@ -127,7 +84,7 @@ class BeitAttention(keras.layers.Layer):
           ┌──────────────────────────────┐      │
           │ + relative position bias     │      │ (optional:
           │   B[h,i,j] = table[R[i,j],h] │      │  use_relative
-          │   table (M, H) is a WEIGHT   │      │  _position
+          │   table (M, H) is a weight   │      │  _position
           │   R is a static int index    │      │  _bias)
           │   M = (2Wh-1)(2Ww-1) + 3     │      │
           └──────────────────────────────┘      │
@@ -151,15 +108,15 @@ class BeitAttention(keras.layers.Layer):
                                 ▼
                      proj_dropout -> Output (B, N+1, D)
 
-        The K projection owns NO bias variable. At dim=32 the built
-        layer has 8 weights and exactly 3 biases: q, v and proj.
+    The k projection owns no bias variable. At dim=32 the built layer has
+    8 weights and exactly 3 biases: q, v and proj.
 
     :param dim: Model / embedding dimension of the tokens. Must be positive and
         divisible by ``num_heads``.
     :type dim: int
     :param num_heads: Number of attention heads. Default: 12.
     :type num_heads: int
-    :param window_size: The **patch grid** ``(Wh, Ww)`` the sequence describes, e.g.
+    :param window_size: The patch grid ``(Wh, Ww)`` the sequence describes, e.g.
         ``(14, 14)`` for a 224px image at patch size 16. An ``int`` means a square grid.
         This is the grid of *patch* tokens only — the cls token is accounted for
         separately by the ``+ 3`` rows of the bias table, so the expected sequence
@@ -170,8 +127,8 @@ class BeitAttention(keras.layers.Layer):
         a plain (relative-position-free) attention and no table weight is created.
         Default: True.
     :type use_relative_position_bias: bool
-    :param qv_bias: If ``True``, the **query and value** projections carry a learnable
-        bias and the **key** projection does not. If ``False``, none of the three do.
+    :param qv_bias: If ``True``, the query and value projections carry a learnable
+        bias and the key projection does not. If ``False``, none of the three do.
         This is BEiT's ``qkv_bias`` configuration flag, renamed here to say what it
         actually does: the reference concatenates ``q_bias``, a non-trainable
         ``zeros_like(v_bias)`` and ``v_bias`` before a fused projection, so no ``k_bias``
@@ -287,11 +244,8 @@ class BeitAttention(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self.head_dim = dim // num_heads
-        # `scale` is stored as given (possibly None) so `get_config()` round-trips the
-        # caller's intent rather than a resolved number. The resolved value reuses
-        # `common.compute_attention_scale`, the package's single definition of the
-        # softmax temperature; it equals `head_dim ** -0.5` up to at most one ULP (see
-        # that helper's docstring), and it is a Python float so it folds into the graph.
+        # `scale` is stored as given (possibly None) so get_config() round-trips the
+        # caller's intent; the resolved value reuses common.compute_attention_scale.
         self.scale = scale
         self._scale_value = (
             float(scale) if scale is not None
@@ -306,12 +260,8 @@ class BeitAttention(keras.layers.Layer):
                 (2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1) + 3
         )
 
-        # Sub-layers are created unconditionally in __init__ and built in build().
-        # DECISION plan-2026-08-23T091307-9a110062/D-560 — a CALLABLE, not a dict,
-        # so each of the four `(dim, dim)` projections gets its OWN
-        # `clone_initializer(...)`. Do NOT collapse it back to a shared
-        # `dense_kwargs = dict(...)`: measured `max|delta| = 0.0` across 24 pairs.
-        # See decisions.md D-560.
+        # DECISION plan-2026-08-23T091307-9a110062/D-560: a callable, not a shared
+        # dict, so each of the four projections clones its own initializer. Collapsing to `dict(...)` measured max|delta|=0.0 across 24 pairs. See decisions.md.
         def dense_kwargs() -> Dict[str, Any]:
             """Build a fresh keyword set for one projection Dense layer.
 
@@ -332,15 +282,8 @@ class BeitAttention(keras.layers.Layer):
         self.q_dense = keras.layers.Dense(
             self.dim, use_bias=self.qv_bias, name="q", **dense_kwargs()
         )
-        # DECISION plan-2026-08-11T012340-f63796dc/D-001 — `use_bias=False` is
-        # BEiT's ARCHITECTURE: the reference fuses QKV behind one bias vector
-        # `cat(q_bias, zeros_like(v_bias), v_bias)`, so no `k_bias` exists.
-        #   * Do NOT "unify" this to `use_bias=self.qv_bias` — that adds `dim`
-        #     parameters and breaks every BEiT checkpoint, silently.
-        #   * Do NOT use `use_bias=True` with a zero or frozen bias; the parameter
-        #     has to be structurally ABSENT.
-        #   * Do NOT add a `k_bias` flag "for symmetry".
-        # See decisions.md D-001 (plan-2026-08-11T012340-f63796dc).
+        # DECISION plan-2026-08-11T012340-f63796dc/D-001: use_bias=False here, never
+        # a zero or frozen bias — the reference fuses QKV behind one bias vector with no k_bias term, so unifying to use_bias=self.qv_bias silently breaks every checkpoint. See decisions.md.
         self.k_dense = keras.layers.Dense(
             self.dim, use_bias=False, name="k", **dense_kwargs()
         )
@@ -358,8 +301,7 @@ class BeitAttention(keras.layers.Layer):
         )
 
         # Created in build(): the learnable table and its static integer index.
-        # `_rel_pos_index` is a NUMPY array, not a tensor -- see the D-011 note in
-        # `build()` for why (graph-scope safety under a lazily-built `fit()`).
+        # `_rel_pos_index` is a numpy array, not a tensor; see the D-011 note in build().
         self.relative_position_bias_table = None
         self._rel_pos_index: Optional[np.ndarray] = None
 
@@ -404,7 +346,7 @@ class BeitAttention(keras.layers.Layer):
         ``modeling_finetune.py``): patch-to-patch entries are the flattened 2D
         displacement, shifted to start at zero and row-major-encoded with a stride of
         ``2 * Ww - 1``; the cls row, cls column and cls-to-cls cell take the last three
-        table rows, **assigned in that order** so that the cls-to-cls cell wins.
+        table rows, assigned in that order so the cls-to-cls cell wins.
 
         :return: Integer index matrix of shape ``(Wh * Ww + 1, Wh * Ww + 1)``, every
             entry in ``[0, num_relative_distance)``.
@@ -432,9 +374,8 @@ class BeitAttention(keras.layers.Layer):
             (num_patches + 1, num_patches + 1), dtype=np.int64
         )
         index[1:, 1:] = relative_coords.sum(-1)
-        # Order matters: the cls ROW is written first, then the cls COLUMN (which
-        # overwrites [0, 0]), then [0, 0] itself. Writing them in any other order
-        # leaves the wrong value in the cls-to-cls cell.
+        # Written in this order (row, then column, then [0,0]) so the cls-to-cls
+        # cell ends up with the right value.
         index[0, 0:] = self.num_relative_distance - 3
         index[0:, 0] = self.num_relative_distance - 2
         index[0, 0] = self.num_relative_distance - 1
@@ -484,11 +425,8 @@ class BeitAttention(keras.layers.Layer):
                 trainable=True,
                 dtype=self.dtype,
             )
-            # DECISION plan-2026-08-11T012340-f63796dc/D-011 — keep this index a
-            # NUMPY array. Do NOT call `ops.convert_to_tensor` here and store the
-            # result: `build()` can run lazily INSIDE the traced train step, so it
-            # lands in the inner `one_step_on_data` FuncGraph and `model.fit()` dies
-            # with `InaccessibleTensorError`. See decisions.md D-011.
+            # DECISION plan-2026-08-11T012340-f63796dc/D-011: keep this index a numpy
+            # array, not a converted tensor — build() can run lazily inside a traced train step, and a stored tensor there makes model.fit() raise InaccessibleTensorError. See decisions.md.
             self._rel_pos_index = np.ascontiguousarray(
                 self._build_relative_position_index().reshape(-1),
                 dtype=np.int32,
@@ -516,7 +454,7 @@ class BeitAttention(keras.layers.Layer):
 
         :param inputs: Token sequence of shape ``(batch, Wh*Ww + 1, dim)``, cls first.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional **keep predicate** (nonzero / ``True`` means
+        :param attention_mask: Optional keep predicate (nonzero / ``True`` means
             "attend to this position"), broadcastable against the attention logits.
             Accepted as rank 2 ``(B, N+1)`` (a key mask), rank 3 ``(B, N+1, N+1)``
             (pairwise), or rank 4 ``(B, heads, N+1, N+1)``. BEiT's own patch grid is
@@ -532,9 +470,7 @@ class BeitAttention(keras.layers.Layer):
         :return: Tensor of shape ``(batch, Wh*Ww + 1, dim)``.
         :rtype: keras.KerasTensor
         """
-        # The batch axis is left dynamic as `-1` in every reshape (graph-safe; never
-        # read as a Python int), while the sequence length is the STATIC `num_tokens`
-        # that `build()` already validated the input against.
+        # Batch axis stays dynamic (-1); seq_len is the static num_tokens build() validated.
         seq_len = self.num_tokens
 
         q = self._split_heads(self.q_dense(inputs), seq_len)
@@ -547,15 +483,10 @@ class BeitAttention(keras.layers.Layer):
         )
 
         if self.use_relative_position_bias:
-            # The bias is REAL-VALUED and is added to the logits HERE, directly. It
-            # must never be routed through `apply_attention_mask` / any mask argument:
-            # that helper binarizes its predicate (`> 0`), which would collapse the
-            # learned table to a keep/drop decision, silently and without a shape
-            # error. See `common.apply_attention_mask`'s binary-`keep` precondition.
-            # (M, heads) gathered by (N+1)^2 indices -> ((N+1)^2, heads)
-            # `_rel_pos_index` is a numpy array (see the D-011 note in `build()`);
-            # it is converted HERE so the constant is materialized in the graph that
-            # is currently tracing, not in whichever graph happened to build it.
+            # The bias is real-valued and added to the logits directly, never routed
+            # through apply_attention_mask, which binarizes its predicate and would collapse the learned table to a keep/drop decision.
+            # `_rel_pos_index` (a numpy array) is converted to a tensor here so the
+            # constant materializes in the currently-tracing graph, not the one that built it.
             bias = keras.ops.take(
                 self.relative_position_bias_table,
                 keras.ops.convert_to_tensor(self._rel_pos_index, dtype="int32"),
@@ -568,20 +499,14 @@ class BeitAttention(keras.layers.Layer):
                 keras.ops.cast(bias, scores.dtype), axis=0
             )
 
-        # The softmax runs in float32 (or float64 under a float64 policy) regardless of
-        # the compute dtype, which is what `common.mask_dtype` returns; under
-        # `mixed_float16` an fp16 softmax over a biased logit row is where this package
-        # has repeatedly measured NaNs. The result is cast back to the compute dtype.
-        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
+        # Softmax runs in float32+ regardless of compute dtype (common.mask_dtype);
+        # an fp16 softmax over a biased logit row has repeatedly measured NaNs. See common.py D-007.
         softmax_dtype = mask_dtype(
             getattr(scores.dtype, "name", None) or str(scores.dtype)
         )
         if attention_mask is not None:
             keep = self._broadcast_mask(attention_mask, seq_len)
-            # `attention_mask` is passed through VERBATIM as the keep predicate; this
-            # site performs no polarity inference (see `common.apply_attention_mask`).
+            # attention_mask passes through verbatim as the keep predicate; no polarity inference.
             scores = apply_attention_mask(
                 scores, keep, out_dtype=softmax_dtype, rescue_axis=-1
             )
