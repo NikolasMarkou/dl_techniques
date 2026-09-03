@@ -1,60 +1,35 @@
-"""
-Multi-query attention for mobile and edge vision models.
+"""Multi-query attention for mobile and edge vision models, the :class:`MobileMQA` layer.
 
-MobileMQA is a subclass of Grouped Query Attention with the group count pinned
-to one. All query heads share ONE key/value head. That is the whole idea: K and
-V are what a decoder must re-read every step, so shrinking them to a single
-head is where the memory bandwidth goes.
+``MobileMQA`` subclasses :class:`GroupedQueryAttention` with the group
+count pinned to one, so all query heads share a single key/value head —
+the K and V a decoder must re-read every step, and so where the memory
+bandwidth goes. Three more differences from the parent: an optional
+stride-2 depthwise convolution downsamples K and V before attention
+(queries stay full resolution), the residual is a learnable scalar
+``x + lambda * Attention(x)`` rather than a plain skip, and RoPE is
+disabled (``rope_percentage`` forced to 0.0) in favor of explicit
+positional embeddings or CNN-induced locality. Everything else —
+projections, attention scale, probability normalizer, dropout, output
+shape — is inherited unchanged.
 
-Architecture:
-    Four differences from the parent GQA:
+With ``num_kv_heads = 1`` the grouped-query form collapses to
+multi-query attention, one K/V head broadcast to every query head::
 
-    1.  **One shared K/V head.** ``num_kv_heads`` is forced to 1 in
-        ``__init__`` and is not a constructor argument. All ``num_heads``
-        query heads read the same K and the same V.
-    2.  **Optional spatial downsampling.** A stride-2 depthwise convolution
-        runs on the K and V feature maps before attention. Q stays at full
-        resolution, so the score matrix is ``(N, M)`` with ``M`` about
-        ``N / 4`` instead of ``(N, N)``.
-    3.  **Learnable residual.** The output is ``x + lambda * Attention(x)``
-        with a trainable scalar ``lambda`` initialized to 1.0, not a plain
-        skip connection.
-    4.  **No RoPE.** ``rope_percentage`` is forced to 0.0. MobileMQA relies on
-        explicit positional embeddings or on CNN-induced locality instead.
-
-    Everything else is inherited from ``GroupedQueryAttention``: the four
-    ``Dense`` projections, the precomputed attention scale, the
-    ``ProbabilityOutput`` normalizer, the attention dropout and
-    ``compute_output_shape()``. See the ``[REUSE]`` note on the class below.
-
-Foundational Mathematics:
-    With ``num_kv_heads = 1`` the grouped-query form collapses to multi-query
-    attention: one K,V head broadcast to all ``num_heads`` query heads::
-
-        Attention(Q, K, V) = softmax( Q @ K^T / sqrt(d_k) ) @ V
-        output             = x + lambda * W_o( Attention(x) )
-
-    Optional stride-2 depthwise downsampling shortens the key/value sequence
-    from ``N = H*W`` to ``M = ceil(H/2)*ceil(W/2)``, roughly ``N / 4``.
+    Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
+    output             = x + lambda * W_o(Attention(x))
 
 References:
-    - Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need."
-    - Rombach et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models."
+    - Shazeer, 2019. Fast Transformer Decoding: One Write-Head is All You
+      Need. (https://arxiv.org/abs/1911.02150)
+    - Rombach et al., 2022. High-Resolution Image Synthesis with Latent
+      Diffusion Models. (https://arxiv.org/abs/2112.10752)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Tuple, Optional, Any, Dict, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .group_query_attention import GroupedQueryAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.mobile_mqa")
 class MobileMQA(GroupedQueryAttention):
@@ -67,85 +42,69 @@ class MobileMQA(GroupedQueryAttention):
     uses a learnable lambda-scaled residual connection
     ``output = input + lambda * Attention(input)``.
 
-    **[REUSE] This class has NO local ``compute_output_shape()``, on purpose.**
-
-    It inherits ``GroupedQueryAttention.compute_output_shape()``, which returns
-    ``tuple(input_shape)``. That is right here, and it is not an accident of
-    omission. The output is ``inputs + lambda * attention_output``, an addition
-    against ``inputs``, so the shapes must already match: K/V downsampling
-    shortens only the key/value sequence, never the query sequence, and ``w_o``
-    projects back to ``dim``.
-
-    WHAT NOT TO DO: don't add an override that re-derives
-    ``tuple(input_shape)``. A second copy is a second thing to keep in step
-    with the parent for no behavioral gain, and if the parent's shape contract
-    changes, the silently-shadowing override is what breaks.
+    This class has no local ``compute_output_shape()``. It inherits
+    :meth:`GroupedQueryAttention.compute_output_shape`, which returns
+    ``tuple(input_shape)`` — correct here because the output is
+    ``inputs + lambda * attention_output``, an addition against
+    ``inputs``, so the shapes must already match: K/V downsampling
+    shortens only the key/value sequence, never the query sequence, and
+    ``w_o`` projects back to ``dim``. Do not add an override that
+    re-derives ``tuple(input_shape)`` — a second copy tracks the parent
+    for no behavioral gain and silently shadows it if the parent's shape
+    contract changes.
 
     Also inherited rather than re-created: ``w_q``/``w_k``/``w_v``/``w_o``,
     ``self.scale`` (the precomputed Python-float attention scale),
-    ``self.attn_prob``, ``self.dropout`` and the optional ``q_norm``/``k_norm``.
-    Only ``call()`` is overridden, plus the ``downsample`` conv and the
-    ``lambda`` weight added here.
+    ``self.attn_prob``, ``self.dropout`` and the optional
+    ``q_norm``/``k_norm``. Only ``call()`` is overridden, plus the
+    ``downsample`` conv and the ``lambda`` weight added here.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-                 inputs  [B, H, W, C]  (a spatial map)
-                             │
-                 ┌───────────┴───────────┐
-                 ▼                       ▼
-          ┌─────────────┐        ┌────────────────────┐
-          │ w_q         │        │ w_k  and  w_v      │
-          │ Dense, from │        │ Dense, from GQA.   │
-          │ GQA         │        │ num_kv_heads == 1, │
-          │             │        │ so each emits ONE  │
-          │             │        │ head's worth       │
-          └──────┬──────┘        └─────────┬──────────┘
-                 │                         ▼
-                 │              ┌────────────────────┐
-                 │              │ downsample         │
-                 │              │ DepthwiseConv2D,   │
-                 │              │ stride 2 (optional)│
-                 │              │ K and V ONLY       │
-                 │              └─────────┬──────────┘
-                 ▼                        ▼
-          q [B, heads, N, d]      k, v [B, 1, M, d]
-          N = H * W               M = N, or about N/4
-                 │                        │
-                 ▼                        ▼
-          q_norm (optional)        k_norm (optional)
-                 │                        │
-                 │                        ▼
-                 │              ┌────────────────────┐
-                 │              │ SHARED K/V:        │
-                 │              │ ops.repeat over    │
-                 │              │ axis 1, num_heads  │
-                 │              │ times. One head's  │
-                 │              │ weights serve      │
-                 │              │ every query head.  │
-                 │              └─────────┬──────────┘
-                 └────────────┬───────────┘
-                              ▼
-                    S = q . k^T * scale     [B, heads, N, M]
-                              ▼
-                    attn_prob(S) -> dropout -> A . v
-                              ▼
-                    transpose, reshape  [B, H, W, C]
-                              ▼
-                             w_o
-                              ▼
-                inputs + lambda_param * w_o(...)
-                a TRAINABLE scalar residual, lambda init 1.0
-                              ▼
-                    output  [B, H, W, C]
+        inputs [B, H, W, C]  (a spatial map)
+                │
+        ┌───────┴────────┐
+        ▼                 ▼
+        w_q          w_k, w_v (from GQA;
+        (from GQA)   num_kv_heads=1, so
+        │            each emits one head)
+        │                 ▼
+        │            downsample (optional)
+        │            DepthwiseConv2D stride 2,
+        │            on K and V only
+        ▼                 ▼
+        q [B,heads,N,d]  k,v [B,1,M,d]
+        N = H*W          M = N or about N/4
+        │                 │
+        ▼                 ▼
+        q_norm (opt.)   k_norm (opt.)
+        │                 ▼
+        │            repeat over axis 1,
+        │            num_heads times: one
+        │            head's weights serve
+        │            every query head
+        └────────┬────────┘
+                  ▼
+        S = q . k^T * scale   [B, heads, N, M]
+                  ▼
+        attn_prob(S) -> dropout -> A . v
+                  ▼
+        transpose, reshape    [B, H, W, C]
+                  ▼
+                 w_o
+                  ▼
+        inputs + lambda_param * w_o(...)
+        (lambda is a trainable scalar, init 1.0)
+                  ▼
+        output [B, H, W, C]
 
-        attention_mask is accepted and NEVER applied. There is no mask
-        code on this path, so padding keeps its full weight. The
-        parameter note carries the measured damage.
-        return_attention_weights=True returns (output, A), with A of
-        shape [B, heads, N, M].
-
+    ``attention_mask`` is accepted but never applied — there is no mask
+    code on this path, so padding keeps its full weight; see the
+    ``attention_mask`` parameter note below for the measured damage.
+    ``return_attention_weights=True`` returns ``(output, A)``, with ``A``
+    of shape ``[B, heads, N, M]``.
 
     :param dim: Input/output dimension. Must be positive and divisible
         by ``num_heads``.
@@ -201,20 +160,10 @@ class MobileMQA(GroupedQueryAttention):
             or ``num_heads`` is not positive, or if ``dim`` is not divisible by
             ``num_heads``.
         """
-        # This `__init__` raises nothing itself, and that is on purpose. Every
-        # constrained argument it takes is validated one frame down, by
-        # `GroupedQueryAttention._validate_inputs`, which raises on non-positive
-        # `dim`, non-positive `num_heads`, and `dim % num_heads != 0`. The two
-        # arguments this subclass adds are `use_downsampling` (a bool, no range
-        # to check) and the initializer/regularizer pair, which Keras validates
-        # when it resolves them.
-        #
-        # WHAT NOT TO DO: don't add a local `if dim <= 0: raise ValueError(...)`
-        # here. It duplicates the parent's check, and it raises a DIFFERENT
-        # message BEFORE the parent's, which silently breaks any
-        # `pytest.raises(..., match=...)` pinned on the parent's text. If
-        # MobileMQA ever grows a constrained argument of its own, validate THAT
-        # argument here and leave the inherited three alone.
+        # Validation happens one frame down, in
+        # GroupedQueryAttention._validate_inputs. Do not add a local dim<=0
+        # check: it would raise a different message before the parent's and
+        # break any test pinned on the parent's text.
 
         # num_kv_heads=1 is the definition of multi-query attention, and
         # rope_percentage=0.0 disables RoPE. Neither is a constructor argument,
@@ -274,9 +223,8 @@ class MobileMQA(GroupedQueryAttention):
             dtype=self.compute_dtype
         )
 
-        # The downsample conv runs on the PROJECTED K/V, not on the input.
-        # w_k and w_v emit num_kv_heads * head_dim channels, and num_kv_heads
-        # is 1, so their output is (B, H, W, head_dim).
+        # Runs on the projected K/V, not the input: w_k/w_v emit head_dim
+        # channels since num_kv_heads is 1.
         if self.downsample is not None:
             if len(input_shape) == 4:
                 kv_shape = list(input_shape)
@@ -310,18 +258,16 @@ class MobileMQA(GroupedQueryAttention):
         :type inputs: keras.KerasTensor
         :param training: Whether in training or inference mode.
         :type training: bool or None
-        :param attention_mask: Accepted and **IGNORED**. It is in the signature
-            only for compatibility with the package's attention contract; no
-            code on this path reads it. Downsampling K/V changes the key/value
-            sequence length, so a general token mask has no unambiguous target
-            here.
-
-            "No effect" understates the problem, so here is the measurement,
-            taken 2026-08-27. Padding is not merely unmasked, it CONTAMINATES
-            real positions. Unit-scale padding moved a real position's output by
-            roughly its own magnitude, 2.77 against a 2.72 baseline. Adversarial
-            padding moved it by 318 against a baseline scale of 1 to 4. Don't
-            feed this layer a padded batch.
+        :param attention_mask: Accepted for compatibility with the
+            package's attention contract, but ignored: no code on this
+            path reads it, since downsampling K/V changes the key/value
+            sequence length and a general token mask has no unambiguous
+            target here. Padding is not merely unmasked, it contaminates
+            real positions: measured 2026-08-27, unit-scale padding moved
+            a real position's output by roughly its own magnitude (2.77
+            against a 2.72 baseline), and adversarial padding by 318
+            against a baseline scale of 1 to 4. Do not feed this layer a
+            padded batch.
         :type attention_mask: keras.KerasTensor or None
         :param return_attention_weights: Whether to return attention
             weights alongside the output.
@@ -376,10 +322,8 @@ class MobileMQA(GroupedQueryAttention):
         if self.k_norm is not None:
             k = self.k_norm(k)
 
-        # 5. Broadcast the ONE K/V head to every query head. This is the
-        # sharing that makes the layer multi-QUERY: one set of K/V weights
-        # serves all num_heads queries. num_kv_heads is 1, so num_groups
-        # equals num_heads.
+        # 5. Broadcast the one K/V head to every query head: this is the
+        # sharing that makes the layer multi-query.
         k = keras.ops.repeat(k, self.num_heads, axis=1)
         v = keras.ops.repeat(v, self.num_heads, axis=1)
 
@@ -412,8 +356,7 @@ class MobileMQA(GroupedQueryAttention):
         # 9. Output projection, then the scaled residual.
         attention_output = self.w_o(out, training=training)
 
-        # This is the layer's signature: a TRAINABLE scalar on the residual
-        # branch, not a plain skip connection.
+        # A trainable scalar on the residual branch, not a plain skip.
         output = inputs + self.lambda_param * attention_output
 
         if return_attention_weights:
@@ -431,16 +374,10 @@ class MobileMQA(GroupedQueryAttention):
         """
         config = super().get_config()
 
-        # Drop the two parent keys this subclass pins in __init__:
-        # num_kv_heads=1 and rope_percentage=0.0. Neither is a constructor
-        # argument here, so leaving them in the config makes
-        # `from_config(get_config())` raise a duplicate-keyword TypeError. The
-        # parent receives them through the kwargs dict this class populates, and
-        # a config-supplied copy collides with it.
-        #
-        # WHAT NOT TO DO: don't keep them for transparency. The key SET of this
-        # config is part of the frozen serialization surface, and adding a key
-        # breaks the round-trip of every existing .keras checkpoint.
+        # num_kv_heads and rope_percentage aren't constructor arguments here;
+        # leaving them would make from_config(get_config()) raise a
+        # duplicate-keyword TypeError, since the parent receives them through
+        # the kwargs dict this class populates in __init__.
         params_to_remove = ['num_kv_heads', 'rope_percentage']
         for param in params_to_remove:
             config.pop(param, None)
@@ -449,5 +386,3 @@ class MobileMQA(GroupedQueryAttention):
             "use_downsampling": self.use_downsampling,
         })
         return config
-
-# ---------------------------------------------------------------------

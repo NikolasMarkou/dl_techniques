@@ -1,64 +1,30 @@
-"""
-A spatial attention map for convolutional feature maps.
+"""Spatial attention map for convolutional feature maps, the :class:`SpatialAttention` layer.
 
-This module implements the spatial attention stage of the Convolutional Block
-Attention Module (CBAM). It scores WHERE in a feature map the information sits.
-Its sibling, channel attention, scores WHAT features matter.
+This is the spatial half of the Convolutional Block Attention Module
+(CBAM): it scores where in a feature map the information sits, while its
+sibling channel attention scores which features matter. The layer pools
+the channel axis with both mean and max, concatenates the two resulting
+`(H, W, 1)` maps into `(H, W, 2)`, and runs one large-kernel convolution
+(7x7 by default) over that descriptor, since saliency is a neighbourhood
+property a 1x1 convolution cannot see. A gate activation, sigmoid by
+default, turns the convolution output into the final `(H, W, 1)` map:
+`M_s(F) = sigma(f^k([AvgPool(F); MaxPool(F)]))`.
 
-Architecture:
-    The layer first squeezes every channel into two 2D descriptors, then turns
-    those descriptors into one attention map. Two steps:
-
-    1.  **Channel information aggregation.** Two pooling ops run along the
-        channel axis, each producing a 2D map:
-
-        -   **Average pooling** summarizes the mean response at every spatial
-            location. This carries global context.
-        -   **Max pooling** reports the strongest single response at every
-            spatial location. This survives when a signal is concentrated
-            rather than spread.
-
-    2.  **Spatial map generation.** The two 2D maps are concatenated on the
-        channel axis into a `(H, W, 2)` descriptor. One convolution with a
-        single filter and a large kernel (7x7 by default) runs over it. A large
-        kernel is used because saliency is a neighbourhood property. The result
-        goes through the gate activation, sigmoid by default, which produces
-        the final map.
-
-Foundational Mathematics:
-    The spatial attention map `M_s` for an input feature map `F` is:
-
-        M_s(F) = σ( f^k ([AvgPool(F); MaxPool(F)]) )
-
-    -   `AvgPool(F)` and `MaxPool(F)` pool along the channel axis. Each turns a
-        tensor of shape `(H, W, C)` into `(H, W, 1)`.
-    -   `[;]` concatenates the two maps on the channel axis, giving `(H, W, 2)`.
-    -   `f^k` is a 2D convolution with one filter of kernel size `k x k`, for
-        example 7x7. It acts as a spatial feature detector.
-    -   `σ` is the gate activation. The default sigmoid bounds the output to
-        `[0, 1]`, which is what makes it usable as a multiplicative mask. A
-        different activation changes that range.
+The layer returns the attention map itself, not the gated input — the
+caller multiplies it back in. It takes no `channels` argument: pooling
+fully reduces the channel axis before the convolution sees it, so one
+instance works for any input width.
 
 References:
-    - The foundational paper for this module:
-      Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
-      Convolutional Block Attention Module". European Conference on
-      Computer Vision (ECCV).
+    - Woo et al., 2018. CBAM: Convolutional Block Attention Module.
+      (https://arxiv.org/abs/1807.06521)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.spatial_attention")
@@ -66,44 +32,40 @@ class SpatialAttention(keras.layers.Layer):
     """
     Spatial attention from CBAM: score where the information sits.
 
-    Pools the input over its channel axis with mean and max, concatenates the
-    two 2D maps, and runs one convolution plus a gate activation over the
-    result. The layer returns the attention MAP, not the gated input:
+    Pools the input over its channel axis with mean and max, concatenates
+    the two 2D maps, and runs one convolution plus a gate activation over
+    the result. The layer returns the attention map, not the gated input:
     ``M_s(F) = sigma(f^{k x k}([AvgPool(F); MaxPool(F)]))``. The caller
-    multiplies it back in. :class:`CBAM` is the caller that does so.
+    multiplies it back in; :class:`CBAM` is the caller that does so.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-                    inputs  [B, H, W, C]
-            attention_mask is accepted but IGNORED here
-                              │
-                    ┌─────────┴─────────┐
-                    ▼                   ▼
-          ┌───────────────────┐ ┌───────────────────┐
-          │ mean over axis -1 │ │ max over axis -1  │
-          │ keepdims=True     │ │ keepdims=True     │
-          └─────────┬─────────┘ └─────────┬─────────┘
-            [B,H,W,1]                     [B,H,W,1]
-                    └─────────┬───────────┘
-                              ▼
-                    concatenate on axis -1
-                              │  [B, H, W, 2]
-                              ▼
-          ┌───────────────────────────────────────┐
-          │ conv: Conv2D(filters=1,               │
-          │   kernel_size=k, padding='same')      │
-          └──────────────────┬────────────────────┘
-                             │  [B, H, W, 1]
-                             ▼
-          ┌───────────────────────────────────────┐
-          │ gate_activation                       │
-          │ (gate_activation_type; 'sigmoid' by   │
-          │  default, which bounds to [0, 1])     │
-          └──────────────────┬────────────────────┘
-                             ▼
-                    output  [B, H, W, 1]
+        inputs [B, H, W, C]  (attention_mask accepted, ignored)
+                    │
+            ┌───────┴───────┐
+            ▼                ▼
+        mean(axis=-1)   max(axis=-1)
+        keepdims=True   keepdims=True
+        [B,H,W,1]        [B,H,W,1]
+            └───────┬───────┘
+                    ▼
+            concatenate(axis=-1)
+                    │  [B, H, W, 2]
+                    ▼
+        ┌────────────────────────┐
+        │ Conv2D(filters=1,      │
+        │   kernel_size=k)       │
+        └───────────┬────────────┘
+                    │  [B, H, W, 1]
+                    ▼
+        ┌────────────────────────┐
+        │ gate_activation        │
+        │ ('sigmoid' by default) │
+        └───────────┬────────────┘
+                    ▼
+            output [B, H, W, 1]
 
     :param kernel_size: Size of the convolution kernel. Must be odd and
         positive. Defaults to 7 following the original CBAM paper.
@@ -161,10 +123,10 @@ class SpatialAttention(keras.layers.Layer):
     .. note::
 
        Unlike its CBAM sibling :class:`ChannelAttention`, this layer takes
-       **no** ``channels`` argument. The two pooling ops fully reduce the
-       channel axis before the convolution sees it, so one instance works for
-       any ``C``. That is why :class:`CBAM` forwards ``channels`` to the
-       channel branch only.
+       no ``channels`` argument. The two pooling ops fully reduce the
+       channel axis before the convolution sees it, so one instance works
+       for any ``C``, which is why :class:`CBAM` forwards ``channels`` to
+       the channel branch only.
     """
 
     def __init__(
@@ -213,7 +175,6 @@ class SpatialAttention(keras.layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
-        # CREATE sub-layer in __init__ following modern Keras 3 pattern
         self.conv = keras.layers.Conv2D(
             filters=1,
             kernel_size=self.kernel_size,
@@ -247,13 +208,8 @@ class SpatialAttention(keras.layers.Layer):
         if self.built:
             return
 
-        # This rank check mirrors ChannelAttention.build in channel_attention.py
-        # and uses the same message shape, so both halves of CBAM fail the same
-        # way. Without it a non-4D input reached self.conv.build below, which
-        # forces [-1] = 2 onto a shape of the wrong length. That surfaced as the
-        # Keras-internal message "Kernel shape must have the same length as
-        # input, but received kernel of shape (k, k, 2, 1) and input of shape
-        # (...)", which names neither this layer nor the real problem.
+        # Without this check a non-4D input reaches self.conv.build below with
+        # a confusing Keras-internal kernel-shape error instead of this one.
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape (batch, height, width, channels), "
@@ -271,7 +227,6 @@ class SpatialAttention(keras.layers.Layer):
         gate_input_shape[-1] = 1
         self.gate_activation.build(tuple(gate_input_shape))
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -287,11 +242,10 @@ class SpatialAttention(keras.layers.Layer):
             ``(batch_size, height, width, channels)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Accepted for signature compatibility with the
-            package's masked attention layers, but **ignored**. There is no
-            masking code on this path and nothing is suppressed. This is a
-            vision layer that pools over channels and emits a per-location
-            gate; it has no token-masking semantics. The parameter stays in
-            the signature so the layer remains drop-in compatible with masked
+            package's masked attention layers, but ignored. This vision
+            layer pools over channels and emits a per-location gate, so it
+            has no token-masking semantics; the parameter stays in the
+            signature so the layer remains drop-in compatible with masked
             attention layers and with existing serialized configs.
         :type attention_mask: keras.KerasTensor or None
         :param training: Whether the layer should behave in training mode
@@ -355,5 +309,3 @@ class SpatialAttention(keras.layers.Layer):
             "gate_activation_args": self.gate_activation_args,
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,38 +1,31 @@
-"""
-Asymmetric cross-attention: the Perceiver's information bottleneck.
+"""Asymmetric cross-attention, the Perceiver's information bottleneck, the :class:`PerceiverAttention` layer.
 
-A transformer's cost is quadratic in its input length, which means the input
-itself decides how deep a model can afford to be. For an image or an audio
-waveform — tens of thousands of positions — that ceiling arrives immediately, and
-the usual response is to shrink the input first with a modality-specific frontend:
-patches for images, filterbanks for audio, tokenizers for text.
+A transformer's cost is quadratic in input length, so a long input caps
+how deep a model can afford to be; the usual fix is a modality-specific
+frontend that shrinks the input first (patches, filterbanks,
+tokenizers). The Perceiver decouples the two quantities instead: a
+small, fixed-size latent array supplies the queries, and the large data
+array supplies the keys and values, so the attention matrix is
+``(N, M)`` rather than ``(M, M)`` with ``N << M``. Every self-attention
+block stacked after the bottleneck then operates on the latents alone,
+at ``O(N^2)`` regardless of ``M``, so depth becomes free of input size
+and the same architecture accepts any modality without a bespoke
+frontend.
 
-The Perceiver's answer is to decouple the two quantities instead. A small,
-fixed-size latent array supplies the queries; the large data array supplies the
-keys and values. The attention matrix is then ``(N, M)`` rather than ``(M, M)``,
-costing ``O(N * M)`` with ``N << M``, and — the part that matters — every
-self-attention block stacked afterwards operates on the latents alone, at
-``O(N^2)``, no matter how large ``M`` was. Depth becomes free of input size, so the
-same architecture accepts any modality without a bespoke frontend: the bottleneck
-does the reduction, and it learns to.
+Queries and keys/values read different tensors, often of different
+modalities, so their projections cannot be fused or shared — this class
+pins ``shared_qk_projections=False`` in the wrapped engine rather than
+exposing it. The class owns no attention arithmetic of its own; it is a
+thin cross-attention facade over :class:`MultiHeadCrossAttention`. The
+sibling facade over the same engine is
+:class:`~.multi_head_attention.MultiHeadAttention`, which presets the
+self-attention configuration instead.
 
-The asymmetry has a consequence for the weights. Queries and keys/values read
-DIFFERENT tensors — often of different modalities — so their projections cannot be
-fused or shared, which is why this layer pins `shared_qk_projections=False` in the
-wrapped engine rather than exposing it.
+With a latent array ``X_lat`` of ``N`` rows and a data array ``X_data``
+of ``M`` rows::
 
-This module owns no attention arithmetic. It is a thin, cross-attention-shaped
-facade over `MultiHeadCrossAttention`: every projection, score, mask application,
-normalization and output projection happens in that one sub-layer. `build` only
-disambiguates and validates shapes, and `call` is a single delegating expression.
-The sibling facade over the same engine is `multi_head_attention.MultiHeadAttention`,
-which presets the self-attention configuration instead.
-
-Foundational mathematics, with a latent array ``X_lat`` of ``N`` rows and a data
-array ``X_data`` of ``M`` rows::
-
-    Q = X_lat  W_q,   K = X_data W_k,   V = X_data W_v
-    Output    = softmax( Q K^T / sqrt(d_k) ) V
+    Q = X_lat W_q,   K = X_data W_k,   V = X_data W_v
+    Output    = softmax(Q K^T / sqrt(d_k)) V
 
 References:
     - Jaegle et al., 2021. Perceiver: General Perception with Iterative Attention.
@@ -46,41 +39,31 @@ References:
       fixed-size-bottleneck idea) (https://arxiv.org/abs/1810.00825)
 """
 
-# ---------------------------------------------------------------------
-
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 
 def _is_list_of_shapes(s: Any) -> bool:
-    """Return whether ``s`` is a container of SHAPES rather than a single shape.
+    """Return whether ``s`` is a container of shapes rather than a single shape.
 
     This module's one shape-classification predicate. It sits at module level
     rather than inside ``build`` so that :meth:`PerceiverAttention.build` and
     :meth:`PerceiverAttention.compute_output_shape` cannot classify the same
-    argument differently - both call this function and nothing else. Two
-    separate copies of the rule disagreeing is the defect it exists to
-    prevent, so don't inline it into either caller.
+    argument differently: both call this function and nothing else, since two
+    separate copies of the rule disagreeing is the defect it exists to prevent.
 
-    Note what it accepts: any list OR tuple whose first element is itself a
-    list or tuple. A tuple of two shape tuples is a shape PAIR here, not a
-    single shape.
+    Accepts any list or tuple whose first element is itself a list or tuple —
+    a tuple of two shape tuples is a shape pair here, not a single shape.
 
     :param s: A shape, or a container of shapes.
     :type s: Any
 
     :return: ``True`` if ``s``'s first element is itself a shape (list/tuple),
-        i.e. ``s`` describes MULTIPLE inputs; ``False`` if ``s`` is one shape.
+        i.e. ``s`` describes multiple inputs; ``False`` if ``s`` is one shape.
     :rtype: bool
     """
     return (
@@ -89,8 +72,6 @@ def _is_list_of_shapes(s: Any) -> bool:
         and isinstance(s[0], (list, tuple))
     )
 
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.perceiver_attention")
 class PerceiverAttention(keras.layers.Layer):
@@ -106,74 +87,49 @@ class PerceiverAttention(keras.layers.Layer):
 
     ``shared_qk_projections=False`` is pinned rather than exposed: the query path
     and the key/value path read different tensors, so their projections must be
-    independent.
-
-    **[REUSE] This class contains no attention arithmetic.** Every projection,
-    score, mask application, probability normalization and output projection is
-    performed by the single ``MultiHeadCrossAttention`` sub-layer created in
-    ``__init__``, with ``shared_qk_projections=False`` so the query path and the
-    key/value path get independent weights (required — they see different
-    tensors). ``build()`` only disambiguates and validates shapes; ``call()`` is a
-    one-expression delegation.
+    independent. This class contains no attention arithmetic of its own — every
+    projection, score, mask application, probability normalization and output
+    projection is performed by the single ``MultiHeadCrossAttention`` sub-layer
+    created in ``__init__``. ``build()`` only disambiguates and validates
+    shapes; ``call()`` is a one-expression delegation. Do not inline the
+    QKV/score/softmax pipeline here: the wrapper's nested ``cross_attention``
+    sub-layer name is baked into every saved ``.keras`` checkpoint of this
+    layer, so flattening it would be a silent checkpoint break.
 
     Its sibling facade over the same engine is
-    ``multi_head_attention.MultiHeadAttention``, which presets the
+    :class:`~.multi_head_attention.MultiHeadAttention`, which presets the
     self-attention configuration instead.
 
-    WHAT NOT TO DO: do not inline the QKV/score/softmax pipeline here. The
-    wrapper's nested ``cross_attention`` sub-layer name is baked into every
-    saved ``.keras`` checkpoint of this layer, so flattening it is a silent
-    checkpoint break rather than a refactor.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-          ┌─────────────────────┐   ┌─────────────────────┐
-          │ query_input         │   │ kv_input            │
-          │   the latent array  │   │   the data array    │
-          │   [B, N, D]         │   │   [B, M, D]         │
-          │   N is FIXED by     │   │   M varies with     │
-          │   the architecture  │   │   the input         │
-          └──────────┬──────────┘   └──────────┬──────────┘
-                     └────────────┬────────────┘
-                                  ▼
-          ┌───────────────────────────────────────┐
-          │ cross_attention                       │
-          │   MultiHeadCrossAttention, built in   │
-          │   __init__ with                       │
-          │     shared_qk_projections=False       │
-          │   so the query path and the key/value │
-          │   path get INDEPENDENT weights - they │
-          │   read different tensors              │
-          │                                       │
-          │   Q from query_input, K and V from    │
-          │   kv_input, QK-norm, scaled scores,   │
-          │   mask, probability, dropout,         │
-          │   weighted sum of V, merge heads,     │
-          │   output projection                   │
-          └──────────────────┬────────────────────┘
-                             ▼
-                   output  [B, N, D]
-                   QUERY-shaped, not data-shaped
+        query_input            kv_input
+        the latent array       the data array
+        [B, N, D]               [B, M, D]
+        N is fixed by the       M varies with
+        architecture             the input
+              └──────────┬──────────┘
+                          ▼
+        ┌──────────────────────────────┐
+        │ cross_attention                │
+        │  (MultiHeadCrossAttention,     │
+        │   shared_qk_projections=False: │
+        │   query and key/value paths    │
+        │   get independent weights)     │
+        │                                │
+        │  Q from query_input, K and V   │
+        │  from kv_input, QK-norm,       │
+        │  scaled scores, mask,          │
+        │  probability, dropout,         │
+        │  weighted sum of V, merge      │
+        │  heads, output projection      │
+        └───────────────┬────────────────┘
+                        ▼
+                output [B, N, D]
+                (query-shaped, not data-shaped)
 
-        kv_input=None falls through to self-attention in the engine.
-        build() only disambiguates and validates shapes. Don't flatten
-        the sub-layer away: the name cross_attention is baked into every
-        saved .keras checkpoint of this class.
-
-    **Why the asymmetry pays:**
-
-    .. code-block:: text
-
-                                attention cost   depth per block
-        self-attention on data  O(M^2)           O(M^2)
-        Perceiver bottleneck    O(N * M)         O(N^2)  <- no M
-
-        With N << M the data array is read ONCE, and every self-
-        attention block after the bottleneck is priced on N alone. That
-        is what lets one architecture take images, audio or point
-        clouds with no modality-specific frontend.
+    ``kv_input=None`` falls through to self-attention in the engine.
 
     :param dim: Input/output dimension. Must be positive and divisible by num_heads.
     :type dim: int
@@ -219,12 +175,12 @@ class PerceiverAttention(keras.layers.Layer):
     Input shape:
         - Cross-attention: ``query_input`` ``(batch, N, dim)`` and ``kv_input``
           ``(batch, M, dim)``; ``build`` accepts the pair as a list of two shapes.
-          Unlike the wrapped engine, BOTH shapes are validated here — rank 3 and a
+          Unlike the wrapped engine, both shapes are validated here — rank 3 and a
           trailing dimension equal to ``dim``.
         - Self-attention: a single 3D shape, used for both roles.
 
     Output shape:
-        3D tensor ``(batch, N, dim)`` — the QUERY's sequence length. The data
+        3D tensor ``(batch, N, dim)``, the query's sequence length. The data
         array's length ``M`` never appears in the output; that is the bottleneck.
 
     Example:
@@ -246,9 +202,9 @@ class PerceiverAttention(keras.layers.Layer):
         applies here unchanged — including the fully-masked-row rescue. Read that
         class's anchors, not this file, when reasoning about the numerics.
 
-    Attributes:
-        cross_attention: The single ``MultiHeadCrossAttention`` sub-layer, named
-            ``cross_attention``. That name is part of the checkpoint format.
+    :ivar cross_attention: The single ``MultiHeadCrossAttention`` sub-layer,
+        named ``cross_attention``. That name is part of the checkpoint format.
+    :vartype cross_attention: MultiHeadCrossAttention
     """
 
     def __init__(
@@ -275,21 +231,14 @@ class PerceiverAttention(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
-        # Adopts the shared validator. Its message is character-for-character
-        # what stood here, so the `match="must be divisible"` regex in
-        # `test_perceiver_attention.py::test_invalid_divisibility` still matches
-        # and no diagnostic detail is lost. Its position in the validation
-        # sequence is unchanged.
         validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
@@ -327,7 +276,7 @@ class PerceiverAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> None:
-        """Disambiguate the shape argument, validate BOTH shapes, build the sub-layer.
+        """Disambiguate the shape argument, validate both shapes, build the sub-layer.
 
         Classification goes through the module-level :func:`_is_list_of_shapes` so
         this method and :meth:`compute_output_shape` cannot disagree — the two
@@ -371,7 +320,6 @@ class PerceiverAttention(keras.layers.Layer):
         # weight restoration.
         self.cross_attention.build(input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -412,9 +360,9 @@ class PerceiverAttention(keras.layers.Layer):
             self,
             input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
     ) -> Tuple[Optional[int], ...]:
-        """Return the QUERY's shape, which is the output's.
+        """Return the query's shape, which is the output's.
 
-        For a shape pair that is the FIRST entry: the data array's length is
+        For a shape pair, that is entry 0: the data array's length is
         consumed by the bottleneck and never reaches the output.
 
         :param input_shape: Input shape(s), either single or list of two shapes.
@@ -454,5 +402,3 @@ class PerceiverAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
-
-# ---------------------------------------------------------------------

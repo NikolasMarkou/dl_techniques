@@ -1,145 +1,89 @@
-"""
-Multi-head self-attention: pairwise relationships between elements of one sequence.
+"""Multi-head self-attention, the :class:`MultiHeadAttention` layer.
 
-The mechanism answers a question a convolution or recurrence cannot ask directly:
-for this element, which other elements matter, and how much? Each position emits
-three projections — a Query stating what it is looking for, a Key advertising what
-it offers, and a Value carrying what it would contribute. Compatibility is the dot
-product of a Query with every Key, normalized into a distribution, and the output
-is the correspondingly weighted sum of Values. Nothing in that computation refers
-to distance, which is why a dependency between positions 1 and 1000 costs the same
-as one between 1 and 2.
+Each position emits a Query, Key and Value; compatibility is the dot
+product of a Query with every Key, normalized into a distribution, and
+the output is the correspondingly weighted sum of Values. Splitting the
+model dimension into ``num_heads`` narrower subspaces and attending
+independently in each lets a position hold several relevance relations
+at once instead of one competing softmax, at no extra parameter cost:
+``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`` with
+``d_k = dim // num_heads``.
 
-The multi-head part is what keeps that flexibility from collapsing. A single
-attention distribution per position forces one notion of relevance, and the softmax
-makes it competitive: attending to a syntactic governor means not attending to a
-semantically similar word. Splitting the model dimension into ``h`` narrower
-subspaces and attending independently in each lets a position hold several
-relevance relations at once, and because the heads share the parameter budget
-rather than adding to it, the cost is the concatenation and one output projection
-that mixes what the heads found.
-
-The ``1/sqrt(d_k)`` factor is the detail that makes the whole thing trainable. A dot
-product of two ``d_k``-dimensional vectors has variance proportional to ``d_k``, so
-without rescaling the logits grow with head width, the softmax saturates, and its
-gradient vanishes exactly where the model is largest. Dividing by ``sqrt(d_k)``
-holds logit variance constant, making head width a free architectural choice rather
-than a stability constraint.
-
-This module owns no attention math of its own. It is a thin, self-attention-shaped
-facade over `MultiHeadCrossAttention`, invoked with `kv_input=None` and
-`shared_qk_projections=True` so a single fused `Dense(3 * dim)` produces Q, K and V
-— possible precisely because all three read the same tensor. `build` validates the
-rank and forwards, `call` is one delegating expression, and
-`compute_output_shape` is the identity. The sibling facade over the same engine is
-`perceiver_attention.PerceiverAttention`, which presets the asymmetric
-cross-attention configuration instead.
-
-Foundational mathematics, with ``d_k = dim // num_heads``::
-
-    Attention(Q, K, V) = softmax( (Q K^T) / sqrt(d_k) ) V
+This class owns no attention arithmetic. It is a thin self-attention
+facade over :class:`MultiHeadCrossAttention`, called with
+``kv_input=None`` and ``shared_qk_projections=True`` so one fused
+``Dense(3 * dim)`` produces Q, K and V. The sibling facade over the same
+engine is :class:`~.perceiver_attention.PerceiverAttention`, which
+presets the asymmetric cross-attention configuration instead.
 
 References:
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
-    - Bahdanau et al., 2014. Neural Machine Translation by Jointly Learning to
-      Align and Translate. (the additive attention this replaced)
-      (https://arxiv.org/abs/1409.0473)
-    - Michel et al., 2019. Are Sixteen Heads Really Better than One?. (what the
-      individual heads turn out to contribute) (https://arxiv.org/abs/1905.10650)
+    - Bahdanau et al., 2014. Neural Machine Translation by Jointly
+      Learning to Align and Translate. (https://arxiv.org/abs/1409.0473)
+    - Michel et al., 2019. Are Sixteen Heads Really Better than One?.
+      (https://arxiv.org/abs/1905.10650)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Tuple, Union, Any, Dict
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.multi_head_attention")
 class MultiHeadAttention(keras.layers.Layer):
     """
     Multi-head self-attention, as a facade over the shared cross-attention engine.
 
-    Provides a clean self-attention interface by wrapping the more general
-    ``MultiHeadCrossAttention``, demonstrating the wrapper pattern for specialized
-    interfaces while keeping robust serialization and one well-tested
-    implementation. The computation is
-    ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`` with Q, K and V all
-    derived from the same input; ``num_heads`` parallel subspaces are attended
-    independently, concatenated, and mixed by a final projection.
+    Wraps the more general ``MultiHeadCrossAttention`` to give it a plain
+    self-attention interface. The computation is
+    ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`` with Q, K and
+    V all derived from the same input; ``num_heads`` parallel subspaces
+    are attended independently, concatenated, and mixed by a final
+    projection. ``shared_qk_projections=True`` is pinned rather than
+    exposed: all three projections read the same tensor, so one fused
+    ``Dense(3 * dim)`` is both correct and cheaper than three.
 
-    ``shared_qk_projections=True`` is pinned rather than exposed: all three
-    projections read the same tensor, so one fused ``Dense(3 * dim)`` is both
-    correct and cheaper than three.
+    This class contains no attention arithmetic of its own. Every
+    projection, score, mask application, probability normalization and
+    output projection happens in the single ``MultiHeadCrossAttention``
+    sub-layer created in ``__init__``. ``build()`` only validates the
+    input rank and forwards; ``call()`` is a one-expression delegation;
+    ``compute_output_shape()`` is the identity. Do not inline a copy of
+    the QKV/score/softmax pipeline here: the sibling already carries
+    QK-norm, ``ProbabilityOutput`` strategies and a mask-broadcast
+    helper, and every ``.keras`` checkpoint of this layer stores the
+    nested sub-layer's weights under the name ``cross_attention``, so
+    flattening the wrapper away would silently break checkpoint loading.
 
-    **[REUSE] This class contains no attention arithmetic.** Every projection,
-    score, mask application, probability normalization and output projection
-    happens in the single ``MultiHeadCrossAttention`` sub-layer created in
-    ``__init__``, invoked with ``kv_input=None`` (self-attention) and
-    ``shared_qk_projections=True`` (one fused QKV ``Dense`` instead of three).
-    ``build()`` only validates the input rank and forwards; ``call()`` is a
-    one-expression delegation; ``compute_output_shape()`` is the identity.
-
-    WHAT NOT TO DO: don't inline a copy of the QKV/score/softmax pipeline here
-    for clarity, or to remove a layer of indirection. Two copies of scaled
-    dot-product attention drift apart - the sibling already carries QK-norm,
-    ``ProbabilityOutput`` strategies and a mask-broadcast helper. And every
-    ``.keras`` checkpoint of this layer stores the nested ``cross_attention``
-    sub-layer's weights under that name, so flattening the wrapper is a silent
-    checkpoint break, not a refactor.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-                    inputs  [B, seq, dim]
-                             │
-                             ▼
-          ┌───────────────────────────────────────┐
-          │ cross_attention                       │
-          │   MultiHeadCrossAttention, built in   │
-          │   __init__ with                       │
-          │     shared_qk_projections=True        │
-          │   called with kv_input=None           │
-          │                                       │
-          │   ONE fused Dense(3 * dim) -> Q, K, V │
-          │   split into num_heads of width d_k   │
-          │   optional QK-norm                    │
-          │   scores * 1/sqrt(d_k)                │
-          │   attention_mask, probability, dropout│
-          │   weighted sum of V, merge heads      │
-          │   output projection back to dim       │
-          └──────────────────┬────────────────────┘
-                             ▼
-                    output  [B, seq, dim]
+        inputs [B, seq, dim]
+                │
+                ▼
+        ┌────────────────────────────┐
+        │ cross_attention             │
+        │  (MultiHeadCrossAttention,  │
+        │   shared_qk_projections,    │
+        │   kv_input=None)            │
+        │                             │
+        │  Dense(3*dim) -> Q, K, V    │
+        │  split into num_heads       │
+        │  optional QK-norm           │
+        │  scores * 1/sqrt(d_k)       │
+        │  mask, probability, dropout │
+        │  weighted sum of V, merge   │
+        │  output projection -> dim   │
+        └──────────────┬──────────────┘
+                        ▼
+                output [B, seq, dim]
 
-        Every stage in that box belongs to MultiHeadCrossAttention. Read
-        its diagram for the internals; this class adds no arithmetic.
-        Don't flatten the sub-layer away: the name cross_attention is
-        baked into every saved .keras checkpoint of this class.
-
-    **Why the heads are split rather than stacked:**
-
-    .. code-block:: text
-
-        one head, width dim     one notion of relevance. The softmax
-                                makes it competitive, so a position must
-                                choose.
-
-        h heads, width dim/h    h relations held at once, same parameter
-                                budget, mixed by the output projection.
-
-        d_k = dim // num_heads. The 1/sqrt(d_k) factor holds logit
-        variance constant, so head width does not saturate the softmax.
+    Every stage in that box belongs to :class:`MultiHeadCrossAttention`;
+    this class adds no arithmetic.
 
     :param dim: Integer, dimension of input embeddings. Must be positive
         and divisible by num_heads.
@@ -223,9 +167,9 @@ class MultiHeadAttention(keras.layers.Layer):
         here unchanged — including the fully-masked-row rescue. Read that class's
         anchors, not this file, when reasoning about the numerics.
 
-    Attributes:
-        cross_attention: The single ``MultiHeadCrossAttention`` sub-layer, named
-            ``cross_attention``. That name is part of the checkpoint format.
+    :ivar cross_attention: The single ``MultiHeadCrossAttention`` sub-layer,
+        named ``cross_attention``. That name is part of the checkpoint format.
+    :vartype cross_attention: MultiHeadCrossAttention
     """
 
     def __init__(
@@ -247,31 +191,21 @@ class MultiHeadAttention(keras.layers.Layer):
 
         Every argument is stored and forwarded verbatim. The only values this
         class supplies itself are ``shared_qk_projections=True`` and
-        ``bias_initializer="zeros"``. The check ORDER below is load-carrying and
-        is explained in the comment beside it. See the class docstring for the
+        ``bias_initializer="zeros"``. See the class docstring for the
         parameter reference.
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
-        # Adopts the shared validator. Its message is character-for-character
-        # what stood here - `dim (63) must be divisible by num_heads (8)` - so the
-        # regex in
-        # `test_multi_head_attention.py::test_invalid_dim_not_divisible` still
-        # matches and no diagnostic detail is lost.
-        #
-        # Don't move this below the `num_heads <= 0` guard. It has always run
-        # first, Python's `%` on a negative modulus does not raise, and callers
-        # have seen this ordering.
+        # Must run before the num_heads<=0 guard: Python's % on a negative
+        # modulus does not raise, so this order is what catches it first.
         validate_head_divisibility(dim, num_heads)
         if num_heads <= 0:
             raise ValueError(f"num_heads must be positive, got {num_heads}")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
 
-        # Store ALL configuration parameters
         self.dim = dim
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
@@ -338,7 +272,6 @@ class MultiHeadAttention(keras.layers.Layer):
         # Build the wrapped cross-attention layer explicitly for serialization
         self.cross_attention.build(tuple(input_shape))
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -365,11 +298,7 @@ class MultiHeadAttention(keras.layers.Layer):
         :return: Attention output tensor of shape ``(batch_size, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
-        # Shape: (B, seq, dim) -> (B, seq, dim).
-        # Pure delegation. No arithmetic happens in this frame. See the [REUSE]
-        # note on the class docstring.
-        #
-        # kv_input=None is what selects the engine's self-attention path.
+        # kv_input=None selects the engine's self-attention path.
         return self.cross_attention(
             query_input=inputs,
             kv_input=None,
@@ -421,5 +350,3 @@ class MultiHeadAttention(keras.layers.Layer):
             "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
-
-# ---------------------------------------------------------------------

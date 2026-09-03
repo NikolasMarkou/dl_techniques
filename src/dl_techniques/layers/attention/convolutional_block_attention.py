@@ -1,40 +1,22 @@
-"""
-The Convolutional Block Attention Module (CBAM): channel attention then spatial
-attention, applied in sequence.
+"""The Convolutional Block Attention Module, the :class:`CBAM` layer: channel attention then spatial attention, in sequence.
 
 A convolutional feature map has three axes worth attending over. A dense
-attention map across all of them would cost ``O(H*W*C)`` parameters, more than
-the convolution it is meant to refine. CBAM's premise is that two separable
-questions are being asked. WHICH feature detectors matter here, and WHERE in the
-image they matter. Factorizing the 3D problem into a per-channel vector and a
-per-location map drops the cost to ``O(C^2/r + k^2)``. That is cheap enough to
-insert after every block of a backbone, and it still expresses both kinds of
-selectivity.
+attention map across all of them would cost `O(H*W*C)` parameters, more
+than the convolution it refines. CBAM factorizes the problem into a
+per-channel vector and a per-location map, dropping the cost to
+`O(C^2/r + k^2)`, cheap enough to insert after every block of a
+backbone. The two stages run in sequence, not in parallel: channel
+attention runs first, so the spatial stage sees features already
+recalibrated for channel importance rather than the raw input, which the
+paper measures as the better arrangement.
 
-The ordering is the substantive design choice. The two stages run in sequence,
-not in parallel. Channel attention runs first, so the spatial stage sees
-features that have already been recalibrated for channel importance. It decides
-where to look in a reweighted map, not in the raw one. Running the stages in
-parallel and summing would ask both questions of the same unrefined input, which
-loses that conditioning. The paper measures the sequential channel-first order
-as the better arrangement.
-
-Each stage aggregates with BOTH average and max pooling, over its own axes. The
-average carries global context. The max reports the strongest single response,
-which survives when a signal is concentrated rather than spread. Channel
-attention pools over ``(H, W)`` and feeds both descriptors through a SHARED
-bottleneck MLP before summing. Sharing means both descriptors are scored by the
-same function. The bottleneck at ratio ``r`` is what keeps the module cheap.
-Spatial attention pools over the channel axis, concatenates the two resulting 2D
-maps, and convolves them with a single large kernel, because saliency is a
-neighbourhood property.
-
-This module is a **composition, not a re-implementation**. It owns no attention
-math. The two stages are the package's existing `ChannelAttention` and
-`SpatialAttention` layers, held as sub-layers, and `call` is just the two
-broadcasting multiplies that wire them together. `channels` is forwarded to the
-channel stage only. `SpatialAttention` fully reduces the channel axis before its
-convolution, so it works for any channel count and needs no such argument.
+The layer is a composition, not a re-implementation. It owns no
+attention math of its own; the two stages are the package's existing
+:class:`ChannelAttention` and :class:`SpatialAttention` layers held as
+sub-layers, and `call` is the two broadcasting multiplies that wire them
+together. `channels` is forwarded to the channel stage only —
+`SpatialAttention` fully reduces the channel axis before its
+convolution, so it works for any channel count.
 
 Foundational mathematics::
 
@@ -52,25 +34,17 @@ References:
     - Hu et al., 2018. Squeeze-and-Excitation Networks. (the channel-attention
       ancestor CBAM's first stage extends with max pooling)
       (https://arxiv.org/abs/1709.01507)
-    - Park et al., 2018. BAM: Bottleneck Attention Module. (the same authors'
-      PARALLEL-branch variant, which CBAM's sequential ordering is measured
-      against) (https://arxiv.org/abs/1807.06514)
+    - Park et al., 2018. BAM: Bottleneck Attention Module. (the same
+      authors' parallel-branch variant, which CBAM's sequential ordering
+      is measured against) (https://arxiv.org/abs/1807.06514)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .channel_attention import ChannelAttention
 from .spatial_attention import SpatialAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.attention.convolutional_block_attention")
@@ -79,126 +53,57 @@ class CBAM(keras.layers.Layer):
     CBAM: sequential channel-then-spatial feature refinement.
 
     Applies channel attention and then spatial attention to a convolutional
-    feature map. Channel attention recalibrates "what" features matter. Spatial
-    attention then refines "where" to focus, so it operates on already
+    feature map. Channel attention recalibrates which features matter. Spatial
+    attention then refines where to focus, operating on the already
     recalibrated features. The full operation is
     ``F'' = M_s(M_c(F) * F) * (M_c(F) * F)``, where ``M_c`` and ``M_s`` are the
     channel and spatial attention maps. The layer returns the refined features,
     not the maps.
 
-    **[REUSE]** This layer contains **no attention math of its own**. Both
-    stages are the package's existing standalone layers, held as sub-layers:
+    This layer contains no attention math of its own. Both stages are the
+    package's existing standalone layers, held as sub-layers:
     :class:`~dl_techniques.layers.attention.channel_attention.ChannelAttention`
     and
     :class:`~dl_techniques.layers.attention.spatial_attention.SpatialAttention`.
-    ``call()`` is only the two multiplications that wire them together. Three
-    consequences a maintainer must respect:
+    ``call()`` is only the two multiplications that wire them together. A fix
+    to either stage's math belongs in that stage's module rather than being
+    inlined or forked here, which would recreate the drift the composition
+    exists to prevent. The constructor's ``channel_*`` and ``spatial_*``
+    parameter pairs are forwarded verbatim and are not re-validated here
+    beyond three cheap positivity checks. ``channels`` is forwarded to the
+    channel stage only: :class:`SpatialAttention` reduces the channel axis
+    away before its convolution, so it works for any channel count.
 
-    * A fix to either stage's math belongs in that stage's module and is
-      inherited here for free. Do **not** inline or fork the pooling, MLP or
-      conv logic into this file. That creates the exact drift the composition
-      exists to prevent.
-    * The constructor's ``channel_*`` and ``spatial_*`` parameter pairs exist
-      because each sub-layer is independently configurable. They are forwarded
-      verbatim and are not re-validated here beyond three cheap positivity
-      checks.
-    * ``channels`` is forwarded to the channel stage only.
-      :class:`SpatialAttention` reduces the channel axis away before its
-      convolution, so it works for any channel count.
-
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-                    inputs F  [B, H, W, C]
-                              │
-                    ┌─────────┴────────────┐
-                    ▼                      │
-          ┌──────────────────────────┐     │
-          │ channel_attention(F)     │     │
-          │   → M_c  [B, 1, 1, C]    │     │
-          │   "WHAT matters"         │     │
-          └────────────┬─────────────┘     │
-                       ▼                   │
-                      (×)◄─────────────────┘
-                       │  broadcast over H, W
-                       ▼
-               F'  [B, H, W, C]  channel-refined
-                              │
-                    ┌─────────┴────────────┐
-                    ▼                      │
-          ┌──────────────────────────┐     │
-          │ spatial_attention(F')    │     │
-          │   → M_s  [B, H, W, 1]    │     │
-          │   "WHERE it matters"     │     │
-          └────────────┬─────────────┘     │
-                       ▼                   │
-                      (×)◄─────────────────┘
-                       │  broadcast over C
-                       ▼
-               output F''  [B, H, W, C]
+        inputs F [B, H, W, C]
+                │
+        ┌───────┴──────────┐
+        ▼                    │
+        channel_attention(F) │
+        -> M_c [B, 1, 1, C]  │
+        │                    │
+        ▼                    │
+        (x) <────────────────┘  broadcast over H, W
+        │
+        ▼
+        F' [B, H, W, C]  channel-refined
+                │
+        ┌───────┴──────────┐
+        ▼                    │
+        spatial_attention(F')│
+        -> M_s [B, H, W, 1]  │
+        │                    │
+        ▼                    │
+        (x) <────────────────┘  broadcast over C
+        │
+        ▼
+        output F'' [B, H, W, C]
 
-        M_s is computed from F', never from F. That conditioning is
-        why the two stages run in sequence rather than in parallel.
-
-    **Channel stage internals** (owned by ``channel_attention.py``):
-
-    .. code-block:: text
-
-                    F  [B, H, W, C]
-                          │
-                 ┌────────┴────────┐
-                 ▼                 ▼
-            mean over          max over
-            axes (1, 2)        axes (1, 2)
-                 │ [B,1,1,C]       │ [B,1,1,C]
-                 ▼                 ▼
-          ┌─────────────┐   ┌─────────────┐
-          │ dense1 C/r  │   │ dense1 C/r  │
-          │ relu        │   │ relu        │  SAME weights
-          │ dense2 C    │   │ dense2 C    │  in both paths
-          └──────┬──────┘   └──────┬──────┘
-                 └────────┬────────┘
-                          ▼
-                     avg_out + max_out
-                          │
-                          ▼
-                       sigmoid
-                          │
-                          ▼
-                    M_c  [B, 1, 1, C]
-
-    **Spatial stage internals** (owned by ``spatial_attention.py``):
-
-    .. code-block:: text
-
-                    F'  [B, H, W, C]
-                          │
-                 ┌────────┴────────┐
-                 ▼                 ▼
-            mean over          max over
-            axis -1            axis -1
-                 │ [B,H,W,1]       │ [B,H,W,1]
-                 └────────┬────────┘
-                          ▼
-                  concat → [B, H, W, 2]
-                          │
-                          ▼
-             Conv2D(filters=1, k×k, 'same')
-                          │
-                          ▼
-                       sigmoid
-                          │
-                          ▼
-                    M_s  [B, H, W, 1]
-
-    **Cost:**
-
-    .. code-block:: text
-
-        channel stage   O(C² / r)   the shared MLP bottleneck
-        spatial stage   O(k²)       one k×k filter, 2-channel map
-        dense 3D map    O(H·W·C)    what the factorization avoids
+    ``M_s`` is computed from ``F'``, never from ``F`` — that conditioning
+    is why the two stages run in sequence rather than in parallel.
 
     :param channels: Number of input channels. Must be positive.
     :type channels: int
@@ -253,7 +158,7 @@ class CBAM(keras.layers.Layer):
 
     Output shape:
         4D tensor with shape ``(batch_size, height, width, channels)``, identical
-        to the input. This layer returns the REFINED features, not the attention
+        to the input. This layer returns the refined features, not the attention
         maps.
 
     Example:
@@ -320,21 +225,9 @@ class CBAM(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
-        #
-        # `channels` is a real CNN channel count, not a "model dimension". The
-        # `GUIDE.md` naming table's `channels` -> `dim` migration line does NOT
-        # apply to the CNN family (channel, spatial, cbam, non_local, tripse);
-        # `GUIDE.md` section 2 states the carve-out and section 7 repeats it
-        # for migrations. Renaming it would break the frozen public API and
-        # every serialized `get_config()`.
-        #
-        # Note the division of labour. `channels % ratio` is NOT checked here.
-        # That check lives in `ChannelAttention.__init__` and fires when the
-        # sub-layer is constructed three statements below, so a bad
-        # (channels, ratio) pair still raises from this constructor and carries
-        # the sub-layer's message. Duplicating it here would give two spellings
-        # of one rule.
+        # `channels % ratio` is not checked here; ChannelAttention.__init__
+        # raises it when constructed below, so duplicating it here would give
+        # two spellings of one rule.
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if ratio <= 0:
@@ -342,7 +235,6 @@ class CBAM(keras.layers.Layer):
         if kernel_size <= 0:
             raise ValueError(f"kernel_size must be positive, got {kernel_size}")
 
-        # Store ALL configuration parameters
         self.channels = channels
         self.ratio = ratio
         self.kernel_size = kernel_size
@@ -353,8 +245,6 @@ class CBAM(keras.layers.Layer):
         self.channel_use_bias = channel_use_bias
         self.spatial_use_bias = spatial_use_bias
 
-        # CREATE sub-layers in __init__ (following modern Keras 3 pattern).
-        # They stay unbuilt until build() runs.
         self.channel_attention = ChannelAttention(
             channels=self.channels,
             ratio=self.ratio,
@@ -378,7 +268,7 @@ class CBAM(keras.layers.Layer):
     ) -> None:
         """Build both attention stages explicitly.
 
-        Both stages take the SAME ``input_shape``. The channel stage's map
+        Both stages take the same ``input_shape``. The channel stage's map
         broadcasts rather than reshapes, so the spatial stage still sees a
         ``(B, H, W, C)`` tensor. Building by hand guarantees every weight
         variable exists before Keras restores a checkpoint into it.
@@ -392,11 +282,9 @@ class CBAM(keras.layers.Layer):
         if self.built:
             return
 
-        # BUILD sub-layers explicitly for serialization robustness
         self.channel_attention.build(input_shape)
         self.spatial_attention.build(input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -475,5 +363,3 @@ class CBAM(keras.layers.Layer):
             "spatial_use_bias": self.spatial_use_bias,
         })
         return config
-
-# ---------------------------------------------------------------------

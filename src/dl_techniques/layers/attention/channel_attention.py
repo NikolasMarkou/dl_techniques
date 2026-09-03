@@ -1,75 +1,31 @@
-"""
-Per-channel attention weights for convolutional feature maps.
+"""Per-channel attention weights for convolutional feature maps, the :class:`ChannelAttention` layer.
 
-This module implements the channel attention stage of the Convolutional Block
-Attention Module (CBAM). It scores WHAT features matter. Its sibling, spatial
-attention, scores WHERE in the map the information sits.
+This is the channel half of the Convolutional Block Attention Module
+(CBAM): it scores which features matter, while its sibling spatial
+attention scores where in the map the information sits. The layer pools
+the input over its spatial axes with both global average and global max
+pooling, each giving a length-`C` vector, then runs both vectors through
+one shared bottleneck MLP (reduce to `C // ratio`, activate, expand back
+to `C`). The two MLP outputs are summed before the gate, so one strong
+max response can lift a channel whose mean is unremarkable:
+`M_c(F) = sigma(MLP(AvgPool(F)) + MLP(MaxPool(F)))`.
 
-Architecture:
-    The layer first squeezes every spatial map into two channel descriptors,
-    then turns those descriptors into one set of per-channel weights. Three
-    steps:
-
-    1.  **Spatial information aggregation.** Two global pooling ops run over
-        the height and width axes, each producing a length-`C` vector:
-
-        -   **Global average pooling** summarizes the mean response of each
-            channel. This carries global context.
-        -   **Global max pooling** reports the strongest single response of
-            each channel. This survives when a signal is concentrated rather
-            than spread.
-
-    2.  **Shared bottleneck MLP.** Both vectors go through the SAME two dense
-        layers: a reduction to `C // ratio`, the intermediate activation, then
-        an expansion back to `C`. Sharing the MLP halves the parameters and
-        forces one relationship model to explain both descriptors.
-
-    3.  **Merge and gate.** The two MLP outputs are summed, then passed
-        through the gate activation, sigmoid by default, which produces the
-        final per-channel weights.
-
-Foundational Mathematics:
-    The channel attention map `M_c` for an input feature map `F` is:
-
-        M_c(F) = σ( MLP(AvgPool(F)) + MLP(MaxPool(F)) )
-
-    -   `AvgPool(F)` and `MaxPool(F)` pool over the spatial axes. Each turns a
-        tensor of shape `(H, W, C)` into `(C,)`.
-    -   The MLP is two shared weight matrices, `W_0` reducing to `C // ratio`
-        and `W_1` expanding back to `C`, with the intermediate activation
-        between them. Written out:
-
-            M_c(F) = σ( W_1(ReLU(W_0(F_avg))) + W_1(ReLU(W_0(F_max))) )
-
-    -   `σ` is the gate activation. The default sigmoid bounds the output to
-        `[0, 1]`, which is what makes it usable as a multiplicative weight. A
-        different activation changes that range.
-
-    The sum happens before the gate, not after. Both descriptors therefore
-    argue about the same logit, and one strong max response can lift a channel
-    whose mean is unremarkable.
+The layer returns the per-channel weights, not the gated input — the
+caller multiplies them back in. Unlike its sibling `SpatialAttention`,
+this layer needs a `channels` argument, since the shared MLP's weight
+shapes are tied to one channel count.
 
 References:
-    - The foundational paper for this module:
-      Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM:
-      Convolutional Block Attention Module". European Conference on
-      Computer Vision (ECCV).
+    - Woo et al., 2018. CBAM: Convolutional Block Attention Module.
+      (https://arxiv.org/abs/1807.06521)
 """
-
-# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.attention.channel_attention")
 class ChannelAttention(keras.layers.Layer):
@@ -78,52 +34,48 @@ class ChannelAttention(keras.layers.Layer):
 
     Pools the input over its spatial axes with mean and max, runs both
     descriptors through one shared bottleneck MLP, sums the results and gates
-    them. The layer returns the per-channel WEIGHTS, not the gated input:
+    them. The layer returns the per-channel weights, not the gated input:
     ``M_c(F) = sigma(W_1(act(W_0(F_avg))) + W_1(act(W_0(F_max))))``. The caller
     multiplies them back in. :class:`CBAM` is the caller that does so.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-                    inputs  [B, H, W, C]
-                              │
-                    ┌─────────┴─────────┐
-                    ▼                   ▼
-          ┌───────────────────┐ ┌───────────────────┐
-          │ mean over axes    │ │ max over axes     │
-          │ 1 and 2 (H, W)    │ │ 1 and 2 (H, W)    │
-          │ keepdims=True     │ │ keepdims=True     │
-          └─────────┬─────────┘ └─────────┬─────────┘
-            [B,1,1,C]                     [B,1,1,C]
-                    ▼                     ▼
-              reshape [B, C]        reshape [B, C]
-                    └─────────┬───────────┘
-                              ▼
-          ┌───────────────────────────────────────┐
-          │ SHARED WEIGHTS: both paths call the   │
-          │ SAME three objects, in this order     │
-          │   dense1: Dense(C // ratio)           │
-          │   intermediate_activation ('relu')    │
-          │   dense2: Dense(C)                    │
-          └──────────────────┬────────────────────┘
-                             │  two [B, C] results
-                             ▼
-                       elementwise sum
-                             │  [B, C]
-                             ▼
-          ┌───────────────────────────────────────┐
-          │ gate_activation                       │
-          │ (gate_activation_type; 'sigmoid' by   │
-          │  default, which bounds to [0, 1])     │
-          └──────────────────┬────────────────────┘
-                             ▼
-                    reshape [B, 1, 1, C]
-                             ▼
-                   output  [B, 1, 1, C]
+        inputs [B, H, W, C]
+                │
+        ┌───────┴────────┐
+        ▼                 ▼
+        mean(axes=1,2)  max(axes=1,2)
+        keepdims=True   keepdims=True
+        [B,1,1,C]        [B,1,1,C]
+        ▼                 ▼
+        reshape [B,C]   reshape [B,C]
+        └───────┬────────┘
+                ▼
+        ┌────────────────────────┐
+        │ shared weights:         │
+        │  dense1: Dense(C//ratio)│
+        │  intermediate_activation│
+        │    ('relu' by default)  │
+        │  dense2: Dense(C)       │
+        └───────────┬─────────────┘
+                    │  two [B, C] results
+                    ▼
+            elementwise sum
+                    │  [B, C]
+                    ▼
+        ┌────────────────────────┐
+        │ gate_activation         │
+        │ ('sigmoid' by default) │
+        └───────────┬─────────────┘
+                    ▼
+            reshape [B, 1, 1, C]
+                    ▼
+            output [B, 1, 1, C]
 
-        Both activation names shown are defaults. Each is a constructor
-        argument, so neither is guaranteed at runtime.
+    Both paths call the same three sub-layer instances — that sharing is
+    the point, forcing one relationship model to explain both descriptors.
 
     :param channels: Number of input channels. Must be positive and
         divisible by ``ratio``.
@@ -251,25 +203,10 @@ class ChannelAttention(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
-        #
-        # `channels` is a real CNN channel count, not a "model dimension" - this
-        # module never splits it across attention heads. Do NOT rename this kwarg
-        # to `dim`. The CNN family (channel, spatial, cbam, non_local, tripse)
-        # keeps `channels` as a frozen, documented carve-out from the package
-        # naming table; `GUIDE.md` section 2 states the carve-out and section 7
-        # repeats it for migrations. The name is also part of every serialized
-        # `get_config()`.
-        #
-        # The divisibility check below does not call
-        # `common.validate_head_divisibility()`. Its message text happens to
-        # match, but the helper documents a HEAD-SPLIT precondition
-        # (`(..., dim)` -> `(..., num_heads, dim // num_heads)`). `channels %
-        # ratio` is an MLP bottleneck width, not a head count, so sharing the
-        # implementation would make the helper's contract false to save three
-        # lines. The message is pinned by
-        # `test_channel_attention_layer.py::TestChannelAttention` with
-        # `pytest.raises(match="channels .* must be divisible by ratio")`.
+        # `channels` stays the CNN channel-count name here, not `dim` (a
+        # frozen naming carve-out, GUIDE.md section 2). The check below is
+        # not common.validate_head_divisibility(): this is an MLP width, not
+        # a head count.
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if ratio <= 0:
@@ -290,8 +227,6 @@ class ChannelAttention(keras.layers.Layer):
         self.gate_activation_type = gate_activation_type
         self.gate_activation_args = gate_activation_args
 
-        # CREATE sub-layers in __init__ following modern Keras 3 pattern
-        # These layers are unbuilt at this point
         self.dense1 = keras.layers.Dense(
             units=channels // ratio,
             use_bias=use_bias,
@@ -306,11 +241,8 @@ class ChannelAttention(keras.layers.Layer):
             **(self.intermediate_activation_args or {}),
         )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
-        # `dense2` takes a CLONE, not `self.kernel_initializer`: one shared instance
-        # made the (64, 8) squeeze and (8, 64) excite kernels element-for-element equal
-        # in 2 of 2 blocks of `CBAMNet.from_variant('tiny')`. Don't resolve it twice in
-        # `__init__` either: `get_config` reports the caller's. See decisions.md D-070.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070: dense2 takes a clone
+        # of the initializer, not the shared instance -- sharing made both kernels element-for-element equal. See decisions.md.
         self.dense2 = keras.layers.Dense(
             units=channels,
             use_bias=use_bias,
@@ -372,10 +304,9 @@ class ChannelAttention(keras.layers.Layer):
         self.intermediate_activation.build(dense1_output_shape)
         self.dense2.build(dense1_output_shape)
 
-        # The gate runs on the SUM of the two dense2 outputs, shape (B, C).
+        # The gate runs on the sum of the two dense2 outputs, shape (B, C).
         self.gate_activation.build((input_shape[0], self.channels))
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -409,8 +340,8 @@ class ChannelAttention(keras.layers.Layer):
         avg_pool_flat = keras.ops.reshape(avg_pool, (-1, self.channels))
         max_pool_flat = keras.ops.reshape(max_pool, (-1, self.channels))
 
-        # Both paths call the SAME three sub-layers. That sharing is the point:
-        # one MLP has to explain both descriptors.
+        # Both paths call the same three sub-layers, so one MLP explains
+        # both descriptors.
         avg_out = self.dense1(avg_pool_flat, training=training)
         avg_out = self.intermediate_activation(avg_out, training=training)
         avg_out = self.dense2(avg_out, training=training)
@@ -471,5 +402,3 @@ class ChannelAttention(keras.layers.Layer):
             "gate_activation_args": self.gate_activation_args,
         })
         return config
-
-# ---------------------------------------------------------------------
