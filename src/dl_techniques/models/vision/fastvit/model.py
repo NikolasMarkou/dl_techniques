@@ -1,92 +1,29 @@
-"""FastViT (MCi) image tower assembled from the ``layers/fastvit/`` primitives.
+"""FastViT (MCi) image tower for MobileCLIP2.
 
-FastViT is built around a tension every efficient vision backbone has to
-resolve: self-attention mixes tokens globally but costs quadratically in their
-number, so it is unaffordable exactly where a convolutional network spends most
-of its time — the early, high-resolution stages. FastViT keeps attention only in
-the deepest one or two stages, where the feature map is small, and mixes tokens
-everywhere else with RepMixer, a depthwise convolution written as
-``y = x + gamma * (Mixer(x) - Norm(x))``. The subtraction is what makes that
-expression collapse: ``Norm`` is a deliberately degenerate block whose only
-surviving branch is an identity BatchNormalization, so the whole residual is
-affine at inference and fuses into a single depthwise convolution.
+Builds :class:`FastVitImageEncoder`, a channels-last Keras 3 port of timm's
+``FastVit`` class restricted to the five MCi configurations (mci0 through
+mci4), assembled from the block primitives in ``layers/fastvit/``.
 
-That fusability is the architecture's second idea, structural
-reparameterization. Wherever the reference could have used one convolution it
-uses a sum of parallel branches — a ``k x k`` conv-BN beside a ``1x1`` scale
-branch beside an identity, or a ``7x7`` beside a ``3x3`` — which is a strictly
-better-conditioned thing to optimize, and which collapses back into one
-convolution once the BatchNormalizations are folded, at zero inference cost.
+Self-attention mixes tokens globally but its cost grows with the square of
+the token count, so it is too expensive in the early, high-resolution stages
+where a convolutional network spends most of its time. FastViT keeps
+attention only in the last one or two stages, where the feature map is
+small, and mixes tokens everywhere else with RepMixer, a depthwise
+convolution written as an affine residual that folds into a single
+convolution at inference. Every convolution in the reference is likewise a
+sum of parallel branches (a k x k conv-BN beside a 1x1 scale branch beside
+an identity) that also collapses to one convolution once batch
+normalization is folded in.
 
-**This port implements the train-time multi-branch form only.** There is no
-``reparameterize()`` / branch-fusion path anywhere under ``layers/fastvit/`` or
-``layers/mobile_one_block.py``, so a model built here always runs every branch,
-and the *latency* half of the paper's claim is not realized. That matches how
-the MobileCLIP2 reference weights are shipped and evaluated (always with
-``inference_mode=False``); it does mean this tower is a faithful *functional*
-transcription, not a fast one.
-
-The tower is a standalone :class:`keras.Model` and is usable on its own. It is
-also the vision branch of MobileCLIP2 specifically —
-``models/vision_language/mobile_clip/mobile_clip_v2.py`` imports :class:`FastVitImageEncoder`
-from here, while the deliberately non-faithful ``mobile_clip_v1.py`` does not.
-The one place that dual role shows through is the head ``Dense``.
-
-**Architecture**::
-
-    image (B, H, W, 3)
-        |
-    stem: 3 x MobileOneBlock          (k3/s2 dense, k3/s2 depthwise, k1/s1)  -> /4
-        |
-    stage_0 .. stage_{N-1}            FastVitStage
-        |                             (downsample? RepCPE? depth x token mixer)
-    final_conv: MobileOneBlock        k3, depthwise, SE, -> embed_dims[-1] * cls_ratio
-        |
-    GlobalAveragePooling2D
-        |
-    Dropout(head_dropout_rate)
-        |
-    Dense(projection_dim)             <- THIS IS THE CLIP IMAGE PROJECTION
-        |
-    (B, projection_dim)
-
-**The head ``Dense`` is the CLIP image projection, not a classifier.** It is
-named ``projection_dim`` rather than ``num_classes`` for exactly this reason.
-All four MobileCLIP / MobileCLIP2 fastvit configs set ``"timm_proj": null`` with
-``"timm_pool": "avg"``. In open_clip's ``TimmModel`` a non-attention pool asserts
-that the trunk itself does the projecting and instantiates the trunk with
-``num_classes=embed_dim``; the timm ``ClassifierHead``'s linear layer therefore
-*is* the image-side projection into the joint embedding space. There is no
-separate projection layer to add, and adding one would be a second, unfaithful
-projection. ``timm_drop`` is ``0.0`` in all four configs, so the head dropout is
-inert at the reference settings. Passing ``projection_dim=None`` skips it and
-returns the pooled ``embed_dims[-1] * cls_ratio`` features, which is useful for
-backbone reuse and wrong for CLIP.
-
-**The stochastic-depth schedule is GLOBAL, then sliced.** The reference computes
-one linear ramp across ``sum(layers)`` blocks — every block of every stage — and
-hands each stage its contiguous slice. Computing a fresh ``0 -> drop_path_rate``
-ramp per stage would be a different function (stage 1 of a ``(2, 12, 24, 4)``
-model must start where stage 0 ended, not at zero) and produces an
-identically-shaped, identically-parameterized, subtly-wrong model. See
-:func:`_stagewise_drop_path_rates`.
-
-Two more asymmetries in the reference are reproduced rather than tidied away.
-Squeeze-and-Excitation appears at two different reduction ratios in the same
-network — ``1/16`` inside ``final_conv`` (timm's ``SqueezeExcite`` default, never
-overridden there) against ``0.25`` at ``ReparamLargeKernelConv``'s call site.
-And the stages are stored as a FLAT list of :class:`FastVitStage`: a nested
-``List[List[Layer]]`` restores fresh kernels on a ``.keras`` round trip while the
-layer count, the variable paths and the parameter total all still match, so the
-damage is invisible to every check except a value comparison.
-
-The variant table's provenance is uneven and the comment above it says so in
-detail — ``mci3``/``mci4`` are cross-checked against a committed reference file
-by a real oracle, while ``mci0``/``mci1``/``mci2`` come from a timm fetch with no
-local oracle, since timm is not installed here. ``get_config`` therefore stores
-the resolved architecture explicitly rather than only the variant name, so a
-checkpoint keeps describing the network it was trained with even if a table row
-is later corrected.
+This port implements only the train-time multi-branch form: there is no
+``reparameterize()`` / branch-fusion path anywhere under ``layers/fastvit/``
+or ``layers/mobile_one_block.py``, so a built model always runs every
+branch and the latency half of the paper's claim does not apply here. This
+matches how the MobileCLIP2 reference weights are shipped and evaluated
+(always with ``inference_mode=False``). The tower works standalone and also
+as the vision branch of MobileCLIP2 — ``mobile_clip_v2.py`` imports
+:class:`FastVitImageEncoder` from here. No pretrained weights are included
+and this package makes no accuracy claim.
 
 References:
     - Vasu et al., 2023. FastViT: A Fast Hybrid Vision Transformer using
@@ -107,10 +44,8 @@ References:
 """
 
 import keras
-# NOTE: `keras.layers` is deliberately NOT imported under the bare name `layers`
-# — this module has a constructor parameter and a variant field called `layers`
-# (the reference's name for the per-stage depths), and `keras.Model` also owns a
-# `.layers` property. Sub-layers are always spelled `keras.layers.X`.
+# `keras.layers` is not imported under the bare name `layers`: this module has
+# a constructor argument and a variant field named `layers` (per-stage depths).
 from keras import initializers, regularizers, activations
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Mapping
@@ -137,17 +72,15 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 #: timm's ``FastVit`` default and the value every MCi variant uses.
 _REFERENCE_CLS_RATIO = 2.0
 
-#: Squeeze-and-Excitation bottleneck ratio inside ``final_conv``. timm builds it
-#: as ``SqueezeExcite(out_chs, rd_divisor=1)`` and never overrides ``rd_ratio``,
-#: whose ``SqueezeExcite`` default is ``1/16``. This is DELIBERATELY different
-#: from the ``0.25`` that ``ReparamLargeKernelConv`` passes at ITS call site —
-#: the reference really does use two different ratios in the same network.
+#: Squeeze-and-Excitation bottleneck ratio inside ``final_conv``: timm's
+#: unoverridden ``SqueezeExcite`` default. ``ReparamLargeKernelConv`` uses a
+#: different ratio (0.25) elsewhere in the same network; both are correct.
 _FINAL_CONV_SE_REDUCTION_RATIO = 1.0 / 16.0
 
 #: timm's ``SqueezeExcite`` uses biased 1x1 convolutions.
 _FINAL_CONV_SE_USE_BIAS = True
 
-#: The reference applies SE BEFORE the activation
+#: The reference applies SE before the activation
 #: (``return self.act(self.se(out))`` in ``MobileOneBlock.forward``).
 _FINAL_CONV_SE_POSITION = 'pre_act'
 
@@ -171,48 +104,19 @@ _REFERENCE_POS_EMB_SPATIAL_SHAPE = (7, 7)
 # variant table
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-13T183738-24486492/D-004
-# PROVENANCE OF THIS TABLE — read before changing a single number.
+# Fields common to every row and not tabulated: cls_ratio=2.0, down_patch_size=7,
+# down_stride=2, repmixer_kernel_size=3, layer_scale_init_value=1e-5, head_dim=32,
+# activation=GELU. `pos_embs` entries are the RepCPE spatial shape (7, 7) or None.
 #
-# DO NOT "fix" an mci0/mci1/mci2 row by reasoning from the mci3/mci4 rows, and
-# do not edit the committed reference files to make a test pass. The two groups
-# have DIFFERENT provenance and different levels of evidence; conflating them is
-# the deviation X-3 this block exists to keep visible. See decisions.md D-004.
+# DECISION plan-2026-08-13T183738-24486492/D-004: mci3/mci4 rows come from the
+# committed reference file (a real oracle); mci0-mci2 come from a timm fetch with
+# no local oracle here. Do not fix an mci0-mci2 row by reasoning from mci3/mci4 —
+# different provenance. See decisions.md.
 #
-# (i)   `mci3` and `mci4` are transcribed from the USER-SUPPLIED
-#       `mobileclip2.py`, which defines `fastvit_mci3` and `fastvit_mci4` and
-#       nothing else. They are the only two rows with a local provenance. That
-#       file is COMMITTED VERBATIM at `research/mobileclip2_reference/`, and
-#       `tests/test_models/test_fastvit/
-#       test_model.py::test_mci3_mci4_match_supplied_source` PARSES it
-#       (with `ast` — it is PyTorch/timm code and cannot be imported here) and
-#       cross-checks these two rows field by field. That is a real oracle.
-#
-# (ii)  `mci0`, `mci1` and `mci2` are transcribed from TIMM UPSTREAM
-#       (`timm/models/fastvit.py`, fetched 2026-08-13), NOT from the supplied
-#       files. The supplied source does not define them at all.
-#
-# (iii) `timm` is NOT INSTALLED in this environment, so THERE IS NO LOCAL ORACLE
-#       for (ii) — constraint H-7. The tests in this repo can only check that the
-#       table matches a SECOND hand transcription of the same fetch; they cannot
-#       check it against timm itself. Anyone changing an mci0/mci1/mci2 row must
-#       re-derive it from timm upstream and say so, not reason from the mci3/mci4
-#       rows (which differ structurally: 5 stages, no SE, LayerNorm, mlp_ratio 4).
-#
-# Fields common to every row and therefore NOT tabulated: cls_ratio=2.0,
-# down_patch_size=7, down_stride=2, repmixer_kernel_size=3,
-# layer_scale_init_value=1e-5, head_dim=32, activation=GELU.
-#
-# `pos_embs` entries are the RepCPE spatial shape (7, 7) or None. A stage gets a
-# RepConditionalPosEnc iff its entry is not None.
-# DECISION plan-2026-08-19T163559-499b6f0e/D-079: read-only VIEW, not a plain
-# dict. `FastVitImageEncoder.MODEL_VARIANTS` is an ALIAS of this object, so the two names shared one
-# mutable mapping and a caller who wrote through either changed the table for
-# every later caller in the process (R-009 shape S3). A dict cannot become a
-# tuple, so the remedy here is `MappingProxyType`, and copying in `__init__`
-# would again repair nothing -- it leaves both aliases on the same object.
-# The proxy freezes the OUTER level only; the values are still mutable, which is
-# why ``_mci_variant_config` still returns `dict(MCI_VARIANTS[key])`, a copy`.
+# DECISION plan-2026-08-19T163559-499b6f0e/D-079: this is a MappingProxyType, not
+# a plain dict, because `MODEL_VARIANTS` aliases the same object and a plain dict
+# let a write through either name mutate the table for every later caller. See
+# decisions.md.
 MCI_VARIANTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 {
     'mci0': {
@@ -297,16 +201,13 @@ _PER_STAGE_FIELDS = (
 def _resolve_mci_variant(variant: str) -> Dict[str, Any]:
     """Look up a variant name in :data:`MCI_VARIANTS`.
 
-    Args:
-        variant: A key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``). The
-            ``'fastvit_'`` prefix used by timm's model names is accepted and
-            stripped.
+    :param variant: A key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``). The
+        ``'fastvit_'`` prefix used by timm's model names is accepted and
+        stripped.
 
-    Returns:
-        A shallow copy of the variant's configuration dictionary.
+    :return: A shallow copy of the variant's configuration dictionary.
 
-    Raises:
-        ValueError: If ``variant`` is not a known variant name.
+    :raises ValueError: If ``variant`` is not a known variant name.
     """
     key = str(variant)
     if key.startswith('fastvit_'):
@@ -323,19 +224,17 @@ def _stagewise_drop_path_rates(
         depths: Sequence[int],
         drop_path_rate: float,
 ) -> List[List[float]]:
-    """Split ONE global linear stochastic-depth ramp into per-stage slices.
+    """Split one global linear stochastic-depth ramp into per-stage slices.
 
     The ramp is computed across ``sum(depths)`` blocks — the whole network — and
     then cut at the cumulative stage boundaries, so stage ``i`` starts where stage
     ``i - 1`` ended. This reproduces timm's
     ``calculate_drop_path_rates(drop_path_rate, layers, stagewise=True)``.
 
-    Args:
-        depths: Number of blocks in each stage.
-        drop_path_rate: Maximum (last block of the last stage) drop probability.
+    :param depths: Number of blocks in each stage.
+    :param drop_path_rate: Maximum (last block of the last stage) drop probability.
 
-    Returns:
-        One list of floats per stage; concatenating them in order reproduces
+    :return: One list of floats per stage; concatenating them in order reproduces
         ``linear_drop_path_rates(sum(depths), drop_path_rate)`` exactly.
     """
     flat = linear_drop_path_rates(int(sum(depths)), float(drop_path_rate))
@@ -356,64 +255,83 @@ class FastVitImageEncoder(keras.Model):
     one or two with global self-attention), a wide depthwise ``final_conv`` with
     squeeze-and-excitation, and a pooled projection head.
 
-    **The head ``Dense`` IS the CLIP image projection.** MobileCLIP's open_clip
-    configs use ``timm_pool="avg"`` with ``timm_proj=null``, which makes the
-    trunk's own classifier linear the projection into the joint image-text
-    embedding space. Do not add a second projection on top of this model; pass
-    ``projection_dim`` and use its output directly as the image embedding. Set
-    ``projection_dim=None`` to get the pooled ``embed_dims[-1] * cls_ratio``
-    features instead (useful for dense/backbone reuse, NOT for CLIP).
+    Architecture:
 
-    Args:
-        variant: Optional key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``,
-            with an optional ``'fastvit_'`` prefix). When given, every
-            architecture field left as ``None`` is filled from that variant's
-            row. When ``None``, all seven per-stage tuples must be supplied
-            explicitly.
-        layers: Blocks per stage, e.g. ``(2, 6, 10, 2)``.
-        embed_dims: Output channels per stage.
-        mlp_ratios: ConvMlp expansion ratio per stage.
-        se_downsamples: Whether each stage's downsample uses squeeze-and-excitation.
-        downsamples: Whether each stage begins with a downsample. Stage 0 is
-            ``False`` in every MCi variant — the stem has already done the /4.
-        pos_embs: Per stage, the RepCPE depthwise kernel shape, or ``None`` for
-            no positional encoding in that stage.
-        token_mixers: ``'repmixer'`` or ``'attention'`` per stage.
-        stem_use_scale_branch: Whether the three stem ``MobileOneBlock``s keep
-            their 1x1 scale branch. ``False`` for mci3/mci4.
-        norm_layer: Normalization key for the attention stages' pre-norm, either
-            ``'batch_norm'`` or ``'layer_norm'``. Ignored by RepMixer stages,
-            which have no ``norm_layer`` parameter in the reference.
-        lkc_use_act: Whether each downsample's large-kernel convolution applies
-            its activation.
-        input_shape: Image shape ``(H, W, C)``. Defaults to ``(256, 256, 3)``,
-            MobileCLIP's fastvit input resolution.
-        projection_dim: Width of the CLIP image projection. ``None`` skips the
-            projection and returns the pooled features. Defaults to 512.
-        cls_ratio: ``final_conv`` widens the last stage by this factor. Defaults
-            to 2.0 (the reference value).
-        drop_path_rate: Maximum stochastic-depth rate of the SINGLE global linear
-            ramp spanning every block of every stage. Defaults to 0.0.
-        dropout_rate: Dropout inside every block's ConvMlp. Defaults to 0.0.
-        head_dropout_rate: Dropout between the pooling and the projection.
-            Defaults to 0.0 (``timm_drop`` is 0.0 in all four MobileCLIP configs).
-        layer_scale_init_value: LayerScale gamma initialization in every block, or
-            ``None`` to omit LayerScale. Defaults to ``1e-5``.
-        head_dim: Per-head width of the attention token mixer. Defaults to 32.
-        down_patch_size: Downsample large-kernel size. Defaults to 7.
-        down_stride: Downsample stride. Defaults to 2.
-        repmixer_kernel_size: RepMixer depthwise kernel size. Defaults to 3.
-        activation: Activation used throughout. Defaults to ``'gelu'``.
-        kernel_initializer: Initializer for every convolution / projection kernel.
-            Defaults to ``'he_normal'``.
-        kernel_regularizer: Optional regularizer applied to every kernel.
-        **kwargs: Forwarded to :class:`keras.Model`.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If ``variant`` is unknown; if any per-stage tuple is missing
-            when no variant is given; if the seven per-stage tuples do not all
-            have the same length; if ``cls_ratio`` is not positive; or if a rate
-            lies outside ``[0, 1)``.
+        image [B, H, W, 3]
+            |
+        stem: 3x MobileOneBlock       (k3/s2 dense, k3/s2 depthwise, k1/s1) -> /4
+            |
+        stage_0 .. stage_{N-1}        FastVitStage (downsample? RepCPE? blocks)
+            |
+        final_conv: MobileOneBlock    k3, depthwise, SE, -> embed_dims[-1]*cls_ratio
+            |
+        GlobalAveragePooling2D
+            |
+        Dropout(head_dropout_rate)
+            |
+        Dense(projection_dim)         (the CLIP image projection, optional)
+            |
+        [B, projection_dim] or [B, final_features]
+
+    The head ``Dense`` is the CLIP image projection, not a classifier.
+    MobileCLIP's open_clip configs use ``timm_pool="avg"`` with
+    ``timm_proj=null``, which makes the trunk's own classifier linear the
+    projection into the joint image-text embedding space. Do not add a second
+    projection on top of this model; pass ``projection_dim`` and use its
+    output directly as the image embedding. Set ``projection_dim=None`` to
+    get the pooled ``embed_dims[-1] * cls_ratio`` features instead, useful
+    for backbone reuse and not for CLIP.
+
+    :param variant: Optional key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``,
+        with an optional ``'fastvit_'`` prefix). When given, every
+        architecture field left as ``None`` is filled from that variant's
+        row. When ``None``, all seven per-stage tuples must be supplied
+        explicitly.
+    :param layers: Blocks per stage, e.g. ``(2, 6, 10, 2)``.
+    :param embed_dims: Output channels per stage.
+    :param mlp_ratios: ConvMlp expansion ratio per stage.
+    :param se_downsamples: Whether each stage's downsample uses squeeze-and-excitation.
+    :param downsamples: Whether each stage begins with a downsample. Stage 0 is
+        ``False`` in every MCi variant — the stem has already done the /4.
+    :param pos_embs: Per stage, the RepCPE depthwise kernel shape, or ``None`` for
+        no positional encoding in that stage.
+    :param token_mixers: ``'repmixer'`` or ``'attention'`` per stage.
+    :param stem_use_scale_branch: Whether the three stem ``MobileOneBlock``s keep
+        their 1x1 scale branch. ``False`` for mci3/mci4.
+    :param norm_layer: Normalization key for the attention stages' pre-norm, either
+        ``'batch_norm'`` or ``'layer_norm'``. Ignored by RepMixer stages,
+        which have no ``norm_layer`` parameter in the reference.
+    :param lkc_use_act: Whether each downsample's large-kernel convolution applies
+        its activation.
+    :param input_shape: Image shape ``(H, W, C)``. Defaults to ``(256, 256, 3)``,
+        MobileCLIP's fastvit input resolution.
+    :param projection_dim: Width of the CLIP image projection. ``None`` skips the
+        projection and returns the pooled features. Defaults to 512.
+    :param cls_ratio: ``final_conv`` widens the last stage by this factor. Defaults
+        to 2.0 (the reference value).
+    :param drop_path_rate: Maximum stochastic-depth rate of the single global linear
+        ramp spanning every block of every stage. Defaults to 0.0.
+    :param dropout_rate: Dropout inside every block's ConvMlp. Defaults to 0.0.
+    :param head_dropout_rate: Dropout between the pooling and the projection.
+        Defaults to 0.0 (``timm_drop`` is 0.0 in all four MobileCLIP configs).
+    :param layer_scale_init_value: LayerScale gamma initialization in every block, or
+        ``None`` to omit LayerScale. Defaults to ``1e-5``.
+    :param head_dim: Per-head width of the attention token mixer. Defaults to 32.
+    :param down_patch_size: Downsample large-kernel size. Defaults to 7.
+    :param down_stride: Downsample stride. Defaults to 2.
+    :param repmixer_kernel_size: RepMixer depthwise kernel size. Defaults to 3.
+    :param activation: Activation used throughout. Defaults to ``'gelu'``.
+    :param kernel_initializer: Initializer for every convolution / projection kernel.
+        Defaults to ``'he_normal'``.
+    :param kernel_regularizer: Optional regularizer applied to every kernel.
+    :param **kwargs: Forwarded to :class:`keras.Model`.
+
+    :raises ValueError: If ``variant`` is unknown; if any per-stage tuple is missing
+        when no variant is given; if the seven per-stage tuples do not all
+        have the same length; if ``cls_ratio`` is not positive; or if a rate
+        lies outside ``[0, 1)``.
 
     Input shape:
         4D tensor ``(batch, height, width, channels)``.
@@ -431,11 +349,9 @@ class FastVitImageEncoder(keras.Model):
         (1, 512)
     """
 
-    # `MCI_VARIANTS` is this package's only variant table, so the canonical
-    # `MODEL_VARIANTS` spelling is exposed as a class-level ALIAS to the same
-    # dict -- not a copy -- per models/CLAUDE.md. Tooling that resolves a
-    # variant registry via getattr(cls, 'MODEL_VARIANTS') got AttributeError
-    # here until 2026-08-19, while CLAUDE.md asserted fastvit carried it.
+    # `MODEL_VARIANTS` is a class-level alias of `MCI_VARIANTS`, the same object,
+    # not a copy, per models/CLAUDE.md — tooling resolves a variant registry via
+    # getattr(cls, 'MODEL_VARIANTS').
     MODEL_VARIANTS = MCI_VARIANTS
 
     def __init__(
@@ -529,17 +445,14 @@ class FastVitImageEncoder(keras.Model):
         #: Channel count entering ``final_conv`` and (times ``cls_ratio``) the
         #: pooled feature width.
         self.final_features = int(self.embed_dims[-1] * self.cls_ratio)
-        #: ONE global ramp, cut at the stage boundaries. Never a per-stage ramp.
+        #: A single global ramp, cut at the stage boundaries, not a per-stage ramp.
         self.drop_path_rates: List[List[float]] = _stagewise_drop_path_rates(
             self.layers_per_stage, self.drop_path_rate
         )
 
-        # ---- CREATE all sub-layers in __init__ (unbuilt) ----------------
-        # timm's `convolutional_stem`: dense k3/s2, DEPTHWISE k3/s2
-        # (`group_size=1` means depthwise in timm's `num_groups` mapping), then a
-        # pointwise k1/s1. Net stride /4. `use_scale_branch` is per-variant: the
-        # supplied mobileclip2.py monkey-patches the stem specifically to turn it
-        # off for mci3/mci4.
+        # ---- sub-layers, created unbuilt ---------------------------------
+        # timm's `convolutional_stem`: dense k3/s2, depthwise k3/s2, pointwise
+        # k1/s1, net stride /4. `use_scale_branch` is off for mci3/mci4.
         stem_dim = self.embed_dims[0]
         self.stem: List[MobileOneBlock] = [
             MobileOneBlock(
@@ -581,9 +494,8 @@ class FastVitImageEncoder(keras.Model):
             ),
         ]
 
-        # FLAT list. A nested List[List[Layer]] restores FRESH kernels on a
-        # `.keras` round trip while the layer count, the variable paths and the
-        # parameter total all still match (measured repo-wide).
+        # A flat list: a nested List[List[Layer]] restores fresh kernels on a
+        # `.keras` round trip even though the layer count and parameter total match.
         self.stages: List[FastVitStage] = [
             FastVitStage(
                 dim=self.embed_dims[i],
@@ -614,12 +526,9 @@ class FastVitImageEncoder(keras.Model):
             for i in range(self.num_stages)
         ]
 
-        # `final_conv` is DEPTHWISE (group_size=1) and widens by cls_ratio, so
-        # its Conv2D has groups=embed_dims[-1] and filters=final_features.
-        # Its SE ratio is 1/16 (timm's SqueezeExcite default, unoverridden here)
-        # with BIASED convolutions, applied BEFORE the activation. That is NOT
-        # the 0.25 used by ReparamLargeKernelConv — the reference uses two
-        # different SE ratios in the same network on purpose.
+        # `final_conv` is depthwise (group_size=1) and widens by cls_ratio, so its
+        # Conv2D has groups=embed_dims[-1] and filters=final_features. Its SE ratio
+        # is 1/16 (timm's default), different from the 0.25 ReparamLargeKernelConv uses.
         self.final_conv = MobileOneBlock(
             out_channels=self.final_features,
             kernel_size=3,
@@ -641,7 +550,7 @@ class FastVitImageEncoder(keras.Model):
         self.pool = keras.layers.GlobalAveragePooling2D(name='pool')
         self.head_dropout = keras.layers.Dropout(
             self.head_dropout_rate, name='head_dropout')
-        # THE CLIP IMAGE PROJECTION. See the module docstring.
+        # This is the CLIP image projection; see the class docstring.
         self.projection = (
             keras.layers.Dense(
                 self.projection_dim,
@@ -666,9 +575,8 @@ class FastVitImageEncoder(keras.Model):
     def _validate_config(self) -> None:
         """Validate the resolved configuration.
 
-        Raises:
-            ValueError: If the per-stage tuples disagree in length, if any size is
-                non-positive, or if a rate lies outside ``[0, 1)``.
+        :raises ValueError: If the per-stage tuples disagree in length, if any size is
+            non-positive, or if a rate lies outside ``[0, 1)``.
         """
         # A 4-stage vs 5-stage mixup is the most likely transcription error, and
         # every downstream symptom of it is an obscure shape or channel error
@@ -736,11 +644,9 @@ class FastVitImageEncoder(keras.Model):
     ) -> Tuple[Optional[int], ...]:
         """Shape after the three stem blocks (net stride 4).
 
-        Args:
-            input_shape: ``(B, H, W, C)``.
+        :param input_shape: ``(B, H, W, C)``.
 
-        Returns:
-            ``(B, ceil(H / 4), ceil(W / 4), embed_dims[0])``.
+        :return: ``(B, ceil(H / 4), ceil(W / 4), embed_dims[0])``.
         """
         shape = tuple(input_shape)
         for block in self.stem:
@@ -756,11 +662,9 @@ class FastVitImageEncoder(keras.Model):
         Valid before the model is built. The first element is the shape after
         stage 0, not after the stem — use :meth:`stem_output_shape` for that.
 
-        Args:
-            input_shape: ``(B, H, W, C)`` of the image entering the stem.
+        :param input_shape: ``(B, H, W, C)`` of the image entering the stem.
 
-        Returns:
-            One shape tuple per stage, in order.
+        :return: One shape tuple per stage, in order.
         """
         shape = self.stem_output_shape(input_shape)
         shapes = []
@@ -775,12 +679,11 @@ class FastVitImageEncoder(keras.Model):
         """Build every sub-layer explicitly, in forward order.
 
         Each stage changes both the spatial dimensions and the channel count, so
-        the next stage must be built on the PREVIOUS stage's output shape, never
+        the next stage must be built on the previous stage's output shape, not
         on ``input_shape``.
 
-        Args:
-            input_shape: ``(B, H, W, C)``. When it carries no spatial information
-                the model's ``input_shape`` config is used instead.
+        :param input_shape: ``(B, H, W, C)``. When it carries no spatial information
+            the model's ``input_shape`` config is used instead.
         """
         if self.built:
             return
@@ -815,15 +718,13 @@ class FastVitImageEncoder(keras.Model):
     ) -> keras.KerasTensor:
         """Encode a batch of images.
 
-        Args:
-            inputs: Image tensor ``(B, H, W, C)``.
-            training: Keras training flag. Pass ``False`` EXPLICITLY for a
-                deterministic forward — ``training=None`` runs the stochastic
-                path of every stochastic-depth branch and uses batch statistics
-                in every BatchNormalization.
+        :param inputs: Image tensor ``(B, H, W, C)``.
+        :param training: Keras training flag. Pass ``False`` explicitly for a
+            deterministic forward; ``training=None`` runs the stochastic
+            path of every stochastic-depth branch and uses batch statistics
+            in every BatchNormalization.
 
-        Returns:
-            ``(B, projection_dim)``, the CLIP image embedding (un-normalized), or
+        :return: ``(B, projection_dim)``, the CLIP image embedding (un-normalized), or
             ``(B, final_features)`` when ``projection_dim`` is ``None``.
         """
         x = inputs
@@ -844,11 +745,9 @@ class FastVitImageEncoder(keras.Model):
     ) -> Tuple[Optional[int], ...]:
         """Output shape from stored config — valid before the model is built.
 
-        Args:
-            input_shape: ``(B, H, W, C)``.
+        :param input_shape: ``(B, H, W, C)``.
 
-        Returns:
-            ``(B, projection_dim)`` or ``(B, final_features)``.
+        :return: ``(B, projection_dim)`` or ``(B, final_features)``.
         """
         shape = tuple(input_shape)
         batch = shape[0] if len(shape) == 4 else None
@@ -863,9 +762,8 @@ class FastVitImageEncoder(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the full configuration for serialization.
 
-        Returns:
-            A dictionary containing every constructor parameter, with the
-            architecture stored EXPLICITLY (not only as a variant name) so a
+        :return: A dictionary containing every constructor parameter, with the
+            architecture stored explicitly, not only as a variant name, so a
             checkpoint keeps describing the network it was trained with even if
             the variant table is later corrected.
         """
@@ -905,11 +803,9 @@ class FastVitImageEncoder(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "FastVitImageEncoder":
         """Rebuild the model from a serialized configuration.
 
-        Args:
-            config: A dictionary produced by :meth:`get_config`.
+        :param config: A dictionary produced by :meth:`get_config`.
 
-        Returns:
-            A new :class:`FastVitImageEncoder`.
+        :return: A new :class:`FastVitImageEncoder`.
         """
         config = dict(config)
         config['input_shape'] = tuple(config['input_shape'])
@@ -930,18 +826,15 @@ class FastVitImageEncoder(keras.Model):
     ) -> "FastVitImageEncoder":
         """Create an encoder from an MCi variant name.
 
-        Args:
-            variant: A key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``),
-                optionally prefixed ``'fastvit_'``.
-            input_shape: Image shape ``(H, W, C)``.
-            projection_dim: CLIP image-projection width, or ``None``.
-            **kwargs: Forwarded to the constructor.
+        :param variant: A key of :data:`MCI_VARIANTS` (``'mci0'`` ... ``'mci4'``),
+            optionally prefixed ``'fastvit_'``.
+        :param input_shape: Image shape ``(H, W, C)``.
+        :param projection_dim: CLIP image-projection width, or ``None``.
+        :param **kwargs: Forwarded to the constructor.
 
-        Returns:
-            The configured image tower.
+        :return: The configured image tower.
 
-        Raises:
-            ValueError: If ``variant`` is not recognized.
+        :raises ValueError: If ``variant`` is not recognized.
         """
         return cls(
             variant=variant,
@@ -962,20 +855,17 @@ def create_fastvit_image_encoder(
 ) -> FastVitImageEncoder:
     """Create a MobileCLIP2 FastViT image tower.
 
-    Args:
-        variant: ``'mci0'`` ... ``'mci4'`` (an optional ``'fastvit_'`` prefix is
-            accepted). Defaults to ``'mci0'``.
-        input_shape: Image shape ``(H, W, C)``. Defaults to ``(256, 256, 3)``.
-        projection_dim: Width of the CLIP image projection (the head ``Dense``),
-            or ``None`` to return pooled features. Defaults to 512.
-        **overrides: Any :class:`FastVitImageEncoder` constructor keyword, e.g.
-            ``drop_path_rate``, ``head_dropout_rate``, ``kernel_regularizer``.
+    :param variant: ``'mci0'`` ... ``'mci4'`` (an optional ``'fastvit_'`` prefix is
+        accepted). Defaults to ``'mci0'``.
+    :param input_shape: Image shape ``(H, W, C)``. Defaults to ``(256, 256, 3)``.
+    :param projection_dim: Width of the CLIP image projection (the head ``Dense``),
+        or ``None`` to return pooled features. Defaults to 512.
+    :param **overrides: Any :class:`FastVitImageEncoder` constructor keyword, e.g.
+        ``drop_path_rate``, ``head_dropout_rate``, ``kernel_regularizer``.
 
-    Returns:
-        The configured image tower.
+    :return: The configured image tower.
 
-    Raises:
-        ValueError: If ``variant`` is not recognized.
+    :raises ValueError: If ``variant`` is not recognized.
     """
     return FastVitImageEncoder(
         variant=variant,
