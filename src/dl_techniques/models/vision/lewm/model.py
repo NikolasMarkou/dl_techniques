@@ -1,45 +1,27 @@
-"""
-LeWM — Learning the World with Minimal Supervision, Keras 3 port.
+"""``LeWM``, an action-conditioned world model that predicts in embedding space, plus the ``create_lewm`` factory.
 
-Top-level model packaging encoder (ViT), projector, action-embedder,
-autoregressive predictor, pred-projector, and SIGReg regularizer.
+It encodes each frame with a ViT, then predicts the next frame's embedding
+from past embeddings and the action taken, using an AdaLN-zero conditional
+transformer. There is no separate pixel decoder and no EMA target encoder:
+the same live encoder produces both the prediction target and the context,
+and a SIGReg term keeps the embedding space from collapsing instead.
 
-**Forward contract** (`call`):
-
-- inputs: dict with keys
-    * ``pixels``: float tensor, shape ``(B, T, H, W, C)`` — history + 1 future frame.
-    * ``action``: float tensor, shape ``(B, T-1, action_dim)`` — actions taken
-      between successive frames. The final action is internally padded with zeros
-      so the action time axis matches the pixel time axis.
-- returns: predicted embedding tensor of shape ``(B, T, embed_dim)``.
-
-**Losses** are added via `self.add_loss()` inside `call` (so `model.fit`
-with `loss=None` trains correctly):
-
-- MSE prediction loss between ``pred_emb[:, :-1]`` and ``target_emb[:, 1:]``.
-- SIGReg weighted by ``config.sigreg_weight``.
-
-**Inference** — call `rollout(pixels_history, action_sequence)` for
-autoregressive rollout. See method docstring for shape details.
-
-See `/tmp/lewm_source/jepa.py` for the PyTorch reference; see decisions.md
-entries D-001 (live target encoder, no EMA) and D-002 (MLPProjector uses
-LayerNorm, matching upstream default).
+Call takes a dict with ``pixels`` (B, T, H, W, C: history plus one future
+frame) and ``action`` (B, T-1, action_dim), and returns predicted
+embeddings of shape (B, T, embed_dim). The MSE prediction loss and the
+weighted SIGReg loss are both added internally via ``add_loss``, so
+``model.fit`` trains correctly with ``loss=None``. Use ``rollout`` for
+autoregressive inference.
 
 References:
-    - Sobal et al., 2024. Learning the World with Minimal Supervision (LeWM) --
-      the upstream PyTorch reference this module ports; see this package's
-      README section 14 for the citation as recorded with the port.
+    - Sobal et al., 2024. Learning the World with Minimal Supervision (LeWM).
     - Assran et al., 2023. Self-Supervised Learning from Images with a Joint-
       Embedding Predictive Architecture (I-JEPA). CVPR 2023.
-      (https://arxiv.org/abs/2301.08243) -- the predict-in-EMBEDDING-space
-      principle that makes a pixel decoder unnecessary.
+      (https://arxiv.org/abs/2301.08243)
     - LeCun, 2022. A Path Towards Autonomous Machine Intelligence.
-      (OpenReview: BZ5a1r-kVsf) -- the JEPA world-model framing.
+      (OpenReview: BZ5a1r-kVsf)
     - Skean et al., 2025. SIGReg / hyperspherical-energy anti-collapse
-      regularization, as implemented in
-      ``dl_techniques.layers.sigreg`` -- the collapse control this port keeps
-      instead of an EMA target encoder (D-001).
+      regularization, as implemented in ``dl_techniques.layers.sigreg``.
 """
 
 import keras
@@ -57,7 +39,32 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.lewm.model")
 class LeWM(keras.Model):
-    """LeWM — JEPA-style action-conditioned world model.
+    """JEPA-style action-conditioned world model.
+
+    Architecture:
+
+    .. code-block:: text
+
+        pixels  [B, T, H, W, C]        action  [B, T-1, A]
+              |                             |
+              v                        zero-pad to T
+        ViT encoder (per frame)             |
+              |                             v
+        MLPProjector                  ActionEmbedder
+              |  emb [B, T, D]              |  act_emb [B, T, D]
+              +-------------+---------------+
+                            v
+                      ARPredictor
+                            |
+                      MLPProjector (pred_proj)
+                            |
+                            v
+                 pred_emb  [B, T, D]
+                            |
+                +-----------+-----------+
+                v                       v
+          MSE(pred[:-1], emb[1:])   SIGReg(emb)
+                added via add_loss, weighted and summed
 
     :param config: LeWMConfig dataclass (or None to use defaults).
     :param kwargs: passthrough to `keras.Model`.
@@ -73,10 +80,10 @@ class LeWM(keras.Model):
 
         cfg = self.config
 
-        # Vision encoder: ViT-tiny (192d, patch=14, img=224), CLS-pooled feature.
+        # CLS-pooled feature; num_classes is ignored since include_top=False.
         self.encoder = ViT(
             input_shape=cfg.input_image_shape,
-            num_classes=1,  # ignored when include_top=False
+            num_classes=1,
             scale=cfg.encoder_scale,
             patch_size=cfg.patch_size,
             include_top=False,
@@ -84,9 +91,7 @@ class LeWM(keras.Model):
             name="encoder",
         )
 
-        # Projector after encoder: (B, D_enc) -> (B, D) where D = embed_dim.
-        # For tiny ViT D_enc = 192, embed_dim = 192, so this is an internal
-        # LayerNorm+GELU refinement rather than a dim change.
+        # Maps the encoder feature to embed_dim; for the default scale the two dims already match.
         self.projector = MLPProjector(
             input_dim=cfg.embed_dim,
             hidden_dim=cfg.projector_hidden_dim,
@@ -131,11 +136,7 @@ class LeWM(keras.Model):
 
         self._sigreg_weight = cfg.sigreg_weight
 
-        # Per-component loss trackers. The training loss is the sum of an MSE
-        # prediction term and a weighted SIGReg term, both added via
-        # `add_loss`; without these trackers the CSV log shows only the summed
-        # `loss`, so a diverging or dominating term is invisible. The trackers
-        # hold the *weighted* contributions, so pred_loss + sigreg_loss == loss.
+        # Track the weighted MSE and SIGReg terms separately so the CSV log shows both, not just their sum.
         self.pred_loss_tracker = keras.metrics.Mean(name="pred_loss")
         self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
 
@@ -157,8 +158,8 @@ class LeWM(keras.Model):
         B, T = shape[0], shape[1]
         H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
         flat = ops.reshape(pixels, (B * T, H, W, C))
-        feat = self.encoder(flat, training=training)     # (B*T, D_enc)
-        proj = self.projector(feat, training=training)   # (B*T, D)
+        feat = self.encoder(flat, training=training)
+        proj = self.projector(feat, training=training)
         emb = ops.reshape(proj, (B, T, self.config.embed_dim))
         return emb
 
@@ -173,7 +174,7 @@ class LeWM(keras.Model):
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         """Predict embeddings via ARPredictor + pred_proj."""
-        pred = self.predictor([emb, act_emb], training=training)      # (B, T, D)
+        pred = self.predictor([emb, act_emb], training=training)
         B = ops.shape(pred)[0]
         T = ops.shape(pred)[1]
         D = self.config.embed_dim
@@ -189,23 +190,15 @@ class LeWM(keras.Model):
     def _require_pixels_and_action(mapping: Any) -> Any:
         """Return ``(mapping["pixels"], mapping["action"])``, or raise.
 
-        Interface contract (call sites: :meth:`build` and :meth:`call`). Shared
-        because both take the SAME dict-shaped argument -- one a nest of shapes,
-        one a nest of tensors -- and both must fail with the same named
-        ``ValueError``. ``build`` runs FIRST for an explicit ``model.build(...)``
-        and for ``.keras`` deserialization, so a ``build`` that indexed the dict
-        directly would turn this ``ValueError`` into a bare ``TypeError``.
+        Shared between :meth:`build` and :meth:`call`, which both take the
+        same dict-shaped argument and must fail the same way.
 
         :param mapping: The dict passed to ``build`` or ``call``.
         :return: The values under ``"pixels"`` and ``"action"``.
         :raises ValueError: If ``mapping`` is not a dict.
         """
-        # DECISION plan-2026-08-23T091307-9a110062/D-426
-        # Do NOT inline this back into `call` and index the dict directly in
-        # `build`. `build` runs FIRST on `model(...)`, so a direct index turns
-        # this named `ValueError` into a bare `TypeError`. The identical
-        # regression was MEASURED on `video_jepa` on 2026-08-23. One validator,
-        # two callers -- not two copies of the message. See decisions.md D-426.
+        # DECISION plan-2026-08-23T091307-9a110062/D-426: keep this shared; do not inline into call and index the dict directly in build.
+        # build runs first, so a direct index there would turn this ValueError into a bare TypeError (regression measured on video_jepa). See decisions.md.
         if not isinstance(mapping, dict):
             raise ValueError(
                 f"LeWM expects `inputs` to be a dict with 'pixels' and 'action' "
@@ -216,36 +209,17 @@ class LeWM(keras.Model):
     def build(self, input_shape: Dict[str, Any]) -> None:
         """Materialize every weight-bearing sub-layer.
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-424
-        This repeats `call`'s forward shape math instead of tracing `call`,
-        because `call` cannot be traced: `self.add_loss(pred_loss)` below
-        raises ``ValueError: add_loss() can only be called from inside build()
-        or call(), on a tensor input`` when `call` is invoked directly on
-        `KerasTensor` placeholders. `materialize_sublayers` invokes `.call`
-        deliberately (`.__call__` would recurse into `build` forever), so it
-        can never enter the tracking context `add_loss` demands.
-
-        The duplication is kept as small as it can be: every line below goes
-        through the SAME `encode_pixels` / `encode_actions` / `predict_next`
-        helpers `call` uses, so only the four lines of action zero-padding are
-        a second encoding of the topology, and the SIGReg transpose is copied
-        verbatim from `call`. What is skipped is exactly the loss tail --
-        `add_loss` and the two trackers -- which owns no weights.
-
-        A hand walk of a forward graph drifts silently; that is why
-        `materialize_sublayers` prefers a trace. The mitigation is a shipped
-        assertion, not a comment: `test_the_explicit_build_materializes_the_
-        model.py` pins that this build materializes exactly the population a
-        real call does (MEASURED: 188 both ways), so a sub-layer added to
-        `call` and not here fails loudly.
-
-        The batch axis is made concrete (`1`): `encode_pixels` multiplies
-        `B * T`, which is a `TypeError` on `None`, and no weight shape depends
-        on the batch.
+        Repeats ``call``'s forward shapes through the same
+        ``encode_pixels`` / ``encode_actions`` / ``predict_next`` helpers,
+        skipping only the loss tail (``add_loss`` and the trackers), which
+        owns no weights. The batch axis is fixed at 1 since no weight shape
+        depends on it.
 
         :param input_shape: dict with keys ``pixels`` (B, T, H, W, C) and
             ``action`` (B, T-1, A).
         """
+        # DECISION plan-2026-08-23T091307-9a110062/D-424: build re-derives shapes instead of tracing call, since add_loss inside call raises on traced KerasTensor placeholders.
+        # test_the_explicit_build_materializes_the_model.py pins that build and call materialize the same 188-layer population, so a drift fails loudly. See decisions.md.
         if self.built:
             return
         cfg = self.config
@@ -278,33 +252,28 @@ class LeWM(keras.Model):
         """
         pixels, action = self._require_pixels_and_action(inputs)
 
-        # Target encoder is live (no EMA, no stop_gradient).
-        # Upstream LeWM uses the same encoder for both context and target.
-        # Gradient flows through both paths.
-        emb = self.encode_pixels(pixels, training=training)   # (B, T, D)
+        # The same live encoder produces both context and target embeddings; gradient flows through both.
+        emb = self.encode_pixels(pixels, training=training)
 
-        # Pad action along time axis with zeros so act_emb has T timesteps.
-        # Upstream pads before action_encoder (the "append zero action" trick).
+        # Zero-pad the action sequence to T timesteps before embedding it.
         pad_shape = (ops.shape(action)[0], 1, self.config.action_dim)
         zero_pad = ops.zeros(pad_shape, dtype=action.dtype)
-        action_padded = ops.concatenate([action, zero_pad], axis=1)      # (B, T, A)
-        act_emb = self.encode_actions(action_padded)                     # (B, T, D)
+        action_padded = ops.concatenate([action, zero_pad], axis=1)
+        act_emb = self.encode_actions(action_padded)
 
-        pred_emb = self.predict_next(emb, act_emb, training=training)    # (B, T, D)
+        pred_emb = self.predict_next(emb, act_emb, training=training)
 
-        # Self-supervised MSE between pred[:, :-1] and target[:, 1:].
-        pred_ctx = pred_emb[:, :-1]     # (B, T-1, D)
-        target_ctx = emb[:, 1:]         # (B, T-1, D)
+        pred_ctx = pred_emb[:, :-1]
+        target_ctx = emb[:, 1:]
         pred_loss = ops.mean(ops.square(pred_ctx - target_ctx))
         self.add_loss(pred_loss)
 
-        # SIGReg on the projected embeddings, shape (T, B, D) to match upstream.
+        # Transpose to (T, B, D) to match the SIGReg layer's expected axis order.
         emb_tbd = ops.transpose(emb, (1, 0, 2))
         sigreg_loss = self.sigreg(emb_tbd)
         weighted_sigreg = self._sigreg_weight * sigreg_loss
         self.add_loss(weighted_sigreg)
 
-        # Track the two weighted components for observability.
         self.pred_loss_tracker.update_state(pred_loss)
         self.sigreg_loss_tracker.update_state(weighted_sigreg)
 
@@ -322,21 +291,17 @@ class LeWM(keras.Model):
         """Autoregressive rollout from a history of pixel observations.
 
         :param pixels_history: `(B, S, HS, H, W, C)` — ``HS = history_size``
-            frames. Only the ``s = 0`` plane is encoded; all S planes are
-            assumed to share the same history. **S must equal 1**; pass
-            distinct per-rollout histories by tiling externally as upstream
-            does. See DECISION below.
+            frames. Only the ``s = 0`` plane is encoded. ``S`` must equal 1;
+            to roll out distinct per-sample histories, tile them externally
+            or call ``rollout`` once per history.
         :param action_sequence: `(B, S, T, action_dim)` — full action sequence
             of horizon ``T`` (history + future), with ``T >= history_size``.
-        :return: dict with
-            * ``predicted_emb``: `(B, S, T + 1, D)`. **Note the ``T + 1``** —
-              the rollout keeps every step it produces: ``HS`` history frames
-              plus ``(T - HS) + 1`` autoregressive predictions. The first
-              ``HS`` entries along the time axis are **encoder-derived**
-              embeddings of the observed history; the remaining ``T + 1 - HS``
-              entries are **predictor-derived**. A consumer comparing
-              predictions against ground truth must score only the
-              predictor-derived tail, not the encoder-derived head.
+        :return: dict with ``predicted_emb`` of shape `(B, S, T + 1, D)`. The
+            rollout keeps every step it produces: the first ``HS`` entries
+            along the time axis are encoder-derived embeddings of the
+            observed history, and the remaining ``T + 1 - HS`` entries are
+            predictor-derived. Score only the predictor-derived tail against
+            ground truth.
         """
         cfg = self.config
         HS = cfg.history_size
@@ -346,23 +311,14 @@ class LeWM(keras.Model):
         S = ops.shape(action_sequence)[1]
         T = ops.shape(action_sequence)[2]
 
-        # rollout is an eager-only inference path (it runs a Python `for`
-        # loop), so T is a concrete value here. Guard against an action
-        # horizon shorter than the history window — otherwise n_steps below
-        # is negative and the loop is silently skipped.
+        # rollout runs an eager Python loop, so T is concrete here; reject a horizon shorter than the history window.
         if int(T) < HS:
             raise ValueError(
                 f"rollout: action_sequence horizon T={int(T)} must be >= "
                 f"history_size={HS}."
             )
 
-        # Enforce S==1. The original implementation took pixels_history[:, 0]
-        # and broadcast it over S, silently dropping per-S histories (a footgun:
-        # callers passing distinct histories would see them ignored without
-        # warning). Upstream jepa.py:rollout does the same trick because its
-        # callers tile externally; we surface the constraint instead. To
-        # rollout multiple distinct histories, call rollout once per history
-        # or tile s=0 yourself.
+        # Distinct per-S histories would otherwise be silently dropped, since only pixels_history[:, 0] is encoded.
         if int(S) != 1:
             raise ValueError(
                 f"rollout: S must equal 1 (got S={int(S)}). Only "
@@ -371,18 +327,13 @@ class LeWM(keras.Model):
                 f"call rollout once per history."
             )
 
-        # Split actions into initial-history actions + future actions.
-        # act_0: (B, S, HS, A); act_future: (B, S, T-HS, A).
         act_0 = action_sequence[:, :, :HS, :]
         act_future = action_sequence[:, :, HS:, :]
 
-        # Encode history pixels — collapse (B, S) and use first sample plane
-        # replicated over S to avoid re-encoding (S copies of same frames).
-        # pixels_history: (B, S, HS, H, W, C). We take s=0 then tile.
-        pixels_0 = pixels_history[:, 0]     # (B, HS, H, W, C)
-        emb_0 = self.encode_pixels(pixels_0, training=False)  # (B, HS, D)
+        # Encode the shared history once, then broadcast it over S rather than re-encoding S copies.
+        pixels_0 = pixels_history[:, 0]
+        emb_0 = self.encode_pixels(pixels_0, training=False)
 
-        # Broadcast over S: (B, S, HS, D) -> flatten (B*S, HS, D).
         emb = ops.broadcast_to(
             ops.expand_dims(emb_0, axis=1), (B, S, HS, D)
         )
@@ -394,17 +345,17 @@ class LeWM(keras.Model):
         n_steps = T - HS
         for t in range(int(n_steps)):
             act_emb = self.encode_actions(act)
-            # Truncate to last HS steps for the predictor's fixed window.
+            # Truncate to the predictor's fixed HS-step window.
             emb_trunc = emb[:, -HS:]
             act_trunc = act_emb[:, -HS:]
             pred_emb_step = self.predict_next(emb_trunc, act_trunc, training=False)
-            pred_last = pred_emb_step[:, -1:]  # (B*S, 1, D)
+            pred_last = pred_emb_step[:, -1:]
             emb = ops.concatenate([emb, pred_last], axis=1)
 
             next_act = act_future_flat[:, t:t+1, :]
             act = ops.concatenate([act, next_act], axis=1)
 
-        # Final step — one more prediction using the fully-assembled action seq.
+        # One more prediction step using the fully-assembled action sequence.
         act_emb = self.encode_actions(act)
         emb_trunc = emb[:, -HS:]
         act_trunc = act_emb[:, -HS:]
@@ -412,9 +363,7 @@ class LeWM(keras.Model):
         pred_last = pred_emb_step[:, -1:]
         emb = ops.concatenate([emb, pred_last], axis=1)
 
-        # Reshape (B*S, T_full, D) -> (B, S, T_full, D). T_full = HS + n_steps
-        # + 1 = T + 1: the rollout keeps every step it produces (see the
-        # method docstring's predicted_emb note). No truncation.
+        # T_full = HS + n_steps + 1 = T + 1: every produced step is kept, none truncated.
         T_full = ops.shape(emb)[1]
         pred_rollout = ops.reshape(emb, (B, S, T_full, D))
         return {"predicted_emb": pred_rollout}
@@ -425,9 +374,11 @@ class LeWM(keras.Model):
 
     @property
     def metrics(self):
-        """Expose the per-component loss trackers alongside the framework's
-        own trackers (so Keras resets all of them per epoch and the CSV log
-        carries `pred_loss` / `sigreg_loss` next to `loss`)."""
+        """Return the framework's own trackers plus the per-component loss trackers.
+
+        :return: list of metrics, so Keras resets all of them per epoch and
+            the CSV log carries ``pred_loss`` / ``sigreg_loss`` next to ``loss``.
+        """
         return [*super().metrics, self.pred_loss_tracker, self.sigreg_loss_tracker]
 
     # ------------------------------------------------------------------

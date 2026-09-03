@@ -1,123 +1,33 @@
-"""Monocular depth estimation following the Depth Anything (V1) semi-supervised
-recipe: a ViT encoder, a convolutional dense-prediction head, and an optional
-teacher branch supplying feature alignment and pseudo-label consistency.
+"""`DepthAnything`, a monocular depth model built from a ViT encoder, a
+`DPTDecoder` head, and an optional Mean-Teacher branch for semi-supervised
+training. Implements the Depth Anything V1 recipe, not V2: no synthetic
+training data and no distillation through a large teacher.
 
-Predicting depth from a single image is ill-posed — an image is consistent with a
-whole family of scenes related by scale — so the only supervision that
-generalizes across datasets is *relative*: depth up to an unknown affine
-transform. That framing makes heterogeneous data usable, which is the real
-bottleneck, because metric depth labels require LiDAR or stereo rigs and exist
-for a few million images at most while unlabeled photographs exist by the
-billion. Depth Anything's contribution is the observation that naive
-pseudo-labeling on that unlabeled pool does nothing: a student trained on its
-teacher's predictions of unperturbed images has no gradient to learn from,
-because it can already produce those predictions. The fix is to make the
-student's job strictly harder than the teacher's. The teacher sees a clean image;
-the student sees the same image after strong perturbation (color jitter, CutMix)
-and must still agree. The residual difficulty is what carries information. A
-second term keeps the encoder from drifting away from the semantic structure of
-its pretrained initialization by aligning student features to a frozen
-counterpart's — semantic priors are what let a depth model reason about object
-boundaries it never saw supervised.
+Depth from a single image is scale-ambiguous, so the model targets depth up
+to an unknown affine transform rather than metric depth. The semi-supervised
+branch trains the student on a strongly perturbed (color jitter, CutMix) copy
+of an image against a target taken from the teacher's prediction on the clean
+image, so the two disagree and there is a gradient to learn from. A second
+term aligns student features to the teacher to preserve the encoder's
+pretrained semantic structure. Augmentation runs inside `train_step`, not
+`call`, because CutMix changes the correct target over the mixed region.
 
-Color jitter is a per-image photometric perturbation, so "the same image" holds
-under it and the asymmetry above is exactly the intended one. CutMix is not: it
-pastes a rectangle taken from *another row of the batch*, which changes what the
-correct answer is over that rectangle. Augmentation therefore does not happen in
-`call()`, where no target is in scope; `train_step` calls
-`_augment_with_targets`, which mixes the image and every target — the labeled
-depth map, and the teacher's pseudo-depth on the unlabeled branch — by one
-shared box. `call(x, training=True)` is a plain un-augmented forward pass.
+The encoder is this repository's plain `ViT` (patch size 16) or a
+`Conv-BN-ReLU` placeholder stack, not DINOv2, and ships no pretrained
+weights; `from_pretrained_encoder` loads one. The teacher starts as a clone
+of the student and only becomes an EMA average once the caller attaches
+`TeacherEMACallback` (`teacher_ema.py`); nothing in this module advances it
+on its own. `compile()` with no `loss=` defaults to `AffineInvariantLoss`,
+matching the relative-depth objective; `src/train/depth_anything/` passes
+its own `DepthEstimationLoss` instead. `use_feature_alignment` defaults to
+`True` and `enable_semi_supervised` to `False`, so a default-configured
+model builds a teacher that the default `train_step` path never uses;
+`__init__` warns when it detects this combination.
 
-`DepthAnything` implements the **V1** recipe. V2's defining moves — replacing
-real labeled data with synthetic renderings and distilling through a large
-teacher onto pseudo-labeled real images — are not present.
-
-Three things about the encoder differ from the paper and change what the model
-inherits. First, the backbone is this repository's plain supervised `ViT` (patch
-size 16), or a `Conv-BN-ReLU` stack when `encoder_kind='placeholder'`, not
-DINOv2; no pretrained weights are downloaded by this package, so a freshly
-constructed model has no semantic prior to transfer and the feature-alignment
-term is aligning a random encoder to a copy of itself until
-`from_pretrained_encoder` supplies a real checkpoint. Second, the "frozen"
-encoder is *not* frozen in the V1 sense of a fixed pretrained reference; it is a
-`clone_model` of the student, initialized from the student's own weights, and it
-is intended to be advanced as a Mean-Teacher exponential moving average through
-`update_teacher_ema`. That method is a plain public method and nothing in this
-module calls it: the driver is `TeacherEMACallback` in this package's
-`teacher_ema.py`, attached by the trainer in `src/train/depth_anything/`. Without
-that callback the teacher stays pinned at the student's initial weights forever.
-Third, `compile()` with no `loss=` defaults to `AffineInvariantLoss`, not to
-mean-squared error. This is the objective the whole recipe is built around: the
-supervision is relative, so a prediction that is structurally correct but
-globally scaled or shifted is *right*, and an MSE default would penalize it for
-choosing its own scale — which also contradicts the decoder's deliberately
-linear, unclamped output. The default is only what a caller who compiles with an
-optimizer alone gets; the trainer in `src/train/depth_anything/` passes its own
-`DepthEstimationLoss` explicitly and is unaffected by it.
-
-The decoder is named `DPTDecoder` but is not the DPT of the paper. It performs no
-multi-scale "reassemble" from intermediate transformer layers and has no residual
-fusion blocks or skip connections; it is a linear stack of `3x3 Conv - BatchNorm
-- ReLU` stages with bilinear 2x upsampling inserted after the first
-`log2(upsample_factor)` of them, consuming only the encoder's final feature map.
-`upsample_factor` is set to the encoder stride so the output resolution returns
-to the input's, which is why the placeholder encoder was deliberately built to
-stride 16 (its legacy stride-2 initial pool was removed) rather than the 32 a
-four-stage conv tower would naturally give — the decoder's four stages can only
-express `2**4`. The final projection is linear by default, leaving the output
-unconstrained; that is the correct choice for affine-invariant or scale-shift
-losses, which need the network free to choose its own scale, and it is why no
-sigmoid clamps the depth to `[0, 1]`.
-
-A ViT emits `(B, N+1, D)` sequences while the decoder needs `(B, h, w, D)`, so
-`_features_to_spatial` drops the CLS token and reshapes on the patch grid derived
-from `image_shape // patch_size`. This ties the model to a fixed input
-resolution: `encoder_h` and `encoder_w` are computed once in `__init__`, so
-calling the model at a resolution other than the configured `image_shape` will
-reshape against the wrong grid.
-
-Two behavioural choices are worth stating as choices. `use_feature_alignment`
-defaults to `True` while `enable_semi_supervised` defaults to `False`, so the
-default configuration *builds* the teacher — roughly doubling parameter count and
-memory — while the custom `train_step` never routes through the semi-supervised
-branch that would use it. Enable the second rather than paying for a teacher that
-does nothing; `__init__` warns about exactly this combination. Note that
-*disabling the first* is no longer a way to avoid the teacher when semi-supervision
-is on: the pseudo-label consistency term needs a teacher regardless of whether the
-feature-alignment term is wanted, so the teacher is built whenever either flag is
-set and `use_feature_alignment` now governs only the FAL term. And the clone is
-wrapped in a `try/except` that degrades to `use_feature_alignment = False` with a
-warning instead of raising, so an encoder that cannot be cloned yields a working
-but silently unregularized model — and, when semi-supervision was requested, one
-whose consistency term is inactive too, which the same warning says.
-
-This model overrides `train_step`, against this repository's standing rule that
-models use stock `fit()` and feed extra signals through `tf.data`. The exception
-is deliberate and was measured before it was granted: the semi-supervised path
-consumes two batches per step with *different* augmentation applied to each
-(teacher on the clean unlabeled batch, student on the perturbed one — the
-asymmetry above is the entire recipe), and it reads a teacher network that is not
-part of the loss graph. `compute_loss(x, y, y_pred, sample_weight, training)`
-receives neither the second batch nor the teacher, so the rule's prescribed shape
-cannot express this step. The price of the exception is that everything Keras'
-default `train_step` does for free must be done by hand here — in particular
-feeding `self._loss_tracker`, which the default `compute_loss` does *not* do; see
-`_finalize_train_step`. Do not treat this file as precedent for an ordinary
-single-batch model.
-
-Serialization overrides `load_own_variables` for one reason: to materialize the
-nested sub-Models before the framework restores into them. Keras 3 recurses into
-child models and maps weights by attribute path, but it calls the outer model's
-`load_own_variables` first, and at that moment `self.encoder`/`self.decoder`
-exist while their own sub-layers — and therefore their variables — do not. Left
-alone, 55 of 172 weights restored re-initialized and the forward output moved by
-1 to 2.8. A dummy forward under the saved `image_shape` builds the full tree, and
-the restore itself is then the ordinary path-based one. This override used to
-carry a `save_own_variables` twin that dumped the whole `self.weights` list into
-flat numeric slots; it did not replace the framework's recursive save as its
-comment claimed, it ran alongside it and doubled every archive, so it was removed
-(see the D-009 anchor above `load_own_variables`).
+The model overrides `train_step`, which most models in this repository do
+not: the semi-supervised path needs two batches with different augmentation
+per batch and a teacher outside the loss graph, neither of which fits
+`compute_loss`'s single-batch signature.
 
 References:
     - Yang et al., 2024. Depth Anything: Unleashing the Power of Large-Scale
@@ -160,7 +70,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Map depth_anything encoder_type slugs to ViT scale names.
 #
-# Kept as a module-level constant because it is also the SOURCE of
+# Kept as a module-level constant because it is also the source of
 # ``DepthAnything.MODEL_VARIANTS`` below: the three slugs are named in exactly
 # one place, so the encoder-type validation list can never drift from the
 # variant registry (it used to be a second hand-written literal in __init__).
@@ -176,100 +86,104 @@ _VIT_PATCH_SIZE: int = 16
 
 @register_dl_technique("dl_techniques.models.depth_anything.model")
 class DepthAnything(keras.Model):
-    """Depth Anything model implementation.
+    """Monocular depth model: ViT encoder, DPT-style decoder, optional teacher.
 
-    Implements the complete Depth Anything architecture for monocular depth estimation.
-    The model combines a feature encoder (placeholder for DINOv2) with a DPT decoder
-    to produce dense depth predictions from RGB images.
+    Architecture:
 
-    The architecture includes:
-    - Feature encoder for extracting multi-scale representations
-    - DPT decoder for dense prediction
-    - Optional feature alignment with frozen encoder
-    - Strong augmentation pipeline for robust training
+    .. code-block:: text
 
-    Args:
-        encoder_type: String, type of ViT encoder to use.
-            Supported values: ['vit_s', 'vit_b', 'vit_l'].
-            Defaults to 'vit_l'.
-        input_shape: Tuple of integers, input image shape as (height, width, channels).
-            Defaults to (384, 384, 3).
-        decoder_dims: List of integers, dimensions for decoder layers.
-            Defaults to [256, 128, 64, 32].
-        output_channels: Integer, number of output channels for depth prediction.
-            Defaults to 1.
-        kernel_initializer: String or Initializer, initializer for convolutional kernels.
-            Defaults to "he_normal".
-        kernel_regularizer: Regularizer or None, regularizer for convolutional kernels.
-            Defaults to None.
-        loss_weights: Dict of strings to floats, weights for different loss components.
-            Keys: 'labeled', 'unlabeled', 'feature'.
-            Defaults to {'labeled': 1.0, 'unlabeled': 0.5, 'feature': 0.1}.
-        cutmix_prob: Float, probability of applying CutMix augmentation. The
-            augmentation runs inside `train_step`, not inside `call`, so that
-            the depth target is CutMixed by the same box as the image.
-            Defaults to 0.5.
-        color_jitter_strength: Float, strength of color jittering augmentation.
-            Defaults to 0.2.
-        input_value_range: Tuple of two floats or None, the declared value range
-            of the input images. Color jitter clips its result back into this
-            range. Pass None for standardized or `[-1, +1]` inputs — see
-            `create_depth_anything` for the full contract.
-            Defaults to (0.0, 1.0).
-        use_feature_alignment: Boolean, whether to add the feature-alignment
-            loss term during semi-supervised training. This governs the FAL
-            *term* only; it no longer governs whether the teacher encoder is
-            built, because `enable_semi_supervised`'s pseudo-label consistency
-            term needs a teacher of its own. Setting it True with
-            `enable_semi_supervised` False builds a teacher nothing reads, and
-            warns. Defaults to True.
-        **kwargs: Additional keyword arguments for the Model base class.
+        Input [B, H, W, 3]
+              │
+              ▼
+        ┌──────────────────────────────┐
+        │ encoder: ViT (patch 16) or   │────► frozen_encoder (EMA teacher,
+        │ placeholder Conv-BN-ReLU     │       optional, weight-shared clone)
+        └──────────────┬───────────────┘
+                       │  [B, N+1, D] (ViT) or [B, h, w, D]
+                       ▼
+        ┌──────────────────────────────┐
+        │ _features_to_spatial:        │  (ViT path only: drop CLS token,
+        │ reshape to [B, h, w, D]      │   reshape on image_shape // stride)
+        └──────────────┬───────────────┘
+                       ▼
+        ┌──────────────────────────────┐
+        │ decoder: DPTDecoder          │
+        │ upsample_factor = stride     │
+        └──────────────┬───────────────┘
+                       ▼
+        Output [B, H, W, output_channels]  (unconstrained, linear)
+
+    Training (semi-supervised, `enable_semi_supervised=True`):
+
+    .. code-block:: text
+
+        labeled batch ──► augment ──► student ──► decoder ──► labeled loss
+        unlabeled batch ─┬─► augment(strong) ──► student ──► decoder ──► consistency loss
+                         └─► clean ──► frozen_encoder/teacher ──► pseudo-target
+        student features ──► FeatureAlignmentLoss ──► frozen_encoder features
+                                                        (only if use_feature_alignment)
+
+    :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``.
+    :type encoder_type: str
+    :param image_shape: Input image shape ``(height, width, channels)``.
+    :type image_shape: Tuple[int, int, int]
+    :param decoder_dims: Channel dimension per decoder stage.
+    :type decoder_dims: Optional[List[int]]
+    :param output_channels: Number of channels in the predicted depth map.
+    :type output_channels: int
+    :param kernel_initializer: Initializer for convolutional kernels.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for convolutional kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param loss_weights: Weight per loss term, keys ``"labeled"``,
+        ``"unlabeled"``, ``"feature"``.
+    :type loss_weights: Optional[Dict[str, float]]
+    :param cutmix_prob: Probability of applying CutMix. Runs inside
+        `train_step`, not `call`, so the depth target is CutMixed by the same
+        box as the image.
+    :type cutmix_prob: float
+    :param color_jitter_strength: Strength of the color-jitter augmentation.
+    :type color_jitter_strength: float
+    :param input_value_range: Declared value range of the input images; color
+        jitter clips back into it. Pass ``None`` for standardized or
+        ``[-1, +1]`` inputs — see `create_depth_anything` for the full
+        contract.
+    :type input_value_range: Optional[Tuple[float, float]]
+    :param use_feature_alignment: Whether to add the feature-alignment loss
+        term. Governs that term only, not whether the teacher encoder is
+        built: `enable_semi_supervised`'s pseudo-label term needs a teacher
+        of its own, so setting this `True` with `enable_semi_supervised`
+        `False` builds a teacher nothing reads, and `__init__` warns.
+    :type use_feature_alignment: bool
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If `encoder_type` or `encoder_kind` is not recognized.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, 3)`
-        Or tuple of two 4D tensors for training with labeled/unlabeled data.
+        4D tensor ``(batch_size, height, width, 3)``, or a tuple of two such
+        tensors for semi-supervised training with labeled and unlabeled data.
 
     Output shape:
-        4D tensor with shape: `(batch_size, height, width, output_channels)`
-
-    Returns:
-        A 4D tensor representing predicted depth maps.
-
-    Raises:
-        ValueError: If unsupported encoder type is specified.
+        4D tensor ``(batch_size, height, width, output_channels)``.
 
     Example:
-        >>> model = DepthAnything(
-        ...     encoder_type='vit_l',
-        ...     input_shape=(384, 384, 3),
-        ...     decoder_dims=[256, 128, 64, 32]
-        ... )
-        >>> x = keras.random.normal([2, 384, 384, 3])
-        >>> depth = model(x)
-        >>> print(depth.shape)
-        (2, 384, 384, 1)
+        .. code-block:: python
+
+            model = DepthAnything(
+                encoder_type='vit_l',
+                image_shape=(384, 384, 3),
+                decoder_dims=[256, 128, 64, 32]
+            )
+            x = keras.random.normal([2, 384, 384, 3])
+            depth = model(x)
+            print(depth.shape)  # (2, 384, 384, 1)
     """
 
-    # DECISION plan-2026-08-19T070627-a616f581/D-009
-    # This table is DERIVED from `_VIT_SCALE_MAP`, not written out, and
-    # `supported_encoders` is read off it. WHAT NOT TO DO: do not re-inline the
-    # `['vit_s', 'vit_b', 'vit_l']` literal into __init__ (that is what was here
-    # before 2026-08-19 -- a second hand-written copy of the same three slugs,
-    # free to drift from the map that actually resolves them), and do not "align"
-    # this with the guard by renaming `encoder_type` to `variant` or adding a
-    # `from_variant`: the knob is serialized under `encoder_type` in every saved
-    # config, and renaming it would break `.keras` round-trips.
-    #
-    #: Public-name registry of the three published Depth Anything encoder sizes
-    #: (models/CLAUDE.md Axis 2). DERIVED from ``_VIT_SCALE_MAP`` -- no size is
-    #: invented here, and the ``supported_encoders`` validation list below is
-    #: read off this table rather than restated.
-    #:
-    #: This package is structurally INVISIBLE to the ``MODEL_VARIANTS`` guard in
-    #: ``tests/test_models/test_package_api_contract.py``: its variant knob is
-    #: spelled ``encoder_type``, not ``variant``, and it has no ``from_variant``,
-    #: so none of the guard's three predicates can fire on it. It is fixed here
-    #: because the gap is real, not because a test demanded it. See D-009.
+    # DECISION plan-2026-08-19T070627-a616f581/D-009: keep this table derived from `_VIT_SCALE_MAP`, never re-inline the slug list.
+    # A second hand-written `['vit_s', 'vit_b', 'vit_l']` copy in __init__ can drift from the map that resolves them. See decisions.md.
+    #: Public-name registry of the three published Depth Anything encoder sizes, derived from `_VIT_SCALE_MAP`.
+    #: This package's variant knob is `encoder_type`, not `variant`, with no `from_variant`, so it is invisible
+    #: to the repo-wide `MODEL_VARIANTS` guard in `tests/test_models/test_package_api_contract.py`.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         slug: {"encoder_type": slug, "vit_scale": scale}
         for slug, scale in _VIT_SCALE_MAP.items()
@@ -380,10 +294,10 @@ class DepthAnything(keras.Model):
         )
 
     def build(self, input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]) -> None:
-        """Build the model components.
+        """Build the encoder, decoder, optional teacher, and augmentation.
 
-        Args:
-            input_shape: Shape of input tensor(s).
+        :param input_shape: Shape of input tensor(s).
+        :type input_shape: Union[Tuple[int, ...], List[Tuple[int, ...]]]
         """
 
         # Construct the encoder if not already provided via from_config (which
@@ -420,27 +334,10 @@ class DepthAnything(keras.Model):
             name='dpt_decoder',
         )
 
-        # Frozen weight-shared teacher. Order of operations matters:
-        #   1) ensure the student encoder is built (so it has weights to copy).
-        #   2) clone topology and force-build the clone.
-        #   3) copy weights student → teacher and freeze.
-        # Wrapped in try/except — if cloning fails on an exotic subclass we
-        # disable feature alignment for the run rather than crash the model.
-        #
-        # DECISION plan-2026-08-17T183311-79c63e38/D-033
-        # The teacher is built whenever EITHER flag is set, not just under
-        # `use_feature_alignment`. `enable_semi_supervised` needs a teacher for
-        # the pseudo-label consistency term, which is not a feature-space term
-        # and has nothing to do with feature alignment. When this condition was
-        # `if self.use_feature_alignment:` alone, the documented combination
-        # `enable_semi_supervised=True, use_feature_alignment=False` — exposed
-        # as two INDEPENDENT CLI flags by `src/train/depth_anything/` — built no
-        # teacher, so `_train_step_semi_supervised` unpacked `x_unlab`, used it
-        # for nothing, and silently degraded to labeled-only training at half
-        # the throughput, with `update_teacher_ema` a no-op as well. Do not
-        # narrow this back to the FAL knob; `use_feature_alignment` governs the
-        # FAL *term* (see `_train_step_semi_supervised`), not the teacher's
-        # existence.
+        # Build order: ensure the student encoder is built, clone its topology and
+        # force-build the clone, then copy weights student -> teacher and freeze.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-033: build the teacher when either flag is set, not `use_feature_alignment` alone.
+        # `enable_semi_supervised` needs a teacher for pseudo-label consistency too; narrowing this silently degraded to labeled-only training. See decisions.md.
         if self.use_feature_alignment or self.enable_semi_supervised:
             try:
                 dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
@@ -485,8 +382,9 @@ class DepthAnything(keras.Model):
         use_feature_alignment=False`` — the pseudo-label consistency term needs
         a *moving* teacher just as much as the alignment term does.
 
-        Args:
-            decay: EMA decay factor in ``[0,1]``. Higher values → slower update.
+        :param decay: EMA decay factor in ``[0, 1]``. Higher values give a
+            slower update.
+        :type decay: float
         """
         if self.frozen_encoder is None:
             return
@@ -512,16 +410,15 @@ class DepthAnything(keras.Model):
         a successful load, re-copies student → teacher when feature alignment
         is enabled, so the teacher starts from the pretrained snapshot.
 
-        Args:
-            weights_path: Path to a ``.keras`` checkpoint produced by
-                ``model.save(...)``. The checkpoint may itself be a
-                DepthAnything snapshot or a standalone encoder snapshot — the
-                weight-transfer helper matches by layer name.
-            skip_prefixes: Layer-name prefixes to ignore during transfer.
-                Defaults to ``()`` (transfer everything).
-
-        Returns:
-            ``self`` (so calls can chain).
+        :param weights_path: Path to a ``.keras`` checkpoint produced by
+            ``model.save(...)``. The checkpoint may itself be a
+            DepthAnything snapshot or a standalone encoder snapshot; the
+            weight-transfer helper matches by layer name.
+        :type weights_path: str
+        :param skip_prefixes: Layer-name prefixes to ignore during transfer.
+        :type skip_prefixes: Tuple[str, ...]
+        :return: ``self``, so calls can chain.
+        :rtype: DepthAnything
         """
         if not self.built:
             dummy = keras.ops.zeros((1,) + tuple(self.image_shape))
@@ -568,11 +465,10 @@ class DepthAnything(keras.Model):
         Used when ``encoder_kind='placeholder'``. For ``encoder_kind='real'``
         the actual ViT backbone is constructed eagerly in ``__init__``.
 
-        Args:
-            trainable: Boolean indicating whether the encoder should be trainable.
-
-        Returns:
-            Encoder model instance.
+        :param trainable: Whether the encoder should be trainable.
+        :type trainable: bool
+        :return: Encoder model instance.
+        :rtype: keras.Model
         """
         inputs = keras.layers.Input(shape=self.image_shape, name='encoder_input')
 
@@ -587,14 +483,8 @@ class DepthAnything(keras.Model):
             use_bias=False,
             name='initial_conv'
         )(inputs)
-        # DECISION plan-2026-08-17T183311-79c63e38/D-028
-        # `epsilon` is EXPLICIT on all three BatchNorms of this placeholder
-        # encoder, and the justification here is CONSISTENCY, not fidelity:
-        # this Conv-BN-ReLU stack is an in-repo stand-in for DINOv2 with no
-        # reference implementation, so it has nothing to be faithful to. What it
-        # does have is a downstream DPT head normalizing at 1e-5; running the
-        # encoder at Keras' 1e-3 put a 100x spread inside one forward pass for
-        # no stated reason. Do NOT restate the literal here.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028: pass epsilon explicitly on all three placeholder BatchNorms.
+        # Justification is consistency with the downstream DPT head's 1e-5, not reference fidelity (this stack has no reference). See decisions.md.
         x = keras.layers.BatchNormalization(
             epsilon=REFERENCE_BN_EPSILON, name='initial_bn'
         )(x)
@@ -671,18 +561,17 @@ class DepthAnything(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass through the model.
 
-        This is the plain encoder → decoder path. It does **not** augment: strong
+        This is the plain encoder-decoder path. It does not augment: strong
         augmentation is applied by `train_step` (see `_augment_with_targets`),
         where the depth target is in scope and can be CutMixed by the same box.
 
-        Args:
-            inputs: Input tensor with shape (batch_size, height, width, 3)
-                or tuple of (labeled, unlabeled) tensors for training.
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Predicted depth maps with shape (batch_size, height, width, output_channels).
+        :param inputs: Input tensor, shape ``(batch_size, height, width, 3)``,
+            or a tuple of ``(labeled, unlabeled)`` tensors for training.
+        :type inputs: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :param training: Whether the model runs in training or inference mode.
+        :type training: Optional[bool]
+        :return: Predicted depth maps, shape ``(batch_size, height, width, output_channels)``.
+        :rtype: keras.KerasTensor
         """
         # Handle both single input and tuple input for training
         if isinstance(inputs, tuple):
@@ -713,13 +602,16 @@ class DepthAnything(keras.Model):
     ) -> None:
         """Configure the model for training.
 
-        Args:
-            optimizer: Keras optimizer instance.
-            loss: Primary loss function. If None, uses `AffineInvariantLoss` —
-                depth is supervised only up to an unknown affine transform, so
-                that is the objective this recipe is built around.
-            loss_weights: Optional custom loss weights to override defaults.
-            **kwargs: Additional arguments passed to parent compile method.
+        :param optimizer: Keras optimizer instance.
+        :type optimizer: keras.optimizers.Optimizer
+        :param loss: Primary loss function. If ``None``, uses
+            `AffineInvariantLoss`, matching depth supervision that is only
+            defined up to an unknown affine transform.
+        :type loss: Optional[keras.losses.Loss]
+        :param loss_weights: Optional custom loss weights, overriding the
+            defaults.
+        :type loss_weights: Optional[Dict[str, float]]
+        :param kwargs: Additional arguments passed to the parent ``compile``.
         """
         # Set default loss if none provided
         if loss is None:
@@ -727,7 +619,7 @@ class DepthAnything(keras.Model):
 
         super().compile(optimizer=optimizer, loss=loss, **kwargs)
 
-        # Update loss weights if provided. Specialized loss instances are NOT
+        # Update loss weights if provided. Specialized loss instances are not
         # stored on `self` — that previously dead state caused get_config drift.
         if loss_weights is not None:
             self.loss_weights.update(loss_weights)
@@ -742,26 +634,18 @@ class DepthAnything(keras.Model):
         through ``self(x_unlab, training=True)`` but never through this path
         — exactly the Mean-Teacher / consistency-regularization recipe.
 
-        Args:
-            x_unlab: Unlabeled input batch ``(B, H, W, C)``.
-
-        Returns:
-            Pseudo-depth tensor ``(B, H, W, output_channels)`` with no gradient.
+        :param x_unlab: Unlabeled input batch ``(B, H, W, C)``.
+        :type x_unlab: keras.KerasTensor
+        :return: Pseudo-depth tensor ``(B, H, W, output_channels)``, no gradient.
+        :rtype: keras.KerasTensor
         """
         feat = self.frozen_encoder(x_unlab, training=False)
         feat = self._features_to_spatial(feat)
         pseudo = self.decoder(feat, training=False)
         return ops.stop_gradient(pseudo)
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-014
-    # Strong augmentation lives here, in the training path, and NOT in `call()`.
-    # CutMix pastes a rectangle taken from another batch row; when the call sat
-    # inside `call()` no target was in scope, so the image was mixed and the
-    # depth map was not — every cut region supervised one scene's pixels against
-    # another scene's depth, on ~`cutmix_prob` of all batches. Do not move the
-    # augmentation back into `call()` and do not add a second augmentation call
-    # anywhere: every consumer of an augmented image must receive it from this
-    # method together with its identically-mixed targets.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-014: augmentation stays in the training path, never in `call()`.
+    # `call()` has no target in scope, so a `call()`-side CutMix mixed the image but not the depth map on ~cutmix_prob of batches. See decisions.md.
     def _augment_with_targets(
         self,
         x: keras.KerasTensor,
@@ -778,44 +662,27 @@ class DepthAnything(keras.Model):
         * When ``self.augmentation`` is ``None`` — tests and callers that opt out
           of strong augmentation set it so — the inputs are returned unchanged.
 
-        Args:
-            x: Image batch ``(B, H, W, C)``.
-            targets: Tensors to mix by the same box as ``x``.
-
-        Returns:
-            The augmented images and the identically mixed targets.
+        :param x: Image batch ``(B, H, W, C)``.
+        :type x: keras.KerasTensor
+        :param targets: Tensors to mix by the same box as ``x``.
+        :type targets: List[keras.KerasTensor]
+        :return: The augmented images and the identically mixed targets.
+        :rtype: Tuple[keras.KerasTensor, List[keras.KerasTensor]]
         """
         if self.augmentation is None:
             return x, list(targets)
         x_aug, mix = self.augmentation.augment_with_mix(x, training=True)
         return x_aug, [self.augmentation.apply_mix_to_target(t, mix) for t in targets]
 
-    # DECISION plan-2026-08-17T183311-79c63e38/D-033
-    # Both custom step methods MUST end here. Two things Keras' default
-    # `train_step` does for free are not free once `train_step` is overridden,
-    # and both were missing:
-    #   1. `self._loss_tracker` is fed by the DEFAULT `train_step`, NOT by
-    #      `compute_loss`. Both methods previously ran
-    #      `for m in self.metrics: if m.name != "loss": m.update_state(y, y_pred)`
-    #      and never fed the tracker anywhere, so `history.history["loss"]` was
-    #      the `Mean` metric's reset default `0.0` on every step of every run —
-    #      MEASURED `[0.0, 0.0]` across two epochs — and every
-    #      `ModelCheckpoint`/`EarlyStopping`/`ReduceLROnPlateau` monitoring
-    #      `"loss"` was dead. `test_step` is not overridden, which is why
-    #      `val_loss` was real and the shipped trainer never surfaced this.
-    #   2. `self.metrics` yields the `CompileMetrics` CONTAINER, whose
-    #      `.result()` is a dict. Do NOT skip the tracker by name: the tracker
-    #      is identified by identity here, as in `capsnet/model.py`, because
-    #      `Mean.update_state(y, y_pred)` accepts `(y, y_pred)` as
-    #      `(values, sample_weight)` without raising and would silently
-    #      accumulate garbage.
+    # DECISION plan-2026-08-17T183311-79c63e38/D-033: both custom step methods must end by calling this.
+    # `compute_loss` does not feed `_loss_tracker` the way the default `train_step` does; skipping this left `history["loss"]` at 0.0 every step. See decisions.md.
     def _finalize_train_step(
         self,
         y: keras.KerasTensor,
         y_pred: keras.KerasTensor,
         loss: keras.KerasTensor,
     ) -> Dict[str, keras.KerasTensor]:
-        """Update every metric and return a FLAT logs dict.
+        """Update every metric and return a flat logs dict.
 
         Interface contract (called from both training paths, and only from
         inside a step method after the gradients have been applied):
@@ -831,13 +698,14 @@ class DepthAnything(keras.Model):
         * Never raises for a missing tracker: `_loss_tracker` only exists after
           `compile()`.
 
-        Args:
-            y: Ground-truth targets for the compiled metrics.
-            y_pred: Model predictions for the compiled metrics.
-            loss: The scalar total loss that was backpropagated.
-
-        Returns:
-            Flat mapping of metric name to scalar result.
+        :param y: Ground-truth targets for the compiled metrics.
+        :type y: keras.KerasTensor
+        :param y_pred: Model predictions for the compiled metrics.
+        :type y_pred: keras.KerasTensor
+        :param loss: The scalar total loss that was backpropagated.
+        :type loss: keras.KerasTensor
+        :return: Flat mapping of metric name to scalar result.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         loss_tracker = getattr(self, "_loss_tracker", None)
         for metric in self.metrics:
@@ -866,25 +734,8 @@ class DepthAnything(keras.Model):
         Both step methods differentiate ``scaled_loss`` and report ``loss``.
         See the D-034 anchor below for why the two must not be collapsed.
         """
-        # DECISION plan-2026-08-17T183311-79c63e38/D-034
-        # `self.optimizer.scale_loss(loss)` MUST be called inside the tape, and
-        # the SCALED value is what `tape.gradient` differentiates while the
-        # UNSCALED value is what gets reported. Keras' own default TF
-        # `train_step` does exactly this (`backend/tensorflow/trainer.py:72`),
-        # and overriding `train_step` silently opts out of it.
-        # Under `mixed_float16` Keras wraps the optimizer in a
-        # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
-        # `dynamic_scale` (2**15 initially) unconditionally
-        # (`optimizers/loss_scale_optimizer.py:172-177`). Skipping `scale_loss`
-        # therefore does not merely lose fp16 precision -- it divides the whole
-        # update by the loss scale. MEASURED on this exact step shape: total
-        # |dW| over 10 steps was 8.74e-05 without the call vs 2.44e+00 with it,
-        # a ratio of 2.79e+04 (~32768), against a float32 control of 2.74e+00.
-        # Nothing warns; training simply does not move.
-        # In float32 this is a provable no-op: the base
-        # `Optimizer.scale_loss` returns `loss` unchanged unless
-        # `loss_scale_factor` is set (`optimizers/base_optimizer.py:605-614`).
-        # Do not "simplify" this back to `tape.gradient(loss, ...)`.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-034: differentiate the scaled loss, report the unscaled one.
+        # Under mixed_float16 skipping `scale_loss` divides every gradient by the loss scale (measured |dW| ratio ~2.8e4); float32 is unaffected. See decisions.md.
         x, (y,) = self._augment_with_targets(x, [y])
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
@@ -923,17 +774,8 @@ class DepthAnything(keras.Model):
             loss = loss * self.loss_weights.get('labeled', 1.0)
 
             # ---- semi-sup branch: consistency (always) + FAL (opt-in) ----
-            # DECISION plan-2026-08-17T183311-79c63e38/D-033
-            # The gate is the TEACHER's existence, not `use_feature_alignment`.
-            # Both terms used to sit under `self.use_feature_alignment`, while
-            # `train_step` routes here on `self.enable_semi_supervised` alone —
-            # so the documented `enable_semi_supervised=True,
-            # use_feature_alignment=False` configuration executed this method,
-            # skipped the whole block, and was labeled-only training that paid
-            # to unpack and discard `x_unlab`. Pseudo-label consistency is an
-            # L1 between depth maps; it is not a feature-space term and must
-            # not be coupled to the feature-alignment knob. Only the FAL term
-            # below reads that knob.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-033: gate on the teacher's existence, not `use_feature_alignment`.
+            # Coupling pseudo-label consistency to that flag made `enable_semi_supervised=True, use_feature_alignment=False` silently labeled-only. See decisions.md.
             if self.frozen_encoder is not None:
                 # The teacher's pseudo-depth is read off the clean batch, then
                 # mixed by the same box the student's input received.
@@ -989,11 +831,10 @@ class DepthAnything(keras.Model):
           pseudo-label L1-consistency term over ``x_unlab`` and, when
           ``use_feature_alignment`` is also set, a Feature-Alignment-Loss term.
 
-        Args:
-            data: Training data batch.
-
-        Returns:
-            Dictionary containing loss metrics.
+        :param data: Training data batch.
+        :type data: Any
+        :return: Dictionary containing loss metrics.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         x, y = data
         if (
@@ -1007,8 +848,8 @@ class DepthAnything(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
 
-        Returns:
-            Dictionary containing the model configuration.
+        :return: Dictionary containing the model configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -1043,11 +884,10 @@ class DepthAnything(keras.Model):
         Accepts both ``image_shape`` (current key) and ``input_shape``
         (legacy key from pre-bd098beb saved configs) for back-compat.
 
-        Args:
-            config: Dictionary containing model configuration.
-
-        Returns:
-            DepthAnything model instance.
+        :param config: Dictionary containing model configuration.
+        :type config: Dict[str, Any]
+        :return: DepthAnything model instance.
+        :rtype: DepthAnything
         """
         cfg = dict(config)
         # Deserialize initializer/regularizer if present as serialized dicts.
@@ -1068,36 +908,8 @@ class DepthAnything(keras.Model):
     # ------------------------------------------------------------------
     # Load-time materialization of the nested sub-Models.
     # ------------------------------------------------------------------
-    # DECISION plan-2026-08-22T035419-a11304c8/D-009
-    # (supersedes the save-side half of plan_2026-05-10_bd098beb/D-004)
-    #
-    # D-004 fixed a real defect: restoring a saved DepthAnything left
-    # 55/172 weights at their freshly-initialised values (forward diff
-    # ~1-2.8), because Keras' path-walking `_load_state` recursion reaches
-    # `self.encoder`/`self.decoder` before anything has materialized their
-    # sub-layers. It fixed it by ALSO overriding `save_own_variables` to
-    # dump `list(self.weights)` under flat `vars/N` keys, on the stated
-    # premise that this "bypasses Keras' path-walking for these sub-Models
-    # entirely". That premise is FALSE, measured 2026-08-22: Keras' own
-    # recursive attribute-tracked save still runs alongside the override,
-    # so every `.keras` archive held BOTH families for the same tensors —
-    # `vit_l`/384: 610 live weights vs 1220 HDF5 datasets, exactly 2.00x,
-    # 4,882,763,410 bytes. `load_own_variables` only ever read the flat
-    # family back, so the path-based half was write-only dead weight.
-    #
-    # Bisected here: the load-bearing half of D-004 is the FORCE-BUILD
-    # below, not the flat store. Measured, `vit_s`/96, seeded, two full
-    # round trips (save->load->save->load):
-    #   * both overrides removed        -> max|delta| 4.5575 then 3.7332
-    #   * force-build only (this shape) -> 0.0 then 0.0, 322 datasets for
-    #     322 weights, 178,724,298 bytes (exactly half)
-    #
-    # Do NOT re-add a `save_own_variables` that writes `self.weights` into
-    # the store: it does not replace Keras' recursion, it duplicates it,
-    # and it silently doubles every checkpoint. Do NOT delete this method
-    # either — without the force-build the path-based restore lands on an
-    # unbuilt tree and the weights come back re-initialised, which is the
-    # 2026-05-10 defect returning with a green shape-only round trip.
+    # DECISION plan-2026-08-22T035419-a11304c8/D-009: keep the force-build here; never add a `save_own_variables` override.
+    # A flat `self.weights` dump duplicates Keras' own recursive save (measured 2.00x archive size) without replacing it. See decisions.md.
     def load_own_variables(self, store: Any) -> None:  # type: ignore[override]
         """Materialize the nested sub-Models before Keras restores them.
 
@@ -1140,64 +952,69 @@ def create_depth_anything(
 ) -> DepthAnything:
     """Create and build Depth Anything model instance.
 
-    **Input contract.** The model does not normalize its inputs, but the strong
-    augmentation it applies during training does need to know their range: color
-    jitter scales brightness and contrast and its result is clipped back into
-    `input_value_range`. The default `(0.0, 1.0)` says "the caller feeds images
-    in `[0, 1]`". Pass `input_value_range=None` for standardized (mean-zero) or
-    `[-1, +1]` images — the trainer in `src/train/depth_anything/` does, because
-    `src/train/common/megadepth.py` emits RGB in `[-1, +1]`, and clipping those
-    to `[0, 1]` would flatten every negative pixel to zero on the training path
-    only, while evaluation saw the untouched image.
+    Input contract: the model does not normalize its inputs, but the strong
+    augmentation applied during training needs to know their range, since
+    color jitter scales brightness and contrast and clips its result back into
+    `input_value_range`. The default `(0.0, 1.0)` says the caller feeds images
+    in `[0, 1]`. Pass `input_value_range=None` for standardized (mean-zero) or
+    `[-1, +1]` images; the trainer in `src/train/depth_anything/` does this,
+    since `src/train/common/megadepth.py` emits RGB in `[-1, +1]` and clipping
+    those to `[0, 1]` would flatten every negative pixel to zero on the
+    training path only, while evaluation saw the untouched image.
 
-    Augmentation runs inside `train_step`, not inside `call`: CutMix mixes across
-    batch rows, so the depth target has to be mixed by the same rectangle, and
-    only the training path has the target. Calling `model(x, training=True)`
-    directly therefore returns an *un-augmented* forward pass.
+    Augmentation runs inside `train_step`, not inside `call`: CutMix mixes
+    across batch rows, so the depth target has to be mixed by the same
+    rectangle, and only the training path has the target. Calling
+    `model(x, training=True)` directly returns an un-augmented forward pass.
 
-    Args:
-        encoder_type: String, type of ViT encoder to use.
-            Supported values: ['vit_s', 'vit_b', 'vit_l'].
-            Defaults to 'vit_l'.
-        input_shape: Tuple of integers, input image shape as (height, width, channels).
-            Defaults to (384, 384, 3).
-        decoder_dims: List of integers, dimensions for decoder layers.
-            Defaults to [256, 128, 64, 32].
-        output_channels: Integer, number of output channels for depth prediction.
-            Defaults to 1.
-        kernel_initializer: String or Initializer, initializer for convolutional kernels.
-            Defaults to "he_normal".
-        kernel_regularizer: Regularizer or None, regularizer for convolutional kernels.
-            Defaults to None.
-        loss_weights: Dict of strings to floats, weights for different loss components.
-            Keys: 'labeled', 'unlabeled', 'feature'.
-            Defaults to {'labeled': 1.0, 'unlabeled': 0.5, 'feature': 0.1}.
-        cutmix_prob: Float, probability of applying CutMix augmentation.
-            Defaults to 0.5.
-        color_jitter_strength: Float, strength of color jittering augmentation.
-            Defaults to 0.2.
-        input_value_range: Tuple of two floats or None, the declared value range
-            of the input images (see "Input contract" above).
-            Defaults to (0.0, 1.0).
-        use_feature_alignment: Boolean, whether to use feature alignment loss.
-            Defaults to True.
-
-    Returns:
-        Configured and built DepthAnything model instance.
-
-    Raises:
-        ValueError: If unsupported encoder type is specified.
+    :param encoder_type: One of ``"vit_s"``, ``"vit_b"``, ``"vit_l"``.
+    :type encoder_type: str
+    :param image_shape: Input image shape ``(height, width, channels)``.
+    :type image_shape: Tuple[int, int, int]
+    :param decoder_dims: Channel dimension per decoder stage.
+    :type decoder_dims: Optional[List[int]]
+    :param output_channels: Number of channels in the predicted depth map.
+    :type output_channels: int
+    :param kernel_initializer: Initializer for convolutional kernels.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for convolutional kernels.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param loss_weights: Weight per loss term, keys ``"labeled"``,
+        ``"unlabeled"``, ``"feature"``.
+    :type loss_weights: Optional[Dict[str, float]]
+    :param cutmix_prob: Probability of applying CutMix augmentation.
+    :type cutmix_prob: float
+    :param color_jitter_strength: Strength of the color-jitter augmentation.
+    :type color_jitter_strength: float
+    :param use_feature_alignment: Whether to use the feature-alignment loss.
+    :type use_feature_alignment: bool
+    :param encoder_kind: Encoder implementation, ``"real"`` (ViT) or
+        ``"placeholder"`` (Conv-BN-ReLU stack).
+    :type encoder_kind: str
+    :param enable_semi_supervised: Whether to enable the semi-supervised
+        training branch.
+    :type enable_semi_supervised: bool
+    :param input_value_range: Declared value range of the input images (see
+        the input contract above).
+    :type input_value_range: Optional[Tuple[float, float]]
+    :param input_shape: Deprecated alias for `image_shape`.
+    :type input_shape: Optional[Tuple[int, int, int]]
+    :return: Configured and built DepthAnything model instance.
+    :rtype: DepthAnything
+    :raises ValueError: If `encoder_type` is not recognized.
 
     Example:
-        >>> model = create_depth_anything(
-        ...     encoder_type='vit_l',
-        ...     input_shape=(384, 384, 3),
-        ...     kernel_regularizer=keras.regularizers.L2(0.01)
-        ... )
-        >>> model.compile(
-        ...     optimizer=keras.optimizers.AdamW(learning_rate=5e-6),
-        ...     loss=keras.losses.MeanSquaredError()
-        ... )
+        .. code-block:: python
+
+            model = create_depth_anything(
+                encoder_type='vit_l',
+                image_shape=(384, 384, 3),
+                kernel_regularizer=keras.regularizers.L2(0.01)
+            )
+            model.compile(
+                optimizer=keras.optimizers.AdamW(learning_rate=5e-6),
+                loss=keras.losses.MeanSquaredError()
+            )
     """
     logger.info(f"Creating DepthAnything model with encoder: {encoder_type}")
 

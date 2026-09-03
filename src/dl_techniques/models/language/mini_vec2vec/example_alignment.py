@@ -1,22 +1,15 @@
 """
 Example script demonstrating MiniVec2VecAligner usage.
 
-This script shows how to:
-1. Generate synthetic aligned embedding spaces
-2. Use MiniVec2VecAligner to recover the alignment
-3. Evaluate alignment quality **in the frame the map was fitted in**
-4. Test serialization
+This script generates synthetic aligned embedding spaces, uses
+MiniVec2VecAligner to recover the alignment, evaluates the alignment in the
+frame the map was fitted in, and tests serialization.
 
-The third point is the part that is easy to get wrong, and this script used to
-get it wrong. `align` mean-centers both spaces and L2-normalizes every row, and
-it does NOT store the two mean vectors — `call` is only `X @ W`. Applying `W`
-to raw embeddings therefore evaluates the map in a frame it was never fitted
-in. The bug was invisible here because the synthetic fixture is generated
-already unit-normed and near-zero-mean, so `align_frame` was very close to the
-identity on it. Real embedding spaces are not centered, and there the same code
-silently reports a much worse alignment than the model actually learned.
-`align_frame` below is the one place that reproduces the fitted frame; both
-evaluation and the "transform new embeddings" demo go through it.
+`align` mean-centers both spaces and L2-normalizes every row, but does not
+store the two mean vectors — `call` is only `X @ W`. Applying `W` to raw
+embeddings therefore evaluates the map in a frame it was never fitted in.
+`align_frame` below reproduces the fitted frame; both evaluation and the
+"transform new embeddings" demo go through it.
 """
 
 import os
@@ -45,30 +38,24 @@ def generate_synthetic_data(
     Creates two embedding spaces where space_B is a random orthogonal
     transformation of space_A. This provides ground truth for evaluation.
 
-    The base cloud is a MIXTURE of `n_clusters` gaussians, not isotropic noise.
-    That is not decoration: stage 2 of the algorithm matches the two spaces by
+    The base cloud is a mixture of `n_clusters` gaussians, not isotropic
+    noise, because stage 2 of the algorithm matches the two spaces by
     solving a quadratic assignment between their k-means centroid Gram
-    matrices, so a cloud with no cluster structure gives it nothing to match
-    and the whole pipeline returns a map no better than chance. MEASURED with
-    isotropic data at these defaults: final Frobenius error 5.23 against
-    ||Q||_F = sqrt(embed_dim), i.e. no recovery at all.
+    matrices: a cloud with no cluster structure gives it nothing to match.
+    Isotropic data at these defaults measured a final Frobenius error of
+    5.23 against `||Q||_F = sqrt(embed_dim)` — no recovery at all. Keep
+    `align`'s `approx_clusters` matched to `n_clusters`: with 20 modes and
+    `approx_clusters=8`, the centroid sets from the two spaces are no longer
+    permutations of one another and recovery fails the same way (5.31).
+    With both at 20 the error is 0.157.
 
-    Keep `align`'s `approx_clusters` matched to `n_clusters`. Also measured:
-    with 20 modes and `approx_clusters=8`, k-means finds a different arbitrary
-    8-way grouping in each space, the centroid sets are then not permutations
-    of one another, and recovery fails exactly as it does on isotropic data
-    (5.31). With both at 20 the error is 0.157.
-
-    Args:
-        n_samples: Number of samples for alignment.
-        n_eval: Number of samples for evaluation.
-        embed_dim: Embedding dimensionality.
-        n_clusters: Number of gaussian modes in the base cloud.
-        cluster_noise: Standard deviation around each mode.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Tuple of (XA_align, XB_align, XA_eval, XB_eval, ground_truth_W)
+    :param n_samples: Number of samples for alignment.
+    :param n_eval: Number of samples for evaluation.
+    :param embed_dim: Embedding dimensionality.
+    :param n_clusters: Number of gaussian modes in the base cloud.
+    :param cluster_noise: Standard deviation around each mode.
+    :param seed: Random seed for reproducibility.
+    :return: Tuple of (XA_align, XB_align, XA_eval, XB_eval, ground_truth_W).
     """
     if seed is not None:
         np.random.seed(seed)

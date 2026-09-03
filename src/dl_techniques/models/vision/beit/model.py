@@ -1,79 +1,27 @@
 """A BEiT image trunk with a masked-image-modeling head and a classification head.
 
-BEiT asks what BERT's pre-training objective becomes when the input is an image.
-Masking a word and predicting it works because language arrives pre-discretized:
-the target is one symbol out of a finite vocabulary, and the loss is a clean
-classification. Pixels have neither property. Regressing raw pixels at masked
-positions spends the model's capacity on exactly the high-frequency detail that
-carries the least semantic content, and short-range pixel correlation makes much
-of the task solvable by interpolation rather than understanding. BEiT's answer is
-to borrow a vocabulary: a discrete variational autoencoder, trained separately
-and frozen, maps every patch to one code id out of 8192, and the model predicts
-*that* id at each masked position. The objective becomes classification over a
-codebook, the targets sit at the abstraction level of appearance rather than
-intensity, and the pixel-interpolation shortcut disappears because neighbouring
-patches do not determine each other's code.
+BEiT adapts BERT's masked-token pre-training to images by borrowing a
+vocabulary: a discrete variational autoencoder, trained separately and
+frozen, maps every patch to one of 8192 code ids, and the model predicts
+that id at each masked position instead of regressing raw pixels. Three
+classes share one trunk: :class:`BeitModel` is the patch-embedding and
+transformer-block encoder; :class:`BeitForMaskedImageModeling` adds a
+projection over the codebook; :class:`BeitForImageClassification` adds a
+pooling and classification head and emits logits (compile with
+``from_logits=True``). Masked positions are substituted before the class
+token is prepended and before any block runs, so BEiT processes the whole
+sequence and never drops tokens, unlike MAE. Position information comes
+from a learnable relative-position-bias table per block rather than an
+absolute embedding, so ``use_absolute_position_embeddings`` defaults to
+``False``.
 
-The tokenizer is deliberately not part of this module. Code ids are targets, and
-they arrive as tensors in the ``tf.data`` pipeline alongside the patch mask. Nor
-is the masking part of the loss computation here: the objective is restricted to
-masked positions by the ``sample_weight`` carried in the batch, so these models
-define no ``train_step`` and no ``compute_loss``, and none may be added.
-
-Three classes share one trunk. :class:`BeitModel` is the encoder: patch embedding,
-optional mask-token substitution, a prepended class token, ``num_layers``
-transformer blocks with BEiT attention, and a full ``(B, N + 1, D)`` sequence out.
-:class:`BeitForMaskedImageModeling` puts a ``decoder_``-prefixed norm and a single
-affine projection over the codebook on top. :class:`BeitForImageClassification`
-puts a ``head_``-prefixed pool, norm, dropout and classifier on top, and emits
-logits (compile with ``from_logits=True``). Masked positions are replaced *before*
-the class token is prepended and before any block runs — BEiT processes the whole
-sequence and never drops tokens, which is the structural difference from MAE and
-the reason the mask is a substitution rather than a gather.
-
-Position information is relative, not absolute. Each block owns a learnable
-relative-position-bias table indexed by the patch grid, so
-``use_absolute_position_embeddings`` defaults to ``False`` and the absolute
-embedding is not even created when it is off — an unread ``(1, N+1, D)`` weight
-in every checkpoint would be pure dead weight. The shared-table variant
-(one bias table for all blocks, a pre-training-only mode) is not implemented and
-raises rather than silently falling back to per-layer tables: supporting it would
-require threading a per-forward bias tensor through ``TransformerLayer.call()``.
-
-Two details of this implementation exist to protect things that fail silently
-when they are "cleaned up".
-
-``MaskTokenApply`` is created *and built* by every backbone, including the
-classifier's, which never calls it. Removing that apparently dead weight from the
-classifier would leave the two trunks with different weight sets, and the warm
-start ``load_weights_from_checkpoint(target, mim_ckpt,
-skip_prefixes=("decoder_", "head_"))`` — which matches by name, hence the fixed
-``BACKBONE_NAME`` — would quietly transfer a different set of layers with no
-error anywhere.
-
-The trunk's final ``LayerNormalization`` exists only when ``use_mean_pooling`` is
-``False``. That is BEiT's own fork, not a simplification: at the default the
-pooler applies its own norm to the mean of the patch tokens, so a trunk-level
-norm would insert an extra normalization in front of both heads that the
-reference does not have — no error, no shape change, and a perfectly plausible
-loss curve. Likewise the MIM head slices ``[:, 1:, :]`` to drop the class
-position before projecting, so output index ``i`` is patch ``i``; every other
-length-``N`` window of the sequence produces the same output shape and the same
-finite logits while attributing every code-id target to the wrong patch.
-
-``layer_norm_eps`` defaults to ``1e-12`` (HF's ``BeitConfig``), six orders of
-magnitude tighter than a generic ViT's ``1e-6``, and is passed explicitly at
-every normalization site rather than inherited from any factory default.
-Stochastic depth is a linear ramp from ``0`` to ``drop_path_rate`` across the
-blocks, computed at model level because a block holds only its own rate.
-
-Two deliberate deviations, also recorded in this package's ``README.md``:
-``layer_scale_init_value`` follows timm's split (``0.1`` for tiny/small/base,
-``1e-5`` for large) rather than HF's uniform ``0.1`` — the two ports of the same
-official checkpoints disagree, and layer-scale init is training-time-only, so
-neither is wrong but the pick is pinned. And ``tiny`` and ``small`` are repo
-inventions for cheap tests; no BEiT of either size exists in the paper, in HF or
-in timm, while ``base`` and ``large`` reproduce the fetched HF configs verbatim.
+The tokenizer is not part of this module: code ids arrive as tensors
+alongside the patch mask, and the mask is applied through ``sample_weight``
+rather than inside these models, so none of them define ``train_step`` or
+``compute_loss``. ``layer_norm_eps`` defaults to ``1e-12`` (HF's
+``BeitConfig``), tighter than a generic ViT's ``1e-6``. ``tiny`` and
+``small`` variants are repo inventions for cheap tests; ``base`` and
+``large`` reproduce the fetched HF configs verbatim.
 
 References:
     - Bao et al., 2022. BEiT: BERT Pre-Training of Image Transformers. ICLR.
@@ -96,25 +44,9 @@ References:
       and the constructor defaults.
 """
 
-# DECISION plan-2026-08-24T074054-247151fd/D-012
-# DOCSTRING STYLE: this module is 100% Sphinx/reST (`:param:` / `:type:` /
-# `:returns:` / `:raises:`), converted wholesale from Google `Args:` on 2026-08-24 on
-# the user's explicit instruction, to match the declared exemplars
-# `models/vision/resnet/model.py` and `models/language/bert/bert.py`.
-# WHAT NOT TO DO: do NOT read this file as drift and convert it back. That override
-# is deliberate and it CONTRADICTS two tracked convention documents, which both still
-# stand for every other file: repo-root `CLAUDE.md` (Core Conventions) says "Match the
-# file you are editing; never convert a file wholesale", and
-# `src/dl_techniques/models/CLAUDE.md` ("Things you must NOT do") says "Never convert
-# docstring style. This package is measurably mixed; match the file you are editing."
-# Neither document was changed; this file is a named, recorded exception, not a new
-# package-wide rule. `layers/attention/beit_attention.py` was already Sphinx and is
-# deliberately untouched. New docstrings added HERE must be Sphinx, to keep the file
-# internally consistent.
-# CORRECTION 2026-08-24: `models/language/bert/bert.py`, named above, was renamed to
-# `models/language/bert/model.py` by merge `4ed922781`. The exemplar claim is unchanged and still
-# points at the same file under its new name. The line above is preserved as written
-# because anchor bodies are append-only.
+# DECISION plan-2026-08-24T074054-247151fd/D-012: this module is Sphinx/reST
+# throughout, a named exception to the repo's usual "match the file" rule.
+# Do not convert it back to Google style. See decisions.md.
 
 import keras
 from keras.saving import serialize_keras_object, deserialize_keras_object
@@ -139,50 +71,22 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 BeitScale = Literal['tiny', 'small', 'base', 'large']
 
-# The stable sub-model name. `load_weights_from_checkpoint` matches layer BY NAME, so
-# the MIM model and the classifier MUST name their backbone identically or the
-# warm-start transfers zero layers.
+# load_weights_from_checkpoint matches layers by name, so the MIM model and
+# the classifier must name their backbone identically.
 BACKBONE_NAME = "beit_backbone"
 
-# The DALL-E dVAE codebook size BEiT v1 predicts over; HF's `BeitConfig.vocab_size`.
-# It is a property of the MIM TARGET, not of the trunk, so it lives on the MIM head
-# rather than on the backbone (a backbone field nothing reads is a config-shaped lie).
+# The DALL-E dVAE codebook size BEiT v1 predicts over (HF BeitConfig.vocab_size).
 DEFAULT_VOCAB_SIZE = 8192
 
-# ---------------------------------------------------------------------------------
-# THE VARIANT STORY: two tables and one resolver, read top to bottom.
-#
-#   SCALE_CONFIGS   answers "what ARCHITECTURE is this scale?"    'base'      -> widths
-#   MODEL_VARIANTS  answers "what SCALE is this public name?"     'beit_base' -> 'base'
-#   _resolve_scale  accepts either spelling and returns a SCALE_CONFIGS key
-#
-# DECISION plan-2026-08-24T074054-247151fd/D-009
-# WHAT NOT TO DO: do NOT merge these two dicts into one table keyed by public name,
-# however redundant `{'scale': 'tiny'}` looks. `src/dl_techniques/models/CLAUDE.md:269`
-# rules verbatim that "`SCALE_CONFIGS` is NOT a stale spelling of `MODEL_VARIANTS`, and
-# the two must not be merged where both appear", names `beit` (with `vit` and
-# `energy_transformer`) as a deliberate carrier of both, and states at `:285-287` what
-# the merge would destroy: "a name->scale indirection that exists so a variant can pin a
-# patch size or an input resolution alongside its scale". `vit` and
-# `energy_transformer` are graded against the same rule, so a local merge here breaks a
-# repo-wide invariant, not just this file. The tidiness win is taken WITHOUT the merge:
-# the two tables and the resolver are co-located under this one header.
-# ---------------------------------------------------------------------------------
+# SCALE_CONFIGS maps a scale to its architecture; MODEL_VARIANTS maps a public
+# name to a scale; _resolve_scale accepts either spelling.
+# DECISION plan-2026-08-24T074054-247151fd/D-009: keep these two tables
+# separate rather than merged into one, per the repo-wide CLAUDE.md rule that
+# SCALE_CONFIGS is not a stale spelling of MODEL_VARIANTS. See decisions.md.
 
-# DECISION plan-2026-08-11T012340-f63796dc/D-003
-# `layer_scale_init_value` DIVERGES between the two primary sources, and the split
-# below is timm's, not HF's. Measured (both fetched verbatim, 2026-08-11):
-#   * HF `config.json` for microsoft/beit-base-patch16-224 AND
-#     microsoft/beit-large-patch16-224 both report "layer_scale_init_value": 0.1.
-#   * timm `models/vision/beit.py` uses init_values=0.1 for every `beit_base_patch16_*` and
-#     init_values=1e-5 for every `beit_large_patch16_*` (and for both BEiTv2 sizes).
-# WHAT NOT TO DO: do NOT "correct" the large entry to 0.1 to make this table agree with
-# HF's config.json field-for-field. The disagreement is between two ports of the SAME
-# official checkpoints, it is real, and it has been decided deliberately in favour of
-# timm's. Layer-scale init is a training-time-only hyperparameter, so neither value is
-# wrong; an unrecorded pick is what gets re-litigated. Pinned by
-# `TestBeitScaleConfigs::test_layer_scale_init_value_split_is_timms`.
-# See decisions.md D-003 (deviations X-2 and X-3).
+# DECISION plan-2026-08-11T012340-f63796dc/D-003: layer_scale_init_value
+# follows timm's split (0.1 base, 1e-5 large), not HF's uniform 0.1 config.
+# Both ports of the official checkpoints disagree; this pick is pinned. See decisions.md.
 #
 # `tiny` and `small` are REPO INVENTIONS for cheap tests — no BEiT of either size
 # exists in the paper, in HF, or in timm. `base` and `large` reproduce the fetched HF
@@ -327,16 +231,8 @@ def _image_shape_of(input_shape: Any) -> Any:
     return input_shape
 
 
-# ---
-# DECISION plan-2026-08-24T074054-247151fd/D-010
-# `_coerce_backbone` lived BETWEEN `BeitModel` and `BeitForMaskedImageModeling` until
-# this commit, which is why its return annotation is now a STRING: it is read at
-# def-time and `BeitModel` does not exist yet up here (this module has no
-# `from __future__ import annotations`). WHAT NOT TO DO: do not "tidy" the quotes off,
-# and do not move the function back down to its consumers to avoid them -- a module
-# helper wedged between two class definitions is the shape this step exists to remove.
-# The BODY reference to `BeitModel` needs no quoting: it resolves at CALL time, long
-# after the class is defined.
+# DECISION plan-2026-08-24T074054-247151fd/D-010: keep the "BeitModel" return
+# annotation quoted; BeitModel is not yet defined at this point in the module. See decisions.md.
 
 
 def _coerce_backbone(backbone: Any) -> "BeitModel":
@@ -428,9 +324,9 @@ class BeitModel(keras.Model):
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────────────────────────────┐
-        │  final_norm — created ONLY when use_mean_pooling is False.   │
+        │  final_norm — created only when use_mean_pooling is False.   │
         │    When True the pooling head owns the norm instead (D-007), │
-        │    so the trunk emits unnormalized tokens by design.         │
+        │    and the trunk emits unnormalized tokens.                  │
         └───────────────┬──────────────────────────────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
@@ -669,22 +565,9 @@ class BeitModel(keras.Model):
         # `_as_pair`; private, because `self.patch_size` stays the serialization field.
         self._patch_size_pair: Tuple[int, int] = (patch_h, patch_w)
 
-        # DECISION plan-2026-08-24T074054-247151fd/D-017
-        # ONE `TruncatedNormal` instance, deliberately SHARED by `patch_embed` and by
-        # every one of the `num_layers` encoder layers. It is hoisted to `self` only so
-        # that two helpers can reach the SAME object; the sharing itself is unchanged
-        # from before the decomposition.
-        # WHAT NOT TO DO: do not "harden" this into a per-layer
-        # `clone_initializer(...)`, and do not give each helper its own
-        # `TruncatedNormal(...)`. Both are the repo's standard shared-seedless-
-        # initializer fix and both are WRONG HERE: a seedless initializer draws from the
-        # global RNG, so N independent instances consume it in a different pattern than
-        # one instance used N times, which changes every weight in the model. That is a
-        # silent numerical change wearing a hygiene fix's clothes. This restructure is
-        # required to be bitwise inert (`tests/test_models/test_beit/
-        # test_the_restructure_moves_no_numbers.py`), so the hardening belongs to a
-        # separate, separately-measured change.
-        # See decisions.md D-017.
+        # DECISION plan-2026-08-24T074054-247151fd/D-017: keep one shared
+        # TruncatedNormal instance; N per-layer instances draw from the global
+        # RNG in a different pattern and silently change every weight. See decisions.md.
         self._kernel_init = keras.initializers.TruncatedNormal(
             stddev=self.initializer_range
         )
@@ -788,25 +671,9 @@ class BeitModel(keras.Model):
 
     def _build_final_norm(self) -> None:
         """Create the trunk's final LayerNorm — only on the `use_mean_pooling is False` fork."""
-        # DECISION plan-2026-08-11T012340-f63796dc/D-007
-        # The trunk's final LayerNorm EXISTS ONLY WHEN `use_mean_pooling is False`.
-        # This is not a simplification, it is BEiT's own fork. In HF's port
-        # `BeitModel.layernorm` is `nn.Identity()` when `use_mean_pooling=True`, and
-        # `BeitPooler` then applies its OWN LayerNorm to the mean of the patch tokens;
-        # when `use_mean_pooling=False` the trunk applies the LayerNorm and the pooled
-        # output is the raw cls hidden state with no further norm.
-        # WHAT NOT TO DO: do NOT "clean this up" by always applying a final norm here.
-        # At the default `use_mean_pooling=True` that inserts an extra normalization
-        # the reference does not have, in front of BOTH heads (the classifier's
-        # `head_norm` and the MIM head's `decoder_norm` would each be norming an
-        # already-normed sequence). It raises no error, changes no shape, and produces
-        # a perfectly plausible loss curve. Equally, do NOT create the layer
-        # unconditionally and skip it in `call()`: an unused-but-built sub-layer is
-        # dead weight in every checkpoint, and the two heads share this backbone config
-        # so there is no warm-start asymmetry to protect against (unlike `mask_token`,
-        # whose use depends on the CALL, not on the config).
-        # Pinned by `TestBeitArchitectureValidation::test_final_norm_follows_the_mean_pooling_fork`.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-11T012340-f63796dc/D-007: create final_norm only
+        # when use_mean_pooling is False; always applying it double-norms the
+        # pooled output in front of both heads. See decisions.md.
         self.final_norm = None
         if not self.use_mean_pooling:
             self.final_norm = keras.layers.LayerNormalization(
@@ -1011,21 +878,9 @@ class BeitModel(keras.Model):
         })
         return config
 
-    # DECISION plan-2026-08-24T074054-247151fd/D-008
-    # This override is NOT a `cls(**config)` pass-through -- it exists for exactly one
-    # measured field. Both sites are in `__init__`'s "store ALL configuration" block;
-    # the line numbers below are re-derived at this commit, but read the ATTRIBUTE
-    # NAMES, which cannot rot: the `self.input_shape_config = tuple(int(v) ...)`
-    # statement (`:528`) coerces `input_shape` to a tuple itself, so a JSON round trip
-    # already returns a tuple there and normalising it here would be dead code, while
-    # the bare `self.patch_size = patch_size` two lines below it (`:530`) stores that
-    # field RAW -- so a config that went through JSON hands `[16, 16]` back and Keras
-    # attribute tracking wraps it into a `TrackedList`, and `get_config()` then stops
-    # being a fixed point (round 1 emits a tuple, round 2 a list).
-    # WHAT NOT TO DO: do not widen this to normalise every
-    # field "for symmetry" -- an override that restores nothing is the pass-through red
-    # flag. An `int` patch_size is deliberately left an `int`, so the emitted config is
-    # identical to what a directly-constructed model emits.
+    # DECISION plan-2026-08-24T074054-247151fd/D-008: only patch_size needs
+    # normalizing here; input_shape already coerces to a tuple in __init__, so
+    # normalizing it too would be dead code. See decisions.md.
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "BeitModel":
         """Create a trunk from configuration, normalising ``patch_size`` only.
@@ -1243,22 +1098,12 @@ class BeitForMaskedImageModeling(keras.Model):
         :rtype: keras.KerasTensor
         """
         tokens = self.backbone(inputs, training=training)
-        # DECISION plan-2026-08-11T012340-f63796dc/D-012
-        # Drop the cls position BEFORE the head so output index i is patch i.
-        # Do NOT change this slice. `tokens` is `(B, N+1, D)` with cls at index 0, and
-        # EVERY length-N window of it produces the same `(B, N, vocab)` output shape,
-        # the same finite logits and the same plausible loss curve:
-        #   - `[:, :-1, :]`  drops the LAST PATCH and feeds cls in as patch 0 — every
-        #     code-id target is then attributed to the wrong patch, silently;
-        #   - `[:, :, :]`    keeps cls and emits N+1 logits, which only fails loudly if
-        #     the loss refuses to broadcast.
-        # Do NOT "verify" this with a shape assertion — a shape cannot see it (README
-        # §14 Issue 2). It is pinned by IDENTITY in
-        # `TestBeitForMaskedImageModeling::test_the_head_reads_the_patch_tokens_not_a_
-        # shifted_window`, which was demonstrated RED under the `[:, :-1, :]` mutation.
+        # DECISION plan-2026-08-11T012340-f63796dc/D-012: drop the cls position
+        # with tokens[:, 1:, :] before the head, not [:, :-1, :] or [:, :, :] —
+        # both produce the same shape but attribute targets to the wrong patch. See decisions.md.
         patch_tokens = tokens[:, 1:, :]
         x = self.decoder_norm(patch_tokens, training=training)
-        return self.decoder_head(x)  # logits — no softmax
+        return self.decoder_head(x)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
         """Output shape from stored config — valid UNBUILT.
@@ -1407,14 +1252,9 @@ class BeitForImageClassification(keras.Model):
         head_classifier: Final Dense. No activation.
     """
 
-    # DECISION plan-2026-08-24T074054-247151fd/D-007
-    # WHAT NOT TO DO: do not decompose these head constructors into `_build_*`
-    # helpers to mirror `BeitModel.__init__`. Measured by AST at this commit
-    # (body[0].lineno -> body[-1].end_lineno): this constructor is 40 lines and
-    # `BeitForMaskedImageModeling.__init__` is 22 -- both at or under the 40-line
-    # threshold the trunk decomposition earned. A `_build_head` extracted from 40
-    # lines that builds four attributes with no reuse is a shallow method and pure
-    # classitis; symmetry with the trunk is not a reason on its own.
+    # DECISION plan-2026-08-24T074054-247151fd/D-007: keep this constructor
+    # flat rather than decomposed into _build_* helpers like BeitModel's; at
+    # 40 lines building 4 attributes with no reuse, a helper would be classitis. See decisions.md.
     def __init__(
             self,
             backbone: BeitModel,

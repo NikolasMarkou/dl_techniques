@@ -1,12 +1,10 @@
-"""Ideogram4 text-to-image flow-matching DiT (Keras 3 port).
+"""Ideogram4 text-to-image flow-matching DiT, ported to Keras 3.
 
-A self-contained Keras 3 reimplementation of the Ideogram4 neural core: the
-flow-matching DiT transformer, the Flux2 KL-VAE, the logit-normal + Euler
-scheduler/sampler, the velocity loss, an inference pipeline and training code.
-Conditioning is abstracted as a precomputed `llm_features` call input — there is
-no Qwen3-VL in Keras — which is the port's main deliberate divergence. See
-`plans/plan_2026-06-12_59a18a10/` for the design rationale and the
-"what doesn't fit / skipped / changed" report.
+Exports the flow-matching DiT transformer and the Flux2 KL-VAE. The package
+also holds the logit-normal plus Euler scheduler and sampler, the velocity
+loss, an inference pipeline, and training code, imported from their own
+submodules. Conditioning is a precomputed `llm_features` call input rather
+than a live Qwen3-VL model, since Qwen3-VL has no Keras implementation.
 
 The transformer and autoencoder plus their builders are re-exported here.
 Configuration, constants and latent normalization stay behind their submodules::

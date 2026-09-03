@@ -1,87 +1,23 @@
 """
-TabM: a parameter-efficient batched MLP ensemble for tabular data, with integrated
-categorical encoding and selectable diversity mechanisms.
+TabM ensemble model for tabular data. ``TabMModel`` batches `k` MLP members
+that share almost all of their weights, and one-hot encodes categorical
+features inside the model before concatenating them to the numerical ones.
 
-Deep ensembles are the reliable way to improve a neural network on tabular data:
-train `k` models from different initializations and average them. The improvement is
-real but the cost is literal — `k` times the parameters, `k` times the training runs,
-`k` times the inference. TabM asks how much of the ensemble's benefit survives if the
-members are forced to share almost all of their weights, and answers that most of it
-does, provided the shared computation is perturbed per member in the right places.
+Each backbone layer applies a rank-1 perturbation to one shared weight matrix
+`W`: member `i` scales the layer's input by a learned vector `r_i` and its
+output by `s_i`, so `y_i = s_i * ((r_i * x) W) + b_i` is a distinct effective
+weight matrix per member, in `d_in + d_out` parameters instead of
+`d_in * d_out`. `arch_type` selects how far this is pushed, from `'plain'`
+(no ensemble) through `'tabm'` (per-layer rank-1 scaling) to `'tabm-packed'`
+(a fully independent kernel per member); the six variants are listed in the
+`ARCH_SPECS` table.
 
-The mechanism is a rank-1 multiplicative perturbation of a shared kernel. A single
-weight matrix `W` is used by every member; member `i` scales the layer's input by a
-learned vector `r_i` and its output by a learned vector `s_i`, so
-
-`y_i = s_i * ((r_i * x) W) + b_i`
-
-which is exactly `x (diag(r_i) W diag(s_i)) + b_i` — a distinct effective weight
-matrix per member, expressed in `d_in + d_out` parameters instead of
-`d_in * d_out`. The members are genuinely different functions, not a shared function
-with different readouts, and they cost a vector each. That is the whole idea; the
-rest of the architecture is how far the perturbation is pushed.
-
-`arch_type` selects that, and the class attribute `ARCH_SPECS` is the single table
-that says what each value builds — every field in it is read by `_create_layers`,
-and no two rows are equal, so each name denotes a genuinely different model.
-
-Under `'plain'` there is no ensemble at all: `k` must be `None`, the backbone is an
-ordinary MLP and the head an ordinary `Dense` — the baseline the ensemble variants
-are measured against. Under `'tabm'` every backbone layer is a
-`LinearEfficientEnsemble` with per-member input and output scaling, and the head is
-`NLinear`, which is `k` fully independent output matrices; the head is small enough
-that sharing it is not worth the loss of diversity where diversity matters most.
-`'tabm-normal'` is that same architecture with the scaling vectors drawn from
-`N(1, 0.1)` instead of random signs. Random signs is the default because it
-guarantees members start at distinct, unit-magnitude perturbations; a normal draw
-clusters them near the identity, which is the point of offering both.
-
-`'tabm-packed'` drops the rank-1 trick entirely and gives every backbone layer `k`
-independent kernels (`NLinear`). It costs `k` times the backbone parameters and is
-the honest deep-ensemble upper bound the efficient variants are measured against —
-without it in the table, "efficient ensembling recovers most of the benefit" has no
-denominator.
-
-Under `'tabm-mini'` the backbone weights are shared with no per-layer perturbation
-and *all* diversity comes from a single `ScaleEnsemble` adapter applied to the input,
-one learned scale vector per member — the cheapest possible ensemble, and the
-interesting limit case, since every member thereafter computes the same function of a
-differently-scaled input. `'tabm-mini-normal'` is the same with the adapter
-initialized from a normal distribution instead of random signs.
-
-Ensembling is done by carrying an explicit member axis through the whole network:
-tensors are `(batch, k, features)` and every layer is written to broadcast over that
-middle axis, so all `k` members are evaluated in one pass of dense kernels rather
-than in a Python loop. How the batch reaches that shape is governed by
-`share_training_batches`. When true (and always at inference), one batch is tiled `k`
-ways so every member sees identical rows — the members differ only through their
-perturbations. When false, an incoming batch of `B * k` rows is *reshaped* so each
-member gets a disjoint slice, which decorrelates members through data as well as
-through weights. That second path requires the caller to have prepared the batch at
-`k` times the nominal size; the model does not resample for you, and a batch that is
-not a multiple of `k` will not reshape correctly.
-
-Preprocessing is inside the model rather than upstream: numerical features pass
-through unchanged and categorical features are one-hot encoded against declared
-cardinalities, then concatenated. This keeps the whole pipeline differentiable and
-serializable as one object, at the cost of an input width that grows with the sum of
-cardinalities — high-cardinality columns are the case where an external embedding
-would be preferable.
-
-`call` returns per-member predictions of shape `(batch, k, d_out)`, deliberately
-un-aggregated; the `'plain'` path expands to `(batch, 1, d_out)` so the output rank
-does not depend on the architecture. Aggregation is a separate, explicit step —
-`predict_with_uncertainty` returns `ŷ = (1/k) Σ fᵢ(x)` together with the
-across-member standard deviation, and the module-level `ensemble_predict` returns the
-mean alone. It is deliberately not folded into `call`, because the training loss
-needs the per-member outputs and because the right reduction differs by task. The
-spread is a disagreement statistic over whatever `call` emits (logits, for a
-classifier), not a calibrated predictive variance.
-
-Six preset variants scale hidden widths and member count together, from `[64, 32]`
-with `k=4` up to `[2048, 1024, 512, 256]` with `k=32`. The two smallest default to
-`'tabm-mini'` and the rest to `'tabm'`, on the reasoning that at small widths the
-per-layer scaling vectors are a large fraction of the parameter budget.
+Tensors carry an explicit member axis, `(batch, k, features)`, evaluated in
+one pass rather than a Python loop over members. `call` returns this axis
+un-aggregated, shape `(batch, k, d_out)`; `predict_with_uncertainty` and the
+module-level `ensemble_predict` reduce it. `share_training_batches=False`
+expects the caller to pass a batch already sized `k` times the nominal
+batch, reshaped into disjoint per-member slices rather than tiled.
 
 References:
     - Gorishniy et al., 2024. TabM: Advancing Tabular Deep Learning with Parameter-
@@ -119,144 +55,122 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.tabm.model")
 class TabMModel(keras.Model):
-    """TabM: Deep Ensemble Architecture for High-Performance Tabular Learning.
+    """TabM: batched multi-head ensemble for tabular data.
 
-    TabM provides state-of-the-art ensemble methods specifically designed for tabular
-    data, addressing key challenges through efficient ensemble training, integrated
-    preprocessing, and parameter-efficient diversity mechanisms. The architecture
-    offers competitive performance with gradient boosting while maintaining neural
-    network flexibility and end-to-end differentiability.
+    Combines numerical and categorical feature preprocessing, a configurable
+    MLP backbone, and one of six ensembling strategies selected by
+    ``arch_type``.
 
-    **Intent**: Provide a tabular learning solution that combines
-    the performance benefits of ensemble methods with the efficiency of batched
-    training, offering both high accuracy and principled uncertainty estimation
-    for critical tabular ML applications.
+    Architecture:
 
-    **Architecture**:
-    Four-stage pipeline integrating preprocessing, ensemble diversity, backbone
-    computation, and prediction aggregation:
-    - **Preprocessing**: Seamless numerical/categorical feature handling with one-hot encoding
-    - **Ensemble Layer**: Architecture-dependent diversity mechanisms (ScaleEnsemble, etc.)
-    - **Backbone**: Configurable MLP with ensemble-aware or shared weight strategies
-    - **Output**: Standard Dense or NLinear for ensemble-specific prediction heads
+    .. code-block:: text
 
-    **Component Details**:
-    - **Efficient Ensembling**: Batched k-member training without k-fold computational cost
-    - **Mixed Data Support**: Integrated numerical passthrough and categorical encoding
-    - **Diversity Mechanisms**: Multiple strategies from input-level to full perturbations
-    - **Uncertainty Quantification**: `call` emits the un-aggregated member axis and
-      quantifies nothing on its own; `predict_with_uncertainty` is the explicit
-      opt-in that reduces it to a mean and an across-member spread
+        ┌───────────────────────────┐  ┌────────────────────────────┐
+        │ x_num [B, n_num_features] │  │ x_cat [B, n_cat_features]  │
+        └─────────────┬─────────────┘  └──────────────┬─────────────┘
+                      │                              (optional)
+                      │                                ▼
+                      │                 ┌────────────────────────────┐
+                      │                 │ OneHotEncoding per column  │
+                      │                 └──────────────┬─────────────┘
+                      └────────────►(concat, −1)◄───────┘
+                                       │
+                                       ▼
+                       ┌────────────────────────────────┐
+                       │ minimal_ensemble_adapter        │
+                       │ ScaleEnsemble ('tabm-mini' only)│
+                       └────────────────┬─────────────────┘
+                                       ▼
+                       ┌────────────────────────────────┐
+                       │ backbone: TabMBackbone          │
+                       │ hidden_dims stack, wired per     │
+                       │ ARCH_SPECS[arch_type]            │
+                       └────────────────┬─────────────────┘
+                                       ▼
+                       ┌────────────────────────────────┐
+                       │ output_layer: Dense ('plain') or │
+                       │ NLinear (ensemble variants)      │
+                       └────────────────┬─────────────────┘
+                                       ▼
+                       ┌────────────────────────────────┐
+                       │ Output [B, k, n_classes_or_1]    │
+                       │ k=1 for 'plain'                  │
+                       └────────────────────────────────┘
 
-    Args:
-        n_num_features: Integer, number of numerical input features.
-            Must be non-negative. Set to 0 if only categorical features present.
-        cat_cardinalities: List of integers, cardinalities for each categorical feature.
-            Empty list if no categorical features. Each cardinality must be positive.
-        n_classes: Integer or None, number of output classes for classification.
-            Set to None for regression tasks. Binary classification should use n_classes=2.
-        hidden_dims: List of integers, dimensions for each hidden layer.
-            Must be non-empty with all positive values. Defines backbone architecture.
-        arch_type: String, architecture variant selector. The row of `ARCH_SPECS`
-            it names is what `_create_layers` reads; no two rows are equal.
-            - 'plain': Standard MLP, no member axis (k must be None)
-            - 'tabm': Efficient ensemble, per-layer rank-1 scaling, random-signs init
-            - 'tabm-normal': As 'tabm' but the scaling vectors init from N(1, 0.1)
-            - 'tabm-packed': k fully independent backbone kernels (NLinear); costs
-              k times the backbone parameters, no rank-1 scaling
-            - 'tabm-mini': Shared un-perturbed backbone; all diversity comes from a
-              single input-side ScaleEnsemble, random-signs init
-            - 'tabm-mini-normal': As 'tabm-mini' but the adapter inits from N(1, 0.1)
-        k: Integer or None, number of ensemble members.
-            Required for ensemble variants ('tabm', 'tabm-mini', etc.), must be positive.
-            Must be None for 'plain' architecture.
-        activation: String, activation function name for hidden layers.
-            Standard Keras activation names supported.
-        dropout_rate: Float, dropout probability applied after each hidden layer.
-            Must be between 0 and 1. Set to 0.0 to disable dropout.
-        use_bias: Boolean, whether to use bias terms in linear transformations.
-        share_training_batches: Boolean, batch sharing strategy for ensemble training.
-            If True, all ensemble members see same batch (efficient).
-            If False, each member sees different batch subset (more diverse).
-        kernel_initializer: Initializer for linear layer weights.
-            Can be string name or Initializer instance.
-        bias_initializer: Initializer for bias terms.
-            Can be string name or Initializer instance.
-        kernel_regularizer: Optional regularizer for linear layer kernels.
-        bias_regularizer: Optional regularizer for bias terms.
-        name: Optional string name for the model.
-        **kwargs: Additional keyword arguments for the Model base class.
+    Variants:
 
-    Input format:
-        Supports multiple input formats for flexibility:
-        - Tuple: (x_numerical, x_categorical)
-        - Dictionary: {'x_num': x_numerical, 'x_cat': x_categorical}
-        - Single tensor: x_numerical (when no categorical features)
+    .. code-block:: text
 
-    Output format:
-        Tensor with shape:
-        - Plain: (batch_size, 1, n_classes_or_1) for consistency
-        - Ensemble: (batch_size, k, n_classes_or_1) for ensemble predictions
+        arch_type          ensemble_type  backbone_scaling  backbone_init  adapter_init
+        plain              efficient      False             ones           none
+        tabm               efficient      True              random-signs   none
+        tabm-normal        efficient      True              normal         none
+        tabm-packed        packed         False             ones           none
+        tabm-mini          efficient      False             ones           random-signs
+        tabm-mini-normal   efficient      False             ones           normal
 
-    Attributes:
-        Architecture configuration parameters as stored attributes.
-        Layer instances: cat_encoder, minimal_ensemble_adapter, backbone, output_layer.
+    :param n_num_features: Number of numerical input features. 0 if only
+        categorical features are present.
+    :type n_num_features: int
+    :param cat_cardinalities: Cardinality of each categorical feature. Empty
+        if there are none.
+    :type cat_cardinalities: List[int]
+    :param n_classes: Number of output classes, or ``None`` for regression.
+    :type n_classes: Optional[int]
+    :param hidden_dims: Width of each backbone hidden layer.
+    :type hidden_dims: List[int]
+    :param arch_type: One of ``'plain'``, ``'tabm'``, ``'tabm-normal'``,
+        ``'tabm-packed'``, ``'tabm-mini'``, ``'tabm-mini-normal'`` — see
+        Variants above.
+    :type arch_type: str
+    :param k: Number of ensemble members. Required for every variant except
+        ``'plain'``, where it must be ``None``.
+    :type k: Optional[int]
+    :param activation: Activation function for hidden layers.
+    :type activation: str
+    :param dropout_rate: Dropout probability applied after each hidden layer.
+    :type dropout_rate: float
+    :param use_bias: Whether linear layers use a bias term.
+    :type use_bias: bool
+    :param share_training_batches: If ``True``, every member sees the same
+        batch, tiled ``k`` ways. If ``False``, an incoming batch of
+        ``B * k`` rows is reshaped into disjoint per-member slices; the
+        caller must supply a batch of that size.
+    :type share_training_batches: bool
+    :param kernel_initializer: Initializer for linear-layer weights.
+    :param bias_initializer: Initializer for bias terms.
+    :param kernel_regularizer: Optional regularizer for linear-layer kernels.
+    :param bias_regularizer: Optional regularizer for bias terms.
+    :param name: Optional model name.
+    :param kwargs: Additional arguments for the ``keras.Model`` base class.
 
-    Raises:
-        AssertionError: If n_num_features < 0 or invalid architecture configuration.
-        AssertionError: If k requirements don't match arch_type specifications.
-        ValueError: If no valid features provided or invalid input format.
+    :raises AssertionError: If ``n_num_features < 0``, or if ``k`` does not
+        match what ``arch_type`` requires.
+    :raises ValueError: If no features are provided, or the input format is
+        invalid.
+
+    Input shape:
+        A ``(x_num, x_cat)`` tuple, a ``{'x_num': ..., 'x_cat': ...}`` dict,
+        or a single tensor ``x_num`` when there are no categorical features.
+
+    Output shape:
+        ``(batch_size, k, n_classes_or_1)``; ``k=1`` for ``'plain'``.
 
     Example:
-        ```python
-        # Multi-class classification with mixed features
-        model = TabMModel(
-            n_num_features=10,
-            cat_cardinalities=[5, 3, 12],
-            n_classes=4,
-            hidden_dims=[256, 128],
-            arch_type='tabm',
-            k=8
-        )
-
-        # Regression with minimal ensemble
-        model = TabMModel(
-            n_num_features=20,
-            cat_cardinalities=[],
-            n_classes=None,      # Regression
-            hidden_dims=[512, 256, 128],
-            arch_type='tabm-mini',
-            k=4
-        )
-
-        # Baseline plain MLP
-        model = TabMModel(
-            n_num_features=15,
-            cat_cardinalities=[8, 4],
-            n_classes=2,
-            hidden_dims=[128, 64],
-            arch_type='plain'    # No ensemble
-        )
-        ```
+        >>> model = TabMModel(n_num_features=10, cat_cardinalities=[5, 3, 12],
+        ...                   n_classes=4, hidden_dims=[256, 128],
+        ...                   arch_type='tabm', k=8)
 
     Note:
         All sub-layers are created in ``__init__`` and materialized by
-        ``build()``, which traces ``call()`` on symbolic inputs. `call`
-        returns the raw member axis; use
-        `predict_with_uncertainty` (or the module-level `ensemble_predict`) to
-        reduce it to a point estimate and a spread.
+        ``build()``, which traces ``call()`` on symbolic inputs. ``call``
+        returns the raw member axis; use ``predict_with_uncertainty`` (or the
+        module-level ``ensemble_predict``) to reduce it to a point estimate
+        and a spread.
     """
 
-    # What each arch_type actually builds. Every field here is read by
-    # `_create_layers`; an entry that changed nothing would be a lie about an
-    # ablation, so there is deliberately no row whose fields duplicate another's.
-    #
-    #   ensemble_type     - 'efficient' (one shared kernel + rank-1 per-member
-    #                       scaling) or 'packed' (k independent kernels)
-    #   backbone_scaling  - whether the efficient backbone perturbs per member
-    #   backbone_init     - init of the backbone's per-member scaling vectors
-    #   adapter_init      - init of the input-side ScaleEnsemble, or None for
-    #                       no adapter
+    # Every ARCH_SPECS field is read by `_create_layers`; no two rows share
+    # every value, so each arch_type builds a genuinely different model.
     ARCH_SPECS: Dict[str, Dict[str, Any]] = {
         'plain': {
             'ensemble_type': 'efficient',
@@ -358,40 +272,17 @@ class TabMModel(keras.Model):
             name: Optional[str] = "tabm_model",
             **kwargs: Any
     ) -> None:
-        """Initialize the TabM model.
+        """Validate the config and create the preprocessing, backbone and head layers.
 
-        Args:
-            n_num_features: Number of numerical features.
-            cat_cardinalities: List of cardinalities for categorical features.
-            n_classes: Number of output classes (None for regression).
-            hidden_dims: List of hidden layer dimensions.
-            arch_type: Architecture variant selector.
-            k: Number of ensemble members (required for ensemble variants).
-            activation: Activation function for hidden layers.
-            dropout_rate: Dropout rate for regularization.
-            use_bias: Whether to use bias terms.
-            share_training_batches: Batch sharing strategy for ensemble training.
-            kernel_initializer: Initializer for weights.
-            bias_initializer: Initializer for bias terms.
-            kernel_regularizer: Regularizer for weights.
-            bias_regularizer: Regularizer for bias terms.
-            name: Model name.
-            **kwargs: Additional Model arguments.
-
-        Raises:
-            ValueError: If configuration is invalid.
+        :raises ValueError: If the configuration is invalid.
         """
-        # Validate arguments
         self._validate_parameters(n_num_features, cat_cardinalities, hidden_dims, arch_type, k, share_training_batches, dropout_rate)
 
-        # Store configuration
         self.n_num_features = n_num_features
         self.cat_cardinalities = cat_cardinalities.copy() if cat_cardinalities else []
         self.n_classes = n_classes
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: `list(...)`, not
-        # `.copy()`. The default is now a TUPLE (R-009 S1), and a tuple has no
-        # `.copy()`; `list()` accepts both and keeps the stored attribute -- and
-        # therefore `get_config`'s JSON type -- exactly what it always was.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-085: use list(), not
+        # .copy() -- the default is a tuple, which has no .copy(). See decisions.md.
         self.hidden_dims = list(hidden_dims)
         self.arch_type = arch_type
         self.k = k
@@ -404,15 +295,12 @@ class TabMModel(keras.Model):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Calculate input dimensions
         self.d_num = n_num_features
         self.d_cat = sum(cat_cardinalities) if cat_cardinalities else 0
         self.d_flat = self.d_num + self.d_cat
 
-        # Create all sub-layers (following modern Keras 3 patterns)
         self._create_layers()
 
-        # Initialize the Model (Keras handles building automatically)
         super().__init__(name=name, **kwargs)
 
         logger.info(
@@ -430,19 +318,9 @@ class TabMModel(keras.Model):
             share_training_batches: bool,
             dropout_rate: float
     ) -> None:
-        """Validate initialization parameters.
+        """Validate the constructor arguments.
 
-        Args:
-            n_num_features: Number of numerical features.
-            cat_cardinalities: Categorical feature cardinalities.
-            hidden_dims: Hidden layer dimensions.
-            arch_type: Architecture type.
-            k: Number of ensemble members.
-            share_training_batches: Batch sharing flag.
-            dropout_rate: Dropout rate.
-
-        Raises:
-            ValueError: If parameters are invalid.
+        :raises ValueError: If any argument is invalid.
         """
         if n_num_features < 0:
             raise ValueError(
@@ -488,8 +366,7 @@ class TabMModel(keras.Model):
             )
 
     def _create_layers(self) -> None:
-        """Create all model layers with proper initialization."""
-        # Categorical encoding
+        """Create the categorical encoder, ensemble adapter, backbone and output layer."""
         if self.cat_cardinalities:
             self.cat_encoder = OneHotEncoding(self.cat_cardinalities)
         else:
@@ -497,7 +374,6 @@ class TabMModel(keras.Model):
 
         spec = self.ARCH_SPECS[self.arch_type]
 
-        # Minimal ensemble adapter for tabm-mini variants
         if spec['adapter_init'] is not None:
             self.minimal_ensemble_adapter = ScaleEnsemble(
                 k=self.k,
@@ -508,7 +384,6 @@ class TabMModel(keras.Model):
         else:
             self.minimal_ensemble_adapter = None
 
-        # Backbone MLP
         backbone_k = None if self.arch_type == 'plain' else self.k
         self.backbone = TabMBackbone(
             hidden_dims=self.hidden_dims,
@@ -526,7 +401,6 @@ class TabMModel(keras.Model):
             bias_regularizer=self.bias_regularizer
         )
 
-        # Output layer
         d_out = 1 if self.n_classes is None else self.n_classes
 
         if self.arch_type == 'plain':
@@ -554,14 +428,13 @@ class TabMModel(keras.Model):
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from ``input_shape``.
 
-        Without this method TabMModel inherits ``Layer.build``, which marks the
-        model built while every sub-layer is still unbuilt -- Keras warns about
-        exactly that at ``layers/layer.py:393``. The shared helper traces
-        ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        Without this method the model inherits ``Layer.build``, which marks
+        the model built while every sub-layer is still unbuilt. The shared
+        helper traces ``call()`` on symbolic inputs instead, so what gets
+        built cannot drift from what gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape, or nest of shapes, of the input to ``call``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -573,56 +446,38 @@ class TabMModel(keras.Model):
             inputs: Union[Tuple[Any, Any], Dict[str, Any]],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the TabM model implementing ensemble computation.
+        """Normalize inputs, preprocess features, run the ensemble backbone and head.
 
-        This method handles the complete TabM pipeline:
-        1. Input format normalization (tuple/dict to tensors)
-        2. Feature preprocessing (numerical passthrough + categorical one-hot)
-        3. Feature concatenation into unified representation
-        4. Ensemble dimension handling (batched k-member computation)
-        5. Ensemble diversity application (architecture-dependent)
-        6. Backbone MLP forward pass
-        7. Output layer prediction generation
-
-        Args:
-            inputs: Input data in multiple supported formats:
-                - Tuple: (x_numerical, x_categorical)
-                - Dict: {'x_num': x_numerical, 'x_cat': x_categorical}
-                - Single tensor: x_numerical (no categorical features)
-            training: Boolean training mode flag for dropout/batch norm behavior.
-
-        Returns:
-            Predictions with shape:
-            - Plain: (batch_size, 1, n_classes_or_1) for consistency
-            - Ensemble: (batch_size, k, n_classes_or_1) for k ensemble members
-
-        Raises:
-            ValueError: If no valid features provided or invalid input format.
+        :param inputs: A ``(x_num, x_cat)`` tuple, a
+            ``{'x_num': ..., 'x_cat': ...}`` dict, or a single tensor
+            ``x_num`` when there are no categorical features.
+        :type inputs: Union[Tuple[Any, Any], Dict[str, Any]]
+        :param training: Whether the call is in training mode.
+        :type training: Optional[bool]
+        :return: Predictions, shape ``(batch_size, 1, n_classes_or_1)`` for
+            ``'plain'`` or ``(batch_size, k, n_classes_or_1)`` otherwise.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If no features are provided, or the input format
+            is invalid.
         """
-        # Handle different input formats for flexibility
         if isinstance(inputs, dict):
             x_num = inputs.get('x_num')
             x_cat = inputs.get('x_cat')
         elif isinstance(inputs, (tuple, list)) and len(inputs) == 2:
             x_num, x_cat = inputs
         else:
-            # Single tensor input - assume all numerical
             x_num = inputs
             x_cat = None
 
-        # Process features with integrated preprocessing pipeline
         features = []
 
-        # Numerical features (direct passthrough)
         if x_num is not None and self.n_num_features > 0:
             features.append(x_num)
 
-        # Categorical features (one-hot encoding)
         if x_cat is not None and self.cat_cardinalities:
             cat_encoded = self.cat_encoder(x_cat)
             features.append(cat_encoded)
 
-        # Combine features efficiently
         if len(features) == 0:
             raise ValueError("No valid features provided")
         elif len(features) == 1:
@@ -630,32 +485,24 @@ class TabMModel(keras.Model):
         else:
             x = ops.concatenate(features, axis=-1)
 
-        # Handle ensemble dimensions for batched computation
         if self.k is not None:
             batch_size = ops.shape(x)[0]
 
             if self.share_training_batches or not training:
-                # Shared batch strategy: (B, D) -> (B, K, D)
                 x = ops.expand_dims(x, axis=1)  # (B, 1, D)
                 x = ops.tile(x, [1, self.k, 1])  # (B, K, D)
             else:
-                # Independent batch strategy: (B * K, D) -> (B, K, D)
-                # Note: Requires careful batch preparation externally
+                # Caller must supply a batch already sized B * k.
                 x = ops.reshape(x, (batch_size // self.k, self.k, -1))
 
-            # Apply minimal ensemble adapter if present (tabm-mini variants)
             if self.minimal_ensemble_adapter is not None:
                 x = self.minimal_ensemble_adapter(x)
 
-        # Backbone MLP forward pass (ensemble-aware)
         x = self.backbone(x, training=training)
 
-        # Output layer (architecture-specific prediction heads)
         x = self.output_layer(x)
 
-        # Adjust output shape for consistency across architectures
         if self.k is None:
-            # Plain: (B, D) -> (B, 1, D) for consistency with ensemble outputs
             x = ops.expand_dims(x, axis=1)
 
         return x
@@ -667,23 +514,19 @@ class TabMModel(keras.Model):
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Aggregate the member axis into a point estimate and a spread.
 
-        This is the explicit opt-in for the aggregation `call` deliberately does
-        not perform. `call` returns `(batch, k, d_out)`; this returns the mean
-        `ŷ = (1/k) Σ fᵢ(x)` and the across-member standard deviation, each of
-        shape `(batch, d_out)`.
+        `call` returns `(batch, k, d_out)` without aggregating it; this
+        returns the mean `ŷ = (1/k) Σ fᵢ(x)` and the across-member standard
+        deviation, each shaped `(batch, d_out)`.
 
-        The spread is the ensemble's disagreement, which is an *epistemic*
-        signal only. It is computed on whatever `call` emits — for a classifier
-        that is logits, not probabilities, so it is not a calibrated predictive
-        variance and should not be read as one. For `arch_type='plain'` there is
-        one member and the spread is identically zero.
+        The spread is the ensemble's disagreement over whatever `call` emits
+        (logits, for a classifier), not a calibrated predictive variance. For
+        `arch_type='plain'` there is one member and the spread is zero.
 
-        Args:
-            x_data: Input data in any format `call` accepts.
-            **kwargs: Forwarded to `keras.Model.predict`.
-
-        Returns:
-            Tuple `(mean, std)`, both shaped `(batch_size, d_out)`.
+        :param x_data: Input data in any format ``call`` accepts.
+        :type x_data: Union[Tuple[Any, Any], Dict[str, Any], Any]
+        :param kwargs: Forwarded to ``keras.Model.predict``.
+        :return: ``(mean, std)``, both shaped ``(batch_size, d_out)``.
+        :rtype: Tuple[np.ndarray, np.ndarray]
         """
         predictions = self.predict(x_data, **kwargs)
         return np.mean(predictions, axis=1), np.std(predictions, axis=1)
@@ -699,18 +542,19 @@ class TabMModel(keras.Model):
     ) -> "TabMModel":
         """Create a TabM model from a predefined variant.
 
-        Args:
-            variant: String, one of "micro", "tiny", "small", "base", "large", "xlarge"
-            n_num_features: Integer, number of numerical features
-            cat_cardinalities: List of cardinalities for categorical features
-            n_classes: Integer or None, number of output classes (None for regression)
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            TabMModel instance
-
-        Raises:
-            ValueError: If variant is not recognized
+        :param variant: One of ``"micro"``, ``"tiny"``, ``"small"``, ``"base"``,
+            ``"large"``, ``"xlarge"``.
+        :type variant: str
+        :param n_num_features: Number of numerical features.
+        :type n_num_features: int
+        :param cat_cardinalities: Cardinality of each categorical feature.
+        :type cat_cardinalities: List[int]
+        :param n_classes: Number of output classes, or ``None`` for regression.
+        :type n_classes: Optional[int]
+        :param kwargs: Additional arguments passed to the constructor.
+        :return: A configured ``TabMModel``.
+        :rtype: TabMModel
+        :raises ValueError: If ``variant`` is not recognized.
 
         Example:
             >>> # Small ensemble for medium datasets
@@ -736,21 +580,12 @@ class TabMModel(keras.Model):
             )
 
         config = cls.MODEL_VARIANTS[variant].copy()
-        # ``description`` is variant METADATA, not a constructor argument: __init__
-        # forwards unrecognized **kwargs to keras.Model.__init__, which raises on
-        # them. Pop it before the splat below, matching fnet/model.py:598,
-        # time_series/tirex/model.py:747 and mamba/mamba_v1.py:451.
+        # `description` is metadata, not a constructor argument; __init__ raises
+        # on an unrecognized kwarg, so it is popped before the splat below.
         description = config.pop("description", "")
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
-        # House style (`wave_field/model.py`): copy the preset, drop the
-        # metadata key, then `config.update(kwargs)`. Do NOT go back to
-        # splatting named preset fields alongside `**kwargs` -- every
-        # documented override of one of those fields raised
-        # `TypeError: got multiple values for keyword argument`
-        # (MEASURED at all six sites). The `.copy()` is NOT optional and
-        # NOT cosmetic: `config.update(kwargs)` on the shared
-        # `MODEL_VARIANTS[variant]` dict would permanently poison the
-        # class-level table for every later caller. See decisions.md D-127.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset dict
+        # before update(kwargs); splatting named preset fields alongside
+        # **kwargs raised on every override. See decisions.md.
         config.update(kwargs)
 
         logger.info(f"Creating TabM-{variant.upper()} model")
@@ -764,10 +599,10 @@ class TabMModel(keras.Model):
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+        """Return the configuration dictionary for serialization.
 
-        Returns:
-            Dictionary containing the model configuration.
+        :return: All constructor parameters needed to recreate this instance.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -790,15 +625,13 @@ class TabMModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TabMModel":
-        """Create model from configuration.
+        """Create a model from its configuration dictionary, deserializing initializers and regularizers.
 
-        Args:
-            config: Configuration dictionary.
-
-        Returns:
-            TabMModel instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new model instance.
+        :rtype: TabMModel
         """
-        # Handle serialized objects
         if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
             config["kernel_initializer"] = keras.initializers.deserialize(
                 config["kernel_initializer"]
@@ -819,10 +652,10 @@ class TabMModel(keras.Model):
         return cls(**config)
 
     def summary(self, **kwargs: Any) -> None:
-        """Print model summary with TabM-specific information.
+        """Print the standard Keras summary, then TabM-specific configuration details.
 
-        Args:
-            **kwargs: Additional keyword arguments for summary.
+        :param kwargs: Additional arguments forwarded to
+            ``keras.Model.summary``.
         """
         super().summary(**kwargs)
         logger.info("=" * 60)
@@ -854,10 +687,9 @@ class TabMModel(keras.Model):
             logger.info("  - Parameter-efficient batched training")
 
     def __repr__(self) -> str:
-        """Return string representation of the model.
+        """Return a one-line representation with the key architecture parameters.
 
-        Returns:
-            String representation including key parameters.
+        :rtype: str
         """
         return (
             f"TabMModel(arch_type='{self.arch_type}', k={self.k}, "
@@ -887,28 +719,33 @@ def create_tabm_model(
         bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         **kwargs: Any
 ) -> TabMModel:
-    """Create a TabM model with specified configuration.
+    """Create a TabM model with sensible defaults for typical tabular tasks.
 
-    Factory function providing convenient access to TabM architecture with
-    sensible defaults optimized for typical tabular learning scenarios.
-
-    Args:
-        n_num_features: Number of numerical features.
-        cat_cardinalities: List of cardinalities for categorical features.
-        n_classes: Number of output classes (None for regression).
-        hidden_dims: List of hidden layer dimensions.
-        arch_type: Architecture variant selector.
-        k: Number of ensemble members.
-        activation: Activation function for hidden layers.
-        dropout_rate: Dropout rate for regularization.
-        use_bias: Whether to use bias terms.
-        share_training_batches: Batch sharing strategy.
-        kernel_initializer: Initializer for weights.
-        bias_initializer: Initializer for bias terms.
-        **kwargs: Additional model arguments.
-
-    Returns:
-        Configured TabM model ready for compilation and training.
+    :param n_num_features: Number of numerical features.
+    :type n_num_features: int
+    :param cat_cardinalities: Cardinality of each categorical feature.
+    :type cat_cardinalities: List[int]
+    :param n_classes: Number of output classes, or ``None`` for regression.
+    :type n_classes: Optional[int]
+    :param hidden_dims: Width of each backbone hidden layer.
+    :type hidden_dims: Sequence[int]
+    :param arch_type: See :class:`TabMModel`'s Variants table.
+    :type arch_type: str
+    :param k: Number of ensemble members.
+    :type k: Optional[int]
+    :param activation: Activation function for hidden layers.
+    :type activation: str
+    :param dropout_rate: Dropout probability after each hidden layer.
+    :type dropout_rate: float
+    :param use_bias: Whether linear layers use a bias term.
+    :type use_bias: bool
+    :param share_training_batches: See :class:`TabMModel`.
+    :type share_training_batches: bool
+    :param kernel_initializer: Initializer for linear-layer weights.
+    :param bias_initializer: Initializer for bias terms.
+    :param kwargs: Additional arguments forwarded to :class:`TabMModel`.
+    :return: A configured, uncompiled ``TabMModel``.
+    :rtype: TabMModel
 
     Example:
         >>> # Binary classification with mixed features

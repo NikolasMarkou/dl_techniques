@@ -268,7 +268,6 @@ class PowerMLP(keras.Model):
         than merely marked built.
     """
 
-    # Model variant configurations
     MODEL_VARIANTS = {
         "micro": {"hidden_units": [32, 16], "k": 2},
         "tiny": {"hidden_units": [64, 32], "k": 3},
@@ -661,8 +660,8 @@ class PowerMLP(keras.Model):
     ) -> None:
         """Save the model, creating the parent directory if needed.
 
-        An UNBUILT model is REFUSED rather than written: ``self.save()`` would
-        produce a syntactically valid ``.keras`` archive holding ZERO weights,
+        An unbuilt model is refused rather than written: ``self.save()`` would
+        produce a syntactically valid ``.keras`` archive holding zero weights,
         and ``load_model()`` would hand it back as a zero-weight model.
 
         :param filepath: Destination path; should end with ``.keras``.
@@ -670,7 +669,7 @@ class PowerMLP(keras.Model):
         :param overwrite: Whether to overwrite an existing file. Defaults to
             True.
         :type overwrite: bool
-        :param save_format: Accepted for backwards compatibility and IGNORED.
+        :param save_format: Accepted for backwards compatibility and ignored.
             Keras 3 selects the format from the file extension;
             ``saving_api.save_model`` pops this kwarg and never forwards it.
         :type save_format: str
@@ -678,7 +677,6 @@ class PowerMLP(keras.Model):
             ``CapsNet``, ``PowerMLP.__init__`` takes no input shape, so this
             method has nothing to build from.
         """
-        # Ensure directory exists
         directory = os.path.dirname(filepath)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
@@ -693,8 +691,8 @@ class PowerMLP(keras.Model):
                 "`model.build((None, input_dim))`, before saving."
             )
 
-        # `save_format` is deliberately NOT forwarded: Keras 3 picks the format
-        # from the extension and `saving_api.save_model` discards the kwarg.
+        # `save_format` is not forwarded: Keras 3 picks the format from the
+        # extension, and `saving_api.save_model` discards the kwarg.
         self.save(filepath, overwrite=overwrite)
         logger.info(f"PowerMLP model saved to {filepath}")
 
@@ -707,11 +705,8 @@ class PowerMLP(keras.Model):
         :return: Loaded model, ready for inference or continued training.
         :rtype: PowerMLP
         """
-        # Note: both classes are registered via @register_dl_technique --
-        # `dl_techniques.models.power_mlp.model>PowerMLP` and
-        # `dl_techniques.layers.ffn.power_mlp_layer>PowerMLPLayer` (resolved
-        # 2026-08-29 with keras.saving.get_registered_name) -- so custom_objects
-        # may not be strictly necessary, but we include them for robustness.
+        # custom_objects covers .keras archives saved before the
+        # @register_dl_technique migration.
         custom_objects = {
             "PowerMLP": cls,
             "PowerMLPLayer": PowerMLPLayer,
@@ -731,16 +726,12 @@ class PowerMLP(keras.Model):
             such as ``line_length``, ``positions`` or ``print_fn``.
         :type kwargs: Any
         """
-        # Build the model first if it hasn't been built
         if not self.built:
-            # We need an input shape to build. We can infer from hidden_units.
             input_dim = self.hidden_units[0]
             self.build((None, input_dim))
 
-        # Print standard Keras summary
         super().summary(**kwargs)
 
-        # Print PowerMLP-specific configuration
         logger.info("\nPowerMLP Configuration:")
         logger.info(f"  - Architecture (input→hidden→output): {self.hidden_units}")
         logger.info(f"  - ReLU-k power: {self.k}")
@@ -781,7 +772,7 @@ def create_power_mlp(
 
     .. code-block:: text
 
-        loss=None  →  the loss FOLLOWS output_activation:
+        loss=None  →  the loss follows output_activation:
 
             output_activation=None (default)  →  CategoricalCrossentropy(
                                                      from_logits=True)
@@ -789,7 +780,7 @@ def create_power_mlp(
             output_activation='sigmoid'              from_logits=False)
 
         a fixed `loss="categorical_crossentropy"` string would compile
-        with from_logits=False against the LINEAR default, feeding
+        with from_logits=False against the linear default, feeding
         unnormalized real values to a cross-entropy that renormalizes
         by output/sum(output) and clips -- finite, meaningless, silent.
         See the D-053 anchor.
@@ -805,7 +796,7 @@ def create_power_mlp(
     :param learning_rate: Learning rate, applied when ``optimizer`` is a
         string. Defaults to 0.001.
     :type learning_rate: float
-    :param loss: Loss name or instance. ``None`` (the default) DERIVES a
+    :param loss: Loss name or instance. ``None`` (the default) derives a
         categorical cross-entropy whose ``from_logits`` matches the model's
         actual ``output_activation``: ``True`` for the default linear output,
         ``False`` for softmax or sigmoid. Pass a value to override.
@@ -821,7 +812,7 @@ def create_power_mlp(
     :rtype: PowerMLP
 
     Example:
-        >>> # The documented default: linear output, cross-entropy on LOGITS.
+        >>> # The documented default: linear output, cross-entropy on logits.
         >>> model = create_power_mlp(hidden_units=[784, 128, 64, 10], k=3)
         >>> model.loss.from_logits
         True
@@ -836,13 +827,11 @@ def create_power_mlp(
         False
         >>> model.fit(x_train, y_train, epochs=10, validation_split=0.2)
     """
-    # Create model
     model = PowerMLP(hidden_units=hidden_units, k=k, **kwargs)
 
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-053: a fixed string loss
-    # compiled from_logits=False against the linear default output, feeding
-    # unnormalized values to a cross-entropy that clips silently. Derive
-    # from_logits from output_activation instead. See decisions.md.
+    # compiles from_logits=False against the linear default and clips silently.
+    # Derive it from output_activation instead. See decisions.md.
     if loss is None:
         emits_probabilities = (
             model.output_activation is keras.activations.softmax
@@ -858,17 +847,14 @@ def create_power_mlp(
             f"{keras.activations.serialize(model.output_activation)!r}."
         )
 
-    # Handle optimizer
     if isinstance(optimizer, str):
         optimizer = keras.optimizers.get(optimizer)
     if hasattr(optimizer, 'learning_rate'):
         optimizer.learning_rate = learning_rate
 
-    # Default metrics
     if metrics is None:
         metrics = ['accuracy']
 
-    # Compile model
     model.compile(
         optimizer=optimizer,
         loss=loss,
@@ -924,7 +910,7 @@ def create_power_mlp_regressor(
         learning_rate=learning_rate,
         loss="mse",
         metrics=["mae", "mse"],
-        output_activation=None,  # Linear output for regression
+        output_activation=None,
         **kwargs
     )
 
@@ -965,7 +951,6 @@ def create_power_mlp_binary_classifier(
         ... )
         >>> model.fit(x_train, y_train, epochs=20)
     """
-    # Ensure output is configured for binary classification
     if hidden_units[-1] != 1:
         logger.warning(
             f"For binary classification, output should be 1 unit, got {hidden_units[-1]}. "

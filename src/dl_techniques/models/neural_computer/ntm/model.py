@@ -1,62 +1,23 @@
 """
-Neural Turing Machine with a configurable controller, external memory matrix and
-optional output projection.
+Neural Turing Machine model wrapper. ``NTMModel`` unrolls an ``NTMCell`` over a
+sequence with ``keras.layers.RNN`` and projects its output through an optional
+dense layer.
 
-A recurrent network stores everything it knows in a fixed-size hidden vector, so
-the capacity to remember and the capacity to compute are the same resource.
-Holding a long sequence verbatim therefore costs the network exactly the units it
-would otherwise use for processing, and the content it does hold is smeared across
-a representation that has to be rewritten in full at every step. The NTM separates
-the two: a controller of modest width is coupled to an `N x M` memory matrix it
-addresses through a differentiable attention mechanism, so capacity grows by adding
-memory slots rather than controller parameters, and a slot written at step 3 is
-still bit-for-bit present at step 300 unless a write head explicitly erases it.
+A plain recurrent network stores everything in one fixed-size hidden vector, so
+memory and computation share the same resource. The NTM splits them: a
+modest-width controller addresses an external ``N x M`` memory matrix through
+differentiable read and write heads, so capacity grows by adding memory slots
+instead of controller width, and a slot written at step 3 stays present at step
+300 unless a write head erases it. Each head builds its weighting over the ``N``
+slots in four soft steps: content lookup by cosine similarity, interpolation
+with the head's previous position, a circular shift for relative movement, and
+a sharpening step that undoes the blur the shift introduces.
 
-What makes the coupling trainable is that addressing is soft. Every head emits a
-distribution `w` over the `N` slots and reads or writes the whole memory weighted
-by it, so gradients flow to the addressing parameters as well as to the content.
-Each head's distribution is produced in four stages. Content addressing scores a
-key against every row by cosine similarity and softmaxes it at a learned sharpness
-`beta`. An interpolation gate `g` blends that against the head's own weighting from
-the previous step, which is what lets a head stay where it was rather than
-re-deriving its position from content. A shift distribution `s` is then applied by
-circular convolution, `w~(i) = sum_j w(j) * s(i - j mod N)`, giving relative
-movement along the memory — the mechanism that turns "the next slot" into a
-learnable primitive. Finally a sharpening exponent `gamma >= 1` renormalizes
-`w^gamma`, undoing the blur that convolution introduces. The shift's orientation is
-the part that is easy to get wrong: `keras.ops.roll(a, k)[i] == a[(i - k) mod N]`,
-so the tap carrying offset `k` is `roll(w, +k)`, and negating it mirrors the shift
-instead of inverting it. That sign is pinned by a decision anchor in
-`layers/memory/ntm_interface.py` because an inverted version of it survived a long
-period of green tests.
-
-Writing is erase-then-add, `M_t = M_{t-1} * (1 - w e^T) + w a^T`. Splitting the
-update into a multiplicative erase and an additive write means a head can clear a
-slot, overwrite it, or accumulate into it, all as smooth functions of head outputs.
-Within a timestep the cell runs the controller first, then all write heads in
-sequence — each writing into the memory the previous one produced — and only then
-the read heads, so reads observe the current step's writes. The controller itself
-consumes the *previous* step's read vectors concatenated with the input, which is
-the standard one-step delay: a read issued at step `t` can only influence the
-controller at `t+1`.
-
-This module is the model-level wrapper. `NTMCell` is a `keras.layers.RNN` cell
-whose state tuple carries the controller state, the full memory matrix, and the
-read vectors and read/write weightings for every head; wrapping it in `RNN` is what
-unrolls it over a sequence. `return_state=False` on that wrapper is deliberate: the
-raw memory matrix is a large tensor of internal bookkeeping, and exposing it from
-the model's outputs would put it in every `fit()` metric path for the rare caller
-that actually wants to inspect it. The cell's own output is the controller output
-concatenated with the freshly read vectors, width
-`controller_dim + num_read_heads * memory_dim`, which is why the optional dense
-projection exists — without it the model's output width is an artifact of the
-memory configuration rather than the task.
-
-The three presets scale memory and controller together, since a wide controller
-addressing a small memory just relearns to be an LSTM. Shift range stays at 3
-(offsets -1, 0, +1) across all of them: relative movement by more than one slot per
-step is not what the shift is for, and widening it enlarges the softmax the head
-must learn to concentrate.
+``return_state=False`` on the RNN wrapper is fixed: the cell's state carries the
+full memory matrix, and this keeps that large tensor out of the model's output
+and out of every `fit()` metric path. Only the ``base`` variant's memory shape
+(128 x 20) is quoted from the paper; the controller width and the ``tiny`` and
+``large`` tiers are this repo's own.
 
 References:
     - Graves et al., 2014. Neural Turing Machines.
@@ -88,18 +49,17 @@ class NTMModel(keras.Model):
     Neural Turing Machine: an ``NTMCell`` unrolled by ``keras.layers.RNN``.
 
     Wraps the cell in an ``RNN`` layer to give a sequence-to-sequence or
-    sequence-to-vector interface compatible with standard Keras workflows. The
-    cell emits the controller output concatenated with the freshly read vectors,
-    so its width is ``controller_dim + num_read_heads * memory_dim`` -- an
-    artifact of the memory configuration rather than of the task, which is what
-    the optional dense projection exists to fix.
+    sequence-to-vector interface. The cell's own output is the controller output
+    concatenated with the freshly read vectors, width
+    ``controller_dim + num_read_heads * memory_dim``, which depends on the memory
+    configuration rather than the task; the optional dense projection maps that
+    down to ``output_dim``.
 
-    ``return_state=False`` on the ``RNN`` is deliberate and not exposed: the state
+    ``return_state=False`` on the ``RNN`` is not exposed as an option: the state
     tuple carries the full memory matrix, and surfacing it from the model's
-    outputs would drag a large bookkeeping tensor through every ``fit()`` metric
-    path for the rare caller who wants to inspect it.
+    outputs would put a large bookkeeping tensor in every ``fit()`` metric path.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -142,7 +102,7 @@ class NTMModel(keras.Model):
         │                                    output_size instead       │
         └──────────────────────────────────────────────────────────────┘
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -161,7 +121,6 @@ class NTMModel(keras.Model):
     :param output_dim: Width of the final output. Used only when
         ``use_projection=True``.
     :type output_dim: int
-    :param output_dim: Dimension of the final output.
     :param config: NTM hyperparameters — an :class:`NTMConfig`, or the dict it
         serializes to (the ``from_config`` path). Both spellings are retained on
         the instance so ``get_config`` round-trips without re-deriving either.
@@ -213,17 +172,8 @@ class NTMModel(keras.Model):
         config_dict: Its dict form, as re-emitted by :meth:`get_config`.
     """
 
-    # Only 'base' has a published counterpart. Graves et al. 2014
-    # (https://arxiv.org/abs/1410.5401) Table 1 and Table 2 state the memory shape
-    # for EVERY experiment in the paper, and it is 128 x 20 in every single row --
-    # the paper varies controller width and head count by task, never N or M. So
-    # 'base' quotes memory_size=128, memory_dim=20 from those tables, and its
-    # controller_dim=256 does NOT come from them (no LSTM-controller row uses 256;
-    # Table 2 uses 100, or 2x100 for Priority Sort) -- it is this repo's choice, kept
-    # because a 20-wide memory read by a 100-wide LSTM is not a size the rest of the
-    # ladder can be built around. 'tiny' and 'large' are repo-invented tiers with no
-    # published counterpart at all; do not read them as reproducing anything.
-    # Pinned by tests/test_variant_tables_match_upstream_references.py.
+    # 'base' quotes memory_size=128, memory_dim=20 from Graves et al. 2014 Tables 1-2.
+    # controller_dim=256 and the 'tiny'/'large' tiers have no published counterpart.
     NTM_VARIANTS = {
         'tiny': {
             'memory_size': 32,
@@ -235,12 +185,9 @@ class NTMModel(keras.Model):
             'controller_type': 'lstm'
         },
         'base': {
-            # DECISION plan-2026-08-23T091307-9a110062/D-462
-            # 128 x 20 is the paper's memory shape in all 10 experiment rows across
-            # Tables 1 and 2. Do NOT "round up" memory_dim to 32 for a tidier ladder:
-            # memory_size here is already the paper's 128, so the two numbers are one
-            # quoted pair and changing half of it makes the row cite a shape that
-            # appears nowhere in the paper.
+            # DECISION plan-2026-08-23T091307-9a110062/D-462: memory_size and memory_dim
+            # form one quoted pair (128 x 20, Graves et al. Tables 1-2); do not round
+            # memory_dim to 32 alone. See decisions.md.
             'memory_size': 128,
             'memory_dim': 20,
             'controller_dim': 256,
@@ -260,11 +207,7 @@ class NTMModel(keras.Model):
         }
     }
 
-    #: Canonical alias of ``NTM_VARIANTS`` (models/CLAUDE.md Axis 2: "where one
-    #: of those is the package's only variant table, add MODEL_VARIANTS as a
-    #: class-level alias to the same dict"). An ALIAS, never a rename -- the same
-    #: object under both names, so ``from_variant``, ``create_ntm_variant`` and
-    #: every existing reader stay on one table.
+    #: Alias of ``NTM_VARIANTS``, the same dict under both names.
     MODEL_VARIANTS = NTM_VARIANTS
 
     def __init__(
@@ -289,7 +232,6 @@ class NTMModel(keras.Model):
         self.return_sequences = return_sequences
         self.use_projection = use_projection
 
-        # Configuration handling
         if isinstance(config, dict):
             self.config_obj = NTMConfig.from_dict(config)
             self.config_dict = config
@@ -297,15 +239,8 @@ class NTMModel(keras.Model):
             self.config_obj = config
             self.config_dict = config.to_dict()
 
-        # Create Layers (Golden Rule: Create all layers in __init__)
-
-        # 1. NTM Cell
         self.cell = NTMCell(self.config_obj, name="ntm_cell")
 
-        # 2. RNN Wrapper
-        # We wrap the cell in an RNN layer to handle unrolling
-        # return_state=False because we usually don't need raw NTM internal states
-        # in the high-level model output
         self.rnn = keras.layers.RNN(
             self.cell,
             return_sequences=return_sequences,
@@ -313,7 +248,6 @@ class NTMModel(keras.Model):
             name="ntm_rnn"
         )
 
-        # 3. Output Projection
         if self.use_projection:
             self.projection = keras.layers.Dense(
                 output_dim,
@@ -321,11 +255,6 @@ class NTMModel(keras.Model):
             )
         else:
             self.projection = None
-
-        # Build the model if input shape is provided (optional but good for summary())
-        # Note: Keras 3 models often defer build, but we can hint it here.
-        # We generally avoid calling self.build() in __init__ to allow flexibility,
-        # but we can set the input spec.
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the RNN and, when enabled, the projection.
@@ -339,17 +268,11 @@ class NTMModel(keras.Model):
             ``(batch, seq_len, input_dim)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # 1. Build RNN
         self.rnn.build(input_shape)
 
-        # 2. Build Projection
-        # The cell output size is defined in NTMCell.output_size
         rnn_output_dim = self.cell.output_size
 
         if self.use_projection:
-            # If return_sequences: (batch, seq_len, rnn_out)
-            # Else: (batch, rnn_out)
-            # Dense builds on the last dimension
             self.projection.build((None, rnn_output_dim))
 
         super().build(input_shape)

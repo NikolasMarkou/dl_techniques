@@ -155,17 +155,9 @@ DIT_ADALN_CHUNK_NAMES: Tuple[str, ...] = (
 #: Width multiplier of the block's modulation projection.
 NUM_DIT_ADALN_CHUNKS: int = len(DIT_ADALN_CHUNK_NAMES)
 
-# DECISION plan-2026-09-02T170923-1285ed83/D-011
-# `AdaLayerNormContinuous` splits its 2-way projection as `scale, shift`
-# (diffusers order, sd3_adaln.py:501), while upstream DiT's `FinalLayer` splits
-# as `shift, scale` (reference/models.py:132). Do NOT "fix" this by hand-rolling
-# a shift-first copy inside this package: with a zero-init kernel AND bias the
-# two orders are the same function class under a permutation of the Dense's
-# output units, and that permutation is an exact symmetry of the zero
-# initialisation, so training is identical up to relabelling. It matters only
-# for loading an upstream checkpoint, which is impossible here
-# (`pretrained=True` raises). See decisions.md D-011; pinned by
-# `test_dit_blocks.py::TestTheFinalLayerChunkOrderIsScaleFirst`.
+# DECISION plan-2026-09-02T170923-1285ed83/D-011: chunk order is scale-first,
+# not upstream DiT's shift-first — with a zero-init kernel and bias the two orders
+# are the same function up to a Dense-unit permutation. See decisions.md.
 DIT_FINAL_CHUNK_NAMES: Tuple[str, ...] = ("scale", "shift")
 
 #: Width multiplier of the final layer's modulation projection.
@@ -442,15 +434,9 @@ class DiTBlock(keras.layers.Layer):
         # DIT_ADALN_CHUNK_NAMES.
         x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln([x, c])
 
-        # DECISION plan-2026-09-02T170923-1285ed83/D-012
-        # `use_causal_mask` is deliberately NOT passed. DiT self-attention is
-        # bidirectional over image patches (`reference/models.py:101` -- timm
-        # `Attention`, which has no mask at all). Do NOT copy
-        # `adaln_zero.AdaLNZeroConditionalBlock`'s `use_causal_mask=True`
-        # default across: a causal mask changes no shape, no parameter count and
-        # no `get_config()`, it only makes a later patch invisible to an earlier
-        # one. See decisions.md D-012; pinned by
-        # `test_dit_blocks.py::TestTheAttentionIsNonCausal`.
+        # DECISION plan-2026-09-02T170923-1285ed83/D-012: `use_causal_mask` is not
+        # passed — DiT attention is bidirectional over image patches; do not copy
+        # AdaLNZeroConditionalBlock's `use_causal_mask=True` default. See decisions.md.
         x = x + keras.ops.expand_dims(gate_msa, axis=1) * self.attn(
             query=x_norm,
             value=x_norm,

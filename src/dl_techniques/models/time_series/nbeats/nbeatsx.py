@@ -1,72 +1,29 @@
 """
-N-BEATSx: the doubly residual N-BEATS stack extended with exogenous covariates,
-mixing trend / seasonality / generic blocks with exogenous blocks whose basis is
-produced by a temporal convolutional encoder.
+NBeatsXNet and its factory create_nbeatsx_model, the doubly residual N-BEATS
+stack extended with an exogenous-covariate block type, alongside trend /
+seasonality / generic blocks.
 
-Plain N-BEATS forecasts a series from its own past alone. That is a real
-limitation whenever the driver of the horizon is *known in advance* — calendar
-effects, scheduled prices, published weather forecasts — because the information
-exists but the model has no port through which to accept it. Concatenating the
-covariates onto the target and widening the input would technically work, but it
-destroys what makes N-BEATS worth using: every block would then explain a mixture
-of target and covariate, the residual stream would no longer be a decomposition of
-the target, and the trend / seasonality components would stop being readable.
+Plain N-BEATS forecasts a series from its own past alone, so it has no port
+for covariates known in advance (calendar effects, scheduled prices, weather
+forecasts). Concatenating covariates onto the target would work but would mix
+target and covariate into every block, breaking the readable decomposition.
+Instead, N-BEATSx keeps the same residual stacking law and adds a block type
+whose basis is a function of the covariates: history and future covariates are
+concatenated along time, a dilated causal temporal convolutional network
+encodes them to a fixed channel width, and the result splits at the boundary
+into a backcast basis and a forecast basis. The block's dense trunk, which
+sees only the target residual, emits one weight per basis channel rather than
+per timestep. Setting use_tcn=False selects an interpretable variant where the
+raw covariate tensor is the basis and each theta component is the signed
+contribution of one named covariate.
 
-N-BEATSx keeps the residual discipline intact and adds a *block type* instead of a
-new input channel. The stacking law is unchanged — each block subtracts its
-backcast from the running residual and adds its forecast to the accumulator,
-
-    `residual_l = residual_{l-1} - backcast_l`
-    `forecast   = sum_l forecast_l`
-
-— but an exogenous block forms its two expansions differently. The endogenous
-blocks synthesize from a fixed basis (`t^p`, `cos/sin`) or a learned static one;
-the exogenous block synthesizes from a basis that is *itself a function of the
-covariates*. History and future covariates are concatenated along time into one
-`(B, backcast + forecast, exog_dim)` tensor, a dilated causal TCN encodes it to
-`C` channels, and the result is split back at the boundary into a backcast basis
-and a forecast basis. The block's fully connected trunk — which sees only the
-target residual — emits one weight per basis channel, and the projection is
-
-    `backcast = einsum('btc,bc->bt', basis_b, theta_b)`
-    `forecast = einsum('btc,bc->bt', basis_f, theta_f)`
-
-so theta is a per-sample vector over channels, not per-timestep. All of the time
-structure comes from the covariates and all of the *amount* comes from the target
-residual. Running the encoder over the concatenated span rather than the two
-halves separately is deliberate: it gives a single continuous receptive field
-across the backcast/forecast boundary, and the convolutions are causal, so a
-position never reads a covariate value from later in the span. Setting
-`use_tcn=False` selects the interpretable variant, where the raw covariate tensor
-*is* the basis and each theta component is directly the (signed) contribution of
-one named covariate.
-
-Two consequences of this construction are easy to get wrong. First, an exogenous
-block replaces the inherited theta heads with Dense layers of width
-`basis_channels` — `tcn_filters` when encoding, `exogenous_dim` when not — so the
-`thetas_dim` entry configured for an exogenous stack is *inert*; only endogenous
-stacks consume it. Second, the exogenous block overrides `call` outright instead of
-implementing the base class's `_generate_backcast` / `_generate_forecast` hooks
-(which are left as no-ops), because the basis must be built from the covariates
-before theta can be projected against it, whereas the base `call` expands theta
-immediately.
-
-The model takes a dictionary input (`target_history`, `exog_history`,
-`exog_forecast`) rather than a single tensor, since three tensors of two different
-time lengths cannot be packed into one array without padding. Endogenous blocks
-are constructed with `input_dim=1` / `output_dim=1` unconditionally: the residual
-stream here is the univariate target, and covariate width lives entirely in
-`exogenous_dim`. Reversible instance normalization is computed over the time axis
-of the target only — the covariates are passed through unscaled, since a calendar
-indicator or a one-hot has no meaningful per-window z-score — and the summed
-forecast is de-normalized with the target's own statistics. Note that
-`use_normalization` gates the target RevIN. It ALSO gates the RMSNorm layers
-inside every block's fully connected trunk, but only by default: pass
-`use_block_normalization` to control the in-block norms independently (`False`
-matches `NBeatsNet`, which never forwards this flag to its blocks at all). Optional dropout is applied to the *residual stream* between blocks, not
-inside the trunk, so it perturbs what the next block is asked to explain. Unlike
-`NBeatsNet`, `call` returns the forecast tensor alone; there is no reconstruction
-output, so `predict()` and `call` agree exactly.
+The model takes a dictionary input (target_history, exog_history,
+exog_forecast) rather than a single tensor, since these are three tensors of
+two different time lengths. Endogenous blocks always use input_dim=1 and
+output_dim=1: the residual stream is the univariate target, and covariate
+width lives entirely in exogenous_dim. Reversible instance normalization
+covers the target only; covariates pass through unscaled. call() returns the
+forecast tensor alone, with no reconstruction output.
 
 References:
     - Olivares et al., 2023. Neural basis expansion analysis with exogenous
@@ -85,10 +42,6 @@ import keras
 from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 from keras import ops, layers, initializers, regularizers
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
 from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock, TrendBlock, SeasonalityBlock
@@ -98,40 +51,56 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.nbeats.nbeatsx")
 class NBeatsXNet(keras.Model):
     """N-BEATSx: Neural Basis Expansion Analysis with Exogenous Variables.
 
-    **Intent**: Extend the interpretable doubly-residual N-BEATS topology
-    (Trend / Seasonality decomposition over a univariate target) with a
-    dedicated exogenous-variable pathway, so that side information available
-    both in the history window AND the forecast horizon (calendar features,
-    prices, weather, etc.) can be folded into the forecast without breaking
-    the residual stacking discipline. Endogenous blocks operate on the
-    normalized target residual; exogenous blocks (``ExogenousBlock``) consume
-    the history+future exogenous tensors via an optional TCN encoder and emit
-    their own backcast/forecast contributions into the same residual stream.
+    Extends the doubly residual N-BEATS topology with an exogenous-variable
+    pathway, so side information in the history window and the forecast
+    horizon (calendar features, prices, weather) can be folded into the
+    forecast without breaking the residual stacking discipline. Endogenous
+    blocks operate on the normalized target residual; exogenous blocks
+    (:class:`ExogenousBlock`) consume the history and future exogenous
+    tensors through an optional TCN encoder and emit their own backcast and
+    forecast contributions into the same residual stream.
 
-    Architecture::
+    Architecture:
 
-        target_history ──RevIN──> residual ─┐
-                                            v
-          ┌───────────────── stack 0 ─────────────────┐
-          │  block: Trend / Seasonality / Generic      │  (endogenous)
-          │  block: Exogenous(TCN(exog_hist, exog_fut)) │  (exogenous)
-          └───────────────────────────────────────────┘
-                 │ backcast (subtracted)  │ forecast (summed)
-                 v                         v
-              residual'               forecast_sum ──denorm──> y_hat
+    .. code-block:: text
 
-    Each block subtracts its backcast from the running residual and adds its
-    forecast to the global accumulator; the summed forecast is de-normalized
-    with the target's own statistics (reversible instance norm).
+        target_history [B, backcast, 1]
+             |
+             v
+        ┌──────────────┐
+        │ revin          │  (optional)
+        └──────────────┘
+             |
+             v
+        residual [B, backcast]
+             |
+             v
+        ┌──────────────┐   exog_history, exog_forecast
+        │ stack 0        │◄──────────────────────────
+        │ trend/season/  │
+        │ generic/       │
+        │ exogenous(tcn) │
+        └──────────────┘
+             |  residual'          forecast_sum
+             v                          |
+            ...                         v
+                              ┌──────────────┐
+                              │ denorm         │  (optional)
+                              └──────────────┘
+                                          |
+                                          v
+                                   forecast [B, forecast, 1]
 
-    **Input Handling**: history and future exogenous variables require a
-    dictionary input during ``fit`` / ``predict``::
+    Exogenous and endogenous blocks alternate freely within ``stack_types``;
+    each subtracts its backcast from the running residual and adds its
+    forecast to the accumulator.
+
+    Input handling requires a dictionary during ``fit``/``predict``::
 
         inputs = {
             "target_history": (batch, backcast_len, 1),
@@ -139,42 +108,58 @@ class NBeatsXNet(keras.Model):
             "exog_forecast":  (batch, forecast_len, exog_dim),
         }
 
-    **Stack Types**:
+    Stack types:
         - ``'trend'`` / ``'seasonality'`` / ``'generic'``: standard N-BEATS
           blocks (endogenous target residual only).
-        - ``'exogenous'``: NBEATSx block using a TCN over exogenous variables.
-        - ``'exogenous_interpretable'``: NBEATSx block using raw (un-encoded)
+        - ``'exogenous'``: block using a TCN over exogenous variables.
+        - ``'exogenous_interpretable'``: block using raw (un-encoded)
           exogenous variables.
 
-    Args:
-        backcast_length: Integer, length of the input (history) window.
-        forecast_length: Integer, length of the forecast horizon.
-        exogenous_dim: Integer, number of exogenous features per timestep.
-        stack_types: List of stack-type strings (see **Stack Types**).
-        nb_blocks_per_stack: Integer, blocks per stack.
-        thetas_dim: List of basis-expansion dims, one per stack.
-        hidden_layer_units: Integer, hidden width of each block's FC trunk.
-        share_weights_in_stack: Boolean, share weights across the blocks of a
-            stack by reusing one block object at every position, dividing the
-            stack's parameter count by ``nb_blocks_per_stack``.
-        use_normalization: Boolean, apply reversible instance normalization to
-            the target series (the RevIN at the model boundary).
-        use_block_normalization: Optional boolean, enable the four RMSNorm layers
-            *inside* every block's FC trunk. ``None`` (the default) means "follow
-            ``use_normalization``", which is the historical behaviour of this
-            class -- ``use_normalization`` was a single switch with two effects.
-            Pass ``False`` to keep the target RevIN while matching ``NBeatsNet``,
-            whose blocks never receive this flag at all.
-        dropout_rate: Float in [0, 1), residual-stream dropout probability.
-        activation: Activation for block hidden layers.
-        use_bias: Boolean, bias on block FC layers.
-        kernel_initializer: Initializer for block FC kernels.
-        kernel_regularizer: Optional regularizer for block FC kernels.
-        theta_regularizer: Optional regularizer for block theta projections.
-        tcn_filters: Integer, channels for the exogenous TCN encoder.
-        tcn_kernel_size: Integer, kernel size for the exogenous TCN.
-        tcn_dropout_rate: Float, dropout inside the exogenous TCN.
-        **kwargs: Forwarded to ``keras.Model``.
+    :param backcast_length: Length of the input (history) window.
+    :type backcast_length: int
+    :param forecast_length: Length of the forecast horizon.
+    :type forecast_length: int
+    :param exogenous_dim: Number of exogenous features per timestep.
+    :type exogenous_dim: int
+    :param stack_types: Stack-type strings (see Stack types above).
+    :type stack_types: Sequence[str]
+    :param nb_blocks_per_stack: Blocks per stack.
+    :type nb_blocks_per_stack: int
+    :param thetas_dim: Basis-expansion width, one entry per stack.
+    :type thetas_dim: Sequence[int]
+    :param hidden_layer_units: Hidden width of each block's dense trunk.
+    :type hidden_layer_units: int
+    :param share_weights_in_stack: If ``True``, every block in a stack is the
+        same object, dividing the stack's parameter count by
+        ``nb_blocks_per_stack``.
+    :type share_weights_in_stack: bool
+    :param use_normalization: Whether to apply reversible instance
+        normalization to the target series (RevIN at the model boundary).
+    :type use_normalization: bool
+    :param use_block_normalization: Whether to enable the RMSNorm layers
+        inside every block's dense trunk. ``None`` follows
+        ``use_normalization``. Pass ``False`` to keep the target RevIN while
+        matching ``NBeatsNet``, whose blocks never receive this flag.
+    :type use_block_normalization: Optional[bool]
+    :param dropout_rate: Residual-stream dropout probability, in ``[0, 1)``.
+    :type dropout_rate: float
+    :param activation: Activation for block hidden layers.
+    :type activation: Union[str, Callable]
+    :param use_bias: Whether block dense layers use a bias term.
+    :type use_bias: bool
+    :param kernel_initializer: Initializer for block dense kernels.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param kernel_regularizer: Regularizer for block dense kernels.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param theta_regularizer: Regularizer for block theta projections.
+    :type theta_regularizer: Optional[regularizers.Regularizer]
+    :param tcn_filters: Channels for the exogenous TCN encoder.
+    :type tcn_filters: int
+    :param tcn_kernel_size: Kernel size for the exogenous TCN.
+    :type tcn_kernel_size: int
+    :param tcn_dropout_rate: Dropout inside the exogenous TCN.
+    :type tcn_dropout_rate: float
+    :param kwargs: Forwarded to ``keras.Model``.
 
     Example:
         >>> import keras
@@ -238,14 +223,9 @@ class NBeatsXNet(keras.Model):
         self.hidden_layer_units = hidden_layer_units
         self.share_weights_in_stack = share_weights_in_stack
         self.use_normalization = use_normalization
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-116: ADDITIVE, never a rename.
-        # `use_normalization` here gates TWO unrelated things -- the target RevIN at
-        # the model boundary AND the four RMSNorm layers inside every block's FC
-        # trunk -- while the sibling `NBeatsNet` puts NO such key in its
-        # `block_kwargs`, so the same flag means different architectures in the two
-        # classes. `None` reproduces the historical coupling EXACTLY, so no existing
-        # config or checkpoint moves. Do NOT rename `use_normalization` to
-        # `use_target_normalization`: that breaks every stored config in the tree.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-116: keep `use_block_normalization`
+        # additive; do not rename `use_normalization` to `use_target_normalization`.
+        # It stays the historical coupling (target RevIN + in-block RMSNorm) or every stored config breaks. See decisions.md.
         self.use_block_normalization = use_block_normalization
         self.dropout_rate = dropout_rate
         self.activation = deserialize_activation(activation)
@@ -372,13 +352,10 @@ class NBeatsXNet(keras.Model):
             self.blocks.append(stack_blocks)
 
     def build(self, input_shape: Optional[Any] = None) -> None:
-        # We manually trigger builds for sub-blocks to ensure variables exist
-        # Assuming input is dict, we define standard shapes
-        dummy_resid_shape = (None, self.backcast_length * 1)  # Univariate target
+        """Build every block against the flattened univariate residual shape."""
+        # Univariate target residual shape.
+        dummy_resid_shape = (None, self.backcast_length * 1)
 
-        # NOTE: D-003 (plan_2026-06-11_fe7401f4) resolved by plan_2026-06-11_5f49f080 —
-        # TemporalConvNet now has a real build(); ExogenousBlock.build()->encoder.build()
-        # materializes all TCN Conv1D children, so no eager dummy forward is needed.
         for stack in self.blocks:
             for block in stack:
                 # Under share_weights_in_stack the same object appears at every
@@ -393,21 +370,23 @@ class NBeatsXNet(keras.Model):
             inputs: Dict[str, keras.KerasTensor],
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
+        """Normalize the target, run the stacks, and denormalize the forecast.
+
+        :param inputs: Dictionary with ``'target_history'`` ``(B, backcast, 1)``,
+            ``'exog_history'`` ``(B, backcast, exog_dim)`` and
+            ``'exog_forecast'`` ``(B, forecast, exog_dim)``.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Whether dropout runs in training mode.
+        :type training: Optional[bool]
+        :return: Forecast, ``(B, forecast_length, 1)``.
+        :rtype: keras.KerasTensor
         """
-        Args:
-            inputs: Dictionary containing:
-                - 'target_history': (B, Backcast, 1)
-                - 'exog_history': (B, Backcast, ExogDim)
-                - 'exog_forecast': (B, Forecast, ExogDim)
-        """
-        # Unpack Inputs
         y_hist = inputs['target_history']
         x_hist = inputs['exog_history']
         x_fore = inputs['exog_forecast']
 
         batch_size = ops.shape(y_hist)[0]
 
-        # 1. Normalize Target History (Endogenous)
         if self.use_normalization:
             y_mean = ops.mean(y_hist, axis=1, keepdims=True)
             y_std = ops.std(y_hist, axis=1, keepdims=True)
@@ -418,10 +397,9 @@ class NBeatsXNet(keras.Model):
             y_mean = None
             y_std = None
 
-        # Flatten Residual for Dense Stacks: (B, Time * 1)
+        # Dense stacks need a flat (B, Time * 1) residual.
         residual = ops.reshape(residual, (batch_size, self.backcast_length))
 
-        # Accumulator for forecasts
         forecast_sum = ops.zeros((batch_size, self.forecast_length))
 
         dropout_idx = 0
@@ -429,35 +407,27 @@ class NBeatsXNet(keras.Model):
         for stack in self.blocks:
             for block in stack:
                 if isinstance(block, ExogenousBlock):
-                    # Pass exogenous data specifically
                     backcast, forecast = block(
                         residual,
                         training=training,
                         exogenous_inputs=(x_hist, x_fore)
                     )
                 else:
-                    # Standard N-BEATS block (Trend/Seasonality/Generic)
                     backcast, forecast = block(residual, training=training)
 
-                # Update Residual (subtract backcast explanation)
                 residual = residual - backcast
-
-                # Accumulate Forecast
                 forecast_sum = forecast_sum + forecast
 
-                # Dropout
                 if self.dropout_rate > 0.0 and dropout_idx < len(self.dropout_layers):
                     residual = self.dropout_layers[dropout_idx](residual, training=training)
                     dropout_idx += 1
 
-        # Reshape forecast output (B, Time, 1)
         forecast_3d = ops.reshape(forecast_sum, (batch_size, self.forecast_length, 1))
 
-        # Denormalize
         if self.use_normalization:
             forecast_3d = (forecast_3d * y_std) + y_mean
 
-        # Return only forecast for predict() consistency
+        # predict() returns only the forecast — there is no reconstruction output.
         return forecast_3d
 
     @property
@@ -514,7 +484,6 @@ class NBeatsXNet(keras.Model):
             )
         return cls(**config)
 
-# ---------------------------------------------------------------------
 
 def create_nbeatsx_model(
         backcast_length: int = 168,
@@ -523,9 +492,20 @@ def create_nbeatsx_model(
         stack_types: Sequence[str] = ('trend', 'seasonality', 'exogenous'),
         **kwargs
 ) -> NBeatsXNet:
-    """Factory for NBEATSx Model."""
+    """Create an :class:`NBeatsXNet` with auto-calculated theta dimensions if not given.
 
-    # Auto-calculate thetas if not provided
+    :param backcast_length: Length of the input (history) window.
+    :type backcast_length: int
+    :param forecast_length: Length of the forecast horizon.
+    :type forecast_length: int
+    :param exogenous_dim: Number of exogenous features per timestep.
+    :type exogenous_dim: int
+    :param stack_types: Stack types to use.
+    :type stack_types: Sequence[str]
+    :param kwargs: Forwarded to :class:`NBeatsXNet`.
+    :return: The configured model.
+    :rtype: NBeatsXNet
+    """
     if 'thetas_dim' not in kwargs:
         thetas_dim = []
         for s in stack_types:
@@ -534,7 +514,8 @@ def create_nbeatsx_model(
             elif s == 'seasonality':
                 thetas_dim.append(8)
             elif s == 'exogenous':
-                thetas_dim.append(16)  # Matches tcn_filters
+                # Matches tcn_filters.
+                thetas_dim.append(16)
             else:
                 thetas_dim.append(16)
         kwargs['thetas_dim'] = thetas_dim
@@ -549,5 +530,3 @@ def create_nbeatsx_model(
 
     logger.info(f"Created NBEATSx with stacks: {stack_types}")
     return model
-
-# ---------------------------------------------------------------------

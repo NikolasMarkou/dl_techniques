@@ -1,88 +1,24 @@
 """
-N-BEATS forecaster: stacks of fully connected blocks that predict by doubly
-residual basis expansion, over polynomial-trend, Fourier-seasonality or fully
-learned generic bases, with optional reversible instance normalization.
+NBeatsNet and its factory create_nbeats_model, an N-BEATS forecaster built from
+stacks of fully connected blocks that predict through doubly residual basis
+expansion.
 
-The architecture rests on one substitution. Instead of asking a network to emit
-the horizon directly, each block emits a short coefficient vector `theta` and the
-horizon is then *synthesized* from a fixed or learned set of basis functions,
-`y_hat = sum_i theta_i * g_i(t)`. Whatever cannot be expressed by that basis is
-simply not representable by the block, which is what turns a design choice about
-`g` into an interpretability guarantee: a block whose basis is `{1, t, t^2, ...}`
-can only produce a trend, and a block whose basis is `{cos(2*pi*k*t), sin(2*pi*k*t)}`
-can only produce a periodic signal. The forecast the user reads out per stack is
-therefore a genuine decomposition, not an attribution heuristic applied after the
-fact.
-
-The second idea is what lets several such restricted blocks cooperate. Every block
-emits *two* expansions from the same hidden representation: a backcast over the
-lookback window and a forecast over the horizon. The backcast is subtracted from
-the block's own input and only what is left travels onward,
-
-    `residual_l = residual_{l-1} - backcast_l`
-    `forecast   = sum_l forecast_l`
-
-so block `l` is trained on exactly the part of the signal its predecessors failed
-to explain, while the horizon accumulates additively. This is the "doubly
-residual" topology: unlike a plain residual stack, the skip path carries a
-*subtraction* of an explanation rather than a copy of the activation, and the
-forecast path carries a sum that no block can undo. A consequence worth naming:
-because the accumulation is a sum of independent contributions, the ordering of
-stacks matters for interpretation, not for capacity. Putting trend first lets it
-absorb the low-frequency mass before seasonality is fitted to a detrended
-residual; the reverse order still fits, but the components stop meaning what
-their names say.
-
-Structurally, N-BEATS is a dense architecture with no convolution and no
-recurrence. The model flattens `(batch, time, features)` to `(batch, time *
-features)` up front and every block operates on that flat vector: four
-fully-connected layers produce a shared hidden state, two linear heads produce
-`theta_backcast` and `theta_forecast`, and a subclass-specific basis expands each
-into the time domain. In the multivariate case theta is emitted at width
-`thetas_dim * dim` and reshaped to `(batch, dim, thetas_dim)` before the
-`(thetas_dim, time)` basis matmul, then transposed back to `(batch, time, dim)`
-and re-flattened — the transpose is what keeps the block's output in the same
-interleaving as the flattened residual it must be subtracted from, and dropping it
-would silently mix features into time positions. The trend basis evaluates its
-powers on time normalized to roughly `[-1, 1]` across the *joint* backcast +
-forecast span, centred at the boundary between them, so a polynomial fitted on the
-lookback continues smoothly rather than exploding at `t = 0` of the horizon; higher
-degrees are optionally divided by `sqrt(degree + 1)` purely for conditioning. The
-seasonality basis uses `thetas_dim // 2` harmonics as cosine/sine pairs, appending
-a DC term when `thetas_dim` is odd. The generic basis is just two unconstrained
-Dense projections, initialized orthogonally with `gain=0.1` so that the first
-forward pass does not hand the residual stream a large arbitrary subtraction.
-
-Normalization is per-instance and reversible. Mean and standard deviation are
-taken over the time axis (`axis=1`), per series and per feature — never over the
-batch — which is what makes the model indifferent to the absolute level and scale
-of whatever window it is handed; the divisor is floored at `NORM_EPSILON` so a
-constant window yields zeros rather than NaNs. The forecast is de-normalized by
-`x * std + mean`, but the returned residual is scaled by `std` alone: it is a
-difference of normalized quantities, so re-adding the mean would corrupt it. When
-`input_dim != output_dim` the code cannot know which input channels the outputs
-correspond to and assumes the *first* `output_dim` features are the targets,
-slicing their statistics for the de-normalization. That is an assumption, not an
-inference — with a different channel layout, disable normalization or align the
-channels upstream.
-
-`call` deliberately returns the pair `(forecast, final_residual)` rather than the
-forecast alone. The residual is the part of the input the whole stack failed to
-explain, and exposing it lets a training loop penalize it directly to force a
-complete decomposition. Keras returns only the first element from `predict()`, so
-inference is unaffected by the extra output. Penalizing that residual is the
-trainer's job and is done by compiling a second loss against the second output with
-its own `loss_weights` entry — see `src/train/time_series/nbeats/train_nbeats.py`.
-The model used to accept a `reconstruction_weight` of its own, which it stored and
-serialized and never read; it has been removed rather than left to imply that
-setting it did anything.
-
-`share_weights_in_stack` ties the blocks within a stack by reusing one block object
-at every position, so a stack of `n` blocks holds one set of weights and applies it
-`n` times to successively cleaner residuals. It is genuine sharing, not tied copies:
-`len({id(b) for b in stack}) == 1`. This trades capacity for parameters and for a
-recurrent reading of the stack, and it is off by default because the paper's headline
-configuration does not use it.
+Instead of emitting the horizon directly, each block emits a short coefficient
+vector theta, and the horizon is synthesized from a fixed or learned set of
+basis functions, y_hat = sum_i theta_i * g_i(t). A block whose basis is a
+polynomial can only produce a trend; one whose basis is sine/cosine pairs can
+only produce a periodic signal, so the per-stack forecast is a real
+decomposition. Every block also emits a backcast over the lookback window,
+which is subtracted from its input before the residual reaches the next block
+(residual_l = residual_{l-1} - backcast_l), so each block sees only what its
+predecessors failed to explain, while forecasts across all blocks are summed.
+The model flattens (batch, time, features) to (batch, time * features) before
+each block, and applies reversible per-instance normalization (mean/std over
+the time axis) by default. call() returns (forecast, final_residual): the
+residual exposes what the whole stack failed to explain, so a training loop
+can penalize it directly through a second loss term; predict() returns only
+the forecast. share_weights_in_stack reuses one block object at every stack
+position (real weight sharing, not tied copies) and is off by default.
 
 References:
     - Oreshkin et al., 2019. N-BEATS: Neural basis expansion analysis for
@@ -97,10 +33,6 @@ import numpy as np
 from keras import ops, initializers, regularizers
 from typing import List, Tuple, Optional, Union, Any, Dict, Callable, Sequence
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.time_series.nbeats_blocks import (
@@ -112,72 +44,86 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 @register_dl_technique("dl_techniques.models.nbeats.nbeats")
 class NBeatsNet(keras.Model, ForecastMixin):
-    """
-    Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
+    """Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
 
-    This implementation follows modern Keras 3 patterns with proper normalization
-    and serialization. It fully supports multivariate inputs and outputs.
+    Processes input through stacks of blocks. Each block produces a backcast
+    (explanation of its input) and a forecast; the backcast is subtracted from
+    the input to form the residual for the next block, and all forecasts are
+    summed for the final prediction. ``stack_types`` selects each stack's basis:
+    ``'generic'`` (fully learned), ``'trend'`` (polynomial) or ``'seasonality'``
+    (Fourier).
 
-    **Intent**: Provide a complete N-BEATS implementation for time series
-    forecasting with proper residual connections, normalization, and serialization
-    support following modern Keras 3 best practices.
+    Architecture:
 
-    **Architecture**:
-    The model processes input through stacks of blocks. Each block produces a
-    backcast (explanation of input) and forecast (prediction). The backcast is
-    subtracted from the input to form a residual for the next block. All forecasts
-    are summed to produce the final prediction.
+    .. code-block:: text
 
-    **Stack Types**:
-    - Generic: Learned basis functions (fully flexible)
-    - Trend: Polynomial basis functions for trend patterns
-    - Seasonality: Fourier basis functions for periodic patterns
+        input [B, T, D]
+             |
+             v
+        ┌──────────────┐
+        │ normalize      │  (optional, reversible)
+        └──────────────┘
+             |
+             v
+        residual [B, T*D]
+             |
+             v
+        ┌──────────────┐
+        │ stack 1        │──> forecast_1
+        │ (blocks)       │
+        └──────────────┘
+             |  residual
+             v
+        ┌──────────────┐
+        │ stack 2 ...    │──> forecast_2 ...
+        └──────────────┘
+             |
+             v
+        final residual        sum(forecast_i) --> forecast [B, H, D]
 
-    **Training Flow**:
-    Input → [Stack 1] → Residual → [Stack 2] → Residual → ... → Final Residual
-              ↓                      ↓
-           Forecast 1            Forecast 2  ...  → Sum → Final Forecast
-
-    Args:
-        backcast_length: Integer, length of the input time series window.
-            Recommended to be 3-5x larger than forecast_length.
-        forecast_length: Integer, length of the forecast horizon.
-        stack_types: List of strings, types of stacks to use. Valid options:
-            'generic', 'trend', 'seasonality'. Order matters - typically trend
-            before seasonality for interpretability. Defaults to
-            ['trend', 'seasonality', 'generic'].
-        nb_blocks_per_stack: Integer, number of blocks per stack. Each block
-            adds capacity and allows finer residual decomposition. Defaults to 3.
-        thetas_dim: List of integers, dimensionality of theta parameters for each
-            stack. Controls the complexity of basis functions. Must match length
-            of stack_types. Auto-calculated by factory if not provided.
-        hidden_layer_units: Integer, number of hidden units in each block's MLP.
-            Larger values increase capacity but also memory/compute. Defaults to 256.
-        share_weights_in_stack: Boolean, whether blocks in the same stack share
-            weights. When True the stack holds a single block object applied
-            `nb_blocks_per_stack` times, dividing the stack's parameter count by
-            that factor at the cost of expressiveness. Defaults to False.
-        use_normalization: Boolean, whether to use instance normalization on input.
-            Recommended for series with varying scales. Defaults to True.
-        kernel_regularizer: Optional regularizer for block weights. Use for
-            preventing overfitting on small datasets.
-        theta_regularizer: Optional regularizer for theta parameters. Controls
-            smoothness of learned basis functions.
-        dropout_rate: Float in [0, 1), dropout rate between blocks. Use 0.1-0.3
-            for regularization on small datasets. Defaults to 0.0.
-        activation: String or callable, activation function for hidden layers.
-            'relu' or 'gelu' recommended. Defaults to 'relu'.
-        kernel_initializer: String or Initializer, initializer for layer weights.
-            'he_normal' works well with ReLU. Defaults to 'he_normal'.
-        input_dim: Integer, dimensionality of input features. Use > 1 for multivariate
-            time series. Defaults to 1.
-        output_dim: Integer, dimensionality of output features. Defaults to 1.
-        use_bias: Boolean, whether to use bias terms in linear layers. Defaults to True.
-        **kwargs: Additional keyword arguments for the Model base class.
+    :param backcast_length: Length of the input time series window. Recommended
+        to be 3-5x ``forecast_length``.
+    :type backcast_length: int
+    :param forecast_length: Length of the forecast horizon.
+    :type forecast_length: int
+    :param stack_types: Stack types to use, from ``'generic'``, ``'trend'``,
+        ``'seasonality'``. Order matters for interpretation: trend before
+        seasonality lets trend absorb the low-frequency mass first.
+    :type stack_types: Sequence[str]
+    :param nb_blocks_per_stack: Number of blocks per stack.
+    :type nb_blocks_per_stack: int
+    :param thetas_dim: Theta-vector width per stack; must match the length of
+        ``stack_types``. Auto-calculated by the factory if not given directly.
+    :type thetas_dim: Sequence[int]
+    :param hidden_layer_units: Hidden units in each block's MLP.
+    :type hidden_layer_units: int
+    :param share_weights_in_stack: If ``True``, every block in a stack is the
+        same object, so the stack holds one set of weights applied
+        ``nb_blocks_per_stack`` times.
+    :type share_weights_in_stack: bool
+    :param use_normalization: Whether to apply reversible per-instance
+        normalization to the input.
+    :type use_normalization: bool
+    :param kernel_regularizer: Regularizer for block weights.
+    :type kernel_regularizer: Optional[regularizers.Regularizer]
+    :param theta_regularizer: Regularizer for theta parameters.
+    :type theta_regularizer: Optional[regularizers.Regularizer]
+    :param dropout_rate: Dropout rate between blocks, in ``[0, 1)``.
+    :type dropout_rate: float
+    :param activation: Activation function for hidden layers.
+    :type activation: Union[str, Callable]
+    :param kernel_initializer: Initializer for layer weights.
+    :type kernel_initializer: Union[str, initializers.Initializer]
+    :param input_dim: Dimensionality of input features; greater than 1 for
+        multivariate series.
+    :type input_dim: int
+    :param output_dim: Dimensionality of output features.
+    :type output_dim: int
+    :param use_bias: Whether linear layers use a bias term.
+    :type use_bias: bool
+    :param kwargs: Additional arguments for the ``Model`` base class.
 
     Input shape:
         - 3D tensor: ``(batch_size, backcast_length, input_dim)``
@@ -251,22 +197,19 @@ class NBeatsNet(keras.Model, ForecastMixin):
             use_bias: bool = True,
             **kwargs: Any
     ) -> None:
-        """
-        Initialize the N-BEATS model.
+        """Validate the configuration and create every sub-layer.
 
-        Creates all sub-layers in __init__ following modern Keras 3 patterns.
-        Sub-layers are built explicitly in build() for robust serialization.
+        Sub-layers are created here; ``build()`` builds them explicitly so
+        that saved weights restore correctly.
         """
         super().__init__(**kwargs)
 
-        # Validate configuration
         self._validate_configuration(
             backcast_length, forecast_length, stack_types, nb_blocks_per_stack,
             thetas_dim, hidden_layer_units, dropout_rate, input_dim, output_dim
         )
 
-        # Store ALL configuration parameters for serialization
-        # This is critical for get_config() / from_config() to work correctly
+        # Every constructor parameter is stored, for get_config()/from_config().
         self.backcast_length = backcast_length
         self.forecast_length = forecast_length
         self.stack_types = list(stack_types)
@@ -284,7 +227,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
         self.output_dim = output_dim
         self.use_bias = use_bias
 
-        # CREATE all sub-layers in __init__ (Golden Rule #1)
         self.blocks: List[List[Union[GenericBlock, TrendBlock, SeasonalityBlock]]] = []
         self._create_block_stacks()
 
@@ -300,11 +242,9 @@ class NBeatsNet(keras.Model, ForecastMixin):
             input_dim: int,
             output_dim: int
     ) -> None:
-        """
-        Validate model configuration parameters.
+        """Validate model configuration parameters.
 
-        Raises:
-            ValueError: If any parameter is invalid or inconsistent.
+        :raises ValueError: If any parameter is invalid or inconsistent.
         """
         if backcast_length <= 0:
             raise ValueError(f"backcast_length must be positive, got {backcast_length}")
@@ -350,12 +290,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
             )
 
     def _create_block_stacks(self) -> None:
-        """
-        Create all N-BEATS block stacks.
-
-        Creates blocks in __init__ as required by modern
-        Keras 3 patterns. Blocks will be built later in build() method.
-        """
+        """Create every block for every stack. build() builds them later."""
 
         for stack_id, (stack_type, theta_dim) in enumerate(
                 zip(self.stack_types, self.thetas_dim)
@@ -406,20 +341,10 @@ class NBeatsNet(keras.Model, ForecastMixin):
             self.blocks.append(stack_blocks)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model and all its sub-layers.
+        """Build every block explicitly, so weights exist before a load restores them.
 
-        This method is CRITICAL for proper serialization. It explicitly builds
-        all sub-layers (blocks) so that their weight variables exist before
-        weight restoration during model loading.
-
-        Following modern Keras 3 patterns from the complete guide:
-        - Sub-layers created in __init__ (already done)
-        - Sub-layers built in build() (this method)
-        - This ensures robust save/load cycles
-
-        Args:
-            input_shape: Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Expand 2D to 3D if needed to get consistent shape
         if len(input_shape) == 2:
@@ -432,8 +357,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
         batch_size = build_shape[0]
         block_input_shape = (batch_size, self.backcast_length * self.input_dim)
 
-        # CRITICAL: Explicitly build all blocks
-        # This ensures weight variables exist before loading saved weights
         for stack_blocks in self.blocks:
             for block in stack_blocks:
                 # Under share_weights_in_stack the same object appears at every
@@ -441,7 +364,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
                 if not block.built:
                     block.build(block_input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -449,30 +371,21 @@ class NBeatsNet(keras.Model, ForecastMixin):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass through the N-BEATS network.
+        """Run the stacks, accumulating forecasts and passing residuals forward.
 
-        Processes input through stacks of blocks, accumulating forecasts and
-        passing residuals forward. Applies normalization if enabled.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, backcast_length) or
-                (batch_size, backcast_length, input_dim).
-            training: Boolean flag indicating training vs inference mode.
-                Affects dropout behavior.
-
-        Returns:
-            Tuple of (forecast, final_residual):
-
-            - forecast: Predicted values of shape
-              (batch_size, forecast_length, output_dim)
-            - final_residual: Unexplained signal of shape
-              (batch_size, backcast_length * input_dim)
+        :param inputs: Input tensor, ``(batch_size, backcast_length)`` or
+            ``(batch_size, backcast_length, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether dropout runs in training mode.
+        :type training: Optional[bool]
+        :return: ``(forecast, final_residual)`` — forecast of shape
+            ``(batch_size, forecast_length, output_dim)``, residual of shape
+            ``(batch_size, backcast_length * input_dim)``.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
 
         Note:
-            During inference with model.predict(), Keras automatically returns
-            only the first output (forecast). During training/validation, both
-            outputs are returned for potential reconstruction loss computation.
+            ``model.predict()`` returns only the forecast (Keras keeps the
+            first output). Training and validation see both outputs.
         """
         # Expand 2D inputs to 3D for consistent processing
         if len(inputs.shape) == 2:
@@ -494,9 +407,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
             mean = None
             std = None
 
-        # Flatten for block processing.
-        # N-BEATS is essentially a Dense architecture, so we flatten
-        # (batch, time, feat) -> (batch, time * feat)
+        # N-BEATS is a dense architecture: flatten (batch, time, feat) to (batch, time*feat).
         processed_input = ops.reshape(
             normalized_input,
             (batch_size, self.backcast_length * self.input_dim)
@@ -509,64 +420,38 @@ class NBeatsNet(keras.Model, ForecastMixin):
             dtype=self.compute_dtype
         )
 
-        # Process through all stacks and blocks
         for stack_blocks in self.blocks:
             for block in stack_blocks:
-                # Block produces backcast (explanation) and forecast (prediction)
-                # Shapes: (batch, backcast_len * input_dim), (batch, forecast_len * output_dim)
                 backcast, forecast = block(residual, training=training)
-
-                # Update residual: remove explained component
                 residual = residual - backcast
-
-                # Accumulate forecast
                 forecast_sum = forecast_sum + forecast
 
-        # Reshape forecast to 3D
         forecast_3d = ops.reshape(
             forecast_sum,
             (batch_size, self.forecast_length, self.output_dim)
         )
 
-        # Denormalize forecast if normalization was applied
         if self.use_normalization:
-            # We must handle output_dim scaling.
-            # If input_dim != output_dim, we can only reasonably denormalize if
-            # we assume the statistics of the target are similar to the input,
-            # or if input includes the target history.
-            # Standard N-BEATS implementation usually assumes target is subset of input.
-            # Here, we broadcast or slice the statistics if dims match.
             if self.input_dim == self.output_dim:
                 forecast_3d = (forecast_3d * std) + mean
 
-                # Correctly denormalize the flattened residual
-                # 1. Reshape residual to (Batch, Time, Feature)
                 residual_3d = ops.reshape(
                     residual,
                     (batch_size, self.backcast_length, self.input_dim)
                 )
-                # 2. Multiply by std (Batch, 1, Feature) - explicit broadcasting
                 residual_3d = residual_3d * std
 
-                # 3. Flatten back to (Batch, Time * Feature)
                 residual = ops.reshape(
                     residual_3d,
                     (batch_size, self.backcast_length * self.input_dim)
                 )
             else:
-                # If dimensions mismatch, we warn once or handle logic specifically.
-                # For this general implementation, we skip denorm on mismatch or
-                # assume first 'output_dim' features of input correspond to output.
-                # A safe fallback is to only denormalize if dims match, otherwise
-                # rely on the model to learn the scale.
-                # Ideally, RevIN handles specific feature mappings.
-                # Assuming first output_dim features match:
+                # input_dim != output_dim: assume the first output_dim input
+                # features are the targets and slice their statistics.
                 std_out = std[:, :, :self.output_dim]
                 mean_out = mean[:, :, :self.output_dim]
                 forecast_3d = (forecast_3d * std_out) + mean_out
 
-                # For residual, if input_dim > output_dim, we still have full stats
-                # so we can denormalize it
                 residual_3d = ops.reshape(
                     residual,
                     (batch_size, self.backcast_length, self.input_dim)
@@ -577,24 +462,20 @@ class NBeatsNet(keras.Model, ForecastMixin):
                     (batch_size, self.backcast_length * self.input_dim)
                 )
 
-        # Return both forecast and residual
         return forecast_3d, residual
 
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
-        """
-        Compute output shapes for forecast and residual.
+        """Return the shapes of the forecast and residual outputs.
 
-        Args:
-            input_shape: Shape of input tensor.
-
-        Returns:
-            Tuple of (forecast_shape, residual_shape):
-
-            - forecast_shape: (batch_size, forecast_length, output_dim)
-            - residual_shape: (batch_size, backcast_length * input_dim)
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(forecast_shape, residual_shape)`` —
+            ``(batch_size, forecast_length, output_dim)`` and
+            ``(batch_size, backcast_length * input_dim)``.
+        :rtype: Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]
         """
         batch_size = input_shape[0]
         forecast_shape = (batch_size, self.forecast_length, self.output_dim)
@@ -602,14 +483,10 @@ class NBeatsNet(keras.Model, ForecastMixin):
         return forecast_shape, residual_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return complete configuration for serialization.
+        """Return every constructor parameter, for ``from_config()``.
 
-        Returns ALL __init__ parameters as required by modern Keras 3 patterns.
-        This enables proper save/load cycles via from_config().
-
-        Returns:
-            Dictionary containing all configuration parameters.
+        :return: The full configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -634,19 +511,13 @@ class NBeatsNet(keras.Model, ForecastMixin):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'NBeatsNet':
+        """Reconstruct a model from its configuration dictionary.
+
+        :param config: Dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new instance with the same configuration.
+        :rtype: NBeatsNet
         """
-        Create model instance from configuration.
-
-        Deserializes complex objects (regularizers, initializers) before
-        passing to constructor.
-
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            New NBeatsNet instance with same configuration.
-        """
-        # Deserialize complex objects
         if config.get('kernel_regularizer') is not None:
             config['kernel_regularizer'] = regularizers.deserialize(
                 config['kernel_regularizer']
@@ -666,19 +537,17 @@ class NBeatsNet(keras.Model, ForecastMixin):
         """Produce a point-only :class:`Forecast` (``ForecastMixin`` hook).
 
         N-BEATS is a point forecaster: it emits no predictive intervals, so
-        this NEVER fabricates quantile bands. It reuses the model's existing
-        prediction path — ``predict`` returns the forecast tensor (the first
-        element of the ``(forecast, residual)`` tuple from :meth:`call`) of
-        shape ``[B, forecast_length, output_dim]``.
+        this never fabricates quantile bands. ``predict`` returns the forecast
+        tensor (the first element of the ``(forecast, residual)`` tuple from
+        :meth:`call`).
 
-        Args:
-            x: Context window, shape ``[B, backcast_length, input_dim]`` (or the
-                2D univariate form ``[B, backcast_length]``).
-            **kwargs: Forwarded to ``keras.Model.predict`` (e.g. ``batch_size``).
-
-        Returns:
-            A :class:`Forecast` with ``point`` of shape
+        :param x: Context window, ``[B, backcast_length, input_dim]`` (or the
+            2D univariate form ``[B, backcast_length]``).
+        :type x: Any
+        :param kwargs: Forwarded to ``keras.Model.predict`` (e.g. ``batch_size``).
+        :return: A :class:`Forecast` with ``point`` of shape
             ``[B, forecast_length, output_dim]`` and ``quantiles=None``.
+        :rtype: Forecast
         """
         kwargs.setdefault("verbose", 0)
         preds = self.predict(x, **kwargs)
@@ -691,11 +560,6 @@ class NBeatsNet(keras.Model, ForecastMixin):
             quantiles=None,
             quantile_levels=None,
         )
-
-
-# ---------------------------------------------------------------------
-# Factory method
-# ---------------------------------------------------------------------
 
 
 def create_nbeats_model(
@@ -712,107 +576,63 @@ def create_nbeats_model(
         output_dim: int = 1,
         **kwargs: Any
 ) -> NBeatsNet:
+    """Create an N-BEATS model with sensible defaults and auto-calculated theta dimensions.
+
+    :param backcast_length: Length of the input sequence.
+    :type backcast_length: int
+    :param forecast_length: Length of the forecast sequence.
+    :type forecast_length: int
+    :param stack_types: Stack types to use.
+    :type stack_types: Sequence[str]
+    :param nb_blocks_per_stack: Number of blocks per stack.
+    :type nb_blocks_per_stack: int
+    :param thetas_dim: Theta dimensions per stack. If ``None``, calculated as
+        4 (trend, cubic polynomial), ``2 * min(forecast_length // 2, 16)``
+        (seasonality, Fourier harmonics), or ``max(16, forecast_length * 2)``
+        (generic).
+    :type thetas_dim: Optional[List[int]]
+    :param hidden_layer_units: Hidden units in each layer.
+    :type hidden_layer_units: int
+    :param activation: Activation function for hidden layers.
+    :type activation: str
+    :param use_normalization: Whether to apply instance normalization.
+    :type use_normalization: bool
+    :param dropout_rate: Dropout rate for regularization.
+    :type dropout_rate: float
+    :param input_dim: Dimensionality of input features.
+    :type input_dim: int
+    :param output_dim: Dimensionality of output features.
+    :type output_dim: int
+    :param kwargs: Additional arguments passed to the ``NBeatsNet`` constructor.
+    :return: An un-compiled N-BEATS model.
+    :rtype: NBeatsNet
+
+    Example::
+
+        model = create_nbeats_model(backcast_length=96, forecast_length=24)
+        model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+        model.fit(train_data, epochs=100)
+
+        model = create_nbeats_model(
+            backcast_length=168,
+            forecast_length=24,
+            input_dim=10,
+            output_dim=10,
+            stack_types=['trend', 'seasonality', 'generic'],
+            hidden_layer_units=512
+        )
     """
-    Create an N-BEATS model instance with optimal defaults.
-
-    This factory simplifies model creation with sensible defaults and automatic
-    theta dimension calculation. It returns an un-compiled model instance.
-
-    **Usage Recommendations**:
-
-    - **Backcast/Forecast Ratio**: Use backcast_length >= 3 × forecast_length
-      for optimal performance. Larger ratios give more context but increase
-      memory usage.
-
-    - **Stack Selection**:
-
-      - Use ['trend'] for data with clear trends
-      - Use ['seasonality'] for periodic data
-      - Use ['trend', 'seasonality'] for both (recommended)
-      - Add 'generic' as catch-all for complex patterns
-
-    - **Hidden Units**: Scale with data complexity:
-
-      - 128-256 for simple univariate series
-      - 256-512 for complex multivariate series
-      - Larger values increase capacity but require more data
-
-    - **Regularization**: For small datasets, use:
-
-      - dropout_rate: 0.1-0.3
-
-    Args:
-        backcast_length: Length of input sequence. Defaults to 96.
-        forecast_length: Length of forecast sequence. Defaults to 24.
-        stack_types: Types of stacks to use. Defaults to
-            ['trend', 'seasonality', 'generic'].
-        nb_blocks_per_stack: Number of blocks per stack. More blocks increase
-            capacity but also training time. Defaults to 3.
-        thetas_dim: Theta dimensions for each stack. Auto-calculated if None:
-
-            - Trend: 4 (cubic polynomial)
-            - Seasonality: 2 × min(forecast_length // 2, 16) (Fourier harmonics)
-            - Generic: max(16, forecast_length × 2)
-        hidden_layer_units: Hidden units in each layer. Defaults to 256.
-        activation: Activation function. 'relu' or 'gelu' recommended.
-            Defaults to 'relu'.
-        use_normalization: Whether to use instance normalization.
-            Recommended for series with varying scales. Defaults to True.
-        dropout_rate: Dropout rate for regularization. Use 0.1-0.3 for small
-            datasets. Defaults to 0.0.
-        input_dim: Integer, dimensionality of input features. Defaults to 1.
-        output_dim: Integer, dimensionality of output features. Defaults to 1.
-        **kwargs: Additional arguments passed to NBeatsNet constructor.
-
-    Returns:
-        Un-compiled N-BEATS model instance ready for compilation and training.
-
-    Example:
-        >>> # Create model with defaults
-        >>> model = create_nbeats_model(
-        ...     backcast_length=96,
-        ...     forecast_length=24
-        ... )
-        >>>
-        >>> # Compile and train
-        >>> model.compile(
-        ...     optimizer='adam',
-        ...     loss='mse',
-        ...     metrics=['mae']
-        ... )
-        >>> model.fit(train_data, epochs=100)
-        >>>
-        >>> # Custom configuration for complex multivariate series
-        >>> model = create_nbeats_model(
-        ...     backcast_length=168,
-        ...     forecast_length=24,
-        ...     input_dim=10,
-        ...     output_dim=10,
-        ...     stack_types=['trend', 'seasonality', 'generic'],
-        ...     hidden_layer_units=512
-        ... )
-
-    Note:
-        The function logs the created configuration for verification. Check
-        console output to ensure proper setup, especially the backcast/forecast
-        ratio and theta dimensions.
-    """
-    # Auto-calculate theta dimensions if not provided
     if thetas_dim is None:
         thetas_dim = []
         for stack_type in stack_types:
             if stack_type == 'trend':
-                # 4 parameters = cubic polynomial (degree 3)
                 thetas_dim.append(4)
             elif stack_type == 'seasonality':
-                # Fourier harmonics: limited by forecast length and max harmonics
                 harmonics = min(forecast_length // 2, 16)
-                thetas_dim.append(harmonics * 2)  # sin + cos for each harmonic
+                thetas_dim.append(harmonics * 2)
             else:  # 'generic'
-                # Generic needs enough parameters for flexible basis
                 thetas_dim.append(max(16, forecast_length * 2))
 
-    # Create model instance
     model = NBeatsNet(
         backcast_length=backcast_length,
         forecast_length=forecast_length,

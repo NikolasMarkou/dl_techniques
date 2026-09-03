@@ -2,106 +2,23 @@
 Residual convolutional variational autoencoder with selectable Gaussian,
 hypersphere or von Mises-Fisher latent geometry.
 
-Fitting a latent-variable generative model by maximum likelihood requires the
-marginal `p(x) = integral p(x|z) p(z) dz`, which no encoder can evaluate. The
-variational bound sidesteps it by introducing an approximate posterior `q(z|x)`
-and optimizing
+`VAE` optimizes the evidence lower bound
+`L = E_q[log p(x|z)] - beta * KL(q(z|x) || p(z))` using the reparameterization
+trick, so gradients flow through the sampled latent. `sampling_type` switches
+the latent geometry, and each choice changes three things together: the
+second encoder head, the sampler, and the KL term. `"gaussian"` is the
+standard diagonal posterior; `"hypersphere"` reduces the head to one radius
+log-variance and drops the direction term (an implicit uniform-sphere prior,
+not a full S-VAE); `"vmf"` uses a strictly positive concentration `kappa` and
+an analytic von Mises-Fisher KL. The `z_log_var` output slot is reused across
+all three and holds a different quantity in each.
 
-`L = E_q[log p(x|z)] - beta * KL(q(z|x) || p(z))`
-
-a quantity that lower-bounds the log evidence and involves only expectations the
-encoder can produce. The first term is reconstruction; the second pulls the
-per-sample posterior toward the prior, and it is the term that makes the latent
-space a *space* rather than a lookup table — without it nothing stops the encoder
-from scattering each training image to its own isolated coordinate, and decoding an
-unseen point would return noise. `beta` trades the two off explicitly: raise it and
-samples from the prior decode to plausible images while reconstructions blur; lower
-it and the reverse.
-
-The remaining obstacle is that `z` is sampled, and one cannot differentiate through
-a draw. Reparameterization moves the randomness out of the path: for the Gaussian
-mode `z = mu + exp(0.5 * log_var) * eps` with `eps ~ N(0, I)`, so the sampler is a
-deterministic function of the encoder outputs plus an input-independent noise
-tensor, and gradients reach `mu` and `log_var` normally.
-
-`sampling_type` changes the latent geometry, and it changes three things together
-that must stay consistent — the second encoder head, the sampler, and the KL term.
-Under `"gaussian"` the second head emits a full `[B, latent_dim]` diagonal
-log-variance and the KL is the closed-form Gaussian-to-`N(0, I)` divergence, summed
-over the latent axis and averaged over the batch (summing over latents and
-averaging over samples is what keeps the KL comparable across latent widths for a
-fixed `beta`). That comparability is across latent WIDTHS only, and it is worth
-being precise about what it does not cover: the reconstruction term on the other
-side of the trade-off is a **mean** over pixels, not a sum, so `kl_loss_weight` is
-`beta / prod(input_shape)` rather than `beta` -- see the `effective_kl_beta`
-property and the note under `Reconstruction` below. Under `"hypersphere"` the head collapses to a single `[B, 1]` radius
-log-variance: the sampler places `z` on a shell of fixed radius and the only
-learned uncertainty is radial, so the KL is the one-dimensional
-`0.5 * (exp(rlv) - rlv - 1)` on that radius alone. There is deliberately no
-direction term — the direction carries an implicit uniform-sphere prior. This is a
-simplification, not a full S-VAE, and is documented as such because the difference
-matters to anyone comparing against the literature. Under `"vmf"` the head is a
-strictly positive concentration `kappa` (softplus, `[B, 1]`), the sampler draws
-from a von Mises-Fisher distribution around the L2-normalized `z_mean`, and the KL
-is the analytic vMF-to-uniform divergence, which depends only on `kappa` and the
-latent dimension. The `"z_log_var"` output slot is reused across all three modes
-and carries a *different quantity* in each — diagonal log-variance, radius
-log-variance, concentration — a shape-only contract that is worth knowing before
-reading any downstream consumer of that key.
-
-Two choices in the vMF path exist to defeat posterior collapse, the failure mode
-where the KL drives `q(z|x)` to the prior, the decoder learns to ignore `z`, and
-reconstruction stalls at the data mean. The `kappa` head is initialized with a
-zeros kernel and a bias of 12.0, so concentration starts at roughly 12 — an
-informative posterior from step 0, and predictable at initialization rather than
-determined by whatever the encoder features happen to be. Separately, the KL weight
-is a non-trainable scalar model weight rather than a Python float, so a callback
-can ramp it from 0 to `kl_loss_weight` over the first epochs under `tf.function`.
-Its default equals the constructor value, so with no callback attached behaviour is
-unchanged; the Python attribute remains the `get_config` source of truth.
-
-`sample()` draws from each mode's *true* prior rather than always from `N(0, I)`:
-uniform-on-sphere at the sampler's radius for the hypersphere mode, and
-uniform-on-the-unit-sphere for vMF, since the vMF prior at `kappa = 0` is exactly
-that. Drawing Gaussian noise for a model trained on a spherical latent decodes
-points the decoder has never seen and makes a working model look broken.
-
-Architecturally the encoder is a residual convolutional stack: each stage
-downsamples, then applies `steps_per_depth` residual blocks at that width, with the
-filter list setting the width per stage. The decoder mirrors it with upsampling.
-Five presets scale depth, width and latent dimension together and lower
-`kl_loss_weight` as the model grows, since a larger decoder tolerates — and needs —
-a weaker prior pull.
-
-Reconstruction is binary crossentropy on flattened inputs with predictions clipped
-to `[1e-7, 1 - 1e-7]`, which assumes data in `[0, 1]`, reduced by a **mean over
-pixels**. That reduction is the reason `kl_loss_weight` is not `beta`: against the
-standard sum-over-pixels ELBO the model optimizes
-`beta = kl_loss_weight * prod(input_shape)`, which for the shipped presets is
-`micro`/`small` 7.84, `medium`/`large` 3.92 and `xlarge` 0.784 at `(28, 28, 1)`,
-and 30.72 / 15.36 / 3.072 at `(32, 32, 3)` -- a 3.92x swing in regularization
-strength from the input resolution alone, at an unchanged nominal weight. This is a
-known, MEASURED property of the shipped defaults rather than an accident of
-reading: `effective_kl_beta` exposes it, `summary()` logs it, and
-`tests/test_models/test_vae/test_model.py::TestVAEEffectiveBeta` pins it. It is
-deliberately NOT repaired by changing the reduction, because every available repair
-moves the trained behaviour of every existing preset and no re-tuned target could
-be justified without training runs; see decisions.md D-028 of
-plan-2026-08-18T140459-7991552f for the full ruling and the numbers a future
-re-tune needs. The training step is custom
-because the loss depends on intermediate encoder outputs rather than on
-`(y_true, y_pred)` alone; it clips gradients elementwise so that the TRUE gradient
-lands in `[-1, 1]`, a blunt but effective guard against the loss spikes the KL term
-can produce early in training. Read that bound literally only in float32. The clip
-is expressed in the SCALED domain -- the limit is `optimizer.scale_loss(1.0)`, which
-is exactly `1.0` in float32 and the current loss scale under a `LossScaleOptimizer`
--- because a hard `[-1, 1]` on the scaled gradient would clip essentially every
-component to the limit and, after unscaling, shrink the whole update by the loss
-scale. That is measured, not hypothetical; see the anchor at the clip itself.
-The vMF mode opts out of XLA on every compile path — direct `compile()`, factory,
-and reload — because the beta sampler it uses crashes under jit; that opt-out is
-reapplied on deserialization so a reloaded model does not inherit a stale
-`jit_compile="auto"`.
+Reconstruction is binary crossentropy on `[0, 1]`-range inputs, reduced by a
+mean over pixels, while the Gaussian KL is a sum over latents. This means
+`kl_loss_weight` is not the literature's `beta` — the actual value optimized
+is `beta = kl_loss_weight * prod(input_shape)`, exposed as `effective_kl_beta`.
+The vmf mode disables XLA on every compile path (direct `compile()`, the
+factories, and reload) because its sampler is not XLA-compatible.
 
 References:
     - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
@@ -150,54 +67,110 @@ VALID_SAMPLING_TYPES = (
 
 @register_dl_technique("dl_techniques.models.vae.model")
 class VAE(keras.Model):
-    """ResNet-based Variational Autoencoder using modern Keras 3 patterns.
+    """Residual convolutional variational autoencoder.
 
-    VAE learns latent representations through variational inference with
-    ResNet-based encoder and decoder networks. Uses reparameterization trick
-    for proper gradient flow and includes comprehensive numerical stability measures.
+    Architecture:
 
-    Args:
-        latent_dim: Integer, dimensionality of the latent space.
-        input_shape: Tuple of integers, shape of input images (H, W, C).
-        depths: Integer, number of depth levels in the encoder/decoder.
-        steps_per_depth: Integer, number of residual blocks per depth level.
-        filters: List of integers, filter counts for each depth level.
-        kl_loss_weight: Float, weight for KL divergence loss term. This is NOT
-            the `beta` of the standard ELBO: the reconstruction term is a mean
-            over pixels, so the effective `beta` is
-            `kl_loss_weight * prod(input_shape)` (see `effective_kl_beta`) and
-            the same value means different things at different resolutions.
-        sampling_type: String, the latent sampling mode. One of:
-            ``"gaussian"`` (baseline diagonal-Gaussian reparameterization), or
-            ``"hypersphere"`` (a dedicated ``Dense(1)`` radius log-variance head
-            plus a radius-variance KL replacing the Gaussian KL; the direction
-            has an implicit uniform-sphere prior). The hypersphere mode is a
-            deliberate simplification and is NOT a full vMF S-VAE. The legacy
-            value ``"hypersphere_faithful"`` is accepted as a deprecated alias of
-            ``"hypersphere"`` (so old configs/checkpoints still load); the
-            dropped ``"hypersphere_controlled"`` mode now raises ``ValueError``.
-        kernel_initializer: String or initializer, weight initialization method.
-        kernel_regularizer: Regularizer for convolutional weights.
-        use_batch_norm: Boolean, whether to use batch normalization.
-        use_bias: Boolean, whether to use bias terms.
-        dropout_rate: Float, dropout rate for regularization.
-        activation: String or callable, activation function.
-        final_activation: String, activation for final reconstruction layer.
-        name: String, name of the model.
-        **kwargs: Additional arguments for keras.Model.
+    .. code-block:: text
 
-    Example:
-        >>> # Create VAE for MNIST
-        >>> model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
-        >>>
-        >>> # Custom VAE configuration
-        >>> model = VAE(
-        ...     latent_dim=128,
-        ...     input_shape=(64, 64, 3),
-        ...     depths=3,
-        ...     filters=[32, 64, 128],
-        ...     kl_loss_weight=0.01
-        ... )
+        input [H, W, C]
+              │
+        ┌─────▼─────┐
+        │ stem conv  │
+        └─────┬─────┘
+              ▼
+        ┌───────────────────────┐
+        │ encoder stage x depths │  downsample + residual blocks
+        └─────────┬─────────────┘
+                   ▼
+        ┌────────────────────┐
+        │ global avg pool     │
+        └─────────┬──────────┘
+                   ▼
+        ┌────────────────────┐      ┌────────────────────┐
+        │ z_mean [B, latent]  │      │ z_log_var head      │  shape/meaning
+        └─────────┬──────────┘      └─────────┬──────────┘  depends on mode
+                   └───────────┬───────────────┘
+                               ▼
+                    ┌────────────────────┐
+                    │ sampling (reparam)  │  gaussian / hypersphere / vmf
+                    └─────────┬──────────┘
+                               ▼
+                    ┌────────────────────┐
+                    │ decoder projection  │
+                    └─────────┬──────────┘
+                               ▼
+        ┌───────────────────────┐
+        │ decoder stage x depths │  upsample + residual blocks
+        └─────────┬─────────────┘
+                   ▼
+              reconstruction [H, W, C]
+
+    Sampling modes:
+
+    .. code-block:: text
+
+        mode          z_log_var head        KL term
+        gaussian      [B, latent] logvar     sum over latents, N(0, I)
+        hypersphere   [B, 1] radius logvar   1-D radius KL, no direction term
+        vmf           [B, 1] kappa (>0)      analytic vMF-to-uniform KL
+
+    Variants (``MODEL_VARIANTS``, used by :meth:`from_variant`):
+
+    .. code-block:: text
+
+        name     depths  steps  filters              latent  kl_weight
+        micro    2       1      [16, 32]              32     0.01
+        small    2       1      [32, 64]              64     0.01
+        medium   3       1      [32, 64, 128]         128    0.005
+        large    3       2      [64, 128, 256]        256    0.005
+        xlarge   4       2      [64, 128, 256, 512]   512    0.001
+
+    :param latent_dim: Dimensionality of the latent space.
+    :type latent_dim: int
+    :param input_shape: Shape of input images, ``(H, W, C)``.
+    :type input_shape: Tuple[int, int, int]
+    :param depths: Number of stages in the encoder/decoder.
+    :type depths: int
+    :param steps_per_depth: Residual blocks per stage.
+    :type steps_per_depth: int
+    :param filters: Filter count for each stage.
+    :type filters: Optional[List[int]]
+    :param kl_loss_weight: Weight for the KL term. Not the literature `beta`;
+        see the module docstring and :attr:`effective_kl_beta`.
+    :type kl_loss_weight: float
+    :param sampling_type: One of ``"gaussian"``, ``"hypersphere"``, ``"vmf"``.
+        ``"hypersphere_faithful"`` is a deprecated alias of ``"hypersphere"``;
+        ``"hypersphere_controlled"`` was removed and now raises ``ValueError``.
+    :type sampling_type: str
+    :param kernel_initializer: Weight initializer for convolutional layers.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer for convolutional weights.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_batch_norm: Whether to use batch normalization.
+    :type use_batch_norm: bool
+    :param use_bias: Whether to use bias terms.
+    :type use_bias: bool
+    :param dropout_rate: Dropout rate in the residual blocks.
+    :type dropout_rate: float
+    :param activation: Activation used throughout the encoder/decoder.
+    :type activation: str
+    :param final_activation: Activation on the reconstruction layer.
+    :type final_activation: str
+    :param name: Model name.
+    :type name: Optional[str]
+    :param kwargs: Forwarded to ``keras.Model``.
+
+    :Example:
+
+    >>> model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
+    >>> model = VAE(
+    ...     latent_dim=128,
+    ...     input_shape=(64, 64, 3),
+    ...     depths=3,
+    ...     filters=[32, 64, 128],
+    ...     kl_loss_weight=0.01,
+    ... )
     """
 
     # Model variant configurations
@@ -348,23 +321,12 @@ class VAE(keras.Model):
         # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, name=name or "vae", **kwargs)
 
-        # Schedulable KL weight (non-trainable scalar) read by train_step /
-        # test_step in place of the python float self.kl_loss_weight. A warmup
-        # callback (train_vae.py) can assign this under tf.function so the
-        # effective KL weight ramps 0 -> kl_loss_weight over the first N epochs
-        # (cures vmf posterior collapse; D-007). Default == kl_loss_weight, so
-        # with no callback attached behavior is identical to before. The python
-        # float self.kl_loss_weight remains the get_config source of truth.
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # `autocast=False` is load-bearing. `dtype="float32"` alone does NOT
-        # keep a read in float32: Keras autocasts float variables to
-        # `compute_dtype` inside `call`/`train_step`, so under `mixed_float16`
-        # this scalar was read as float16 and
-        # `reconstruction_loss + self.kl_weight * kl_loss` raised
-        # `TypeError: Input 'y' of 'AddV2' ...` (MEASURED, step 5.8). It is a
-        # LOSS WEIGHT (schedule state), not an activation -- it belongs in the
-        # variable dtype. Do NOT drop the explicit `dtype="float32"` either;
-        # the two arguments do different jobs.
+        # Schedulable KL weight, read by train_step/test_step in place of the
+        # python float self.kl_loss_weight; a warmup callback can ramp it from
+        # 0 over the first epochs. Default equals kl_loss_weight.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: dtype="float32" alone does
+        # NOT stop Keras autocasting this scalar to compute_dtype in call/train_step.
+        # autocast=False is required or mixed_float16 raises on the loss add. See decisions.md.
         self.kl_weight = self.add_weight(
             name="kl_weight",
             shape=(),
@@ -386,41 +348,35 @@ class VAE(keras.Model):
         )
 
     def compile(self, *args, **kwargs):
-        # DECISION plan_2026-06-04_6196678d/D-009: vMF's keras.random.beta ->
-        # StatelessRandomGammaV3 has NO XLA-GPU kernel (TF 2.18); force-disable
-        # XLA for vmf on EVERY compile path (direct .compile(), load_model()
-        # recompile, factory) so GPU save/load + fit don't crash. For vmf this
-        # MUST win even over an explicitly-passed jit_compile. Do NOT scope the
-        # opt-out to the factories only (the prior D-005 factory-only opt-out
-        # missed the load_model() recompile path -> GPU save/load crashed); do
-        # NOT try to make the Wood/Ulrich rejection sampler XLA-clean. Other
-        # modes (gaussian/hypersphere) keep the caller's jit_compile unchanged.
-        # Supersedes the factory-only D-005 opt-out (now redundant but harmless).
+        """Compile the model, disabling XLA for the vmf sampler on every path.
+
+        :param args: Forwarded to ``keras.Model.compile``.
+        :param kwargs: Forwarded to ``keras.Model.compile``; ``jit_compile``
+            is overridden to ``False`` when ``sampling_type == "vmf"``.
+        """
+        # DECISION plan_2026-06-04_6196678d/D-009: vMF's sampler has no XLA-GPU
+        # kernel; force jit_compile=False on every compile path (including
+        # load_model recompile), overriding any caller-passed value. See decisions.md.
         if getattr(self, "sampling_type", None) == "vmf":
             kwargs["jit_compile"] = False
         return super().compile(*args, **kwargs)
 
     def compile_from_config(self, config):
-        # D-009: overriding compile() makes Keras route load_model()'s recompile
-        # through compile_from_config (else it warns + skips recompile, leaving a
-        # reloaded vmf model with stale jit_compile="auto" that XLA-crashes on a
-        # later GPU .fit()). Re-derive args via Keras' deserializer and funnel
-        # through our compile() so the vmf jit_compile=False opt-out survives reload.
+        """Recompile from a saved config, routed through :meth:`compile`.
+
+        Overriding ``compile()`` makes Keras call this method on
+        ``load_model()`` instead of skipping recompilation, so the vmf
+        ``jit_compile=False`` override survives a reload.
+
+        :param config: Serialized compile config, as produced by Keras.
+        :return: This model, recompiled.
+        :rtype: VAE
+        """
         config = keras.saving.deserialize_keras_object(config)
         self.compile(**config)
-        # DECISION plan-2026-08-22T035419-a11304c8/D-014: these two lines are the
-        # tail of Keras' own `Trainer.compile_from_config`
-        # (keras/src/trainers/trainer.py:973-975). Overriding the method without
-        # them silently DROPPED the whole saved optimizer state on every reload:
-        # measured 2026-08-22 on a VAE fitted for one epoch, the archive held 122
-        # optimizer variables and the reloaded model's optimizer held 2, so
-        # `BaseOptimizer.load_own_variables` warned ("Skipping variable loading
-        # for optimizer 'adam' ...") and restored NOTHING. A checkpoint resumed
-        # that way restarts Adam from zeroed moments with a zeroed step count.
-        # Do NOT "simplify" this back to `self.compile(**config); return self` --
-        # the override exists only for the D-009 vmf jit_compile opt-out and must
-        # otherwise reproduce the base method exactly. Guarded by
-        # tests/test_models/test_vae/test_the_optimizer_state_survives_reload.py.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-014: these two lines are Keras'
+        # own Trainer.compile_from_config tail; omitting them silently drops the
+        # saved optimizer state on reload (measured: 122 vars -> 2). See decisions.md.
         if hasattr(self, "optimizer") and self.built:
             self.optimizer.build(self.trainable_variables)
         return self

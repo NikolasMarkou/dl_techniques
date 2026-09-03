@@ -1,54 +1,33 @@
 """
-Tiny Recursive Model: a small shared reasoning network applied repeatedly under
-Adaptive Computation Time, with optional Q-learned halting.
+Tiny Recursive Model: a small shared reasoning network applied repeatedly
+under Adaptive Computation Time, with optional Q-learned halting.
 
-A feedforward network spends the same compute on every input, so its budget must be
-sized for the hardest example it will ever see and is wasted on the rest. On
-puzzle-style tasks that mismatch is extreme — some instances fall out in one pass,
-others need many rounds of revision — and buying the capacity by adding layers pays
-for it in parameters as well as in time. TRM decouples the two. A single small
-network is applied recursively, so depth becomes iteration count rather than
-parameter count, and Adaptive Computation Time lets each example in the batch choose
-its own iteration count. Parameter efficiency comes from the sharing; compute
-efficiency comes from the early halt.
+A feedforward network spends the same compute on every input, so its
+budget must fit the hardest case and is wasted on the rest. TRM applies
+one small network recursively instead: depth becomes iteration count, not
+parameter count, and each example in the batch picks its own iteration
+count. The outer ACT loop lives in the training script, not this model:
+`call` performs one outer step, taking a `carry` dict in and returning the
+updated one. Inside a step, `TRMInner` updates the low-level state `z_L`
+from the previous `z_L` and the token embeddings, then the high-level
+state `z_H` from the previous `z_H` and the fresh `z_L`.
 
-The recursion has two nested levels. The outer ACT loop is driven by the *training
-script*, not by this model: `call` performs exactly one outer step, taking a `carry`
-dict in and returning the updated one, so the loop lives outside and the model stays
-a stock Keras model with no custom `train_step`. Inside each such step, `TRMInner`
-updates two latent states — the low-level `z_L` from the previous `z_L` and the token
-embeddings, then the high-level `z_H` from the previous `z_H` and the freshly updated
-`z_L`. Each of these is a single update per outer step, not an inner loop; the
-hierarchy is in the *dependency order* (low-level state refreshed against the input,
-high-level state refreshed against the low-level result), not in a cycle count.
+Halting is learned: a `q_head` reads two logits off `z_H`'s first
+position. Under Q-learning an example halts when `q_halt > q_continue`;
+with `no_act_continue` the rule is `q_halt > 0`. `halt_max_steps` is a
+hard ceiling either way. Training fits the Q-values as a Bellman target,
+looking one step ahead under `training=False` and detaching it with
+`stop_gradient`, and also forces a random subset of examples to keep
+going for extra steps so the halting head sees states beyond an immediate
+halt. Inference uses the learned halt signal with no exploration.
 
-Halting is a learned decision, and the model exposes it as two logits from a `q_head`
-read off `z_H`'s first position. Under the default Q-learning mode an example halts
-when `q_halt > q_continue`; with `no_act_continue` the rule degenerates to
-`q_halt > 0`. `halt_max_steps` is a hard ceiling in both cases. During training the
-Q-values are fitted as a Bellman TD target: the model looks one step ahead, takes
-`max(q_halt, q_continue)` at the next state (or `q_halt` alone if that step would be
-the last), and detaches it with `stop_gradient` so the bootstrap is a target rather
-than part of the graph. The lookahead runs with `training=False` deliberately —
-evaluating the next state under dropout would make the target noisy in a way that has
-nothing to do with the state's actual value.
-
-Two behavioural choices are worth stating. Training adds an exploration branch that
-forces a random subset of examples to keep going for at least a randomly drawn number
-of steps; without it the halting head can collapse to halting immediately, and the
-model never sees the states that deeper recursion would reach. Inference has *no*
-exploration but does use the learned halt signal — an earlier version halted only on
-`halt_max_steps` at inference, which contradicted both the paper and this package's
-own README by making the learned head dead weight at the only time it matters.
-
-The carry's latent states are passed forward through `stop_gradient`. Gradients
-therefore flow within one outer step but not across them: each step is trained as a
-one-step improvement on a state treated as given, rather than by backpropagating
-through the whole variable-length recursion. That is what keeps memory constant in
-the number of ACT steps, and it is the approximation the method rests on. A halted
-example's states are reset to the learnable `H_init` / `L_init` on the next call, and
-its `current_data` slot is refilled from the incoming batch, so a single batch slot is
-reused by successive examples as they finish at different times.
+The carry's latent states pass forward through `stop_gradient`, so
+gradients flow within one outer step but not across steps: memory stays
+constant in the number of ACT steps, at the cost of a one-step-truncated
+approximation. A halted example's states reset to the learnable `H_init`
+/ `L_init` on the next call, and its `current_data` slot refills from the
+incoming batch, so one batch slot is reused as examples finish at
+different times.
 
 References:
     - Jolicoeur-Martineau, 2025. Less is More: Recursive Reasoning with Tiny
@@ -88,55 +67,35 @@ class TRM(keras.Model):
     """
     Tiny Recursive Model (TRM) with Adaptive Computation Time (ACT).
 
-    This model recursively refines its predictions over a variable number of steps.
-    It starts with an initial state and iteratively updates it using a core reasoning
-    module (`TRMInner`). The decision to continue or halt is learned, allowing
-    the model to allocate more computation to harder problems.
+    `call` runs a single step of the ACT loop: it takes the state `carry`
+    forward one step through the `TRMInner` reasoning module and returns
+    the updated carry. A training script owns the outer loop, calling this
+    repeatedly until every sequence in the batch has halted.
 
-    **Intent**: To solve complex reasoning tasks with a highly parameter-efficient
-    model by applying the same small network (`TRMInner`) recursively, progressively
-    improving the solution.
+    `carry` is a dict holding: `inner_carry` (the `z_H` / `z_L` latent
+    states for `TRMInner`), `steps` (the per-item step count), `halted`
+    (a boolean mask), and `current_data` (the input for non-halted items).
 
-    **Architecture**:
-    The model's `call` method implements a single step of the ACT loop. An external
-    training script is expected to manage the state (`carry`) and loop until all
-    sequences in the batch have halted. The core computation is delegated to the
-    `TRMInner` layer.
-
-    **State Management**:
-    - `carry`: A dictionary holding the state between steps, including:
-      - `inner_carry`: The `z_H` and `z_L` latent states for `TRMInner`.
-      - `steps`: The current step count for each item in the batch.
-      - `halted`: A boolean mask indicating which items have halted.
-      - `current_data`: The input data for non-halted items.
-
-    Args:
-        vocab_size (int): Size of the vocabulary for token embeddings.
-        hidden_size (int): Dimensionality of hidden states.
-        num_heads (int): Number of attention heads in transformer layers.
-        expansion (float): Factor to determine FFN intermediate size.
-        seq_len (int): Length of the input sequence (excluding puzzle embedding).
-        puzzle_emb_len (int): Length of the puzzle embedding prefix. Default is 16.
-        h_layers (int): Number of layers in the H_level reasoning module. Default is 2.
-        l_layers (int): Number of layers in the L_level reasoning module. Default is 2.
-        halt_max_steps (int): Maximum number of ACT steps allowed. Default is 10.
-        halt_exploration_prob (float): Probability of exploration during halting
-            decisions. Default is 0.1.
-        no_act_continue (bool): Whether to use simple halting (True) or Q-learning
-            based halting (False). Default is True.
-        rope_theta (float): Theta value for RoPE (Rotary Position Embedding).
-            Default is 10000.0.
-        attention_type (str): Type of attention mechanism to use. Default is
-            'group_query' (with `num_kv_heads == num_heads`, arithmetically
-            plain MHA) — the only plain-self-attention type that carries RoPE.
-        ffn_type (str): Type of feed-forward network to use. Default is 'swiglu'.
-        normalization_type (str): Type of normalization layer to use. Default is 'rms_norm'.
-        normalization_position (str): Position of normalization ('pre' or 'post').
-            Default is 'post'.
-        dropout_rate (float): Dropout rate for transformer layers. Default is 0.0.
-        attention_dropout_rate (float): Dropout rate specifically for attention.
-            Default is 0.0.
-        **kwargs: Additional arguments for the `keras.Model` base class.
+    :param vocab_size: Size of the vocabulary for token embeddings.
+    :param hidden_size: Dimensionality of hidden states.
+    :param num_heads: Number of attention heads in transformer layers.
+    :param expansion: FFN intermediate-size multiplier.
+    :param seq_len: Length of the input sequence, excluding the puzzle embedding.
+    :param puzzle_emb_len: Length of the puzzle embedding prefix.
+    :param h_layers: Number of layers in the H-level reasoning module.
+    :param l_layers: Number of layers in the L-level reasoning module.
+    :param halt_max_steps: Maximum number of ACT steps allowed.
+    :param halt_exploration_prob: Probability of forcing extra exploration steps during training.
+    :param no_act_continue: If True, halt on `q_halt > 0`; if False, use Q-learning halting (`q_halt > q_continue`).
+    :param rope_theta: RoPE base frequency.
+    :param attention_type: Attention mechanism. Default `'group_query'` with
+        `num_kv_heads == num_heads`, plain multi-head attention that carries RoPE.
+    :param ffn_type: Feed-forward network type. Default `'swiglu'`.
+    :param normalization_type: Normalization layer type. Default `'rms_norm'`.
+    :param normalization_position: `'pre'` or `'post'`. Default `'post'`.
+    :param dropout_rate: Dropout rate for transformer layers.
+    :param attention_dropout_rate: Dropout rate for attention.
+    :param kwargs: Forwarded to `keras.Model`.
     """
 
     def __init__(
@@ -154,9 +113,7 @@ class TRM(keras.Model):
         no_act_continue: bool = True,
         rope_theta: float = 10000.0,
         # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
-        # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
-        # components.py. `TRM` passes this value down explicitly, so it
-        # overrides the component default and must agree with it.
+        # 'multi_head' — see TRMReasoningModule.__init__ in components.py. See decisions.md.
         attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
@@ -234,9 +191,7 @@ class TRM(keras.Model):
         access them for the state reset logic. Without this, an error occurs
         because the weights don't exist yet on the first call.
 
-        Args:
-            input_shape (Optional[Any]): Shape of the input. Not used since the
-                inner layer handles its own shape inference.
+        :param input_shape: Shape of the input. Not used since the inner layer handles its own shape inference.
         """
         if not self.inner.built:
             self.inner.build()
@@ -250,17 +205,9 @@ class TRM(keras.Model):
         reasoning process, including latent states, step counters, halting flags,
         and current data.
 
-        Args:
-            batch (Dict[str, keras.KerasTensor]): A batch of input data containing:
-                - `inputs` (keras.KerasTensor): Input token IDs with shape
-                    (batch_size, seq_len).
+        :param batch: A batch of input data containing: - `inputs` (keras.KerasTensor): Input token IDs with shape (batch_size, seq_len).
 
-        Returns:
-            Dict[str, Any]: The initial `carry` dictionary containing:
-                - `inner_carry`: Initial latent states (all zeros).
-                - `steps`: Step counter initialized to 0.
-                - `halted`: Boolean mask initialized to True (triggers reset on first step).
-                - `current_data`: Data tensor initialized to zeros.
+        :return: Dict[str, Any]: The initial `carry` dictionary containing: - `inner_carry`: Initial latent states (all zeros). - `steps`: Step counter initialized to 0. - `halted`: Boolean mask initialized to True (triggers reset on first step). - `current_data`: Data tensor initialized to zeros.
         """
         batch_size = keras.ops.shape(batch["inputs"])[0]
         full_shape = (
@@ -293,26 +240,11 @@ class TRM(keras.Model):
         It handles state resetting for newly started sequences, delegates computation
         to the inner layer, and manages the halting logic.
 
-        Args:
-            carry (Dict[str, Any]): The state from the previous step containing:
-                - `inner_carry`: Latent states from previous step.
-                - `steps`: Current step count.
-                - `halted`: Boolean mask of halted sequences.
-                - `current_data`: Current input data.
-            batch (Dict[str, keras.KerasTensor]): The current batch of data containing:
-                - `inputs`: Input token IDs.
-            training (Optional[bool]): Boolean flag for training mode. Affects halting
-                behavior (training uses learned halting, inference uses max steps).
+        :param carry: The state from the previous step containing: - `inner_carry`: Latent states from previous step. - `steps`: Current step count. - `halted`: Boolean mask of halted sequences. - `current_data`: Current input data.
+        :param batch: The current batch of data containing: - `inputs`: Input token IDs.
+        :param training: Boolean flag for training mode. Affects halting behavior (training uses learned halting, inference uses max steps).
 
-        Returns:
-            Tuple containing:
-            - new_carry (Dict[str, Any]): The updated state for the next step.
-            - outputs (Dict[str, keras.KerasTensor]): The model outputs for this step:
-                - `logits`: Prediction logits.
-                - `q_halt_logits`: Halting probability logits.
-                - `q_continue_logits`: Continuation probability logits.
-                - `target_q_continue` (optional): Target Q-value for Bellman update
-                    (only present during training with Q-learning).
+        :return: Tuple containing: - new_carry (Dict[str, Any]): The updated state for the next step. - outputs (Dict[str, keras.KerasTensor]): The model outputs for this step: - `logits`: Prediction logits. - `q_halt_logits`: Halting probability logits. - `q_continue_logits`: Continuation probability logits. - `target_q_continue` (optional): Target Q-value for Bellman update (only present during training with Q-learning).
         """
         inner_carry = carry["inner_carry"]
         halted = carry["halted"]
@@ -394,15 +326,8 @@ class TRM(keras.Model):
                 outputs["target_q_continue"] = keras.ops.sigmoid(target_q)
 
         if not training:
-            # Inference mode: halt on learned signal OR max-steps reached.
-            # Mirrors training-mode halting minus the exploration branch
-            # (B-5 fix — previously inference never halted early, contradicting
-            # both the TRM paper and the package README).
-            # DECISION plan_2026-05-10_e6309bd5/D-001: inference uses the
-            # learned halt signal so that ACT halts on q_halt > 0 (or
-            # q_halt > q_continue under Q-learning mode). No exploration at
-            # inference. halt_max_steps==1 keeps the original is_last_step
-            # short-circuit.
+            # DECISION plan_2026-05-10_e6309bd5/D-001: inference must halt on the
+            # learned signal too, mirroring training minus exploration, not only on halt_max_steps. See decisions.md.
             if self.halt_max_steps > 1:
                 if self.no_act_continue:
                     halt_signal = q_halt > 0
@@ -426,9 +351,7 @@ class TRM(keras.Model):
         """
         Return configuration for serialization.
 
-        Returns:
-            Dict[str, Any]: Configuration dictionary containing all parameters needed
-                to reconstruct this model.
+        :return: Dict[str, Any]: Configuration dictionary containing all parameters needed to reconstruct this model.
         """
         config = super().get_config()
         config.update({
@@ -470,11 +393,8 @@ def create_trm(
     halt_exploration_prob: float = 0.1,
     no_act_continue: bool = True,
     rope_theta: float = 10000.0,
-    # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
-    # 'multi_head' — see the anchor on `TRMReasoningModule.__init__` in
-    # components.py. A 'multi_head' default here would re-impose the defect on
-    # every model built through this factory, because the value is passed down
-    # explicitly and overrides the component default.
+    # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not 'multi_head'
+    # — a 'multi_head' default here would re-impose the defect on every model this factory builds. See decisions.md.
     attention_type: AttentionType = 'group_query',
     ffn_type: FFNType = 'swiglu',
     normalization_type: NormalizationType = 'rms_norm',
@@ -489,33 +409,27 @@ def create_trm(
     ``L_init`` weights exist before the first ``call``. This mirrors the
     factory convention used elsewhere in ``dl_techniques.models``.
 
-    Args:
-        vocab_size: Size of the vocabulary for token embeddings.
-        hidden_size: Dimensionality of hidden states. Must be divisible by
-            ``num_heads``.
-        num_heads: Number of attention heads in transformer layers.
-        expansion: Factor to determine FFN intermediate size.
-        seq_len: Length of the input sequence (excluding puzzle embedding).
-        puzzle_emb_len: Length of the puzzle embedding prefix. Default 16.
-        h_layers: Number of layers in the H-level module. Default 2.
-        l_layers: Number of layers in the L-level module. Default 2.
-        halt_max_steps: Maximum ACT steps. Must be >= 1. Default 10.
-        halt_exploration_prob: Probability of exploration during halting.
-            Must be in [0, 1]. Default 0.1.
-        no_act_continue: Use simple halting (True) vs Q-learning (False).
-            Default True.
-        rope_theta: Theta for Rotary Position Embedding. Default 10000.0.
-        attention_type: Type of attention mechanism. Default 'group_query';
-            'multi_head' carries no RoPE.
-        ffn_type: Type of feed-forward network.
-        normalization_type: Type of normalization layer.
-        normalization_position: ``pre`` or ``post`` normalization.
-        dropout_rate: Dropout rate for transformer layers.
-        attention_dropout_rate: Dropout rate for attention.
-        name: Optional Keras model name.
+    :param vocab_size: Size of the vocabulary for token embeddings.
+    :param hidden_size: Dimensionality of hidden states. Must be divisible by ``num_heads``.
+    :param num_heads: Number of attention heads in transformer layers.
+    :param expansion: Factor to determine FFN intermediate size.
+    :param seq_len: Length of the input sequence (excluding puzzle embedding).
+    :param puzzle_emb_len: Length of the puzzle embedding prefix. Default 16.
+    :param h_layers: Number of layers in the H-level module. Default 2.
+    :param l_layers: Number of layers in the L-level module. Default 2.
+    :param halt_max_steps: Maximum ACT steps. Must be >= 1. Default 10.
+    :param halt_exploration_prob: Probability of exploration during halting. Must be in [0, 1]. Default 0.1.
+    :param no_act_continue: Use simple halting (True) vs Q-learning (False). Default True.
+    :param rope_theta: Theta for Rotary Position Embedding. Default 10000.0.
+    :param attention_type: Type of attention mechanism. Default 'group_query'; 'multi_head' carries no RoPE.
+    :param ffn_type: Type of feed-forward network.
+    :param normalization_type: Type of normalization layer.
+    :param normalization_position: ``pre`` or ``post`` normalization.
+    :param dropout_rate: Dropout rate for transformer layers.
+    :param attention_dropout_rate: Dropout rate for attention.
+    :param name: Optional Keras model name.
 
-    Returns:
-        A built ``TRM`` instance.
+    :return: A built ``TRM`` instance.
     """
     model = TRM(
         vocab_size=vocab_size,

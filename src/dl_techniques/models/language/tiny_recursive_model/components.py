@@ -1,51 +1,29 @@
 """
-The recursive reasoning core of the Tiny Recursive Model (TRM): a hierarchical
-latent state refined by repeated passes of a small transformer stack, with the
-number of passes decided at run time rather than baked into the depth.
+The recursive reasoning core of the Tiny Recursive Model (TRM): a
+hierarchical latent state refined by repeated passes of a small
+transformer stack, with the number of passes decided at run time rather
+than fixed by the model's depth.
 
-The premise is that reasoning depth and parameter count need not be the same
-quantity. A conventional transformer buys more computation only by adding
-layers, so every input pays for the worst case and the weights grow with it.
-TRM instead applies a *small* stack many times to a persistent latent state, so
-depth becomes a temporal quantity: the same weights are re-entered, and how many
-times is a per-sample decision made by the halting head. What the model learns is
-therefore an update rule for a state, not a fixed-length pipeline.
+A conventional transformer adds capacity only by adding layers, so every
+input pays for the worst case. TRM instead applies one small stack many
+times to a persistent state: the same weights are re-entered, and a
+halting head decides per sample how many times. The state has two halves
+on different schedules: `z_L` is refreshed against the token embeddings
+every pass and does the fast, local work; `z_H` only ever sees the
+refreshed `z_L`, so it accumulates across passes instead of being
+rewritten. Gradients are cut at each step boundary (`call` returns its
+carry through `stop_gradient`), so training covers one step at a time
+rather than the full trajectory, and the halting head reads a (halt,
+continue) logit pair from position 0 of `z_H`.
 
-The state is split in two, and the asymmetry between the halves is the whole
-point. `z_L` is refreshed against the token embeddings on every pass and carries
-the fast, local work; `z_H` never sees the tokens directly, only the refreshed
-`z_L`, and so accumulates across passes rather than being rewritten by them.
-Injection is additive on entry (`hidden_states + input_injection`), which keeps
-each module's input on the same footing as its own previous output instead of
-concatenating a second stream.
-
-Gradients are cut at the step boundary. `call` returns its carry through
-`stop_gradient`, so backpropagation covers one step's forward pass and stops
-there rather than unrolling the entire ACT trajectory. The memory cost of a step
-is thus independent of how many steps a sample takes, at the price of a
-one-step-truncated gradient: the model is trained to make a good local update,
-not to plan the sequence of updates. The halting head is what consumes that
-trade-off, emitting a (halt, continue) logit pair from position 0 of `z_H` for
-the outer loop's ACT decision.
-
-Two layers implement this. `TRMReasoningModule` is the raw computation -- a stack
-of `TransformerLayer` instances applied to an injected state, used for both
-halves. `TRMInner` is the orchestration -- embeddings, the `z_L` then `z_H`
-update order, the prediction head and the halting head -- and owns the learnable
-initial states `H_init` and `L_init`, so the trajectory starts somewhere the
-model chose rather than at zero-by-convention.
-
-Positional information enters only through attention. There is no positional term
-in the embedding stage, so the attention type must carry RoPE or the stack is
-exactly permutation-equivariant; this is why the default is `'group_query'` with
-`num_kv_heads == num_heads` (arithmetically plain MHA) rather than `'multi_head'`,
-and why the RoPE keys are intersected against the target type's registry
-allowlist rather than forwarded blind. Both decisions are anchored in the code
-below with their measurements.
-
-Both layers follow the composite-layer pattern: sub-layers are created in
-`__init__` and built explicitly in `build`, so every weight variable exists
-before any weight restoration runs.
+`TRMReasoningModule` is the raw computation: a stack of `TransformerLayer`
+instances applied to an injected state, used for both halves.
+`TRMInner` orchestrates embeddings, the `z_L`-then-`z_H` update order, the
+prediction head and the halting head, and owns the learnable initial
+states `H_init` and `L_init`. Positional information enters only through
+attention, so the attention type must carry RoPE; the default is
+`'group_query'` with `num_kv_heads == num_heads`, plain multi-head
+attention that also carries RoPE.
 
 References:
     - Jolicoeur-Martineau, 2025. Less is More: Recursive Reasoning with Tiny
@@ -101,7 +79,7 @@ class TRMReasoningModule(keras.layers.Layer):
     ``'group_query'`` with ``num_kv_heads == num_heads`` is arithmetically plain
     multi-head attention that also carries RoPE.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -214,33 +192,8 @@ class TRMReasoningModule(keras.layers.Layer):
         seq_len: int,
         puzzle_emb_len: int = 16,
         rope_theta: float = 10000.0,
-        # DECISION plan-2026-08-17T183311-79c63e38/D-007: the default is
-        # 'group_query' with `num_kv_heads == num_heads` (arithmetically plain
-        # MHA) because that is the only registry entry reachable from
-        # `TransformerLayer` that gives plain self-attention AND carries RoPE.
-        #
-        # WHAT NOT TO DO: do NOT "simplify" this back to 'multi_head' with the
-        # rope keys still in `attention_args` below. RoPE is a per-Q/K rotation
-        # applied INSIDE attention; `MultiHeadAttention` declares no RoPE
-        # parameter at all (its registry allowlist is ['dim'] plus nine optional
-        # keys, none of them `max_seq_len` or `rope_theta`), and
-        # `create_attention_layer` USED TO filter kwargs against that allowlist
-        # and drop the rest SILENTLY. So that spelling constructed,
-        # forward-passed, serialized and tested cleanly with RoPE absent — which is
-        # exactly what shipped: with no positional term in the embedding stage
-        # either, `TRMReasoningModule` was exactly permutation-equivariant.
-        # MEASURED on CPU by
-        # `tests/.../test_positional_signal.py::test_reasoning_stack_is_not_permutation_equivariant`:
-        # `max|P f(x) - f(P x)| = 7.7486e-07` (float32 noise) before this
-        # change. Same defect and same fix as ModernBERT's D-007 and DINOv3's
-        # D-010. See decisions.md D-007.
-        #
-        # As of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011)
-        # `create_attention_layer` no longer drops silently — it RAISES on any
-        # key the target type does not declare — so reverting the default to
-        # 'multi_head' would now be a hard ValueError on the rope keys rather
-        # than a silently position-blind model. The fix does not depend on that:
-        # 'group_query' is what actually carries RoPE.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-007: default is 'group_query'
+        # (plain MHA with RoPE); 'multi_head' has no RoPE and left the stack permutation-equivariant. See decisions.md.
         attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
@@ -287,37 +240,9 @@ class TRMReasoningModule(keras.layers.Layer):
 
         intermediate_size = int(hidden_size * expansion)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-029
-        # These three keys are THIS MODULE'S OWN generic conveniences derived
-        # from its own hyperparameters, not an end user's expressed intent, so
-        # they are pre-filtered against the target type's registry allowlist
-        # instead of being forwarded unconditionally.
-        #
-        # WHAT NOT TO DO, and why: do NOT go back to a literal
-        # `attention_args={'num_kv_heads': ..., 'max_seq_len': ...,
-        # 'rope_theta': ...}`. Since 2026-08-17
-        # (plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer`
-        # RAISES on any key the target type does not declare, and
-        # `MultiHeadAttention` declares none of these three. MEASURED at
-        # HEAD ae2e2aa0a, both arms:
-        #   * `create_trm(attention_type='multi_head')` ->
-        #     `ValueError: create_attention_layer('multi_head'): 3 unsupported
-        #     parameter(s) ['max_seq_len','num_kv_heads','rope_theta']`, and
-        #     the same for every non-'group_query' type, so the documented
-        #     `attention_type` knob had exactly ONE legal value.
-        #   * A TRM `.keras` saved from commit 1c10e4203 (the last commit
-        #     before the D-007 default flip, whose `TRM.__init__` defaults to
-        #     'multi_head') FAILED to load at HEAD with that same ValueError,
-        #     because `get_config()` serializes `attention_type`. Verified by
-        #     building the artifact in a detached worktree, not by reading.
-        # The registry intersection is what makes both work again: for
-        # 'group_query' all three keys are accepted, so the shipped default
-        # path is byte-identical; for 'multi_head' all three are dropped, which
-        # is correct -- a legacy checkpoint's weights ARE MultiHeadAttention
-        # weights and must be rebuilt as such. No `from_config` string
-        # remapping: rewriting 'multi_head' to 'group_query' on load would
-        # rebuild a DIFFERENT weight tree than the file contains.
-        # See decisions.md D-029.
+        # DECISION plan-2026-08-18T140459-7991552f/D-029: pre-filter these three
+        # keys against the target attention type's registry allowlist; create_attention_layer raises on an
+        # unsupported key, and MultiHeadAttention declares none of them. See decisions.md.
         attention_args = assemble_attention_config(
             attention_type,
             {
@@ -455,7 +380,7 @@ class TRMInner(keras.layers.Layer):
     initial states ``H_init`` and ``L_init`` are learnable weights owned by this
     layer, so a trajectory begins where the model chose to begin it.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -500,7 +425,7 @@ class TRMInner(keras.layers.Layer):
 
         B = batch, S = seq_len, P = puzzle_emb_len, H = hidden_size, V = vocab_size
 
-    **Data Flow:**
+    Data flow:
 
     .. code-block:: text
 

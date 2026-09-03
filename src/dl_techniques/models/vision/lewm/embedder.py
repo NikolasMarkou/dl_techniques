@@ -1,17 +1,10 @@
-"""
-ActionEmbedder — maps per-timestep action vectors to the model's embedding space.
+"""``ActionEmbedder``, a layer that maps per-timestep action vectors to the model's embedding space.
 
-Upstream PyTorch (`/tmp/lewm_source/module.py:Embedder`):
+It runs a 1x1 Conv1D as a per-timestep linear projection, then a 2-layer
+SiLU MLP. Keras Conv1D is already channels-last, so no transpose is needed
+around the convolution.
 
-.. code-block:: python
-
-    Conv1d(action_dim, smoothed_dim, kernel_size=1)
-    -> permute -> Linear(smoothed_dim, mlp_scale * emb_dim) -> SiLU
-    -> Linear(mlp_scale * emb_dim, emb_dim)
-
-In Keras we use `Conv1D` (channels-last) directly — so the PyTorch
-`permute(0,2,1)` pair is a no-op here. Input is `(B, T, action_dim)`, output
-is `(B, T, emb_dim)`.
+Input is ``(B, T, action_dim)``, output is ``(B, T, emb_dim)``.
 """
 
 import keras
@@ -22,6 +15,21 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.lewm.embedder")
 class ActionEmbedder(keras.layers.Layer):
     """Embed per-timestep action vectors to the model's embedding space.
+
+    Architecture:
+
+    .. code-block:: text
+
+        action  [B, T, action_dim]
+           |
+           v
+        Conv1D k=1  (per-timestep projection)
+           |  [B, T, smoothed_dim]
+           v
+        Dense -> SiLU -> Dense
+           |
+           v
+        embedding  [B, T, emb_dim]
 
     :param action_dim: dimension of the raw action vector (e.g. 2 for PushT).
     :param smoothed_dim: intermediate dim after the 1x1 Conv1D "patch embed".

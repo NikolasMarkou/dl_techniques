@@ -162,20 +162,12 @@ MODEL_VAR_TYPES: Tuple[str, ...] = (
     "fixed_large",
 )
 
-# DECISION plan-2026-09-02T170923-1285ed83/D-017
-# The default is False, DIVERGING from upstream's `clip_denoised=True`.
-# WHAT NOT TO DO: do not "restore" upstream's default to match the reference
-# file. Upstream inherits True from the ADM/IDDPM pixel codebase and then
-# overrides it at every DiT call site -- its own `sample.py` passes
-# `clip_denoised=False` (reference/train_and_sample_excerpts.py:62) precisely
-# because DiT diffuses VAE latents, which are not in [-1, 1]. Clipping them
-# destroys the sample while every shape, dtype and finiteness check stays
-# green. Matching upstream's DEFAULT would mean diverging from upstream's
-# BEHAVIOUR. See decisions.md D-017; pinned by
-# TestTheClipDenoisedDefaultIsFalseForLatents.
+# DECISION plan-2026-09-02T170923-1285ed83/D-017: default is False, diverging from
+# upstream's `clip_denoised=True` — DiT diffuses VAE latents, which are not in
+# [-1, 1], and upstream's own sample.py already passes False. See decisions.md.
 #: Whether ``x_0_hat`` is clamped to ``[-1, 1]`` before the posterior mean.
 #:
-#: ``False``. See the module docstring: this sampler diffuses LATENTS.
+#: ``False``. See the module docstring: this sampler diffuses latents.
 DEFAULT_CLIP_DENOISED: bool = False
 
 
@@ -446,15 +438,9 @@ class GaussianDiffusion:
         :return: ``'float32'`` or ``'float64'``.
         :rtype: str
         """
-        # DECISION plan-2026-09-02T170923-1285ed83/D-018
-        # `getattr(dtype, "name", None) or str(dtype)` rather than
-        # `keras.backend.standardize_dtype`. WHAT NOT TO DO: do not "simplify"
-        # this to the standardize_dtype call -- the Keras-2-residue guard in
-        # `tests/test_the_keras2_backend_calls_are_gone.py` forbids every
-        # `keras.backend.*` call across all of `src/`, and it is a whole-tree
-        # AST sweep, so the failure lands on an unrelated suite. `str` alone is
-        # not enough either: a `tf.DType` stringifies as "<dtype: 'float64'>".
-        # Same call as `bit_diffusion/sde.py:123`. See decisions.md D-018.
+        # DECISION plan-2026-09-02T170923-1285ed83/D-018: uses `getattr(dtype, "name",
+        # None) or str(dtype)`, not `keras.backend.standardize_dtype` — a repo-wide
+        # guard forbids any `keras.backend.*` call across `src/`. See decisions.md.
         raw = x.dtype
         name = getattr(raw, "name", None) or str(raw)
         return "float64" if name == "float64" else "float32"
@@ -817,21 +803,9 @@ class GaussianDiffusion:
                 model_log_variance = model_var_values
                 model_variance = keras.ops.exp(model_log_variance)
             else:
-                # DECISION plan-2026-09-02T170923-1285ed83/D-016
-                # These five lines are a DELIBERATE second copy of the
-                # LEARNED_RANGE interpolation that
-                # `losses/ddpm_hybrid_loss.py:call` also computes. WHAT NOT TO
-                # DO: do not "share" them by having this sampler import the
-                # loss, or the loss import this sampler -- the first is a
-                # models/ -> losses/ dependency and the second is its inverse,
-                # and one of the two directions would have to become a cycle
-                # the moment either side needed the other's helper. Do not move
-                # them into `utils/ddpm_schedule.py` either: that module is
-                # pure NumPy by design and owns no Keras op. The two copies are
-                # held in lockstep by an EXECUTABLE guard,
-                # `TestTheVarianceInterpolationAgreesWithTheLoss` in
-                # tests/test_models/test_dit/test_dit_diffusion.py, which fails
-                # if either copy is edited alone. See decisions.md D-016.
+                # DECISION plan-2026-09-02T170923-1285ed83/D-016: this is a second
+                # copy of the learned-range interpolation in `losses/ddpm_hybrid_loss.py`
+                # — do not import one from the other, that creates a models/losses cycle. See decisions.md.
                 min_log = self._gather(
                     sched.posterior_log_variance_clipped, t, n_bcast, dtype
                 )

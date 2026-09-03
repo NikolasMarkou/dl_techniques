@@ -1,37 +1,19 @@
-"""Logit-normal time schedule and Euler flow-matching sampler parameters.
+"""Time schedule and sampler presets for Ideogram4's Euler flow-matching sampler.
 
-Faithful Keras-3 port of the PyTorch ``src/ideogram4/scheduler.py`` plus the
-named preset registry from ``src/ideogram4/sampler_configs.py``.
+Holds the logit-normal time warp (:class:`LogitNormalSchedule`), the linear
+step grid the warp is applied to (:func:`make_step_intervals`), the sampler
+hyperparameter bundle (:class:`SamplerParameters`), and three named presets.
+The warp needs the inverse standard-normal CDF and the logistic sigmoid,
+which ``keras.ops`` has no backend-agnostic form of, so it runs in NumPy and
+SciPy (float64 internally, cast to float32 on return) rather than as part of
+the differentiable model graph. None of these are Keras layers: nothing here
+is trainable or saved into a `.keras` file.
 
-Design note (eager / CPU, NOT a differentiable graph)
------------------------------------------------------
-The schedule produces the *time grid* consumed by the sampling loop: a small
-set of scalar ``t`` values that index the integration. It is NOT part of the
-differentiable model forward (that is the transformer velocity prediction). The
-logit-normal warp needs the inverse standard-normal CDF (``ndtri``) and the
-logistic sigmoid (``expit``); ``keras.ops`` has no backend-agnostic ``erfinv`` /
-``ndtri``, so we compute the warp in NumPy via :func:`scipy.special.ndtri` and
-:func:`scipy.special.expit`, matching PyTorch's ``torch.special.ndtri`` /
-``torch.special.expit``. Internals run in float64 (as PyTorch does), then cast
-to float32 on return. ``__call__`` accepts a Python float or ``np.ndarray`` and
-returns the same kind (scalar in -> scalar out, array in -> array out).
-
-Time convention and direction
------------------------------
-``t = 0`` is clean data and ``t = 1`` is pure noise (fixed by the trainer's
-``x_t = (1 - tau)*x0 + tau*x1`` with target ``v = x1 - x0``), so reverse sampling
-runs from the noise end DOWN to the data end with a negative Euler step.
-:class:`LogitNormalSchedule` is strictly DECREASING in its uniform argument
-(``t_ = 1 - expit(...)``), i.e. ``schedule(0)`` is the NOISE end and
-``schedule(1)`` the data end -- the opposite ordering to
-:func:`make_step_intervals`, which ascends. A sampler must therefore walk the
-uniform grid FORWARD to walk ``t`` downward; ``pipeline.py`` does exactly that
-(D-002). ``make_step_intervals`` returning an ascending grid is not a statement
-about sampling direction.
-
-These are plain frozen dataclasses / functions mirroring the PyTorch module; no
-``keras.layers.Layer`` is involved (nothing here is trainable or serialized into
-a ``.keras`` graph).
+Callers must respect the time convention: `t = 0` is clean data and `t = 1`
+is pure noise, so sampling walks `t` downward. `LogitNormalSchedule` is
+strictly decreasing in its uniform input, while `make_step_intervals` returns
+an ascending grid, so a sampler steps the uniform grid forward to make `t`
+go down; see the pipeline's Euler loop for how the two compose.
 """
 
 from __future__ import annotations
@@ -57,8 +39,7 @@ class LogitNormalSchedule:
 
     Warps a uniform time ``t in (0, 1)`` through the inverse-CDF / sigmoid
     logit-normal transform and clamps the result to the time interval implied
-    by ``[logsnr_min, logsnr_max]``. Mirrors the PyTorch ``LogitNormalSchedule``
-    exactly::
+    by ``[logsnr_min, logsnr_max]``::
 
         z   = ndtri(t)                 # inverse standard-normal CDF
         y   = mean + std * z
@@ -66,15 +47,14 @@ class LogitNormalSchedule:
         t_  = clamp(t_, t_min, t_max)
 
     where ``t_min = 1 / (1 + exp(0.5 * logsnr_max))`` and
-    ``t_max = 1 / (1 + exp(0.5 * logsnr_min))``.
+    ``t_max = 1 / (1 + exp(0.5 * logsnr_min))``. The output is strictly
+    decreasing in `t`: `schedule(0)` sits at the noise end, `schedule(1)` at
+    the data end.
 
-    Args:
-        mean: Mean of the logit-normal warp (resolution-aware in practice).
-        std: Standard deviation of the warp. Defaults to ``1.0``.
-        logsnr_min: Minimum log-SNR; sets the upper time bound ``t_max``.
-            Defaults to ``-15.0``.
-        logsnr_max: Maximum log-SNR; sets the lower time bound ``t_min``.
-            Defaults to ``18.0``.
+    :ivar mean: Mean of the logit-normal warp; resolution-aware in practice.
+    :ivar std: Standard deviation of the warp. Defaults to ``1.0``.
+    :ivar logsnr_min: Minimum log-SNR, sets the upper time bound `t_max`. Defaults to ``-15.0``.
+    :ivar logsnr_max: Maximum log-SNR, sets the lower time bound `t_min`. Defaults to ``18.0``.
 
     Example:
         >>> sched = LogitNormalSchedule(mean=1.0, std=1.5)
@@ -87,23 +67,21 @@ class LogitNormalSchedule:
     logsnr_max: float = 18.0
 
     def __call__(self, t: FloatOrArray) -> FloatOrArray:
-        """Apply the logit-normal warp + log-SNR clamp.
+        """Apply the logit-normal warp and log-SNR clamp.
 
-        Args:
-            t: Uniform time(s) in the open interval ``(0, 1)``; a python float
-                or a NumPy array.
-
-        Returns:
-            The warped time(s) as float32. Scalar in -> python ``float`` out;
-            array in -> ``np.ndarray`` (float32) out.
+        :param t: Uniform time(s) in the open interval ``(0, 1)``, as a python
+            float or a NumPy array.
+        :return: The warped time(s) as float32. A scalar input returns a
+            python `float`; an array input returns an `np.ndarray`.
         """
         scalar_input = np.isscalar(t)
-        # float64 internally, matching torch.float64.
         t_arr = np.asarray(t, dtype=np.float64)
 
-        z = ndtri(t_arr)                       # inverse standard-normal CDF
+        # Inverse standard-normal CDF.
+        z = ndtri(t_arr)
         y = self.mean + self.std * z
-        t_ = expit(y)                          # logistic sigmoid
+        # Logistic sigmoid, then flip so t=0 is the noise end.
+        t_ = expit(y)
         t_ = 1.0 - t_
 
         t_min = 1.0 / (1.0 + math.exp(0.5 * self.logsnr_max))
@@ -121,24 +99,18 @@ def get_schedule_for_resolution(
     known_mean: float = 1.0,
     std: float = 1.0,
 ) -> LogitNormalSchedule:
-    """Build a resolution-aware logit-normal schedule (eval-time).
+    """Build a logit-normal schedule whose mean shifts with image resolution.
 
     The mean is shifted by half the log pixel-count ratio relative to a known
     reference resolution::
 
         mean = known_mean + 0.5 * log(num_pixels / known_pixels)
 
-    Args:
-        image_resolution: ``(H, W)`` of the target image.
-        known_resolution: ``(H, W)`` reference resolution. Defaults to
-            ``(512, 512)``.
-        known_mean: Schedule mean at the reference resolution. Defaults to
-            ``1.0``.
-        std: Standard deviation passed through to the schedule. Defaults to
-            ``1.0``.
-
-    Returns:
-        A :class:`LogitNormalSchedule` with the resolution-shifted mean.
+    :param image_resolution: ``(H, W)`` of the target image.
+    :param known_resolution: ``(H, W)`` reference resolution. Defaults to ``(512, 512)``.
+    :param known_mean: Schedule mean at the reference resolution. Defaults to ``1.0``.
+    :param std: Standard deviation passed through to the schedule. Defaults to ``1.0``.
+    :return: A :class:`LogitNormalSchedule` with the resolution-shifted mean.
     """
     num_pixels = image_resolution[0] * image_resolution[1]
     known_pixels = known_resolution[0] * known_resolution[1]
@@ -147,19 +119,16 @@ def get_schedule_for_resolution(
 
 
 def make_step_intervals(num_steps: int) -> np.ndarray:
-    """Default linear step schedule used by the v4 eval config.
+    """Build the uniform grid a schedule warps into sampling times.
 
-    This is the UNIFORM grid the schedule warps, not the sampler's time
-    sequence: it ascends, while :class:`LogitNormalSchedule` maps it to a
-    strictly DECREASING ``t``. Its ordering says nothing about integration
-    direction (see the module docstring's time-convention note).
+    This is the ascending uniform grid, not the sampler's time sequence:
+    :class:`LogitNormalSchedule` maps it to a strictly decreasing `t`, so its
+    own ascending order says nothing about integration direction.
 
-    Args:
-        num_steps: Number of sampling steps.
-
-    Returns:
-        A float32 ``np.ndarray`` of shape ``(num_steps + 1,)`` linearly spaced
-        on ``[0, 1]`` (endpoints inclusive), strictly ascending.
+    :param num_steps: Number of sampling steps.
+    :return: A float32 array of shape ``(num_steps + 1,)``, linearly spaced
+        on ``[0, 1]`` with both endpoints included, strictly ascending.
+    :rtype: np.ndarray
     """
     return np.linspace(0.0, 1.0, num_steps + 1, dtype=np.float32)
 
@@ -168,27 +137,19 @@ def make_step_intervals(num_steps: int) -> np.ndarray:
 class SamplerParameters:
     """Bundle of sampling hyperparameters for a named preset.
 
-    ``guidance_schedule`` is in LOOP-INDEX order: index ``0`` is the LAST
-    sampling step (final polish), index ``num_steps - 1`` is the FIRST sampling
-    step. ``mu`` and ``std`` are the mean and stddev of the logit-normal noise
-    schedule (passed as ``known_mean`` and ``std`` to
-    :func:`get_schedule_for_resolution`).
+    ``guidance_schedule`` is in loop-index order: index ``0`` is the last
+    sampling step, the final polish; index ``num_steps - 1`` is the first
+    sampling step. ``mu`` and ``std`` are the mean and standard deviation of
+    the logit-normal noise schedule, passed as ``known_mean`` and ``std`` to
+    :func:`get_schedule_for_resolution`. The dataclass is frozen: a preset is
+    immutable once built.
 
-    Note:
-        Declared ``frozen`` (immutable preset). The PyTorch original is also
-        ``kw_only``; here we keep field order so positional construction in
-        :data:`PRESETS` reads identically to the reference.
-
-    Args:
-        num_steps: Number of Euler integration steps.
-        guidance_schedule: Per-step CFG guidance weights in loop-index order;
-            its length MUST equal ``num_steps``.
-        mu: Mean of the logit-normal noise schedule.
-        std: Standard deviation of the logit-normal noise schedule. Defaults to
-            ``1.0``.
-
-    Raises:
-        ValueError: If ``len(guidance_schedule) != num_steps``.
+    :ivar num_steps: Number of Euler integration steps.
+    :ivar guidance_schedule: Per-step CFG guidance weights in loop-index order;
+        its length must equal ``num_steps``.
+    :ivar mu: Mean of the logit-normal noise schedule.
+    :ivar std: Standard deviation of the logit-normal noise schedule. Defaults to ``1.0``.
+    :raises ValueError: If ``len(guidance_schedule) != num_steps``.
     """
 
     num_steps: int

@@ -1,85 +1,21 @@
-"""
-xLSTM language model: a token-embedding to vocabulary-logits stack of mLSTM
-(matrix-memory) and sLSTM (scalar-memory) residual blocks, with the split between
-the two block types set by a single ratio.
+"""xLSTM language model: stacked mLSTM and sLSTM residual blocks over token
+embeddings, producing vocabulary logits. The continuous-input forecasting
+sibling that reuses the same blocks is :class:`forecaster.xLSTMForecaster`.
 
-Despite living under `models/time_series/`, this class is a language model — its
-input is integer token ids `(B, T)` and its output is `(B, T, vocab_size)` logits.
-The continuous-input forecasting sibling that reuses the same block stack is
-`forecaster.xLSTMForecaster`.
+A classic LSTM's sigmoid gates are bounded in ``(0, 1)``, so a stored value
+can only decay, never be overwritten. xLSTM replaces them with exponential
+gating, stabilized by a running log-domain maximum, so a strong new input
+can dominate older memory. The layers chosen by ``mlstm_ratio`` also get a
+matrix memory instead of a scalar one: capacity scales with
+``key_dim * value_dim`` instead of width, and retrieval looks like
+attention but keeps a fixed-size state instead of a growing KV cache.
 
-The classic LSTM has two structural limits that block it from competing at scale.
-It cannot *revise* a stored decision: the sigmoid input and forget gates are
-bounded in `(0, 1)`, so once memory is committed, later evidence can only decay it
-gradually, never overwrite it decisively. And its memory per unit is a single
-scalar, so the number of distinguishable things it can hold grows only with width.
-xLSTM attacks each limit with one change.
-
-The first change is exponential gating. The input gate becomes `i_t = exp(i_proj)`,
-which is unbounded above, so a single strongly-activated step can dominate
-everything accumulated before it — the "revision" the sigmoid gate cannot express.
-A raw exponential of course overflows immediately, and the fix is what makes the
-cell work. A running maximum is carried in the log domain as a fourth state,
-
-    `m_t = max(m_{t-1} + log f_t, log i_t)`
-    `i_t = exp(log i_t - m_t)`,  `f_t = exp(m_{t-1} + log f_t - m_t)`
-
-which bounds both gates in `(0, 1]`. The subtraction is exactly cancelling rather
-than approximate: the cell keeps a normalizer state alongside the memory,
-`c_t = f_t*c_{t-1} + i_t*z_t` and `n_t = f_t*n_{t-1} + i_t`, and reads out the
-ratio `h_t = o_t * c_t / n_t`. Both numerator and denominator carry the same
-`exp(-m_t)` factor, so it divides out and the stabilized recurrence computes the
-same function as the unstabilized one, in a representable range. This is why the
-sLSTM cell carries four states, `[h, c, n, m]`, where a standard LSTM carries two.
-The forget gate is selectable: `slstm_forget_gate='sigmoid'` (the default) takes
-its log for the stabilizer, `'exp'` treats the pre-activation as already
-logarithmic.
-
-The second change is the matrix memory. An mLSTM cell replaces the vector cell
-state with a matrix `C_t` of shape `(key_dim, value_dim)` per head and updates it
-by an outer product, `C_t = f_t*C_{t-1} + i_t*(v_t k_t^T)`, retrieving with a query,
-`h_t = o_t * (C_t q_t) / max(|n_t^T q_t|, exp(-m_t))`. This is associative-memory
-storage: each step writes a key/value pair into a distinct outer-product direction
-instead of overwriting a shared scalar, so capacity scales with `key_dim *
-value_dim` rather than with width, and retrieval is the same query-key-value
-operation attention performs — but with a fixed-size state instead of a growing KV
-cache. The same log-domain stabilizer guards it; without it the matrix memory
-overflows fp32 after a few dozen steps.
-
-A caveat about what "parallelizable" means here. The mLSTM recurrence is
-*formulated* so that it admits a parallel, attention-like evaluation over a whole
-sequence. This implementation does not exploit that: both cells are wrapped in
-`keras.layers.RNN` and stepped sequentially, so mLSTM's advantage over sLSTM in
-this codebase is representational capacity, not wall-clock throughput. Treat any
-speed claim as belonging to the paper, not to this code.
-
-Architecturally the model is a plain residual stack. `mlstm_ratio` sets the split
-by index: the first `int(num_layers * mlstm_ratio)` blocks are mLSTM and the rest
-are sLSTM, putting the high-capacity associative memory in the lower layers and the
-stateful scalar refinement above it. The two block types are shaped differently,
-following the paper's two figures. An mLSTM block is pre-up-projection: it widens
-by `mlstm_expansion_factor`, applies a depthwise *causal* convolution with swish,
-runs the mLSTM in the widened space, normalizes and projects back down, with the
-residual spanning the whole thing. An sLSTM block is post-normalization: sLSTM,
-then normalization, then a configurable gated feed-forward network (SwiGLU by
-default), with one skip around the block. Normalization type and FFN type are
-resolved through the shared factories rather than hard-coded, so a stack can be run
-with LayerNorm or RMSNorm without touching this file.
-
-Because every path through the model is recurrent or causally convolved, causality
-is a property of the architecture rather than of a mask. There is no attention and
-no positional encoding, and consequently no way to accidentally leak future tokens
-by omitting a mask — the failure mode that haunts transformer language models
-simply cannot occur here.
-
-Two deliberate behavioural choices. `normalization_kwargs` is stored exactly as
-passed, including a `None` sentinel, and `or {}` is applied only at the factory
-call site; storing the resolved `{}` instead would make `get_config()` emit
-something the constructor never received and break lossless round-tripping.
-`from_variant(..., pretrained=True)` raises `NotImplementedError` rather than
-warning and returning a randomly initialized model — no checkpoints ship with this
-package, and silently handing back random weights to a caller who asked for trained
-ones is indistinguishable from success.
+Every path through the model is recurrent or causally convolved, so there
+is no mask to omit and no way to leak future tokens. The mLSTM recurrence
+is parallelizable in the paper; this implementation steps both cell types
+sequentially through ``keras.layers.RNN``, so any throughput claim belongs
+to the paper, not this code. ``from_variant(..., pretrained=True)`` raises
+``NotImplementedError`` — no checkpoints ship with this package.
 
 References:
     - Beck et al., 2024. xLSTM: Extended Long Short-Term Memory.
@@ -109,57 +45,59 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.xlstm.model")
 class xLSTM(keras.Model):
-    """
-    Complete xLSTM architecture with stacked sLSTM and mLSTM blocks.
+    """Stack of mLSTM and sLSTM residual blocks mapping tokens to vocabulary logits.
 
-    This model implements the xLSTM from Section 2.4 of the paper, creating a
-    deep sequence model by residually stacking xLSTM blocks. The architecture
-    balances parallelizable matrix memory (mLSTM) with stateful recurrent memory
-    (sLSTM) for optimal sequence modeling.
+    Architecture:
 
-    **Intent**: Provide a complete, configurable xLSTM model for sequence-to-sequence
-    tasks, language modeling, and other sequential prediction tasks.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Tokens
-       ↓
-    Embedding
-       ↓
-    [xLSTM Blocks] × num_layers
-       ↓
-    Final Normalization
-       ↓
-    Output Head (Dense)
-    ```
+        tokens [B, T]
+           |
+        Embedding                 -> [B, T, embed_dim]
+           | (dropout, optional)
+        mLSTM block  x n_mlstm     (lower layers)
+           |
+        sLSTM block  x n_slstm     (upper layers)
+           |
+        final normalization
+           |
+        Dense (output_head)       -> [B, T, vocab_size]
 
-    The blocks are distributed according to mlstm_ratio:
-    - First num_layers * mlstm_ratio blocks are mLSTM
-    - Remaining blocks are sLSTM
+    The first ``int(num_layers * mlstm_ratio)`` blocks are mLSTM; the rest are sLSTM.
 
-    Args:
-        vocab_size: Integer, size of the vocabulary.
-        embed_dim: Integer, dimensionality of token embeddings.
-        num_layers: Integer, total number of xLSTM blocks.
-        mlstm_ratio: Float in [0, 1], fraction of layers that should be mLSTM.
-            Defaults to 0.5 (balanced architecture).
-        mlstm_num_heads: Integer, number of heads for mLSTM blocks. Defaults to 4.
-        mlstm_expansion_factor: Integer, expansion factor for mLSTM. Defaults to 2.
-        slstm_forget_gate: Literal['sigmoid', 'exp'], sLSTM forget gate activation.
-            Defaults to 'sigmoid'.
-        ffn_type: String, FFN type for sLSTM blocks. Defaults to 'swiglu'.
-        ffn_expansion_factor: Integer, FFN expansion for sLSTM. Defaults to 2.
-        normalization_type: String, type of normalization. Defaults to 'layer_norm'.
-        normalization_kwargs: Optional dict of normalization kwargs.
-        dropout_rate: Float, dropout rate for FFN in sLSTM blocks. Defaults to 0.0.
-        embedding_dropout_rate: Float, dropout after embedding. Defaults to 0.0.
-        kernel_initializer: Initializer for kernel weights.
-        recurrent_initializer: Initializer for recurrent weights.
-        bias_initializer: Initializer for bias weights.
-        kernel_regularizer: Optional regularizer for kernel weights.
-        recurrent_regularizer: Optional regularizer for recurrent weights.
-        bias_regularizer: Optional regularizer for bias weights.
-        **kwargs: Additional arguments for the Model base class.
+    :param vocab_size: Size of the vocabulary.
+    :type vocab_size: int
+    :param embed_dim: Dimensionality of token embeddings.
+    :type embed_dim: int
+    :param num_layers: Total number of xLSTM blocks.
+    :type num_layers: int
+    :param mlstm_ratio: Fraction of layers that are mLSTM, in [0, 1]. Defaults to 0.5.
+    :type mlstm_ratio: float
+    :param mlstm_num_heads: Number of heads for mLSTM blocks. Defaults to 4.
+    :type mlstm_num_heads: int
+    :param mlstm_expansion_factor: Expansion factor for mLSTM. Defaults to 2.
+    :type mlstm_expansion_factor: int
+    :param slstm_forget_gate: sLSTM forget-gate activation, ``'sigmoid'`` or ``'exp'``. Defaults to ``'sigmoid'``.
+    :type slstm_forget_gate: str
+    :param ffn_type: FFN type for sLSTM blocks. Defaults to ``'swiglu'``.
+    :type ffn_type: str
+    :param ffn_expansion_factor: FFN expansion factor for sLSTM. Defaults to 2.
+    :type ffn_expansion_factor: int
+    :param normalization_type: Normalization layer type. Defaults to ``'layer_norm'``.
+    :type normalization_type: str
+    :param normalization_kwargs: Extra keyword arguments for the normalization layer.
+    :type normalization_kwargs: dict, optional
+    :param dropout_rate: Dropout rate for the FFN in sLSTM blocks. Defaults to 0.0.
+    :type dropout_rate: float
+    :param embedding_dropout_rate: Dropout rate applied after the embedding. Defaults to 0.0.
+    :type embedding_dropout_rate: float
+    :param kernel_initializer: Initializer for kernel weights.
+    :param recurrent_initializer: Initializer for recurrent weights.
+    :param bias_initializer: Initializer for bias weights.
+    :param kernel_regularizer: Optional regularizer for kernel weights.
+    :param recurrent_regularizer: Optional regularizer for recurrent weights.
+    :param bias_regularizer: Optional regularizer for bias weights.
+    :param kwargs: Additional arguments for the Keras ``Model`` base class.
 
     Input shape:
         2D integer tensor with shape: `(batch_size, sequence_length)`.
@@ -169,7 +107,6 @@ class xLSTM(keras.Model):
 
     Example:
         ```python
-        # Create xLSTM model for language modeling
         model = xLSTM(
             vocab_size=50000,
             embed_dim=512,
@@ -179,30 +116,23 @@ class xLSTM(keras.Model):
             ffn_type='swiglu',
             normalization_type='rms_norm'
         )
-
-        # Compile and train
         model.compile(
             optimizer='adam',
             loss='sparse_categorical_crossentropy',
             metrics=['accuracy']
         )
-
-        # Generate predictions
         tokens = keras.random.randint(0, 50000, shape=(4, 128))
         logits = model(tokens)
         print(logits.shape)  # (4, 128, 50000)
         ```
     """
 
-    # Default architectural constants (discoverability; cosmetic).
     DEFAULT_MLSTM_RATIO: float = 0.5
     DEFAULT_MLSTM_NUM_HEADS: int = 4
     DEFAULT_FFN_TYPE: str = 'swiglu'
     DEFAULT_NORMALIZATION_TYPE: str = 'layer_norm'
 
-    # Predefined size variants for the language model (small / base / large).
-    # These are the ONLY model in the family with NEW semantic size variants:
-    # LM scaling (embed_dim / num_layers / heads) is a real, meaningful axis.
+    # Size variants scale embed_dim, num_layers and heads for the language model.
     MODEL_VARIANTS = {
         "small": {
             "embed_dim": 256,
@@ -252,7 +182,6 @@ class xLSTM(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be positive, got {vocab_size}")
         if embed_dim <= 0:
@@ -262,7 +191,6 @@ class xLSTM(keras.Model):
         if not 0 <= mlstm_ratio <= 1:
             raise ValueError(f"mlstm_ratio must be in [0, 1], got {mlstm_ratio}")
 
-        # Store configuration
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.num_layers = num_layers
@@ -273,8 +201,8 @@ class xLSTM(keras.Model):
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
         self.normalization_type = normalization_type
-        # Store the RAW value (preserve the None sentinel for lossless round-trip);
-        # `or {}` is applied ONLY at the create_normalization_layer call site below.
+        # Keeps the None sentinel for lossless round-trip; `or {}` applies only
+        # at the create_normalization_layer call site below.
         self.normalization_kwargs = normalization_kwargs
         self.dropout_rate = dropout_rate
         self.embedding_dropout_rate = embedding_dropout_rate
@@ -285,14 +213,12 @@ class xLSTM(keras.Model):
         self.recurrent_regularizer = recurrent_regularizer
         self.bias_regularizer = bias_regularizer
 
-        # Embedding layer
         self.embedding = layers.Embedding(
             input_dim=vocab_size,
             output_dim=embed_dim,
             name='embedding',
         )
 
-        # Optional embedding dropout
         if embedding_dropout_rate > 0:
             self.embedding_dropout = layers.Dropout(
                 rate=embedding_dropout_rate,
@@ -301,13 +227,11 @@ class xLSTM(keras.Model):
         else:
             self.embedding_dropout = None
 
-        # Create xLSTM blocks
         self.blocks = []
         num_mlstm = int(num_layers * mlstm_ratio)
 
         for i in range(num_layers):
             if i < num_mlstm:
-                # mLSTM block
                 block = mLSTMBlock(
                     units=embed_dim,
                     expansion_factor=mlstm_expansion_factor,
@@ -323,7 +247,6 @@ class xLSTM(keras.Model):
                     name=f'mlstm_block_{i}',
                 )
             else:
-                # sLSTM block
                 block = sLSTMBlock(
                     units=embed_dim,
                     ffn_type=ffn_type,
@@ -343,14 +266,12 @@ class xLSTM(keras.Model):
 
             self.blocks.append(block)
 
-        # Final normalization
         self.final_norm = create_normalization_layer(
             normalization_type=normalization_type,
             name='final_norm',
             **(self.normalization_kwargs or {})
         )
 
-        # Output head
         self.output_head = layers.Dense(
             vocab_size,
             kernel_initializer=kernel_initializer,
@@ -361,18 +282,11 @@ class xLSTM(keras.Model):
         )
 
     def build(self, input_shape) -> None:
-        """Explicitly build every sublayer so weights restore on `.keras` load.
+        """Build every sublayer explicitly, before ``super().build()``, so weights restore on `.keras` load.
 
-        LM input is integer tokens ``[B, T]``. The Embedding maps ``[B, T]`` ->
-        ``[B, T, embed_dim]``; every downstream sublayer (dropout, blocks,
-        final_norm, output_head) operates on the ``[B, T, embed_dim]`` shape.
-
-        Per LESSONS (D-002): a ``super().build()``-only body leaves sublayers
-        unbuilt at ``load_model`` weight-restore time, so the restored weights
-        have nowhere to land and the next forward silently re-initializes them.
-        Build each sublayer in order BEFORE ``super().build()``.
+        :param input_shape: Shape of the token input, `(batch_size, sequence_length)`.
         """
-        # Token shape [B, T] -> embedded shape [B, T, embed_dim].
+        # Token shape [B, T] maps to embedded shape [B, T, embed_dim].
         embedded_shape = tuple(input_shape) + (self.embed_dim,)
 
         self.embedding.build(input_shape)
@@ -391,32 +305,24 @@ class xLSTM(keras.Model):
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the xLSTM model.
+        """Run the forward pass through the xLSTM model.
 
-        Args:
-            inputs: Integer tensor of token IDs, shape (batch_size, seq_len).
-            training: Boolean, whether in training mode.
-            mask: Optional mask tensor.
-
-        Returns:
-            Logits tensor of shape (batch_size, seq_len, vocab_size).
+        :param inputs: Integer tensor of token ids, shape `(batch_size, seq_len)`.
+        :param training: Whether the call runs in training mode.
+        :type training: bool, optional
+        :param mask: Optional mask tensor.
+        :return: Logits tensor of shape `(batch_size, seq_len, vocab_size)`.
+        :rtype: keras.KerasTensor
         """
-        # Embedding
         x = self.embedding(inputs, training=training)
 
-        # Embedding dropout
         if self.embedding_dropout is not None:
             x = self.embedding_dropout(x, training=training)
 
-        # Pass through xLSTM blocks
         for block in self.blocks:
             x = block(x, training=training, mask=mask)
 
-        # Final normalization
         x = self.final_norm(x, training=training)
-
-        # Output projection
         logits = self.output_head(x, training=training)
 
         return logits
@@ -502,10 +408,10 @@ class xLSTM(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'xLSTM':
-        """Create model from configuration.
+        """Create a model from a configuration, deserializing initializers and regularizers first.
 
-        Deserializes the initializer/regularizer objects that ``get_config``
-        serialized (H9) before reconstructing the model.
+        :param config: Configuration dict as returned by :meth:`get_config`.
+        :return: A reconstructed :class:`xLSTM` instance.
         """
         config = dict(config)
         for key in ("kernel_initializer", "recurrent_initializer",

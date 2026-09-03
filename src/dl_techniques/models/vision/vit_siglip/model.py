@@ -1,38 +1,31 @@
-"""
-Vision Transformer with a two-stage convolutional patch-embedding stem.
+"""Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-**The name is a misattribution, and it is corrected here rather than in a footnote.**
-SigLIP's contribution is a LOSS: the pairwise **sigmoid** objective that replaces
-CLIP's softmax over the in-batch similarity matrix, removing the need for a global
-normalization across all pairs and therefore for very large batches. It is not a
-patch-embedding scheme. SigLIP's own vision tower is a plain ViT with a single
-`Conv2D(k=s=patch)` stem, **no CLS token**, and a MAP (multi-head attention pooling)
-head. This module shares none of those three: it has a two-stage stem, it offers a
-`pooling='cls'` mode, and it has no MAP head. It also contains no text tower and no
-loss, so nothing here can be sigmoid-contrastive.
+The "SigLIP" name is inherited and does not describe what this file builds.
+SigLIP's contribution is a sigmoid pairwise loss that replaces CLIP's softmax
+over the in-batch similarity matrix; its own vision tower uses a single-conv
+stem, no CLS token and a MAP pooling head. This file has none of those
+three: a two-stage stem, an optional CLS token, and no MAP head. It contains
+no text tower and no loss.
 
-What it actually is: a standard pre-norm ViT encoder whose patch embedding is split
-into two strided convolutions -- `Conv2D(embed_dim//2, k=s=patch//2)` -> LayerNorm ->
-GELU -> `Conv2D(embed_dim, k=s=2)` -- for a total stride of `2 * (patch // 2)`. That
-identity forces `patch_size` to be EVEN in both dimensions (an odd value gives a
-stride smaller than the declared patch size and a token count that does not match
-`num_patches`); the constructor raises rather than letting the mismatch surface as an
-opaque reshape failure at the first forward. Everything else -- attention,
-normalization, FFN -- is built through the `dl_techniques` factories, so the
-component types are configurable per instance.
+What it builds: a standard pre-norm ViT encoder whose patch embedding is
+split into two strided convolutions, `Conv2D(embed_dim//2, k=s=patch//2)` ->
+LayerNorm -> GELU -> `Conv2D(embed_dim, k=s=2)`, for a total stride of
+`2 * (patch // 2)`. That forces `patch_size` to be even in both dimensions;
+an odd value gives a stride smaller than the declared patch size, so the
+constructor raises instead of letting the mismatch surface as a reshape
+failure later. Attention, normalization and FFN come from the
+`dl_techniques` factories.
 
-The class and the `SCALE_CONFIGS` keys keep the `SigLIP` name for source
-compatibility. Do NOT read a published SigLIP number as applying to a model built
-here, and do NOT "restore" the claim that two-stage patch embedding comes from
-SigLIP.
+The class name and `SCALE_CONFIGS` keys keep `SigLIP` for source
+compatibility. A published SigLIP number does not apply to a model built
+here.
 
 References:
     - Zhai et al., 2023. Sigmoid Loss for Language Image Pre-Training (SigLIP).
-      (https://arxiv.org/abs/2303.15343) -- the loss this package does not implement.
+      (https://arxiv.org/abs/2303.15343)
     - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words (ViT).
-      (https://arxiv.org/abs/2010.11929) -- the architecture this package does build.
-    - Lee et al., 2019. Set Transformer. (https://arxiv.org/abs/1810.00825) -- the
-      MAP/attention-pooling head SigLIP's tower uses and this one does not.
+      (https://arxiv.org/abs/2010.11929)
+    - Lee et al., 2019. Set Transformer. (https://arxiv.org/abs/1810.00825)
 """
 
 import keras

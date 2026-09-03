@@ -1,69 +1,25 @@
 """
 Self-Organizing Map for topological memory and pattern organization.
+``SOMModel`` wraps :class:`SOM2dLayer` in a full training and
+visualization framework.
 
-This model provides a complete framework for a Self-Organizing Map (SOM),
-an unsupervised neural network that learns to produce a low-dimensional,
-discretized representation of high-dimensional input data. The SOM forms
-a topological map where the spatial arrangement of neurons on a 2D grid
-reflects the intrinsic relationships within the input data, making it a
-powerful tool for clustering, visualization, and associative memory.
+A SOM is a 2D grid of neurons, each holding a prototype vector in the
+input space. For each input, neurons compete on Euclidean distance; the
+closest one, the Best Matching Unit, wins. The BMU's weights, and those
+of neurons in a shrinking neighborhood around it, move toward the input:
+``w_i(t+1) = w_i(t) + eta(t) * h_ci(t) * (x(t) - w_i(t))``, where
+``eta(t)`` is a decaying learning rate and ``h_ci(t)`` is a Gaussian or
+bubble function of grid distance from the BMU. Unlike a plain vector
+quantizer, this neighborhood update makes nearby grid cells learn similar
+prototypes, so the trained grid preserves the topology of the input space.
 
-Architectural Overview:
-    The core of the model is a 2D grid of neurons, where each neuron `i`
-    maintains a prototype or weight vector `w_i` of the same dimension as
-    the input space. The learning process is competitive and cooperative,
-    unfolding in three key steps for each training input vector `x`:
-    1.  **Competition**: All neurons on the grid compete to be the "winner"
-        by calculating their distance to the input vector. The neuron
-        whose weight vector is most similar to the input is designated
-        the Best Matching Unit (BMU).
-    2.  **Cooperation**: The BMU determines the spatial center of a
-        neighborhood of excited neurons on the grid. The BMU and its
-        topological neighbors are activated for learning.
-    3.  **Adaptation**: The weight vectors of the activated neurons are
-        updated to become more similar to the input vector. The magnitude
-        of the update is dependent on the neuron's distance from the BMU
-        within the neighborhood.
-
-    This iterative process causes neighboring neurons in the grid to learn
-    to represent similar input patterns, effectively organizing the map to
-    preserve the topological structure of the input data space.
-
-Foundational Mathematics and Intuition:
-    The SOM algorithm is defined by two primary mathematical operations:
-    finding the BMU and updating the weights.
-
-    -   **BMU Selection (Competition)**: The BMU, denoted by index `c`, is
-        found by minimizing the Euclidean distance between the input vector
-        `x` and the weight vector `w_i` of each neuron `i`:
-        `c = argmin_i || x(t) - w_i(t) ||`
-        This step identifies the neuron that currently serves as the best
-        prototype for the given input.
-
-    -   **Weight Update (Adaptation)**: The weights of all neurons are then
-        updated according to the rule:
-        `w_i(t+1) = w_i(t) + η(t) * h_ci(t) * (x(t) - w_i(t))`
-        -   `η(t)` is the learning rate, a monotonically decreasing
-            function of time `t`. It controls the magnitude of weight
-            changes, starting larger for coarse organization and becoming
-            smaller for fine-tuning.
-        -   `h_ci(t)` is the neighborhood function, which is the cornerstone
-            of topological preservation. It depends on the grid distance
-            between neuron `i` and the BMU `c`. A common choice is the
-            Gaussian function:
-            `h_ci(t) = exp(-||r_i - r_c||^2 / (2 * σ(t)^2))`
-            where `r_i` and `r_c` are the grid coordinates and `σ(t)` is
-            the neighborhood radius, which also decreases over time.
-
-    The intuition behind the decaying neighborhood radius `σ(t)` is crucial.
-    Initially, a large `σ` allows distant neurons to be influenced by the
-    BMU, establishing a coarse, global order on the map. As `σ` shrinks,
-    the updates become localized, allowing the map to fine-tune its
-    representation of the local data topology.
+Input should be normalized. Class prototypes for classification are
+learned separately, via :meth:`SOMModel.fit_class_prototypes`, not at
+construction time.
 
 References:
-    -   Kohonen, T. (1990). The self-organizing map. *Proceedings of the
-        IEEE*, 78(9), 1464-1480.
+    - Kohonen, T. (1990). The self-organizing map. Proceedings of the
+      IEEE, 78(9), 1464-1480.
 """
 
 import time
@@ -87,166 +43,68 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.som.model")
 class SOMModel(keras.Model):
-    """
-    Self-Organizing Map model implementing associative memory and topological learning.
+    """Self-organizing map wrapping :class:`SOM2dLayer` with training and
+    visualization methods.
 
-    This model wraps a SOM2dLayer to provide a complete framework for unsupervised
-    learning, pattern organization, and memory-based classification. It demonstrates
-    how competitive learning creates topological maps where similar inputs activate
-    nearby neurons, forming a structured memory system suitable for clustering,
-    visualization, and associative recall tasks.
+    Architecture:
 
-    **Intent**: Provide a complete implementation of Self-Organizing
-    Maps that can function as an associative memory system for data visualization,
-    clustering, dimensionality reduction, and classification tasks while maintaining
-    topological relationships in the learned representation.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Input(shape=[batch_size, input_dim])
-            ↓
-    SOM2dLayer: Competitive Learning
-    - Find Best Matching Unit (BMU)
-    - Update BMU and neighbors
-    - Preserve topology
-            ↓
-    Output: (BMU coordinates, quantization error)
-    - BMU coords: shape=[batch_size, 2]
-    - Quant error: shape=[batch_size]
-    ```
+        input [B, input_dim]
+          │
+          ▼
+        SOM2dLayer (competitive learning)
+          - find Best Matching Unit (BMU)
+          - update BMU and neighbors ('training' only)
+          │
+          ▼
+        (bmu_coords [B, 2], quant_errors [B])
 
-    **Memory Organization Process**:
-    1. **Competition**: For each input, neurons compete to be the Best Matching Unit
-    2. **Cooperation**: BMU and neighboring neurons update toward the input
-    3. **Adaptation**: Learning rate and neighborhood decay over training
-    4. **Result**: Topological map where similar patterns cluster together
+    :meth:`train` trains the map. :meth:`fit_class_prototypes` then assigns
+    each class a representative BMU location, and :meth:`predict_class`
+    classifies new inputs by nearest-prototype BMU. The ``visualize_*``
+    methods plot the learned grid, class distribution, U-matrix, hit
+    histogram, and a memory-recall example.
 
-    **Key Concepts**:
-    - **Best Matching Unit (BMU)**: Neuron with weights closest to input
-    - **Topological Preservation**: Similar inputs map to nearby grid locations
-    - **Neighborhood Learning**: Updates extend beyond BMU to neighbors
-    - **Competitive Learning**: Neurons compete to represent input patterns
-
-    **Training Process**:
-    The training follows these steps per sample:
-    1. Find BMU (neuron most similar to input)
-    2. Update BMU weights toward input
-    3. Update neighbor weights based on distance from BMU
-    4. Gradually reduce learning rate and neighborhood size
-
-    **Memory Retrieval**:
-    For associative recall:
-    1. Present query pattern to trained SOM
-    2. Find BMU that best matches query
-    3. Retrieve stored prototype (BMU weights)
-    4. Optionally find similar training samples
-
-    **Applications**:
-    - **Data Visualization**: Project high-dimensional data to 2D grid
-    - **Clustering**: Discover natural groupings without supervision
-    - **Dimensionality Reduction**: Create meaningful low-dimensional maps
-    - **Anomaly Detection**: Identify patterns outside learned topology
-    - **Classification**: Use topology for nearest-neighbor classification
-    - **Memory Systems**: Model associative memory and pattern completion
-
-    Args:
-        map_size: Tuple of (height, width) defining the 2D grid dimensions.
-            Larger maps provide finer-grained organization but require more
-            training. Typical sizes range from (10, 10) to (50, 50).
-        input_dim: Integer dimensionality of input vectors. Must match the
-            feature dimension of training data.
-        initial_learning_rate: Float learning rate at start of training.
-            Controls how much neurons update toward inputs. Typical values
-            range from 0.1 to 0.5. Defaults to 0.1.
-        sigma: Float initial neighborhood radius. Determines how many
-            neighboring neurons are updated along with the BMU. Larger values
-            preserve more topology early in training. Defaults to 1.0.
-        neighborhood_function: String specifying neighborhood kernel type.
-            Options are 'gaussian' (smooth falloff) or 'bubble' (hard cutoff).
-            Defaults to 'gaussian'.
-        weights_initializer: Weight initialization strategy. Can be string
-            name ('random_uniform', 'glorot_uniform') or Initializer instance.
-            Defaults to 'random_uniform'.
-        regularizer: Optional weight regularizer to prevent overfitting.
-            Can be L1, L2, or custom Regularizer instance. Defaults to None.
-        class_prototypes: Optional dictionary mapping class labels to BMU
-            coordinates for classification. Typically computed via
-            fit_class_prototypes() rather than provided directly. Defaults to None.
-        name: Optional name for the model. Defaults to None.
-        **kwargs: Additional keyword arguments for Model base class.
+    :param map_size: Grid dimensions ``(height, width)``.
+    :type map_size: Tuple[int, int]
+    :param input_dim: Dimensionality of input vectors.
+    :type input_dim: int
+    :param initial_learning_rate: Learning rate at the start of training.
+    :type initial_learning_rate: float
+    :param sigma: Initial neighborhood radius.
+    :type sigma: float
+    :param neighborhood_function: ``'gaussian'`` or ``'bubble'``.
+    :type neighborhood_function: str
+    :param weights_initializer: Initializer name or instance for the SOM weights.
+    :type weights_initializer: Union[str, keras.initializers.Initializer]
+    :param regularizer: Optional weight regularizer.
+    :type regularizer: Optional[keras.regularizers.Regularizer]
+    :param class_prototypes: Optional pre-computed class-to-BMU mapping;
+        normally set by :meth:`fit_class_prototypes` instead.
+    :type class_prototypes: Optional[Dict[int, Tuple[int, int]]]
+    :param name: Optional model name.
+    :type name: Optional[str]
+    :param kwargs: Forwarded to ``keras.Model``.
 
     Input shape:
-        2D tensor with shape: `(batch_size, input_dim)`.
-        Input data should be normalized for best results.
+        ``(batch_size, input_dim)``, normalized.
 
     Output shape:
-        Tuple of two tensors:
-        - BMU coordinates: `(batch_size, 2)` with integer grid positions
-        - Quantization errors: `(batch_size,)` with distance to BMU
+        ``(bmu_coords, quant_errors)`` — integer ``(batch_size, 2)`` and
+        float ``(batch_size,)``.
 
-    Attributes:
-        som_layer: The underlying SOM2dLayer performing competitive learning.
-        class_prototypes: Dict mapping class labels to representative BMU positions.
-        map_size: Stored grid dimensions (height, width).
-        input_dim: Stored input dimensionality.
-
-    Methods:
-        train(): Train the SOM on data to organize the memory structure.
-        fit_class_prototypes(): Map classes to grid locations for classification.
-        predict_class(): Classify inputs using learned class prototypes.
-        visualize_grid(): Display learned neuron prototypes as a 2D grid.
-        visualize_class_distribution(): Show how classes map across the grid.
-        visualize_u_matrix(): Display cluster boundaries in the learned map.
-        visualize_hit_histogram(): Show activation frequency across neurons.
-        visualize_memory_recall(): Demonstrate associative memory retrieval.
+    :ivar som_layer: The underlying :class:`SOM2dLayer`.
+    :ivar class_prototypes: Dict mapping class labels to BMU positions.
+    :ivar map_size: Grid dimensions.
+    :ivar input_dim: Input dimensionality.
 
     Example:
-        ```python
-        # Create SOM for MNIST digits (28x28 = 784 dimensions)
-        som = SOMModel(
-            map_size=(20, 20),
-            input_dim=784,
-            initial_learning_rate=0.1,
-            sigma=2.0
-        )
-
-        # Train on data to organize memory
-        history = som.train(
-            x_train,
-            epochs=10,
-            batch_size=32
-        )
-
-        # Fit class prototypes for classification
-        som.fit_class_prototypes(x_train, y_train)
-
-        # Classify new data
-        predictions = som.predict_class(x_test)
-
-        # Visualize the learned memory structure
-        som.visualize_grid()
-        som.visualize_class_distribution(x_train, y_train)
-
-        # Demonstrate memory recall
-        som.visualize_memory_recall(
-            test_sample=x_test[0],
-            x_train=x_train,
-            y_train=y_train
-        )
-        ```
-
-    Note:
-        For Models, Keras automatically handles sub-layer building during the
-        first forward pass. The build() method explicitly builds the SOM layer
-        to ensure proper weight initialization and serialization support.
-
-        Input data should typically be normalized (e.g., to [0, 1] or [-1, 1])
-        for optimal convergence. The SOM is particularly effective for high-
-        dimensional data where traditional visualization methods fail.
-
-        Class prototypes must be fitted before classification can be performed.
-        The model supports both supervised (with labels) and unsupervised (without
-        labels) modes of operation.
+        >>> som = SOMModel(map_size=(20, 20), input_dim=784, sigma=2.0)
+        >>> history = som.train(x_train, epochs=10, batch_size=32)
+        >>> som.fit_class_prototypes(x_train, y_train)
+        >>> predictions = som.predict_class(x_test)
+        >>> som.visualize_grid()
     """
 
     def __init__(
@@ -290,11 +148,8 @@ class SOMModel(keras.Model):
 
         self._is_built = False
 
-        # Create the SOM layer - instantiated in __init__, built in build()
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: `name` is explicit and
-        # is the auto-name of the first instance in a process, so the weight
-        # paths do not move; what it removes is the per-process counter that
-        # made two instances of this model disagree by path.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-081: name is explicit, not
+        # auto-generated, so two instances in one process don't disagree on weight paths. See decisions.md.
         self.som_layer = SOM2dLayer(
             map_size=map_size,
             input_dim=input_dim,
@@ -307,15 +162,9 @@ class SOMModel(keras.Model):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model by initializing the SOM layer.
+        """Build the SOM layer explicitly, for correct weight init and serialization.
 
-        This method explicitly builds the SOM layer to ensure proper weight
-        initialization and serialization support. Called automatically on
-        first forward pass or can be called explicitly.
-
-        Args:
-            input_shape: Shape tuple of input data, typically (batch_size, input_dim).
+        :param input_shape: Shape of the input, typically ``(batch_size, input_dim)``.
         """
         if not self._is_built:
             self.som_layer.build(input_shape)
@@ -328,40 +177,21 @@ class SOMModel(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Forward pass computing Best Matching Units and quantization errors.
+        """Compute Best Matching Units and quantization errors.
 
-        In training mode, this also updates neuron weights via competitive learning.
-        In inference mode, only BMU coordinates and errors are computed.
+        Also updates neuron weights via competitive learning when ``training``
+        is ``True``; otherwise only inference is performed.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, input_dim). Should be
-                normalized for best results.
-            training: Boolean or None indicating training mode. When True,
-                performs weight updates. When False or None, only performs
-                inference. Defaults to None.
-
-        Returns:
-            Tuple containing:
-            - bmu_coords: Integer tensor of shape (batch_size, 2) with grid
-                coordinates of the Best Matching Unit for each input.
-            - quant_errors: Float tensor of shape (batch_size,) with Euclidean
-                distances between inputs and their BMUs (quantization error).
+        :param inputs: Input tensor, shape ``(batch_size, input_dim)``, normalized.
+        :param training: Whether to update weights.
+        :return: ``(bmu_coords, quant_errors)`` — integer ``(batch_size, 2)`` grid
+            coordinates of each input's BMU, and float ``(batch_size,)`` Euclidean
+            distances to those BMUs.
         """
         return self.som_layer(inputs, training=training)
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-062
-    # EVERY inference-time BMU lookup goes through here, in CHUNKS.
-    # `SOMLayer._find_bmu` broadcasts to `(batch, num_neurons, input_dim)`, so
-    # passing an entire unbatched dataset materializes one intermediate of that
-    # size: the class docstring's own MNIST example (`map_size=(20,20)`,
-    # `input_dim=784`, 60000 samples) is a ~75 GB float32 tensor. Five call
-    # sites did exactly that. DO NOT call `self.som_layer(...)` directly on a
-    # full dataset again -- `train()` already batches its own loop, and these
-    # sites now mirror it. The chunking is mathematically inert: BMU assignment
-    # is per-sample and `training=False` updates nothing, so results are
-    # IDENTICAL to the unbatched path, not merely close.
-    # See decisions.md D-062.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-062: every inference-time BMU lookup
+    # goes through here, chunked; an unbatched call on 60000 MNIST samples is ~75 GB. See decisions.md.
     def _bmu_indices_in_batches(
             self,
             x: np.ndarray,
@@ -369,19 +199,11 @@ class SOMModel(keras.Model):
     ) -> np.ndarray:
         """Return the BMU grid coordinates for ``x``, one chunk at a time.
 
-        Args:
-            x: Samples of shape ``(n_samples, ...)``. Flattened to
-                ``(n_samples, input_dim)`` before lookup, matching what
-                :meth:`train` does per batch.
-            batch_size: Rows per forward pass. Must be positive. The default
-                1024 keeps the ``(batch, num_neurons, input_dim)`` intermediate
-                bounded regardless of dataset size.
 
-        Returns:
-            Integer array of shape ``(n_samples, 2)`` with the grid coordinates
-            of each sample's Best Matching Unit -- exactly what a single
-            unbatched ``self.som_layer(x, training=False)`` would return.
+        :param x: Samples of shape ``(n_samples, ...)``. Flattened to ``(n_samples, input_dim)`` before lookup, matching what :meth:`train` does per batch.
+        :param batch_size: Rows per forward pass. Must be positive. The default 1024 keeps the ``(batch, num_neurons, input_dim)`` intermediate bounded regardless of dataset size.
 
+        :return: Integer array of shape ``(n_samples, 2)`` with the grid coordinates of each sample's Best Matching Unit -- exactly what a single unbatched ``self.som_layer(x, training=False)`` would return.
         Failure mode: raises ``ValueError`` for a non-positive ``batch_size``.
         An empty ``x`` returns an empty ``(0, 2)`` array rather than raising.
         """
@@ -417,27 +239,14 @@ class SOMModel(keras.Model):
         to preserve topological relationships. The learning rate and neighborhood
         size decay over training for stable convergence.
 
-        Args:
-            x_train: Training data array of shape (n_samples, input_dim) or
-                (n_samples, height, width) for images. Automatically flattened
-                if needed. Should be normalized to [0, 1] or similar range.
-            epochs: Number of complete passes through the training data.
-                More epochs allow finer organization but risk overfitting.
-                Typical values: 10-100. Defaults to 10.
-            batch_size: Number of samples per gradient update. Larger batches
-                provide more stable updates but slower convergence. Typical
-                values: 16-128. Defaults to 32.
-            shuffle: Whether to shuffle training data before each epoch.
-                Recommended for better convergence. Defaults to True.
-            verbose: Verbosity level controlling logging frequency.
-                0: silent, 1: progress updates every 10%, 2: every epoch.
-                Defaults to 1.
 
-        Returns:
-            Dictionary containing training history with keys:
-            - 'mean_quantization_error': List of average quantization errors
-                per epoch. Lower values indicate better organization.
+        :param x_train: Training data array of shape (n_samples, input_dim) or (n_samples, height, width) for images. Automatically flattened if needed. Should be normalized to [0, 1] or similar range.
+        :param epochs: Number of complete passes through the training data. More epochs allow finer organization but risk overfitting. Typical values: 10-100. Defaults to 10.
+        :param batch_size: Number of samples per gradient update. Larger batches provide more stable updates but slower convergence. Typical values: 16-128. Defaults to 32.
+        :param shuffle: Whether to shuffle training data before each epoch. Recommended for better convergence. Defaults to True.
+        :param verbose: Verbosity level controlling logging frequency. 0: silent, 1: progress updates every 10%, 2: every epoch. Defaults to 1.
 
+        :return: Dictionary containing training history with keys: - 'mean_quantization_error': List of average quantization errors per epoch. Lower values indicate better organization.
         Example:
             ```python
             # Train with default settings
@@ -469,39 +278,15 @@ class SOMModel(keras.Model):
             sample_batch = x_train[:1].reshape(1, -1)
             self.build(sample_batch.shape)
 
-        # Configure total training iterations for decay schedules.
-        #
-        # This MUST be in the same units the layer counts in. SOMLayer.call does
-        # ``iterations.assign_add(shape(inputs)[0])`` -- it counts SAMPLES
-        # (presentations). This used to write ``epochs * (len(x) // batch_size)``
-        # -- BATCHES -- so the counter outran its own budget by a factor of
-        # batch_size**2 / len(x) per epoch.
-        #
-        # Measured with the repo's own test config (64 samples, batch 32,
-        # 5 epochs): max_iterations was 10 while iterations reached 32 after the
-        # first batch, so the learning rate went NEGATIVE from the second batch
-        # (+0.1000, then -0.2200, -0.5400, ... -2.7800) and sigma sat pinned at
-        # its 1e-4 floor. A negative rate moves every neuron AWAY from its
-        # input, so the map anti-organised for 9 of 10 batches.
+        # Iteration budget must count samples, not batches: SOMLayer.call does
+        # iterations.assign_add(shape(inputs)[0]) each step.
         total_iterations = epochs * len(x_train)
         if total_iterations == 0:
             total_iterations = epochs  # Degenerate case: empty training set.
         self.som_layer.max_iterations.assign(float(total_iterations))
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-061
-        # RESET the counter, not just the budget. `SOMLayer.call` does
-        # `iterations.assign_add(...)`, so after a first `train(x, epochs=E)`
-        # the counter sits exactly AT `max_iterations`. Rewriting the same
-        # budget on a SECOND `train()` call therefore left the decayed learning
-        # rate clamped at 0 for the whole run: the second call performed ZERO
-        # adaptation and reported a flat quantization error, silently. Every
-        # existing test calls `train()` exactly once, so nothing saw it.
-        # DO NOT "fix" this by enlarging the budget instead, and DO NOT touch
-        # the units of `total_iterations` above -- that earlier fix (samples,
-        # not batches) is CORRECT and is what made this reachable, by changing
-        # the budget from a value the counter overran to one it lands exactly
-        # on. Reverting it would re-hide this defect behind a worse one.
-        # See decisions.md D-061.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-061: reset the counter, not just the
+        # budget, or a second train() call starts already at max_iterations and adapts nothing. See decisions.md.
         self.som_layer.iterations.assign(0.0)
 
         history = {'mean_quantization_error': []}
@@ -563,16 +348,11 @@ class SOMModel(keras.Model):
         The process finds where each class naturally clusters in the trained map,
         providing interpretable class organization that respects the learned topology.
 
-        Args:
-            x_train: Training data array of shape (n_samples, input_dim) or
-                (n_samples, height, width) for images. Should be the same data
-                used to train the SOM for accurate prototype fitting.
-            y_train: Class labels array of shape (n_samples,) with integer
-                class indices. Each unique value represents a distinct class.
 
-        Raises:
-            ValueError: If y_train contains no valid samples or if model is not built.
+        :param x_train: Training data array of shape (n_samples, input_dim) or (n_samples, height, width) for images. Should be the same data used to train the SOM for accurate prototype fitting.
+        :param y_train: Class labels array of shape (n_samples,) with integer class indices. Each unique value represents a distinct class.
 
+        :raises ValueError: If y_train contains no valid samples or if model is not built.
         Example:
             ```python
             # Train SOM first
@@ -645,19 +425,12 @@ class SOMModel(keras.Model):
         training, making predictions based on location in the memory structure
         rather than direct feature matching.
 
-        Args:
-            x_test: Test data array of shape (n_samples, input_dim) or
-                (n_samples, height, width) for images. Should use the same
-                normalization as training data.
 
-        Returns:
-            Array of predicted class labels with shape (n_samples,). Each value
-            is an integer corresponding to the nearest class prototype.
+        :param x_test: Test data array of shape (n_samples, input_dim) or (n_samples, height, width) for images. Should use the same normalization as training data.
 
-        Raises:
-            ValueError: If class prototypes have not been fitted. Call
-                fit_class_prototypes() before prediction.
+        :return: Array of predicted class labels with shape (n_samples,). Each value is an integer corresponding to the nearest class prototype.
 
+        :raises ValueError: If class prototypes have not been fitted. Call fit_class_prototypes() before prediction.
         Example:
             ```python
             # After training and fitting prototypes
@@ -728,24 +501,13 @@ class SOMModel(keras.Model):
         The visualization reveals the topological organization where similar
         prototypes cluster together, demonstrating the memory structure.
 
-        Args:
-            figsize: Tuple of (width, height) in inches for the figure size.
-                Larger values provide more detail for large grids.
-                Defaults to (10, 10).
-            cmap: Matplotlib colormap name for visualization. Used for image
-                grids ('gray' for grayscale images) or heatmaps ('viridis').
-                Defaults to 'viridis'.
-            save_path: Optional file path to save the visualization.
-                Supports formats like .png, .pdf, .svg. Defaults to None.
-            show: If ``True``, call ``plt.show()`` before returning. Defaults to
-                ``False``: this is library code, so it never blocks on a GUI
-                unless the caller asks. When ``False`` the figure is closed, so
-                repeated calls do not leak figures.
 
-        Returns:
-            The ``matplotlib`` ``Figure``. It is already closed when
-            ``show=False``; use ``show=True`` or ``save_path`` to render it.
+        :param figsize: Tuple of (width, height) in inches for the figure size. Larger values provide more detail for large grids. Defaults to (10, 10).
+        :param cmap: Matplotlib colormap name for visualization. Used for image grids ('gray' for grayscale images) or heatmaps ('viridis'). Defaults to 'viridis'.
+        :param save_path: Optional file path to save the visualization. Supports formats like .png, .pdf, .svg. Defaults to None.
+        :param show: If ``True``, call ``plt.show()`` before returning. Defaults to ``False``: this is library code, so it never blocks on a GUI unless the caller asks. When ``False`` the figure is closed, so repeated calls do not leak figures.
 
+        :return: The ``matplotlib`` ``Figure``. It is already closed when ``show=False``; use ``show=True`` or ``save_path`` to render it.
         Example:
             ```python
             # Basic visualization
@@ -809,14 +571,8 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-051
-        # Do NOT restore an unconditional ``plt.show()`` here. This is library
-        # code: it must not decide to block on a GUI, and on the headless hosts
-        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
-        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
-        # Measured before the repair: four visualize_* calls left four figures
-        # open and emitted ten UserWarnings. The caller gets the Figure back and
-        # decides. See decisions.md D-051.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051: never call plt.show()
+        # unconditionally; on a headless host it leaks the figure instead of blocking. See decisions.md.
         if show:
             plt.show()
         else:
@@ -846,32 +602,17 @@ class SOMModel(keras.Model):
         Class prototypes (if fitted) are overlaid as starred markers, showing the
         representative locations for classification.
 
-        Args:
-            x_data: Data samples of shape (n_samples, input_dim) to visualize.
-                Typically training data used to train the SOM.
-            y_data: Class labels of shape (n_samples,). Can be integer labels
-                or one-hot encoded. Automatically converted to class indices.
-            figsize: Tuple of (width, height) in inches for the figure.
-                Defaults to (10, 10).
-            cmap: Matplotlib colormap for class colors. 'tab10' provides
-                distinct colors for up to 10 classes. Use 'tab20' for more.
-                Defaults to 'tab10'.
-            alpha: Transparency of data points (0=transparent, 1=opaque).
-                Lower values help visualize overlapping regions.
-                Defaults to 0.5.
-            marker_size: Size of scatter plot markers in points squared.
-                Defaults to 100.
-            save_path: Optional file path to save visualization.
-                Defaults to None.
-            show: If ``True``, call ``plt.show()`` before returning. Defaults to
-                ``False``: this is library code, so it never blocks on a GUI
-                unless the caller asks. When ``False`` the figure is closed, so
-                repeated calls do not leak figures.
 
-        Returns:
-            The ``matplotlib`` ``Figure``. It is already closed when
-            ``show=False``; use ``show=True`` or ``save_path`` to render it.
+        :param x_data: Data samples of shape (n_samples, input_dim) to visualize. Typically training data used to train the SOM.
+        :param y_data: Class labels of shape (n_samples,). Can be integer labels or one-hot encoded. Automatically converted to class indices.
+        :param figsize: Tuple of (width, height) in inches for the figure. Defaults to (10, 10).
+        :param cmap: Matplotlib colormap for class colors. 'tab10' provides distinct colors for up to 10 classes. Use 'tab20' for more. Defaults to 'tab10'.
+        :param alpha: Transparency of data points (0=transparent, 1=opaque). Lower values help visualize overlapping regions. Defaults to 0.5.
+        :param marker_size: Size of scatter plot markers in points squared. Defaults to 100.
+        :param save_path: Optional file path to save visualization. Defaults to None.
+        :param show: If ``True``, call ``plt.show()`` before returning. Defaults to ``False``: this is library code, so it never blocks on a GUI unless the caller asks. When ``False`` the figure is closed, so repeated calls do not leak figures.
 
+        :return: The ``matplotlib`` ``Figure``. It is already closed when ``show=False``; use ``show=True`` or ``save_path`` to render it.
         Example:
             ```python
             # Basic class distribution
@@ -951,14 +692,8 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-051
-        # Do NOT restore an unconditional ``plt.show()`` here. This is library
-        # code: it must not decide to block on a GUI, and on the headless hosts
-        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
-        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
-        # Measured before the repair: four visualize_* calls left four figures
-        # open and emitted ten UserWarnings. The caller gets the Figure back and
-        # decides. See decisions.md D-051.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051: never call plt.show()
+        # unconditionally; on a headless host it leaks the figure instead of blocking. See decisions.md.
         if show:
             plt.show()
         else:
@@ -984,23 +719,13 @@ class SOMModel(keras.Model):
         This visualization is essential for understanding the cluster structure
         learned by the SOM, revealing natural groupings in the data.
 
-        Args:
-            figsize: Tuple of (width, height) in inches for the figure.
-                Defaults to (10, 10).
-            cmap: Matplotlib colormap where bright indicates boundaries.
-                'viridis_r' (reversed) makes boundaries bright. Can also use
-                'hot', 'plasma_r', etc. Defaults to 'viridis_r'.
-            save_path: Optional file path to save visualization.
-                Defaults to None.
-            show: If ``True``, call ``plt.show()`` before returning. Defaults to
-                ``False``: this is library code, so it never blocks on a GUI
-                unless the caller asks. When ``False`` the figure is closed, so
-                repeated calls do not leak figures.
 
-        Returns:
-            The ``matplotlib`` ``Figure``. It is already closed when
-            ``show=False``; use ``show=True`` or ``save_path`` to render it.
+        :param figsize: Tuple of (width, height) in inches for the figure. Defaults to (10, 10).
+        :param cmap: Matplotlib colormap where bright indicates boundaries. 'viridis_r' (reversed) makes boundaries bright. Can also use 'hot', 'plasma_r', etc. Defaults to 'viridis_r'.
+        :param save_path: Optional file path to save visualization. Defaults to None.
+        :param show: If ``True``, call ``plt.show()`` before returning. Defaults to ``False``: this is library code, so it never blocks on a GUI unless the caller asks. When ``False`` the figure is closed, so repeated calls do not leak figures.
 
+        :return: The ``matplotlib`` ``Figure``. It is already closed when ``show=False``; use ``show=True`` or ``save_path`` to render it.
         Example:
             ```python
             # Basic U-Matrix visualization
@@ -1065,14 +790,8 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-051
-        # Do NOT restore an unconditional ``plt.show()`` here. This is library
-        # code: it must not decide to block on a GUI, and on the headless hosts
-        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
-        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
-        # Measured before the repair: four visualize_* calls left four figures
-        # open and emitted ten UserWarnings. The caller gets the Figure back and
-        # decides. See decisions.md D-051.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051: never call plt.show()
+        # unconditionally; on a headless host it leaks the figure instead of blocking. See decisions.md.
         if show:
             plt.show()
         else:
@@ -1097,25 +816,15 @@ class SOMModel(keras.Model):
         underutilized. Uniform utilization indicates good map organization, while
         many "dead" neurons suggest overparameterization or poor initialization.
 
-        Args:
-            x_data: Data samples of shape (n_samples, input_dim) to analyze.
-                Typically the training data.
-            figsize: Tuple of (width, height) in inches. Defaults to (10, 10).
-            cmap: Matplotlib colormap for the heatmap. Defaults to 'viridis'.
-            log_scale: Whether to use logarithmic color scaling. Useful when
-                activation frequencies vary by orders of magnitude. Defaults to False.
-            save_path: Optional file path to save visualization. Defaults to None.
-            show: If ``True``, call ``plt.show()`` before returning. Defaults to
-                ``False``: this is library code, so it never blocks on a GUI
-                unless the caller asks. When ``False`` the figure is closed, so
-                repeated calls do not leak figures.
 
-        Returns:
-            A ``(hit_histogram, figure)`` tuple. ``hit_histogram`` is an array of
-            shape (grid_height, grid_width) containing hit counts for each
-            neuron, useful for quantitative analysis of map utilization; the
-            ``matplotlib`` ``Figure`` is already closed when ``show=False``.
+        :param x_data: Data samples of shape (n_samples, input_dim) to analyze. Typically the training data.
+        :param figsize: Tuple of (width, height) in inches. Defaults to (10, 10).
+        :param cmap: Matplotlib colormap for the heatmap. Defaults to 'viridis'.
+        :param log_scale: Whether to use logarithmic color scaling. Useful when activation frequencies vary by orders of magnitude. Defaults to False.
+        :param save_path: Optional file path to save visualization. Defaults to None.
+        :param show: If ``True``, call ``plt.show()`` before returning. Defaults to ``False``: this is library code, so it never blocks on a GUI unless the caller asks. When ``False`` the figure is closed, so repeated calls do not leak figures.
 
+        :return: A ``(hit_histogram, figure)`` tuple. ``hit_histogram`` is an array of shape (grid_height, grid_width) containing hit counts for each neuron, useful for quantitative analysis of map utilization; the ``matplotlib`` ``Figure`` is already closed when ``show=False``.
         Example:
             ```python
             # Basic hit histogram
@@ -1167,14 +876,8 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-051
-        # Do NOT restore an unconditional ``plt.show()`` here. This is library
-        # code: it must not decide to block on a GUI, and on the headless hosts
-        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
-        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
-        # Measured before the repair: four visualize_* calls left four figures
-        # open and emitted ten UserWarnings. The caller gets the Figure back and
-        # decides. See decisions.md D-051.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051: never call plt.show()
+        # unconditionally; on a headless host it leaks the figure instead of blocking. See decisions.md.
         if show:
             plt.show()
         else:
@@ -1205,30 +908,17 @@ class SOMModel(keras.Model):
         This illustrates how SOMs function as content-addressable memory where
         partial or noisy inputs can retrieve complete, similar memories.
 
-        Args:
-            test_sample: Single test sample of shape (input_dim,) or (1, input_dim).
-                This is the query to the associative memory.
-            n_similar: Number of similar training samples to retrieve and display.
-                Defaults to 5.
-            x_train: Optional training data of shape (n_samples, input_dim) for
-                finding similar samples. If None, only shows query and prototype.
-                Defaults to None.
-            y_train: Optional training labels for annotating similar samples.
-                Defaults to None.
-            figsize: Tuple of (width, height) in inches. Should be wide enough
-                for all panels. Defaults to (15, 3).
-            cmap: Matplotlib colormap for visualization. Use 'gray' for grayscale
-                images. Defaults to 'gray'.
-            save_path: Optional file path to save visualization. Defaults to None.
-            show: If ``True``, call ``plt.show()`` before returning. Defaults to
-                ``False``: this is library code, so it never blocks on a GUI
-                unless the caller asks. When ``False`` the figure is closed, so
-                repeated calls do not leak figures.
 
-        Returns:
-            The ``matplotlib`` ``Figure``. It is already closed when
-            ``show=False``; use ``show=True`` or ``save_path`` to render it.
+        :param test_sample: Single test sample of shape (input_dim,) or (1, input_dim). This is the query to the associative memory.
+        :param n_similar: Number of similar training samples to retrieve and display. Defaults to 5.
+        :param x_train: Optional training data of shape (n_samples, input_dim) for finding similar samples. If None, only shows query and prototype. Defaults to None.
+        :param y_train: Optional training labels for annotating similar samples. Defaults to None.
+        :param figsize: Tuple of (width, height) in inches. Should be wide enough for all panels. Defaults to (15, 3).
+        :param cmap: Matplotlib colormap for visualization. Use 'gray' for grayscale images. Defaults to 'gray'.
+        :param save_path: Optional file path to save visualization. Defaults to None.
+        :param show: If ``True``, call ``plt.show()`` before returning. Defaults to ``False``: this is library code, so it never blocks on a GUI unless the caller asks. When ``False`` the figure is closed, so repeated calls do not leak figures.
 
+        :return: The ``matplotlib`` ``Figure``. It is already closed when ``show=False``; use ``show=True`` or ``save_path`` to render it.
         Example:
             ```python
             # Basic memory recall (query + prototype only)
@@ -1341,14 +1031,8 @@ class SOMModel(keras.Model):
         if save_path:
             plt.savefig(save_path, bbox_inches='tight', dpi=300)
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-051
-        # Do NOT restore an unconditional ``plt.show()`` here. This is library
-        # code: it must not decide to block on a GUI, and on the headless hosts
-        # this repo runs on (``MPLBACKEND=Agg`` is mandated repo-wide) the call
-        # only emits "FigureCanvasAgg is non-interactive" and LEAKS the figure.
-        # Measured before the repair: four visualize_* calls left four figures
-        # open and emitted ten UserWarnings. The caller gets the Figure back and
-        # decides. See decisions.md D-051.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-051: never call plt.show()
+        # unconditionally; on a headless host it leaks the figure instead of blocking. See decisions.md.
         if show:
             plt.show()
         else:
@@ -1364,9 +1048,7 @@ class SOMModel(keras.Model):
         parameters for reconstructing the model. All constructor parameters must
         be included for proper serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters passed to __init__.
-            Includes serialized initializers and regularizers.
+        :return: Dictionary containing all configuration parameters passed to __init__. Includes serialized initializers and regularizers.
         """
         config = super().get_config()
 
@@ -1400,11 +1082,9 @@ class SOMModel(keras.Model):
         model from saved configuration. It deserializes complex objects and
         converts JSON-compatible types back to their original forms.
 
-        Args:
-            config: Configuration dictionary from get_config().
 
-        Returns:
-            New instance of SOMModel with the saved configuration.
+        :param config: Configuration dictionary from get_config().
+        :return: New instance of SOMModel with the saved configuration.
         """
         if config.get('weights_initializer'):
             config['weights_initializer'] = keras.initializers.deserialize(
@@ -1450,26 +1130,20 @@ def create_som(
     are continuous problem-specific quantities. Kohonen defines no named scale
     family, so this factory constructs the class directly.
 
-    Args:
-        map_size: (height, width) of the neuron grid. Both entries must be
-            positive.
-        input_dim: Dimensionality of the input vectors. Must be positive.
-        initial_learning_rate: Starting learning rate for the adaptation step.
-            Must be positive; it decays over the configured iteration budget.
-        sigma: Initial neighborhood radius. Must be positive.
-        neighborhood_function: Either ``'gaussian'`` or ``'bubble'``.
-        weights_initializer: Initializer for the neuron prototype vectors.
-        regularizer: Optional regularizer applied to the prototype weights.
-        class_prototypes: Optional pre-fitted class -> BMU coordinate mapping.
-        **kwargs: Additional arguments forwarded to the model constructor.
 
-    Returns:
-        A configured SOMModel instance. Calling it returns
-        ``(bmu_coordinates, quantization_errors)``.
+    :param map_size: (height, width) of the neuron grid. Both entries must be positive.
+    :param input_dim: Dimensionality of the input vectors. Must be positive.
+    :param initial_learning_rate: Starting learning rate for the adaptation step. Must be positive; it decays over the configured iteration budget.
+    :param sigma: Initial neighborhood radius. Must be positive.
+    :param neighborhood_function: Either ``'gaussian'`` or ``'bubble'``.
+    :param weights_initializer: Initializer for the neuron prototype vectors.
+    :param regularizer: Optional regularizer applied to the prototype weights.
+    :param class_prototypes: Optional pre-fitted class -> BMU coordinate mapping.
+    :param kwargs: Additional arguments forwarded to the model constructor.
 
-    Raises:
-        ValueError: If any argument is outside its valid range.
+    :return: A configured SOMModel instance. Calling it returns ``(bmu_coordinates, quantization_errors)``.
 
+    :raises ValueError: If any argument is outside its valid range.
     Example:
         >>> model = create_som(map_size=(4, 4), input_dim=8)
         >>> bmu, err = model(keras.random.normal((6, 8)), training=False)

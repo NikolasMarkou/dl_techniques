@@ -1,10 +1,9 @@
-"""Ideogram4 latent normalization constants.
+"""Per-channel statistics for denormalizing the Ideogram4 VAE latent.
 
-Ported from the PyTorch reference ``src/ideogram4/latent_norm.py``. The two
-128-element vectors ``LATENT_SHIFT`` and ``LATENT_SCALE`` are the per-channel
-mean / std used to denormalize the VAE latent before decoding (the inverse of
-the encoder-side normalization). Values are copied byte-identically from the
-reference; only ``get_latent_norm`` is reimplemented with numpy/keras (no torch).
+``LATENT_SHIFT`` and ``LATENT_SCALE`` are 128-element vectors holding the
+per-channel mean and standard deviation of the VAE latent. :func:`get_latent_norm`
+turns them into tensors so the pipeline can undo the encoder-side
+normalization before decoding.
 """
 
 from __future__ import annotations
@@ -280,14 +279,10 @@ LATENT_SCALE: Tuple[float, ...] = (
 
 
 def get_latent_norm() -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Return the per-channel latent shift / scale vectors.
+    """Build the per-channel latent shift and scale tensors.
 
-    Reimplements the PyTorch ``get_latent_norm`` with numpy/keras (no torch).
-    The two vectors are the per-channel denormalization statistics applied to
-    the VAE latent before decoding.
-
-    Returns:
-        A pair ``(shift, scale)``, each a float32 keras tensor of shape ``(128,)``.
+    :return: A pair ``(shift, scale)``, each a float32 tensor of shape ``(128,)``.
+    :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
     """
     shift = np.asarray(LATENT_SHIFT, dtype="float32")
     scale = np.asarray(LATENT_SCALE, dtype="float32")

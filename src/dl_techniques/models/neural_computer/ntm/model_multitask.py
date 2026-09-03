@@ -1,32 +1,19 @@
 """
-Neural Turing Machine conditioned on a task identity for multi-task sequence
-learning.
+Neural Turing Machine conditioned on a task identity, for multi-task sequence
+learning. ``NTMMultiTask`` wraps a sequence-level ``NeuralTuringMachine``.
 
-The NTM's algorithmic tasks — copy, repeat-copy, associative recall, priority sort
-— share an input format but demand different memory disciplines, and a single NTM
-trained on their union has no way to know which discipline the current sequence
-calls for. Task conditioning supplies that missing bit. A one-hot task vector is
-broadcast across the temporal axis and concatenated onto every timestep's features,
-so the controller sees the task identity at the same moment it sees the first
-symbol, and the head parameters it emits — key, sharpness, interpolation gate,
-shift, erase and add vectors — can be functions of the task from step one.
+The NTM's algorithmic tasks (copy, repeat-copy, associative recall, priority
+sort) share an input format but need different memory disciplines, and one NTM
+trained on their union has no way to tell which discipline a given sequence
+calls for. This model fixes that by broadcasting a one-hot task vector across
+the temporal axis and concatenating it onto every timestep's features, so the
+controller sees the task identity from the first symbol. Broadcasting instead
+of prepending a task token keeps the task identity out of the controller's
+recurrent state, at the cost of `num_tasks` extra input features per timestep.
 
-Broadcasting rather than prepending a task token is the deliberate choice here. A
-prepended token would make the task identity a memory the controller has to hold
-across the whole sequence, competing for exactly the recurrent capacity that
-external memory exists to relieve; carrying it on every timestep instead makes it a
-free-standing input the controller can consult without remembering. The cost is
-`num_tasks` extra input features at every step, which is negligible against the
-controller width.
-
-The wrapper is otherwise thin: it computes the fused feature dimension
-(`feature_dim + num_tasks`) in `build` and hands it to the inner
-`NeuralTuringMachine`, which is the fully unrolled sequence-level NTM rather than
-the RNN cell. Output is always a sequence — these tasks are supervised at every
-timestep, not at the end — so `return_sequences=True` is fixed rather than exposed,
-and `return_state=False` keeps the memory matrix out of the model's outputs. The
-broadcast target shape is built from `ops.shape(x)` rather than static dimensions
-so a variable sequence length survives graph tracing.
+Output is always a sequence, since these tasks are supervised at every
+timestep: `return_sequences=True` and `return_state=False` are fixed on the
+inner NTM rather than exposed as constructor arguments.
 
 References:
     - Graves et al., 2014. Neural Turing Machines.
@@ -65,7 +52,7 @@ class NTMMultiTask(keras.Model):
     memory matrix is internal state rather than a model output, so neither is
     exposed as a constructor knob.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -135,11 +122,11 @@ class NTMMultiTask(keras.Model):
         >>> outputs = model([sequence, task_id], training=False)   # (2, 20, 8)
 
     Note:
-        The task vector is BROADCAST, not prepended. A prepended task token would
+        The task vector is broadcast, not prepended. A prepended task token would
         force the controller to carry the task identity in recurrent state across
-        the whole sequence — competing for the capacity that external memory
-        exists to relieve — whereas broadcasting makes it a free-standing input at
-        every step, at a cost of ``num_tasks`` extra features per timestep.
+        the whole sequence, competing with the capacity external memory is meant
+        to free up. Broadcasting instead makes it a free-standing input at every
+        step, at a cost of ``num_tasks`` extra features per timestep.
 
     Attributes:
         ntm_config: The resolved :class:`NTMConfig`.
@@ -161,7 +148,6 @@ class NTMMultiTask(keras.Model):
         """
         super().__init__(**kwargs)
 
-        # Handle configuration serialization/deserialization
         if isinstance(ntm_config, dict):
             self.ntm_config = NTMConfig.from_dict(ntm_config)
         else:
@@ -170,7 +156,6 @@ class NTMMultiTask(keras.Model):
         self.output_dim = output_dim
         self.num_tasks = num_tasks
 
-        # Create sub-layers in __init__ (Golden Rule)
         self.ntm_layer = NeuralTuringMachine(
             config=self.ntm_config,
             output_dim=output_dim,
@@ -180,7 +165,7 @@ class NTMMultiTask(keras.Model):
         )
 
     def build(self, input_shape: Union[List[Tuple], Tuple]) -> None:
-        """Build the inner NTM at the FUSED input width.
+        """Build the inner NTM at the fused input width.
 
         The NTM never sees the raw sequence: its input width is
         ``feature_dim + num_tasks``, computed here from the sequence shape, which
@@ -198,14 +183,11 @@ class NTMMultiTask(keras.Model):
 
         sequence_shape, task_shape = input_shape
 
-        # Calculate combined dimension: feature_dim + num_tasks
-        # sequence_shape is (batch, seq_len, feature_dim)
         if sequence_shape[-1] is None:
             raise ValueError("Last dimension of input sequence must be defined.")
 
         combined_feature_dim = sequence_shape[-1] + self.num_tasks
 
-        # The NTM layer expects (batch, seq_len, combined_dim)
         ntm_input_shape = (sequence_shape[0], sequence_shape[1], combined_feature_dim)
 
         self.ntm_layer.build(ntm_input_shape)
@@ -229,7 +211,7 @@ class NTMMultiTask(keras.Model):
         :param training: Training-mode flag, forwarded explicitly to the NTM layer
             rather than left to Keras' ambient ``CallContext``. Nothing in the NTM
             stack is training-sensitive today, so this currently changes no
-            output; see the ``D-059`` anchor above.
+            output.
         :type training: Optional[bool]
         :return: Output tensor of shape ``(batch, seq_len, output_dim)``.
         :rtype: keras.KerasTensor
@@ -240,23 +222,18 @@ class NTMMultiTask(keras.Model):
 
         x, task_one_hot = inputs
 
-        # Get dynamic dimensions using ops for graph safety
+        # keras.ops.shape keeps a dynamic seq_len valid under graph tracing.
         input_shape = keras.ops.shape(x)
         batch_size = input_shape[0]
         seq_len = input_shape[1]
 
-        # 1. Expand task_one_hot to (Batch, 1, Num_Tasks)
         task_expanded = keras.ops.expand_dims(task_one_hot, axis=1)
 
-        # 2. Broadcast across sequence length: (Batch, Seq_Len, Num_Tasks)
-        # We explicitly cast shapes to ensure compatibility with ops.broadcast_to
         target_shape = (batch_size, seq_len, self.num_tasks)
         task_broadcasted = keras.ops.broadcast_to(task_expanded, target_shape)
 
-        # 3. Concatenate: (Batch, Seq_Len, Dim + Num_Tasks)
         ntm_input = keras.ops.concatenate([x, task_broadcasted], axis=-1)
 
-        # 4. Pass to NTM
         return self.ntm_layer(ntm_input, training=training)
 
     def compute_output_shape(self, input_shape: List[Tuple]) -> Tuple[int, int, int]:
@@ -272,7 +249,6 @@ class NTMMultiTask(keras.Model):
         :rtype: Tuple[int, int, int]
         """
         sequence_shape = input_shape[0]
-        # Return (batch, seq_len, output_dim)
         return (sequence_shape[0], sequence_shape[1], self.output_dim)
 
     def get_config(self) -> Dict[str, Any]:
@@ -301,7 +277,6 @@ class NTMMultiTask(keras.Model):
         :return: An ``NTMMultiTask`` instance.
         :rtype: NTMMultiTask
         """
-        # Ensure ntm_config is reconstructed properly
         if "ntm_config" in config and isinstance(config["ntm_config"], dict):
             config["ntm_config"] = NTMConfig.from_dict(config["ntm_config"])
         return cls(**config)

@@ -1,80 +1,26 @@
 """
-A Dense feature stack whose output head emits the parameters of a conditional
-Gaussian mixture over the target, with ancestral sampling and a variance
-decomposition built on top of it.
+MDNModel and its factory create_mdn_model, a Dense feature stack whose output
+head emits the parameters of a conditional Gaussian mixture over the target.
 
-The failure this architecture repairs is specific. Regression under squared error is
-maximum likelihood under a fixed-variance unimodal Gaussian, so the network can only
-ever return `E[y|x]`. When the conditional distribution is multi-modal — inverse
-problems, where several distinct outputs explain the same input — the conditional
-mean falls between the modes and is a value the process never generates. Averaging
-two correct answers produces a wrong one. Widening the network does not help, because
-the target being fit is the mean itself.
+Regression under squared error is maximum likelihood under a fixed-variance
+unimodal Gaussian, so a plain network can only ever return E[y|x]. When the
+conditional distribution is multi-modal, the conditional mean falls between
+the modes and is a value the process never generates. This model replaces the
+point head with a density:
 
-A mixture density network replaces the point head with a density:
+p(y|x) = sum_i pi_i(x) * N(y; mu_i(x), diag sigma_i(x)^2)
 
-`p(y|x) = sum_i pi_i(x) * N(y; mu_i(x), diag sigma_i(x)^2)`
+trained under the mixture negative log-likelihood. The gradient now rewards
+placing probability mass where the data is, so components separate onto modes
+and sigma_i absorbs local noise; sigma_i is a function of x, so the model can
+be confident in one region and diffuse in another (heteroscedasticity).
 
-and trains under `L = -log sum_i pi_i(x) N(y; mu_i(x), sigma_i(x))`. The gradient now
-rewards placing probability mass where the data is, not splitting the difference, so
-components separate onto modes and `sigma_i` absorbs whatever local noise remains.
-Heteroscedasticity comes free: `sigma_i` is a function of `x`, so the model can be
-confident in one region and diffuse in another.
-
-The parameterization is where the numerics live. `sigma` is produced by a softplus
-plus a `min_sigma` floor (1e-3), which keeps it strictly positive and, more
-importantly, bounds `log(sigma)` and `1/sigma` — an unfloored MDN drives `sigma`
-toward zero on any component that lands exactly on a data point and the likelihood
-diverges. `pi` is emitted as RAW LOGITS with no activation at all; every consumer
-(loss, sampling, point estimate, uncertainty) applies exactly one softmax or
-log_softmax to that slice, and adding an activation at the head would compress the
-logits through a double application. The likelihood is evaluated entirely in log
-space: `log_softmax` over the mixture axis, per-dimension Gaussian log-densities
-summed over the last axis, then `logsumexp` over the mixture axis. The ordering is
-load-bearing — the sum over output dimensions is the log of a product (components are
-diagonal, so dimensions are independent given a component) and must happen before the
-mixture is reduced, and doing either step in probability space underflows as
-`output_dimension` grows.
-
-Structurally the model is a stack of hidden blocks feeding one `MDNLayer`. Each
-configured hidden size expands to `Dense -> [BatchNorm] -> Activation -> [Dropout]`,
-with normalization before the activation and dropout last; the Dense carries no
-activation of its own precisely so the normalization can sit between them. All
-sublayers are created in `__init__` and explicitly built in `build()` rather than
-lazily on first call: a sublayer that does not exist when a `.keras` file restores
-weights is re-initialized afterwards, and the saved values are discarded without any
-error. The head returns a single concatenated tensor of width
-`2 * output_dim * num_mixtures + num_mixtures` laid out `[mu | sigma | pi]`, which is
-why sampling and uncertainty are methods on this model rather than caller-side
-post-processing — the split is the layer's contract, not a convention.
-
-`compile()` deliberately does not accept a `loss` argument. It hard-wires
-`mdn_layer.loss_func`, because the output tensor is a parameter vector and any
-ordinary regression loss applied to it is meaningless arithmetic over concatenated
-`mu`, `sigma` and logits. Making the loss unpassable removes the failure mode rather
-than documenting it.
-
-`sample()` draws ancestrally: a Gumbel-max categorical pick over `pi / temperature`
-selects a component, then a Gaussian draw is taken from that component's parameters.
-Temperature acts on the logits before the softmax, so below 1 it concentrates on
-dominant components and above 1 it flattens toward uniform selection — it changes
-which mode is visited, not the width of the component once chosen. When a `seed` is
-given, sample `i` uses `seed + i` so the draws are reproducible yet uncorrelated, and
-inside the layer the Gaussian draw is offset again so it does not alias the
-categorical stream. Samples stack on axis 1, giving `[batch, num_samples, output_dim]`.
-
-`predict_with_uncertainty` applies the law of total variance to the mixture:
-`E[y|x] = sum_i pi_i mu_i`, with `sum_i pi_i sigma_i^2` as the within-component term
-and `sum_i pi_i (mu_i - E[y|x])^2` as the between-component term. The keys name these
-`aleatoric_variance` and `epistemic_variance`, and that second name should be read as
-a label for the between-component spread, not as a claim about parameter uncertainty:
-a single deterministically-trained MDN has one set of weights and cannot express
-uncertainty about them. Genuine epistemic uncertainty requires an ensemble or a
-posterior over weights. The returned intervals are likewise `point +/- z * sqrt(total
-variance)`, a Gaussian approximation applied to a distribution chosen for being
-non-Gaussian; they are calibrated in the unimodal case and merely indicative when the
-mixture is genuinely multi-modal, where the honest interval is a set of disjoint
-regions that a single lower/upper pair cannot represent.
+Compile does not accept a loss argument: it hard-wires the MDN layer's own
+negative-log-likelihood loss, since an ordinary regression loss applied to a
+concatenated [mu, sigma, pi] vector is meaningless. The head output is a single
+tensor of width 2*output_dim*num_mixtures + num_mixtures, laid out
+[mu | sigma | pi]; sampling and uncertainty estimation are methods on this
+model because that split is the layer's contract.
 
 References:
     - Bishop, 1994. Mixture Density Networks. Aston University Technical Report
@@ -92,10 +38,6 @@ from keras import ops
 from keras import layers
 from typing import List, Union, Optional, Dict, Any, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.statistics.mdn_layer import (
     MDNLayer,
@@ -109,91 +51,76 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.mdn.model")
 class MDNModel(keras.Model):
     """A complete Mixture Density Network model.
 
-    **Intent**: Wrap a configurable Dense feature-extraction stack and an
-    ``MDNLayer`` output head into a single serializable ``keras.Model`` that
-    predicts the parameters of a Gaussian-mixture distribution P(y|x) instead of
-    a point estimate, enabling uncertainty quantification, multi-modal regression,
-    and probabilistic sampling. All sublayers are created in ``__init__`` (every
-    architectural parameter is construction-time known); ``build()`` only threads
-    shapes through them so saved weights restore losslessly.
+    Combines a configurable Dense feature-extraction stack with an
+    :class:`MDNLayer` output head, predicting the parameters of a
+    Gaussian-mixture distribution over the target instead of a point estimate.
+    All sublayers are created in ``__init__``; ``build()`` only threads shapes
+    through them, so a ``.keras`` weight restore lands losslessly.
 
-    This model combines a feature extraction network with an MDN layer and handles
-    the appropriate loss function and sampling functionality. It enables the prediction
-    of probability distributions instead of single point estimates, which is valuable
-    for regression problems with multi-modal outputs or heteroscedastic noise.
+    Architecture:
 
-    Architecture Overview:
-    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-    │   Input     │ -> │  Feature    │ -> │  Feature    │ -> │    MDN      │
-    │ [batch, D]  │    │ Extraction  │    │ Extraction  │    │   Layer     │
-    │             │    │  Layer 1    │    │  Layer N    │    │ [μ,σ,π]     │
-    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-                            │                    │                   │
-                      ┌─────────────┐    ┌─────────────┐             │
-                      │ BatchNorm   │    │ BatchNorm   │             │
-                      │ (optional)  │    │ (optional)  │             │
-                      └─────────────┘    └─────────────┘             │
-                            │                    │                   │
-                      ┌─────────────┐    ┌─────────────┐             │
-                      │ Activation  │    │ Activation  │             │
-                      │   (ReLU)    │    │   (ReLU)    │             │
-                      └─────────────┘    └─────────────┘             │
-                            │                    │                   │
-                      ┌─────────────┐    ┌─────────────┐             │
-                      │  Dropout    │    │  Dropout    │             │
-                      │ (optional)  │    │ (optional)  │             │
-                      └─────────────┘    └─────────────┘             │
-                                                                     │
-                                                                     v
-                                                           ┌─────────────┐
-                                                           │   Output    │
-                                                           │Distribution │
-                                                           │ Parameters  │
-                                                           └─────────────┘
+    .. code-block:: text
 
-    Args:
-        hidden_layers: List of hidden layer sizes for feature extraction.
-            Each integer represents the number of units in that layer.
-        output_dimension: Dimensionality of the output space.
-            This is the number of target variables being predicted.
-        num_mixtures: Number of Gaussian mixtures in the MDN layer.
-            More mixtures allow modeling more complex distributions but increase parameters.
-        hidden_activation: Activation function for hidden layers.
-            Defaults to 'relu'.
-        kernel_initializer: Initializer for the kernel weights matrix.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Regularizer function applied to the kernel weights matrix.
-            Helps prevent overfitting. Defaults to None.
-        use_batch_norm: Whether to use batch normalization between hidden layers.
-            Can help with training stability and convergence. Defaults to False.
-        dropout_rate: Dropout rate for regularization. Set to None for no dropout.
-            Randomly sets input units to 0 during training to prevent overfitting.
-            Defaults to None.
-        **kwargs: Additional model arguments passed to the parent Model class.
+        input [B, D]
+             |
+             v
+        ┌──────────────┐
+        │ dense         │  (repeated per hidden_layers entry)
+        │ batchnorm     │  (optional)
+        │ activation    │
+        │ dropout       │  (optional)
+        └──────────────┘
+             |
+             v
+        ┌──────────────┐
+        │ mdn_layer     │  emits [mu | sigma | pi]
+        └──────────────┘
+             |
+             v
+        output [B, 2*output_dim*num_mixtures + num_mixtures]
 
-    Example:
-        >>> # Create a model for 2D output with 5 mixture components
-        >>> model = MDNModel(
-        ...     hidden_layers=[64, 32],          # Two hidden layers
-        ...     output_dimension=2,              # 2D target space (e.g., x,y coordinates)
-        ...     num_mixtures=5,                  # 5 Gaussian components
-        ...     kernel_initializer='he_normal',  # Good for ReLU activations
-        ...     kernel_regularizer=keras.regularizers.L2(1e-5)  # L2 regularization
-        ... )
-        >>> model.compile(optimizer='adam')      # Uses MDN loss automatically
-        >>> model.fit(x_train, y_train, epochs=100)
-        >>> samples = model.sample(x_test, num_samples=10)  # Generate 10 samples per input
+    :param hidden_layers: Sizes of the hidden feature-extraction layers.
+    :type hidden_layers: List[int]
+    :param output_dimension: Dimensionality of the target being predicted.
+    :type output_dimension: int
+    :param num_mixtures: Number of Gaussian components in the mixture.
+    :type num_mixtures: int
+    :param hidden_activation: Activation function for hidden layers.
+    :type hidden_activation: str
+    :param kernel_initializer: Initializer for the kernel weight matrices.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Regularizer applied to the kernel weight matrices.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_batch_norm: Whether to insert batch normalization between hidden
+        layers.
+    :type use_batch_norm: bool
+    :param dropout_rate: Dropout rate applied after each hidden layer, or
+        ``None`` for no dropout.
+    :type dropout_rate: Optional[float]
+    :param kwargs: Additional arguments passed to the parent ``Model`` class.
+
+    Example::
+
+        model = MDNModel(
+            hidden_layers=[64, 32],
+            output_dimension=2,
+            num_mixtures=5,
+            kernel_initializer='he_normal',
+            kernel_regularizer=keras.regularizers.L2(1e-5)
+        )
+        model.compile(optimizer='adam')
+        model.fit(x_train, y_train, epochs=100)
+        samples = model.sample(x_test, num_samples=10)
 
     Note:
-        The model automatically uses the MDN loss function when compiled.
-        The sampling functionality allows for uncertainty quantification and
-        probabilistic predictions.
+        The model uses the MDN negative-log-likelihood loss automatically on
+        compile. Sampling and ``predict_with_uncertainty`` give probabilistic
+        predictions rather than a single point estimate.
     """
 
     # Class-level defaults (discoverability).
@@ -213,18 +140,16 @@ class MDNModel(keras.Model):
             dropout_rate: Optional[float] = None,
             **kwargs: Any
     ) -> None:
-        """Initialize the MDN model.
+        """Validate the configuration and create every sublayer.
 
-        Validates all input parameters and CREATES all sublayers (every
-        architectural parameter is construction-time known). ``build()`` then only
-        threads shapes through them. Creating layers here (not in ``build()``) is
-        required so that on ``.keras`` weight-restore the sublayers already exist
-        and saved weights land losslessly instead of being silently re-initialized.
+        Sublayers are created here, not in ``build()``, so that on a
+        ``.keras`` weight restore they already exist and the saved weights
+        land instead of being silently re-initialized.
 
-        Raises:
-            ValueError: If hidden_layers is empty or contains non-positive values.
-            ValueError: If output_dimension or num_mixtures are not positive integers.
-            ValueError: If dropout_rate is not in the range [0, 1).
+        :raises ValueError: If ``hidden_layers`` is empty or holds a
+            non-positive value, if ``output_dimension`` or ``num_mixtures``
+            is not a positive integer, or if ``dropout_rate`` is outside
+            ``[0, 1)``.
         """
         super().__init__(**kwargs)
 
@@ -256,14 +181,7 @@ class MDNModel(keras.Model):
 
         self._build_input_shape = None  # For serialization
 
-        # CREATE ALL SUBLAYERS (Golden Rule).
-        # Every architectural parameter is construction-time known, so all
-        # sublayers are instantiated here. build() only threads shapes through
-        # them via explicit .build() calls.
-        #
-        # Each "hidden layer" expands to up to 4 sublayers:
-        #   Dense -> [BatchNorm] -> Activation -> [Dropout]
-        # (BatchNorm before activation; Dropout last — standard ordering.)
+        # Each hidden layer expands to Dense -> [BatchNorm] -> Activation -> [Dropout].
         self.feature_layers = []  # [Dense, BatchNorm?, Activation, Dropout?]*N
         for i, units in enumerate(self.hidden_layers_sizes):
             self.feature_layers.append(layers.Dense(
@@ -295,27 +213,23 @@ class MDNModel(keras.Model):
                    f"{output_dimension}D output, {num_mixtures} mixtures")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the model with the given input shape.
+        """Thread the input shape through every sublayer, in order.
 
-        Sublayers are CREATED in ``__init__``; this method only threads shapes
-        through them by calling each sublayer's ``.build()`` explicitly (each layer
-        needs the output shape of the previous one). The explicit per-sublayer
-        ``.build()`` chain is REQUIRED: a ``build()`` that defers sublayer building
-        to first ``call`` leaves them unbuilt at ``.keras`` weight-restore time,
-        which silently re-initializes the restored weights.
+        Sublayers are created in ``__init__``; this only calls each
+        sublayer's own ``build()`` explicitly, since a deferred build would
+        leave sublayers unbuilt at ``.keras`` weight-restore time and the
+        restored weights would be silently re-initialized.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
-                Format: (batch_size, feature_dim) where batch_size can be None
+        :param input_shape: ``(batch_size, feature_dim)``; ``batch_size`` may
+            be ``None``.
+        :type input_shape: Tuple[Optional[int], ...]
         """
         # Store input shape for serialization support
         self._build_input_shape = input_shape
 
         logger.info(f"Building MDNModel with input shape: {input_shape}")
 
-        # BUILD ALL SUBLAYERS SEQUENTIALLY
-        # Each layer needs to know the output shape of the previous layer; we
-        # propagate shapes forward (Dropout/Activation pass shape through).
+        # Each layer needs the output shape of the previous one.
         current_shape = input_shape
         for layer in self.feature_layers:
             layer.build(current_shape)
@@ -331,49 +245,22 @@ class MDNModel(keras.Model):
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        """Forward pass of the model.
+        """Run the feature stack, then the MDN head.
 
-        Implements the complete forward computation:
-        1. Feature extraction through hidden layers
-        2. Mixture parameter prediction via MDN layer
-
-        The data flow is:
-        input -> feature_layer_1 -> ... -> feature_layer_N -> mdn_layer -> output
-
-        Each feature layer may include batch normalization and dropout, which behave
-        differently during training vs inference:
-        - BatchNorm: Uses batch statistics during training, moving averages during inference
-        - Dropout: Active during training (randomly zeros units), disabled during inference
-
-        Args:
-            inputs: Input tensor with shape [batch_size, input_dim]
-            training: Boolean indicating whether the model should behave in training mode.
-                - True: Enables dropout, uses batch statistics for BatchNorm
-                - False/None: Disables dropout, uses moving averages for BatchNorm
-                Defaults to None (inference mode).
-
-        Returns:
-            Output tensor containing mixture parameters with shape:
-            [batch_size, (2 * output_dim * num_mixtures) + num_mixtures]
-
-            The output structure is: [μ₁, μ₂, ..., μₙ, σ₁, σ₂, ..., σₙ, π₁, π₂, ..., πₘ]
-            where:
-            - n = num_mixtures * output_dim (means and std devs for each component/dimension)
-            - m = num_mixtures (mixture weights)
+        :param inputs: Input tensor, ``[batch_size, input_dim]``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether BatchNorm/Dropout run in training mode.
+        :type training: Optional[bool]
+        :return: Mixture parameters, ``[batch_size, 2*output_dim*num_mixtures + num_mixtures]``,
+            laid out ``[mu_1, ..., mu_n, sigma_1, ..., sigma_n, pi_1, ..., pi_m]``
+            where ``n = num_mixtures * output_dim`` and ``m = num_mixtures``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
-        # FEATURE EXTRACTION PHASE
-        # Pass input through all feature extraction layers sequentially
-        # Each layer transforms the representation to be more suitable for the task
         for layer in self.feature_layers:
-            # Propagate training flag to each layer
-            # This is crucial for layers like BatchNorm and Dropout
             x = layer(x, training=training)
 
-        # MDN PARAMETER PREDICTION PHASE
-        # Transform the learned features into mixture distribution parameters
-        # Returns concatenated [μ, σ, π] parameters for all mixture components
         return self.mdn_layer(x, training=training)
 
     def sample(
@@ -383,83 +270,54 @@ class MDNModel(keras.Model):
             temperature: float = 1.0,
             seed: Optional[int] = None
     ) -> keras.KerasTensor:
-        """Generate samples from the predicted distribution.
+        """Draw samples from the predicted mixture distribution.
 
-        Performs Monte Carlo sampling from the mixture distribution predicted by the model.
-        This is useful for:
-        - Uncertainty quantification: Multiple samples show prediction spread
-        - Multi-modal exploration: Samples can come from different mixture components
-        - Probabilistic decision making: Use sample statistics for robust decisions
+        Runs one forward pass to get ``[mu, sigma, pi]``, then for each
+        sample selects a component via a categorical draw over ``pi`` and
+        samples from that component's Gaussian.
 
-        The sampling process:
-        1. Forward pass to get mixture parameters [μ, σ, π]
-        2. For each sample:
-           a. Select mixture component using categorical distribution over π
-           b. Sample from selected Gaussian N(μᵢ, σᵢ²)
-        3. Stack all samples for return
+        :param inputs: Input tensor, ``[batch_size, input_dim]``.
+        :type inputs: keras.KerasTensor
+        :param num_samples: Number of samples to draw per input.
+        :type num_samples: int
+        :param temperature: Scales the mixture logits before the categorical
+            draw. Below 1 concentrates on dominant components; above 1
+            flattens toward uniform selection.
+        :type temperature: float
+        :param seed: If given, sample ``i`` uses ``seed + i`` for a
+            reproducible but uncorrelated draw.
+        :type seed: Optional[int]
+        :return: Samples, ``[batch_size, num_samples, output_dim]``.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If ``num_samples`` or ``temperature`` is not
+            positive.
 
-        Args:
-            inputs: Input tensor with shape [batch_size, input_dim]
-            num_samples: Number of samples to generate for each input.
-                More samples give better uncertainty estimates but increase computation.
-                Defaults to 1.
-            temperature: Temperature parameter for sampling (higher = more random).
-                - temperature > 1: More uniform sampling across mixture components
-                - temperature = 1: Uses predicted mixture weights exactly
-                - temperature < 1: More concentrated sampling around dominant components
-                Defaults to 1.0.
-            seed: Optional seed for reproducible sampling. If provided, each sample
-                uses seed + sample_index for deterministic results. Defaults to None.
+        Example::
 
-        Returns:
-            Samples from the predicted distribution with shape:
-            [batch_size, num_samples, output_dim]
-
-            Each sample[i, j, :] represents the j-th sample for the i-th input.
-
-        Raises:
-            ValueError: If num_samples is not positive or temperature is not positive.
-
-        Example:
-            >>> # Generate 100 samples for uncertainty quantification
-            >>> samples = model.sample(x_test, num_samples=100)
-            >>> # Compute sample statistics
-            >>> sample_mean = ops.mean(samples, axis=1)      # [batch, output_dim]
-            >>> sample_std = ops.std(samples, axis=1)        # [batch, output_dim]
-            >>> # Use samples for robust decision making
-            >>> confidence_intervals = ops.percentile(samples, [5, 95], axis=1)
+            samples = model.sample(x_test, num_samples=100)
+            sample_mean = ops.mean(samples, axis=1)
+            sample_std = ops.std(samples, axis=1)
+            confidence_intervals = ops.percentile(samples, [5, 95], axis=1)
         """
-        # Input validation
         if num_samples <= 0:
             raise ValueError("num_samples must be positive")
         if temperature <= 0:
             raise ValueError("temperature must be positive")
 
-        # Get mixture parameters from forward pass
-        # Use inference mode (training=False) for consistent predictions
+        # Inference mode, for predictions consistent across calls.
         predictions = self(inputs, training=False)
 
-        # Generate multiple independent samples
-        # Each sample involves stochastic choices, so we need multiple draws
         samples = []
         for i in range(num_samples):
-            # Use different seeds for each sample if a seed is provided
-            # This ensures reproducible but uncorrelated samples
             sample_seed = None if seed is None else seed + i
 
-            # Generate one sample from the mixture distribution
-            # This involves: component selection + Gaussian sampling
-            # DECISION plan_2026-06-09_be55db55/D-004: forward the per-sample
-            # `sample_seed` (seed + i) into mdn_layer.sample. It was previously
-            # computed and DISCARDED (latent bug), making `seed=` a no-op. Do NOT
-            # drop this arg; MDNLayer.sample was extended to accept `seed`. See
-            # decisions.md D-004.
+            # DECISION plan_2026-06-09_be55db55/D-004: forward sample_seed into
+            # mdn_layer.sample; it was previously computed and discarded, so
+            # `seed=` was a no-op. Do not drop this argument. See decisions.md D-004.
             sample = self.mdn_layer.sample(
                 predictions, temperature=temperature, seed=sample_seed)
             samples.append(sample)
 
-        # Stack samples along a new dimension: [batch, samples, output_dim]
-        # This makes it easy to compute statistics across samples
         return ops.stack(samples, axis=1)
 
     def predict_with_uncertainty(
@@ -467,98 +325,46 @@ class MDNModel(keras.Model):
             inputs: keras.KerasTensor,
             confidence_level: float = 0.95
     ) -> Dict[str, keras.KerasTensor]:
-        """Generate predictions with comprehensive uncertainty estimates.
+        """Decompose the mixture's predictive variance and give an interval.
 
-        This method provides a complete uncertainty analysis of the model's predictions,
-        decomposing uncertainty into its fundamental components and providing
-        interpretable confidence intervals.
+        Applies the law of total variance: ``Var[y|x] = aleatoric +
+        epistemic``, where ``aleatoric = sum_i pi_i * sigma_i^2`` and
+        ``epistemic = sum_i pi_i * (mu_i - E[y|x])^2``. The interval is a
+        Gaussian approximation, ``point +/- z * sqrt(total_variance)``; it is
+        calibrated for a unimodal mixture and only indicative when the
+        mixture is genuinely multi-modal.
 
-        Uncertainty Decomposition:
-        The total predictive uncertainty is decomposed using the law of total variance:
+        :param inputs: Input tensor, ``[batch_size, input_dim]``.
+        :type inputs: keras.KerasTensor
+        :param confidence_level: Confidence level for the prediction
+            interval, in ``(0, 1)``.
+        :type confidence_level: float
+        :return: Dictionary with keys ``point_estimates``, ``total_variance``,
+            ``aleatoric_variance``, ``epistemic_variance``, ``lower_bound`` and
+            ``upper_bound``, each ``[batch_size, output_dim]``.
+        :rtype: Dict[str, keras.KerasTensor]
+        :raises ValueError: If ``confidence_level`` is not in ``(0, 1)``.
 
-        Var[y|x] = E[Var[y|x,θ]] + Var[E[y|x,θ]]
-                 = Aleatoric    + Epistemic
+        Example::
 
-        Where:
-        - Aleatoric uncertainty: Irreducible noise in the data (heteroscedastic noise)
-        - Epistemic uncertainty: Model uncertainty due to limited training data
-
-        Mathematical Details:
-        - Point estimate: E[y|x] = Σᵢ πᵢ(x) * μᵢ(x)
-        - Aleatoric variance: E[Var[y|x,θ]] = Σᵢ πᵢ(x) * σᵢ²(x)
-        - Epistemic variance: Var[E[y|x,θ]] = Σᵢ πᵢ(x) * (μᵢ(x) - E[y|x])²
-
-        Args:
-            inputs: Input tensor with shape [batch_size, input_dim]
-            confidence_level: Confidence level for prediction intervals (0-1).
-                Common values: 0.95 (95%), 0.99 (99%), 0.68 (68% ≈ 1σ)
-                Defaults to 0.95.
-
-        Returns:
-            Dictionary containing comprehensive uncertainty estimates:
-
-            * **point_estimates**: Mean predictions [batch_size, output_dim]
-                The expected value of the mixture distribution
-
-            * **total_variance**: Total predictive variance [batch_size, output_dim]
-                Combined aleatoric + epistemic uncertainty
-
-            * **aleatoric_variance**: Data uncertainty component [batch_size, output_dim]
-                Irreducible uncertainty due to noise in the data
-                High values indicate inherently noisy/ambiguous regions
-
-            * **epistemic_variance**: Model uncertainty component [batch_size, output_dim]
-                Uncertainty due to limited training data
-                High values indicate regions where more data would help
-
-            * **lower_bound**: Lower prediction interval bounds [batch_size, output_dim]
-                Lower bound of confidence interval assuming Gaussian approximation
-
-            * **upper_bound**: Upper prediction interval bounds [batch_size, output_dim]
-                Upper bound of confidence interval assuming Gaussian approximation
-
-        Raises:
-            ValueError: If confidence_level is not in the range (0, 1).
-
-        Example:
-            >>> # Get comprehensive uncertainty analysis
-            >>> uncertainty = model.predict_with_uncertainty(x_test, confidence_level=0.95)
-            >>>
-            >>> # Extract components
-            >>> predictions = uncertainty['point_estimates']
-            >>> total_unc = uncertainty['total_variance']
-            >>> data_noise = uncertainty['aleatoric_variance']
-            >>> model_unc = uncertainty['epistemic_variance']
-            >>>
-            >>> # Identify high-uncertainty regions
-            >>> high_epistemic = ops.where(model_unc > ops.percentile(model_unc, 90))
-            >>> print(f"Regions needing more training data: {high_epistemic}")
-            >>>
-            >>> # Use confidence intervals for decision making
-            >>> pred_width = uncertainty['upper_bound'] - uncertainty['lower_bound']
-            >>> confident_predictions = predictions[pred_width < threshold]
+            uncertainty = model.predict_with_uncertainty(x_test, confidence_level=0.95)
+            predictions = uncertainty['point_estimates']
+            data_noise = uncertainty['aleatoric_variance']
+            model_unc = uncertainty['epistemic_variance']
+            pred_width = uncertainty['upper_bound'] - uncertainty['lower_bound']
         """
-        # Input validation
         if not (0 < confidence_level < 1):
             raise ValueError("confidence_level must be in the range (0, 1)")
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-117: there is deliberately NO
-        # `predictions = self.predict(inputs)` here. It used to run a full forward pass
-        # over `inputs` whose result was never read -- `get_point_estimate` and
-        # `get_uncertainty` below each run their own -- so this method cost THREE
-        # forward passes to use two. Do NOT re-add it "for clarity".
-        # COMPUTE POINT ESTIMATES
-        # Calculate the expected value of the mixture distribution
-        # E[y|x] = Σᵢ πᵢ(x) * μᵢ(x)
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-117: no separate
+        # `self.predict(inputs)` call here; get_point_estimate/get_uncertainty
+        # below each already run a forward pass. Do not re-add it.
         point_estimates = get_point_estimate(
             model=self,
             x_data=inputs,
             mdn_layer=self.mdn_layer
         )
 
-        # DECOMPOSE UNCERTAINTY
-        # Separate total uncertainty into aleatoric (data) and epistemic (model) components
-        # This decomposition is crucial for understanding prediction reliability
         total_variance, aleatoric_variance = get_uncertainty(
             model=self,
             x_data=inputs,
@@ -566,21 +372,14 @@ class MDNModel(keras.Model):
             point_estimates=point_estimates
         )
 
-        # Calculate epistemic variance (model uncertainty)
-        # By law of total variance: Total = Aleatoric + Epistemic
         epistemic_variance = total_variance - aleatoric_variance
 
-        # COMPUTE CONFIDENCE INTERVALS
-        # Assume the mixture distribution is approximately Gaussian (CLT)
-        # Use z-scores from normal distribution for interval bounds
         lower_bound, upper_bound = get_prediction_intervals(
             point_estimates=point_estimates,
             total_variance=total_variance,
             confidence_level=confidence_level
         )
 
-        # Convert all numpy arrays back to Keras tensors for consistency
-        # This ensures compatibility with the rest of the Keras ecosystem
         return {
             'point_estimates': ops.convert_to_tensor(point_estimates),
             'total_variance': ops.convert_to_tensor(total_variance),
@@ -596,48 +395,31 @@ class MDNModel(keras.Model):
             metrics: Optional[List[Union[str, keras.metrics.Metric]]] = None,
             **kwargs: Any
     ) -> None:
-        """Configure the model for training.
+        """Configure the model for training with the MDN negative-log-likelihood loss.
 
-        Automatically sets up the MDN-specific loss function and configures the
-        optimizer and metrics for training. The MDN loss function is the negative
-        log-likelihood of the mixture distribution.
+        The loss argument is not exposed here: the loss is always
+        ``self.mdn_layer.loss_func``, since an ordinary regression loss
+        applied to the concatenated ``[mu, sigma, pi]`` output would not be
+        meaningful.
 
-        Mathematical Background:
-        The loss function maximizes the likelihood of the observed data under the
-        predicted mixture distribution:
+        :param optimizer: Optimizer instance or name (``'adam'``, ``'rmsprop'``,
+            ``'sgd'``, ...).
+        :type optimizer: Union[str, keras.optimizers.Optimizer]
+        :param metrics: Metrics to track during training. Standard regression
+            metrics may not apply directly, since the model outputs
+            distribution parameters rather than point predictions.
+        :type metrics: Optional[List[Union[str, keras.metrics.Metric]]]
+        :param kwargs: Additional compile arguments (``loss_weights``,
+            ``run_eagerly``, ...).
 
-        L = -log(Σᵢ πᵢ(x) * N(y_true | μᵢ(x), σᵢ(x)))
+        Example::
 
-        This loss automatically:
-        - Encourages accurate mean predictions (μᵢ close to y_true)
-        - Learns appropriate uncertainty levels (σᵢ matching data noise)
-        - Balances mixture weights (πᵢ) based on local data density
-
-        Args:
-            optimizer: Optimizer instance or string name.
-                Common choices:
-                - 'adam': Adaptive learning rates, good default
-                - 'rmsprop': Good for recurrent architectures
-                - 'sgd': Simple but may need learning rate tuning
-            metrics: List of metrics to track during training.
-                Note: Standard regression metrics may not be directly applicable
-                since the model outputs distribution parameters, not predictions.
-                Consider custom metrics that evaluate the quality of the distributions.
-                Defaults to None.
-            **kwargs: Additional compile arguments (e.g., loss_weights, run_eagerly).
-
-        Example:
-            >>> # Basic compilation
-            >>> model.compile(optimizer='adam')
-            >>>
-            >>> # Advanced compilation with custom optimizer
-            >>> model.compile(
-            ...     optimizer=keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0),
-            ...     metrics=['mae']  # Track mean absolute error of point estimates
-            ... )
+            model.compile(optimizer='adam')
+            model.compile(
+                optimizer=keras.optimizers.Adam(learning_rate=0.001, clipnorm=1.0),
+                metrics=['mae']
+            )
         """
-        # Use the MDN layer's loss function automatically
-        # This loss function is specifically designed for mixture distributions
         super().compile(
             optimizer=optimizer,
             loss=self.mdn_layer.loss_func,  # Negative log-likelihood loss
@@ -647,14 +429,10 @@ class MDNModel(keras.Model):
         logger.info(f"MDNModel compiled with optimizer: {optimizer}")
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization.
+        """Return the constructor configuration.
 
-        Serializes all constructor parameters needed to recreate the model.
-        This enables saving and loading the model architecture.
-
-        Returns:
-            Dictionary containing the model configuration with all parameters
-            needed to reconstruct the model via from_config().
+        :return: Every constructor argument, plus the base model config.
+        :rtype: Dict[str, Any]
         """
         config = {
             "hidden_layers": self.hidden_layers_sizes,
@@ -671,43 +449,34 @@ class MDNModel(keras.Model):
         return {**base_config, **config}
 
     def get_build_config(self) -> Dict[str, Any]:
-        """Get the build configuration for serialization.
+        """Return the build configuration, separate from the constructor config.
 
-        Stores information needed to rebuild the model layers after loading.
-        This is separate from get_config() which stores constructor parameters.
-
-        Returns:
-            Dictionary containing the build configuration, specifically the
-            input shape needed to reconstruct the layer architecture.
+        :return: Dictionary with the stored ``input_shape``.
+        :rtype: Dict[str, Any]
         """
         return {
             "input_shape": self._build_input_shape,
         }
 
     def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Build the model from a build configuration.
+        """Rebuild the model layers from a stored build configuration.
 
-        Reconstructs the model layers using the stored build configuration.
-        This is called automatically when loading a saved model.
+        Called automatically when loading a saved model.
 
-        Args:
-            config: Dictionary containing the build configuration from get_build_config().
+        :param config: Dictionary from :meth:`get_build_config`.
+        :type config: Dict[str, Any]
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MDNModel":
-        """Create a model from its configuration.
+        """Reconstruct a model from a configuration dictionary.
 
-        Reconstructs the model from a configuration dictionary created by get_config().
-        This enables loading saved models with their exact architecture.
-
-        Args:
-            config: Dictionary with the model configuration from get_config().
-
-        Returns:
-            A new MDN model instance with the same architecture as the original.
+        :param config: Dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new model instance with the same architecture.
+        :rtype: MDNModel
         """
         config_copy = config.copy()
 
@@ -725,30 +494,20 @@ class MDNModel(keras.Model):
         return cls(**config_copy)
 
     def save(self, filepath: str, **kwargs: Any) -> None:
-        """Save the model to a file.
+        """Save the model, adding a ``.keras`` extension if missing.
 
-        Saves the complete model including architecture, weights, and training configuration
-        in Keras format. The saved model can be loaded with keras.models.load_model().
+        :param filepath: Path to save to.
+        :type filepath: str
+        :param kwargs: Additional arguments passed to the parent ``save()``.
 
-        Args:
-            filepath: Path where to save the model. If the path doesn't end with
-                '.keras', the extension will be added automatically for consistency.
-            **kwargs: Additional save arguments passed to the parent save method.
-                Common options:
-                - save_format: 'h5' or 'tf' (default is 'tf' for .keras files)
-                - save_traces: Whether to save function traces (default True)
+        Example::
 
-        Example:
-            >>> # Save model
-            >>> model.save('my_mdn_model')  # Automatically becomes 'my_mdn_model.keras'
-            >>>
-            >>> # Load model later
-            >>> loaded_model = keras.models.load_model(
-            ...     'my_mdn_model.keras',
-            ...     custom_objects={'MDNModel': MDNModel, 'MDNLayer': MDNLayer}
-            ... )
+            model.save('my_mdn_model')  # Becomes 'my_mdn_model.keras'
+            loaded_model = keras.models.load_model(
+                'my_mdn_model.keras',
+                custom_objects={'MDNModel': MDNModel, 'MDNLayer': MDNLayer}
+            )
         """
-        # Ensure consistent file extension for clarity
         if not filepath.endswith('.keras'):
             filepath += '.keras'
 
@@ -756,49 +515,27 @@ class MDNModel(keras.Model):
         super().save(filepath, **kwargs)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the model.
+        """Return the output shape for a given input shape.
 
-        Calculates the shape of the output tensor based on the input shape.
-        The output contains all mixture parameters concatenated together.
+        :param input_shape: ``(batch_size, input_features)``; ``batch_size``
+            may be ``None``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``(batch_size, 2*output_dim*num_mixtures + num_mixtures)``.
+        :rtype: Tuple[Optional[int], ...]
 
-        Output Structure:
-        The model outputs a concatenated tensor with:
-        - μ parameters: num_mixtures * output_dim values (means)
-        - σ parameters: num_mixtures * output_dim values (std deviations)
-        - π parameters: num_mixtures values (mixture weights)
+        Example::
 
-        Total size: (2 * num_mixtures * output_dim) + num_mixtures
-
-        Args:
-            input_shape: Shape of the input tensor.
-                Format: (batch_size, input_features) where batch_size can be None
-
-        Returns:
-            Output shape tuple: (batch_size, total_mixture_params)
-            where total_mixture_params = (2 * output_dim * num_mixtures) + num_mixtures
-
-        Example:
-            >>> # Model with output_dim=2, num_mixtures=3
-            >>> input_shape = (None, 10)  # Batch size unknown, 10 input features
-            >>> output_shape = model.compute_output_shape(input_shape)
-            >>> print(output_shape)  # (None, 21)
-            >>> # Breakdown: (2*2*3) + 3 = 12 + 9 = 21 total parameters
-            >>> # 12 = μ and σ parameters for 3 mixtures × 2 dimensions
-            >>> # 3 = π parameters for 3 mixture weights
+            input_shape = (None, 10)
+            output_shape = model.compute_output_shape(input_shape)
+            # output_shape == (None, 21) for output_dim=2, num_mixtures=3:
+            # (2*2*3) + 3 = 12 + 9 = 21
         """
-        # Convert input_shape to list for manipulation
         input_shape_list = list(input_shape)
 
-        # Calculate total number of mixture parameters
-        # Each mixture component needs: output_dim μ values + output_dim σ values + 1 π value
-        # Total across all mixtures: num_mix * (output_dim + output_dim + 1/num_mix)
-        # Simplified: (2 * output_dim * num_mix) + num_mix
         output_features = (2 * self.output_dim * self.num_mix) + self.num_mix
 
-        # Return shape preserving batch dimension
         return tuple(input_shape_list[:-1] + [output_features])
 
-# ---------------------------------------------------------------------
 
 def create_mdn_model(
         hidden_layers: List[int],
@@ -816,34 +553,41 @@ def create_mdn_model(
 
     Convenience factory mirroring ``create_nbeats_model``/``create_deepar``: it
     instantiates the model and runs a tiny inference-mode dummy forward pass so
-    the returned model is already BUILT (weights materialized), ready for
+    the returned model is already built (weights materialized), ready for
     ``.summary()``, ``.save()``, or weight transfer without a separate warmup.
 
-    Args:
-        hidden_layers: List of hidden layer sizes for feature extraction.
-        output_dimension: Dimensionality of the target/output space.
-        num_mixtures: Number of Gaussian mixture components.
-        input_dimension: Feature dimension of the input, used only to build the
-            model via the dummy forward pass.
-        hidden_activation: Activation for hidden layers. Defaults to ``"relu"``.
-        kernel_initializer: Kernel weight initializer. Defaults to
-            ``"glorot_uniform"``.
-        kernel_regularizer: Optional kernel regularizer. Defaults to ``None``.
-        use_batch_norm: Whether to insert BatchNormalization. Defaults to ``False``.
-        dropout_rate: Dropout rate in ``[0, 1)`` or ``None``. Defaults to ``None``.
-        **kwargs: Forwarded to :class:`MDNModel` (e.g. ``name``).
+    :param hidden_layers: Sizes of the hidden feature-extraction layers.
+    :type hidden_layers: List[int]
+    :param output_dimension: Dimensionality of the target/output space.
+    :type output_dimension: int
+    :param num_mixtures: Number of Gaussian mixture components.
+    :type num_mixtures: int
+    :param input_dimension: Feature dimension of the input, used only for the
+        dummy forward pass that builds the model.
+    :type input_dimension: int
+    :param hidden_activation: Activation for hidden layers.
+    :type hidden_activation: str
+    :param kernel_initializer: Kernel weight initializer.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional kernel regularizer.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_batch_norm: Whether to insert BatchNormalization.
+    :type use_batch_norm: bool
+    :param dropout_rate: Dropout rate in ``[0, 1)`` or ``None``.
+    :type dropout_rate: Optional[float]
+    :param kwargs: Forwarded to :class:`MDNModel` (e.g. ``name``).
+    :return: A built :class:`MDNModel` instance.
+    :rtype: MDNModel
 
-    Returns:
-        A built :class:`MDNModel` instance.
+    Example::
 
-    Example:
-        >>> model = create_mdn_model(
-        ...     hidden_layers=[64, 32],
-        ...     output_dimension=2,
-        ...     num_mixtures=5,
-        ...     input_dimension=10,
-        ... )
-        >>> model.compile(optimizer="adam")
+        model = create_mdn_model(
+            hidden_layers=[64, 32],
+            output_dimension=2,
+            num_mixtures=5,
+            input_dimension=10,
+        )
+        model.compile(optimizer="adam")
     """
     model = MDNModel(
         hidden_layers=hidden_layers,
@@ -861,5 +605,3 @@ def create_mdn_model(
     dummy = np.zeros((1, input_dimension), dtype="float32")
     model(dummy, training=False)
     return model
-
-# ---------------------------------------------------------------------

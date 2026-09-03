@@ -1,32 +1,18 @@
-"""Flux2 KL-VAE for the Ideogram4 Keras port (NHWC, channels-last).
+"""VAE for the Ideogram4 pipeline: image to latent and back, channels-last.
 
-A faithful Keras 3 reimplementation of the Flux2 KL autoencoder used by
-Ideogram4 (PyTorch ``autoencoder.py``). The PyTorch reference is channels-FIRST
-(NCHW); this port is channels-LAST (NHWC) throughout. The building blocks are:
+Builds the encoder-decoder pair the pipeline uses to turn a latent into an
+image (and, for training, an image into a latent). The reference
+implementation is channels-first; this port is channels-last throughout.
+`ResnetBlock` and `AttnBlock` form the encoder and decoder stacks, with
+`AttnBlock` used only at the lowest resolution, since its cost grows with
+the square of the spatial token count. `Downsample` and `Upsample` move
+between resolution stages. `AutoEncoder` wraps `Encoder` and `Decoder` with
+a KL reparameterization; at inference only its `decode` method runs, since
+the pipeline's diffusion sampler produces the latent directly.
 
-- :class:`ResnetBlock` -- ``GroupNorm32 -> swish -> Conv3x3 -> GroupNorm32 ->
-  swish -> Conv3x3`` with a 1x1 conv skip when ``in_ch != out_ch``.
-- :class:`AttnBlock` -- ``GroupNorm32`` + 1x1 q/k/v convs + scaled-dot-product
-  self-attention over the flattened ``H*W`` spatial tokens + 1x1 proj_out, added
-  residually. Used ONLY at the bottleneck (lowest resolution) -- never at full
-  resolution (O((HW)^2) memory; see plan Failure Modes).
-- :class:`Downsample` -- asymmetric pad ``[[0,0],[0,1],[0,1],[0,0]]`` (bottom +
-  right by 1) then ``Conv2D(stride=2, padding="valid")``.
-- :class:`Upsample` -- nearest x2 upsample + ``Conv2D(3x3, same)``.
-- :class:`Encoder` / :class:`Decoder` -- the standard Flux2 down/up stacks with a
-  mid block (ResnetBlock + AttnBlock + ResnetBlock).
-- :class:`AutoEncoder` -- holds Encoder + Decoder, exposes ``encode`` (returns
-  ``(z_mean, z_log_var)``), a KL :class:`Sampling` reparameterization, and
-  ``decode``. ``call`` runs encode -> sample -> decode and returns the
-  reconstruction. At pipeline inference only the DECODER is used.
-
-GroupNorm uses the built-in ``keras.layers.GroupNormalization(groups=32,
-epsilon=1e-6)`` directly (no repo-norms wrapper). Every channel count fed to a
-GroupNorm must be divisible by 32; the config invariant (config.py
-``validate_vae_groupnorm``) guarantees this for the provided presets, and the
-ctor also asserts it defensively.
-
-swish(x) = x * sigmoid(x) is ``keras.activations.silu``.
+Every channel count fed to a `GroupNormalization(groups=32)` must be
+divisible by 32; `config.py`'s `validate_vae_groupnorm` checks this for the
+provided presets, and each constructor here checks it again.
 
 References:
     - Kingma and Welling, 2014. Auto-Encoding Variational Bayes.
@@ -49,10 +35,6 @@ from __future__ import annotations
 import keras
 from typing import Any, Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import Sampling
 from dl_techniques.models.vision_language.ideogram4.config import (
@@ -62,7 +44,6 @@ from dl_techniques.models.vision_language.ideogram4.config import (
 from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 _GN_GROUPS: int = 32
 _GN_EPS: float = 1e-6
@@ -83,10 +64,6 @@ def _check_div32(value: int, what: str) -> None:
             f"(GroupNormalization groups={_GN_GROUPS})."
         )
 
-
-# ---------------------------------------------------------------------
-# ResnetBlock
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
@@ -135,14 +112,8 @@ class ResnetBlock(keras.layers.Layer):
         self.conv2 = keras.layers.Conv2D(
             out_channels, kernel_size=3, strides=1, padding="same", name="conv2"
         )
-        # 1x1 projection skip only when the channel count changes.
-        # DECISION plan_2026-06-12_59a18a10/D-007: nin_shortcut kept conditional
-        # (created only when in_channels != out_channels). This is STRUCTURAL
-        # (matches the PyTorch reference), NOT a runtime config toggle. Do NOT
-        # "always create" an identity 1x1 conv when in==out per the guide's
-        # weight-compat rule: that rule targets runtime toggles, and an identity
-        # 1x1 conv here would add dead parameters and diverge from PyTorch. See
-        # decisions.md D-007.
+        # DECISION plan_2026-06-12_59a18a10/D-007: nin_shortcut stays conditional
+        # (not always-created); it is structural, matching the reference. See decisions.md.
         self.nin_shortcut: Optional[keras.layers.Conv2D] = None
         if in_channels != out_channels:
             self.nin_shortcut = keras.layers.Conv2D(
@@ -198,10 +169,6 @@ class ResnetBlock(keras.layers.Layer):
         )
         return config
 
-
-# ---------------------------------------------------------------------
-# AttnBlock (spatial self-attention over H*W tokens)
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
@@ -304,19 +271,9 @@ class AttnBlock(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-# Downsample (asymmetric pad + stride-2 valid conv)
-# ---------------------------------------------------------------------
 
-
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose.
-# The legacy alias namespace is keyed by the bare class name alone, and the 2026-09-01 collision
-# with pw_fnet was resolved by prefixing the NARROWER consumer (``PWFNetDownsample``), leaving
-# ideogram4's VAE as the canonical owner of ``Custom>Downsample``. Do NOT "make it consistent" by
-# renaming this to ``Ideogram4Downsample``: uniqueness is already satisfied, so every arm of
-# ``tests/test_the_legacy_alias_namespace_has_no_collisions.py`` would stay green while the rename
-# silently moved a live key -- ``keras.saving.get_registered_object("Custom>Downsample")`` resolves
-# to THIS class today, and pre-migration archives read it. See decisions.md D-001.
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the bare name Downsample;
+# it owns the legacy Custom>Downsample alias. Renaming would silently move that key. See decisions.md.
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Downsample(keras.layers.Layer):
     """Stride-2 spatial downsample with asymmetric padding.
@@ -382,33 +339,15 @@ class Downsample(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-# Upsample (nearest x2 + 3x3 conv)
-# ---------------------------------------------------------------------
 
-
-# DECISION plan-2026-09-01T110541-dcc1574a/D-001: this class keeps the BARE name on purpose, for
-# the same reason as ``Downsample`` above -- ideogram4's VAE is the canonical owner of
-# ``Custom>Upsample`` and pw_fnet's copy was the one renamed (``PWFNetUpsample``). Do NOT rename
-# this to ``Ideogram4Upsample`` for consistency: the guard cannot see such a rename (uniqueness
-# is preserved either way) and it would move a legacy key that archives still read. The separate
-# D-005 anchor in this class's docstring is about its INTERNALS and is unrelated to its name.
-# See decisions.md D-001.
+# DECISION plan-2026-09-01T110541-dcc1574a/D-001: keep the bare name Upsample,
+# same reason as Downsample above -- it owns the legacy Custom>Upsample alias. See decisions.md.
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
 class Upsample(keras.layers.Layer):
-    """Nearest-neighbour x2 upsample + ``Conv2D(3x3, same)`` (Flux2 Upsample).
+    """Nearest-neighbour x2 upsample plus ``Conv2D(3x3, same)``.
 
-    # DECISION plan_2026-06-12_59a18a10/D-005: this is a thin sub-layer wrapper
-    # of ``UpSampling2D(2, "nearest") + Conv2D(channels, 3, same)``, deliberately
-    # built out of stock Keras layers this class OWNS. Do NOT refactor it to call
-    # a shared string-dispatch helper that takes a live tensor and returns a
-    # tensor: such a helper builds into a functional graph, so it cannot be owned
-    # as a constructed sub-layer inside a subclassed ``keras.Model`` Decoder
-    # without also building a Functional sub-model. The repo once had exactly
-    # such a helper and this class refused it; the helper was deleted in 2026-08
-    # and its only other caller was rewritten into this same owned-sub-layer
-    # shape, so the rule this anchor states is now the house pattern rather than
-    # a local exception. See decisions.md D-005.
+    # DECISION plan_2026-06-12_59a18a10/D-005: stays a thin wrapper of stock
+    # UpSampling2D + Conv2D sub-layers, not a functional-graph helper call. See decisions.md.
 
     :param channels: Output channel count.
     :type channels: int
@@ -458,10 +397,6 @@ class Upsample(keras.layers.Layer):
         config.update({"channels": self.channels})
         return config
 
-
-# ---------------------------------------------------------------------
-# Encoder
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
@@ -644,10 +579,6 @@ class Encoder(keras.layers.Layer):
             config["ch_mult"] = tuple(config["ch_mult"])
         return cls(**config)
 
-
-# ---------------------------------------------------------------------
-# Decoder
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
@@ -833,10 +764,6 @@ class Decoder(keras.layers.Layer):
         return cls(**config)
 
 
-# ---------------------------------------------------------------------
-# AutoEncoder
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.models.ideogram4.vae")
 class AutoEncoder(keras.Model):
@@ -997,10 +924,6 @@ class AutoEncoder(keras.Model):
         config["params"] = AutoEncoderParams.from_dict(config["params"])
         return cls(**config)
 
-
-# ---------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------
 
 
 def create_ideogram4_autoencoder(

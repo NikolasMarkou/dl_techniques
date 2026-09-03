@@ -1,68 +1,21 @@
-"""
-ConvNeXt V1: a pure convolutional network modernized toward transformer design.
+"""ConvNeXtV1, a pure convolutional network modernized toward transformer design.
 
-The architecture answers a question left open by the Vision Transformer's
-success: how much of that success is attention, and how much is everything else
-the transformer papers changed at the same time -- the patchified stem, the large
-receptive field per operation, the inverted bottleneck, the sparse placement of
-normalization and activation, LayerNorm in place of BatchNorm, and separate
-downsampling stages. Applying those changes one at a time to a ResNet-50, with
-no attention anywhere, recovers the accuracy of a Swin Transformer at matched
-FLOPs. The conclusion is that the convolution was never the limitation; the
-surrounding design was.
-
-Each block is a depthwise `KxK` convolution (default 7, the "large kernel"
-standing in for attention's wide receptive field) followed by an inverted
-bottleneck MLP: a 1x1 expansion to `4F` channels, one GELU, and a 1x1 reduction
-back to `F`. There is a single activation and a single normalization per block
-rather than one of each per convolution -- the sparsity is deliberate, and adding
-them back costs accuracy. A learnable per-channel `gamma` (layer scale) closes
-the block, initialized small so a fresh block starts near a no-op and the
-network begins life close to its identity path.
-
-`ConvNextV1Block` is a TRANSFORM-ONLY block: it returns `F(x)`, not `x + F(x)`,
-and applies no drop-path. The residual and the stochastic-depth wiring belong to
-the caller, and this model owns them in `call` -- `residual = x`, block, optional
-drop-path, `add([residual, x])`. Wiring it as `x = block(x)` instead silently
-removes the residual, which does not raise, does not change any shape, and
-annihilates the signal by roughly a factor of 1e-5 per block. The `gamma` floor
-of `GAMMA_MIN_VALUE = 1e-6` exists so a residual path can never be scaled to
-exactly zero.
-
-The drop-path ramp is GLOBAL across the whole network, not per stage: the rate
-for a block is indexed by `block_start_idx + block_idx` over `sum(depths)`
-blocks, so stage 0 starts at 0.0 and the last block of the last stage reaches
-`drop_path_rate`. Computing it per stage instead would reset the schedule four
-times and leave every stage's first block unregularized.
-
-Downsampling is a separate LayerNorm + strided convolution between stages rather
-than a stride inside a residual block, and the stem is the same operation applied
-to the image (a `strides x strides` patchify, default 4). The DOWNSAMPLE
-convolutions use `padding="same"` rather than `"valid"`: at kernel == stride the
-two are identical whenever the spatial dimension divides the stride, but
-`"valid"` collapses to a 0x0 feature map on the small inputs the CIFAR-scale
-variants use, which produced non-finite output.
-
-The STEM does NOT follow that rule and this is deliberate, not an oversight: it
-uses `"same"` only at `stem_stride == 1` and `"valid"` otherwise. MEASURED at
-kernel == stride == 4: on a divisible `(32,32,3)` the two agree exactly (8x8
-either way), and they diverge only on a non-divisible input -- `(30,30,3)` gives
-7x7 under `"valid"` and 8x8 under `"same"`. Changing the stem to unconditional
-`"same"` would therefore move the spatial geometry of every checkpoint trained
-at a non-divisible input size: weight-SHAPE-compatible, activation-value
-different, and silently so. The 0x0 collapse the downsample fix was for cannot
-reach the stem, whose input is the image. See the F-60 ruling in
-`plans/plan-2026-08-19T163559-499b6f0e/decisions.md` (D-125).
-
-`stochastic_mode` selects what the per-block regularizer actually does: `depth`
-is standard stochastic depth (drops the whole branch at training time), while
-`gradient` is forward-identity and only perturbs the backward pass. `depth` is
-the behaviour-preserving default.
-
-No pretrained ConvNeXt V1 weights are distributed with this package.
-`pretrained=True` raises `NotImplementedError` rather than warning and returning
-a randomly initialized model, because the previous behaviour made an unavailable
-download indistinguishable from a successful one. Local checkpoints load by path.
+The architecture tests how much of the Vision Transformer's success came from
+attention versus everything else transformer papers changed at the same time: a
+patchified stem, a large receptive field per operation, an inverted bottleneck, sparse
+normalization and activation, LayerNorm instead of BatchNorm, and separate downsampling
+stages. Applying those changes to a ResNet-50, with no attention anywhere, matches a
+Swin Transformer's accuracy at the same FLOPs. Each block is a depthwise `KxK`
+convolution (default 7) followed by an inverted bottleneck MLP (1x1 expand to `4F`
+channels, GELU, 1x1 reduce back to `F`), with one normalization and one activation per
+block rather than one per convolution. `ConvNextV1Block` is transform-only: it returns
+`F(x)`, not `x + F(x)`; the residual add and the drop-path gate live in this model's
+`call`. The drop-path rate ramps linearly across the whole network, not per stage, so
+the schedule does not reset at each stage boundary. Downsampling uses `padding="same"`
+between stages so small CIFAR-scale inputs do not collapse to a 0x0 feature map; the
+stem keeps `"valid"` padding at `stem_stride > 1` to preserve the spatial geometry
+existing checkpoints were trained with. No pretrained weights are distributed:
+`pretrained=True` raises `NotImplementedError`.
 
 References:
     - Liu et al., 2022. A ConvNet for the 2020s. (https://arxiv.org/abs/2201.03545)
@@ -430,17 +383,8 @@ class ConvNeXtV1(keras.Model):
             filters=self.dims[0],
             kernel_size=stem_kernel_size,
             strides=stem_stride,
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-125
-            # Deliberately NOT the unconditional `padding="same"` the
-            # downsample layers use. MEASURED at kernel == stride == 4:
-            # the two are identical on a divisible input ((32,32,3) ->
-            # 8x8 either way) and differ only on a non-divisible one
-            # ((30,30,3) -> 7x7 valid vs 8x8 same), so "making it
-            # consistent" would silently move the spatial geometry of
-            # every checkpoint trained at a non-divisible size --
-            # weight-shape-compatible, activation-value different. The
-            # 0x0-collapse-to-NaN the downsample fix was for cannot reach
-            # the stem, whose input is the image. See decisions.md D-125.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-125: not the unconditional
+            # "same" the downsample layers use — "same" here would silently shift the spatial geometry of checkpoints trained at a non-divisible input size. See decisions.md.
             padding="same" if stem_stride == 1 else "valid",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
@@ -473,11 +417,8 @@ class ConvNeXtV1(keras.Model):
             filters=self.dims[stage_idx],
             kernel_size=downsample_kernel_size,
             strides=downsample_stride,
-            # DECISION plan_2026-06-15_e6a0391c/D-003: "same" (not "valid") so the
-            # kernel==stride downsample never collapses to 0x0 on small inputs
-            # (CIFAR 32x32 / 16x16 — sizes the convnext tests exercise), which
-            # previously yielded non-finite (NaN) output. Identical to "valid"
-            # when the spatial dim is divisible by the stride.
+            # DECISION plan_2026-06-15_e6a0391c/D-003: "same" not "valid" — at
+            # kernel==stride, "valid" collapses small CIFAR-scale inputs to 0x0 and produced NaN output. Identical to "valid" when the spatial dim divides the stride. See decisions.md.
             padding="same",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,

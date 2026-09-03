@@ -1,25 +1,17 @@
-"""
-Construction and inspection helpers for the masked autoencoder.
+"""Two helpers for the masked autoencoder: a factory and a visualizer.
 
-Two functions, and neither of them is the architecture: :func:`create_mae_model`
-is the package's ``create_*`` factory -- it wires a caller-supplied encoder to
-the convolutional decoder and returns a built :class:`MAE` -- and
-:func:`visualize_reconstruction` plots an image, its masked view and the
-reconstruction side by side for eyeballing a checkpoint.
+``create_mae_model`` wires a caller-supplied encoder to the convolutional
+decoder and returns a built :class:`MaskedAutoencoder`. ``visualize_reconstruction``
+plots an image, its masked view, and the reconstruction side by side.
 
-The model itself, its masking policy and its loss live in
-``dl_techniques.models.vision.masked_autoencoder.mae``, which carries the full
-architectural description. This module is deliberately thin: anything that
-decides what the model IS belongs there, not here.
+Neither function defines the architecture, the masking policy, or the loss
+those live in ``dl_techniques.models.vision.masked_autoencoder.mae``.
 
 References:
     - He et al., 2022. Masked Autoencoders Are Scalable Vision Learners.
-      CVPR 2022. (https://arxiv.org/abs/2111.06377) -- the mask-a-high-fraction-
-      of-patches-and-reconstruct-pixels recipe this package implements.
+      CVPR 2022. (https://arxiv.org/abs/2111.06377)
     - Xie et al., 2022. SimMIM: A Simple Framework for Masked Image Modeling.
-      CVPR 2022. (https://arxiv.org/abs/2111.09886) -- the lightweight-decoder
-      variant this package's convolutional decoder is closer to than to MAE's
-      transformer decoder.
+      CVPR 2022. (https://arxiv.org/abs/2111.09886)
 """
 import keras
 import numpy as np
@@ -41,20 +33,15 @@ def create_mae_model(
         input_shape: Tuple[int, int, int] = (224, 224, 3),
         **kwargs: Any
 ) -> MaskedAutoencoder:
-    """Convenience factory to create an MAE model.
+    """Build a MaskedAutoencoder from a caller-supplied encoder.
 
-    Wraps the MaskedAutoencoder constructor for consistency.
-
-    Args:
-        encoder: A built Keras Model to serve as the feature extractor.
-        patch_size: Size of patches for masking.
-        mask_ratio: Ratio of patches to mask.
-        decoder_dims: Optional list of decoder dimensions.
-        input_shape: Input image shape.
-        **kwargs: Arguments passed to MaskedAutoencoder.
-
-    Returns:
-        MaskedAutoencoder model instance.
+    :param encoder: A built Keras model to use as the feature extractor.
+    :param patch_size: Patch size used for masking.
+    :param mask_ratio: Fraction of patches to mask.
+    :param decoder_dims: Decoder channel widths, one per stage.
+    :param input_shape: Input image shape.
+    :param kwargs: Passed through to `MaskedAutoencoder`.
+    :return: A configured `MaskedAutoencoder` instance.
     """
     mae = MaskedAutoencoder(
         encoder=encoder,
@@ -73,16 +60,13 @@ def visualize_reconstruction(
         images: np.ndarray,
         num_samples: int = 4
 ) -> np.ndarray:
-    """Visualize MAE reconstructions for multiple images.
+    """Build a composite grid of original, masked, and reconstructed images.
 
-    Args:
-        mae: Trained MaskedAutoencoder model.
-        images: Batch of images (N, H, W, C).
-        num_samples: Number of images to plot.
-
-    Returns:
-        A large composite image array (Grid) of shape (Total_H, Total_W, C).
-        Grid Layout: [Original | Masked | Reconstructed] per row.
+    :param mae: A trained `MaskedAutoencoder` model.
+    :param images: Batch of images, shape `(N, H, W, C)`.
+    :param num_samples: Number of images to plot.
+    :return: Composite image array of shape `(N * H, 3 * W, C)`, each row
+        laid out as original, masked, reconstructed.
     """
     num_samples = min(num_samples, len(images))
     samples = images[:num_samples]

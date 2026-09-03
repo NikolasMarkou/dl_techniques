@@ -783,24 +783,13 @@ def build_convnext_block(
 
 
 #: Block-type string -> builder. Append-only: the keys are public API,
-#: recorded in every run directory's config and in the study's reports, so
-#: renaming one invalidates existing results rather than tidying them.
-#:
-#: ``"convnext_v2"`` was REMOVED on 2026-08-30, which is a deliberate exception
-#: to that rule rather than an oversight. Its Global Response Normalization
-#: reduces over the sequence axis, so unlike every other entry here it mixes
-#: tokens GLOBALLY -- measured on trained encoders, perturbing position 0 moved
-#: position 60 by 8.378e-02, more than the attention arm did at the same
-#: distance, against exactly 0.000 for ``clifford`` and ``convnext``. That made
-#: the study's controlled comparison uncontrolled: the arms were meant to differ
-#: only in the sequence-mixing block, with the convolutional arms sharing a
-#: fixed span. The V2 arm was withdrawn instead of being explained away.
-#:
-#: ``ConvNextEncoderBlock`` still accepts ``version="v2"``, and deliberately so:
-#: the 28 V2 cells already written under ``results/`` deserialize through the
-#: layer's own ``get_config``, not through this registry, and must stay
-#: loadable. What is gone is the ability to CONSTRUCT that arm from a study
-#: config.
+#: recorded in every run's config, so renaming one invalidates existing
+#: results. ``"convnext_v2"`` was removed 2026-08-30: its Global Response
+#: Normalization mixes tokens globally (perturbing position 0 moved position
+#: 60 by 8.378e-02, against 0.000 for ``clifford``/``convnext``), breaking the
+#: study's controlled comparison. ``ConvNextEncoderBlock`` still accepts
+#: ``version="v2"`` so existing ``results/`` checkpoints keep loading;
+#: only constructing it from a study config is gone.
 BLOCK_REGISTRY: Dict[str, Callable[..., keras.layers.Layer]] = {
     "transformer": build_transformer_block,
     "clifford": build_clifford_block,

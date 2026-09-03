@@ -1,75 +1,37 @@
 """
-Pure additive exponential smoothing (ETS) in single-source-of-error state-space form.
+ETSModel and its factory create_ets, a pure additive exponential smoothing
+forecaster in single-source-of-error state-space form.
 
-Why this model exists
----------------------
-Every other forecaster under ``models/time_series/`` is **direct**: it emits the
-whole ``[B, H, F]`` horizon block from per-step heads in a single pass, with no
-recursion and nothing compounding across the horizon. That is a perfectly good
-way to forecast, but it means the repository had **no model with a smoothing
-parameter** -- and therefore no way to exercise, let alone verify, the result
-that motivates the multistep losses in ``losses/multistep_loss.py``:
+Every other forecaster under models/time_series/ is direct: it emits the whole
+horizon block from per-step heads in one pass, with nothing compounding across
+steps. This model instead runs a level-trend-seasonal recursion over the
+context window, one step at a time, then reads the h-step forecast off the
+final state in closed form (no rollout loop, no sampling). Only the pure
+additive variants ANN, AAN and AAA are implemented; multiplicative and mixed
+variants are not, since the shrinkage result below does not extend to them.
 
-    Minimising h-steps-ahead errors SHRINKS a model's smoothing parameters
-    toward zero, making it less reactive to noise and more stable over longer
-    horizons (Svetunkov, Kourentzes & Killick, 2023).
+    yhat_t = l_{t-1} + b_{t-1} + s_{t-m}
+    l_t    = l_{t-1} + b_{t-1} + alpha * (y_t - yhat_t)
+    b_t    = b_{t-1} + beta * (y_t - yhat_t)
+    s_t    = s_{t-m} + gamma * (y_t - yhat_t)
 
-That result is proven for **pure additive** ETS and ARIMA, and it arises through
-**recursive** error accumulation. This model is the smallest object on which it
-can be reproduced rather than merely cited, and
-``tests/test_models/test_ets/`` does reproduce it.
-
-The state space
----------------
-Hyndman et al.'s additive ETS, written with a single error term::
-
-    yhat_t = l_{t-1} + b_{t-1} + s_{t-m}          (one step ahead, from t-1)
-    e_t    = y_t - yhat_t
-    l_t    = l_{t-1} + b_{t-1} + alpha * e_t      (level)
-    b_t    = b_{t-1} + beta * e_t                 (trend)
-    s_t    = s_{t-m} + gamma * e_t                (seasonal)
-
-Because the model is *pure additive*, the h-step-ahead forecast from origin t is
-closed form -- no rollout loop, no sampling::
-
-    yhat_{t+h|t} = l_t + h * b_t + s_{t + h - m*ceil(h/m)}
-
-Only ``ANN`` (local level), ``AAN`` (local trend) and ``AAA`` (additive
-seasonal) are implemented. Multiplicative and mixed variants are deliberately
-absent: the shrinkage result does not extend to them, and shipping them here
-would invite exactly the claim the paper declines to make.
-
-Forecast origins
-----------------
-ADAM computes the multistep errors from *every in-sample origin*. Here the
-**sliding-window dataset supplies the origins**: one training sample is one
-context window plus its ``H``-step future, so a minibatch IS a sample of
-forecast origins and ``MultistepLoss`` averages over it unchanged. This costs a
-re-filter per overlapping window, which is nothing for a model with at most
-three trainable scalars, and it buys a single code path -- ``call`` and
-``_forecast`` are the same function, so there is no train/serve skew and no
-mode flag.
-
-Trainable surface
------------------
-``alpha``, ``beta`` and ``gamma`` only -- one scalar each, held in ``[0, 1]``
-through a sigmoid. **The initial states are derived from the input window**
+The trainable surface is exactly alpha, beta and gamma, each a scalar held in
+[0, 1] through a sigmoid. Initial states are derived from the input window
 (level from the first seasonal period, trend from its first differences,
-seasonal from the deviations of the first period, centred to sum to zero) rather
-than fitted. That keeps the model batch-friendly and scale-adaptive, and it
-keeps the trainable surface *exactly* the smoothing parameters -- which is what
-the shrinkage claim is about. A model with fitted initial states would let the
-optimiser trade shrinkage against initialisation and confound the measurement.
+seasonal from the first period's deviations) rather than fitted, so a caller
+does not need to supply or tune them. Minimising h-step-ahead error is known to
+shrink these smoothing parameters toward zero (Svetunkov, Kourentzes &
+Killick, 2023); this is the smallest model in the tree on which that result
+can be reproduced.
 
-References
-----------
--   Svetunkov, I., Kourentzes, N., & Killick, R. (2023). "Multi-step Estimators
-    and Shrinkage Effect in Time Series Models". *Computational Statistics*.
-    DOI: 10.1007/s00180-023-01377-x
--   Svetunkov, I. (2023). *Forecasting and Analytics with the Augmented Dynamic
-    Adaptive Model (ADAM)*. https://openforecast.org/adam/
--   Hyndman, R.J., Koehler, A.B., Ord, J.K., & Snyder, R.D. (2008).
-    *Forecasting with Exponential Smoothing: The State Space Approach*. Springer.
+References:
+    - Svetunkov, I., Kourentzes, N., & Killick, R. (2023). Multi-step Estimators
+      and Shrinkage Effect in Time Series Models. Computational Statistics.
+      DOI: 10.1007/s00180-023-01377-x
+    - Svetunkov, I. (2023). Forecasting and Analytics with the Augmented Dynamic
+      Adaptive Model (ADAM). https://openforecast.org/adam/
+    - Hyndman, R.J., Koehler, A.B., Ord, J.K., & Snyder, R.D. (2008).
+      Forecasting with Exponential Smoothing: The State Space Approach. Springer.
 """
 
 import math
@@ -78,20 +40,12 @@ from typing import Any, Dict, Optional, Tuple
 import keras
 import numpy as np
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 
-# ---------------------------------------------------------------------
-
 #: The pure-additive ETS variants this model implements.
 ETS_VARIANTS = ("ANN", "AAN", "AAA")
-
-# ---------------------------------------------------------------------
 
 
 def _inverse_sigmoid(value: float) -> float:
@@ -109,8 +63,32 @@ def _inverse_sigmoid(value: float) -> float:
 class ETSModel(keras.Model, ForecastMixin):
     """Pure additive ETS with trainable smoothing parameters.
 
-    See the module docstring for the state-space equations, the closed-form
-    h-step forecast, and why the initial states are derived rather than fitted.
+    See the module docstring for the state-space equations and the closed-form
+    h-step forecast. Initial states are derived from the input window rather
+    than fitted.
+
+    Architecture:
+
+    .. code-block:: text
+
+        context [B, T]
+             |
+             v
+        ┌───────────────┐
+        │ filter (scan)  │  level/trend/seasonal recursion, one step at a time
+        └───────────────┘
+             |
+             v
+        final state [B, 2+m]
+             |
+             v
+        ┌───────────────┐
+        │ closed-form    │  yhat_{t+h} = level + h*trend + seasonal[h]
+        │ horizon read   │
+        └───────────────┘
+             |
+             v
+        forecast [B, H, 1]
 
     :param variant: ``"ANN"`` (level only), ``"AAN"`` (level + trend) or
         ``"AAA"`` (level + trend + additive seasonal).
@@ -191,9 +169,6 @@ class ETSModel(keras.Model, ForecastMixin):
         self.beta_raw = None
         self.gamma_raw = None
 
-    # -----------------------------------------------------------------
-    # build
-    # -----------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the one-to-three smoothing scalars.
@@ -248,9 +223,6 @@ class ETSModel(keras.Model, ForecastMixin):
 
         super().build(input_shape)
 
-    # -----------------------------------------------------------------
-    # smoothing parameters
-    # -----------------------------------------------------------------
 
     def _smoothing(self) -> Tuple[Any, Any, Any]:
         """Return ``(alpha, beta, gamma)`` as tensors in ``[0, 1]``.
@@ -297,9 +269,6 @@ class ETSModel(keras.Model, ForecastMixin):
             return 0.0
         return float(keras.ops.convert_to_numpy(keras.ops.sigmoid(self.gamma_raw)))
 
-    # -----------------------------------------------------------------
-    # the recursion
-    # -----------------------------------------------------------------
 
     @staticmethod
     def _as_series(inputs: Any) -> Any:
@@ -413,9 +382,6 @@ class ETSModel(keras.Model, ForecastMixin):
 
         return forecast[:, :, None]
 
-    # -----------------------------------------------------------------
-    # forward pass
-    # -----------------------------------------------------------------
 
     def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         """Filter the context window, then forecast ``horizon`` steps from its end.
@@ -454,26 +420,21 @@ class ETSModel(keras.Model, ForecastMixin):
             from information up to ``t-1``.
         """
         if not self.built:
-            # This is a public entry point that does NOT go through
-            # ``Model.__call__``, so nothing has built the weights yet.
+            # This entry point skips Model.__call__, so weights are not built yet.
             self.build(tuple(inputs.shape))
 
         series = self._as_series(inputs)
         _, history = self._filter(series)
 
-        # history[t] is the state AFTER absorbing y_t, so the one-step-ahead
-        # prediction of y_t comes from history[t-1], with the initial state
-        # standing in at t = 0.
-        history = keras.ops.transpose(history, (1, 0, 2))  # [B, T, 2 + m]
+        # history[t] is the state after absorbing y_t, so the one-step-ahead
+        # prediction of y_t comes from history[t-1] (initial state stands in at t=0).
+        history = keras.ops.transpose(history, (1, 0, 2))
         initial = self._initial_state(series)[:, None, :]
         previous = keras.ops.concatenate([initial, history[:, :-1, :]], axis=1)
 
         fitted = previous[:, :, 0] + previous[:, :, 1] + previous[:, :, 2]
         return fitted, series - fitted
 
-    # -----------------------------------------------------------------
-    # Forecast contract
-    # -----------------------------------------------------------------
 
     def _forecast(self, x: Any, **kwargs: Any) -> Forecast:
         """Produce a point :class:`Forecast`.
@@ -490,9 +451,6 @@ class ETSModel(keras.Model, ForecastMixin):
         point = keras.ops.convert_to_numpy(self(x, training=False))
         return Forecast(point=np.asarray(point))
 
-    # -----------------------------------------------------------------
-    # serialization
-    # -----------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor configuration.
@@ -512,9 +470,6 @@ class ETSModel(keras.Model, ForecastMixin):
             }
         )
         return config
-
-
-# ---------------------------------------------------------------------
 
 
 def create_ets(
@@ -547,4 +502,3 @@ def create_ets(
         **kwargs,
     )
 
-# ---------------------------------------------------------------------

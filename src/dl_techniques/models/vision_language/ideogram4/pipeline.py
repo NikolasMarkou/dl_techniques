@@ -1,65 +1,21 @@
-"""Ideogram4 image-generation inference pipeline (Keras 3 port).
+"""End-to-end Ideogram4 image generation: denoise, then decode.
 
-Integrates the three already-built, separately-tested pieces -- the
-flow-matching DiT :class:`Ideogram4Transformer`, the Flux2 KL-VAE
-:class:`AutoEncoder`, and the logit-normal / Euler :class:`LogitNormalSchedule`
--- into a single end-to-end denoise-and-decode pipeline.
+Defines :class:`Ideogram4Pipeline`, which wires together three already-built
+pieces: the flow-matching DiT `Ideogram4Transformer`, the VAE `AutoEncoder`,
+and the `LogitNormalSchedule` time warp. It runs an Euler integration loop
+with asymmetric classifier-free guidance to denoise a latent, then decodes
+that latent into an image.
 
-Decision D1 (conditioning as input)
------------------------------------
-There is NO Qwen3-VL text encoder and NO tokenizer in this Keras port. The
-pipeline takes the precomputed ``llm_features`` conditioning tensor
-``(B, T, llm_features_dim)`` DIRECTLY as a call input. The PyTorch
-``_build_inputs(num_text_tokens_per_sample, ...)`` (which packs variable-length
-text from a tokenizer) is therefore simplified: ``T`` is fixed per batch as
-``llm_features.shape[1]`` and there is no left-padding (one segment per row).
+There is no text encoder or tokenizer here. The pipeline takes a precomputed
+`llm_features` conditioning tensor directly as a call input, one segment per
+row with no padding, instead of building it from raw text. The negative CFG
+branch reuses the same transformer as the positive branch by default, with
+`llm_features` zeroed, rather than requiring two separate trained models.
 
-Faithful bits ported from PyTorch
----------------------------------
-- ``_build_inputs``: packed ``position_ids`` with ``IMAGE_POSITION_OFFSET`` on
-  the image grid, ``segment_ids``, and the per-token ``indicator``
-  (``LLM_TOKEN_INDICATOR`` on text, ``OUTPUT_IMAGE_INDICATOR`` on image).
-- ``__call__``: the Euler denoise loop with ASYMMETRIC CFG
-  ``v = gw * pos_v + (1 - gw) * neg_v`` and the update ``z += v * (s - t)``.
-
-Time convention
----------------
-``t = 0`` is clean data and ``t = 1`` is pure noise, fixed by the trainer
-(``src/train/ideogram4/train_ideogram4.py``: ``x_t = (1 - tau)*x0 + tau*x1``
-with ``x1 ~ N(0, I)``, target ``v = x1 - x0``), so the regressed velocity points
-data -> noise. Reverse sampling therefore starts at the NOISE end of the time
-grid -- which is what the initial ``z`` draw is -- and descends to the data end,
-making ``s - t`` NEGATIVE at every step. ``LogitNormalSchedule`` is strictly
-DECREASING in its uniform argument, so the loop indexes ``step_intervals`` in
-reverse to obtain that descent (D-002; the derivation sits at the loop). Same
-convention as ``models/vision_language/sd3_mmdit/``, the identical rectified flow.
-- ``_decode``: unpatchify ``(B, gh, gw, p, p, c)`` -> ``(B, gh*p, gw*p, c)``
-  [NHWC], optional latent denorm (shift/scale), VAE decode, clamp to ``[-1, 1]``.
-
-Deliberate Keras-port simplifications (documented surprises)
------------------------------------------------------------
-1. **Single shared transformer for both CFG branches** (PyTorch uses two
-   separate transformer modules -- a conditional and an unconditional one).
-   Here the SAME ``transformer`` runs both branches by default: the negative
-   (unconditional) branch is image-only with ``llm_features`` zeroed, so the
-   asymmetric CFG is still well-defined. An optional
-   ``unconditional_transformer`` may be supplied to recover the two-model form.
-2. **Latent denorm guarded on ``in_channels == 128``.** ``get_latent_norm``
-   returns 128-element shift/scale vectors keyed to the FULL config's
-   ``in_channels``. For the TINY preset (``in_channels=32 != 128``) those
-   vectors do not apply, so latent denorm is skipped (identity pass-through)
-   with a logged note. Only the full-scale latent (128) is denormed.
-3. **Image size is derived from the ACTUAL VAE upsample factor**
-   (``2 ** (len(ch_mult) - 1)``), not the nominal ``config.ae_scale_factor``.
-   The tiny VAE (``ch_mult=(1, 2)``) upsamples by 2, while the full VAE
-   (``ch_mult=(1, 2, 4, 4)``) upsamples by 8 -- matching ``ae_scale_factor``
-   only for the full preset. Deriving from ``ch_mult`` keeps the pipeline
-   self-consistent for any preset (the latent the decoder receives always has
-   ``z_channels`` channels at the correct spatial size).
-
-The denoise loop runs at inference (no ``GradientTape``); the schedule eval is
-scalar / NumPy on the CPU (built in step 8). Random noise is drawn via
-``keras.random.normal`` with an integer ``seed`` for determinism.
+Callers must respect the time convention: `t = 0` is clean data and `t = 1`
+is pure noise, so the Euler loop walks from the noise end to the data end,
+and the per-step delta `s - t` is negative throughout. `height` and `width`
+must be divisible by `patch_size * vae_upsample_factor`.
 """
 
 from __future__ import annotations
@@ -95,10 +51,8 @@ from dl_techniques.models.vision_language.ideogram4.vae import (
     create_ideogram4_autoencoder,
 )
 
-# ---------------------------------------------------------------------
-# Latent-norm guard: get_latent_norm() returns 128-element vectors keyed to the
-# full config's in_channels. Denorm only applies when in_channels matches.
-# ---------------------------------------------------------------------
+# get_latent_norm() returns 128-element vectors keyed to the full config's
+# in_channels; denorm applies only when in_channels matches.
 _LATENT_NORM_CHANNELS = 128
 
 
@@ -107,44 +61,65 @@ def apply_cfg_blend(
     neg_v: keras.KerasTensor,
     gw: float,
 ) -> keras.KerasTensor:
-    """Asymmetric classifier-free-guidance blend ``gw*pos + (1-gw)*neg``.
+    """Blend positive and negative velocities: ``gw * pos + (1 - gw) * neg``.
 
-    Factored out so the blend math is unit-testable in isolation. With
-    ``gw == 1`` the result is the conditional branch alone; with ``gw == 0`` it
-    is the unconditional branch alone.
+    With ``gw == 1`` the result is the conditional branch alone; with
+    ``gw == 0`` it is the unconditional branch alone.
 
-    Args:
-        pos_v: Conditional (positive) velocity ``(B, L_img, C)``.
-        neg_v: Unconditional (negative) velocity ``(B, L_img, C)``.
-        gw: Scalar guidance weight for this step.
-
-    Returns:
-        The blended velocity, same shape as the inputs.
+    :param pos_v: Conditional (positive) velocity, shape ``(B, L_img, C)``.
+    :param neg_v: Unconditional (negative) velocity, shape ``(B, L_img, C)``.
+    :param gw: Scalar guidance weight for this step.
+    :return: The blended velocity, same shape as the inputs.
     """
     return gw * pos_v + (1.0 - gw) * neg_v
 
 
 class Ideogram4Pipeline:
-    """End-to-end Ideogram4 image generation: denoise (Euler + CFG) then decode.
+    """End-to-end Ideogram4 image generation: Euler + CFG denoise, then decode.
 
-    A plain orchestration class (NOT a ``keras.Layer`` / ``keras.Model``) that
-    holds the trained sub-models and the structural config. Conditioning is the
-    precomputed ``llm_features`` tensor passed to :meth:`__call__` (decision D1).
+    A plain orchestration class, not a `keras.Layer` or `keras.Model`, that
+    holds the trained sub-models and the structural config. Conditioning is
+    the precomputed `llm_features` tensor passed to :meth:`__call__`.
 
-    Args:
-        transformer: The flow-matching DiT velocity predictor. Used for BOTH the
-            conditional and (by default) the unconditional CFG branches.
-        autoencoder: The Flux2 KL-VAE; only :meth:`AutoEncoder.decode` is used.
-        config: The transformer / pipeline :class:`Ideogram4Config`.
-        ae_params: The VAE :class:`AutoEncoderParams` (drives unpatchify /
-            spatial-factor math).
-        unconditional_transformer: Optional separate model for the negative CFG
-            branch (PyTorch's two-model form). Defaults to ``None`` -> the shared
-            ``transformer`` runs both branches.
+    Denoise and decode:
 
-    Raises:
-        TypeError: If ``transformer`` / ``autoencoder`` / ``config`` /
-            ``ae_params`` are not of the expected types.
+    .. code-block:: text
+
+        llm_features [B,T,D]      noise z [B,N,C]
+              │                         │
+              ▼                         ▼
+        ┌──────────────┐       Euler loop, num_steps
+        │ _build_inputs │       ┌────────────────────┐
+        └──────┬───────┘        │ transformer (pos)   │◄── llm_features
+               │                │ transformer (neg)   │◄── zeroed feats
+               ▼                │ cfg blend -> v       │
+        position/segment/       │ z += v * (s - t)     │
+        indicator ids           └──────────┬───────────┘
+                                            ▼
+                                   final latent z [B,N,C]
+                                            │
+                                            ▼
+                                    ┌───────────────┐
+                                    │ _decode        │
+                                    │ unpatchify     │
+                                    │ (optional)     │
+                                    │ latent denorm  │
+                                    │ VAE decode     │
+                                    └───────┬───────┘
+                                            ▼
+                                  image [B,H,W,out_ch] in [0,1]
+
+    :param transformer: The flow-matching DiT velocity predictor. Runs both
+        the conditional and, by default, the unconditional CFG branches.
+    :param autoencoder: The VAE; only :meth:`AutoEncoder.decode` is used.
+    :param config: The transformer and pipeline :class:`Ideogram4Config`.
+    :param ae_params: The VAE :class:`AutoEncoderParams`, driving the
+        unpatchify and spatial-factor math.
+    :param unconditional_transformer: Optional separate model for the
+        negative CFG branch. Defaults to `None`, so the shared `transformer`
+        runs both branches.
+    :raises TypeError: If `transformer`, `autoencoder`, `config`, or
+        `ae_params` are not of the expected types.
     """
 
     def __init__(
@@ -188,18 +163,14 @@ class Ideogram4Pipeline:
             unconditional_transformer is None,
         )
 
-    # -----------------------------------------------------------------
-    # Derived geometry
-    # -----------------------------------------------------------------
-
     @property
     def vae_upsample_factor(self) -> int:
-        """Actual VAE decode spatial-upsample factor ``2**(len(ch_mult)-1)``.
+        """VAE decode spatial-upsample factor, ``2 ** (len(ch_mult) - 1)``.
 
-        The decoder upsamples once between every pair of resolution stages, so
-        the latent->pixel ratio is ``2 ** (num_stages - 1)``. This is the
-        ground-truth factor (the nominal ``config.ae_scale_factor`` matches it
-        only for the full preset).
+        The decoder upsamples once between every pair of resolution stages,
+        so the latent-to-pixel ratio is ``2 ** (num_stages - 1)``. This is
+        the actual factor; `config.ae_scale_factor` matches it only for the
+        full preset.
         """
         return 2 ** (len(self.ae_params.ch_mult) - 1)
 
@@ -208,10 +179,6 @@ class Ideogram4Pipeline:
         """Pixel edge length covered by one image token: ``patch * vae_factor``."""
         return self.config.patch_size * self.vae_upsample_factor
 
-    # -----------------------------------------------------------------
-    # Packed-input construction (simplified _build_inputs)
-    # -----------------------------------------------------------------
-
     def _build_inputs(
         self,
         batch_size: int,
@@ -219,26 +186,20 @@ class Ideogram4Pipeline:
         height: int,
         width: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int, int]:
-        """Build packed ``position_ids`` / ``segment_ids`` / ``indicator``.
+        """Build packed ``position_ids``, ``segment_ids``, and ``indicator``.
 
-        Simplified port of the PyTorch ``_build_inputs``: one sample per row, no
-        left-padding (``T`` is fixed per batch), a single attention segment per
-        row. The sequence is ``[T text tokens][grid_h*grid_w image tokens]``.
+        One sample per row, no padding: `T` is fixed per batch, and each row
+        holds a single attention segment. The packed sequence is
+        ``[T text tokens][grid_h * grid_w image tokens]``.
 
-        Args:
-            batch_size: Number of samples ``B``.
-            num_text_tokens: Conditioning length ``T`` (= ``llm_features.shape[1]``).
-            height: Target image height in pixels (divisible by
-                :attr:`pixels_per_token_edge`).
-            width: Target image width in pixels.
-
-        Returns:
-            ``(position_ids, segment_ids, indicator, num_image_tokens, grid_h,
-            grid_w)`` -- the three packed arrays plus the image-grid sizes.
-
-        Raises:
-            ValueError: If ``height`` / ``width`` are not divisible by the
-                per-token pixel edge.
+        :param batch_size: Number of samples `B`.
+        :param num_text_tokens: Conditioning length `T`, equal to `llm_features.shape[1]`.
+        :param height: Target image height in pixels, divisible by :attr:`pixels_per_token_edge`.
+        :param width: Target image width in pixels.
+        :return: ``(position_ids, segment_ids, indicator, num_image_tokens, grid_h, grid_w)``.
+        :rtype: Tuple[np.ndarray, np.ndarray, np.ndarray, int, int, int]
+        :raises ValueError: If `height` or `width` are not divisible by the
+            per-token pixel edge.
         """
         patch = self.pixels_per_token_edge
         if height % patch != 0 or width % patch != 0:
@@ -251,44 +212,35 @@ class Ideogram4Pipeline:
         num_image = grid_h * grid_w
         total_len = num_text_tokens + num_image
 
-        # --- image position ids (t=0, h in [0,grid_h), w in [0,grid_w)) each
-        #     offset by IMAGE_POSITION_OFFSET so they never collide with text. ---
+        # Image position ids are (t=0, h, w) offset so they never collide with text.
         hh, ww = np.meshgrid(
             np.arange(grid_h), np.arange(grid_w), indexing="ij"
         )
         image_pos = np.stack(
             [
-                np.zeros(num_image, dtype=np.int32),            # t axis
-                hh.reshape(-1).astype(np.int32),                # h axis
-                ww.reshape(-1).astype(np.int32),                # w axis
+                np.zeros(num_image, dtype=np.int32),
+                hh.reshape(-1).astype(np.int32),
+                ww.reshape(-1).astype(np.int32),
             ],
             axis=-1,
         )
-        image_pos = image_pos + IMAGE_POSITION_OFFSET           # (num_image, 3)
+        image_pos = image_pos + IMAGE_POSITION_OFFSET
 
-        # --- text position ids: arange(T) replicated across the 3 axes. ---
         text_arange = np.arange(num_text_tokens, dtype=np.int32)
-        text_pos = np.stack([text_arange] * 3, axis=-1)         # (T, 3)
+        text_pos = np.stack([text_arange] * 3, axis=-1)
 
-        # --- pack: text block then image block, broadcast over the batch. ---
-        pos_single = np.concatenate([text_pos, image_pos], axis=0)  # (L, 3)
+        pos_single = np.concatenate([text_pos, image_pos], axis=0)
         position_ids = np.broadcast_to(
             pos_single[None], (batch_size, total_len, 3)
         ).astype(np.int32).copy()
 
-        # --- segment_ids: one segment per row (all ones). ---
         segment_ids = np.ones((batch_size, total_len), dtype=np.int32)
 
-        # --- indicator: LLM on text positions, OUTPUT_IMAGE on image positions. ---
         indicator = np.empty((batch_size, total_len), dtype=np.int32)
         indicator[:, :num_text_tokens] = LLM_TOKEN_INDICATOR
         indicator[:, num_text_tokens:] = OUTPUT_IMAGE_INDICATOR
 
         return position_ids, segment_ids, indicator, num_image, grid_h, grid_w
-
-    # -----------------------------------------------------------------
-    # Decode (unpatchify + optional latent denorm + VAE decode)
-    # -----------------------------------------------------------------
 
     def _decode(
         self,
@@ -296,23 +248,20 @@ class Ideogram4Pipeline:
         grid_h: int,
         grid_w: int,
     ) -> keras.KerasTensor:
-        """Unpatchify the latent, (optionally) denorm, and VAE-decode.
+        """Unpatchify the latent, denorm it if applicable, and VAE-decode.
 
-        Args:
-            z: Final denoised latent ``(B, num_image, in_channels)``.
-            grid_h: Image-grid height in tokens.
-            grid_w: Image-grid width in tokens.
-
-        Returns:
-            The decoded image ``(B, H, W, out_ch)`` in ``[0, 1]``.
+        :param z: Final denoised latent, shape ``(B, num_image, in_channels)``.
+        :param grid_h: Image-grid height in tokens.
+        :param grid_w: Image-grid width in tokens.
+        :return: The decoded image, shape ``(B, H, W, out_ch)``, values in ``[0, 1]``.
         """
         patch = self.config.patch_size
         in_channels = self.config.in_channels
         ae_channels = in_channels // (patch * patch)  # = z_channels
 
-        # --- latent denorm (guarded on in_channels == 128). ---
+        # Latent-norm vectors are keyed to the full config's in_channels.
         if in_channels == _LATENT_NORM_CHANNELS:
-            shift, scale = get_latent_norm()  # (128,), (128,)
+            shift, scale = get_latent_norm()
             z = z * scale + shift
         else:
             logger.debug(
@@ -322,26 +271,20 @@ class Ideogram4Pipeline:
                 _LATENT_NORM_CHANNELS,
             )
 
-        # --- unpatchify: (B, gh*gw, p*p*c) -> (B, gh*p, gw*p, c) [NHWC]. ---
         batch = keras.ops.shape(z)[0]
         z = keras.ops.reshape(
             z, (batch, grid_h, grid_w, patch, patch, ae_channels)
         )
-        # (B, gh, p, gw, p, c) so reshape merges (gh,p) -> H and (gw,p) -> W.
+        # Transpose so the reshape below merges (gh,p) into H and (gw,p) into W.
         z = keras.ops.transpose(z, (0, 1, 3, 2, 4, 5))
         z_img = keras.ops.reshape(
             z, (batch, grid_h * patch, grid_w * patch, ae_channels)
         )
 
-        # --- VAE decode -> image, clamp to [-1, 1], map to [0, 1]. ---
         image = self.autoencoder.decode(z_img)
         image = keras.ops.clip(image, -1.0, 1.0)
         image = (image + 1.0) * 0.5
         return image
-
-    # -----------------------------------------------------------------
-    # Denoise + decode
-    # -----------------------------------------------------------------
 
     def __call__(
         self,
@@ -356,42 +299,34 @@ class Ideogram4Pipeline:
         seed: int = 0,
         schedule: Optional[LogitNormalSchedule] = None,
     ) -> keras.KerasTensor:
-        """Run the full Euler + asymmetric-CFG denoise loop, then VAE-decode.
+        """Run the Euler plus asymmetric-CFG denoise loop, then VAE-decode.
 
-        Args:
-            llm_features: Precomputed conditioning ``(B, T, llm_features_dim)``.
-            height: Target image height in pixels.
-            width: Target image width in pixels.
-            num_steps: Number of Euler integration steps.
-            guidance_scale: Constant CFG weight (used when ``guidance_schedule``
-                is ``None``).
-            guidance_schedule: Optional per-step CFG weights in LOOP-INDEX order
-                (length must equal ``num_steps``); index 0 is the LAST step.
-            mu: Logit-normal schedule mean (``known_mean``). Used when
-                ``schedule`` is ``None``.
-            std: Logit-normal schedule stddev. Used when ``schedule`` is ``None``.
-            seed: Integer seed for the initial noise (determinism).
-            schedule: Optional prebuilt :class:`LogitNormalSchedule`; if ``None``
-                one is built via :func:`get_schedule_for_resolution`.
-
-        Returns:
-            The generated image ``(B, height, width, out_ch)`` in ``[0, 1]``.
-
-        Raises:
-            ValueError: If ``guidance_schedule`` length disagrees with
-                ``num_steps`` or ``height``/``width`` are not patch-divisible.
+        :param llm_features: Precomputed conditioning, shape ``(B, T, llm_features_dim)``.
+        :param height: Target image height in pixels.
+        :param width: Target image width in pixels.
+        :param num_steps: Number of Euler integration steps.
+        :param guidance_scale: Constant CFG weight, used when `guidance_schedule` is `None`.
+        :param guidance_schedule: Optional per-step CFG weights in loop-index
+            order (length must equal `num_steps`); index 0 is the last step.
+        :param mu: Logit-normal schedule mean (`known_mean`). Used when `schedule` is `None`.
+        :param std: Logit-normal schedule standard deviation. Used when `schedule` is `None`.
+        :param seed: Integer seed for the initial noise, for determinism.
+        :param schedule: Optional prebuilt :class:`LogitNormalSchedule`; if
+            `None`, one is built via :func:`get_schedule_for_resolution`.
+        :return: The generated image, shape ``(B, height, width, out_ch)``, values in ``[0, 1]``.
+        :raises ValueError: If `guidance_schedule`'s length disagrees with
+            `num_steps`, or `height`/`width` are not patch-divisible.
         """
         batch_size = int(keras.ops.shape(llm_features)[0])
         num_text_tokens = int(keras.ops.shape(llm_features)[1])
         in_channels = self.config.in_channels
         llm_dim = self.config.llm_features_dim
 
-        # --- schedule + step grid + per-step guidance weights. ---
         if schedule is None:
             schedule = get_schedule_for_resolution(
                 (height, width), known_mean=mu, std=std
             )
-        step_intervals = make_step_intervals(num_steps)  # (num_steps+1,) numpy
+        step_intervals = make_step_intervals(num_steps)
 
         if guidance_schedule is not None:
             if len(guidance_schedule) != num_steps:
@@ -403,7 +338,6 @@ class Ideogram4Pipeline:
         else:
             gw_per_step = [float(guidance_scale)] * num_steps
 
-        # --- packed inputs. ---
         (
             position_ids,
             segment_ids,
@@ -417,25 +351,24 @@ class Ideogram4Pipeline:
         segment_ids = keras.ops.convert_to_tensor(segment_ids)
         indicator = keras.ops.convert_to_tensor(indicator)
 
-        # --- conditional llm_features placed at text positions, zero at image. ---
-        text_feats = keras.ops.cast(llm_features, "float32")  # (B, T, llm_dim)
+        # Conditional llm_features sit at text positions; image positions get zeros.
+        text_feats = keras.ops.cast(llm_features, "float32")
         image_feat_pad = keras.ops.zeros(
             (batch_size, num_image, llm_dim), dtype="float32"
         )
         llm_features_full = keras.ops.concatenate(
             [text_feats, image_feat_pad], axis=1
-        )  # (B, L, llm_dim)
+        )
 
-        # --- initial latent noise (image tokens only). ---
         z = keras.random.normal(
             (batch_size, num_image, in_channels), seed=seed, dtype="float32"
         )
         text_z_padding = keras.ops.zeros(
             (batch_size, num_text_tokens, in_channels), dtype="float32"
         )
-        pos_z = keras.ops.concatenate([text_z_padding, z], axis=1)  # (B, L, C)
+        pos_z = keras.ops.concatenate([text_z_padding, z], axis=1)
 
-        # --- negative (unconditional) branch: IMAGE-ONLY, conditioning zeroed. ---
+        # Negative branch is image-only; conditioning is zeroed rather than dropped.
         neg_position_ids = position_ids[:, num_text_tokens:]
         neg_segment_ids = segment_ids[:, num_text_tokens:]
         neg_indicator = indicator[:, num_text_tokens:]
@@ -445,41 +378,19 @@ class Ideogram4Pipeline:
 
         neg_model = self.unconditional_transformer or self.transformer
 
-        # --- Euler loop: i from num_steps-1 down to 0. ---
         for i in range(num_steps - 1, -1, -1):
-            # DECISION plan-2026-08-14T233721-d4f9beb2/D-002: `step_intervals`
-            # is indexed in REVERSE of the loop index so `t` descends from the
-            # noise end to the data end. Derivation: the trainer
-            # (src/train/ideogram4/train_ideogram4.py) uses
-            # `x_t = (1 - tau)*x0 + tau*x1` with `x1 ~ N(0, I)` and target
-            # `v = x1 - x0`, so `t = 0` is clean data, `t = 1` is noise, and
-            # reverse sampling must run t_max -> t_min with dt < 0.
-            # `step_intervals` ASCENDS 0 -> 1 while `LogitNormalSchedule` is
-            # strictly DECREASING (`t_ = 1 - expit(...)`), so
-            # `schedule(step_intervals[j])` descends in `j`. With `i` descending,
-            # `j = num_steps - 1 - i` ascends, which makes t_val > s_val, i.e.
-            # dt = s_val - t_val < 0 at every step; the first executed iteration
-            # sits at `schedule(step_intervals[0]) ~ t_max`, the endpoint the
-            # pure-noise `z` seeded above actually corresponds to, and the last
-            # lands on `schedule(step_intervals[num_steps]) ~ t_min`. The
-            # trajectory is continuous: step i's s_val is step (i-1)'s t_val.
-            # Do NOT instead swap t_val/s_val on the forward index -- with `i`
-            # descending that walks `t` backwards between iterations. Do NOT
-            # ascend `i` either: `guidance_schedule` is in LOOP-INDEX order
-            # (scheduler.SamplerParameters: index 0 is the LAST, polish step).
-            # See decisions.md D-002.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-002: index step_intervals
+            # by j = num_steps-1-i (not i) so t descends noise -> data as i falls.
+            # guidance_schedule stays in loop-index order. See decisions.md.
             j = num_steps - 1 - i
             t_val = float(schedule(float(step_intervals[j])))
             s_val = float(schedule(float(step_intervals[j + 1])))
             gw_i = gw_per_step[i]
 
-            # Shape (B, 1) -- NOT (B,). ScalarSinusoidalEmbedding squeezes a
-            # trailing singleton, so a rank-1 (B,) tensor with B == 1 would
-            # collapse to a scalar and break its Dense. (B, 1) squeezes to (B,)
-            # safely for any B, then the transformer expands it back over L.
+            # Shape (B, 1), not (B,): a B==1 rank-1 tensor would collapse to a
+            # scalar and break ScalarSinusoidalEmbedding's trailing squeeze.
             t = keras.ops.full((batch_size, 1), t_val, dtype="float32")
 
-            # conditional (full-seq) velocity, image slice only.
             pos_out = self.transformer(
                 dict(
                     llm_features=llm_features_full,
@@ -490,9 +401,8 @@ class Ideogram4Pipeline:
                     indicator=indicator,
                 )
             )
-            pos_v = pos_out[:, num_text_tokens:]  # (B, num_image, C)
+            pos_v = pos_out[:, num_text_tokens:]
 
-            # unconditional (image-only) velocity.
             neg_v = neg_model(
                 dict(
                     llm_features=neg_llm_features,
@@ -508,12 +418,7 @@ class Ideogram4Pipeline:
             z = z + v * (s_val - t_val)
             pos_z = keras.ops.concatenate([text_z_padding, z], axis=1)
 
-        # --- decode the final latent. ---
         return self._decode(z, grid_h, grid_w)
-
-    # -----------------------------------------------------------------
-    # Convenience constructor
-    # -----------------------------------------------------------------
 
     @classmethod
     def from_config(
@@ -521,19 +426,17 @@ class Ideogram4Pipeline:
         variant: str = "tiny",
         seed: Optional[int] = None,
     ) -> "Ideogram4Pipeline":
-        """Build a fresh (UNTRAINED) pipeline from a named preset for smoke tests.
+        """Build a fresh, untrained pipeline from a named preset.
 
-        Constructs a new transformer + autoencoder from the ``variant`` preset.
-        The resulting pipeline runs end-to-end but produces noise (no weights are
-        trained) -- useful only for shape / finiteness / determinism smoke tests.
+        Constructs a new transformer and autoencoder from the `variant`
+        preset. The resulting pipeline runs end to end but produces noise,
+        since no weights are trained; useful for shape, finiteness, and
+        determinism smoke tests.
 
-        Args:
-            variant: One of the config presets (``"tiny"`` or ``"full"``).
-            seed: Optional sampling seed forwarded to the VAE ``Sampling`` layer
-                (unused at decode, which is deterministic).
-
-        Returns:
-            A constructed :class:`Ideogram4Pipeline`.
+        :param variant: One of the config presets (``"tiny"`` or ``"full"``).
+        :param seed: Optional sampling seed forwarded to the VAE `Sampling`
+            layer. Unused at decode, which is deterministic.
+        :return: A constructed :class:`Ideogram4Pipeline`.
         """
         config, ae_params = get_ideogram4_config(variant)
         transformer = create_ideogram4_transformer(variant)

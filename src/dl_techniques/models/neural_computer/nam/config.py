@@ -32,23 +32,10 @@ class NAMConfig:
     :param epsilon: Numerical stability constant for arithmetic.
 
     .. note::
-       There is no ``shift_range``. NAM builds every NTM read and write head
-       with ``AddressingMode.CONTENT`` (see :mod:`.cell`), under which the
-       circular-shift projection is not created at all, so the field this
-       docstring used to advertise configured nothing. Removed 2026-08-18;
-       :meth:`from_dict` ignores it, so a config dict serialized before then
-       still loads. See decisions.md D-014.
-
-    .. note::
-       There is no ``num_write_heads`` either, for the same reason and by the
-       same audit one pass later. :mod:`.cell` constructs exactly one
-       :class:`NTMWriteHead` — a single attribute, not a list comprehension
-       over a count, unlike ``num_read_heads`` immediately above it — so the
-       field was a default, three identical variant entries and a serialized
-       key that no code read. Removed 2026-08-19; :meth:`from_dict` ignores it,
-       so a config dict serialized before then still loads. Note that
-       ``num_read_heads`` IS live. See decisions.md
-       plan-2026-08-18T140459-7991552f/D-035.
+       Every NTM read and write head uses ``AddressingMode.CONTENT`` (see
+       :mod:`.cell`), so there is no ``shift_range`` and exactly one write
+       head, unlike the ``num_read_heads`` read heads. ``from_dict`` ignores
+       unrecognized keys, so an older serialized config still loads.
     """
 
     hidden_size: int = 128

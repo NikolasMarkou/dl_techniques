@@ -1,73 +1,26 @@
 """
-Masked language model pre-trainer that wraps an arbitrary encoder and corrupts its
-input on the fly, with a configurable mask/random/unchanged corruption split.
+Masked language model pre-trainer that wraps an arbitrary encoder and
+corrupts its input on the fly.
 
-Autoregressive factorization conditions each token only on its left context, which
-forces every representation in the network to be one-sided. Masked language modelling
-removes that constraint by changing the objective rather than the architecture: delete
-a random subset `S` of positions and maximize `sum_{i in S} log p(x_i | x_notS)`. Because
-the target is held out of the input, attention can be fully bidirectional without the
-prediction becoming trivial, and each position's representation is free to use both
-sides of the sentence. The price is supervision density: only the selected positions
-produce any signal, so a sequence yields roughly `mask_ratio * T` training targets
-instead of `T`. That is why the ratio is a tuned quantity, and why the corruption is
-drawn fresh inside `train_step`/`test_step` rather than baked into the dataset - the
-same example is masked differently on every epoch, which multiplies the effective
-number of distinct training examples at no storage cost.
+Unlike autoregressive training, which conditions each token only on its
+left context, MLM deletes a random subset of positions and predicts them
+from the rest, so attention can run fully bidirectional. Of the selected
+positions, 80% become `[MASK]`, 10% become a random vocabulary id, and 10%
+are left unchanged; all three groups are scored, so the encoder cannot rely
+on the `[MASK]` token to know a position is being predicted. Corruption is
+redrawn every `train_step`/`test_step` call rather than baked into the
+dataset, and the loss is the dense cross entropy over every position
+reduced through the selection mask as `sample_weight`, so unselected
+positions contribute no gradient.
 
-The corruption itself is not a plain deletion, and the reason is a train/deploy
-mismatch: the `[MASK]` id is an artifact of pre-training and never appears in the
-downstream inputs the encoder will eventually see. Conditioning entirely on it would
-let the encoder learn a representation that is only correct in the presence of a token
-it will never meet again. So of the selected positions a fraction
-`1 - random_token_ratio - unchanged_ratio` (0.8 by default) becomes `[MASK]`,
-`random_token_ratio` (0.1) becomes a uniformly drawn vocabulary id, and
-`unchanged_ratio` (0.1) is left verbatim. All three groups are scored. The unchanged
-group is the important one: since the model cannot tell a scored-but-unchanged position
-from an ordinary one, it must keep a predictive representation at *every* position
-rather than only where a mask token flags one. The random-token group additionally
-stops the model from assuming the observed id is always correct.
-
-Selection and corruption are independent per-token uniform draws
-(`dl_techniques.utils.masking.strategies.apply_mlm_masking`), not quotas: 15/80/10/10
-are expectations, and the number of masked positions varies from batch to batch.
-Positions whose id appears in `special_token_ids` are excluded by value equality.
-Padding is excluded only when an `attention_mask` is supplied; call this without one
-and pad positions are eligible for masking and are scored like any other token.
-
-Labels are the full uncorrupted id tensor, so the per-position cross entropy is dense
-and the restriction to masked positions happens in the reduction: the boolean selection
-mask is passed as `sample_weight`, and the loss is
-`sum(CE * mask) / max(sum(mask), 1)`. Unselected positions are multiplied by exactly
-zero, so they contribute neither loss nor gradient, and normalizing by the number of
-selected tokens rather than by the sequence length makes the loss scale independent of
-how many tokens the Bernoulli draw happened to select. The `max(..., 1)` floor keeps a
-batch in which nothing was selected finite instead of producing `0/0`.
-
-The prediction head is `Dense(hidden_size, gelu) -> Dropout -> LayerNorm ->
-Dense(vocab_size)`. Two things about it diverge from BERT's and are deliberate. First,
-the output projection is an independent `hidden_size x vocab_size` matrix and is *not*
-tied to the encoder's input embedding table. The wrapper accepts any encoder and cannot
-assume that an embedding matrix is exposed, or under what attribute, so tying would make
-the model-agnostic contract conditional on encoder internals; the cost is an extra
-`hidden_size * vocab_size` parameters and the loss of the regularization that tying
-provides. Second, BERT places LayerNorm directly after the activation and uses no
-dropout in the head, whereas here dropout sits between them.
-
-"Model-agnostic" is a contract, not an absence of one. The encoder must expose a
-`hidden_size` attribute (a missing one raises `ValueError` at construction) and its
-`call` must return a mapping containing `last_hidden_state`.
-
-`train_step` and `test_step` are hand-written over `tf.GradientTape`, so this model is
-TensorFlow-backend only. The `metrics` property is overridden to return the two internal
-trackers PLUS whatever was passed to `compile(metrics=...)`, and `train_step` feeds the
-compiled ones explicitly; a compiled metric whose NAME collides with `loss` or
-`accuracy` is still dropped, because the step's return dict is keyed by name, but it now
-logs a warning instead of vanishing. Validation masking is dynamic as well, so `val_loss` carries the
-noise of a fresh corruption draw and an epoch-to-epoch comparison mixes model change
-with sampling noise. `call()` deliberately does no masking at all: it runs the encoder
-on the inputs as given and returns logits for every position, which is what makes
-`predict()` usable for scoring an already-masked sequence prepared by the caller.
+The encoder is treated as a plug-in component: it must expose a
+`hidden_size` attribute and return a mapping with `last_hidden_state`. The
+prediction head does not tie its output projection to the encoder's input
+embeddings, since the wrapper cannot assume one is exposed. `train_step`
+and `test_step` are hand-written over `tf.GradientTape`, so this model is
+TensorFlow-backend only. `call()` does no masking itself — it scores the
+inputs as given, which is what makes `predict()` usable on a sequence the
+caller already masked.
 
 References:
     - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional Transformers for
@@ -118,16 +71,11 @@ class MaskedLanguageModel(keras.Model):
     The encoder is treated as a core component, making it easy to save and
     reuse for downstream fine-tuning after pre-training is complete.
 
-    **Masking Strategy (BERT-style):**
+    Masking strategy (BERT-style): 15% of tokens are selected. Of those, 80%
+    become `[MASK]`, 10% become a random token, and 10% are left unchanged.
+    Special tokens (`[CLS]`, `[SEP]`, `[PAD]`) are never masked.
 
-    - 15% of tokens are selected for masking.
-    - Of these selected tokens:
-      - 80% are replaced with [MASK] token
-      - 10% are replaced with a random token
-      - 10% are left unchanged
-    - Special tokens ([CLS], [SEP], [PAD]) are never masked.
-
-    **Architecture:**
+    Architecture:
 
     .. code-block:: text
 
@@ -270,14 +218,9 @@ class MaskedLanguageModel(keras.Model):
         compiled = getattr(self, "_compile_metrics", None)
         if compiled is not None:
             names = {m.name for m in tracked}
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-131
-            # The name dedup must stay NAME-based: train_step returns
-            # ``{m.name: m.result() for m in self.metrics}``, so admitting a
-            # second metric called "accuracy" would not add a row, it would
-            # overwrite the tracker's under the same key. Do NOT "fix" this by
-            # comparing identity. Warn instead -- the dropped metric IS updated
-            # (measured 0.015625 against the tracker's 0.055556 on one epoch),
-            # so silence made a live, diverging number invisible. See D-131.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-131: dedup must stay
+            # name-based, since train_step keys its dict by name. Warn on a
+            # collision instead of silently dropping the live metric. See decisions.md.
             dropped = sorted(m.name for m in compiled.metrics if m.name in names)
             if dropped and not getattr(self, "_warned_metric_name_clash", False):
                 self._warned_metric_name_clash = True
@@ -433,23 +376,9 @@ class MaskedLanguageModel(keras.Model):
                 y_pred=logits,
                 sample_weight=masked_positions,
             )
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
-            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
-            # the SCALED value is what `tape.gradient` differentiates while the
-            # UNSCALED value is what is reported. Do NOT "simplify" this back
-            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
-            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
-            # every gradient by `dynamic_scale` (2**15 initially)
-            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
-            # precision -- it divides the whole update by the loss scale, with
-            # no warning of any kind. In float32 it is a provable no-op: the
-            # base `Optimizer.scale_loss` returns `loss` unchanged unless
-            # `loss_scale_factor` is set. Keras' own default TF `train_step`
-            # does exactly this; overriding `train_step` silently opts out.
-            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
-            # float32 3.561846e+01 vs mixed_float16 1.617076e-03, ratio 2.203e+04, on a REAL BERT encoder
-            # See decisions.md D-036, and the same ruling at
-            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss must run
+            # inside the tape and tape.gradient must differentiate the scaled value —
+            # omitting it silently divides the whole update under mixed_float16. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables

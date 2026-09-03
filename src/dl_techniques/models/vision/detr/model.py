@@ -1,75 +1,31 @@
 """
-DETR object detection: a CNN backbone feeding a transformer encoder-decoder that
-turns a fixed set of learned object queries into a set of box and class
+DETR object detection: a CNN backbone feeding a transformer encoder-decoder
+that turns a fixed set of learned object queries into box and class
 predictions.
 
-Detection had always been posed as a dense surrogate problem. Anchors, region
-proposals and grid cells produce tens of thousands of candidate boxes, almost all
-of them redundant, and a hand-designed non-maximum-suppression stage afterwards
-decides which survive. That pipeline is not end-to-end: NMS is non-differentiable,
-anchor priors encode assumptions about object scale and aspect, and duplicate
-suppression is a rule rather than something the model learns. DETR's premise is
-that detection is *set prediction*, and that a model can be trained to emit a set
-directly if two things are supplied. The first is a decoder that lets predictions
-see each other: `num_queries` learned embeddings pass through self-attention at
-every decoder layer, so a query that is about to claim an object can observe that
-a sibling query has already claimed it and move on. Duplicate suppression becomes
-a learned interaction rather than a post-process. The second is a permutation-
-invariant loss — a Hungarian bipartite matching between the fixed-size prediction
-set and the ground-truth set, with unmatched predictions supervised toward a
-"no object" class. That loss lives in the training loop, not here; this module is
-the forward architecture only, and the extra logit for "no object" is the reason
-the classifier emits `num_classes + 1` outputs.
+Earlier detectors produce tens of thousands of candidate boxes (anchors,
+region proposals, grid cells) and prune them with a non-differentiable
+non-maximum-suppression step. DETR instead treats detection as set
+prediction. `num_queries` learned embeddings, shared across every image and
+carrying no image content, pass through decoder self-attention so a query
+that has claimed an object can signal that to the others, replacing NMS with
+a learned interaction. Training matches this fixed-size prediction set to
+the ground-truth set with a Hungarian bipartite matching (implemented in the
+training loop, not here) and supervises unmatched predictions toward a
+"no object" class, which is why the classifier emits `num_classes + 1`
+outputs. `num_queries` is a hard ceiling on detections per image.
 
-The queries themselves are the conceptual center. They carry no image content —
-they are a `num_queries x hidden_dim` embedding table, learned once and shared
-across every image. Each one converges during training into a slot with a soft
-spatial and size preference, and cross-attention is what fills that slot with the
-content of whatever object occupies that region of the current image. `num_queries`
-is therefore a hard ceiling on detections per image, which is why the paper sets
-it far above the maximum object count in the dataset.
-
-The forward path is backbone, then 1x1 projection to `hidden_dim`, then flatten
-to a sequence, then encoder, then decoder, then two heads: a `Dense` for class
-logits and a three-layer MLP for boxes, the latter passed through `sigmoid` so
-its four outputs are normalized `cxcywh` coordinates in `[0, 1]`. Positional
-encoding is computed on the *projected* feature map rather than on the input
-image, which matters because `PositionEmbeddingSine2D` derives its grid from the
-spatial dimensions of what it is handed; computing it on the full-resolution
-image would produce an encoding of the wrong size for the stride-16 feature map.
-That layer emits channels-first `(B, C, H, W)` and is transposed to `(B, H, W, C)`
-immediately afterwards to match the rest of the graph's NHWC layout.
-
-Several places depart from the paper, deliberately or as unfinished work, and a
-reader comparing against the reference implementation should know which is which.
-The padding mask **is** honoured, but only above the backbone. `call` takes an
-`(images, padding_mask)` tuple with `True` for padding at image resolution,
-nearest-downsamples it onto the stride-16 feature grid, inverts it into a keep
-mask and passes it to encoder self-attention and decoder cross-attention as a
-rank-2 `(B, S)` key mask (both attention layers broadcast it to `(B, 1, 1, S)`
-themselves, so the `(B, T, S)` form is never materialized). What this does NOT
-do is mask the convolutional backbone: a padded canvas still leaks into the
-feature cells within one receptive field of the boundary, exactly as in the
-reference implementation, so masking suppresses the padding's contribution to
-attention and not its contribution to the features. Positional encodings are added to the
-*input* of each encoder layer rather than to queries and keys only, so values
-carry positional content too, and because the addition is applied to the running
-`memory` at every layer the encoding accumulates across the stack instead of being
-re-injected identically; the decoder makes the same simplification with the query
-embeddings, adding them to the whole decoder input rather than to `Q` and `K`.
-The backbone is tapped at `conv4_block6_out` (C4, stride 16) rather than C5, and
-is frozen by default (`backbone_trainable=False`) rather than fine-tuned at a
-reduced learning rate; note also that ImageNet weights *are* downloaded here via
-`keras.applications`, so unlike most of this package the backbone is genuinely
-pretrained, while nothing above it is. There is no final decoder layer
-normalization, so the auxiliary outputs are read raw from each decoder layer.
-
-`aux_loss=True`, the default, applies both heads to every decoder layer's output
-and returns the intermediate predictions under `aux_outputs`. This is a training
-aid rather than an architectural feature: supervising every layer with the same
-matching loss pressures each layer to already be producing a usable detection set,
-which measurably speeds convergence for a model that is otherwise slow to train.
-Inference consumes `pred_logits` and `pred_boxes` alone.
+The forward path is backbone, 1x1 projection to `hidden_dim`, flatten to a
+sequence, encoder, decoder, then two heads: a `Dense` for class logits and a
+three-layer MLP for boxes passed through `sigmoid`, giving normalized
+`cxcywh` coordinates in `[0, 1]`. `aux_loss=True`, the default, applies both
+heads to every decoder layer and returns the intermediate predictions under
+`aux_outputs`, which speeds convergence during training; inference needs
+only `pred_logits` and `pred_boxes`. The backbone downloads ImageNet weights
+through `keras.applications` and is frozen by default
+(`backbone_trainable=False`); everything above it is not pretrained. See
+:class:`DETR`'s docstring for where this implementation departs from the
+paper.
 
 References:
     - Carion et al., 2020. End-to-End Object Detection with Transformers.
@@ -111,47 +67,61 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.detr.model")
 class DetrTransformer(layers.Layer):
-    """
-    DETR Transformer combining encoder and decoder stacks.
+    """Encoder-decoder transformer that turns image features into per-query outputs.
 
-    **Intent**: To process image features through a transformer architecture,
-    allowing the model to capture global dependencies in the image and attend
-    to relevant regions for object detection.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input Features + Positional Encoding
-           ↓
-    Encoder Stack (N Layers)
-           ↓
-    Memory (Encoded Features)
-           ↓
-    Decoder Stack (N Layers) ← Object Queries + Query Positional Encoding
-           ↓
-    Output Features (for each query)
-    ```
+    .. code-block:: text
 
-    Args:
-        hidden_dim: The dimensionality of the transformer. Defaults to 256.
-        num_heads: The number of attention heads. Defaults to 8.
-        num_encoder_layers: Number of encoder layers. Defaults to 6.
-        num_decoder_layers: Number of decoder layers. Defaults to 6.
-        ffn_dim: The hidden dimension of the FFN. Defaults to 2048.
-        dropout_rate: The dropout rate. Defaults to 0.1.
-        activation: Activation function for FFN. Defaults to "relu".
-        normalization_type: Type of normalization. Defaults to "layer_norm".
-        ffn_type: Type of FFN to use. Defaults to "mlp".
-        **kwargs: Additional layer arguments.
+        src [B, H*W, D]   pos_embed [B, H*W, D]
+              │                  │
+              └────────┬─────────┘
+                       ▼
+        ┌─────────────────────────────┐
+        │ Encoder stack (N layers)    │  self-attention, masked by `mask`
+        └──────────────┬──────────────┘
+                       ▼
+                    memory [B, H*W, D]
+                       │
+        query_embed [Q, D] ──────────┐
+                       │             ▼
+        ┌─────────────────────────────┐
+        │ Decoder stack (N layers)    │  self-attn over queries,
+        │                             │  cross-attn over memory
+        └──────────────┬──────────────┘
+                       ▼
+        per-layer outputs [B, Q, D], one per decoder layer
+
+    :param hidden_dim: Transformer hidden dimension.
+    :type hidden_dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param num_encoder_layers: Number of encoder layers.
+    :type num_encoder_layers: int
+    :param num_decoder_layers: Number of decoder layers.
+    :type num_decoder_layers: int
+    :param ffn_dim: Hidden dimension of the feed-forward network.
+    :type ffn_dim: int
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param activation: Activation function for the feed-forward network.
+    :type activation: str
+    :param normalization_type: Normalization type used throughout.
+    :type normalization_type: str
+    :param ffn_type: Feed-forward network variant.
+    :type ffn_type: str
+    :param kwargs: Additional layer arguments.
 
     Input shape:
         Tuple of:
-        - src: `(batch_size, H*W, hidden_dim)` - Flattened image features
-        - mask: `(batch_size, H*W)` - Padding mask
-        - query_embed: `(num_queries, hidden_dim)` - Object query embeddings
-        - pos_embed: `(batch_size, H*W, hidden_dim)` - Positional encodings
+        - src: ``(batch_size, H*W, hidden_dim)``, flattened image features.
+        - mask: ``(batch_size, H*W)``, padding mask.
+        - query_embed: ``(num_queries, hidden_dim)``, object query embeddings.
+        - pos_embed: ``(batch_size, H*W, hidden_dim)``, positional encodings.
 
     Output shape:
-        List of `(batch_size, num_queries, hidden_dim)` tensors, one for each decoder layer
+        List of ``(batch_size, num_queries, hidden_dim)`` tensors, one per
+        decoder layer.
     """
 
     def __init__(
@@ -248,30 +218,27 @@ class DetrTransformer(layers.Layer):
         pos_embed: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> List[keras.KerasTensor]:
-        """
-        Forward pass through encoder and decoder.
+        """Run the encoder stack, then the decoder stack.
 
-        Args:
-            src: Source features (batch_size, H*W, hidden_dim)
-            mask: Key KEEP mask (batch_size, H*W), 1 for a real feature position
-                and 0 for one that came from image padding. ``None`` attends to
-                everything. Note the polarity: this is the inverse of the
-                ``padding_mask`` :class:`DETR` accepts, which is True FOR
-                padding; :meth:`DETR.call` does the inversion.
-            query_embed: Object query embeddings (num_queries, hidden_dim)
-            pos_embed: Positional encodings (batch_size, H*W, hidden_dim)
-            training: Training mode flag
-
-        Returns:
-            List of decoder outputs, one per layer
+        :param src: Source features, shape ``(batch_size, H*W, hidden_dim)``.
+        :type src: keras.KerasTensor
+        :param mask: Key keep mask, shape ``(batch_size, H*W)``, 1 for a real
+            feature position and 0 for one that came from image padding.
+            ``None`` attends to everything. This is the inverse of the
+            ``padding_mask`` :class:`DETR` accepts, which is true for
+            padding; :meth:`DETR.call` does the inversion.
+        :type mask: Optional[keras.KerasTensor]
+        :param query_embed: Object query embeddings, shape ``(num_queries, hidden_dim)``.
+        :type query_embed: keras.KerasTensor
+        :param pos_embed: Positional encodings, shape ``(batch_size, H*W, hidden_dim)``.
+        :type pos_embed: keras.KerasTensor
+        :param training: Whether the layer runs in training or inference mode.
+        :type training: Optional[bool]
+        :return: List of decoder outputs, one per layer.
+        :rtype: List[keras.KerasTensor]
         """
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: a 2-D (B, S) key mask
-        # is passed STRAIGHT THROUGH to both attentions. `MultiHeadCrossAttention`
-        # expands a rank-2 mask to (B, 1, 1, S) itself, so do NOT "fix" this by
-        # materializing the (B, T, S) form the parameter names suggest: at
-        # DETR's stride-16 feature maps S is a few thousand and the square form
-        # costs O(S^2) per image for information the broadcast already carries.
-        # The previous code passed None here and the whole mask was discarded.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: pass the 2-D (B, S) key mask straight through, never materialize (B, T, S).
+        # `MultiHeadCrossAttention` broadcasts it to (B, 1, 1, S) itself; the square form costs O(S^2) for nothing. See decisions.md.
 
         # Encoder forward pass
         memory = src
@@ -339,40 +306,87 @@ class DetrTransformer(layers.Layer):
 @register_dl_technique("dl_techniques.models.detr.model")
 class DETR(models.Model):
     """
-    The complete DETR model for end-to-end object detection.
+    End-to-end object detection: backbone, transformer, two prediction heads.
 
-    **Intent**: To provide a complete, end-to-end model that takes an image
-    and returns a set of object detections (class probabilities and bounding boxes).
+    Architecture:
 
-    **Architecture**:
-    ```
-    Image → Backbone(CNN) → 1x1 Conv ↘
-                                     + → Transformer → Prediction Heads → Detections
-    Mask  → PositionalEncoding(Sine) ↗
-    ```
+    .. code-block:: text
 
-    Args:
-        num_classes: Number of object classes (excluding "no object").
-        num_queries: Max number of detections per image.
-        backbone: A Keras model (CNN) for feature extraction.
-        transformer: The DETR transformer module.
-        hidden_dim: Dimensionality of the transformer. Must be a multiple of 4
-            (the sine position encoding takes `hidden_dim // 2` features per
-            axis, and that value must itself be even). Defaults to 256.
-        aux_loss: If True, returns predictions from all intermediate decoder
-            layers for auxiliary loss calculation. Defaults to True.
-        **kwargs: Additional model arguments.
+        images [B, H, W, 3]        padding_mask [B, H, W]
+              │                          │
+              ▼                          │
+        ┌──────────────┐                 │
+        │ backbone(CNN)│                 │
+        │ (pretrained, │                 │
+        │  frozen)     │                 │
+        └──────┬───────┘                 │
+               ▼                         ▼ (nearest-downsample to feature grid)
+        ┌──────────────┐         ┌───────────────┐
+        │ 1x1 Conv     │         │ keep mask [B,S]│
+        │ → hidden_dim │         └───────┬────────┘
+        └──────┬───────┘                 │
+               ├─────────────────────────┤
+               ▼                         ▼
+        ┌────────────────────────────────────┐
+        │ pos_embed: PositionEmbeddingSine2D  │  (computed on the projected
+        │ (on the projected feature map)      │   feature map, not the image)
+        └──────────────────┬───────────────────┘
+                           ▼
+        ┌────────────────────────────────────┐
+        │ DetrTransformer                     │
+        └──────────────────┬───────────────────┘
+                           ▼
+              per-decoder-layer outputs
+                    │              │
+                    ▼              ▼
+             class_embed      bbox_embed (3-layer MLP, sigmoid)
+                    │              │
+                    ▼              ▼
+             pred_logits      pred_boxes
+        [B, Q, num_classes+1] [B, Q, 4] (cxcywh, [0, 1])
+
+        aux_loss=True also applies both heads to every non-final decoder
+        layer's output and returns them under aux_outputs.
+
+    This implementation departs from the paper in a few places. The padding
+    mask is honoured only above the backbone: it is downsampled to the
+    stride-16 feature grid and passed to encoder self-attention and decoder
+    cross-attention, but the backbone convolutions themselves still see the
+    padded canvas, matching the reference implementation. Positional
+    encodings are added to the running encoder `memory` at every layer
+    (accumulating across the stack) rather than only to queries and keys, and
+    the decoder does the same with the query embeddings. The backbone is
+    tapped at `conv4_block6_out` (C4, stride 16) rather than C5, and there is
+    no final decoder layer normalization, so auxiliary outputs are read raw
+    from each decoder layer.
+
+    :param num_classes: Number of object classes, excluding "no object".
+    :type num_classes: int
+    :param num_queries: Maximum number of detections per image.
+    :type num_queries: int
+    :param backbone: A Keras CNN model used for feature extraction.
+    :type backbone: keras.Model
+    :param transformer: The DETR transformer module.
+    :type transformer: DetrTransformer
+    :param hidden_dim: Transformer dimensionality. Must be a multiple of 4:
+        the sine position encoding takes `hidden_dim // 2` features per axis,
+        and that value must itself be even.
+    :type hidden_dim: int
+    :param aux_loss: Whether to return predictions from every intermediate
+        decoder layer for auxiliary loss calculation.
+    :type aux_loss: bool
+    :param kwargs: Additional model arguments.
 
     Input shape:
         Tuple of:
-        - images: `(batch_size, height, width, 3)`
-        - padding_mask: `(batch_size, height, width)` boolean mask
+        - images: ``(batch_size, height, width, 3)``.
+        - padding_mask: ``(batch_size, height, width)`` boolean mask.
 
     Output shape:
         Dictionary containing:
-        - pred_logits: `(batch_size, num_queries, num_classes + 1)`
-        - pred_boxes: `(batch_size, num_queries, 4)`
-        - aux_outputs: List of dicts (if aux_loss=True)
+        - pred_logits: ``(batch_size, num_queries, num_classes + 1)``.
+        - pred_boxes: ``(batch_size, num_queries, 4)``.
+        - aux_outputs: list of dicts, if ``aux_loss=True``.
     """
 
     def __init__(
@@ -388,16 +402,8 @@ class DETR(models.Model):
         super().__init__(**kwargs)
         if num_classes <= 0 or num_queries <= 0 or hidden_dim <= 0:
             raise ValueError("num_classes, num_queries, and hidden_dim must be positive.")
-        # DECISION plan-2026-08-28T181715-3870472c/D-007
-        # The constraint is `% 4`, and before this there was NO parity check at
-        # all. Do not drop it: `hidden_dim // 2` is handed to
-        # `PositionEmbeddingSine2D` as `num_pos_feats`, and THAT value must
-        # itself be even because the layer splits it between its sine and
-        # cosine halves. `hidden_dim = 10` produced `num_pos_feats = 5` and
-        # built a position encoder that could never complete a forward pass;
-        # `call()` also reshapes the encoding to `hidden_dim`, which needs
-        # `2 * (hidden_dim // 2) == hidden_dim`, i.e. an even `hidden_dim`.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-28T181715-3870472c/D-007: keep the `% 4` check; do not weaken it to `% 2`.
+        # `hidden_dim // 2` becomes `PositionEmbeddingSine2D`'s `num_pos_feats`, which must itself be even. See decisions.md.
         if hidden_dim % 4 != 0:
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be a multiple of 4: the sine "
@@ -420,15 +426,8 @@ class DETR(models.Model):
 
         # Box prediction head: the paper's 3-layer perceptron,
         # `Dense(d) -> ReLU -> Dense(d) -> ReLU -> Dense(4)`.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-047: built explicitly, NOT
-        # via `create_ffn_layer('mlp', ...)`. That factory key is `MLPBlock`,
-        # which is `fc1 -> act -> dropout -> fc2` — TWO Dense layers
-        # (`layers/ffn/mlp.py:215,225`) — while this comment, the module
-        # docstring and README.md:558 all claimed three, as does the paper. No
-        # depth-configurable MLP exists in `layers/ffn/` (checked the whole
-        # registry), so a local Sequential is the honest construction; do not
-        # "restore reuse" by swapping the factory back in without first adding
-        # a depth parameter there.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-047: build this Sequential directly, not via `create_ffn_layer('mlp', ...)`.
+        # That factory key builds a 2-layer MLPBlock, not the paper's 3-layer one, and no depth-configurable MLP exists in layers/ffn/. See decisions.md.
         self.bbox_embed = keras.Sequential(
             [
                 layers.Dense(hidden_dim, activation='relu', name="bbox_fc1"),
@@ -448,12 +447,15 @@ class DETR(models.Model):
         self.pos_embed = PositionEmbeddingSine2D(num_pos_feats=hidden_dim // 2, name="pos_embed")
 
     def build(self, input_shape) -> None:
-        """Build DETR and all sublayers so .keras round-trip can restore weights.
+        """Build DETR and every sublayer so a ``.keras`` round trip can restore weights.
 
-        Keras weight-restore calls load_own_variables() on each sublayer; if a
-        sublayer is unbuilt (no variables), load_own_variables raises when the
-        saved store has more entries than the (empty) variable list.  Building
-        here ensures every sublayer has its variables before weights are loaded.
+        Keras calls ``load_own_variables`` on each sublayer during restore;
+        an unbuilt sublayer has no variables, so the restore raises when the
+        saved store holds more entries than that empty list. Building here
+        gives every sublayer its variables before weights are loaded.
+
+        :param input_shape: Shape of the input tensor(s).
+        :type input_shape: Any
         """
         # input_shape is either [(B,H,W,3),(B,H,W)] or (B,H,W,3)
         if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
@@ -486,15 +488,15 @@ class DETR(models.Model):
         inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
         training: Optional[bool] = None
     ) -> Dict[str, Any]:
-        """
-        Forward pass through DETR model.
+        """Run the backbone, transformer, and prediction heads.
 
-        Args:
-            inputs: Tuple of (images, padding_mask)
-            training: Training mode flag
-
-        Returns:
-            Dictionary with predictions
+        :param inputs: Tuple of ``(images, padding_mask)``.
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :param training: Whether the model runs in training or inference mode.
+        :type training: Optional[bool]
+        :return: Dictionary with ``pred_logits``, ``pred_boxes``, and,
+            when ``aux_loss=True``, ``aux_outputs``.
+        :rtype: Dict[str, Any]
         """
         images, padding_mask = inputs
 
@@ -527,15 +529,8 @@ class DETR(models.Model):
         # accessing .embeddings before the Embedding layer is built).
         query_embed_weights = self.query_embed(keras.ops.arange(self.num_queries))
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: the padding mask is
-        # PROPAGATED. It arrives at image resolution and True means padding, so
-        # it is nearest-downsampled onto the feature grid, flattened and
-        # INVERTED into the keep-mask the attention layers take. Nearest, not
-        # area/bilinear: `apply_attention_mask`'s keep predicate is binary
-        # (`> 0`), so an interpolated 0.5 would read as full keep — a
-        # half-padded boundary cell must be a definite decision, and nearest
-        # keeps it valid, matching the reference implementation's
-        # `interpolate(mask, size)[0] > 0.5` on the padding polarity.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-046: downsample the padding mask with nearest interpolation, never area/bilinear.
+        # The attention keep predicate is binary (`> 0`); an interpolated 0.5 at a boundary cell would read as full keep. See decisions.md.
         key_keep_mask = None
         if padding_mask is not None:
             mask_f = keras.ops.cast(padding_mask, projected_features.dtype)
@@ -587,18 +582,19 @@ class DETR(models.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "DETR":
-        """Deserialize model from configuration.
+        """Deserialize a model from configuration, migrating a pre-D-007 archive.
 
-        Defensive copy, plus the guide section 6.3 migration path for
-        ``hidden_dim``. The constructor's multiple-of-4 rule is a NEW rejection
-        of a value the old code accepted without any parity check at all, so an
-        archive written before it must still load. A non-conforming
-        ``hidden_dim`` is rounded UP here with a warning, never raised on --
-        including inside the serialized transformer sub-config, so the two
-        widths stay consistent. Rounding up rather than down preserves
-        capacity, and the width change cannot break anything that previously
-        worked: such a model's position encoder could never complete a forward
-        pass, so it was never trainable or servable.
+        An archive written before the multiple-of-4 `hidden_dim` rule can
+        carry a non-conforming value. That value is rounded up here with a
+        warning rather than rejected, and the serialized transformer
+        sub-config is updated to match so the two widths stay consistent.
+        Such an archive's position encoder could never complete a forward
+        pass, so rounding up cannot break anything that previously worked.
+
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: DETR model instance.
+        :rtype: DETR
         """
         config = dict(config)
         hidden_dim = config.get("hidden_dim")
@@ -651,27 +647,39 @@ def create_detr(
     normalization_type: str = "layer_norm",
     ffn_type: str = "mlp"
 ) -> DETR:
-    """
-    Convenience factory to create a DETR model with a specified backbone.
+    """Build a DETR model from a named backbone and transformer hyperparameters.
 
-    Args:
-        num_classes: Number of object detection classes.
-        num_queries: Number of object queries.
-        backbone_name: Name of the CNN backbone ("resnet50").
-        backbone_trainable: If True, the backbone weights will be fine-tuned.
-        hidden_dim: Dimensionality of the transformer. Must be a multiple of 4.
-        num_heads: Number of attention heads.
-        num_encoder_layers: Number of encoder layers.
-        num_decoder_layers: Number of decoder layers.
-        ffn_dim: Hidden dimension of the FFNs in the transformer.
-        dropout_rate: Dropout rate used in the transformer.
-        aux_loss: If True, model outputs predictions from intermediate layers.
-        activation: Activation function for FFN. Defaults to "relu".
-        normalization_type: Type of normalization to use. Defaults to "layer_norm".
-        ffn_type: Type of FFN to use. Defaults to "mlp".
-
-    Returns:
-        A DETR Keras model instance.
+    :param num_classes: Number of object detection classes.
+    :type num_classes: int
+    :param num_queries: Number of object queries.
+    :type num_queries: int
+    :param backbone_name: Name of the CNN backbone; only ``"resnet50"`` is implemented.
+    :type backbone_name: str
+    :param backbone_trainable: Whether the backbone weights are fine-tuned.
+    :type backbone_trainable: bool
+    :param hidden_dim: Transformer dimensionality. Must be a multiple of 4.
+    :type hidden_dim: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param num_encoder_layers: Number of encoder layers.
+    :type num_encoder_layers: int
+    :param num_decoder_layers: Number of decoder layers.
+    :type num_decoder_layers: int
+    :param ffn_dim: Hidden dimension of the transformer's feed-forward networks.
+    :type ffn_dim: int
+    :param dropout_rate: Dropout rate used in the transformer.
+    :type dropout_rate: float
+    :param aux_loss: Whether the model outputs predictions from intermediate layers.
+    :type aux_loss: bool
+    :param activation: Activation function for the feed-forward network.
+    :type activation: str
+    :param normalization_type: Normalization type used throughout.
+    :type normalization_type: str
+    :param ffn_type: Feed-forward network variant.
+    :type ffn_type: str
+    :return: A DETR Keras model instance.
+    :rtype: DETR
+    :raises NotImplementedError: If `backbone_name` is not ``"resnet50"``.
     """
     if backbone_name == "resnet50":
         base_model = keras.applications.ResNet50(

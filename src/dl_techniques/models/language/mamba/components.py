@@ -1,3 +1,19 @@
+"""Mamba selective state space layer and its pre-norm residual wrapper.
+
+``MambaLayer`` runs a causal 1D convolution followed by a selective state
+space scan: the discretization parameters delta, B and C are projected from
+the input at every step, so the layer can choose per token what to keep or
+forget. A standard state space model uses fixed parameters and cannot do
+this. ``MambaResidualBlock`` wraps the layer in pre-norm residual form
+(``output = hidden_states + MambaLayer(LayerNorm(hidden_states))``) and is
+the unit stacked to build a full Mamba model.
+
+The scan runs sequentially over the sequence length with ``keras.ops.while_loop``,
+since the parameters differ at every step and a convolutional shortcut does
+not apply. It runs in the layer's variable dtype, not its compute dtype, to
+avoid precision drift over long accumulations.
+"""
+
 import math
 import keras
 import numpy as np
@@ -15,20 +31,18 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.mamba.components")
 class MambaLayer(keras.layers.Layer):
     """
-    Core Mamba selective state space model layer.
+    Selective state space layer: a causal conv feeding an input-dependent SSM scan.
 
-    This layer implements the selective SSM computation as the fundamental
-    building block of the Mamba architecture. It combines a causal 1D
-    convolution with a recurrent state space model where the discretization
-    parameters (Δ, B, C) are computed from the input data, enabling the
-    model to selectively propagate or forget information.
+    The discretization parameters delta, B and C come from a projection of
+    the input at each step, so the state update below is data-dependent
+    rather than fixed:
 
-    **Intent**:
-    Provide efficient sequence modeling with linear complexity by using a
-    selective state space mechanism that adapts its behavior based on input
-    content, unlike traditional SSMs with fixed parameters.
+        h_t = A_bar * h_(t-1) + B_bar * x_t
+        y_t = C * h_t
 
-    **Architecture**:
+    where A_bar = exp(delta * A) and B_bar = delta * B.
+
+    Architecture:
 
     .. code-block:: text
 
@@ -61,20 +75,6 @@ class MambaLayer(keras.layers.Layer):
            │
            ▼
         Output
-
-    **Mathematical Foundation**:
-
-    The core SSM equations:
-        h_t = A̅ * h_{t-1} + B̅ * x_t    (state update)
-        y_t = C * h_t                   (output projection)
-
-    Where:
-        A̅ = exp(Δ * A)                  (discretized state matrix)
-        B̅ = Δ * B                       (discretized input matrix)
-        Δ, B, C = projections(x)        (data-dependent parameters)
-
-    The key innovation is that Δ, B, and C are computed from the input,
-    making the state space model "selective" and input-dependent.
 
     :param d_model: Dimensionality of input and output embeddings.
     :type d_model: int
@@ -227,28 +227,9 @@ class MambaLayer(keras.layers.Layer):
             name="x_proj"
         )
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-084: the paper's dt_proj
-        # initialization is passed as INITIALIZERS, not applied with `.assign()`
-        # inside `build()`.
-        #
-        # WHAT NOT TO DO: do NOT move this back into `build()` as
-        #     self.dt_proj.kernel.assign(...)   # dt_init_std
-        #     self.dt_proj.bias.assign(inv_dt)  # inverse softplus of a
-        #                                       # log-uniform draw in [dt_min, dt_max]
-        # Keras 3 runs the symbolic build pass of a sublayer first reached from a
-        # PARENT layer's `call()` -- i.e. every real Mamba model, since
-        # `MambaLayer` is reached through `MambaResidualBlock` -- inside a
-        # `StatelessScope`, which RECORDS the `.assign()` and then DISCARDS it.
-        # Measured 2026-08-17, CPU: through a parent's `call()` the bias was
-        # ALL ZERO, so `softplus(bias) == 0.693147` uniformly, against the
-        # `[dt_min=0.001, dt_max=0.1]` range the paper's scheme exists to cover
-        # -- ~7x above dt_max and ~660x above dt_min -- and the kernel was
-        # Dense's default glorot (max 0.391 vs the intended 0.9995). The
-        # selective-SSM timestep initialization that makes Mamba trainable was
-        # simply absent, in every model, with every test green. A direct
-        # `.build(...)` gave the correct values, which is why this was invisible.
-        # Same defect class as D-021 (RoPE tables) and F-9 (N-BEATS bases).
-        # See decisions.md D-084.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-084: dt_proj's init is passed as
+        # initializers, not `.assign()` in build() — a StatelessScope build reached
+        # from a parent's call() records then discards an `.assign()`. See decisions.md.
         self.dt_proj = keras.layers.Dense(
             self.d_inner,
             use_bias=True,
@@ -333,21 +314,8 @@ class MambaLayer(keras.layers.Layer):
         :param input_shape: Shape of input tensor (batch_size, seq_len, d_model).
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Idempotence guard: a parent that calls `child.build(shape)` directly
-        # (both residual blocks in this package do) would otherwise re-run
-        # `add_weight` on an instance a forward pass already built, and Keras
-        # raises `ValueError: You cannot add new elements of state ... to a
-        # layer that is already built` (MEASURED 2026-08-21). The rationale that
-        # used to stand here -- "Keras traces `call()` more than once on the
-        # first invocation" -- is NOT the live path: `Layer.__call__` checks
-        # `self.built`, so a parent whose `call()` runs this layer twice
-        # succeeds even with no guard at all. A second CORRECTION: the claim
-        # "every sibling in this package already has it" was FALSE --
-        # `Mamba2Layer` had no guard at all until D-123 added one. The two
-        # `add_weight`-owning layers (`MambaLayer`, `Mamba2Layer`) both carry it
-        # now; `MambaResidualBlock` / `Mamba2ResidualBlock` deliberately do not,
-        # because they only delegate to sub-layer `build`s that are themselves
-        # guarded.
+        # Guards against re-running add_weight when a parent block calls
+        # child.build(shape) directly on an instance a forward pass already built.
         if self.built:
             return
 
@@ -439,16 +407,9 @@ class MambaLayer(keras.layers.Layer):
         """
         batch_size, d_inner, seq_len = keras.ops.shape(u)
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-044
-        # The recurrent scan runs in the VARIABLE dtype (float32 under
-        # `mixed_float16`), never in the compute dtype. `call()` already casts
-        # `A_log` to float32 on purpose, and `keras.ops.einsum` PROMOTES rather
-        # than raising, so `deltaA` came out float32 while `h` was materialised at
-        # `compute_dtype` — the exception then landed on `deltaA[:, :, t] * h`
-        # inside `body`, two statements away from its cause. Do NOT "fix" this by
-        # casting `A` down to float16: this is a sequential accumulation over
-        # `seq_len` steps and half-precision state is exactly where it drifts.
-        # See decisions.md D-044.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-044: scan runs in variable dtype
+        # (float32), never compute dtype — half precision drifts over the sequential
+        # accumulation. Do not cast A down to compute dtype. See decisions.md.
         scan_dtype = self.variable_dtype
         u = keras.ops.cast(u, scan_dtype)
         delta = keras.ops.cast(delta, scan_dtype)
@@ -456,9 +417,8 @@ class MambaLayer(keras.layers.Layer):
         B = keras.ops.cast(B, scan_dtype)
         C = keras.ops.cast(C, scan_dtype)
         D = keras.ops.cast(D, scan_dtype)
-        # `z` is deliberately NOT lifted: the SiLU gate is a `keras.layers.Activation`,
-        # which runs at `compute_dtype`, so the gating is applied AFTER the result
-        # comes back down (see the return statement).
+        # z stays at compute_dtype: the SiLU gate below applies after the
+        # result is cast back down.
 
         # Discretize continuous parameters A and B
         # A_bar = exp(Δ * A)
@@ -654,15 +614,11 @@ class MambaResidualBlock(keras.layers.Layer):
     Implements the standard pre-norm residual architecture:
         output = hidden_states + MambaLayer(LayerNorm(hidden_states))
 
-    This is the fundamental building block for stacking multiple Mamba layers
-    to create deep sequence models. The pre-normalization pattern (also called
-    "pre-activation") has been shown to improve training stability in deep networks.
+    Stacking these blocks builds a deep sequence model. Pre-normalization
+    (normalizing before the sublayer rather than after) improves training
+    stability in deep networks.
 
-    **Intent**:
-    Provide a reusable residual wrapper that handles normalization and skip
-    connections, allowing the core MambaLayer to focus solely on the SSM logic.
-
-    **Architecture**:
+    Architecture:
 
     .. code-block:: text
 

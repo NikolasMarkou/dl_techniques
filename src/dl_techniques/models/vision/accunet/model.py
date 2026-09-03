@@ -1,71 +1,27 @@
-"""
-A segmentation U-Net whose convolutional blocks carry transformer-like context.
+"""AccUNet: a fully convolutional U-Net for image segmentation, built by
+:class:`AccUNet` and the ``create_acc_unet*`` factory functions.
 
-The architecture starts from an observation about why transformer U-Nets win on
-medical segmentation. Their advantage is usually attributed to attention itself,
-but two more prosaic properties travel with it: every position sees the whole
-image, and features are exchanged *across* scales rather than only within a
-matched encoder-decoder pair. ACC-UNet's thesis is that both properties can be
-obtained with pooling and 1x1 convolutions alone, and therefore without paying
-attention's `O(N^2)` cost in the number of pixels `N` -- which at segmentation
-resolutions is the dominant term.
+Transformer U-Nets are usually credited to attention, but two plainer
+properties travel with it: every position sees the whole image, and
+features are exchanged across scales, not only within a matched
+encoder-decoder pair. AccUNet gets both from pooling and 1x1 convolutions
+instead. Each HANC block average- and max-pools its input at several
+strides, so a pixel is compared to the mean and peak of its neighborhood at
+radii `2, 4, ..., 2^(k-1)` rather than to every other pixel, at `O(N * k)`
+cost instead of `O(N^2)`. `k` shrinks with depth, reaching `k = 1` at the
+bottleneck, where the HANC layer pools nothing and is a plain 1x1
+projection. Skip connections pass through ResPath, per-level residual
+refinement, then MLFC, cross-level feature exchange, before reaching the
+decoder.
 
-Long-range context comes from hierarchical neighborhood aggregation. For a block
-with `k` levels, the feature map is average- and max-pooled at strides
-`2, 4, ..., 2^(k-1)`, each summary is resized back to full resolution, all of
-them are concatenated with the untouched input to give `C * (2k - 1)` channels,
-and a 1x1 convolution learns how to weigh them. Each pixel is thus compared not
-to every other pixel but to the mean and the peak of its neighborhood at several
-radii, which costs `O(N * k)`. The mean carries texture, the max carries the
-salient activation, and their difference at a given radius is what tells a pixel
-whether it sits inside a homogeneous region or on a boundary.
-
-`k` shrinks with depth: `[3, 3, 3, 2, 1]` down the encoder and `[2, 2, 3, 3]` up
-the decoder. This is deliberate -- a stride-4 pool at the bottleneck already spans
-a large fraction of the image, so extra levels there summarize nearly the same
-thing. The endpoint is worth stating plainly, because it is easy to misread as a
-milder version of the same block: at `k = 1` the HANC layer pools nothing at all
-and degenerates to a 1x1 projection of the input. The bottleneck level therefore
-carries no hierarchical context whatsoever; its receptive field is what the two
-stacked depthwise convolutions give it.
-
-Each block itself is an inverted bottleneck -- 1x1 expansion by `inv_factor`,
-depthwise 3x3, the HANC aggregation, a 1x1 projection to the requested width, and
-squeeze-excitation. The residual shortcut exists only when input and output width
-agree, which in practice means the second block of every level; the first block
-of a level changes width and runs without one. Decoder level 3 uses
-`inv_factor=4` where every other block uses 3.
-
-Skip connections get two stages of treatment, both aimed at the semantic gap
-between a shallow encoder feature and the deep decoder feature it is concatenated
-with. ResPath first passes each of the four pre-bottleneck levels through a stack
-of residual conv-SE blocks, `[4, 3, 2, 1]` of them from the shallowest level
-down -- most refinement where the gap is widest. MLFC then resizes all four levels
-to each level's resolution in turn, concatenates, compiles back down with 1x1
-convolutions and adds the result residually, so a shallow feature acquires deep
-semantics and a deep feature reacquires spatial detail. The bottleneck bypasses
-both stages and goes straight into the decoder.
-
-Two implementation choices are not what the parameter names suggest.
-`mlfc_iterations` does not set `MLFCLayer.num_iterations`; it creates that many
-*separate* single-iteration MLFC layers applied in sequence. The two forms are
-not equivalent, because `MLFCLayer` applies its per-level squeeze-excitation once
-after its internal loop -- stacking three layers therefore recalibrates channels
-three times, not once. And `input_channels` is a constructor argument rather than
-something inferred at build time because `HANCBlock` fixes its expansion width
-from the channel count at construction; the model must know the input depth
-before it ever sees a tensor.
-
-Spatial dimensions must be divisible by 16. Four stride-2 pools and four
-stride-2 transposed convolutions cannot round-trip an odd dimension, and the
-decoder's concatenate is where that shows up, so the model raises at the first
-call with a static shape rather than failing deeper with a shape mismatch.
-Dynamic (`None`) dimensions are accepted and unchecked -- the divisibility
-contract still holds at run time, it just cannot be verified at trace time.
-
-The head applies its activation: sigmoid for `num_classes == 1`, softmax
-otherwise. The model therefore emits probabilities, not logits, and must be
-compiled with `from_logits=False`.
+`mlfc_iterations` builds that many separate single-iteration MLFC layers in
+sequence rather than one layer that loops, since each layer's internal
+squeeze-excitation only runs once per layer. Input spatial dimensions must
+be divisible by 16: four stride-2 pools and four stride-2 transposed
+convolutions cannot round-trip an odd dimension, and a static shape that
+violates this raises at the first call. The head applies its own
+activation, sigmoid for one class and softmax otherwise, so the model
+emits probabilities and must be compiled with `from_logits=False`.
 
 References:
     - Ibtehaz & Kihara, 2023. ACC-UNet: A Completely Convolutional UNet Model
@@ -110,9 +66,8 @@ def _force_no_xla(kwargs: Dict[str, Any], owner: str) -> None:
     Detected unsupported operations ... on XLA_GPU_JIT``. Inference is
     unaffected; only the gradient needs the missing kernel.
 
-    The opt-out deliberately wins even over an explicitly-passed
-    ``jit_compile=True``: on a GPU that request is a guaranteed crash, so there
-    is no configuration in which honouring it would be useful.
+    The opt-out wins even over an explicitly-passed ``jit_compile=True``,
+    since that request is a guaranteed crash on a GPU.
 
     This is the single home of the forcing rule. Both :class:`AccUNet` and
     :class:`AccUNetFunctional` call it; do not inline a copy in either.
@@ -152,7 +107,7 @@ class AccUNet(keras.Model):
     directly. ``k`` shrinks with depth and reaches 1 at the bottleneck, where
     the HANC layer pools nothing and degenerates to a 1x1 projection.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -181,7 +136,7 @@ class AccUNet(keras.Model):
         ┌──────────▼───────────┐          ▼                       │
         │ Enc L4 (bottleneck)  │   ┌───────────────┐              │
         │   2×HANC(16F, k=1)   │   │ ResPath ×4    │              │
-        │   k=1 → NO pooling,  │   │ MLFC ×N       │──────────────┘
+        │   k=1: no pooling,   │   │ MLFC ×N       │──────────────┘
         │   a 1×1 projection   │   └───────────────┘   (concat with
         └──────────┬───────────┘    skip refinement     upsampled x)
                    │
@@ -197,11 +152,11 @@ class AccUNet(keras.Model):
                         ▼
         ┌──────────────────────────────────────┐
         │  Output [B, H, W, num_classes]       │
-        │  PROBABILITIES, not logits           │
+        │  probabilities, not logits           │
         │  → compile with from_logits=False    │
         └──────────────────────────────────────┘
 
-    **Per-level configuration:**
+    Per-level configuration:
 
     .. code-block:: text
 
@@ -219,9 +174,9 @@ class AccUNet(keras.Model):
         F = base_filters (default 32)
 
     :param input_channels: Number of input channels (e.g. 3 for RGB, 1 for
-        grayscale). Must be positive. This is a CONSTRUCTOR argument rather
-        than something inferred at build time because :class:`HANCBlock` fixes
-        its expansion width from the channel count at construction.
+        grayscale). Must be positive. Passed at construction rather than
+        inferred at build time because :class:`HANCBlock` fixes its expansion
+        width from the channel count at construction.
     :type input_channels: int
     :param num_classes: Number of output classes for segmentation. Must be
         positive. Also selects the head activation: 1 gives sigmoid, more than
@@ -230,10 +185,10 @@ class AccUNet(keras.Model):
     :param base_filters: Base filter count. The five encoder levels use
         ``[base_filters, ×2, ×4, ×8, ×16]``. Must be positive. Defaults to 32.
     :type base_filters: int
-    :param mlfc_iterations: How many MLFC layers to stack. NOTE this does NOT
-        set ``MLFCLayer.num_iterations``; it creates that many SEPARATE
-        single-iteration layers applied in sequence, which is not equivalent
-        because each layer applies its squeeze-excitation once. Must be
+    :param mlfc_iterations: How many MLFC layers to stack. This does not set
+        ``MLFCLayer.num_iterations``; it creates that many separate
+        single-iteration layers applied in sequence, which is not equivalent,
+        since each layer applies its squeeze-excitation once. Must be
         positive. Defaults to 3.
     :type mlfc_iterations: int
     :param kernel_initializer: Initializer for every convolution kernel.
@@ -365,34 +320,26 @@ class AccUNet(keras.Model):
             base_filters * 16    # Level 4 (bottleneck): 512
         ]
 
-        # CREATE all sub-layers in __init__ following Modern Keras 3 pattern
-        # No helper methods - all layers created here directly
-
-        # === ENCODER BLOCKS ===
         self.encoder_blocks: List[List[HANCBlock]] = []
 
-        for level in range(5):  # 5 encoder levels
+        for level in range(5):
             if level == 0:
-                # First level: input_channels -> base_filters
                 input_ch = input_channels
                 output_ch = self.filter_sizes[0]
                 k = 3
             else:
-                # Other levels: prev_filters -> curr_filters
                 input_ch = self.filter_sizes[level - 1]
                 output_ch = self.filter_sizes[level]
-                # Determine k based on level (as per paper)
                 if level <= 2:
                     k = 3
                 elif level == 3:
                     k = 2
-                else:  # level 4 (bottleneck)
+                else:
                     k = 1
 
-            # Create 2 HANC blocks per level
             block1 = HANCBlock(
                 filters=output_ch,
-                input_channels=input_ch,  # FIX: First block always takes input_ch for the level
+                input_channels=input_ch,
                 k=k,
                 inv_factor=3,
                 kernel_initializer=self.kernel_initializer,
@@ -402,7 +349,7 @@ class AccUNet(keras.Model):
 
             block2 = HANCBlock(
                 filters=output_ch,
-                input_channels=output_ch,  # Second block always has same in/out
+                input_channels=output_ch,
                 k=k,
                 inv_factor=3,
                 kernel_initializer=self.kernel_initializer,
@@ -412,9 +359,8 @@ class AccUNet(keras.Model):
 
             self.encoder_blocks.append([block1, block2])
 
-        # === POOLING LAYERS ===
         self.pooling_layers: List[keras.layers.Layer] = []
-        for level in range(4):  # Only 4 pooling layers (not needed for bottleneck)
+        for level in range(4):
             pool = keras.layers.MaxPooling2D(
                 pool_size=2,
                 strides=2,
@@ -422,14 +368,11 @@ class AccUNet(keras.Model):
             )
             self.pooling_layers.append(pool)
 
-        # === DECODER BLOCKS ===
         self.decoder_upsamples: List[keras.layers.Layer] = []
         self.decoder_blocks: List[List[HANCBlock]] = []
 
-        for level in range(4):  # 4 decoder levels
-            # Upsample layer
-            # curr_filters = self.filter_sizes[4 - level]  # 512, 256, 128, 64
-            next_filters = self.filter_sizes[3 - level]  # 256, 128, 64, 32
+        for level in range(4):
+            next_filters = self.filter_sizes[3 - level]
 
             upsample = keras.layers.Conv2DTranspose(
                 filters=next_filters,
@@ -442,22 +385,22 @@ class AccUNet(keras.Model):
             )
             self.decoder_upsamples.append(upsample)
 
-            # Determine k and inv_factor based on level
             if level <= 1:
                 k = 2
                 inv_factor = 3
             elif level == 2:
                 k = 3
                 inv_factor = 3
-            else:  # level 3
+            else:
+                # Decoder level 3 uses inv_factor=4; every other block uses 3.
                 k = 3
-                inv_factor = 4  # Special case as per paper
+                inv_factor = 4
 
-            # Decoder blocks (2 per level)
-            # Input: next_filters (from upsample) + next_filters (from skip) = 2*next_filters
+            # Input channels are the upsampled features concatenated with the
+            # skip connection, both at next_filters width.
             block1 = HANCBlock(
                 filters=next_filters,
-                input_channels=2 * next_filters,  # Concatenated channels
+                input_channels=2 * next_filters,
                 k=k,
                 inv_factor=inv_factor,
                 kernel_initializer=self.kernel_initializer,
@@ -467,7 +410,7 @@ class AccUNet(keras.Model):
 
             block2 = HANCBlock(
                 filters=next_filters,
-                input_channels=next_filters,  # Output of block1
+                input_channels=next_filters,
                 k=k,
                 inv_factor=inv_factor,
                 kernel_initializer=self.kernel_initializer,
@@ -477,10 +420,8 @@ class AccUNet(keras.Model):
 
             self.decoder_blocks.append([block1, block2])
 
-        # === SKIP CONNECTION PROCESSING ===
-        # ResPath layers for each encoder level (except bottleneck)
         self.res_paths: List[ResPath] = []
-        res_path_blocks = [4, 3, 2, 1]  # Number of blocks for each level
+        res_path_blocks = [4, 3, 2, 1]
 
         for level in range(4):
             res_path = ResPath(
@@ -492,21 +433,19 @@ class AccUNet(keras.Model):
             )
             self.res_paths.append(res_path)
 
-        # MLFC layers for multi-level feature compilation
         self.mlfc_layers: List[MLFCLayer] = []
-        channels_list = self.filter_sizes[:4]  # First 4 levels only
+        channels_list = self.filter_sizes[:4]
 
         for i in range(self.mlfc_iterations):
             mlfc = MLFCLayer(
                 channels_list=channels_list,
-                num_iterations=1,  # Each MLFC layer does 1 iteration
+                num_iterations=1,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'mlfc_{i}'
             )
             self.mlfc_layers.append(mlfc)
 
-        # === OUTPUT LAYER ===
         # Output convolution and activation
         self.output_conv = keras.layers.Conv2D(
             filters=self.num_classes,
@@ -524,7 +463,6 @@ class AccUNet(keras.Model):
             # Multi-class segmentation
             self.output_activation = keras.layers.Softmax(name='output_activation')
 
-        # === CONCATENATION LAYERS ===
         # Create concatenation layers for decoder skip connections
         self.concat_layers: List[keras.layers.Layer] = []
         for level in range(4):
@@ -535,12 +473,9 @@ class AccUNet(keras.Model):
     def _validate_spatial_dims(shape: Tuple[Optional[int], ...]) -> None:
         """Reject a statically-known height or width that is not a multiple of 16.
 
-        DECISION plan_2026-05-10_bdb2c84d/D-001: AccUNet requires H, W divisible
-        by 16. ``padding='same'`` on MaxPooling2D was tried first but
-        ``Conv2DTranspose(strides=2, padding='same')`` always emits ``2 * H_in``
-        which cannot recover odd dims, so the decoder Concatenate still
-        mismatched. Failing loudly is the honest contract; the trainer must
-        resize inputs accordingly.
+        DECISION plan_2026-05-10_bdb2c84d/D-001: require H, W divisible by 16;
+        `Conv2DTranspose(strides=2, padding='same')` cannot recover an odd
+        dimension, so the decoder concatenate would mismatch. See decisions.md.
 
         :param shape: Input shape; positions 1 and 2 are height and width.
             ``None`` dims are accepted and left unchecked (dynamic shape).
@@ -580,7 +515,6 @@ class AccUNet(keras.Model):
         # Validate spatial dims at first call (skipped for dynamic shapes).
         self._validate_spatial_dims(tuple(inputs.shape))
 
-        # === ENCODER FORWARD PASS ===
         encoder_features: List[keras.KerasTensor] = []
         x = inputs
 
@@ -597,33 +531,27 @@ class AccUNet(keras.Model):
                 # Bottleneck features (level 4)
                 bottleneck_features = x
 
-        # === SKIP CONNECTION PROCESSING ===
         # Apply ResPath to encoder features
         processed_features: List[keras.KerasTensor] = []
         for level, features in enumerate(encoder_features):
             processed = self.res_paths[level](features, training=training)
             processed_features.append(processed)
 
-        # Apply MLFC layers iteratively
         for mlfc_layer in self.mlfc_layers:
             processed_features = mlfc_layer(processed_features, training=training)
 
-        # === DECODER FORWARD PASS ===
         x = bottleneck_features
 
         for level in range(4):
-            # Upsample
             x = self.decoder_upsamples[level](x)
 
-            # Concatenate with processed skip connection features
-            skip_features = processed_features[3 - level]  # Reverse order
+            # Decoder level 0 pairs with the deepest pre-bottleneck skip.
+            skip_features = processed_features[3 - level]
             x = self.concat_layers[level]([x, skip_features])
 
-            # Apply decoder blocks
             for block in self.decoder_blocks[level]:
                 x = block(x, training=training)
 
-        # === OUTPUT LAYER ===
         x = self.output_conv(x)
         x = self.output_activation(x)
 
@@ -680,30 +608,17 @@ class AccUNet(keras.Model):
         """
         config = keras.saving.deserialize_keras_object(config)
         self.compile(**config)
-        # The next two lines are the tail of Keras' own
-        # `Trainer.compile_from_config` (keras/src/trainers/trainer.py:973-975).
-        # Overriding the method without them silently DROPS the whole saved
-        # optimizer state on every reload -- measured on the VAE, which carries
-        # the same override pair: the archive held 122 optimizer variables and
-        # the reloaded model's optimizer held 2, so `load_own_variables` warned
-        # and restored nothing, and a resumed checkpoint restarted Adam from
-        # zeroed moments. Do NOT simplify this to `self.compile(**config);
-        # return self`.
+        # Mirrors the tail of Keras' Trainer.compile_from_config; omitting it
+        # drops the saved optimizer state on reload instead of restoring it.
         if hasattr(self, "optimizer") and self.built:
             self.optimizer.build(self.trainable_variables)
         return self
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-01T163450-1f49c11f/D-002: the `create_acc_unet*`
-# factories do NOT return the `AccUNet` instance -- they wrap it in a second,
-# separate model object, and that wrapper is the path the measured GPU
-# reproduction (`create_acc_unet_binary`) used. A class-level override on
-# `AccUNet` alone is therefore green in tests and dead on the reported path, so
-# the wrapper needs its own class carrying the same opt-out. Do NOT instead
-# force `jit_compile=False` inside the factory bodies: that is the shape VAE's
-# D-005 shipped and its D-009 had to supersede, because it misses the
-# `load_model()` recompile path. See `decisions.md` D-002.
+# DECISION plan-2026-09-01T163450-1f49c11f/D-002: the create_acc_unet*
+# factories wrap AccUNet in a separate model object, so it needs its own
+# XLA opt-out class rather than relying on AccUNet's. See decisions.md.
 @register_dl_technique("dl_techniques.models.accunet.model")
 class AccUNetFunctional(keras.Model):
     """Functional wrapper returned by the ``create_acc_unet*`` factories.
@@ -860,7 +775,7 @@ def create_acc_unet_binary(
     """
     return create_acc_unet(
         input_channels=input_channels,
-        num_classes=1,  # Binary segmentation
+        num_classes=1,
         base_filters=base_filters,
         mlfc_iterations=mlfc_iterations,
         input_shape=input_shape,

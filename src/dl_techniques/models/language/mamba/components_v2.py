@@ -1,3 +1,19 @@
+"""Mamba-2 selective state space layer and its pre-norm residual wrapper.
+
+``Mamba2Layer`` computes its SSM parameters (delta, B, C) in one parallel
+projection of the input, unlike Mamba v1 which computes them sequentially
+after the convolution. It also splits the projection into a gated-MLP path
+and an SSM path that run side by side, and normalizes the SSM output with
+RMSNorm before combining the two. ``Mamba2ResidualBlock`` wraps the layer in
+pre-norm residual form and is the unit a full model stacks.
+
+``B`` and ``C`` are computed per group and broadcast to the heads each group
+serves (grouped-query-attention style), so ``nheads`` must be divisible by
+``ngroups``. The scan itself runs sequentially with `keras.ops.while_loop`
+in the layer's variable dtype, since half precision drifts over the
+accumulation.
+"""
+
 import math
 import keras
 import numpy as np
@@ -12,15 +28,9 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.mamba.components_v2")
 class Mamba2Layer(keras.layers.Layer):
     """
-    Core Mamba v2 selective state space model layer.
+    Selective state space layer with a parallel delta/B/C projection and a gated MLP path.
 
-    This layer implements the Mamba v2 architecture, which refines Mamba v1
-    by computing SSM parameters (Δ, B, C) in parallel from the input.
-    This differs from v1, where they were computed sequentially after a
-    convolution. The layer also integrates an optional gated MLP path and
-    RMS normalization for improved performance and stability.
-
-    **Architecture**:
+    Architecture:
 
     .. code-block:: text
 
@@ -159,49 +169,22 @@ class Mamba2Layer(keras.layers.Layer):
 
         # RMS Normalization (or LayerNorm as a fallback)
         if self.rmsnorm:
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-123
-            # A real RMSNorm. Do NOT go back to
-            # `LayerNormalization(rms_scaling=True)`: MEASURED 2026-08-21, that
-            # flag divides by sqrt(VAR + eps), i.e. by the mean-DEPENDENT
-            # standard deviation, not by sqrt(mean(x**2) + eps). It does not
-            # subtract the mean (the carried "it mean-centers" claim is wrong),
-            # but it is still not RMSNorm: max|LN(rms_scaling) - RMSNorm| =
-            # 8.5928 on an input with per-token mean 3.0, while RMSNorm matches
-            # the closed form to 2.4e-07. Mamba-2 is defined with RMSNorm, so
-            # the CODE was wrong here, not the comment. Weight path moves
-            # `rmsnorm/gamma` -> `norm/scale`; 0 mamba checkpoints exist under
-            # `results/` (8 `.keras` total, none mamba), so nothing reloads.
-            # The layer NAME stays "rmsnorm" -- it is finally accurate, and
-            # keeping it holds the weight-path prefix that
-            # `test_build_and_reload.py` pins.
-            # See decisions.md D-123.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-123: a real RMSNorm, not
+            # LayerNormalization(rms_scaling=True) — that flag divides by the
+            # mean-dependent std, not sqrt(mean(x**2)+eps). See decisions.md.
             self.norm = RMSNorm(epsilon=self.norm_epsilon, name="rmsnorm")
 
         # Output projection
         self.out_proj = keras.layers.Dense(self.d_model, use_bias=bias, name="out_proj")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-123
-        # Idempotence guard. Without it `Mamba2ResidualBlock.build` -- which
-        # calls `self.mamba2.build(input_shape)` unconditionally -- kills any
-        # instance whose child was already built, with `ValueError: You cannot
-        # add new elements of state ... to a layer that is already built`
-        # (MEASURED). Do NOT reach for the "parent whose call() runs the layer
-        # twice" reproduction: `Layer.__call__` short-circuits on `self.built`,
-        # so that probe passes identically with and without this guard and
-        # proves nothing. The RED proof is a DIRECT second `build(shape)`.
-        # See decisions.md D-123.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-123: idempotence guard —
+        # Mamba2ResidualBlock.build calls mamba2.build unconditionally. See decisions.md.
         if self.built:
             return
 
-        # A_log initialization (per head).
-        # `np.random`, deliberately and MEASURED: `keras.utils.set_random_seed`
-        # calls `np.random.seed(seed)`, so two seeded builds of this layer
-        # produce bit-identical `A_log` and `dt_bias` (max diff exactly 0.0).
-        # Drawing with `keras.random` instead would mean converting a backend
-        # tensor to numpy inside `build()` to feed `Constant`, which is not
-        # graph-safe. Pinned by
-        # `tests/test_models/test_mamba/test_build_and_reload.py`.
+        # np.random, not keras.random: a seeded build must produce bit-identical
+        # A_log/dt_bias, and keras.random would need a graph-unsafe tensor-to-numpy hop.
         A_init = np.log(np.random.uniform(1, 16, size=self.nheads))
         self.A_log = self.add_weight(
             name="A_log",
@@ -232,18 +215,9 @@ class Mamba2Layer(keras.layers.Layer):
             trainable=True,
         )
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-042
-        # Build EXACTLY the sub-layers `call()` runs. This class overrides
-        # `build`, so `build_from_config` takes the `self.build(input_shape)`
-        # branch rather than the build-by-run branch; without these lines a
-        # standalone `.keras` reload -- or embedding in any parent that also
-        # overrides `build` -- restores weights into sub-layers that do not
-        # exist. `Mamba2` itself masked this by having no `build` override.
-        # `self.norm` is built only when `rmsnorm` is set, because `call` only
-        # runs it then: building an unused sub-layer creates weights the lazy
-        # path never created and silently changes the `.keras` layout.
-        # Sibling that gets this right: `components.py::MambaLayer.build`.
-        # See decisions.md D-042 and plans/SYSTEM.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-042: build exactly the
+        # sub-layers call() runs, or a standalone reload restores weights into
+        # sub-layers that were never built. See decisions.md.
         conv_dim = self.d_ssm + 2 * self.ngroups * self.d_state
         conv_input_shape = (input_shape[0], input_shape[1], conv_dim)
 
@@ -269,16 +243,9 @@ class Mamba2Layer(keras.layers.Layer):
         """Performs the selective scan recurrence."""
         batch_size, seq_len, nheads, headdim = keras.ops.shape(x)
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-044
-        # The recurrent scan runs in the VARIABLE dtype (float32 under
-        # `mixed_float16`), never in the compute dtype. `call()` already casts
-        # `A_log` to float32 on purpose, and `keras.ops.einsum` PROMOTES rather
-        # than raising, so `deltaA` came out float32 while `h` was materialised at
-        # `compute_dtype` — the exception then landed on `h_A_part + h_B_part`
-        # inside `body`, away from its cause. Do NOT "fix" this by casting `A`
-        # down to float16: this is a sequential accumulation over `seq_len` steps
-        # and half-precision state is exactly where it drifts.
-        # See decisions.md D-044.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-044: scan runs in variable
+        # dtype, never compute dtype — half precision drifts over the accumulation.
+        # See decisions.md.
         scan_dtype = self.variable_dtype
         x = keras.ops.cast(x, scan_dtype)
         dt = keras.ops.cast(dt, scan_dtype)
@@ -286,22 +253,9 @@ class Mamba2Layer(keras.layers.Layer):
         B = keras.ops.cast(B, scan_dtype)
         C = keras.ops.cast(C, scan_dtype)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-042: BROADCAST B/C from
-        # their group to the heads that group serves -- do NOT sum over `g`.
-        # This body used to do `einsum("bh,bgn->bhgn")` then
-        # `einsum("bhgn,bhp->bhpn")`, and `einsum('bhpn,bgn->bhpg')` then
-        # `sum(axis=3)`, i.e. it CONTRACTED the group axis, so every head
-        # received `sum_g B_g` and `sum_g C_g`. MEASURED on CPU at
-        # `nheads=4, ngroups=4`: the scan was bit-invariant to PERMUTING the
-        # group axis (max|delta| 9.5e-07 on |y|max 10.2) and reproduced a
-        # `ngroups=1` layer fed the summed `B`/`C` to 1.3e-06 -- i.e. `ngroups`
-        # allocated `2*ngroups*d_state` projection channels and then collapsed
-        # them additively, exactly `ngroups=1` with a rescaled B/C. GQA (which
-        # `mamba_v2.py`'s module docstring invokes) BROADCASTS WITHIN a group;
-        # it does not sum across groups.
-        # Head->group order matches the reference's
-        # `repeat(B, "b l g n -> b l (g h) n")`: heads are contiguous blocks,
-        # head `i` reads group `i // (nheads // ngroups)`.
+        # DECISION plan-2026-08-18T140459-7991552f/D-042: broadcast B/C from their
+        # group to the heads it serves; summing over the group axis collapses
+        # any ngroups>1 to ngroups=1 with a rescaled B/C. See decisions.md.
         heads_per_group = self.nheads // self.ngroups
         if self.ngroups != self.nheads:
             B = keras.ops.repeat(B, heads_per_group, axis=2)  # (B, L, H, N)
@@ -446,32 +400,19 @@ class Mamba2Layer(keras.layers.Layer):
 class Mamba2ResidualBlock(keras.layers.Layer):
     """Residual block wrapping a Mamba2Layer with pre-normalization.
 
-    :param norm_before_gate: Forwarded verbatim to the wrapped
-        :class:`Mamba2Layer`; see its docstring for the semantics. It is exposed
-        here because that docstring names ``norm_before_gate=True`` as the
-        remedy for a checkpoint trained under the pre-2026-08-15 default, and
-        this block did not accept, forward or serialize it — which made the
-        documented escape hatch unreachable from every real model, since
-        :class:`~dl_techniques.models.language.mamba.mamba_v2.Mamba2Model` builds its
-        whole stack out of these blocks.
-    :param ngroups: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
-    :param dt_min: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
-    :param dt_max: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
-    :param dt_init_floor: Forwarded verbatim to the wrapped
-        :class:`Mamba2Layer`.
-    :param bias: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
-    :param conv_bias: Forwarded verbatim to the wrapped :class:`Mamba2Layer`.
+    :param norm_before_gate: Forwarded to the wrapped :class:`Mamba2Layer`; see
+        its docstring for the semantics.
+    :param ngroups: Forwarded to the wrapped :class:`Mamba2Layer`.
+    :param dt_min: Forwarded to the wrapped :class:`Mamba2Layer`.
+    :param dt_max: Forwarded to the wrapped :class:`Mamba2Layer`.
+    :param dt_init_floor: Forwarded to the wrapped :class:`Mamba2Layer`.
+    :param bias: Forwarded to the wrapped :class:`Mamba2Layer`.
+    :param conv_bias: Forwarded to the wrapped :class:`Mamba2Layer`.
 
-    .. note::
-       Those six joined ``norm_before_gate`` on 2026-08-19 for exactly the
-       reason its own ``:param:`` gives. :class:`Mamba2Layer` declares, stores
-       and USES all seven, but this block declared only the last one, so from
-       any assembled Mamba-2 model ``ngroups`` was pinned at 1 (which is what
-       made multi-group state unreachable), ``conv_bias`` could not be turned
-       off, and the Δ initialisation range could not be widened. Every default
-       here equals the corresponding :class:`Mamba2Layer` default, so the
-       default construction path is unchanged. See decisions.md
-       plan-2026-08-18T140459-7991552f/D-036.
+    Note:
+        Every default here matches the corresponding :class:`Mamba2Layer`
+        default, so the default construction path is unchanged. See
+        decisions.md plan-2026-08-18T140459-7991552f/D-036.
     """
 
     def __init__(
@@ -485,17 +426,8 @@ class Mamba2ResidualBlock(keras.layers.Layer):
             norm_epsilon: float = 1e-5,
             rmsnorm: bool = True,
             norm_before_gate: bool = False,
-            # DECISION plan-2026-08-18T140459-7991552f/D-036
-            # These six are pure pass-throughs and their defaults MUST stay
-            # equal to `Mamba2Layer`'s, which is where the semantics live. Do
-            # NOT drop them again: until 2026-08-19 this block declared none of
-            # them, and since `Mamba2Model` builds its entire stack out of these
-            # blocks, six documented `Mamba2Layer` knobs were unreachable from
-            # every assembled model -- `ngroups` in particular, which is why the
-            # multi-group state path had no caller. Do not give them
-            # block-local defaults either: a divergence here silently rebuilds
-            # a different `in_proj`/`conv1d` width than the docstring one level
-            # down promises. See decisions.md.
+            # DECISION plan-2026-08-18T140459-7991552f/D-036: these six are pure
+            # pass-throughs; keep their defaults equal to Mamba2Layer's. See decisions.md.
             ngroups: int = 1,
             dt_min: float = 0.001,
             dt_max: float = 0.1,

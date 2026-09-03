@@ -1,119 +1,28 @@
 """
-Decoder-only language model that substitutes :class:`WaveFieldAttention` for
-dot-product multi-head attention inside a GPT-2-style pre-norm stack, with a
-weight-tied LM head and a `field_size` hyperparameter that jointly with
-`max_seq_len` decides whether the stack is actually causal.
+Decoder-only causal language model. ``WaveFieldLLM`` swaps GPT-2's
+dot-product attention for :class:`WaveFieldAttention` inside a standard
+pre-norm transformer stack built from ``WaveFieldDecoderBlock``.
 
-The mechanism being explored is a replacement for pairwise attention's quadratic
-mixing. Softmax attention computes an `N x N` interaction matrix, which is both its
-expressive strength and its cost. Wave-field attention instead routes information
-through a shared medium: each token is mapped to an absolute position on a 1-D field
-grid of `field_size` cells and *deposits* its value there, weighted by the magnitude
-of its key, using a bilinear split across the two cells its real-valued position
-falls between. The field is then convolved with a per-head damped-wave kernel
-`k(t) = exp(-alpha * t) * cos(omega * t + phi)` for `t >= 0`, evaluated by FFT; a
-learnable coupling matrix mixes heads at each grid position; and every token
-*gathers* back from the convolved field at its own position. Tokens never see each
-other directly -- they see what the medium carries -- so cost is `O(N*D +
-G log G * H * D_h)` rather than `O(N^2 * D)`. The damping sets an effective
-interaction range and the oscillation a preferred phase relationship, which is the
-sense in which the kernel is a learned, structured, infinitely-long convolution
-rather than a fixed local window. Two multiplicative gates then restore some
-content-dependence that a pure convolution lacks: `sigmoid(Q / sqrt(d_h))` modulates
-the gathered field per token, and a projection of the block input gates the output.
+Instead of an N x N attention matrix, each token deposits its value onto a
+1-D field of ``field_size`` cells, weighted by its key magnitude and split
+bilinearly across the two nearest cells. The field is convolved by FFT
+with a per-head damped-wave kernel, ``k(t) = exp(-alpha*t) * cos(omega*t +
+phi)``; a learned matrix then mixes heads at each grid position, and every
+token gathers back from its own position. Tokens interact only through
+this shared field, so cost is ``O(N*D + G log G * H * D_h)`` instead of
+``O(N^2 * D)``. Two gates restore content-dependence: a sigmoid on the
+query scales the gathered field per token, and a projection of the block
+input gates the block output.
 
-The model wrapped around that layer is deliberately conventional, so the attention
-is the only variable under test: learned token and positional embeddings, a
-LayerNorm and dropout on the embedding output, `depth` pre-norm blocks each running
-attention and a `4D` GELU FFN over residual connections, a final LayerNorm, and a
-head that by default reuses the transposed token embedding matrix rather than
-learning its own `V x D` projection. The block is defined locally as
-`WaveFieldDecoderBlock` rather than assembled from `TransformerLayer` or the
-attention factory for one concrete reason: those expect a `(B, N, N)` attention mask,
-while `WaveFieldAttention` takes a `(B, N)` padding mask (it has no pairwise matrix
-to mask), and bending either side to fit would have meant changing shared code for a
-single consumer.
+The rest of the stack is a standard GPT-2-style decoder: learned token and
+positional embeddings, ``depth`` pre-norm blocks, and a weight-tied LM
+head by default. ``call`` returns ``{"logits", "last_hidden_state"}``.
 
-Two build-time details are not optional. Sub-layers are built EAGERLY in
-`_build_architecture` and again explicitly in the block's `build`, because
-`WaveFieldAttention` creates weights through an initializer that calls
-`keras.random.normal`; under Keras 3's symbolic tracing of a subclassed
-`keras.Model`, nested build can be skipped, and the failure mode is not an error but
-an initializer that re-fires on every forward pass with no backing variable. And the
-embedding pipeline is ordered add -> norm -> dropout: `PositionalEmbedding`'s own
-dropout is disabled and `embed_dropout` is kept as a separate post-norm layer,
-because the layer's internal order would give add -> dropout -> norm, which under an
-identical dropout mask differs by up to ~38% of signal RMS at this model's default
-dropout rate. That is a behaviour change, not a cleanup (D-006).
-
-Causality (MEASURED, NOT GUARANTEED — read this before decoding autoregressively):
-    This module builds NO explicit causal mask. Whatever token-level causality
-    the stack has comes entirely from :class:`WaveFieldAttention`'s
-    left-aligned damped wave kernel, and that layer explicitly refuses to
-    guarantee it: the kernel is causal on the FIELD GRID only (output at grid
-    cell `g` depends only on cells `<= g`), while the bilinear scatter/gather
-    spans two grid cells, so a later token can deposit into a cell an earlier
-    token gathers from. See the "Causality" section of
-    ``src/dl_techniques/layers/attention/wave_field_attention.py`` — "no
-    sufficient condition on ``field_size`` / ``max_seq_len`` is offered here",
-    "Do NOT rely on this layer for autoregressive decoding".
-
-    Whether a leak occurs is a property of the exact
-    ``(field_size, max_seq_len)`` PAIR — through the field stride
-    ``(field_size - 1) / (max_seq_len - 1)`` — and the ratio
-    ``field_size / max_seq_len`` is only a lossy summary of it. Measured
-    end-to-end on this model (``max_seq_len=32``, ``embed_dim=64``,
-    ``depth=2``, seeded, random init, one token substituted; the reported
-    value is the worst absolute logit change over ALL earlier positions and
-    ALL perturbed positions, against logits of magnitude ~1.1)::
-
-        ratio  field_size  stride   worst leak (CPU / GPU)
-        0.50    16         0.4839   5.46e-04 / 5.50e-04    LEAKS
-        0.75    24         0.7419   3.77e-04 / 4.05e-04    LEAKS
-        1.00    32         1.0000   6.71e-08 / below 1e-5  clean
-        1.50    48         1.5161   4.96e-05 / 1.24e-04    LEAKS
-        2.00    64         2.0323   5.96e-08 / below 1e-5  clean   <- DEFAULT
-        4.00   128         4.0968   8.94e-08 / below 1e-5  clean
-
-    A "clean" row is NOT an exact zero. The clean residue is float32 noise at
-    logits of magnitude ~1.1, and it is process-history dependent: the same
-    config and seed was measured at 0.0 in one process ordering and 1.565e-07
-    in another, ratio 2.0 gives 0.0 at seeds 1234/7 but 6.109e-07 at seed 99,
-    and values up to 1.185e-06 have been observed on GPU with no code change.
-    What is pinned — and all that should be relied on — is the ORDER OF
-    MAGNITUDE: a clean row stays below 1e-5, a leaky row stays above 1e-5, and
-    the two are separated by ~40x in the measurements above.
-
-    ``field_size`` defaults to ``2 * max_seq_len`` (ratio 2.0, D-002), which
-    measured clean at every configuration tested and whose stride
-    ``(2M - 1) / (M - 1) > 2`` keeps consecutive tokens more than one grid
-    cell apart. That is evidence, not a proof, and it is NOT a ratio
-    threshold: ratio 1.50 leaks while ratio 1.00 does not, so the property is
-    not monotone in the ratio, and any change to ``field_size`` or
-    ``max_seq_len`` must be re-measured rather than reasoned about. The pin is
-    ``TestWaveFieldLLMCausalityRatioSweep`` in
-    ``tests/test_models/test_wave_field/test_model.py``.
-
-Other deliberate choices:
-
-- No pretrained weights are distributed with this package. `pretrained=True` reaches
-  `_download_weights`, which raises `NotImplementedError` naming the local-path
-  alternative, rather than warning and returning a randomly initialized model — the
-  behaviour it replaced handed a caller who asked for pretrained weights an untrained
-  model with no exception (D-005). The surrounding `except` clause is narrowed to
-  concrete I/O errors for the same reason; broadening it to `Exception` would swallow
-  that `NotImplementedError` and reinstate the bug. A local checkpoint is loaded by
-  passing `pretrained="/path/to/file.keras"`, with `skip_mismatch=True` so a differing
-  vocabulary does not block the rest of the weights — through
-  `utils.weight_transfer.load_weights_or_raise`, which refuses a load that changes
-  none of the model's variables. `skip_mismatch=True` makes a checkpoint that matches
-  NOTHING restore nothing and return normally, which read as success here until
-  2026-08-15.
-- The class default `vocab_size` is 50261 — tiktoken `gpt2`'s 50257 plus 4 special
-  tokens — matching the training script's default so direct instantiation cannot
-  silently disagree with the trainer (D-005).
-- `call` returns a dict `{"logits", "last_hidden_state"}` rather than a bare tensor,
-  so the shared causal-LM loss and data wrappers that key on `"logits"` work unchanged.
+No explicit causal mask is built anywhere in this module. Whether the
+stack is actually causal is a measured property of the layer below, not a
+guarantee — see ``WaveFieldLLM``'s docstring for the numbers. No
+pretrained weights ship with this package; ``pretrained=True`` raises
+``NotImplementedError``.
 
 References:
     - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
@@ -153,19 +62,41 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.wave_field.model")
 class WaveFieldDecoderBlock(keras.layers.Layer):
-    """Pre-norm transformer decoder block with :class:`WaveFieldAttention`.
+    """Pre-norm transformer decoder block built on :class:`WaveFieldAttention`.
 
-    Sub-layers (pre-norm GPT-2 style):
+    Block internals:
 
-    1. ``attn_norm`` -> :class:`WaveFieldAttention` -> residual
-    2. ``ffn_norm``  -> Dense(4D, gelu) -> Dense(D) -> Dropout -> residual
+    .. code-block:: text
 
-    No causal mask is built here: the ONLY mask this block forwards to
-    attention is the optional padding mask ``(B, N)``. Token-level causality
-    is therefore whatever :class:`WaveFieldAttention` happens to provide,
-    which is a MEASURED property of the ``(field_size, max_seq_len)`` pair and
-    is not guaranteed — see the "Causality" section of this module's docstring
-    for the measured table.
+        input [B, N, D]
+          │
+          ├─────────────────────────┐
+          ▼                         │
+        attn_norm (LayerNorm)       │
+          ▼                         │
+        WaveFieldAttention          │
+          ▼                         │
+          + ◄───────────────────────┘
+          │
+          ├─────────────────────────┐
+          ▼                         │
+        ffn_norm (LayerNorm)        │
+          ▼                         │
+        Dense(4D, gelu)             │
+          ▼                         │
+        Dense(D)                    │
+          ▼                         │
+        Dropout                     │
+          ▼                         │
+          + ◄───────────────────────┘
+          ▼
+        output [B, N, D]
+
+    No causal mask is built here. The only mask this block forwards to
+    attention is the optional padding mask ``(B, N)``. Token-level
+    causality is therefore whatever :class:`WaveFieldAttention` provides,
+    which is a measured property of ``(field_size, max_seq_len)``, not a
+    guarantee — see :class:`WaveFieldLLM` for the measured table.
 
     :param embed_dim: Hidden dim (must be divisible by ``num_heads``).
     :param num_heads: Number of attention heads.
@@ -261,18 +192,15 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Explicitly build every sub-layer so a ``.keras`` reload restores
-        weights onto already-built sub-layers (H5).
+        """Build every sub-layer explicitly.
 
-        Explicit build of WaveFieldAttention is especially required: when the
-        block is invoked, Keras 3's ``__call__`` wrapper triggers build for the
-        block but does not always reach nested sub-layer build paths before the
-        inner call is traced -- so ``add_weight`` inside the attention layer can
-        fail with "'NoneType' object has no attribute 'assign'". Building it
-        explicitly here pins variable creation to the block's build phase.
+        Keras 3's ``__call__`` wrapper can trace a block's inner call before
+        every nested sub-layer has built, and ``WaveFieldAttention`` then
+        fails ``add_weight`` with "'NoneType' object has no attribute
+        'assign'". Building each sub-layer here, before any call is traced,
+        avoids that.
 
-        Args:
-            input_shape: Shape of the block input ``(B, seq, embed_dim)``.
+        :param input_shape: Shape of the block input ``(B, seq, embed_dim)``.
         """
         # Attention block: pre-norm -> WaveFieldAttention.
         self.attn_norm.build(input_shape)
@@ -333,22 +261,85 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.wave_field.model")
 class WaveFieldLLM(keras.Model):
-    """Decoder-only language model with WaveFieldAttention blocks.
+    """Decoder-only language model built from ``WaveFieldDecoderBlock`` layers.
 
     Mirrors the public surface of :class:`GPT2` so it slots into the same
-    training pipeline. The two notable differences are:
+    training pipeline. It differs in two ways: attention is
+    :class:`WaveFieldAttention` (see the module docstring), and it takes a
+    ``field_size`` hyperparameter that defaults to ``2 * max_seq_len``.
 
-    1. Attention is :class:`WaveFieldAttention` (FFT damped-wave field). No
-       explicit causal mask is constructed anywhere in this module, and
-       token-level causality is a MEASURED property of the
-       ``(field_size, max_seq_len)`` pair rather than a guarantee — see the
-       "Causality" section of this module's docstring.
-    2. A new hyperparameter ``field_size`` (defaults to ``2 * max_seq_len``,
-       see ``DECISION plan_2026-05-07_1519e34f/D-002``).
+    Architecture:
+
+    .. code-block:: text
+
+        input_ids [B, N]
+          │
+          ▼
+        token_embeddings ──► position_embeddings [B, N, D]
+          │
+          ▼
+        embed_norm ──► embed_dropout
+          │
+          ▼
+        block_0 .. block_{depth-1}  (WaveFieldDecoderBlock)
+          │
+          ▼
+        final_norm
+          │
+          ├──────────────────────────┬──────────────────────────┐
+          ▼ (tie_word_embeddings)    ▼ (not tied)                ▼
+        matmul with token emb.ᵀ     lm_head (Dense)        last_hidden_state
+          │                          │                            │
+          └────────────┬─────────────┘                            │
+                        ▼                                         ▼
+                     logits [B, N, V]              {"logits", "last_hidden_state"}
 
     Output is a dict ``{"logits", "last_hidden_state"}`` so that
     :class:`MaskedCausalLMLoss` and the standard CLM data-wrapper that keys
     on ``"logits"`` work unchanged.
+
+    Causality is not guaranteed. No explicit causal mask is built anywhere
+    in this module, and whatever token-level causality exists comes only
+    from ``WaveFieldAttention``'s damped-wave kernel, which is causal on
+    the field grid but not on tokens: the bilinear scatter/gather can let a
+    later token deposit into a cell an earlier token reads from. Whether
+    this leaks is a property of the exact ``(field_size, max_seq_len)``
+    pair, measured end-to-end (``max_seq_len=32``, ``embed_dim=64``,
+    ``depth=2``, one token substituted, worst absolute logit change over
+    all positions, against logits of magnitude ~1.1):
+
+    .. code-block:: text
+
+        ratio  field_size  stride   worst leak (CPU / GPU)
+        0.50    16         0.4839   5.46e-04 / 5.50e-04    leaks
+        0.75    24         0.7419   3.77e-04 / 4.05e-04    leaks
+        1.00    32         1.0000   6.71e-08 / below 1e-5  clean
+        1.50    48         1.5161   4.96e-05 / 1.24e-04    leaks
+        2.00    64         2.0323   5.96e-08 / below 1e-5  clean  (default)
+        4.00   128         4.0968   8.94e-08 / below 1e-5  clean
+
+    A "clean" row is not an exact zero — it is float32 noise (values from
+    0.0 up to ~1.2e-06 have been observed across seeds and devices for the
+    same config) that stays about 40x below a "leaks" row. The property is
+    not monotone in the ratio (1.50 leaks, 1.00 does not), so it must be
+    re-measured after any change to ``field_size`` or ``max_seq_len``, not
+    inferred from the ratio. The default, ``field_size = 2 * max_seq_len``,
+    measured clean at every configuration tested. The measurement is pinned
+    by ``TestWaveFieldLLMCausalityRatioSweep`` in
+    ``tests/test_models/test_wave_field/test_model.py``, and the attention
+    layer's own docstring (``layers/attention/wave_field_attention.py``)
+    says not to rely on it for autoregressive decoding.
+
+    Variants (:data:`MODEL_VARIANTS`):
+
+    .. code-block:: text
+
+        variant  embed_dim  depth  heads  max_seq_len  field_size
+        xl       1600       48     25     1024         2048
+        large    1280       36     20     1024         2048
+        medium   1024       24     16     1024         2048
+        small    768        12     12     1024         2048
+        tiny     256        4      4      512          1024
 
     :param vocab_size: Vocabulary size. Default 50261 (Tiktoken ``gpt2``
         + 4 special tokens — see DECISION ``D-005``).
@@ -523,18 +514,9 @@ class WaveFieldLLM(keras.Model):
             embeddings_initializer=kernel_init,
             name="token_embeddings",
         )
-        # DECISION plan-2026-08-13T091555-230c101d/D-006
-        # `PositionalEmbedding` owns the slice + broadcast-add, so the manual
-        # `ops.arange` / `token_emb + pos_emb` pair is gone. Its own dropout is
-        # deliberately DISABLED (`dropout_rate=0.0`) and `embed_dropout` is kept
-        # as a separate layer applied AFTER `embed_norm`: this model's order is
-        # add -> norm -> dropout, while `PositionalEmbedding.call` would give
-        # add -> dropout -> norm. Under an IDENTICAL dropout mask those two
-        # orders differ by max |delta| 0.395 on unit-variance activations at the
-        # model's own default dropout_rate=0.1 (~38% of signal RMS), so folding
-        # `embed_dropout` into this call is a behaviour change, not a cleanup.
-        # Do NOT "simplify" by passing dropout_rate=self.dropout_rate here and
-        # deleting `embed_dropout`. See decisions.md D-006.
+        # DECISION plan-2026-08-13T091555-230c101d/D-006: keep dropout_rate=0.0
+        # here and embed_dropout as a separate post-norm layer; folding dropout
+        # into this call changes output by up to 38% of signal RMS. See decisions.md.
         self.position_embeddings = create_embedding_layer(
             'positional_learned',
             max_seq_len=self.max_seq_len,
@@ -579,14 +561,8 @@ class WaveFieldLLM(keras.Model):
         else:
             self.lm_head = None
 
-        # Eagerly build the embedding tables and decoder blocks. The
-        # WaveFieldAttention layer constructs its weights via
-        # `IdentityPlusNoise` which calls `keras.random.normal` at build
-        # time. Under Keras 3's symbolic call tracing for `keras.Model`
-        # subclasses, nested-layer build can be skipped, leading to the
-        # initializer firing on every forward pass with no backing
-        # variable. Eagerly building here pins variable creation to model
-        # construction time, before any tracing occurs.
+        # Build eagerly: WaveFieldAttention's initializer calls keras.random.normal
+        # at build time, and symbolic tracing can otherwise skip nested build.
         block_input_shape: Tuple[Optional[int], ...] = (
             None, self.max_seq_len, self.embed_dim,
         )
@@ -668,14 +644,8 @@ class WaveFieldLLM(keras.Model):
         })
         return config
 
-    # DECISION plan-2026-08-13T091555-230c101d/D-005
-    # _download_weights raises NotImplementedError instead of falling back to
-    # random-init. The prior behaviour (logger.warning + return model) handed a
-    # caller who asked for pretrained=True an untrained model with no
-    # exception. Do NOT reinstate a warn-and-return branch here or in
-    # from_variant. No public WaveFieldLLM weights are distributed with
-    # dl_techniques; users must pass a local path via
-    # pretrained="/path/to/file.keras" or pretrained=False (default).
+    # DECISION plan-2026-08-13T091555-230c101d/D-005: raise here, never warn-and-return
+    # a random-init model for pretrained=True. See decisions.md.
     @staticmethod
     def _download_weights(
         variant: str,
@@ -748,19 +718,12 @@ class WaveFieldLLM(keras.Model):
                         0, model.vocab_size, (1, 32),
                     ).astype("int32")
                     model(dummy, training=False)
-                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: do NOT go back
-                # to a bare `model.load_weights(path, skip_mismatch=True)`. A
-                # non-matching checkpoint restores NOTHING and returns normally,
-                # so the old log line reported a successful load of an untrained
-                # model. See decisions.md D-070.
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: use load_weights_or_raise,
+                # not load_weights — the latter silently no-ops on a non-matching checkpoint.
                 load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
-                # DECISION plan-2026-08-13T091555-230c101d/D-005
-                # Do NOT broaden this except clause to `Exception`: that would
-                # swallow the NotImplementedError from _download_weights and
-                # return a random-init model masquerading as pretrained, which
-                # is the exact bug this branch replaced. Only concrete I/O
-                # errors (a missing/corrupt local mirror) are caught.
+                # DECISION plan-2026-08-13T091555-230c101d/D-005: catch only I/O errors here.
+                # Broadening to Exception would swallow _download_weights' NotImplementedError.
                 try:
                     resolved_path = cls._download_weights(variant)
                 except (IOError, OSError, ValueError) as e:
@@ -776,8 +739,7 @@ class WaveFieldLLM(keras.Model):
                             0, model.vocab_size, (1, 32),
                         ).astype("int32")
                         model(dummy, training=False)
-                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: same guard on
-                    # the downloaded-mirror path.
+                    # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: same guard as above.
                     load_weights_or_raise(model, resolved_path, skip_mismatch=True)
 
         return model

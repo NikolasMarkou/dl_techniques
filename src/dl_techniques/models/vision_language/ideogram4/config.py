@@ -1,22 +1,18 @@
-"""Configuration dataclasses for the Ideogram4 Keras port.
+"""Config dataclasses for the Ideogram4 transformer and its VAE.
 
-Mirrors the PyTorch ``Ideogram4Config`` (``modeling_ideogram4.py``) and
-``AutoEncoderParams`` (``autoencoder.py``), plus the pipeline-level fields
-(``patch_size``, ``ae_scale_factor``, ``max_text_tokens``). All invariants that
-the downstream layers silently rely on are enforced in ``__post_init__`` as
-``ValueError`` guards:
+``Ideogram4Config`` holds the DiT hyperparameters, ``AutoEncoderParams`` the
+VAE ones. Each dataclass checks its own invariants in ``__post_init__`` and
+raises ``ValueError`` on a bad combination, so a broken config fails at
+construction time instead of inside a layer's ``build()``. The checks cover:
+an integer head dimension, an even head dimension (mRoPE needs half of it),
+the mRoPE band sizes fitting inside that half, every VAE stage channel count
+being divisible by 32 (``GroupNormalization(groups=32)``), and
+``in_channels == z_channels * patch_size**2``.
 
-1. ``emb_dim % num_heads == 0``           -> integer ``head_dim``.
-2. ``head_dim`` even                      -> mRoPE needs ``head_dim/2`` freqs.
-3. mRoPE band bound                       -> h/w bands fit inside ``head_dim/2``
-   (the EXACT check from ``Ideogram4MRoPE`` so config and layer agree).
-4. VAE channel / 32 divisibility          -> ``GroupNormalization(groups=32)``.
-5. ``in_channels == z_channels * patch_size**2`` cross-consistency.
-
-Two presets are provided: ``full`` (the real model, defined-not-run) and
-``tiny`` (small enough to smoke-train on a 12GB GPU while satisfying ALL
-invariants). Use :func:`get_ideogram4_config` to retrieve a ``(config, ae)``
-pair by variant name.
+Two presets are provided: ``full`` (the real model size, not run locally) and
+``tiny`` (small enough to smoke-train on a 12GB GPU while satisfying every
+invariant above). Use :func:`get_ideogram4_config` to build a
+``(config, ae)`` pair from a preset name.
 """
 
 from __future__ import annotations
@@ -36,19 +32,18 @@ from dl_techniques.models.vision_language.ideogram4.constants import QWEN3_VL_AC
 
 @dataclass(frozen=True)
 class AutoEncoderParams:
-    """Flux2 KL-VAE structural parameters.
+    """VAE structural parameters.
 
-    Mirrors the PyTorch ``AutoEncoderParams`` dataclass. Frozen so it can be
-    safely shared/hashed; tuple-valued ``ch_mult`` round-trips to/from a list.
+    Frozen so it can be shared and hashed. The tuple-valued ``ch_mult`` round
+    trips to and from a list via :meth:`to_dict` / :meth:`from_dict`.
 
-    Args:
-        resolution: Square input edge length in pixels.
-        in_channels: Pixel channels of the input image (RGB = 3).
-        ch: Base channel width at the highest resolution.
-        out_ch: Output (reconstructed) pixel channels.
-        ch_mult: Per-stage channel multipliers over ``ch``.
-        num_res_blocks: ResnetBlocks per resolution stage.
-        z_channels: Latent channel count (pre-patchification).
+    :ivar resolution: Square input edge length in pixels.
+    :ivar in_channels: Pixel channels of the input image (RGB = 3).
+    :ivar ch: Base channel width at the highest resolution.
+    :ivar out_ch: Output (reconstructed) pixel channels.
+    :ivar ch_mult: Per-stage channel multipliers over ``ch``.
+    :ivar num_res_blocks: Resnet blocks per resolution stage.
+    :ivar z_channels: Latent channel count, before patchification.
     """
 
     resolution: int = 256
@@ -83,27 +78,26 @@ class AutoEncoderParams:
 class Ideogram4Config:
     """Ideogram4 flow-matching DiT configuration.
 
-    Mirrors the PyTorch ``Ideogram4Config`` and carries the extra
-    pipeline-level fields (``patch_size``, ``ae_scale_factor``,
-    ``max_text_tokens``) plus ``z_channels`` so the
-    ``in_channels == z_channels * patch_size**2`` linkage is explicit and
-    checked. Frozen; tuple-valued ``mrope_section`` round-trips to/from a list.
+    Carries the DiT hyperparameters plus the pipeline-level fields
+    (``patch_size``, ``ae_scale_factor``, ``max_text_tokens``) and
+    ``z_channels``, so the constraint
+    ``in_channels == z_channels * patch_size**2`` is explicit and checked.
+    Frozen; the tuple-valued ``mrope_section`` round trips to and from a list.
 
-    Args:
-        emb_dim: Transformer hidden width. Must be divisible by ``num_heads``.
-        num_layers: Number of DiT blocks.
-        num_heads: Attention head count.
-        intermediate_size: SwiGLU FFN hidden width.
-        adanln_dim: AdaLN conditioning embedding width.
-        in_channels: Patchified latent channels (= ``z_channels * patch_size**2``).
-        llm_features_dim: Precomputed conditioning feature width.
-        rope_theta: mRoPE base frequency.
-        mrope_section: 3-tuple ``(t_band, h_band, w_band)`` for mRoPE interleave.
-        norm_eps: RMSNorm / LayerNorm epsilon.
-        patch_size: Latent patchification edge (latent -> token).
-        ae_scale_factor: VAE spatial downsampling factor (pixels -> latent).
-        max_text_tokens: Maximum conditioning text tokens.
-        z_channels: VAE latent channels (must match the paired AutoEncoderParams).
+    :ivar emb_dim: Transformer hidden width. Must be divisible by ``num_heads``.
+    :ivar num_layers: Number of DiT blocks.
+    :ivar num_heads: Attention head count.
+    :ivar intermediate_size: SwiGLU FFN hidden width.
+    :ivar adanln_dim: AdaLN conditioning embedding width.
+    :ivar in_channels: Patchified latent channels (``z_channels * patch_size**2``).
+    :ivar llm_features_dim: Precomputed conditioning feature width.
+    :ivar rope_theta: mRoPE base frequency.
+    :ivar mrope_section: 3-tuple ``(t_band, h_band, w_band)`` for the mRoPE interleave.
+    :ivar norm_eps: RMSNorm / LayerNorm epsilon.
+    :ivar patch_size: Latent patchification edge, latent to token.
+    :ivar ae_scale_factor: VAE spatial downsampling factor, pixels to latent.
+    :ivar max_text_tokens: Maximum conditioning text tokens.
+    :ivar z_channels: VAE latent channels; must match the paired ``AutoEncoderParams``.
     """
 
     emb_dim: int = 4608
@@ -213,32 +207,22 @@ class Ideogram4Config:
 
 
 def validate_vae_groupnorm(ae: AutoEncoderParams) -> None:
-    """Assert every GroupNorm(32) channel count is divisible by 32.
+    """Check every GroupNorm(32) channel count is divisible by 32.
 
-    The base ``ch`` and every stage channel ``ch * m`` for ``m in ch_mult`` feed
-    ``keras.layers.GroupNormalization(groups=32)`` in the VAE; each must be
-    divisible by 32 or the layer raises at build time.
+    The base ``ch`` and every stage channel ``ch * m`` for ``m in ch_mult``
+    feed ``keras.layers.GroupNormalization(groups=32)`` in the VAE; each must
+    be divisible by 32 or the layer raises at build time.
 
     Note:
-        The stage loop is UNREACHABLE for the declared ``ch_mult:
-        Tuple[int, ...]``. The base check runs first, so anything reaching the
-        loop has ``ch == 32 * k``, and ``32 * k * m`` is divisible by 32 for
-        every integer ``m``. It is kept as defence-in-depth for a non-integer
-        multiplier (the frozen dataclass does no runtime type check, so
-        ``ch_mult=(1, 1.5)`` does raise here). Do NOT write a test asserting
-        that an *integer* ``ch_mult`` reaches this branch -- one was shipped in
-        ``tests/test_models/test_sd3_mmdit/test_config_groupnorm_validation.py``
-        and asserted the opposite of its own name before being replaced by an
-        exhaustive unreachability proof. Nor weaken the base check to a smaller
-        modulus: that is the one edit that makes this branch live for integer
-        input, and the replacement test is RED-proven against exactly it.
+        The stage loop cannot fail for the declared ``ch_mult: Tuple[int,
+        ...]`` type: once the base check passes, ``ch == 32 * k``, and
+        ``32 * k * m`` is divisible by 32 for any integer ``m``. It stays as a
+        guard against a non-integer multiplier, since the frozen dataclass
+        does no runtime type check and ``ch_mult=(1, 1.5)`` does reach it.
 
-    Args:
-        ae: The AutoEncoder parameters to validate.
-
-    Raises:
-        ValueError: If ``ch`` is not divisible by 32, or -- only for a
-            non-integer multiplier -- if some ``ch * m`` is not.
+    :param ae: The AutoEncoder parameters to validate.
+    :raises ValueError: If ``ch`` is not divisible by 32, or, for a
+        non-integer multiplier, if some ``ch * m`` is not.
     """
     if ae.ch % 32 != 0:
         raise ValueError(
@@ -324,21 +308,18 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 def get_ideogram4_config(
     variant: str = "tiny",
 ) -> Tuple[Ideogram4Config, AutoEncoderParams]:
-    """Return the ``(Ideogram4Config, AutoEncoderParams)`` pair for a variant.
+    """Build the ``(Ideogram4Config, AutoEncoderParams)`` pair for a variant.
 
-    Both objects are constructed (so all ``__post_init__`` invariants run) and
-    the VAE GroupNorm-divisibility invariant is asserted. The transformer
-    ``z_channels`` is cross-checked against the AutoEncoder ``z_channels``.
+    Constructs both dataclasses, which runs their own ``__post_init__``
+    checks, then checks the VAE GroupNorm divisibility and that the
+    transformer and AutoEncoder agree on ``z_channels``.
 
-    Args:
-        variant: One of the keys in :data:`PRESETS` (``"tiny"`` or ``"full"``).
-
-    Returns:
-        A ``(config, ae)`` tuple.
-
-    Raises:
-        ValueError: If ``variant`` is unknown, any config invariant fails, the
-            VAE GroupNorm divisibility fails, or the two ``z_channels`` disagree.
+    :param variant: One of the keys in :data:`PRESETS` (``"tiny"`` or ``"full"``).
+    :return: A ``(config, ae)`` tuple.
+    :rtype: Tuple[Ideogram4Config, AutoEncoderParams]
+    :raises ValueError: If ``variant`` is unknown, a config invariant fails,
+        the VAE GroupNorm divisibility check fails, or the two ``z_channels``
+        disagree.
     """
     if variant not in PRESETS:
         raise ValueError(

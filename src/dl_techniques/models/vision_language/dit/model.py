@@ -109,25 +109,15 @@ LABEL_TABLE_INIT_STDDEV: float = 0.02
 def flattened_linear_xavier(
     fan_in: int, fan_out: int
 ) -> keras.initializers.Initializer:
-    """Xavier-uniform for a conv kernel treated as a **flattened** ``Linear``.
+    """Xavier-uniform for a conv kernel treated as a flattened ``Linear``.
 
-    Interface contract: pure, allocation-free, and returns a FRESH initializer
-    object every call. Callers pass statically known integers; nothing here
-    reads a layer or a tensor.
+    Pure and allocation-free, returning a fresh initializer object every
+    call. Callers pass statically known integers; nothing here reads a layer
+    or a tensor.
 
-    # DECISION plan-2026-09-02T170923-1285ed83/D-013
-    WHAT NOT TO DO: do not leave :class:`PatchEmbedding2D` on a Keras
-    ``glorot_*`` default and call it equivalent to upstream. Keras computes a
-    convolution's fans over the full kernel shape ``(p, p, C_in, D)``, so its
-    ``fan_out`` is ``p * p * D``; upstream reshapes the kernel to
-    ``(D, p * p * C_in)`` before calling ``xavier_uniform_``
-    (``reference/models.py``, ``initialize_weights``), so its ``fan_out`` is
-    ``D`` with no ``p * p`` factor. At ``p = 2`` that is a 4x difference in
-    ``fan_out`` and a real difference in the sampled range, with no shape
-    symptom, no parameter-count symptom and no error. The exact upstream limit
-    is written here from statically known integers instead. See decisions.md
-    D-013, which also records why this five-line helper is duplicated from
-    ``bit_diffusion/model.py`` rather than imported across model packages.
+    # DECISION plan-2026-09-02T170923-1285ed83/D-013: fan_out is computed as if
+    # the kernel were reshaped to (D, p*p*C_in), matching upstream — a plain Keras
+    # glorot_* default computes fan_out as p*p*D instead, a 4x difference at p=2. See decisions.md.
 
     :param fan_in: ``patch_h * patch_w * in_channels``.
     :type fan_in: int
@@ -590,32 +580,12 @@ class DiT(keras.Model):
         token_shape = (batch, self.num_patches, self.hidden_size)
         c_shape = (batch, self.hidden_size)
 
-        # The frozen 2-D sin-cos table, computed with NumPy and installed
-        # through a Constant initializer.
-        #
-        # NEVER a plain tensor attribute (it does not survive a `.keras` round
-        # trip and binds to a stale FuncGraph), and NEVER
-        # `add_weight(zeros) + .assign()` inside build(): StatelessScope
-        # DISCARDS the assign, leaving the table all zeros in every real model
-        # with no shape symptom and no error. Both are measured repo failures.
-        # DECISION plan-2026-09-02T170923-1285ed83/D-028
-        # The table FOLLOWS the variable dtype policy but NEVER NARROWS below
-        # float32. `get_2d_sincos_pos_embed` computes in float64, so a
-        # hard-coded `dtype="float32"` would silently down-cast the table under
-        # a float64 policy while `call` casts it back up at the point of use --
-        # float32 precision inside a float64 forward pass, with nothing to
-        # raise. WHAT NOT TO DO: do not replace this with a bare
-        # `dtype=self.variable_dtype`; under a pure (non-"mixed") float16 policy
-        # that stores sin/cos values with ~3 decimal digits, and the frozen
-        # positional code is exactly the kind of never-narrow quantity the rest
-        # of this port protects (see `diffusion.py::_compute_dtype`, D-018).
-        # `mixed_float16` is unaffected either way -- its variable dtype is
-        # already float32. See decisions.md D-028; pinned by
-        # `tests/test_models/test_dit/test_dit.py::TestUnderEveryDtypePolicy::
-        # test_the_frozen_table_follows_the_policy_without_narrowing`, whose
-        # `TABLE_POLICIES` carries a PURE `float16` arm precisely so the floor
-        # is convictable -- the three `POLICIES` arms cannot see it, because
-        # `mixed_float16`'s variable dtype is float32.
+        # The frozen 2-D sin-cos table, computed with NumPy and installed through a
+        # Constant initializer — never a plain tensor attribute (does not survive a
+        # .keras round trip) and never add_weight(zeros)+.assign() (StatelessScope discards it).
+        # DECISION plan-2026-09-02T170923-1285ed83/D-028: table follows the variable dtype
+        # policy but never narrows below float32 — do not replace with a bare
+        # `dtype=self.variable_dtype`, which would drop precision under pure float16. See decisions.md.
         table_dtype = "float64" if self.variable_dtype == "float64" else "float32"
         table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         self.pos_embed = self.add_weight(
@@ -765,18 +735,9 @@ class DiT(keras.Model):
         combined = keras.ops.concatenate([half, half], axis=0)
         model_out = self([combined, t, y], training=training)
 
-        # DECISION plan-2026-09-02T170923-1285ed83/D-014
-        # THREE channels, not `self.in_channels`. WHAT NOT TO DO: do not
-        # "fix" this to `model_out[..., :self.in_channels]`. Upstream ships
-        # exactly this and leaves the in_channels form COMMENTED OUT with the
-        # note "for exact reproducibility reasons, we apply classifier-free
-        # guidance on only three channels by default"
-        # (`reference/models.py`, `forward_with_cfg`). At the published
-        # `in_channels = 4` the obvious fix guides one extra channel: every
-        # shape, dtype, parameter count, `get_config()` and `.keras` round trip
-        # is identical, and every published `cfg_scale` result becomes
-        # irreproducible. See decisions.md D-014; pinned by
-        # `test_the_cfg_guidance_covers_only_three_channels.py` (step 10).
+        # DECISION plan-2026-09-02T170923-1285ed83/D-014: guides exactly three channels,
+        # not `self.in_channels` — upstream does the same for exact reproducibility;
+        # the obvious `model_out[..., :self.in_channels]` fix changes published cfg_scale results. See decisions.md.
         eps = model_out[..., :CFG_GUIDED_CHANNELS]
         rest = model_out[..., CFG_GUIDED_CHANNELS:]
 

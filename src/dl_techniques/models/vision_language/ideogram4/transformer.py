@@ -1,92 +1,26 @@
-"""
-Ideogram4 flow-matching diffusion transformer: a single packed self-attention
-stream that interleaves text-conditioning tokens with image latent tokens and
-regresses a velocity field, with 3D multi-axis rotary positions and a tanh-gated
-4-stream AdaLN block.
+"""Ideogram4 flow-matching diffusion transformer.
 
-The generative principle is flow matching. Training pairs a clean latent with a
-noise sample, interpolates them along a straight line, and asks the network to
-predict the path's velocity -- a target that is constant along the path, which is
-why a handful of Euler steps can integrate it. What the transformer itself pins is
-narrow: `t` is a scalar in `[0, 1]` (`ScalarSinusoidalEmbedding(input_range=(0.0,
-1.0))`), it may be per-sample `(B,)` or per-token `(B, L)`, and the output is a
-velocity in the latent's own channel space. Everything about *which* endpoint `t = 0`
-denotes lives outside this module; the convention the package settles on is stated in
-the note below.
+Defines :class:`Ideogram4Transformer`, which packs text-conditioning tokens
+and image latent tokens into one self-attention stream and regresses a
+velocity field for Euler integration, using 3D multi-axis rotary positions
+and a tanh-gated AdaLN block.
 
-The structurally distinctive choice is that there is no cross-attention anywhere.
-Rather than keeping conditioning in a separate tower and injecting it through
-cross-attention layers, Ideogram4 packs text and image tokens into ONE sequence and
-lets ordinary self-attention do the mixing. Roles are carried as data, not as
-structure: an integer `indicator` marks each position as text or image, and two
-float masks derived from it gate each stream's contribution before a plain addition
-merges them into the single hidden state `h`. The masking is applied twice on each
-branch, before *and* after its projection, and the second application is the
-load-bearing one: `input_proj` and `llm_cond_proj` both carry a bias, so without the
-post-projection mask every text position would pick up the image projection's bias
-vector (and vice versa) and the merge would no longer be role-pure. A learned 2-entry
-`embed_image_indicator` is then added on top, so the stack can distinguish the two
-roles by more than the content that happens to be there. The payoff of packing is
-uniformity: one block stack, one rotary table and one mask mechanism serve any
-text/image split without reshaping, and the split may vary per batch.
+There is no cross-attention. Text and image tokens share one sequence; an
+integer `indicator` marks each token's role, and float masks derived from it
+gate each stream both before and after its projection, so the two streams'
+biases stay separated when they are added into one hidden state. Attention
+is block-diagonal over `segment_ids` rather than causal, since a diffusion
+transformer must see the whole latent and caption at once. Position is 3D:
+`position_ids` carries `(t, h, w)`, and mRoPE splits the rotary frequency
+budget into three bands sized by `mrope_section`.
 
-Attention structure comes from `segment_ids`, not from a triangular mask. Positions
-sharing a segment attend to each other and nothing else, which makes attention
-block-diagonal over independently packed rows. This is deliberately NOT causal, and
-should not be: a diffusion transformer denoises the whole latent at once, so an
-image token must see the entire caption and the entire latent. The block-diagonal
-keep-mask is realized as an ADDITIVE finite mask, `where(same_segment, 0.0, -1e9)`
-added to the scaled scores (D-004), rather than a boolean mask that could produce an
-all-`-inf` row and hence a NaN softmax; the finite form is also XLA-safe.
-
-Positional information is 3D. `position_ids` carries `(t, h, w)` coordinates per
-token, and mRoPE splits the head's rotary frequency budget into three bands sized by
-`mrope_section`, interleaving them across `head_dim / 2` so each axis rotates its own
-subset of feature pairs. The cos/sin tables are computed once per forward and shared
-by every block. The PyTorch reference builds the band interleave with a dynamic
-in-place scatter; this port precomputes a static per-slot one-hot selector at
-`build()` and applies it with an einsum (D-003), which is XLA-safe and was verified
-element-wise against a NumPy reproduction of the reference forward.
-
-Conditioning enters only through modulation. The scalar time is sinusoidally
-embedded, projected to `adanln_dim` and passed through SiLU -- note the activation
-comes *after* the projection -- yielding `adaln_input`, which every block and the
-output head consume. When `t` arrives per-sample the resulting `(B, adaln)` vector is
-expanded to `(B, 1, adaln)` so it broadcasts over the sequence; the branch is a
-Python `if` on static rank, not a tensor-valued condition, so it is trace-safe. The
-per-block modulation itself lives in `Ideogram4TransformerBlock` and departs from
-this repo's usual AdaLN-zero block in three ways worth knowing before comparing them:
-it emits 4 streams rather than 6 (scale and gate per sublayer, NO shift), the gates
-are `tanh` rather than raw, and each sublayer sits in a 4-RMSNorm sandwich with a
-post-norm applied INSIDE the residual branch, i.e.
-`x = x + tanh(gate) * norm2(sublayer(norm1(x) * (1 + scale)))`. That post-norm
-placement is unusual but is replicated exactly rather than normalized away.
-
-Deliberate choices and divergences:
-
-- **The time convention, settled: `t = 0` is clean data, `t = 1` is pure noise, and
-  the velocity points data -> noise.** `src/train/ideogram4/train_ideogram4.py` trains
-  with `x_t = (1 - tau) * x0 + tau * x1` for `x1 ~ N(0, I)` and target `v = x1 - x0`,
-  which fixes that assignment; `pipeline.py`'s sampler follows it, seeding pure noise
-  at the top of the time grid and integrating DOWN, so its `z += v * (s - t)` runs with
-  `s < t` (a negative step) and the `t` it evaluates the transformer at descends
-  monotonically toward the data end. Because `LogitNormalSchedule` is strictly
-  DECREASING in its uniform argument, the loop reads its step grid in reverse to obtain
-  that descent -- see the D-002 derivation at the loop itself. This is the same
-  convention as `models/vision_language/sd3_mmdit/`, which implements the identical rectified flow, so
-  the two packages' schedulers and samplers can be read against each other. The module's
-  `[0, 1]` range alone still implies nothing; the endpoints are fixed by the trainer.
-- Conditioning is a PRECOMPUTED `llm_features` call input (D1). The reference
-  conditions on 13 stacked hidden-state taps of Qwen3-VL-8B; that model has no Keras
-  equivalent, so the text tower is out of scope and this is not an end-to-end
-  text-to-image model as it stands.
-- The architecture is faithful in math but NOT weight-compatible with the released
-  `ideogram-4-nf4` checkpoint: there is no nf4 dequantization path and no parameter
-  name map. Models built here are randomly initialized.
-- The velocity head casts to float32 unconditionally, even under a mixed-precision
-  policy, mirroring the reference's `.float()` return.
-- `Ideogram4Config` is a plain frozen dataclass rather than a Keras-serializable
-  object, so `from_config` rebuilds it via `Ideogram4Config.from_dict`.
+Conditioning is precomputed `llm_features`, taken as a call input, since
+Qwen3-VL has no Keras equivalent; this is not an end-to-end text-to-image
+model on its own. The architecture is faithful in math to the reference but
+not weight-compatible with the released checkpoint: weights here are always
+randomly initialized. `t = 0` is clean data and `t = 1` is pure noise; see
+`pipeline.py` for how a sampler must walk that convention. The velocity head
+always returns float32, even under a mixed-precision policy.
 
 References:
     - Lipman et al., 2023. Flow Matching for Generative Modeling.
@@ -112,10 +46,6 @@ References:
 
 import keras
 from typing import Any, Dict, Optional, Tuple
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
@@ -161,6 +91,30 @@ class Ideogram4Transformer(keras.Model):
 
     Output: ``(B, L, in_channels)`` velocity, always float32.
 
+    Forward pass:
+
+    .. code-block:: text
+
+        x [B,L,C]         llm_features [B,L,D]        t [B] or [B,L]
+          │ mask,proj,mask   │ mask,norm,proj,mask       │
+          ▼                  ▼                           ▼
+        ┌──────────────────────────┐              ┌─────────────┐
+        │ h = image + text (masked │              │ t_embedding │
+        │ add) + indicator embed   │              │ + adaln proj│
+        └────────────┬─────────────┘              └──────┬──────┘
+                      │                                   │
+                      │  cos, sin ◄── mRoPE(position_ids)  │
+                      ▼                                   │
+              ┌───────────────────┐                       │
+              │ block_0 .. block_N│◄── segment_ids  ◄──────┘
+              └────────┬──────────┘   (attention mask)
+                       ▼
+                ┌─────────────┐
+                │ final_layer │
+                └──────┬──────┘
+                       ▼
+              velocity [B,L,in_channels] (float32)
+
     :param config: The :class:`Ideogram4Config` describing the model.
     :type config: Ideogram4Config
     :param kwargs: Additional ``keras.Model`` arguments.
@@ -186,9 +140,6 @@ class Ideogram4Transformer(keras.Model):
         self.config = config
         emb_dim = config.emb_dim
         head_dim = config.head_dim
-
-        # --- sub-layers (created in __init__; functional weights build on first
-        #     call). A keras.Model may own sub-layers as plain attributes. ---
 
         # Noise (image) projection: in_channels -> emb_dim.
         self.input_proj = keras.layers.Dense(
@@ -256,13 +207,11 @@ class Ideogram4Transformer(keras.Model):
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from ``input_shape``.
 
-        Without this method Ideogram4Transformer inherits ``Layer.build``, which marks the
-        model built while every sub-layer is still unbuilt -- Keras warns about
-        exactly that at ``layers/layer.py:393``. The shared helper traces
-        ``call()`` on symbolic inputs, so what gets built cannot drift from what
-        gets called.
+        The default `Layer.build` would mark the model built while its
+        sub-layers stay unbuilt. This traces `call()` on symbolic inputs
+        instead, so what gets built cannot drift from what gets called.
 
-        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape, or nest of shapes, of the input to `call`.
         """
         if self.built:
             return
@@ -294,53 +243,46 @@ class Ideogram4Transformer(keras.Model):
 
         compute_dtype = self.input_proj.compute_dtype
 
-        # --- role masks (float, gate each contribution to its own tokens) ---
         is_text = keras.ops.equal(indicator, LLM_TOKEN_INDICATOR)
         is_image = keras.ops.equal(indicator, OUTPUT_IMAGE_INDICATOR)
         llm_token_mask = keras.ops.cast(
             keras.ops.expand_dims(is_text, axis=-1), compute_dtype
-        )  # (B, L, 1)
+        )
         output_image_mask = keras.ops.cast(
             keras.ops.expand_dims(is_image, axis=-1), compute_dtype
-        )  # (B, L, 1)
+        )
 
-        # --- image (noise) stream: mask -> project -> mask ---
+        # Mask both before and after the projection, since the Dense bias
+        # would otherwise leak across the text/image boundary after the add.
         x = keras.ops.cast(x, compute_dtype) * output_image_mask
         x = self.input_proj(x, training=training) * output_image_mask
 
-        # --- conditioning (time) -> AdaLN input ---
-        t_cond = self.t_embedding(t, training=training)  # (B, emb) or (B, L, emb)
-        # Static-rank branch (guide-preferred ndim over len(.shape)); rank is
-        # known at trace, so this stays a python `if`, not a tensor-value branch.
+        t_cond = self.t_embedding(t, training=training)
+        # Rank is known at trace time, so this stays a plain python branch.
         if keras.ops.ndim(t_cond) == 2:
-            # t was (B,): add a length-1 token axis to broadcast over L.
-            t_cond = keras.ops.expand_dims(t_cond, axis=1)  # (B, 1, emb)
+            # t was (B,): add a length-1 token axis so it broadcasts over L.
+            t_cond = keras.ops.expand_dims(t_cond, axis=1)
         adaln_input = keras.ops.silu(
             self.adaln_proj(t_cond, training=training)
-        )  # (B, 1, adaln) or (B, L, adaln)
+        )
 
-        # --- text (conditioning) stream: mask -> norm -> project -> mask ---
         llm_features = keras.ops.cast(llm_features, compute_dtype) * llm_token_mask
         llm_features = self.llm_cond_norm(llm_features, training=training)
         llm_features = (
             self.llm_cond_proj(llm_features, training=training) * llm_token_mask
         )
 
-        # --- masked add into the single packed stream ---
         h = x + llm_features
 
-        # Image-indicator embedding: index 1 for image tokens, 0 otherwise.
-        indicator_index = keras.ops.cast(is_image, "int32")  # (B, L) in {0, 1}
+        indicator_index = keras.ops.cast(is_image, "int32")
         h = h + self.embed_image_indicator(indicator_index)
 
-        # --- mRoPE tables (shared across blocks) ---
         cos, sin = self.rotary_emb(position_ids)
 
-        # --- DiT block stack ---
         for block in self.blocks:
             h = block(h, segment_ids, cos, sin, adaln_input, training=training)
 
-        # --- velocity head; always float32 (PyTorch returns .float()) ---
+        # Always float32, even under a mixed-precision policy.
         out = self.final_layer(h, c=adaln_input, training=training)
         return keras.ops.cast(out, "float32")
 
@@ -381,11 +323,6 @@ class Ideogram4Transformer(keras.Model):
         return cls(**config)
 
 
-# ---------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------
-
-
 def create_ideogram4_transformer(
     variant: str = "tiny",
     **overrides: Any,
@@ -418,5 +355,3 @@ def create_ideogram4_transformer(
         config.num_layers,
     )
     return Ideogram4Transformer(config=config)
-
-# ---------------------------------------------------------------------

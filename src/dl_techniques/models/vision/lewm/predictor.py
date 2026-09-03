@@ -1,14 +1,9 @@
-"""
-ARPredictor — autoregressive next-state predictor for LeWM.
+"""``ARPredictor``, LeWM's autoregressive next-state predictor.
 
-Wraps a stack of `AdaLNZeroConditionalBlock` layers with:
-- a learned positional embedding of shape (1, num_frames, input_dim),
-- an input projection (Dense) from input_dim -> hidden_dim (or Identity),
-- a conditioning projection (Dense) from input_dim -> hidden_dim,
-- a final LayerNorm (elementwise-affine default),
-- an output projection (Dense) from hidden_dim -> output_dim.
-
-Upstream reference: `/tmp/lewm_source/module.py:Transformer, ARPredictor`.
+It adds a learned positional embedding to the input sequence, then runs a
+stack of AdaLN-zero conditional transformer blocks, conditioned on a
+second input sequence. Input and conditioning projections are skipped
+when their dimension already matches the internal hidden dimension.
 """
 
 import keras
@@ -22,6 +17,28 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.lewm.predictor")
 class ARPredictor(keras.layers.Layer):
     """Autoregressive predictor with AdaLN-zero conditional Transformer stack.
+
+    Architecture:
+
+    .. code-block:: text
+
+        x  [B, T, input_dim]        c  [B, T, input_dim]
+           |                           |
+           v                           v
+        + pos_embedding             Dense (optional)
+           |                           |
+        Dense (optional)               |
+           |                           |
+           +---------> AdaLN-zero block x depth <---------+
+                            |
+                            v
+                       LayerNorm
+                            |
+                            v
+                    Dense (optional)
+                            |
+                            v
+                  output  [B, T, output_dim]
 
     :param num_frames: maximum sequence length for the learned positional
         embedding.
@@ -109,13 +126,10 @@ class ARPredictor(keras.layers.Layer):
             )
         x_shape, c_shape = input_shape
 
-        # Learned pos embedding: (1, num_frames, input_dim).
+        # Small init keeps the positional embedding from dominating the residual stream early on.
         self.pos_embedding = self.add_weight(
             name="pos_embedding",
             shape=(1, self.num_frames, self.input_dim),
-            # Small init (DiT / ViT convention) — the positional embedding is
-            # added to encoder embeddings of comparable scale; a unit-stddev
-            # init would dominate the residual stream early in training.
             initializer=keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )

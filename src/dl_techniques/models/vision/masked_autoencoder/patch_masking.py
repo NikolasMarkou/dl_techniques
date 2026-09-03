@@ -1,5 +1,9 @@
-"""
-A patch-based random masking strategy for self-supervised learning.
+"""``PatchMasking``, a layer that splits an image into patches and randomly masks a fraction of them.
+
+It picks patches to mask with a per-batch random ranking rather than a
+fixed grid, so the masked set differs every call. A masked patch is
+replaced by a learnable token, Gaussian noise, zero, or a constant value,
+depending on ``mask_value``.
 """
 
 import keras
@@ -11,10 +15,31 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.masked_autoencoder.patch_masking")
 class PatchMasking(keras.layers.Layer):
-    """Layer for creating patches and applying random masking.
+    """Split an image into patches and randomly mask a fraction of them.
 
-    Attributes:
-        mask_token: Learnable mask token (if mask_value="learnable").
+    Architecture:
+
+    .. code-block:: text
+
+        image  [B, H, W, C]
+           |
+           v
+        split into patches  [B, nH, nW, pH, pW, C]
+           |
+        random per-batch mask  [B, nH*nW]
+           |
+        replace masked patches (token / noise / zero / constant)
+           |
+           v
+        masked image  [B, H, W, C]
+
+    :param patch_size: side length of a square patch.
+    :param mask_ratio: fraction of patches to mask, in [0, 1].
+    :param mask_value: how to fill a masked patch: ``"learnable"`` (a
+        trained token), ``"noise"``, ``"zero"``, or a constant float.
+    :param kwargs: passthrough to `keras.layers.Layer`.
+    :ivar mask_token: The learnable mask token, set only when
+        ``mask_value="learnable"``.
     """
 
     def __init__(
@@ -40,7 +65,7 @@ class PatchMasking(keras.layers.Layer):
         _, height, width, channels = input_shape
 
         if height is None or width is None:
-             # Defer strict shape check to call if dynamic
+             # Dynamic spatial dims: divisibility by patch_size is not checked here.
              pass
         else:
             if height % self.patch_size != 0 or width % self.patch_size != 0:
@@ -69,16 +94,11 @@ class PatchMasking(keras.layers.Layer):
 
         num_masked = int(num_patches * self.mask_ratio)
 
-        # 1. Random noise
         noise = random.uniform(shape=(batch_size, num_patches))
-
-        # 2. Sort noise to get random indices
         rand_indices = ops.argsort(noise, axis=-1)
-
-        # 3. Find rank of each patch
+        # Ranking the shuffled indices recovers each patch's random rank.
         rank = ops.argsort(rand_indices, axis=-1)
-
-        # 4. Mask patches with low rank (1 = masked, 0 = visible)
+        # 1 = masked, 0 = visible.
         mask = ops.cast(rank < num_masked, dtype="float32")
         return mask
 
@@ -97,27 +117,20 @@ class PatchMasking(keras.layers.Layer):
         num_patches_w = width // self.patch_size
         num_patches = num_patches_h * num_patches_w
 
-        # 1. Create Mask (float32)
         mask = self._create_mask(batch_size, num_patches, training)
 
-        # 2. Extract Patches: (B, H, W, C) -> (B, num_h, patch_h, num_w, patch_w, C)
         patches = ops.reshape(
             inputs,
             (batch_size, num_patches_h, self.patch_size,
              num_patches_w, self.patch_size, self.channels)
         )
-        # -> (B, num_h, num_w, patch_h, patch_w, C)
         patches = ops.transpose(patches, (0, 1, 3, 2, 4, 5))
 
-        # 3. Apply Mask
-        # Reshape mask to broadcast: (B, num_h, num_w, 1, 1, 1)
+        # Cast to the input dtype so the multiply below stays in one precision.
         mask_reshaped = ops.reshape(mask, (batch_size, num_patches_h, num_patches_w, 1, 1, 1))
-
-        # Cast mask to input dtype (e.g., float16) to allow mixed precision multiplication
         mask_reshaped = ops.cast(mask_reshaped, inputs.dtype)
 
         if self.mask_value == "learnable":
-            # Broadcast token to (B, num_h, num_w, patch, patch, C)
             token = ops.cast(self.mask_token, inputs.dtype)
             token = ops.broadcast_to(token, ops.shape(patches))
             masked_patches = (1 - mask_reshaped) * patches + mask_reshaped * token
@@ -127,10 +140,8 @@ class PatchMasking(keras.layers.Layer):
         elif self.mask_value == "zero":
             masked_patches = (1 - mask_reshaped) * patches
         else:
-             # Constant float
             masked_patches = (1 - mask_reshaped) * patches + mask_reshaped * ops.cast(self.mask_value, inputs.dtype)
 
-        # 4. Reconstruct: (B, num_h, num_w, patch_h, patch_w, C) -> (B, H, W, C)
         masked_patches = ops.transpose(masked_patches, (0, 1, 3, 2, 4, 5))
         masked_images = ops.reshape(masked_patches, (batch_size, height, width, self.channels))
 

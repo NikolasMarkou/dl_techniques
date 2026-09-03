@@ -1,39 +1,19 @@
-"""
-Vision Transformer with a hierarchical MLP (hMLP) patch stem.
+"""Vision Transformer with a hierarchical MLP (hMLP) patch stem.
 
-A standard ViT embeds each patch with a single linear projection. Replacing that
-with a small convolutional stem improves supervised accuracy, but it also breaks
-masked self-supervised pretraining: a convolutional stem has a receptive field
-wider than one patch, so a masked patch's neighbours leak into its embedding and
-the model can partially see what it is being asked to reconstruct. The hMLP stem
-resolves the tension by keeping the improvement and refusing the leak.
+A standard ViT embeds each patch with one linear projection. A convolutional
+stem improves accuracy but breaks masked self-supervised pretraining, because
+its receptive field crosses patch boundaries and lets a masked patch's
+neighbors leak into its embedding. The hMLP stem keeps the accuracy gain
+without the leak: each patch runs through a hierarchy of linear projections,
+normalization and non-linearity, independently of every other patch. No
+operation crosses a patch boundary, so masking before or after the stem gives
+identical results, at under 1% extra FLOPs.
 
-It processes each patch INDEPENDENTLY through a hierarchy of linear projections
-with normalization and non-linearity between them, halving the token grid at each
-step. As implemented (`layers/hierarchical_mlp_stem.py`) the hierarchy starts with
-a 4x4 stride-4 convolution and then stacks 2x2 stride-2 stages, so for the default
-16-pixel patch it is THREE stages covering 4x4 -> 8x8 -> 16x16 pixels; there is no
-2x2-pixel stage. Because no
-operation ever crosses a patch boundary, masking before the stem and masking
-after it produce identical results — which is exactly the property BeiT and MAE
-need, and exactly what a convolutional stem cannot offer. The cost is under 1%
-of FLOPs.
-
-`stem_norm_layer` chooses between BatchNorm and LayerNorm inside the stem.
-BatchNorm performs better but couples examples within a batch; LayerNorm is the
-stable choice at small batch sizes. Everything after the stem is a conventional
-pre-norm transformer encoder built from the repo's `TransformerLayer`, so the
-attention, FFN and normalization types are all selectable through the same
-factories the rest of the library uses.
-
-`pooling` selects how a sequence becomes a vector when `include_top=False`:
-`cls` takes the class token, `mean` averages the patch tokens, `max` takes their
-maximum. Note that positional-mode pooling over a padded sequence is a known
-hazard elsewhere in this library; here the sequence length is fixed by the patch
-grid, so the modes are unambiguous.
-
-Variants follow the standard ViT ladder as `(embed_dim, num_heads, num_layers,
-mlp_ratio)`, from tiny at 192 wide to huge at 1280.
+`stem_norm_layer` chooses BatchNorm (better accuracy) or LayerNorm (more
+stable at small batch sizes) inside the stem. Everything after the stem is a
+standard pre-norm transformer encoder built from the repo's TransformerLayer,
+with attention, FFN and normalization type selectable through the usual
+factories.
 
 References:
     - Touvron et al., 2022. Three things everyone should know about Vision
@@ -84,194 +64,213 @@ StemNormLayer = Literal['batch', 'layer']
 
 @register_dl_technique("dl_techniques.models.vit_hmlp.model")
 class ViTHMLP(keras.Model):
-    """
-    Vision Transformer with Hierarchical MLP Stem using factory-based component creation.
+    """Vision Transformer with a hierarchical MLP stem.
 
-    This model implements the complete Vision Transformer architecture with a hierarchical MLP stem
-    that processes patches progressively through multiple scales. The implementation leverages the
-    dl-techniques framework's factory system for consistent component creation and follows modern
-    Keras 3 best practices for robust serialization and deployment.
+    Processes each patch independently through a hierarchy of linear
+    projections, then runs a standard pre-norm transformer encoder. The stem
+    never mixes information across patch boundaries, so it is safe to mask
+    before or after it runs.
 
-    **Intent**: Provide a configurable Vision Transformer implementation with hMLP stem that
-    leverages the dl-techniques framework's modular components while following modern Keras 3 best
-    practices for robust serialization and deployment. The hMLP stem provides superior performance
-    for both supervised learning and masked self-supervised learning approaches.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input Images (batch, height, width, channels)
-           ↓
-    HierarchicalMLPStem → Patches (batch, num_patches, embed_dim)
-      ↓ 4×4 → 8×8 → 16×16 pixel processing (three stages, 4x4 stride-4 first)
-           ↓
-    Add CLS Token → (batch, seq_len, embed_dim)
-           ↓
-    PositionalEmbedding + Dropout
-           ↓
-    TransformerLayer × num_layers
-           ↓
-    Final Normalization
-           ↓
-    [Classification Head] OR [Feature Extraction]
-           ↓
-    Output (shape depends on configuration)
-    ```
+    .. code-block:: text
 
-    **hMLP Stem Processing**:
-    1. **Progressive Resolution**: Patches processed at 4×4, 8×8, 16×16 pixel scales
-    2. **Independent Processing**: No cross-patch information leakage (SSL compatible)
-    3. **Hierarchical Features**: Each scale contributes to final patch representation
-    4. **Efficient Implementation**: <1% computational overhead vs standard linear projection
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C]                  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  HierarchicalMLPStem                 │
+        │  4x4 stride-4, then 2x2 stride-2     │
+        │  stages → [B, N, D]                  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  prepend CLS token → [B, N+1, D]     │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  + learned positional embedding      │
+        │  → Dropout(pos_dropout_rate)         │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayer × num_layers       │
+        │  pre-norm by default                 │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final norm over the whole sequence  │
+        └───────────────┬──────────────────────┘
+                        │
+            ┌───────────┴────────────┐
+            ▼                        ▼
+        include_top=True        include_top=False
+            │                        │
+        ┌───────────────┐   ┌────────────────────────────┐
+        │ x[:, 0]       │   │ pooling='cls'  → x[:, 0]   │
+        │ [Dropout]     │   │ pooling='mean' → mean over │
+        │ Dense(classes)│   │ pooling='max'  → max  over │
+        │               │   │   the whole sequence       │
+        │ → [B, classes]│   │ pooling=None → [B,N+1,D]   │
+        └───────────────┘   └────────────────────────────┘
 
-    **Scale Configurations**:
-    - **Tiny**: 192d, 3h, 12L - Efficient for small datasets/mobile deployment
-    - **Small**: 384d, 6h, 12L - Balanced performance and efficiency
-    - **Base**: 768d, 12h, 12L - Standard configuration (original paper)
-    - **Large**: 1024d, 16h, 24L - High performance for large datasets
-    - **Huge**: 1280d, 16h, 32L - Maximum capacity for demanding tasks
+    hMLP stem stages:
 
-    Args:
-        input_shape: Tuple[int, int, int], input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-            Example: (224, 224, 3) for ImageNet.
-        num_classes: Integer, number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        scale: VitScale, model scale configuration determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'. Defaults to 'base'.
-        patch_size: Union[int, Tuple[int, int]], size of patches to extract from images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-            Defaults to 16.
-        include_top: Boolean, whether to include classification head.
-            When False, model acts as feature extractor. Defaults to True.
-        pooling: Optional[PoolingMode], pooling strategy for feature extraction.
-            Only used when include_top=False:
-            - 'cls': Use CLS token representation
-            - 'mean': Global average pooling over sequence
-            - 'max': Global max pooling over sequence
-            - None: Return full sequence (batch, seq_len, embed_dim)
-            Defaults to None.
-        dropout_rate: Float, dropout rate for general regularization.
-            Applied in transformer layers and classification head. Defaults to 0.0.
-        attention_dropout_rate: Float, dropout rate for attention weights.
-            Applied within attention mechanisms. Defaults to 0.0.
-        pos_dropout_rate: Float, dropout rate after positional embeddings.
-            Defaults to 0.0.
-        stem_norm_layer: StemNormLayer, normalization type for hMLP stem.
-            Available options:
-            - 'batch': Batch normalization (better performance, default)
-            - 'layer': Layer normalization (stable for small batches)
-            Defaults to 'batch'.
-        kernel_initializer: Union[str, Initializer], weight initializer for all layers.
-            Defaults to 'he_normal'.
-        kernel_regularizer: Optional[Regularizer], weight regularizer for all layers.
-            Defaults to None.
-        bias_initializer: Union[str, Initializer], bias initializer for all layers.
-            Defaults to 'zeros'.
-        bias_regularizer: Optional[Regularizer], bias regularizer for all layers.
-            Defaults to None.
-        normalization_type: NormalizationType, normalization layer type.
-            Uses factory for consistent creation. Available options:
-            - 'layer_norm': Standard layer normalization (default)
-            - 'rms_norm': Root Mean Square normalization
-            - 'band_rms': Band-constrained RMS normalization
-            - 'dynamic_tanh': Dynamic Tanh normalization
-            Defaults to 'layer_norm'.
-        normalization_position: Literal['pre', 'post'], normalization position in transformer.
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'pre'.
-        ffn_type: FFNType, feed-forward network type for transformer layers.
-            Uses factory for consistent creation. Available options:
-            - 'mlp': Standard MLP with intermediate expansion (default)
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'geglu': GELU-based Gated Linear Unit
-            Defaults to 'mlp'.
-        activation: Union[str, Callable], activation function for FFN.
-            Defaults to 'gelu'.
-        use_stochastic_depth: Boolean, whether to use stochastic depth regularization.
-            Provides regularization for deep networks. Defaults to False.
-        stochastic_depth_rate: Float, maximum drop path rate for stochastic depth.
-            Only used when use_stochastic_depth=True. Defaults to 0.1.
-        name: Optional[str], model name. Auto-generated if None.
-        **kwargs: Additional arguments for Model base class.
+    .. code-block:: text
+
+        input patch grid
+              ▼
+        4x4 stride-4 conv
+              ▼
+        2x2 stride-2 stage           three stages total for the
+              ▼                       default 16-pixel patch:
+        2x2 stride-2 stage            4x4 -> 8x8 -> 16x16
+              ▼
+        patch embedding [B, N, D]
+
+        each stage stays inside its own patch: no operation reaches
+        across a patch boundary, so masking before or after the stem
+        gives identical results.
+
+    Scales:
+
+    .. code-block:: text
+
+        scale     embed_dim   heads   layers   mlp_ratio
+        tiny         192        3       12        4.0
+        small        384        6       12        4.0
+        base         768       12       12        4.0
+        large       1024       16       24        4.0
+        huge        1280       16       32        4.0
+
+    CLS handling in mean and max pooling:
+
+    .. code-block:: text
+
+        pooling='cls' reads x[:, 0] alone
+
+        pooling='mean'/'max' pool the whole sequence, CLS token
+        included (no exclude_positions; this differs from the
+        sibling vit package, which excludes the CLS token)
+
+    :param input_shape: Input image shape ``(height, width, channels)``. Must
+        have positive dimensions divisible by ``patch_size``. Defaults to
+        ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of output classes. Must be positive. Only used
+        when ``include_top=True``. Defaults to 1000.
+    :type num_classes: int
+    :param scale: Model scale, one of ``'tiny'``, ``'small'``, ``'base'``,
+        ``'large'``, ``'huge'``. Defaults to ``'base'``.
+    :type scale: VitScale
+    :param patch_size: Patch size; an int gives square patches. Image
+        dimensions must be divisible by it. Defaults to 16.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param include_top: Whether to include the classification head. When
+        False the model is a feature extractor. Defaults to True.
+    :type include_top: bool
+    :param pooling: Pooling strategy, used only when ``include_top=False``:
+        ``'cls'`` reads the CLS token, ``'mean'``/``'max'`` pool the whole
+        sequence including the CLS token, ``None`` returns the full
+        sequence. Defaults to None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate, applied in the transformer
+        layers and before the classification head. Defaults to 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout rate for attention weights.
+        Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Dropout rate after the positional embedding.
+        Defaults to 0.0.
+    :type pos_dropout_rate: float
+    :param stem_norm_layer: Normalization inside the hMLP stem: ``'batch'``
+        (default, better accuracy) or ``'layer'`` (more stable at small
+        batch sizes).
+    :type stem_norm_layer: StemNormLayer
+    :param kernel_initializer: Weight initializer for every layer. Defaults
+        to ``'he_normal'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Weight regularizer for every layer. Defaults
+        to None.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer for every layer. Defaults to
+        ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer for every layer. Defaults to
+        None.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier passed to
+        ``create_normalization_layer``. Defaults to ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` (default) or ``'post'``.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier passed to the factory.
+        Defaults to ``'mlp'``.
+    :type ffn_type: FFNType
+    :param activation: Activation for the FFN. Defaults to ``'gelu'``.
+    :type activation: Union[str, callable]
+    :param use_stochastic_depth: Whether transformer layers apply stochastic
+        depth. Defaults to False.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Maximum drop-path rate, used only when
+        ``use_stochastic_depth=True``. Defaults to 0.1.
+    :type stochastic_depth_rate: float
+    :param name: Model name; auto-generated as
+        ``vision_transformer_hmlp_<scale>`` when None.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If ``input_shape`` is not a positive 3-tuple, if
+        ``patch_size`` is invalid or does not divide the image dimensions, if
+        ``num_classes`` is not positive, if ``scale``, ``pooling`` or
+        ``stem_norm_layer`` is unrecognized, or if any rate leaves ``[0, 1]``.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-        Requirements:
-        - height and width must be divisible by corresponding patch dimensions
-        - All dimensions must be positive
-        - Channels typically 1 (grayscale) or 3 (RGB)
+        4D tensor ``(batch_size, height, width, channels)``, with height and
+        width divisible by the corresponding patch dimensions.
 
     Output shape:
-        Depends on configuration:
+        - ``include_top=True``: ``(batch_size, num_classes)``, logits with no
+          softmax applied.
+        - ``include_top=False, pooling='cls'|'mean'|'max'``:
+          ``(batch_size, embed_dim)``.
+        - ``include_top=False, pooling=None``:
+          ``(batch_size, num_patches + 1, embed_dim)``.
 
-        **Classification mode** (include_top=True):
-        - Shape: `(batch_size, num_classes)`
-        - Values: Logits for each class (no softmax applied)
-
-        **Feature extraction mode** (include_top=False):
-        - pooling='cls': `(batch_size, embed_dim)` - CLS token features
-        - pooling='mean': `(batch_size, embed_dim)` - Mean-pooled features
-        - pooling='max': `(batch_size, embed_dim)` - Max-pooled features
-        - pooling=None: `(batch_size, seq_len, embed_dim)` - Full sequence
-
-    Attributes:
-        embed_dim: Integer, embedding dimension determined by scale.
-        num_heads: Integer, number of attention heads determined by scale.
-        num_layers: Integer, number of transformer layers determined by scale.
-        num_patches: Integer, total number of image patches.
-        max_seq_len: Integer, maximum sequence length (num_patches + 1 for CLS).
-        stem: HierarchicalMLPStem layer for progressive patch processing.
-        pos_embed: PositionalEmbedding layer for sequence position encoding.
-        transformer_layers: List of TransformerLayer instances.
-        norm: Final normalization layer.
-        head: Optional Dense layer for classification.
+    :ivar embed_dim: Embedding dimension, fixed by ``scale``.
+    :vartype embed_dim: int
+    :ivar num_heads: Attention head count, fixed by ``scale``.
+    :vartype num_heads: int
+    :ivar num_layers: Transformer depth, fixed by ``scale``.
+    :vartype num_layers: int
+    :ivar num_patches: Total number of image patches.
+    :vartype num_patches: int
+    :ivar max_seq_len: ``num_patches + 1``, counting the CLS token.
+    :vartype max_seq_len: int
+    :ivar stem: The hierarchical MLP stem.
+    :vartype stem: HierarchicalMLPStem
+    :ivar transformer_layers: The encoder stack.
+    :vartype transformer_layers: list[TransformerLayer]
 
     Example:
-        ```python
-        # Standard ViT-Base with hMLP stem for ImageNet classification
-        model = ViTHMLP(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base'
-        )
+        .. code-block:: python
 
-        # Feature extractor with CLS token and modern components
-        feature_model = ViTHMLP(
-            input_shape=(224, 224, 3),
-            scale='base',
-            include_top=False,
-            pooling='cls',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
+            model = ViTHMLP(
+                input_shape=(224, 224, 3),
+                num_classes=1000,
+                scale='base'
+            )
 
-        # Model optimized for self-supervised learning
-        ssl_model = ViTHMLP(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base',
-            stem_norm_layer='batch',  # Better performance
-            use_stochastic_depth=True,
-            stochastic_depth_rate=0.1,
-            dropout_rate=0.0  # No dropout for SSL pre-training
-        )
-
-        # Compile for training
-        model.compile(
-            optimizer='adamw',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        ```
+            feature_model = ViTHMLP(
+                input_shape=(224, 224, 3),
+                scale='base',
+                include_top=False,
+                pooling='cls'
+            )
 
     Note:
-        This implementation follows modern Keras 3 patterns with proper serialization
-        support. The hMLP stem provides superior performance for both supervised learning
-        and masked self-supervised learning compared to standard patch embedding.
-        All sub-components are created using dl_techniques factories for consistency
-        and configurability.
+        The head emits logits, so compile with ``from_logits=True``.
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
@@ -412,8 +411,8 @@ class ViTHMLP(keras.Model):
                 f"num_heads ({self.num_heads})"
             )
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Using factories for consistent component creation where available
+        # Create all sub-layers in __init__; they are unbuilt until build() runs.
+        # Uses factories for consistent component creation where available.
 
         # Hierarchical MLP Stem (specialized component, direct instantiation)
         self.stem = HierarchicalMLPStem(
@@ -459,17 +458,8 @@ class ViTHMLP(keras.Model):
                 use_stochastic_depth=self.use_stochastic_depth,
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
-                # DECISION plan-2026-08-23T091307-9a110062/D-560
-                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
-                # "simplify" this back to `self.kernel_initializer`: one seedless
-                # initializer INSTANCE replays its draw, so every same-shape kernel
-                # it reaches is bit-identical. MEASURED at HEAD before this change,
-                # on a seeded 12-layer build: 132 of 264 same-shape kernel
-                # pairs at `max|delta| = 0.0` -- all 12
-                # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
-                # pairwise identical (66 pairs), likewise the 12 `.../proj/kernel`.
-                # `seed=` is not the discriminator; instance identity is.
-                # See decisions.md D-560 (and D-540 for the first three ports).
+                # DECISION plan-2026-08-23T091307-9a110062/D-560: each block gets its own
+                # clone_initializer() copy; a shared instance replays one draw across all blocks. See decisions.md.
                 use_bias=True,
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
@@ -502,10 +492,8 @@ class ViTHMLP(keras.Model):
             )
 
         # Feature-extraction pooling via the shared SequencePooling layer.
-        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling (CLS INCLUDED in
-        # mean/max — no exclude_positions, byte-identical to global_pool(x)); this INTENTIONALLY differs
-        # from vit (which excludes CLS) — divergence preserved + now explicit. Do NOT add
-        # exclude_positions=[0] here (would drop the CLS token and change outputs).
+        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling with the CLS
+        # token included in mean/max (no exclude_positions); adding it would drop CLS from the output. See decisions.md.
         self.pool = None
         if self.pooling == "cls":
             self.pool = SequencePooling(strategy="cls", name="seq_pool")
@@ -520,10 +508,15 @@ class ViTHMLP(keras.Model):
             f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model and all its sub-layers.
+        """Create the CLS token and explicitly build every sub-layer.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        Each sub-layer is built in computational order rather than left to a
+        lazy first call, so the weight tree materializes on ``.keras``
+        reload.
+
+        :param input_shape: Input shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if self.built:
             return
@@ -569,7 +562,7 @@ class ViTHMLP(keras.Model):
 
         logger.info(f"Built VisionTransformer-hMLP-{self.scale} with {self.num_patches} patches")
 
-        # Always call parent build at the end (must be the LAST statement)
+        # Parent build must run last.
         super().build(input_shape)
 
     def call(
@@ -577,62 +570,56 @@ class ViTHMLP(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
+        """Forward pass through the Vision Transformer with hMLP stem.
+
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Model output. ``(batch, num_classes)`` logits with
+            ``include_top=True``; otherwise the pooled features
+            ``(batch, embed_dim)`` or, when ``pooling is None``, the full
+            sequence ``(batch, max_seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        Forward pass through the Vision Transformer with hMLP stem.
+        # Patch embedding: (batch_size, num_patches, embed_dim).
+        x = self.stem(inputs, training=training)
 
-        Args:
-            inputs: Input tensor (batch_size, height, width, channels).
-            training: Whether in training mode.
-
-        Returns:
-            Model output tensor. Shape depends on include_top and pooling settings.
-        """
-        # Process patches with hierarchical MLP stem
-        x = self.stem(inputs, training=training)  # (batch_size, num_patches, embed_dim)
-
-        # Add CLS token to sequence
+        # Prepend the CLS token: (batch_size, seq_len, embed_dim).
         batch_size = ops.shape(x)[0]
         cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)  # (batch_size, seq_len, embed_dim)
+        x = ops.concatenate([cls_tokens, x], axis=1)
 
-        # Add positional embeddings (includes dropout)
+        # Positional embedding includes its own dropout.
         x = self.pos_embed(x, training=training)
 
-        # Apply transformer layers
         for layer in self.transformer_layers:
             x = layer(x, training=training)
 
-        # Apply final normalization
         x = self.norm(x, training=training)
 
-        # Handle different output modes
         if self.include_top:
-            # Extract CLS token for classification
-            cls_token = x[:, 0, :]  # (batch_size, embed_dim)
+            cls_token = x[:, 0, :]
             if self.head_dropout is not None:
                 cls_token = self.head_dropout(cls_token, training=training)
-            x = self.head(cls_token)  # (batch_size, num_classes)
+            x = self.head(cls_token)
             return x
         else:
-            # Feature extraction mode
-            # cls / mean / max all route through SequencePooling. Here the pool is built
-            # WITHOUT exclude_positions, so the CLS token is INCLUDED in mean/max
-            # (byte-identical to the previous GlobalAveragePooling1D/GlobalMaxPooling1D over
-            # the full sequence x). This intentionally differs from vit.
+            # cls / mean / max all route through SequencePooling, built without
+            # exclude_positions, so the CLS token is included in mean/max.
             if self.pool is not None:
-                return self.pool(x)  # (batch_size, embed_dim)
-            # pooling is None -> return the full transformer output
-            return x  # (batch_size, seq_len, embed_dim)
+                return self.pool(x)
+            return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute the output shape for a given input shape.
 
-        Args:
-            input_shape: Input tensor shape.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape, depending on ``include_top`` and ``pooling``.
+        :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if len(input_shape) < 4:
             raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
@@ -648,10 +635,13 @@ class ViTHMLP(keras.Model):
                 return (batch_size, self.max_seq_len, self.embed_dim)
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration for serialization.
 
-        CRITICAL: Must include ALL __init__ parameters for proper serialization.
+        Includes every ``__init__`` parameter, which is what makes the round
+        trip lossless.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -672,16 +662,9 @@ class ViTHMLP(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            # DECISION plan-2026-08-23T091307-9a110062/D-400
-            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
-            # expression at three sites. It is now the single shared pair in
-            # `dl_techniques.utils.activation_serialization`, which ~50 other
-            # classes in this tree also call. Do NOT re-inline it: the string
-            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
-            # a bare string, and many callers store a dl_techniques
-            # activation-factory key such as 'mish' that is not a Keras
-            # activation at all), and a second copy of that rule is exactly the
-            # kind of hand-maintained lockstep this centralisation removes.
+            # DECISION plan-2026-08-23T091307-9a110062/D-400: use the shared
+            # activation_serialization pair, not an inline isinstance(str) check;
+            # keras.activations.serialize rejects a bare dl_techniques key like 'mish'. See decisions.md.
             "activation": serialize_activation(self.activation),
             "use_stochastic_depth": self.use_stochastic_depth,
             "stochastic_depth_rate": self.stochastic_depth_rate,
@@ -694,25 +677,21 @@ class ViTHMLP(keras.Model):
             config: Dict[str, Any],
             custom_objects: Optional[Dict[str, Any]] = None
     ) -> "ViTHMLP":
-        """
-        Recreate a model from its serialized configuration.
+        """Recreate a model from its serialized configuration.
 
-        `get_config` serializes the initializers and regularizers, so they must
-        be deserialized back into objects here; without this, the raw config
-        dicts reach `__init__` and are stored (and re-serialized) as dicts.
+        ``get_config`` serializes the initializers, regularizers and
+        activation, so they need deserializing back into objects here;
+        otherwise the raw config dicts reach ``__init__`` and get stored
+        (and re-serialized) as dicts.
 
-        ``activation`` was NOT handled here before D-205, even though this method
-        already existed -- the presence of a `from_config` is not evidence that
-        every serialized key is covered by it.
-
-        Args:
-            config: Configuration dictionary from `get_config`.
-            custom_objects: Optional mapping of names to custom callables, used
-                to resolve an activation that is not registered with
-                ``keras.saving.register_keras_serializable``.
-
-        Returns:
-            ViTHMLP model instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :param custom_objects: Optional mapping of names to custom callables,
+            used to resolve an activation that is not registered with
+            ``keras.saving.register_keras_serializable``.
+        :type custom_objects: Optional[Dict[str, Any]]
+        :return: A new ``ViTHMLP`` instance.
+        :rtype: ViTHMLP
         """
         config = dict(config)
         for key in ("kernel_initializer", "bias_initializer"):
@@ -736,25 +715,28 @@ class ViTHMLP(keras.Model):
             input_shape: Tuple[int, int, int] = (224, 224, 3),
             **kwargs: Any
     ) -> "ViTHMLP":
-        """
-        Create a ViTHMLP from a predefined variant.
+        """Create a ViTHMLP model from a predefined variant.
 
-        Args:
-            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
-            num_classes: Number of output classes.
-            input_shape: Input image shape (height, width, channels).
-            **kwargs: Additional arguments passed to the constructor.
-
-        Returns:
-            ViTHMLP model instance.
-
-        Raises:
-            ValueError: If the variant is not recognized.
+        :param variant: One of ``'tiny'``, ``'small'``, ``'base'``,
+            ``'large'``, ``'huge'``.
+        :type variant: str
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param input_shape: Input image shape ``(height, width, channels)``.
+        :type input_shape: Tuple[int, int, int]
+        :param kwargs: Additional keyword arguments for the ``ViTHMLP``
+            constructor.
+        :return: A new ``ViTHMLP`` instance.
+        :rtype: ViTHMLP
+        :raises ValueError: If ``variant`` is not recognized.
 
         Example:
-            >>> model = ViTHMLP.from_variant("base", num_classes=1000)
-            >>> model = ViTHMLP.from_variant("small", num_classes=10,
-            ...                              input_shape=(32, 32, 3), patch_size=4)
+            .. code-block:: python
+
+                model = ViTHMLP.from_variant("base", num_classes=1000)
+                model = ViTHMLP.from_variant(
+                    "small", num_classes=10, input_shape=(32, 32, 3), patch_size=4
+                )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -769,11 +751,16 @@ class ViTHMLP(keras.Model):
         )
 
     def get_feature_extractor(self) -> "ViTHMLP":
-        """
-        Get a feature extractor version of this model.
+        """Return a feature-extractor twin of this model.
 
-        Returns:
-            New ViTHMLP instance configured for feature extraction.
+        Copies every configuration value, sets ``include_top=False`` and
+        ``pooling='cls'``. Note this constructs a new, randomly initialized
+        model; it does not transfer this instance's weights.
+
+        :return: New ``ViTHMLP`` instance configured for CLS-token feature
+            extraction.
+        :rtype: ViTHMLP
+        :raises ValueError: If the model was not properly initialized.
         """
         if not hasattr(self, 'input_shape_config') or not self.input_shape_config:
             raise ValueError("Model must be properly initialized before creating feature extractor")
@@ -866,80 +853,79 @@ def create_vit_hmlp(
         stochastic_depth_rate: float = 0.1,
         **kwargs: Any
 ) -> ViTHMLP:
-    """
-    Create a Vision Transformer with Hierarchical MLP stem.
+    """Create a Vision Transformer with a hierarchical MLP stem.
 
-    This factory function provides parameter validation and sensible defaults
-    for creating Vision Transformer models with hMLP stem. The hMLP stem provides
-    superior performance for both supervised learning and masked self-supervised
-    learning compared to standard patch embedding.
+    Validates its own parameters, then delegates model construction to
+    :class:`ViTHMLP`.
 
-    Args:
-        input_shape: Input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-        num_classes: Number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        scale: Model scale determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'.
-        patch_size: Size of patches to extract from input images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-        include_top: Whether to include the classification head.
-        pooling: Pooling mode for feature extraction when include_top=False.
-            Available: 'cls', 'mean', 'max', None.
-        dropout_rate: Dropout rate for general regularization.
-        attention_dropout_rate: Dropout rate for attention weights.
-        pos_dropout_rate: Dropout rate for positional embeddings.
-        stem_norm_layer: Normalization type for hMLP stem.
-            'batch' provides better performance, 'layer' is stable for small batches.
-        kernel_initializer: Weight initializer for all layers.
-        kernel_regularizer: Weight regularizer for all layers.
-        bias_initializer: Bias initializer for all layers.
-        bias_regularizer: Bias regularizer for all layers.
-        normalization_type: Type of normalization layer to use.
-        normalization_position: Position of normalization in transformer layers.
-        ffn_type: Type of feed-forward network for transformer layers.
-        activation: Activation function for feed-forward networks.
-        use_stochastic_depth: Whether to use stochastic depth regularization.
-        stochastic_depth_rate: Maximum drop path rate for stochastic depth.
-        **kwargs: Additional arguments for ViTHMLP constructor.
-
-    Returns:
-        ViTHMLP model instance.
-
-    Raises:
-        ValueError: If any parameter validation fails.
+    :param input_shape: Input image shape ``(height, width, channels)``; must
+        be compatible with ``patch_size``.
+    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``.
+    :type num_classes: int
+    :param scale: Model scale, one of ``'tiny'``, ``'small'``, ``'base'``,
+        ``'large'``, ``'huge'``.
+    :type scale: VitScale
+    :param patch_size: Patch size; an int gives square patches.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param pooling: Feature-extraction pooling when ``include_top=False``:
+        ``'cls'``, ``'mean'``, ``'max'`` or None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention-weight dropout rate.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Post-positional-embedding dropout rate.
+    :type pos_dropout_rate: float
+    :param stem_norm_layer: Normalization inside the hMLP stem: ``'batch'``
+        (better accuracy) or ``'layer'`` (more stable at small batch sizes).
+    :type stem_norm_layer: StemNormLayer
+    :param kernel_initializer: Weight initializer for every layer.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Weight regularizer for every layer.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer for every layer.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer for every layer.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'pre'`` or ``'post'``.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier.
+    :type ffn_type: FFNType
+    :param activation: FFN activation.
+    :type activation: Union[str, callable]
+    :param use_stochastic_depth: Whether layers apply stochastic depth.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Maximum drop-path rate.
+    :type stochastic_depth_rate: float
+    :param kwargs: Additional keyword arguments forwarded to the
+        :class:`ViTHMLP` constructor.
+    :return: ``ViTHMLP`` model instance.
+    :rtype: ViTHMLP
+    :raises ValueError: If any parameter is invalid.
 
     Example:
-        ```python
-        # Create ViT-Base with hMLP stem for ImageNet
-        model = create_vit_hmlp(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base',
-            stem_norm_layer='batch'  # Better performance
-        )
+        .. code-block:: python
 
-        # Create feature extractor with modern components
-        feature_model = create_vit_hmlp(
-            input_shape=(384, 384, 3),
-            scale='small',
-            include_top=False,
-            pooling='cls',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
+            model = create_vit_hmlp(
+                input_shape=(224, 224, 3),
+                num_classes=1000,
+                scale='base'
+            )
 
-        # Model optimized for self-supervised learning
-        ssl_model = create_vit_hmlp(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base',
-            use_stochastic_depth=True,
-            stochastic_depth_rate=0.1,
-            dropout_rate=0.0,  # No dropout for SSL pre-training
-            stem_norm_layer='batch'
-        )
-        ```
+            feature_model = create_vit_hmlp(
+                input_shape=(384, 384, 3),
+                scale='small',
+                include_top=False,
+                pooling='cls',
+                normalization_type='rms_norm',
+                ffn_type='swiglu'
+            )
     """
     # Validate basic parameters before model creation
     if num_classes <= 0:
@@ -973,7 +959,8 @@ def create_vit_hmlp(
     num_patches = (img_h // patch_h) * (img_w // patch_w)
     if num_patches <= 0:
         raise ValueError(f"Number of patches must be positive, got {num_patches}")
-    if num_patches > 10000:  # Reasonable upper limit
+    # 10000 patches is a practical upper bound before memory becomes a concern.
+    if num_patches > 10000:
         logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
 
     # Create model instance
@@ -1018,38 +1005,32 @@ def create_inputs_with_masking(
         patch_size: Tuple[int, int] = (16, 16),
         mask_ratio: float = 0.4,
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """
-    Create masked input images and corresponding mask for self-supervised learning.
+    """Create masked input images and a matching mask, for self-supervised training.
 
-    This function demonstrates the key advantage of hMLP stem: it can be used with
-    masked self-supervised learning approaches like MAE and BeiT. The hMLP stem
-    processes patches independently without information leakage, making it perfect
-    for masked learning scenarios.
+    Because the hMLP stem processes each patch independently, masking can be
+    applied before or after it with the same result, which is what MAE and
+    BeiT-style training needs.
 
-    Args:
-        batch_size: Batch size for generated data.
-        image_size: Image dimensions (height, width).
-        patch_size: Patch dimensions (height, width).
-        mask_ratio: Ratio of patches to mask (0.0 to 1.0).
-
-    Returns:
-        Tuple of (images, mask) where mask is 1 for masked patches, 0 for visible.
+    :param batch_size: Batch size for the generated data.
+    :type batch_size: int
+    :param image_size: Image dimensions ``(height, width)``.
+    :type image_size: Tuple[int, int]
+    :param patch_size: Patch dimensions ``(height, width)``.
+    :type patch_size: Tuple[int, int]
+    :param mask_ratio: Fraction of patches to mask, in ``[0.0, 1.0]``.
+    :type mask_ratio: float
+    :return: ``(images, mask)``, where ``mask`` is 1 for a masked patch and 0
+        for a visible one.
+    :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+    :raises ValueError: If ``mask_ratio`` leaves ``[0.0, 1.0]``.
 
     Example:
-        ```python
-        # Create masked inputs for MAE-style training with hMLP stem
-        images, mask = create_inputs_with_masking(
-            batch_size=32,
-            mask_ratio=0.75  # Typical MAE masking ratio
-        )
+        .. code-block:: python
 
-        # Create model with hMLP stem
-        model = create_vit_hmlp(scale='base')
-        model.build(images.shape)
-
-        # Apply masking after stem (key advantage of hMLP)
-        masked_patches, _ = apply_mask_after_stem(model.stem, images, mask)
-        ```
+            images, mask = create_inputs_with_masking(batch_size=32, mask_ratio=0.75)
+            model = create_vit_hmlp(scale='base')
+            model.build(images.shape)
+            masked_patches, _ = apply_mask_after_stem(model.stem, images, mask)
     """
     if not (0.0 <= mask_ratio <= 1.0):
         raise ValueError(f"mask_ratio must be between 0.0 and 1.0, got {mask_ratio}")
@@ -1087,45 +1068,36 @@ def apply_mask_after_stem(
         images: keras.KerasTensor,
         mask: keras.KerasTensor
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """
-    Process images with hMLP stem then apply masking.
+    """Process images through the hMLP stem, then zero out the masked patches.
 
-    This function demonstrates the key advantage of hMLP stem: it can be used with
-    masked self-supervised learning by applying masking after the stem processing.
-    Unlike convolutional stems, hMLP doesn't cause information leakage between patches,
-    making it perfect for masked self-supervised learning scenarios.
+    Since the stem never mixes information across patch boundaries, masking
+    after it gives the same result as masking before it.
 
-    Args:
-        stem: Hierarchical MLP stem instance.
-        images: Input images of shape (batch_size, height, width, channels).
-        mask: Mask tensor of shape (batch_size, num_patches) where 1 = masked.
-
-    Returns:
-        Tuple of (masked_patches, mask) where masked patches are set to zero.
+    :param stem: Hierarchical MLP stem instance.
+    :type stem: HierarchicalMLPStem
+    :param images: Input images of shape ``(batch_size, height, width, channels)``.
+    :type images: keras.KerasTensor
+    :param mask: Mask tensor of shape ``(batch_size, num_patches)``, 1 for a
+        masked patch.
+    :type mask: keras.KerasTensor
+    :return: ``(masked_patches, mask)``, where masked patches are zeroed.
+    :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
 
     Example:
-        ```python
-        # Create model and inputs
-        model = create_vit_hmlp(scale='base')
-        model.build((None, 224, 224, 3))
+        .. code-block:: python
 
-        images, mask = create_inputs_with_masking(batch_size=4, mask_ratio=0.75)
-
-        # Apply masking after stem - key advantage for SSL
-        masked_patches, mask = apply_mask_after_stem(model.stem, images, mask)
-
-        # masked_patches can be used for MAE/BeiT training
-        # where only visible patches are processed by the encoder
-        logger.info("Applied masking after hMLP stem processing")
-        ```
+            model = create_vit_hmlp(scale='base')
+            model.build((None, 224, 224, 3))
+            images, mask = create_inputs_with_masking(batch_size=4, mask_ratio=0.75)
+            masked_patches, mask = apply_mask_after_stem(model.stem, images, mask)
     """
-    # Process images with hierarchical MLP stem
-    patches = stem(images)  # Shape: (batch_size, num_patches, embed_dim)
+    # Shape: (batch_size, num_patches, embed_dim).
+    patches = stem(images)
 
-    # Apply mask (set masked patches to zero)
-    mask_expanded = ops.expand_dims(mask, -1)  # Shape: (batch_size, num_patches, 1)
+    # Shape: (batch_size, num_patches, 1).
+    mask_expanded = ops.expand_dims(mask, -1)
 
-    # Broadcast mask to match patch dimensions
+    # Broadcast mask to match patch dimensions.
     embed_dim = ops.shape(patches)[-1]
     mask_expanded = ops.repeat(mask_expanded, embed_dim, axis=-1)
 

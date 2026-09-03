@@ -21,27 +21,26 @@ filters, so a 3-channel input leaves the frontend with 111 channels at unchanged
 spatial resolution. The filter bank is built for one static `(height, width)`;
 this frontend cannot be traced with unknown spatial dims.
 
-What follows is complex-valued, and it is worth being precise about where the
-complexity comes from, because the layer names invite the wrong reading. The
-transform returns the *real part* of the inverse FFT, so the phase of the
-shearlet coefficients is not propagated; the model casts that real tensor to
+What follows is complex-valued, and the source of that complexity needs
+explaining, because the layer names invite the wrong reading. The transform
+returns the real part of the inverse FFT, so the phase of the shearlet
+coefficients is not propagated; the model casts that real tensor to
 `complex64` with an identically zero imaginary part. The imaginary channel is
 populated only by the first complex convolution, whose kernel is genuinely
-complex -- so phase here is a learned quantity mixed by complex multiplication,
-not the analytic phase of the transform. Complex multiplication is what makes the
-layer more than two real convolutions: it couples the two components
-(`(a + ib)(c + id)`), and that coupling is the architecture's stated source of
-parameter efficiency.
+complex, so phase here is a learned quantity mixed by complex multiplication,
+not the analytic phase of the transform. Complex multiplication is what makes
+the layer more than two real convolutions: it couples the two components
+(`(a + ib)(c + id)`), and that coupling is the stated source of the
+architecture's parameter efficiency.
 
 The body is two (or three, at `large`/`imagenet`) complex convolutions with
 stride 2, each followed by a split ReLU applied independently to the real and
-imaginary parts -- the simplest complex activation, and not a modulus-based one
-such as modReLU. Global average pooling over the spatial axes then collapses the
-feature map before the dense stack, a deliberate substitution for flattening: it
-drops the first dense layer's parameter count by the spatial area and makes the
-dense widths independent of input resolution, at the cost of discarding where in
-the image a response occurred. The dense stack alternates complex dense,
-activation and complex dropout.
+imaginary parts, the simplest complex activation, not a modulus-based one such
+as modReLU. Global average pooling over the spatial axes then replaces
+flattening before the dense stack: it drops the first dense layer's parameter
+count by the spatial area and makes the dense widths independent of input
+resolution, at the cost of discarding where in the image a response occurred.
+The dense stack alternates complex dense, activation and complex dropout.
 
 The classifier head takes `ops.abs` of the final complex vector before a real
 `Dense`, so the phase learned through the network reaches the decision only
@@ -89,17 +88,17 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class CoShNet(keras.Model):
     """Complex Shearlet Network: a complex-valued classifier on a fixed frontend.
 
-    CoShNet replaces the learned early layers of a CNN with a NON-TRAINABLE
+    CoShNet replaces the learned early layers of a CNN with a non-trainable
     shearlet filter bank applied in the frequency domain, then processes the
     result with complex-valued layers. The transform emits
     ``1 + scales * (directions + 1)`` filter responses per input channel at
     unchanged spatial resolution; the real result is cast to ``complex64`` with
     a zero imaginary part, and the imaginary channel is populated only by the
-    FIRST complex convolution, whose kernel is genuinely complex. The body is
+    first complex convolution, whose kernel is genuinely complex. The body is
     a stack of stride-2 :class:`ComplexConv2D` layers with split ReLU, then
     complex global average pooling (not flatten), then a complex dense stack
     with complex dropout. The head takes ``ops.abs`` and applies a real softmax
-    ``Dense``, so the model emits PROBABILITIES, not logits.
+    ``Dense``, so the model emits probabilities, not logits.
 
     **Architecture Overview:**
 
@@ -107,23 +106,23 @@ class CoShNet(keras.Model):
 
         ┌──────────────────────────────────────┐
         │   Input [B, H, W, C_in]              │
-        │   (H, W must be STATIC: the filter   │
+        │   (H, W must be static: the filter   │
         │    bank is built for one shape)      │
         └───────────────┬──────────────────────┘
                         │
                         ▼
         ┌──────────────────────────────────────┐
-        │  ShearletTransform  (NON-TRAINABLE)  │
+        │  ShearletTransform  (non-trainable)  │
         │    FFT → × N filters → iFFT → Re{·}  │
         │    N = 1 + scales·(directions + 1)   │
         │    defaults 4, 8 → N = 37            │
-        │    spatial resolution UNCHANGED      │
+        │    spatial resolution unchanged      │
         └───────────────┬──────────────────────┘
                         │  real [B, H, W, C_in·N]
                         ▼
         ┌──────────────────────────────────────┐
         │  ops.cast → complex64                │
-        │  imaginary part is IDENTICALLY ZERO  │
+        │  imaginary part is zero at this point│
         └───────────────┬──────────────────────┘
                         │
                         ▼
@@ -140,7 +139,7 @@ class CoShNet(keras.Model):
         └───────────────┬──────────────────────┘
                         │  complex64 [B, H', W', f_last]
                         │
-                        ├──── include_top=False ──► returned AS IS
+                        ├──── include_top=False ──► returned as is
                         │      (complex64; most real Keras
                         │       layers downstream will refuse it)
                         ▼
@@ -166,7 +165,7 @@ class CoShNet(keras.Model):
                         ▼
         ┌──────────────────────────────────────┐
         │  Output [B, num_classes]             │
-        │  PROBABILITIES, not logits           │
+        │  probabilities, not logits           │
         │  → compile with from_logits=False    │
         └──────────────────────────────────────┘
 
@@ -179,11 +178,11 @@ class CoShNet(keras.Model):
         x · w = (a·c - b·d) + i·(a·d + b·c)
                 └── Re ──┘        └── Im ──┘
 
-        the two components are COUPLED: each output part reads
+        the two components are coupled: each output part reads
         both input parts. This coupling is the stated source of
         the architecture's parameter efficiency.
 
-        ComplexReLU is SPLIT, not modulus-based:
+        ComplexReLU is split, not modulus-based:
             relu(Re) + i·relu(Im)     ── not modReLU
 
     **Variants:**
@@ -207,7 +206,7 @@ class CoShNet(keras.Model):
     :type num_classes: int
     :param input_shape: Input shape ``(height, width, channels)`` excluding the
         batch dimension. ``None`` resolves to ``(32, 32, 3)`` for CIFAR-10
-        compatibility. The spatial dims must be STATIC and positive: the
+        compatibility. The spatial dims must be static and positive: the
         shearlet filter bank is constructed for one concrete ``(height,
         width)`` and cannot be traced with unknown spatial dims.
     :type input_shape: Optional[Tuple[int, int, int]]
@@ -249,17 +248,17 @@ class CoShNet(keras.Model):
         head. When False the ``complex64`` convolutional feature map is
         returned. Defaults to True.
     :type include_top: bool
-    :param epsilon: **DEAD KNOB.** Validated, stored, serialized and forwarded
-        to every complex layer, and never used in a computation. ``grep -n
+    :param epsilon: Has no effect. Validated, stored, serialized and forwarded
+        to every complex layer, but never used in a computation: ``grep -n
         "epsilon" layers/complex_layers.py`` returns 6 hits, all of them
-        docstring / signature / validation / ``get_config``; no complex layer
+        docstring, signature, validation or ``get_config``; no complex layer
         performs a division at all, so there is no numerical-stability term for
-        it to be. MEASURED 2026-08-18 on ONE built ``nano`` (so the weights are
-        held fixed -- rebuilding under ``set_random_seed`` does NOT reproduce
-        them here, and that invalid instrument reported a spurious 0.023):
-        forward is deterministic self-vs-self at exactly 0.0, and after mutating
-        all 4 live ``epsilon`` attributes from 1e-7 to 1e-1 the output changes by
-        exactly **0.0**. Kept for config compatibility. Must still be positive.
+        it to be. Measured on one built ``nano`` (rebuilding under
+        ``set_random_seed`` does not reproduce the same weights, so this must
+        be checked on a fixed build): forward is deterministic self-vs-self at
+        exactly 0.0, and mutating all 4 live ``epsilon`` attributes from 1e-7
+        to 1e-1 changes the output by exactly 0.0. Kept for config
+        compatibility. Must still be positive.
     :type epsilon: float
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class. ``name`` defaults to ``"coshnet"`` but may be overridden.
@@ -474,13 +473,8 @@ class CoShNet(keras.Model):
         outputs = self._build_model(inputs)
 
         # Initialize the Model
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-066
-        # `name` is a DEFAULT here, not a constant. Hard-coding it made two
-        # things impossible at once: `CoShNet(name="x")` raised `TypeError: got
-        # multiple values for keyword argument 'name'`, and -- now that
-        # `get_config` calls `super().get_config()` -- a round trip would feed
-        # the restored `name` straight back into this call and raise. Do NOT
-        # restore the literal. See decisions.md D-066.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-066: `name` stays a default, not a hard-coded literal.
+        # A literal breaks `CoShNet(name="x")` and a get_config round trip. See decisions.md.
         kwargs.setdefault("name", "coshnet")
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
 
@@ -744,16 +738,8 @@ class CoShNet(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-127
-        # House style (`wave_field/model.py`): copy the preset, drop the
-        # metadata key, then `config.update(kwargs)`. Do NOT go back to
-        # splatting named preset fields alongside `**kwargs` -- every
-        # documented override of one of those fields raised
-        # `TypeError: got multiple values for keyword argument`
-        # (MEASURED at all six sites). The `.copy()` is NOT optional and
-        # NOT cosmetic: `config.update(kwargs)` on the shared
-        # `MODEL_VARIANTS[variant]` dict would permanently poison the
-        # class-level table for every later caller. See decisions.md D-127.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-127: copy the preset before `config.update(kwargs)`.
+        # Splatting preset fields alongside **kwargs raised a duplicate-keyword TypeError at all six sites. See decisions.md.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.pop("description", None)
         config.update(kwargs)

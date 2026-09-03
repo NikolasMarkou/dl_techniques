@@ -56,55 +56,67 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # Stable names
 # ---------------------------------------------------------------------
 
-# The stable sub-model name. A warm-start matches layers BY NAME, so any two graph models that
-# share this trunk MUST name their backbone identically or the transfer moves zero layers.
+# A warm-start matches layers by name, so any two graph models sharing this trunk
+# must name their backbone identically or the transfer moves zero layers.
 GRAPH_BACKBONE_NAME = "graph_et_backbone"
 
 
 @register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphEnergyTransformerBackbone(keras.Model):
-    """Shared Graph Energy Transformer trunk: node-project -> [PE] -> [mask token] ->
-    [CLS] -> ``num_blocks`` ET blocks.
+    """Shared graph trunk giving the ``EnergyTransformer`` block one checkpointable
+    home that both graph heads compose under the same name.
 
-    **Intent**: give the ``EnergyTransformer`` block a single, separately-checkpointable GRAPH
-    trunk that BOTH graph heads compose under the same name. Variant B (node anomaly) runs a
-    SINGLE block and reads its per-step LayerNormed states via :meth:`descend_capture`; variant
-    C-lite (graph classification) runs ``S`` stacked blocks via the standard :meth:`call` and
-    reads the CLS token.
+    Architecture:
 
-    **Call signature** — the backbone consumes a DICT of graph tensors::
+    .. code-block:: text
+
+        node_features [B, N, F]   adjacency, node_mask, pe (optional)
+                │
+                ▼
+        ┌───────────────┐
+        │ node_proj      │
+        │ [B, N, D]      │
+        └───────┬────────┘
+                ▼
+        (+ pe_proj(pe))         (optional, 'use_pe')
+        (+ mask_token)          (optional, node_replace_mask present)
+        (prepend cls_token)     (optional, 'use_cls'; N -> N+1)
+                │
+                ▼
+        ┌───────────────┐
+        │ ET block x     │  call(): num_blocks, fed adjacency + node_mask
+        │ num_blocks     │  descend_capture(): blocks[0] only, manual T steps
+        └───────┬────────┘
+                ▼
+        tokens [B, N', D]
+
+    Variant B (node anomaly) uses one block and reads per-step LayerNormed
+    states through :meth:`descend_capture`; variant C (graph classification)
+    stacks ``S`` blocks and reads the final states through the standard
+    :meth:`call`. Both variants share :meth:`embed` for the token-building
+    stage above the blocks.
+
+    The backbone takes a dict of graph tensors::
 
         {
-          "node_features": (B, N, F),     # required — raw per-node features
-          "adjacency":     (B, N, N),     # required by `call()` — binary graph adjacency
-          "node_mask":     (B, N),        # rank-2 per-node validity (1 = real, 0 = PAD)
-          "pe":            (B, N, pe_dim), # only when `use_pe` (Laplacian eigenvectors)
-          "node_replace_mask": (B, N) bool # optional — masked-node pretext (mask-token apply)
-          "target_index":  (B,)            # variant B only; accepted and NOT read by anything
-                                           # (the head takes a static index-0 slice — see D-003)
+          "node_features": (B, N, F),      # required
+          "adjacency":     (B, N, N),      # required by call()
+          "node_mask":     (B, N),         # 1 = real, 0 = pad
+          "pe":            (B, N, pe_dim), # only when use_pe
+          "node_replace_mask": (B, N) bool # optional masked-node pretext
+          "target_index":  (B,)            # variant B only; accepted, unused
         }
 
-    ``embed`` reads ``node_features`` / ``pe`` / ``node_replace_mask``; ``call`` additionally
-    reads ``adjacency`` / ``node_mask`` (and CLS-augments both when ``use_cls``).
+    ``embed`` reads ``node_features``, ``pe`` and ``node_replace_mask``;
+    ``call`` additionally reads ``adjacency`` and ``node_mask``, CLS-augmenting
+    both when ``use_cls``.
 
-    **Three public methods (the seam for the two heads).**
-
-    * :meth:`embed` -> ``(B, N', D)`` embedded tokens (node projection, optional PE add,
-      optional mask-token apply, optional CLS prepend). Used by BOTH heads.
-    * :meth:`call` -> ``(B, N', D)`` — the STANDARD stacked forward (variant C): embed, then
-      ``num_blocks`` blocks each fed the (CLS-augmented) rank-3 adjacency + rank-2 node mask.
-    * :meth:`descend_capture` -> ``dict[int, (B, N', D)]`` — variant B: run the single block's
-      descent MANUALLY through its PUBLIC ``.norm`` / ``.attention.update`` / ``.hopfield.update``
-      and capture the LayerNormed state ``g_t`` after selected steps. NO copy of block internals.
-
-    **``MaskTokenApply`` is ALWAYS created and ALWAYS built** (guide §9 "ALWAYS CREATE /
-    CONDITIONALLY USE"), even for a head that never masks nodes — so the trunk weight surface
-    does not depend on whether a masked-node pretext is used.
-
-    **Weight-compatibility caveat.** A ``use_pe=True`` backbone (variant C) owns a ``pe_proj``
-    Dense and a ``cls_token`` that a ``use_pe=False`` backbone (variant B) does NOT. The two are
-    INTENTIONALLY NOT weight-compatible — B and C are different models, and a cross-variant
-    warm-start is expected to transfer nothing (different ``N`` too, via the CLS token).
+    ``mask_token`` is created and built on every trunk, even one that never
+    masks a node, so the weight surface does not depend on whether the
+    masked-node pretext is used. A ``use_pe=True`` backbone (variant C) owns a
+    ``pe_proj`` Dense and a ``cls_token`` that a ``use_pe=False`` backbone
+    (variant B) does not, so the two are not weight-compatible and a
+    cross-variant warm-start transfers nothing.
 
     :param node_feature_dim: Input node-feature dimension ``F``.
     :param embed_dim: Token dimension ``D``.
@@ -119,20 +131,19 @@ class GraphEnergyTransformerBackbone(keras.Model):
     :param hopfield_activation: ``'relu'`` (default) or ``'softmax'``.
     :param hopfield_beta: Temperature of the ``'softmax'`` Hopfield branch.
     :param noise_std: eq.-27 Langevin noise std (training only). ``0.0`` (default) keeps the
-        descent guarantee — **variant B MUST keep this ``0.0``** so the manual
+        descent guarantee; variant B must keep this ``0.0`` so the manual
         :meth:`descend_capture` loop matches the block's own noiseless descent.
     :param norm_epsilon: ``epsilon`` of each block's inner ``EnergyLayerNorm``.
-    :param attn_self: ``True`` (default for the GRAPH trunk) lets a node attend to itself so the
-        graph loaders' ``add_self_loops=True`` adjacency diagonal is HONORED. The image ET-Full
-        MIM default is ``False`` (a token does not attend to itself); for graphs that is wrong —
-        ``EnergyAttention`` would silently MASK the adjacency diagonal, making the deliberately
-        added self-loops a dead no-op (E_ATT bit-identical with diagonal 1 vs 0). Configurable;
-        pass ``attn_self=False`` to recover the paper's image default. See decisions.md D-004.
+    :param attn_self: ``True`` (default for the graph trunk) lets a node attend to itself, so
+        the graph loaders' ``add_self_loops=True`` adjacency diagonal is honored. The image
+        model's default is ``False``; on a graph that would silently mask the adjacency
+        diagonal, making the added self-loops a dead no-op. Pass ``attn_self=False`` to recover
+        the image default. See decisions.md D-004.
     :param use_weighted_adjacency: If ``True``, each ET block learns the paper's eq.-25 per-edge
         weighted adjacency ``Ŵ`` (a Conv2D over ``X⊗X`` gated by the binary adjacency), folded
         multiplicatively into the attention logits. The binary adjacency the projector needs is
-        ALREADY the rank-3 (CLS-augmented) ``attention_mask`` each block receives in :meth:`call`,
-        so NO new input plumbing is required here — only this flag. ``False`` (default) is
+        already the rank-3 (CLS-augmented) ``attention_mask`` each block receives in :meth:`call`,
+        so no new input plumbing is required here, only this flag. ``False`` (default) is
         byte-identical to the C-lite binary-adjacency model. See ``EnergyTransformer`` D-002 of
         plan ``plan-2026-07-15T053724-78001af1``.
     :param adjacency_kernel_size: Conv2D kernel of the ``Ŵ`` projector (default ``1``). Only used
@@ -205,7 +216,6 @@ class GraphEnergyTransformerBackbone(keras.Model):
         if use_pe and (not isinstance(pe_dim, int) or pe_dim <= 0):
             raise ValueError(f"pe_dim must be a positive integer when use_pe, got {pe_dim}")
 
-        # ----- store ALL configuration (serialization contract) -----
         self.node_feature_dim = int(node_feature_dim)
         self.embed_dim = int(embed_dim)
         self.num_heads = int(num_heads)
@@ -235,19 +245,19 @@ class GraphEnergyTransformerBackbone(keras.Model):
         self.use_cls = bool(use_cls)
         self.seed = seed
 
-        # ----- CREATE all sub-layers in __init__ (unbuilt), never in build()/call() -----
-        # A lazily-created sub-layer is not tracked at save time and SILENTLY DROPS ITS
-        # WEIGHTS on a `.keras` round-trip (MEMORY: subclassed lazy-build serialization).
+        # Sub-layers are created here (unbuilt), never lazily in build()/call() -- a
+        # lazily-created sub-layer is not tracked at save time and silently drops its
+        # weights on a `.keras` round-trip.
         self.node_proj = layers.Dense(
             self.embed_dim, name="node_proj", dtype=self.dtype_policy
         )
 
-        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the mask token exists on every trunk,
-        # even one that never masks a node, so the weight surface is use-independent.
+        # Created and built on every trunk, even one that never masks a node, so the
+        # weight surface does not depend on whether the pretext is used.
         self.mask_token = MaskTokenApply(name="node_mask_token", dtype=self.dtype_policy)
 
-        # PE projection: only when use_pe. B (use_pe=False) and C (use_pe=True) are therefore
-        # NOT weight-compatible by design (documented in the class docstring).
+        # Only when use_pe -- B (use_pe=False) and C (use_pe=True) are therefore not
+        # weight-compatible (documented in the class docstring).
         self.pe_proj = (
             layers.Dense(self.embed_dim, name="pe_proj", dtype=self.dtype_policy)
             if self.use_pe else None
@@ -256,10 +266,9 @@ class GraphEnergyTransformerBackbone(keras.Model):
         # cls_token is a raw learnable weight -> created in build() (add_weight's home), only
         # when use_cls. See build().
 
-        # Blocks are constructed through the overridable `_make_block` seam (NOT inline) so the
-        # proven-RED fp16/XLA guard test can subclass the backbone and force the fp16-unsafe
-        # construction to prove the guard bites. The dtype rationale (the D-002 fp16/XLA fix)
-        # lives on `_make_block`. Production code MUST NOT override it.
+        # Built through the overridable `_make_block` seam so the fp16/XLA guard test can
+        # subclass the backbone and force the fp16-unsafe construction to prove itself.
+        # Production code must not override it. See _make_block for the dtype rationale.
         self.blocks: List[EnergyTransformer] = [
             self._make_block(i) for i in range(self.num_blocks)
         ]
@@ -322,7 +331,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
         node_mask_shape = (None, None)
 
         self.node_proj.build(node_feat_shape)
-        # ALWAYS built — even for a head that never masks a node.
+        # Built even for a head that never masks a node.
         self.mask_token.build([token_shape, node_mask_shape])
         if self.use_pe:
             self.pe_proj.build((None, None, self.pe_dim))
@@ -428,9 +437,8 @@ class GraphEnergyTransformerBackbone(keras.Model):
         if self.use_cls:
             adjacency, node_mask = self._augment_cls_masks(adjacency, node_mask)
 
-        # D-002: run the block in its VARIABLE dtype (float32 under mixed_float16), never fp16
-        # — its EnergyLayerNorm backward overflows fp16 under XLA and silently kills training.
-        # Both casts are no-ops under float32/float64. DO NOT REMOVE THEM.
+        # D-002: run the block in its variable dtype (float32 under mixed_float16), never
+        # fp16 -- EnergyLayerNorm's backward overflows fp16 under XLA. See decisions.md.
         block_dtype = self.blocks[0].compute_dtype
         x = ops.cast(x, block_dtype)
         adj = ops.cast(adjacency, block_dtype)                             # rank-3 keep mask
@@ -585,35 +593,49 @@ def _coerce_graph_backbone(backbone: Any) -> GraphEnergyTransformerBackbone:
 
 @register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphAnomalyDetector(keras.Model):
-    """Variant B (node anomaly): shared graph trunk -> target-node ``g_1 || g_T`` readout -> MLP.
+    """Variant B (node anomaly): shared graph trunk, then a target-node
+    ``g_1 || g_T`` readout through a 2-layer MLP.
 
-    **Intent**: the paper's §4 / App. C node-anomaly model. A SINGLE
-    :class:`GraphEnergyTransformerBackbone` block descends for ``T`` steps; the head reads the
-    TARGET node's LayerNormed state at the FIRST step (``g_1``) and at the LAST step (``g_T``),
-    concatenates them (the paper: "both layernormed"), and maps the pair to a single anomaly
-    LOGIT via a 2-layer MLP.
+    Architecture:
 
-    **Why ``g_1 || g_T`` and not just ``g_T``.** The paper reads the token BEFORE the descent has
-    converged (``g_1``) alongside the converged state (``g_T``): the first step still carries the
-    raw one-hop neighbourhood signal, the last carries the settled attractor. Concatenating both
-    is a strictly richer readout than either alone, and it is what makes the manual
-    :meth:`~GraphEnergyTransformerBackbone.descend_capture` seam (which captures BOTH steps in a
-    single descent) worth its while.
+    .. code-block:: text
 
-    **STATIC index-0 target readout (XLA-safe).** The fraud subgraph sampler ALWAYS puts the
-    target node at index 0, so the head reads ``g[:, 0, :]`` — a static slice that compiles under
-    ``jit_compile=True``. ``target_index`` stays in the input contract for forward-compat but is
-    ignored; a runtime-broadcast ``take_along_axis`` gather would make the fp16/XLA training path
-    uncompilable (``BroadcastArgs must be compile-time constant``). See D-003.
+        graph dict (1 block, T steps)
+                │
+                ▼
+        ┌────────────────────┐
+        │ backbone.embed +   │  descend_capture() -> {1: g_1, T: g_T}
+        │ descend_capture    │
+        └─────────┬───────────┘
+                  ▼
+        target node g_1[0], g_T[0]  (static index-0 slice)
+                  │
+        ┌─────────┴─────────┐
+        │ ln1(g_1)  lnT(g_T) │  normed separately, then concatenated
+        └─────────┬─────────┘
+                  ▼ [B, 2D]
+        ┌────────────────────┐
+        │ Dense(gelu) + drop  │
+        │ Dense(1)            │
+        └─────────┬───────────┘
+                  ▼
+             logit [B, 1]
 
-    **The head emits a LOGIT** (no sigmoid in-graph). Compile with
-    ``BinaryCrossentropy(from_logits=True)`` — the house convention (mirrors the image
-    classifier's ``from_logits`` head).
+    A single backbone block descends for ``T`` steps; the head reads the
+    target node's LayerNormed state at the first step (``g_1``) and the last
+    (``g_T``) and concatenates them, following the paper. ``g_1`` still
+    carries the raw one-hop neighbourhood signal, and ``g_T`` the settled
+    attractor, so the pair is a richer readout than either alone -- the
+    reason :meth:`~GraphEnergyTransformerBackbone.descend_capture` exists.
 
-    **No ``return_energy`` rejection.** Unlike the image heads' ``_reject_energy_backbone``,
-    :class:`GraphEnergyTransformerBackbone` has NO ``return_energy`` flag — its blocks are built
-    with ``return_energy=False`` unconditionally and it never surfaces the energy trace — so there
-    is no fp16 energy-trace hazard to guard against here (noted per step spec).
+    The fraud subgraph sampler always places the target node at index 0, so
+    the readout is a static ``g[:, 0, :]`` slice rather than a runtime
+    gather; a runtime-broadcast gather does not compile under
+    ``jit_compile=True``. ``target_index`` stays in the input contract for
+    forward compatibility but is ignored. The head emits a logit with no
+    sigmoid applied; compile with ``BinaryCrossentropy(from_logits=True)``.
+    The backbone has no ``return_energy`` flag -- its blocks always run with
+    ``return_energy=False`` -- so there is no energy trace for this head to guard against.
 
     :param backbone: A :class:`GraphEnergyTransformerBackbone` (typically ``num_blocks=1``,
         ``use_cls=False``, ``use_pe=False``, ``noise_std=0.0``), or its serialized config dict.
@@ -628,11 +650,9 @@ class GraphAnomalyDetector(keras.Model):
     Input shape:
         The variant-B graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
         "node_mask": (B, N), "target_index": (B,)}``. ``target_index`` is accepted for
-        forward-compatibility and is **ignored**: the readout is a static ``g[:, 0, :]``
-        slice, so the target node must be at index 0 (which the fraud subgraph sampler
-        guarantees). Passing any other value changes nothing — it does not raise, and it
-        does not move the readout. Pinned by
-        ``test_model.py::TestTargetIndexIsIgnored``. See D-003.
+        forward compatibility and is ignored: the readout is a static ``g[:, 0, :]``
+        slice, so the target node must be at index 0, which the fraud subgraph sampler
+        guarantees. Passing any other value changes nothing. See D-003.
 
     Output shape:
         ``(batch, 1)`` — a single anomaly logit per target node.
@@ -660,14 +680,11 @@ class GraphAnomalyDetector(keras.Model):
         self.mlp_dropout_rate = float(mlp_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
-        # `head_` prefix so a B-pretext -> B warm-start (name-matched) moves ONLY the shared
-        # trunk (`graph_et_backbone`) and never the head. Sub-layers CREATED here, BUILT in
-        # build() — a lazily-created sub-layer silently drops its weights on a `.keras`
-        # round-trip (MEMORY: subclassed lazy-build serialization).
-        #
-        # `g_1` and `g_T` are LayerNormed SEPARATELY (paper: "both layernormed") — two distinct
-        # norm layers, not one shared norm, since the first-step and converged states have
-        # different statistics.
+        # `head_` prefix so a B-pretext -> B warm-start (name-matched) moves only the
+        # shared trunk and never the head. Built in build(), not lazily -- a lazily-created
+        # sub-layer silently drops its weights on a `.keras` round-trip.
+        # g_1 and g_T get separate norm layers (paper: "both layernormed"): the first-step
+        # and converged states have different statistics.
         self.ln1 = layers.LayerNormalization(
             epsilon=1e-6, name="head_ln1", dtype=self.dtype_policy
         )
@@ -678,8 +695,8 @@ class GraphAnomalyDetector(keras.Model):
             self.mlp_hidden_dim, activation="gelu", name="head_mlp_hidden",
             dtype=self.dtype_policy,
         )
-        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
-        # layer structure does not depend on a numeric value.
+        # Created at every dropout rate, including 0, so the layer structure does not
+        # depend on the numeric value.
         self.head_dropout = layers.Dropout(
             self.mlp_dropout_rate, name="head_mlp_dropout", dtype=self.dtype_policy
         )
@@ -733,7 +750,7 @@ class GraphAnomalyDetector(keras.Model):
         g1_t = caps[1][:, 0, :]                                       # (B, D)
         gT_t = caps[t_last][:, 0, :]                                  # (B, D)
 
-        # LayerNorm each SEPARATELY, then concat (paper: "both layernormed").
+        # LayerNorm each separately, then concat (paper: "both layernormed").
         g1_n = self.ln1(g1_t, training=training)                      # (B, D)
         gT_n = self.lnT(gT_t, training=training)                      # (B, D)
         h = ops.concatenate([g1_n, gT_n], axis=-1)                    # (B, 2D)
@@ -773,39 +790,47 @@ class GraphAnomalyDetector(keras.Model):
 
 @register_dl_technique("dl_techniques.models.graph_energy_transformer.model")
 class GraphClassifier(keras.Model):
-    """Variant C-lite (graph classification): shared graph trunk -> CLS-token readout -> logits.
+    """Variant C-lite (graph classification): shared graph trunk, then a
+    CLS-token readout mapped to class logits.
 
-    **Intent**: the paper's §5 / App. D graph-classification model. The default is the
-    *binary-adjacency* "C-lite" form (D-001 of this plan — no learned per-edge weight, hence no new
-    hand-derived gradient); the paper's eq.-25 learned per-edge weighted adjacency is available
-    **opt-in** via ``use_weighted_adjacency=True`` (Branch A — ``Ŵ`` computed once per block, folded
-    multiplicatively into the attention energy with a hand-derived, oracle-verified gradient; see
-    ``EnergyTransformer`` D-002 and the package README §3.2). A stack of ``S``
-    :class:`GraphEnergyTransformerBackbone` ET blocks
-    (``num_blocks=S=4``, Table 9) descends the graph tokens with a prepended learnable CLS token,
-    Laplacian positional encodings, and eq.-27 saddle-escape Langevin noise (``noise_std``, active
-    in training only). The graph-level representation is the FINAL CLS token; a LayerNorm ->
-    Dropout -> Dense maps it to ``num_classes`` LOGITS.
+    Architecture:
 
-    **The CLS token / mask / PE augmentation lives entirely in the BACKBONE**, not this head:
-    :meth:`GraphEnergyTransformerBackbone.embed` prepends the CLS token (``N -> N+1``, CLS gets no
-    PE — the PE add precedes the prepend) and :meth:`~GraphEnergyTransformerBackbone.call`
-    CLS-augments the rank-3 adjacency + rank-2 node mask via ``_augment_cls_masks`` (CLS row/column
-    all-ones = fully connected; the original adjacency occupies the ``[1:, 1:]`` block unchanged;
-    PAD exclusion still flows from the rank-2 ``node_mask``). This head therefore only *reads* the
-    CLS token — it constructs no masks itself.
+    .. code-block:: text
 
-    **STATIC index-0 CLS slice (XLA-safe).** The CLS token is always at index 0 (the backbone
-    prepends it first), so the readout is a static ``tokens[:, 0, :]`` slice that compiles under
-    ``jit_compile=True`` (a runtime-broadcast ``take_along_axis`` gather would not — tf2xla
-    rejects it with ``BroadcastArgs must be compile-time constant``; variant B's target readout
-    takes the same static index-0 approach, D-003). This head is XLA/``jit_compile=True`` safe.
+        graph dict (S blocks, CLS + Laplacian PE + Langevin noise)
+                │
+                ▼
+        ┌────────────────────┐
+        │ backbone.call()    │  CLS prepended, adjacency/mask CLS-augmented,
+        │ [B, N+1, D]         │  all inside the backbone
+        └─────────┬───────────┘
+                  ▼
+        CLS token tokens[:, 0]  (static index-0 slice)
+                  │
+        ┌─────────┴─────────┐
+        │ LayerNorm + Dropout │
+        │ Dense(num_classes)  │
+        └─────────┬───────────┘
+                  ▼
+             logits [B, C]
 
-    **The head emits LOGITS** (no softmax in-graph). The dataset (``build_tudataset_graph_dataset``)
-    yields INTEGER labels, so the trainer (step 8) compiles
-    ``SparseCategoricalCrossentropy(from_logits=True)`` (or one-hots + ``CategoricalCrossentropy``
-    with label smoothing). The loss choice is finalized in step 8; the head just emits
-    ``(B, num_classes)`` logits.
+    The default is the binary-adjacency "C-lite" form; the paper's eq.-25
+    learned per-edge weighted adjacency is available opt-in through
+    ``use_weighted_adjacency=True``. A stack of ``S``
+    :class:`GraphEnergyTransformerBackbone` blocks (``num_blocks=S=4``, Table
+    9) descends the graph tokens with a prepended learnable CLS token,
+    Laplacian positional encodings, and eq.-27 saddle-escape Langevin noise
+    (training only). The graph-level representation is the final CLS token.
+
+    The CLS token, its mask augmentation and the PE add all live in the
+    backbone, not this head: :meth:`GraphEnergyTransformerBackbone.embed`
+    prepends the CLS token after the PE add (so CLS gets no PE), and
+    :meth:`~GraphEnergyTransformerBackbone.call` CLS-augments the rank-3
+    adjacency and rank-2 node mask, leaving the original adjacency's
+    ``[1:, 1:]`` block unchanged. This head only reads the CLS token at a
+    static ``tokens[:, 0, :]`` slice, which keeps it compilable under
+    ``jit_compile=True`` (a runtime-broadcast gather would not be). The head
+    emits logits with no softmax applied.
 
     :param backbone: A :class:`GraphEnergyTransformerBackbone` (typically ``num_blocks=4``,
         ``use_cls=True``, ``use_pe=True``, ``noise_std=0.02``), or its serialized config dict.
@@ -848,15 +873,14 @@ class GraphClassifier(keras.Model):
         self.head_dropout_rate = float(head_dropout_rate)
         self.embed_dim = backbone.embed_dim
 
-        # `head_` prefix so a warm-start (name-matched) moves ONLY the shared trunk
-        # (`graph_et_backbone`) and never the head. Sub-layers CREATED here, BUILT in build() —
-        # a lazily-created sub-layer silently drops its weights on a `.keras` round-trip
-        # (MEMORY: subclassed lazy-build serialization).
+        # `head_` prefix so a warm-start (name-matched) moves only the shared trunk and
+        # never the head. Built in build(), not lazily -- a lazily-created sub-layer
+        # silently drops its weights on a `.keras` round-trip.
         self.head_norm = layers.LayerNormalization(
             epsilon=1e-6, name="head_norm", dtype=self.dtype_policy
         )
-        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
-        # layer structure does not depend on a numeric value.
+        # Created at every dropout rate, including 0, so the layer structure does not
+        # depend on the numeric value.
         self.head_dropout = layers.Dropout(
             self.head_dropout_rate, name="head_dropout", dtype=self.dtype_policy
         )

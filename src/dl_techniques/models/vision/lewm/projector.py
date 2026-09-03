@@ -1,21 +1,8 @@
-"""
-MLPProjector — 2-layer MLP used by LeWM for the projector and pred_proj.
+"""``MLPProjector``, a 2-layer MLP LeWM uses for both the projector and pred_proj heads.
 
-Upstream PyTorch (`/tmp/lewm_source/module.py:MLP`):
-
-.. code-block:: python
-
-    Linear(input_dim, hidden_dim) -> LayerNorm(hidden_dim) -> GELU
-    -> Linear(hidden_dim, output_dim)
-
-DECISION D-002: MLPProjector uses LayerNormalization, not BatchNormalization.
-In upstream JEPA the `norm_fn` defaults to `nn.LayerNorm`. We expose the
-same default here. (The description in plan.md said "BatchNorm1d" following
-a reading of upstream `JEPA`, but the actual `MLP` class defaults to
-`LayerNorm` and that's what upstream LeWM wires in. We follow the
-upstream-code truth, not the plan note.) This also sidesteps the
-BN-batch-of-1 failure mode flagged in plan.md Pre-Mortem Scenario 2.
-See plans/plan_2026-04-21_8416bc0b/decisions.md (D-002) for full rationale.
+It runs Dense, then an optional LayerNormalization, then GELU, then a
+second Dense. Normalization defaults on and uses LayerNormalization rather
+than BatchNormalization, so a batch of size 1 still works.
 """
 
 import keras
@@ -27,12 +14,23 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class MLPProjector(keras.layers.Layer):
     """2-layer MLP with intermediate normalization + GELU.
 
+    Architecture:
+
+    .. code-block:: text
+
+        input  [..., input_dim]
+           |
+           v
+        Dense -> LayerNorm (optional) -> GELU -> Dense
+           |
+           v
+        output  [..., output_dim]
+
     :param input_dim: expected last-dim of the input (kept for clarity;
         Keras infers from input_shape in build).
     :param hidden_dim: width of the hidden layer.
     :param output_dim: output last-dim. Defaults to input_dim.
-    :param use_layer_norm: if True (default), apply LayerNormalization on
-        the hidden activation. Follows upstream `norm_fn=nn.LayerNorm`.
+    :param use_layer_norm: apply LayerNormalization on the hidden activation.
     :param kwargs: passthrough to `keras.layers.Layer`.
     """
 
@@ -56,6 +54,8 @@ class MLPProjector(keras.layers.Layer):
         self.use_layer_norm = use_layer_norm
 
         self.fc1 = keras.layers.Dense(hidden_dim, activation=None, name="fc1")
+        # DECISION plan_2026-04-21_8416bc0b/D-002: LayerNorm, not BatchNorm; a batch of 1 would break BatchNorm.
+        # Matches upstream MLP's norm_fn default. See decisions.md.
         self.norm = (
             keras.layers.LayerNormalization(epsilon=1e-6, name="norm")
             if use_layer_norm else None

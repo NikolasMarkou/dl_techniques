@@ -1,35 +1,18 @@
-"""Unified forecast contract for time-series models.
+"""Unified forecast contract shared by every time-series model in this package.
 
-This module defines the shared inference contract that lets any time-series
-forecaster be consumed uniformly regardless of its internal output paradigm
-(point, quantile-tensor, parametric, or mixture). It is the foundation layer
-of the contract decided in plan ``plan_2026-06-10_39646d39`` (decision D-001).
+This module holds :class:`Forecast`, a plain dataclass carrying the
+materialized numpy arrays a single forecast call produces, and
+:class:`ForecastMixin`, which gives a model a uniform
+``predict_forecast(x) -> Forecast`` entry point over a model-specific
+``_forecast`` hook. A point model returns ``quantiles=None`` rather than
+fabricate an interval it never estimated; a probabilistic model populates
+``quantiles`` of shape ``[B, H, F, Q]`` with matching ``quantile_levels``.
+Callers branch on ``has_quantiles()`` instead of the concrete model type.
 
-The contract has two pieces:
-
-``Forecast``
-    A plain ``@dataclass`` holding the *concrete* predicted arrays of a single
-    forecast call. It is inert data, NOT a Keras layer: it carries numpy arrays
-    (already-materialized predictions, not symbolic tensors) and is therefore
-    never serialized into a ``.keras`` file and never registered with Keras.
-
-``ForecastMixin``
-    A light mixin that gives a model a uniform ``predict_forecast(x) -> Forecast``
-    entry point delegating to a model-specific ``_forecast`` hook.
-
-**Point vs probabilistic rationale.** Point models (e.g. plain regressors)
-expose ``quantiles=None`` and MUST NOT fabricate intervals; probabilistic
-models (e.g. tirex, prism-quantile) populate ``quantiles`` of shape
-``[B, H, F, Q]`` alongside the matching ``quantile_levels``. Callers test
-``has_quantiles()`` (or catch the ``ValueError`` from ``interval``) instead of
-branching on the concrete model type. This keeps a single calling convention
-across all four output paradigms while never inventing uncertainty a point
-model did not produce.
-
-**Scope note.** ``Forecast.interval`` performs an EXACT level lookup — it is for
-callers who know the trained ``quantile_levels``. The closest-quantile fuzzy
-mapping deliberately lives in each model's ``predict_quantiles`` and is NOT
-duplicated here (D-001 "thin contract").
+``Forecast`` is inert data, not a Keras layer: it is never serialized into a
+``.keras`` file and never registered with Keras. ``Forecast.interval`` looks
+up an exact quantile level; a caller wanting the closest available level
+should use the model's own ``predict_quantiles`` instead.
 """
 
 from __future__ import annotations
@@ -50,24 +33,17 @@ from dl_techniques.utils.logger import logger
 class Forecast:
     """Concrete predicted arrays from a single forecast call.
 
-    A ``Forecast`` is inert data (a plain dataclass, not a Keras layer). It holds
-    already-materialized numpy predictions and is never serialized into a
-    ``.keras`` model file.
+    Shapes use `B` batch size, `H` forecast horizon, `F` feature count,
+    `Q` quantile-level count, `S` Monte-Carlo sample count.
 
-    Shape conventions:
-        - ``B`` batch size, ``H`` forecast horizon, ``F`` feature/channel count,
-          ``Q`` number of quantile levels, ``S`` Monte-Carlo sample count.
-
-    Attributes:
-        point: Point/median forecast, shape ``[B, H, F]``. Required.
-        quantiles: Quantile forecasts, shape ``[B, H, F, Q]``, or ``None`` for
-            point-only models. The last axis is ordered to match
-            ``quantile_levels``.
-        quantile_levels: The ``Q`` quantile levels (e.g. ``[0.1, 0.5, 0.9]``)
-            matching the last axis of ``quantiles``; ``None`` when there are no
-            quantiles.
-        samples: Optional Monte-Carlo samples, shape ``[S, B, H, F]``; ``None``
-            unless a model explicitly provides them.
+    :ivar point: Point or median forecast, shape `[B, H, F]`. Required.
+    :vartype point: np.ndarray
+    :ivar quantiles: Quantile forecasts, shape `[B, H, F, Q]`, or `None` for point-only models. The last axis matches `quantile_levels`.
+    :vartype quantiles: np.ndarray, optional
+    :ivar quantile_levels: The `Q` quantile levels, e.g. `[0.1, 0.5, 0.9]`, matching the last axis of `quantiles`; `None` when there are no quantiles.
+    :vartype quantile_levels: list[float], optional
+    :ivar samples: Optional Monte-Carlo samples, shape `[S, B, H, F]`; `None` unless a model provides them.
+    :vartype samples: np.ndarray, optional
     """
 
     point: np.ndarray
@@ -78,30 +54,25 @@ class Forecast:
     def has_quantiles(self) -> bool:
         """Return whether this forecast carries quantile predictions.
 
-        Returns:
-            ``True`` iff both ``quantiles`` and ``quantile_levels`` are present.
+        :return: True if both `quantiles` and `quantile_levels` are present.
+        :rtype: bool
         """
         return self.quantiles is not None and self.quantile_levels is not None
 
     def interval(self, low: float, high: float) -> tuple[np.ndarray, np.ndarray]:
         """Extract a prediction interval from the stored quantiles.
 
-        Performs an EXACT lookup of ``low`` and ``high`` in ``quantile_levels``
-        and slices the corresponding planes out of ``quantiles``. This method is
-        for callers who know the trained levels; the closest-quantile fuzzy
-        mapping lives in each model's ``predict_quantiles`` and is intentionally
-        NOT duplicated here.
+        Looks up `low` and `high` exactly in `quantile_levels` and slices the
+        matching planes out of `quantiles`. For the closest-available level
+        instead of an exact match, use the model's `predict_quantiles`.
 
-        Args:
-            low: The lower quantile level (must be present in ``quantile_levels``).
-            high: The upper quantile level (must be present in ``quantile_levels``).
-
-        Returns:
-            A ``(lower, upper)`` tuple of numpy arrays, each of shape ``[B, H, F]``.
-
-        Raises:
-            ValueError: If this forecast has no quantiles, or if ``low``/``high``
-                are not present in ``quantile_levels``.
+        :param low: The lower quantile level, must be present in `quantile_levels`.
+        :type low: float
+        :param high: The upper quantile level, must be present in `quantile_levels`.
+        :type high: float
+        :return: A `(lower, upper)` tuple of numpy arrays, each shaped `[B, H, F]`.
+        :rtype: tuple[np.ndarray, np.ndarray]
+        :raises ValueError: If this forecast has no quantiles, or if `low`/`high` are not present in `quantile_levels`.
         """
         if self.quantiles is None or self.quantile_levels is None:
             raise ValueError(
@@ -141,26 +112,21 @@ class Forecast:
 class ForecastMixin:
     """Mixin granting a model a uniform ``predict_forecast`` entry point.
 
-    This is a plain mixin (NOT a Keras layer and NOT registered for
-    serialization). It adds no instance state, so mixing it into a serializable
-    model does not affect ``get_config``/round-trip behavior.
+    A plain mixin, not a Keras layer and not registered for serialization. It
+    adds no instance state, so mixing it into a serializable model does not
+    affect `get_config`/round-trip behavior.
 
-    Subclasses MUST implement :meth:`_forecast`, returning a :class:`Forecast`.
+    A subclass must implement :meth:`_forecast`, returning a :class:`Forecast`.
     The public :meth:`predict_forecast` is a thin validating wrapper around it.
     """
 
     def _forecast(self, x, **kwargs) -> Forecast:
-        """Model-specific forecast hook (MUST be implemented by subclasses).
+        """Model-specific forecast hook; a subclass must implement this.
 
-        Args:
-            x: Model input (context window / batch); type is model-specific.
-            **kwargs: Model-specific forecast options.
-
-        Returns:
-            A :class:`Forecast` for ``x``.
-
-        Raises:
-            NotImplementedError: Always, in this base implementation.
+        :param x: Model input, context window or batch; type is model-specific.
+        :param kwargs: Model-specific forecast options.
+        :return: A :class:`Forecast` for `x`.
+        :raises NotImplementedError: Always, in this base implementation.
         """
         raise NotImplementedError(
             f"{type(self).__name__} mixes in ForecastMixin but does not "
@@ -169,22 +135,16 @@ class ForecastMixin:
         )
 
     def predict_forecast(self, x, **kwargs) -> Forecast:
-        """Produce a validated :class:`Forecast` for ``x``.
+        """Produce a validated :class:`Forecast` for `x`.
 
-        Delegates to :meth:`_forecast` and validates the result is a
-        ``Forecast`` with a non-``None`` ``point``. Intentionally thin: no
-        batching/chunking logic in this iteration.
+        Delegates to :meth:`_forecast` and checks the result is a `Forecast`
+        with a non-`None` `point`. Does no batching or chunking of its own.
 
-        Args:
-            x: Model input (context window / batch); type is model-specific.
-            **kwargs: Forwarded to :meth:`_forecast`.
-
-        Returns:
-            The :class:`Forecast` returned by :meth:`_forecast`.
-
-        Raises:
-            TypeError: If ``_forecast`` does not return a :class:`Forecast`.
-            ValueError: If the returned forecast has a ``None`` ``point``.
+        :param x: Model input, context window or batch; type is model-specific.
+        :param kwargs: Forwarded to :meth:`_forecast`.
+        :return: The :class:`Forecast` returned by :meth:`_forecast`.
+        :raises TypeError: If `_forecast` does not return a `Forecast`.
+        :raises ValueError: If the returned forecast has a `None` `point`.
         """
         forecast = self._forecast(x, **kwargs)
 

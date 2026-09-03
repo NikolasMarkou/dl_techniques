@@ -1,75 +1,33 @@
 """
-Causal language model pre-trainer that wraps a decoder backbone, shifts inputs against
-labels by one position, and projects hidden states to vocabulary logits through an
-output head whose weights are tied to the backbone's embedding matrix when one can be
-found.
+Causal language model pre-trainer that wraps a decoder backbone, shifts
+inputs against labels by one position, and projects hidden states to
+vocabulary logits through a head tied to the backbone's embedding matrix
+when one can be found.
 
-Next-token prediction is the exact chain-rule factorization of the sequence likelihood,
-`log p(x) = sum_t log p(x_t | x_<t)`, which is what makes it both a valid density model
-and unusually efficient supervision: a single forward pass over a length-`T` sequence
-produces `T - 1` scored predictions, against roughly `0.15 * T` for masked language
-modelling. Nothing is held out of the input, so no capacity is spent reconstructing
-deliberately destroyed tokens.
+Next-token prediction scores every position in one forward pass, unlike
+masked language modelling which scores roughly 15% of them. Because a
+model-agnostic wrapper cannot inject a causal mask into an arbitrary
+backbone, `build()` instead runs a future-leak probe: two forward passes
+differing only at one position, checking that every earlier position's
+hidden state is unchanged. A bidirectional backbone fails this with a
+`ValueError` instead of training silently toward a collapsed loss. Weight
+tying looks for the backbone's embedding matrix through several attribute
+paths in order and falls back to an untied `Dense` head, with a warning,
+if none match.
 
-That efficiency rests entirely on one structural condition: the representation at
-position `t` must not depend on `x_{>t}`. A model-agnostic wrapper cannot *inject* a
-causal mask into an arbitrary backbone - it does not know that backbone's masking
-API - but it can refuse to train one that leaks, and that is what this module does.
-`build()` runs a future-leak probe: two forward passes over the same random ids
-differing only at position `t`, asserting that `last_hidden_state` at every position
-before `t` is unchanged. A bidirectional encoder fails it with a `ValueError` naming
-the measured delta instead of training silently. Without the probe the failure looks
-like spectacular success - loss collapsing toward zero and accuracy toward one within
-a handful of steps - because position `t` is reading the very token it is asked to
-predict. The probe costs one extra forward pass at build time; set
-`verify_causality=False` to skip it, and understand that doing so restores the silent
-mode. If the probe cannot be run at all (a backbone rejecting the probe's input
-shape, say) it logs a warning naming the exception rather than passing quietly.
+The shift convention is `x = input_ids[:, :-1]`, `y = input_ids[:, 1:]`,
+applied inside `train_step`/`test_step`. The attention mask is sliced twice:
+the input-aligned half feeds the backbone, the label-aligned half feeds the
+loss and metrics — using the same slice for both would score the first
+padding id as if it were a real label. The perplexity tracker averages
+`exp(batch_loss)` over batches, which by Jensen's inequality is an upper
+bound on corpus perplexity; exponentiate the tracked loss instead when
+comparing against a perplexity computed from an aggregated loss.
 
-The shift convention is `x = input_ids[:, :-1]` and `y = input_ids[:, 1:]`, applied
-inside `train_step`/`test_step` so that datasets stay unshifted and the training and
-evaluation paths cannot drift apart. The mask is sliced twice, and the two slices are
-*not* interchangeable: the backbone receives the input-aligned `attention_mask[:, :-1]`
-because it must know which of its own input positions are padding, while the loss and
-the metrics receive the label-aligned `attention_mask[:, 1:]`. An earlier revision used
-the input-aligned slice for both, which weighted the final real token's prediction as
-if its label were real when that label is in fact the first padding id - an off-by-one
-that trained the model to emit padding.
-
-The output head is `logits = h @ E^T + b` when weight tying succeeds. Tying rests on the
-observation that the input and output vocabularies index the same objects, so a single
-matrix can serve both directions; it removes `hidden_size * vocab_size` parameters,
-which for a large vocabulary is a substantial fraction of the model, and typically
-improves perplexity. Locating `E` in an arbitrary backbone is necessarily heuristic and
-is attempted in order: an explicit `get_embedding_matrix()` method, a `token_embeddings`
-sublayer (searched for a variable of shape `(vocab_size, hidden_size)`, then
-`.embeddings`, then `.weight`), and finally a HuggingFace-shaped
-`embeddings.word_embeddings.weight` or `embeddings.weight`. If none matches, the model
-falls back to an untied `Dense` instead of failing; the warning only fires once the
-model is already built, so a tying request that quietly did not take is visible in the
-logs but does not stop the run. A zero-initialized bias is added in the tied path even
-though the tied kernel carries no bias of its own, because tying fixes the projection
-directions but leaves the per-token frequency prior unmodelled.
-
-Two construction-order choices are deliberate. With `tie_weights=False` the `Dense` head
-is created in `__init__` rather than in `build`, so that `load_model()` always finds an
-existing layer to restore weights into; in the tied path there is no kernel to restore
-and only the bias needs to exist, so it is created in `build`. And `build` wraps the
-backbone's own `build` in a bare `except`, because a backbone taking a dict of inputs
-will often reject a single `input_shape`; proceeding is safe since the first real call
-builds it anyway, whereas raising would break tying for every dict-input backbone.
-`_apply_output_head` re-enters `build` if the head components are still missing, so a
-direct `call()` without an explicit `build()` works.
-
-The perplexity tracker averages `exp(batch_loss)` over batches rather than exponentiating
-the averaged loss. By Jensen's inequality the reported figure is an upper bound on the
-true corpus perplexity and is not comparable with a perplexity computed from an
-aggregated loss; for reporting, exponentiate the tracked loss instead.
-
-The backbone contract mirrors the masked-language-model wrapper: it must expose a
-`hidden_size` attribute (a missing one raises `ValueError`) and return a mapping
-containing `last_hidden_state`. `train_step` uses `tf.GradientTape` directly, so this
-model is TensorFlow-backend only.
+The backbone must expose a `hidden_size` attribute and return a mapping
+containing `last_hidden_state`. `train_step` uses `tf.GradientTape`
+directly, so this model is TensorFlow-backend only. Set
+`verify_causality=False` to skip the future-leak probe.
 
 References:
     - Bengio et al., 2003. A Neural Probabilistic Language Model. JMLR 3:1137-1155.
@@ -98,16 +56,14 @@ class CausalLanguageModel(keras.Model):
     This model wraps a given causal backbone (like GPT) and adds the necessary
     logic for autoregressive pre-training.
 
-    **Weight Tying:**
-    This model attempts to tie the weights of the output projection layer with
-    the backbone's input embeddings. This logic is executed during the `build()`
-    phase. If `tie_weights=False` is set explicitly, a standard Dense layer
-    is created during initialization to ensure robust serialization.
+    Weight tying: the model attempts to tie the output projection to the
+    backbone's input embeddings during `build()`. If `tie_weights=False` is
+    set explicitly, a standard Dense layer is created during initialization
+    instead, so serialization has a layer to restore into.
 
-    **Causality:**
-    The backbone must be causal. ``build()`` verifies it with a future-leak probe
-    and raises ``ValueError`` if a past position moves when a future token is
-    changed. Pass ``verify_causality=False`` to skip the check.
+    Causality: the backbone must be causal. `build()` verifies it with a
+    future-leak probe and raises `ValueError` if a past position moves when
+    a future token changes. Pass `verify_causality=False` to skip the check.
 
     :param backbone: An instance of a Keras model that acts as the decoder.
     :param vocab_size: The size of the vocabulary.
@@ -178,38 +134,16 @@ class CausalLanguageModel(keras.Model):
     def metrics(self):
         return [self.loss_tracker, self.acc_metric, self.perplexity_metric]
 
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-035: match by variable shape
+    # first, not `layer.weight` — that assumes the PyTorch spelling and raises
+    # on an unbuilt Keras layer. See decisions.md D-035 and D-049.
     def _embedding_variable_of(
             self, layer: Any
     ) -> Optional[keras.KerasTensor]:
         """Return `layer`'s ``(vocab_size, hidden_size)`` variable, or None.
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-035
-        SHAPE MATCHING FIRST, attribute names second. Do NOT reintroduce a bare
-        ``layer.weight`` access: ``weight`` is the PyTorch spelling, a Keras
-        ``Embedding`` calls it ``embeddings``, and reading either attribute on
-        an UNBUILT layer raises rather than returning None. That combination
-        made `CausalLanguageModel(backbone=BERT(...))` raise
-        ``AttributeError: 'Embedding' object has no attribute 'weight'`` at
-        construction time for this repository's OWN BERT -- the most obvious
-        backbone there is. Matching on the variable's shape works for a built
-        layer of any provenance and degrades to `None` (weight tying disabled)
-        instead of crashing.
-
-        HISTORICAL, and CLOSED -- kept because the closing condition is the
-        interesting part. This locator was once blind on a ``BERT`` backbone:
-        ``BERT`` implemented no ``build()``, so Keras marked it built while it
-        held ZERO variables, and the locator ran before anything existed to
-        find. ``embedding_weights`` was None and ``use_weight_tying`` was False
-        after a full forward pass, while calling
-        ``_locate_embedding_weights()`` at that same moment RETURNED the
-        matrix -- the locator was never wrong. ``BERT.build`` now exists
-        (decisions.md D-049) and tying is active and substantive: MEASURED,
-        ``BERT.build((None, 12))`` yields 17 tensors / 12,768 params against 0
-        and 0 before, and the pin that recorded the blindness -- an
-        ``xfail(strict=True)`` in
-        ``tests/test_models/test_masked_language_model/test_the_embedding_locator_finds_a_keras_embedding.py``
-        -- was UN-PINNED at step 17.1 and is a plain passing assertion today.
-        Do NOT re-add the pin. See decisions.md D-035 and D-049.
+        Shape matching works for a built layer of any provenance and
+        degrades to None (tying disabled) instead of crashing.
 
         Interface contract (2 callers by design):
             :param layer: Any object that may own the token-embedding variable.
@@ -260,18 +194,9 @@ class CausalLanguageModel(keras.Model):
     def build(self, input_shape):
         """Builds the model and initializes the output head/weight tying."""
         # 1. Ensure backbone is built to access its variables.
-        #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-049
-        # This step is LOAD-BEARING for determinism, not a convenience. The
-        # weight-tying branch below is chosen by whether
-        # `_locate_embedding_weights` finds anything, and that answer must be the
-        # SAME when the model is saved and when it is rebuilt on load. At HEAD a
-        # save happened after a `__call__` (backbone built, matrix found, one
-        # `output_bias` created) while the load called `build()` on an unbuilt
-        # backbone (nothing found, an untied `Dense` created instead) — hence
-        # `expected 2 variables, but received 0`. Do NOT restore the bare
-        # `except Exception: pass`: it made the branch depend on an unreported
-        # failure. See decisions.md D-049.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-049: this determines which
+        # weight-tying branch is chosen, so it must give the same answer on
+        # save and on load. Do not restore a bare except pass. See decisions.md.
         if not self.backbone.built:
             try:
                 self.backbone.build(input_shape)
@@ -425,10 +350,10 @@ class CausalLanguageModel(keras.Model):
     ) -> Tuple[Dict[str, keras.KerasTensor], keras.KerasTensor, Optional[keras.KerasTensor]]:
         """Prepares causal inputs by shifting tokens.
 
-        Returns the shifted inputs, the shifted labels and the **label-aligned**
+        Returns the shifted inputs, the shifted labels and the label-aligned
         loss weights. The backbone gets the input-aligned mask slice
         ``attention_mask[:, :-1]``; the loss gets ``attention_mask[:, 1:]``,
-        because a weight multiplies a *label*. Using the input-aligned slice for
+        because a weight multiplies a label. Using the input-aligned slice for
         both scores the final real token against a padding label.
         """
         input_ids = inputs["input_ids"]
@@ -465,24 +390,9 @@ class CausalLanguageModel(keras.Model):
             sequence_output = backbone_outputs["last_hidden_state"]
             logits = self._apply_output_head(sequence_output)
             loss = self.compute_loss(y=y_labels, y_pred=logits, sample_weight=loss_weights)
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-036
-            # `self.optimizer.scale_loss(loss)` MUST be inside the tape, and
-            # the SCALED value is what `tape.gradient` differentiates while the
-            # UNSCALED value is what is reported. Do NOT "simplify" this back
-            # to `tape.gradient(loss, ...)`. Under `mixed_float16` Keras wraps
-            # the optimizer in a `LossScaleOptimizer` whose `apply()` DIVIDES
-            # every gradient by `dynamic_scale` (2**15 initially)
-            # UNCONDITIONALLY, so omitting the call does not merely lose fp16
-            # precision -- it divides the whole update by the loss scale, with
-            # no warning of any kind. In float32 it is a provable no-op: the
-            # base `Optimizer.scale_loss` returns `loss` unchanged unless
-            # `loss_scale_factor` is set. Keras' own default TF `train_step`
-            # does exactly this; overriding `train_step` silently opts out.
-            # MEASURED at this site (SGD, 5 steps, total |dW|, GPU) --
-            # float32 1.859214e+01 vs mixed_float16 6.757726e-04, ratio
-            # 2.7513e+04, on a REAL BERT backbone
-            # See decisions.md D-036, and the same ruling at
-            # `depth_anything/model.py:892` under 79c63e38/D-034.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-036: scale_loss must run
+            # inside the tape and tape.gradient must differentiate the scaled value —
+            # omitting it silently divides the whole update under mixed_float16. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(loss)
 
         trainable_vars = self.trainable_variables

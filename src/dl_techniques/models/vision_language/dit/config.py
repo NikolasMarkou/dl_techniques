@@ -40,9 +40,9 @@ The canonical key form is the upstream public name -- ``"DiT-XL/2"`` -- because
 that is the string checkpoints, papers and command lines use, and a port that
 renames it forces every reader to translate. Filesystem-safe spellings such as
 ``"dit_xl_2"`` are accepted by :func:`normalize_variant_name`, which maps them
-onto the canonical key. There is deliberately only ONE table: a second table
-keyed by a sanitized name would be the same twelve rows under a second spelling
-and would have to be kept in lockstep by hand.
+onto the canonical key. There is only one table: a second table keyed by a
+sanitized name would be the same twelve rows under a second spelling and
+would have to be kept in lockstep by hand.
 
 References:
     - Peebles, W. and Xie, S. "Scalable Diffusion Models with Transformers."
@@ -247,15 +247,9 @@ class DiffusionConfig:
                 f"{self.schedule_name!r}"
             )
 
-        # DECISION plan-2026-09-02T170923-1285ed83/D-010
-        # Do NOT replace this with a literal minimum-step threshold for the
-        # 'linear' schedule. The plan (and ddpm_schedule.py's own docstring
-        # before this step) claimed the floor was num_timesteps >= 50. It is
-        # not 50, and it is not a floor: beta_end = (1000/T) * 0.02 = 20/T
-        # crosses 1.0 at T = 20, but np.linspace(a, b, 1) drops the endpoint, so
-        # the measured accepted set is {1} U [20, inf). No threshold expression
-        # states that. Build the schedule and let its own validation decide.
-        # See decisions.md D-010.
+        # DECISION plan-2026-09-02T170923-1285ed83/D-010: do not replace this with a
+        # literal minimum-step threshold — the accepted set is {1} U [20, inf), which no
+        # single threshold expresses. Build the schedule and let it decide. See decisions.md.
         try:
             self.build_schedule()
         except ValueError as exc:

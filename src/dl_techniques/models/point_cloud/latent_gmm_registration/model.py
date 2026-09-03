@@ -1,64 +1,33 @@
 """
-Latent-GMM Point Cloud Registration model.
+Latent-GMM point cloud registration. ``LatentGMMRegistration`` estimates the
+rigid transform between two point clouds by mapping both to a shared latent
+Gaussian mixture and solving the transform in closed form.
 
-ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
-    The weighted-Procrustes rotation solver in the forward path uses
-    ``tf.linalg.svd`` / ``tf.linalg.diag`` to recover the
-    optimal rigid rotation from the cross-covariance matrix.
+Both clouds pass through a shared autoencoder and correspondence network to get
+soft assignments to GMM components. The component means and mixing weights come
+from plain tensor ops, and a weighted Procrustes solve then recovers the
+rotation and translation between the two sets of component means. That solve
+uses `tf.linalg.svd` and `tf.linalg.diag` directly instead of `keras.ops`:
+`keras.ops.svd` returns a different tuple order and a transposed third factor,
+and `keras.ops.diag` does not batch. `keras.ops.det` is used, since it is a
+drop-in replacement.
 
-    CORRECTED 2026-08-20 (step 19.1, D-083). The previous wording here --
-    "there is no ``keras.ops.svd``" -- is FALSE and was never re-measured:
-    ``keras.ops.svd``, ``keras.ops.det`` and ``keras.ops.diag`` all exist in
-    Keras 3.8. What is true is narrower, and it is the reason two of the three
-    calls stay raw:
-
-    * ``ops.svd`` is batched, but returns ``(u, s, vh)`` where
-      ``tf.linalg.svd`` returns ``(s, u, v)`` -- a different tuple ORDER and a
-      transposed third factor. Mis-binding that tuple is the exact defect
-      ``D-001`` records at this site.
-    * ``ops.diag`` is NOT batched: for a ``(B, 3)`` input it returns ``(3,)``
-      where ``tf.linalg.diag`` returns ``(B, 3, 3)``.
-    * ``ops.det`` IS a drop-in and HAS been migrated.
-
-    The two remaining raw ``tf.linalg`` calls are therefore an accepted,
-    documented exception to the keras.ops-only (H10) rule for the forward pass
-    -- on the measured semantics above, not on an availability claim.
-
-FLOAT32 ONLY -- this model does NOT run under ``mixed_float16``.
-    MEASURED (2026-08-19, TF 2.18 / Keras 3.8, RTX 4070 and CPU): a single
-    forward pass under ``keras.mixed_precision.set_global_policy(
-    "mixed_float16")`` raises, inside ``compute_rigid_transform``::
-
-        NotFoundError: Could not find device for node:
-        {{node Svd}} = Svd[T=DT_HALF, compute_uv=true, full_matrices=false]
-
-    This is NOT a dtype-plumbing bug in this package. TensorFlow registers NO
-    ``Svd`` kernel for ``DT_HALF`` on ``CPU`` or ``GPU`` -- the op's kernel list
-    is ``{CPU: float, double, complex64, complex128}`` and
-    ``{GPU: double, float}``; only the XLA JIT devices accept ``DT_HALF``. Half
-    precision is also the wrong arithmetic for this step on its own merits: the
-    weighted-Procrustes solve orthogonalizes a 3x3 cross-covariance and its
-    ``det``-based reflection correction switches on the SIGN of a quantity that
-    is near zero exactly when the rotation is near-degenerate.
-
-    Train and infer this model under the default ``float32`` policy. See
-    plan ``plan-2026-08-19T163559-499b6f0e`` decisions.md D-011.
+This model runs in float32 only. TensorFlow has no `Svd` kernel for half
+precision on CPU or GPU, and the reflection correction in
+`compute_rigid_transform` reads the sign of a determinant that is near zero
+exactly when the rotation is near-degenerate, which half precision would make
+unreliable regardless.
 
 References:
     - Yuan et al., 2020. DeepGMR: Learning Latent Gaussian Mixture Models for
-      Registration. ECCV 2020. (https://arxiv.org/abs/2008.09088) -- the method
-      family this model follows: both clouds are mapped to a SHARED latent GMM
-      and the rigid transform is then solved in closed form.
+      Registration. ECCV 2020. (https://arxiv.org/abs/2008.09088)
     - Myronenko and Song, 2010. Point Set Registration: Coherent Point Drift.
-      IEEE TPAMI 32(12). (https://arxiv.org/abs/0905.2635) -- the probabilistic
-      (GMM) view of registration this replaces the iterative form of.
+      IEEE TPAMI 32(12). (https://arxiv.org/abs/0905.2635)
     - Umeyama, 1991. Least-Squares Estimation of Transformation Parameters
-      Between Two Point Patterns. IEEE TPAMI 13(4) -- the SVD/Procrustes
-      solution, including the ``det = -1`` reflection correction implemented in
-      ``compute_rigid_transform``.
+      Between Two Point Patterns. IEEE TPAMI 13(4).
     - Qi et al., 2017. PointNet: Deep Learning on Point Sets for 3D
       Classification and Segmentation. CVPR 2017.
-      (https://arxiv.org/abs/1612.00593) -- the per-point encoder shape.
+      (https://arxiv.org/abs/1612.00593)
 """
 
 import keras
@@ -79,82 +48,78 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.latent_gmm_registration.model")
 class LatentGMMRegistration(keras.Model):
-    """Robust Semi-Supervised Point Cloud Registration via Latent GMM.
+    """Semi-supervised point cloud registration via a latent GMM.
 
-    This model implements the complete architecture from the paper, combining a
-    feature-learning autoencoder with a GMM-based correspondence network to
-    estimate the rigid transformation between two point clouds.
+    Combines a feature-learning autoencoder with a GMM-based correspondence
+    network to estimate the rigid transformation between two point clouds.
 
-    **Intent**: To provide an end-to-end, learning-based solution for point
-    cloud registration that is robust to noise and large transformations.
+    Architecture:
 
-    **Architecture**:
-    ```
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Input: (Source PC, Target PC)                               │
-    │         Shape: (B, N, 3) each                                │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  PointCloudAutoencoder                                       │
-    │  ├─ Reconstructions: x_rec, y_rec  (B, N, 3)                 │
-    │  ├─ Local Features: local_x, local_y  (B, N, F_local)        │
-    │  └─ Global Features: global_x, global_y  (B, F_global)       │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  CorrespondenceNetwork (shared weights)                      │
-    │  Inputs: (local_features, global_features)                   │
-    │  Outputs: gamma_x, gamma_y  (B, N, K)                        │
-    │  where K = num_gaussians (soft assignments)                  │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  GMM Parameter Estimation (non-trainable ops)                │
-    │  ├─ Mixing coefficients: pi_x, pi_y  (B, K)                  │
-    │  └─ Component means: mu_x, mu_y  (B, K, 3)                   │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Rigid Transform Estimation (weighted Procrustes)            │
-    │  ├─ Rotation: R  (B, 3, 3)                                   │
-    │  └─ Translation: t  (B, 3)                                   │
-    └────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-    ┌──────────────────────────────────────────────────────────────┐
-    │  Output Dictionary                                           │
-    │  ├─ reconstruction_x: (B, N, 3)                              │
-    │  ├─ reconstruction_y: (B, N, 3)                              │
-    │  ├─ estimated_r: (B, 3, 3)                                   │
-    │  └─ estimated_t: (B, 3)                                      │
-    └──────────────────────────────────────────────────────────────┘
+    .. code-block:: text
 
-    Legend: B=batch_size, N=num_points, K=num_gaussians, F=feature_dim
-    ```
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Input: (Source PC, Target PC)                               │
+        │         Shape: (B, N, 3) each                                │
+        └────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  PointCloudAutoencoder                                       │
+        │  ├─ Reconstructions: x_rec, y_rec  (B, N, 3)                 │
+        │  ├─ Local Features: local_x, local_y  (B, N, F_local)        │
+        │  └─ Global Features: global_x, global_y  (B, F_global)       │
+        └────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  CorrespondenceNetwork (shared weights)                      │
+        │  Inputs: (local_features, global_features)                   │
+        │  Outputs: gamma_x, gamma_y  (B, N, K)                        │
+        │  where K = num_gaussians (soft assignments)                  │
+        └────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  GMM Parameter Estimation (non-trainable ops)                │
+        │  ├─ Mixing coefficients: pi_x, pi_y  (B, K)                  │
+        │  └─ Component means: mu_x, mu_y  (B, K, 3)                   │
+        └────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Rigid Transform Estimation (weighted Procrustes)            │
+        │  ├─ Rotation: R  (B, 3, 3)                                   │
+        │  └─ Translation: t  (B, 3)                                   │
+        └────────────────────┬─────────────────────────────────────────┘
+                             │
+                             ▼
+        ┌──────────────────────────────────────────────────────────────┐
+        │  Output Dictionary                                           │
+        │  ├─ reconstruction_x: (B, N, 3)                              │
+        │  ├─ reconstruction_y: (B, N, 3)                              │
+        │  ├─ estimated_r: (B, 3, 3)                                   │
+        │  └─ estimated_t: (B, 3)                                      │
+        └──────────────────────────────────────────────────────────────┘
 
-    **Key Components**:
-    - **PointCloudAutoencoder**: Extracts local and global features from point clouds
-    - **CorrespondenceNetwork**: Computes soft assignments to GMM components
-    - **GMM Parameter Estimation**: Non-trainable operations for computing GMM statistics
-    - **Rigid Transform Estimation**: Closed-form solution for optimal transformation
+        Legend: B=batch_size, N=num_points, K=num_gaussians, F=feature_dim
 
-    Args:
-        num_gaussians: Number of latent GMM components. Must be positive.
-            Determines the expressiveness of the latent correspondence space.
-        k_neighbors: Number of neighbors for feature extraction. Must be positive.
-            Controls the receptive field of local feature computation.
-        chamfer_weight: Weight for the Chamfer reconstruction loss. Default 1.0.
-            Balances reconstruction quality vs transformation accuracy.
-        transform_weight: Weight for the transformation loss. Default 1.0.
-            Balances transformation accuracy vs reconstruction quality.
-        **kwargs: Additional arguments for Model base class.
+    :param num_gaussians: Number of latent GMM components. Must be positive.
+    :type num_gaussians: int
+    :param k_neighbors: Number of neighbors for local feature extraction. Must
+        be positive.
+    :type k_neighbors: int
+    :param chamfer_weight: Weight of the Chamfer reconstruction loss. Defaults
+        to 1.0.
+    :type chamfer_weight: float
+    :param transform_weight: Weight of the supervised transformation loss.
+        Defaults to 1.0.
+    :type transform_weight: float
+    :param kwargs: Additional arguments for the ``keras.Model`` base class.
 
-    Examples:
+    :raises ValueError: If ``num_gaussians`` or ``k_neighbors`` is not positive,
+        or if either weight is negative.
+
+    Example:
         >>> model = LatentGMMRegistration(
         ...     num_gaussians=32,
         ...     k_neighbors=16,
@@ -176,17 +141,10 @@ class LatentGMMRegistration(keras.Model):
             transform_weight: float = 1.0,
             **kwargs: Any
     ) -> None:
-        """Initialize LatentGMMRegistration model.
+        """Validate the config and create the autoencoder, correspondence network and loss.
 
-        Args:
-            num_gaussians: Number of latent GMM components.
-            k_neighbors: Number of neighbors for feature extraction.
-            chamfer_weight: Weight for the Chamfer reconstruction loss.
-            transform_weight: Weight for the transformation loss.
-            **kwargs: Additional arguments for Model base class.
-
-        Raises:
-            ValueError: If num_gaussians or k_neighbors are not positive.
+        :raises ValueError: If ``num_gaussians`` or ``k_neighbors`` is not
+            positive, or if either loss weight is negative.
         """
         super().__init__(**kwargs)
 
@@ -219,34 +177,22 @@ class LatentGMMRegistration(keras.Model):
         )
 
     def build(self, input_shape: Any) -> None:
-        """Materialize every weight-bearing sub-layer.
+        """Build the two stateful sub-layers by hand instead of tracing ``call``.
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-423
-        This walks the two stateful sub-layers by hand instead of tracing
-        `call`, because `call` cannot be traced symbolically at all: it ends in
-        `compute_rigid_transform`, whose `tf.linalg.svd` is a raw-backend op
-        that rejects a `KerasTensor` outright (`ValueError: A KerasTensor
-        cannot be used as input to a TensorFlow function`). That op is kept
-        deliberately for its `(s, u, v)` tuple order -- see the D-001/D-083
-        block on `compute_rigid_transform` -- so the trace cannot be repaired
-        from the other side.
+        # DECISION plan-2026-08-23T091307-9a110062/D-423: build cannot trace
+        # ``call`` since it ends in ``tf.linalg.svd``, which rejects a
+        # ``KerasTensor``. See decisions.md.
 
-        The walk is short and total: `self.autoencoder` and
-        `self.correspondence_net` are the ONLY sub-layers that own state
-        (`self.chamfer_loss_fn` owns none), both are invoked before `call`
-        reaches the SVD, and `compute_gmm_params`/`compute_rigid_transform`
-        carry no weights. MEASURED: 26 weights here, 26 after a real forward
-        call -- and `test_the_explicit_build_materializes_the_model.py` pins
-        that equality so this second encoding of the topology cannot drift
-        silently.
+        ``self.autoencoder`` and ``self.correspondence_net`` are the only
+        sub-layers with weights; ``compute_gmm_params`` and
+        ``compute_rigid_transform`` are stateless.
+        ``test_the_explicit_build_materializes_the_model.py`` pins the weight
+        count against a real forward call. The batch axis is fixed at 1 since
+        no weight shape depends on it.
 
-        The batch axis is made concrete (`1`) for the same reason
-        `materialize_sublayers` retries with a concrete batch: no weight shape
-        depends on it.
-
-        Args:
-            input_shape: `(source_shape, target_shape)`, each
-                `(batch, num_points, 3)`.
+        :param input_shape: A pair of shapes, ``(source_shape, target_shape)``,
+            each ``(batch, num_points, 3)``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -267,37 +213,29 @@ class LatentGMMRegistration(keras.Model):
             inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
             training: bool = False
     ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass of the model.
+        """Run the autoencoder and correspondence network, then solve for the rigid transform.
 
-        Args:
-            inputs: Tuple of (source_pc, target_pc) point clouds.
-                Each point cloud has shape (batch_size, num_points, 3).
-            training: Whether in training mode. Affects dropout and batch normalization.
-
-        Returns:
-            Dictionary containing:
-                - reconstruction_x: Reconstructed source point cloud (batch_size, num_points, 3)
-                - reconstruction_y: Reconstructed target point cloud (batch_size, num_points, 3)
-                - estimated_r: Estimated rotation matrix (batch_size, 3, 3)
-                - estimated_t: Estimated translation vector (batch_size, 3)
+        :param inputs: A ``(source_pc, target_pc)`` pair, each
+            ``(batch_size, num_points, 3)``.
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+        :param training: Whether the call is in training mode.
+        :type training: bool
+        :return: A dict with ``reconstruction_x``, ``reconstruction_y``
+            (each ``(batch_size, num_points, 3)``), ``estimated_r``
+            (``(batch_size, 3, 3)``) and ``estimated_t`` (``(batch_size, 3)``).
+        :rtype: Dict[str, keras.KerasTensor]
         """
         source_pc, target_pc = inputs
 
-        # The autoencoder processes both point clouds simultaneously to extract:
-        # - Reconstructions (x_rec, y_rec): Decoded point clouds for Chamfer loss
-        # - Local features: Per-point features capturing neighborhood geometry
-        # - Global features: Point cloud-level features capturing overall structure
         (x_rec, y_rec), (local_x, local_y), (global_x, global_y) = self.autoencoder(
             (source_pc, target_pc),
             training=training
         )
 
-        # gamma[i,j,k] is the probability that point j belongs to component k.
-        # The correspondence network is shared between source and target for consistency
+        # gamma[i, j, k] is the probability that point j belongs to component k.
         gamma_x = self.correspondence_net((local_x, global_x), training=training)
         gamma_y = self.correspondence_net((local_y, global_y), training=training)
 
-        # pi/mu are differentiable but carry no trainable parameters.
         pi_x, mu_x = compute_gmm_params(source_pc, gamma_x)
         pi_y, mu_y = compute_gmm_params(target_pc, gamma_y)
 
@@ -314,51 +252,33 @@ class LatentGMMRegistration(keras.Model):
             self,
             data: Tuple[Tuple[keras.KerasTensor, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]]
     ) -> Dict[str, keras.KerasTensor]:
-        """Custom training step with semi-supervised loss.
+        """Run a training step combining Chamfer and transformation loss.
 
-        The training combines two complementary objectives:
-        1. Unsupervised: Chamfer distance for point cloud reconstruction quality
-        2. Supervised: Transformation accuracy when ground truth R,t are available
+        ``loss = chamfer_weight * L_chamfer + transform_weight * L_transform``,
+        where ``L_chamfer`` is the summed Chamfer distance over both point
+        clouds and ``L_transform = ||I - R_est^T R_gt||^2 + ||t_est - t_gt||^2``.
 
-        Loss = chamfer_weight * L_chamfer + transform_weight * L_transform
-        where:
-            L_chamfer = Chamfer(source, reconstruction_x) + Chamfer(target, reconstruction_y)
-            L_transform = ||I - R_est^T * R_gt||^2 + ||t_est - t_gt||^2
-
-        Args:
-            data: Tuple of ((source_pc, target_pc), (R_gt, t_gt)) where:
-                - source_pc: Source point cloud (batch_size, num_points, 3)
-                - target_pc: Target point cloud (batch_size, num_points, 3)
-                - R_gt: Ground truth rotation matrix (batch_size, 3, 3)
-                - t_gt: Ground truth translation vector (batch_size, 3)
-
-        Returns:
-            Dictionary of loss values and metrics:
-                - loss: Total weighted loss
-                - chamfer_loss: Reconstruction loss (sum of both point clouds)
-                - transform_loss: Transformation estimation loss (rotation + translation)
-                - Other compiled metrics
+        :param data: A ``((source_pc, target_pc), (R_gt, t_gt))`` pair — point
+            clouds each ``(batch_size, num_points, 3)``, ground-truth rotation
+            ``(batch_size, 3, 3)`` and translation ``(batch_size, 3)``.
+        :type data: Tuple[Tuple[keras.KerasTensor, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :return: A dict with ``loss``, ``chamfer_loss``, ``transform_loss`` and
+            any compiled metrics.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         (source_pc, target_pc), (R_gt, t_gt) = data
 
-        # `keras.backend.GradientTape` does not exist in Keras 3; the tape comes
-        # from the backend directly. This module already depends on raw TF for
-        # the Procrustes SVD (see the module docstring's accepted exception).
+        # keras.backend has no GradientTape in Keras 3; the tape is the backend's own.
         with tf.GradientTape() as tape:
             y_pred = self((source_pc, target_pc), training=True)
 
-            # Compute Chamfer loss (unsupervised reconstruction)
             loss_chamfer_x = self.chamfer_loss_fn(source_pc, y_pred["reconstruction_x"])
             loss_chamfer_y = self.chamfer_loss_fn(target_pc, y_pred["reconstruction_y"])
             total_chamfer_loss = loss_chamfer_x + loss_chamfer_y
 
-            # Compute transformation loss (supervised)
             R_est, t_est = y_pred["estimated_r"], y_pred["estimated_t"]
 
-            # Rotation loss: ||I - R_est^T * R_gt||_F^2
-            # This measures how well R_est aligns with R_gt using the Frobenius norm
-            # When R_est = R_gt, we have R_est^T * R_gt = I (identity)
-            # The closer to zero, the better the rotation alignment
+            # ||I - R_est^T R_gt||_F^2: zero when R_est and R_gt agree.
             loss_r = keras.ops.mean(
                 keras.ops.square(
                     keras.ops.eye(3) - keras.ops.matmul(
@@ -368,13 +288,10 @@ class LatentGMMRegistration(keras.Model):
                 )
             )
 
-            # Translation loss: ||t_est - t_gt||_2^2 (Mean Squared Error)
-            # Direct L2 distance between estimated and ground truth translation vectors
             loss_t = keras.ops.mean(keras.ops.square(t_est - t_gt))
 
             total_transform_loss = loss_r + loss_t
 
-            # Total weighted loss
             total_loss = (
                     self.chamfer_weight * total_chamfer_loss +
                     self.transform_weight * total_transform_loss
@@ -384,12 +301,7 @@ class LatentGMMRegistration(keras.Model):
         gradients = tape.gradient(total_loss, trainable_vars)
         self.optimizer.apply(gradients, trainable_vars)
 
-        # `self.compiled_metrics` is a Keras 3 deprecation shim that loops over
-        # *every* metric including the loss tracker, so it cannot be handed a
-        # structured y/y_pred. `compute_metrics` is the supported entry point and
-        # no-ops when `compile(metrics=...)` was not given. y_true mirrors `call`'s
-        # output dict; the bare `(R_gt, t_gt)` tuple used before could not even be
-        # packed, since (B, 3, 3) and (B, 3) do not stack.
+        # compute_metrics accepts a structured y/y_pred; compiled_metrics does not.
         metric_results = self.compute_metrics(
             x=(source_pc, target_pc),
             y={
@@ -414,39 +326,26 @@ class LatentGMMRegistration(keras.Model):
             self,
             data: Tuple[Tuple[keras.KerasTensor, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]]
     ) -> Dict[str, keras.KerasTensor]:
-        """Custom test step with semi-supervised loss evaluation.
+        """Run the same loss computation as :meth:`train_step`, without gradients.
 
-        Evaluates the same loss components as training but without gradient computation.
-        Useful for validation and testing with ground truth transformations.
-
-        Args:
-            data: Tuple of ((source_pc, target_pc), (R_gt, t_gt)) where:
-                - source_pc: Source point cloud (batch_size, num_points, 3)
-                - target_pc: Target point cloud (batch_size, num_points, 3)
-                - R_gt: Ground truth rotation matrix (batch_size, 3, 3)
-                - t_gt: Ground truth translation vector (batch_size, 3)
-
-        Returns:
-            Dictionary of loss values and metrics:
-                - loss: Total weighted loss
-                - chamfer_loss: Reconstruction loss (sum of both point clouds)
-                - transform_loss: Transformation estimation loss (rotation + translation)
-                - Other compiled metrics
+        :param data: A ``((source_pc, target_pc), (R_gt, t_gt))`` pair — point
+            clouds each ``(batch_size, num_points, 3)``, ground-truth rotation
+            ``(batch_size, 3, 3)`` and translation ``(batch_size, 3)``.
+        :type data: Tuple[Tuple[keras.KerasTensor, keras.KerasTensor], Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :return: A dict with ``loss``, ``chamfer_loss``, ``transform_loss`` and
+            any compiled metrics.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         (source_pc, target_pc), (R_gt, t_gt) = data
 
         y_pred = self((source_pc, target_pc), training=False)
 
-        # Compute Chamfer loss (unsupervised reconstruction)
         loss_chamfer_x = self.chamfer_loss_fn(source_pc, y_pred["reconstruction_x"])
         loss_chamfer_y = self.chamfer_loss_fn(target_pc, y_pred["reconstruction_y"])
         total_chamfer_loss = loss_chamfer_x + loss_chamfer_y
 
-        # Compute transformation loss (supervised)
         R_est, t_est = y_pred["estimated_r"], y_pred["estimated_t"]
 
-        # Rotation loss: ||I - R_est^T * R_gt||_F^2
-        # Measures alignment quality between estimated and ground truth rotations
         loss_r = keras.ops.mean(
             keras.ops.square(
                 keras.ops.eye(3) - keras.ops.matmul(
@@ -456,23 +355,16 @@ class LatentGMMRegistration(keras.Model):
             )
         )
 
-        # Translation loss: ||t_est - t_gt||_2^2
         loss_t = keras.ops.mean(keras.ops.square(t_est - t_gt))
 
         total_transform_loss = loss_r + loss_t
 
-        # Total weighted loss
         total_loss = (
                 self.chamfer_weight * total_chamfer_loss +
                 self.transform_weight * total_transform_loss
         )
 
-        # `self.compiled_metrics` is a Keras 3 deprecation shim that loops over
-        # *every* metric including the loss tracker, so it cannot be handed a
-        # structured y/y_pred. `compute_metrics` is the supported entry point and
-        # no-ops when `compile(metrics=...)` was not given. y_true mirrors `call`'s
-        # output dict; the bare `(R_gt, t_gt)` tuple used before could not even be
-        # packed, since (B, 3, 3) and (B, 3) do not stack.
+        # compute_metrics accepts a structured y/y_pred; compiled_metrics does not.
         metric_results = self.compute_metrics(
             x=(source_pc, target_pc),
             y={
@@ -494,11 +386,10 @@ class LatentGMMRegistration(keras.Model):
         }
 
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization.
+        """Return the configuration dictionary for serialization.
 
-        Returns:
-            Dictionary containing all constructor parameters needed to
-            recreate this model instance.
+        :return: All constructor parameters needed to recreate this instance.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -511,13 +402,12 @@ class LatentGMMRegistration(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "LatentGMMRegistration":
-        """Create model from configuration.
+        """Create a model from its configuration dictionary.
 
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            New model instance reconstructed from configuration.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new model instance.
+        :rtype: LatentGMMRegistration
         """
         return cls(**config)
 
@@ -526,52 +416,32 @@ def compute_gmm_params(
         points: keras.KerasTensor,
         gamma: keras.KerasTensor
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Compute GMM parameters from soft point-to-component assignments.
+    """Compute GMM mixing coefficients and component means from soft assignments.
 
-    Given a point cloud and soft assignments (responsibilities) from an E-step,
-    computes the M-step GMM parameters: mixing coefficients and component means.
+    ``pi_k = mean_i gamma_ik`` and ``mu_k = sum_i(gamma_ik * x_i) / sum_i gamma_ik``.
 
-    Algorithm:
-        pi_k = (1/N) * sum_i gamma_ik  (average responsibility per component)
-        mu_k = sum_i (gamma_ik * x_i) / sum_i gamma_ik  (weighted mean)
-
-    Args:
-        points: Point cloud of shape (batch_size, num_points, 3).
-            The 3D coordinates of each point.
-        gamma: Soft assignments of shape (batch_size, num_points, num_gaussians).
-            gamma[b,i,k] = responsibility of component k for point i in batch b.
-            Each row (over k) should sum to 1 (probability distribution).
-
-    Returns:
-        Tuple of (pi, mu) where:
-            - pi: Mixing coefficients of shape (batch_size, num_gaussians).
-                  Represents the weight/importance of each Gaussian component.
-            - mu: Component means of shape (batch_size, num_gaussians, 3).
-                  The 3D centroid of each Gaussian component.
+    :param points: Point cloud coordinates.
+    :type points: keras.KerasTensor, shape (batch_size, num_points, 3)
+    :param gamma: Soft assignments; ``gamma[b, i, k]`` is the responsibility of
+        component k for point i in batch b. Each row over k sums to 1.
+    :type gamma: keras.KerasTensor, shape (batch_size, num_points, num_gaussians)
+    :return: ``(pi, mu)`` — mixing coefficients
+        ``(batch_size, num_gaussians)`` and component means
+        ``(batch_size, num_gaussians, 3)``.
+    :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
     """
-    # Mixing coefficients: pi_k = (1/N) * sum_i gamma_ik
-    # Average the soft assignments across all points to get component weights
-    pi = keras.ops.mean(gamma, axis=1)  # Shape: (batch_size, num_gaussians)
+    pi = keras.ops.mean(gamma, axis=1)
 
-    # Component means: mu_k = sum_i (gamma_ik * x_i) / sum_i gamma_ik
-    # Weighted average of points, where weights are the soft assignments
-
-    # Expand dimensions for element-wise multiplication and broadcasting
     gamma_expanded = keras.ops.expand_dims(gamma, axis=-1)  # (B, N, K, 1)
     points_expanded = keras.ops.expand_dims(points, axis=2)  # (B, N, 1, 3)
 
-    # Element-wise multiplication: gamma_ik * x_i for all i,k
-    # Then sum over all points (axis=1) to get weighted sum per component
     weighted_sum = keras.ops.sum(
-        gamma_expanded * points_expanded,  # (B, N, K, 3)
+        gamma_expanded * points_expanded,
         axis=1
-    )  # Shape: (B, K, 3)
+    )  # (B, K, 3)
 
-    # Normalize by the TOTAL responsibility sum_i gamma_ik -- not by `pi`, which is
-    # that sum divided by N. Dividing by the mean instead of the sum inflated every
-    # component mean by exactly N (and, through compute_rigid_transform's centroids,
-    # the estimated translation with it).
-    # Add epsilon to avoid division by zero for components with negligible weight
+    # Normalize by the total responsibility, not by `pi`: dividing by the mean
+    # instead inflates every component mean, and the translation with it, by N.
     gamma_sum = keras.ops.sum(gamma, axis=1, keepdims=False)  # (B, K)
     gamma_sum_expanded = keras.ops.expand_dims(gamma_sum, axis=-1) + 1e-8  # (B, K, 1)
     mu = weighted_sum / gamma_sum_expanded  # Shape: (B, K, 3)
@@ -585,119 +455,76 @@ def compute_rigid_transform(
         mu_target: keras.KerasTensor,
         pi_target: keras.KerasTensor
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Compute optimal rigid transformation between GMM means.
+    """Solve the weighted-Procrustes rigid transform between two sets of GMM means.
 
-    Uses weighted Procrustes analysis to find the optimal rotation R and translation t
-    that minimizes the weighted sum of squared distances between corresponding GMM means:
+    Finds the rotation R and translation t minimizing
+    ``sum_k w_k * ||R mu_source_k + t - mu_target_k||^2``, where
+    ``w_k = pi_source_k * pi_target_k``.
 
-        min_{R,t} sum_k w_k * ||R * mu_source_k + t - mu_target_k||^2
-
-    where w_k = pi_source_k * pi_target_k (component importance weighting).
-
-    Algorithm:
-        1. Compute weighted centroids of both GMMs
-        2. Center both sets of means around their centroids
-        3. Compute weighted covariance matrix H
-        4. Perform SVD: H = U * S * V^T
-        5. Compute rotation: R = V * U^T (with reflection correction)
-        6. Compute translation: t = centroid_target - R * centroid_source
-
-    Args:
-        mu_source: Source GMM means of shape (batch_size, num_gaussians, 3).
-            The 3D positions of source Gaussian components.
-        pi_source: Source mixing coefficients of shape (batch_size, num_gaussians).
-            Weights indicating importance of each source component.
-        mu_target: Target GMM means of shape (batch_size, num_gaussians, 3).
-            The 3D positions of target Gaussian components.
-        pi_target: Target mixing coefficients of shape (batch_size, num_gaussians).
-            Weights indicating importance of each target component.
-
-    Returns:
-        Tuple of (R, t) where:
-            - R: Rotation matrix of shape (batch_size, 3, 3).
-                 Orthogonal matrix with det(R) = +1 (proper rotation).
-            - t: Translation vector of shape (batch_size, 3).
-                 The displacement to align centroids after rotation.
+    :param mu_source: Source GMM component means.
+    :type mu_source: keras.KerasTensor, shape (batch_size, num_gaussians, 3)
+    :param pi_source: Source mixing coefficients.
+    :type pi_source: keras.KerasTensor, shape (batch_size, num_gaussians)
+    :param mu_target: Target GMM component means.
+    :type mu_target: keras.KerasTensor, shape (batch_size, num_gaussians, 3)
+    :param pi_target: Target mixing coefficients.
+    :type pi_target: keras.KerasTensor, shape (batch_size, num_gaussians)
+    :return: ``(R, t)`` — a proper rotation matrix (``det(R) = +1``),
+        shape ``(batch_size, 3, 3)``, and a translation, shape
+        ``(batch_size, 3)``, aligning the centroids after rotation.
+    :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
     """
-    # w_k = pi_source_k * pi_target_k: joint importance of corresponding components.
     weights = keras.ops.expand_dims(
         pi_source * pi_target,
         axis=-1
-    )  # Shape: (B, K, 1)
+    )  # (B, K, 1)
 
-    # centroid = sum_k (w_k * mu_k) / sum_k w_k
-    weight_sum = keras.ops.sum(weights, axis=1) + 1e-8  # (B, 1) with stability epsilon
+    weight_sum = keras.ops.sum(weights, axis=1) + 1e-8  # (B, 1)
 
     centroid_source = keras.ops.sum(weights * mu_source, axis=1) / weight_sum  # (B, 3)
     centroid_target = keras.ops.sum(weights * mu_target, axis=1) / weight_sum  # (B, 3)
 
-    # Centering removes translation, leaving only rotation to solve.
     mu_source_centered = mu_source - keras.ops.expand_dims(centroid_source, axis=1)
     mu_target_centered = mu_target - keras.ops.expand_dims(centroid_target, axis=1)
 
-    # H = sum_k w_k * mu_source_k^T * mu_target_k -- the 3x3 matrix that encodes
-    # the optimal rotation.
-    # DECISION plan_2026-06-15_00924f53/D-001: pre-existing forward blocker exposed once the
-    # graph-feature fix let the encoder run. `weights` is (B,K,1); to scale the transposed
-    # source (B,3,K) per component, broadcast (B,1,K) via transpose -- NOT expand_dims(axis=1)
-    # which yields a rank-4 (B,1,K,1) and crashes the Mul. Minimal in-scope F-LGM-2 fix.
+    # DECISION plan_2026-06-15_00924f53/D-001: broadcast weights via transpose to
+    # (B, 1, K), not expand_dims(axis=1), which gives rank-4 and crashes the Mul.
     H = keras.ops.matmul(
-        # Transpose source: (B, 3, K); per-component weights broadcast as (B, 1, K)
         keras.ops.transpose(mu_source_centered, (0, 2, 1)) * keras.ops.transpose(weights, (0, 2, 1)),
-        mu_target_centered  # (B, K, 3)
-    )  # Result: (B, 3, 3)
+        mu_target_centered
+    )  # (B, 3, 3)
 
-    # H = U * S * V^T; the optimal rotation is R = V * U^T when det(V*U^T) = +1.
-    # Raw tf.linalg.svd is kept for its TUPLE ORDER, not for availability --
-    # see the module docstring's corrected §L2-5 note.
-    # DECISION plan_2026-06-15_00924f53/D-001: tf.linalg.svd returns (s, u, v) with
-    # H = u @ diag(s) @ v^T (v is NOT pre-transposed). The original unpack `U,_,Vt`
-    # mis-bound s->U and v->Vt, crashing transpose on the rank-2 singular values.
-    # Bind u, v correctly; R = V @ U^T. Minimal in-scope F-LGM-2 fix.
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-    # Do NOT try to make this model `mixed_float16`-capable by wrapping this
-    # call in a float32 cast island. TensorFlow has NO `Svd` kernel for
-    # `DT_HALF` on either CPU or GPU (measured: the raise lists
-    # `CPU: {float,double,complex64,complex128}`, `GPU: {double,float}`), and
-    # orthogonalizing a 3x3 cross-covariance whose `det` sign selects the
-    # reflection correction is not sound arithmetic in half precision anyway.
-    # This model is float32-only BY DESIGN -- see the module docstring.
+    # tf.linalg.svd is kept for its (s, u, v) tuple order and un-transposed v,
+    # which keras.ops.svd does not match. See the module docstring.
+    # DECISION plan_2026-06-15_00924f53/D-001: bind u, v as (s, u, v), not
+    # (u, s, v); the prior unpack mis-bound s to U and crashed the transpose.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-011: do not wrap this in a
+    # float32 cast island for mixed_float16; TF has no half-precision Svd kernel.
     _s, U, V = tf.linalg.svd(H)
 
-    R = keras.ops.matmul(V, keras.ops.transpose(U, (0, 2, 1)))  # V * U^T
+    R = keras.ops.matmul(V, keras.ops.transpose(U, (0, 2, 1)))
 
-    # det(R) = -1 means a reflection, not a rotation; correct it by flipping the
-    # sign of the smallest singular direction.
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-083: `ops.det` IS batched and
-    # IS a drop-in here (measured bit-identical). Its two neighbours are not:
-    # `ops.svd` returns `(u, s, vh)` where `tf.linalg.svd` returns `(s, u, v)`
-    # -- a different tuple order AND a transposed third factor, which is exactly
-    # the mistake D-001 records being made at this site once already -- and
-    # `ops.diag` is NOT batched (it returns (3,) for a (B, 3) input where
-    # `tf.linalg.diag` returns (B, 3, 3)).
-    det = ops.det(R)  # Shape: (B,)
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-083: keras.ops.det is batched
+    # and a measured drop-in here; keras.ops.svd and keras.ops.diag are not.
+    det = ops.det(R)  # (B,)
 
-    # Create correction matrix: diag([1, 1, det(R)])
-    # When det(R) = +1, this is identity (no change)
-    # When det(R) = -1, this flips the sign of the third component
+    # diag([1, 1, det(R)]) is identity when det(R) = +1, else flips the third axis.
     correction = keras.ops.stack([
         keras.ops.ones_like(det),
         keras.ops.ones_like(det),
         det
-    ], axis=-1)  # Shape: (B, 3)
-    correction_matrix = tf.linalg.diag(correction)  # Shape: (B, 3, 3)
+    ], axis=-1)  # (B, 3)
+    correction_matrix = tf.linalg.diag(correction)  # (B, 3, 3)
 
-    # Apply correction: R = V * correction * U^T
     R = keras.ops.matmul(
         keras.ops.matmul(V, correction_matrix),
         keras.ops.transpose(U, (0, 2, 1))
     )
 
-    # After rotation, translation aligns the centroids: t = c_target - R * c_source
     t = centroid_target - keras.ops.squeeze(
         keras.ops.matmul(R, keras.ops.expand_dims(centroid_source, axis=-1)),
         axis=-1
-    )  # Shape: (B, 3)
+    )  # (B, 3)
 
     return R, t
 
@@ -718,21 +545,22 @@ def create_latent_gmm_registration(
     scale it, so this factory constructs the class with the paper defaults
     rather than delegating to ``from_variant``.
 
-    Args:
-        num_gaussians: Number of latent GMM components. Must be positive.
-        k_neighbors: Number of neighbors used for local feature extraction.
-            Must be positive and smaller than the number of input points.
-        chamfer_weight: Weight of the Chamfer reconstruction loss.
-        transform_weight: Weight of the supervised transformation loss.
-        **kwargs: Additional arguments forwarded to the model constructor.
+    :param num_gaussians: Number of latent GMM components. Must be positive.
+    :type num_gaussians: int
+    :param k_neighbors: Number of neighbors for local feature extraction. Must
+        be positive and smaller than the number of input points.
+    :type k_neighbors: int
+    :param chamfer_weight: Weight of the Chamfer reconstruction loss.
+    :type chamfer_weight: float
+    :param transform_weight: Weight of the supervised transformation loss.
+    :type transform_weight: float
+    :param kwargs: Additional arguments forwarded to the model constructor.
 
-    Returns:
-        A configured LatentGMMRegistration instance.
+    :return: A configured ``LatentGMMRegistration`` instance.
+    :rtype: LatentGMMRegistration
+    :raises ValueError: If any numeric argument is out of range.
 
-    Raises:
-        ValueError: If any of the numeric arguments is out of range.
-
-    Examples:
+    Example:
         >>> model = create_latent_gmm_registration(num_gaussians=8, k_neighbors=8)
         >>> out = model((keras.random.normal((2, 64, 3)),
         ...              keras.random.normal((2, 64, 3))))

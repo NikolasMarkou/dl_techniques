@@ -1,25 +1,17 @@
-"""Shared internals for the three DINO factory functions.
+"""Shared internals used by all three DINO factory functions.
 
-This module holds the pieces that more than one DINO module needs verbatim:
+This module holds two functions: `reject_input_shape`, which rejects the
+removed `input_shape` factory argument identically for `create_dino_v1`,
+`create_dino_v2` and `create_dino_v3`; and `sync_teacher_to_student`, which
+copies every student weight into its teacher counterpart, used by both
+`create_dino_teacher_student_pair` and `DINOTrainingModel.__init__` so the
+DINO teacher always starts as an exact copy of the student, matching the
+reference `main_dino.py`'s `teacher.load_state_dict(student.state_dict())`
+before step 0.
 
-* `reject_input_shape` — `create_dino_v1`, `create_dino_v2` and `create_dino_v3`
-  converged on a single parameter scheme (see
-  `src/dl_techniques/models/vision/dino/README.md` § "Factory signatures"), and refusing the
-  removed `input_shape` spelling is identical in all three.
-* `sync_teacher_to_student` — the DINO teacher must START as a copy of the student
-  (reference `main_dino.py` does `teacher.load_state_dict(student.state_dict())`
-  before step 0). Both `create_dino_teacher_student_pair` and
-  `DINOTrainingModel.__init__` need it, and a second hand-written copy loop is
-  exactly the duplication that lets the two drift.
-
-It is imported by `src/dl_techniques/models/vision/dino/dino_v1.py`,
-`src/dl_techniques/models/vision/dino/dino_v2.py`,
-`src/dl_techniques/models/vision/dino/dino_v3.py` and
-`src/dl_techniques/models/vision/dino/training.py`.
-
-Do NOT grow this into a shared ViT trunk or a shared `MODEL_VARIANTS` table — that
-unification is a deliberate, recorded non-goal (plan decision D-003: the three model
-files have no test suite dense enough to prove a behaviour-preserving merge).
+This module holds no shared ViT trunk and no shared `MODEL_VARIANTS` table:
+the three DINO model files have no test suite dense enough to prove a
+behaviour-preserving merge (plan decision D-003).
 """
 
 from typing import Any, Dict
@@ -36,26 +28,20 @@ __all__ = ["reject_input_shape", "sync_teacher_to_student"]
 def reject_input_shape(kwargs: Dict[str, Any], factory_name: str) -> None:
     """Raise if a caller passed the removed ``input_shape`` factory argument.
 
-    Interface contract:
-        Parameters:
-            kwargs: The factory's own ``**kwargs`` dict. Inspected, never mutated.
-            factory_name: The calling factory's name, quoted back in the message so
-                the error names the call site the user actually wrote.
-        Returns:
-            ``None`` when ``input_shape`` is absent.
-        Failure mode:
-            ``TypeError`` when ``input_shape`` is present. It is a ``TypeError`` and
-            not a ``ValueError`` because, from the caller's point of view, this is an
-            unexpected keyword argument — the same class of failure Python raises for
-            a name a function does not accept.
+    The `DINOv1` and `DINOv2` constructors still accept `input_shape` as a
+    lower-level escape hatch, so a leftover `input_shape` in a factory call
+    would flow through `**kwargs` into the constructor and can disagree with
+    `image_size` there. Plan decision D-013 records the resulting silent
+    defect: construction succeeds with the wrong patch count and the model
+    only fails, or does not fail, much later.
 
-    Why this refusal exists rather than a silent pass-through: the ``DINOv1`` and
-    ``DINOv2`` CONSTRUCTORS still accept ``input_shape`` as a lower-level escape
-    hatch, so an ``input_shape`` left in a factory call would flow through
-    ``**kwargs`` and reach the constructor, where it can DISAGREE with
-    ``image_size``. That disagreement is the measured silent defect recorded as
-    plan decision D-013: construction succeeds with the wrong patch count and the
-    model only fails (or worse, does not fail) much later.
+    :param kwargs: The factory's own ``**kwargs`` dict. Inspected, never mutated.
+    :type kwargs: Dict[str, Any]
+    :param factory_name: The calling factory's name, quoted back in the
+        error message so it names the call site the user actually wrote.
+    :type factory_name: str
+    :raises TypeError: If ``input_shape`` is present, since from the
+        caller's point of view this is an unexpected keyword argument.
     """
     if "input_shape" in kwargs:
         raise TypeError(
@@ -72,23 +58,16 @@ def reject_input_shape(kwargs: Dict[str, Any], factory_name: str) -> None:
 def _path_suffix(weight: Any) -> str:
     """Return a weight's path with its owning model's root name removed.
 
-    Interface contract:
-        Parameters:
-            weight: A `keras.Variable` (anything exposing `.path`).
-        Returns:
-            The path after the first `/`, or the whole path when there is no
-            `/`. Read only, no side effects.
-        Failure mode:
-            `AttributeError` if `weight` has no `.path` -- not defended
-            against, because the only callers iterate `model.weights`.
+    Two models built by the same factory in the same process get different
+    root names (``sequential`` and ``sequential_1``), so a full-path
+    comparison would reject every legitimate pair; stripping the root lets
+    the comparison work.
 
-    Why the root is stripped rather than compared: two models built by the
-    same factory in the same process get DIFFERENT root names (`sequential`
-    and `sequential_1`), so a full-path comparison would reject every
-    legitimate pair. MEASURED on the in-tree factory pair
-    (`create_dino_teacher_student_pair("tiny", ...)`): 157/157 weights, 0
-    suffix mismatches -- the paths are in fact identical there, and the strip
-    only matters for a hand-built pair.
+    :param weight: A ``keras.Variable`` (anything exposing ``.path``).
+    :type weight: Any
+    :return: The path after the first ``/``, or the whole path when there is
+        no ``/``.
+    :rtype: str
     """
     return weight.path.split("/", 1)[-1]
 

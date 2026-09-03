@@ -1,53 +1,24 @@
 """
-This module provides a `DPTDecoder` layer, which implements the decoder component of
-the Dense Prediction Transformer (DPT) architecture.
+`DPTDecoder`, the decoder half of the Dense Prediction Transformer (DPT)
+architecture, turning encoder features into a dense pixel-wise prediction
+such as a depth map.
 
-While the "Transformer" part of DPT refers to its encoder (which uses a Vision
-Transformer to extract features), the decoder's role is to take these powerful,
-high-level features and translate them back into a dense, pixel-wise prediction, such
-as a depth map or a segmentation mask.
+The "Transformer" in DPT names its encoder, not this decoder. This decoder is
+a plain convolutional head: a sequence of `3x3 Conv2D` + `BatchNormalization`
++ activation blocks, one per entry in `dims`, each narrowing the channel
+count. `upsample_factor` (a power of two, at most `2 ** len(dims)`) places a
+`2x` bilinear `UpSampling2D` after each of the first `log2(upsample_factor)`
+stages; the remaining stages keep the resolution. A final `3x3 Conv2D`
+projects to `output_channels`.
 
-This decoder is not a Transformer-based decoder. Instead, it is a lightweight and
-effective convolutional head. It progressively refines the feature maps from the
-encoder, gradually reducing the channel dimensionality while raising the spatial
-resolution by `upsample_factor` (1, i.e. unchanged, by default) to produce the
-final dense output.
-
-Architectural Design:
-
-1.  **Sequential Convolutional Blocks:**
-    -   The core of the decoder is a sequence of simple convolutional blocks.
-    -   Each block consists of a `3x3 Conv2D` layer, followed by `BatchNormalization`
-        and a non-linear `Activation` (e.g., ReLU).
-    -   The number of blocks and the channel dimension of each block are defined by
-        the `dims` parameter. For example, `dims=[256, 128, 64]` would create three
-        such blocks, reducing the channel dimension from the input's size down to 64.
-
-2.  **Optional Bilinear Upsampling:**
-    -   `upsample_factor` controls how much spatial resolution the decoder
-        recovers. It must be a power of two no greater than `2 ** len(dims)`, and
-        `log2(upsample_factor)` `2x` `UpSampling2D` blocks are placed after the
-        leading non-final conv stages; the remaining stages keep the resolution.
-    -   `upsample_factor=1`, the default, is the no-upsampling case: the input
-        features are assumed to already carry the output resolution, as in DPT
-        variants whose encoder preserves spatial detail or whose multi-scale
-        features are fused *before* this head. `models/vision/depth_anything/model.py`
-        does not use that default — it passes the encoder stride (16), so a
-        `H/16 x W/16` feature map returns to full resolution.
-
-3.  **Final Output Projection:**
-    -   After the sequence of refining blocks, a final `3x3 Conv2D` layer is used to
-        project the features into the desired number of `output_channels`.
-    -   This final layer applies `output_activation`, which defaults to `linear`
-        — deliberately, and `DepthAnything` depends on it: affine-invariant and
-        scale-shift depth losses need the output unconstrained so the network can
-        choose its own scale (see `model.py`'s module docstring). Bounded
-        activations such as `sigmoid` belong only to a pipeline whose target
-        genuinely lives in `[0, 1]`; `softmax` suits multi-class segmentation.
-
-In summary, the `DPTDecoder` acts as a simple but effective "prediction head" that
-takes a high-dimensional feature map from a powerful encoder and translates it into a
-low-dimensional, interpretable, pixel-wise output map.
+The final layer's activation defaults to `linear`, not a bounded activation.
+`DepthAnything` needs that: affine-invariant and scale-shift depth losses
+require an unconstrained output so the network can pick its own scale (see
+`model.py`'s module docstring). A pipeline whose target genuinely lives in
+`[0, 1]` should pass `sigmoid`; multi-class segmentation should pass
+`softmax`. `upsample_factor=1`, the default, assumes the input features
+already carry the output resolution; `model.py` instead passes the encoder
+stride (16), so an `H/16 x W/16` feature map is restored to full resolution.
 """
 
 import keras
@@ -60,75 +31,79 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-#: Variance epsilon for every ``BatchNormalization`` in this package.
-#:
-#: The DPT dense-prediction head below follows the Depth Anything V1 recipe (see
-#: ``model.py``'s module docstring, which enumerates the three places this
-#: package deliberately departs from the paper — normalization is not one of
-#: them). That reference is PyTorch, whose ``nn.BatchNorm2d`` defaults to 1e-5;
-#: Keras' ``BatchNormalization`` defaults to 1e-3, 100x larger. The same fact is
-#: stated for the other torch port in this repo at
-#: ``layers/fastvit/reference.py``, where getting it wrong once silently
-#: mis-normalized 86 of 114 layers with every test green.
-#:
-#: ``model.py``'s placeholder encoder imports this constant too. Its
-#: justification is different and weaker: that encoder is an in-repo stand-in
-#: for DINOv2 with no reference implementation at all, so the value there is
-#: chosen for consistency with the head it feeds, not for fidelity.
+#: Variance epsilon for every `BatchNormalization` in this package.
+#: Matches the torch reference's `nn.BatchNorm2d` default (1e-5), not
+#: Keras' own default (1e-3, 100x larger).
 REFERENCE_BN_EPSILON: float = 1e-5
 
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.depth_anything.components")
 class DPTDecoder(keras.layers.Layer):
-    """DPT (Dense Prediction Transformer) decoder.
+    """Convolutional decoder head for dense prediction (DPT-style).
 
-    Implements the decoder component of the DPT architecture for dense prediction tasks.
-    The decoder processes multi-scale features through a series of convolutional layers
-    with batch normalization and activation functions to produce dense predictions.
+    Architecture:
 
-    Args:
-        dims: List of integers, decoder layer dimensions for each stage.
-            Defaults to [256, 128, 64, 32].
-        output_channels: Integer, number of output channels for final prediction.
-            Defaults to 1.
-        kernel_initializer: String or Initializer, initializer for convolutional kernels.
-            Defaults to "he_normal".
-        kernel_regularizer: Regularizer or None, regularizer for convolutional kernels.
-            Defaults to None.
-        use_bias: Boolean, whether to use bias in convolutional layers.
-            Defaults to False.
-        activation: String or callable, activation function to use.
-            Defaults to "relu".
-        output_activation: String or callable, activation function for output layer.
-            Defaults to "linear" (no activation). For depth estimation pipelines that
-            use AffineInvariantLoss or DepthEstimationLoss, the network output should
-            be unconstrained; clamp to ``[0,1]`` only when explicitly required.
-        upsample_factor: Integer, total bilinear upsampling factor applied across the
-            decoder stages. Must be a power of 2 and ``<= 2 ** len(dims)``. When
-            greater than 1, ``2x`` ``UpSampling2D`` blocks are placed after the first
-            ``log2(upsample_factor)`` non-final conv stages so the cumulative upscale
-            equals ``upsample_factor``. The remaining stages keep the resolution.
-            Defaults to 1 (no upsampling — original behavior).
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
+
+        Input [B, H, W, C]
+              │
+              ▼
+        ┌─────────────────────────────┐
+        │ per stage i in dims:        │
+        │  Conv2D(dims[i], 3x3, same) │
+        │  → BatchNorm(eps=1e-5)      │
+        │  → Activation               │
+        │  → UpSampling2D(2x, bilinear)│  (only for the first
+        └──────────────┬──────────────┘   log2(upsample_factor) stages)
+                       ▼
+        ┌─────────────────────────────┐
+        │ Conv2D(output_channels, 3x3)│
+        │ → output_activation         │  (linear by default)
+        └──────────────┬──────────────┘
+                       ▼
+        Output [B, H*upsample_factor, W*upsample_factor, output_channels]
+
+    :param dims: Channel dimension per decoder stage; its length sets the
+        number of stages.
+    :type dims: Optional[List[int]]
+    :param output_channels: Number of channels in the final prediction.
+    :type output_channels: int
+    :param kernel_initializer: Initializer for every convolutional kernel.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Optional regularizer for every convolutional
+        kernel.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param use_bias: Whether the stage convolutions use a bias term. The
+        final output convolution always uses one.
+    :type use_bias: bool
+    :param activation: Activation applied after each stage's batch norm.
+    :type activation: Union[str, callable]
+    :param output_activation: Activation applied to the final projection.
+        Defaults to ``"linear"`` so the output stays unconstrained for
+        affine-invariant and scale-shift depth losses; pass ``"sigmoid"``
+        only when the target genuinely lives in ``[0, 1]``, or ``"softmax"``
+        for multi-class segmentation.
+    :type output_activation: Union[str, callable]
+    :param upsample_factor: Total bilinear upsampling factor across every
+        stage. Must be a power of 2, at most ``2 ** len(dims)``.
+    :type upsample_factor: int
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        4D tensor ``(batch_size, height, width, channels)``.
 
     Output shape:
-        4D tensor with shape:
-        `(batch_size, height * upsample_factor, width * upsample_factor,
-        output_channels)`
-
-    Returns:
-        A 4D tensor representing the decoded dense predictions.
+        4D tensor ``(batch_size, height * upsample_factor,
+        width * upsample_factor, output_channels)``.
 
     Example:
-        >>> decoder = DPTDecoder(dims=[256, 128, 64, 32], output_channels=1)
-        >>> x = keras.random.normal([2, 64, 64, 768])  # Input features
-        >>> output = decoder(x)
-        >>> print(output.shape)
-        (2, 64, 64, 1)
+        .. code-block:: python
+
+            decoder = DPTDecoder(dims=[256, 128, 64, 32], output_channels=1)
+            x = keras.random.normal([2, 64, 64, 768])
+            output = decoder(x)
+            print(output.shape)  # (2, 64, 64, 1)
     """
 
     def __init__(
@@ -195,10 +170,8 @@ class DPTDecoder(keras.layers.Layer):
             self.conv_layers.append(conv)
 
             # Batch normalization layer
-            # DECISION plan-2026-08-17T183311-79c63e38/D-028
-            # `epsilon` is EXPLICIT: Keras' 1e-3 default is 100x the torch
-            # reference this head follows. Do NOT drop the argument, and do NOT
-            # restate the literal — the constant has one definition above.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028: pass epsilon explicitly, never drop it.
+            # Keras' 1e-3 default is 100x the torch reference this head follows. See REFERENCE_BN_EPSILON above.
             bn = keras.layers.BatchNormalization(
                 epsilon=REFERENCE_BN_EPSILON, name=f'bn_{i}'
             )
@@ -237,22 +210,11 @@ class DPTDecoder(keras.layers.Layer):
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Build every sublayer `call` runs, in `call`'s own shape order.
 
-        Args:
-            input_shape: Shape tuple of the input tensor.
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[int, ...]
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-124
-        # Do NOT go back to "sublayers are built lazily on the first call". That
-        # is true of `__call__` and FALSE of `keras.models.load_model`, which
-        # builds from the SAVED input_shape and restores immediately -- so the
-        # restore found a zero-weight decoder. MEASURED 2026-08-21, standalone,
-        # CPU: pre-forward weight count after `build` was 0 (post-forward 12),
-        # and a perturb-save-reload moved the output by max|dOut| = 70.98 with
-        # 12 of 12 weights back at class defaults. The save side was BLIND --
-        # the archive held 12 of 12 HDF5 datasets both before and after the fix
-        # -- so an archive-content check alone cannot see this, and neither can
-        # a post-forward count. Inside `DepthAnything` it was masked by that
-        # model's `load_own_variables` force-build; `DPTDecoder` is public API.
-        # See decisions.md D-124.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-124: sublayers build eagerly here, not lazily on first call.
+        # `load_model` restores from the saved input_shape without a forward pass; lazy build left it 0-weight. See decisions.md.
         self._build_input_shape = input_shape
         shape = tuple(input_shape)
         for conv, bn, act, up in zip(
@@ -276,15 +238,14 @@ class DPTDecoder(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through decoder.
+        """Run the decoder stages then the output projection.
 
-        Args:
-            inputs: Input features tensor with shape (batch_size, height, width, channels).
-            training: Boolean indicating whether the layer should behave in
-                training mode or inference mode.
-
-        Returns:
-            Decoded output tensor with shape (batch_size, height, width, output_channels).
+        :param inputs: Input features, shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer runs in training or inference mode.
+        :type training: Optional[bool]
+        :return: Decoded output, shape ``(batch_size, height, width, output_channels)``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -309,11 +270,10 @@ class DPTDecoder(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
         """Compute the output shape of the layer.
 
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Shape tuple of the input.
+        :type input_shape: Tuple[int, ...]
+        :return: Output shape tuple.
+        :rtype: Tuple[int, ...]
         """
         # Convert to list for consistent manipulation
         input_shape_list = list(input_shape)
@@ -333,8 +293,8 @@ class DPTDecoder(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
 
-        Returns:
-            Dictionary containing the layer configuration.
+        :return: Dictionary containing the layer configuration.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -352,8 +312,8 @@ class DPTDecoder(keras.layers.Layer):
     def get_build_config(self) -> Dict[str, Any]:
         """Get build configuration for serialization.
 
-        Returns:
-            Dictionary containing the build configuration.
+        :return: Dictionary containing the build configuration.
+        :rtype: Dict[str, Any]
         """
         return {
             "input_shape": self._build_input_shape,
@@ -362,8 +322,8 @@ class DPTDecoder(keras.layers.Layer):
     def build_from_config(self, config: Dict[str, Any]) -> None:
         """Build layer from configuration.
 
-        Args:
-            config: Dictionary containing build configuration.
+        :param config: Dictionary containing build configuration.
+        :type config: Dict[str, Any]
         """
         if config.get("input_shape") is not None:
             self.build(config["input_shape"])

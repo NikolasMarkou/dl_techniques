@@ -1,90 +1,25 @@
 """CLIP-style contrastive dual encoder whose towers are CliffordNet
-geometric-algebra blocks rather than attention, with a selectable
-Clifford-aware projection head.
+geometric-algebra blocks instead of attention, with a selectable Clifford-aware
+projection head.
 
-The premise CLIP rests on is unchanged here: two towers are trained to place an
-image and its caption at the same point of a shared unit sphere, supervised only
-by which pairing in the batch is the true one. What changes is how each tower
-mixes information. A CliffordNet block replaces the attention matmul with a
-*sparse rolling geometric product*: features are read as multivectors over a
-channel axis, and pairs of channels separated by a fixed shift are combined
-through the geometric product `a b = <a, b> + a ^ b`. The symmetric inner part
-behaves like the correlation a dot-product attention would compute, while the
-antisymmetric wedge part carries orientation — information that a symmetric
-similarity discards entirely. Because the shifts are a small fixed set rather
-than an all-pairs comparison, cost is linear in sequence or spatial size instead
-of quadratic, which is the practical reason to prefer it here.
+Two towers are trained to place an image and its caption at the same point of
+a shared unit sphere, supervised only by which pairing in the batch is the
+true one, exactly as in standard CLIP. What differs is how each tower mixes
+information: a CliffordNet block reads features as multivectors over the
+channel axis and combines channel pairs at a fixed shift through the
+geometric product `a b = <a, b> + a ^ b`. The inner part behaves like a
+dot-product attention score; the wedge part carries orientation, which a
+symmetric similarity discards. Because the shift set is small and fixed
+rather than all-pairs, cost is linear in sequence or spatial size.
 
-The geometric product mixes *channels*, not positions. Spatial and sequential
-context therefore has to be supplied separately, by depthwise convolution inside
-the block — bidirectional in the vision tower, strictly left-looking in
-:class:`CausalCliffordNetBlock` so text position `i` sees only positions `<= i`.
-This is also why the vision tower has no positional signal by default: nothing
-in the stem or the product distinguishes one patch coordinate from another.
-``vision_positional_encoding`` adds a learned 2-D table over the post-stem map
-and is default-off, so leaving it off is byte-identical to the pre-flag model and
-existing checkpoints keep loading.
-
-The vision tower is hierarchical, not isotropic. A stride-``vision_patch_size``
-conv stem (two-stage with BatchNorm and SiLU at patch sizes 1 and 4) feeds
-``len(vision_stage_channels)`` stages; between adjacent stages a
-:class:`PatchMerging` halves resolution and emits exactly ``2 * src`` channels,
-with an extra ``Dense`` inserted only when the requested next-stage width is not
-that doubling. The shipped ladder is ``[D, D, 2D, 2D]``, which doubles twice
-across four stages and so keeps the parameter budget near the older isotropic
-tower while collecting the activation-memory win from spatial halving. Total
-depth is preserved against that older ladder — the stage depths sum to the
-former ``vision_depth``. The text tower stays isotropic. Both towers use an
-*external* residual, ``x = x + drop_path(block(x))``: the blocks are
-transform-only and returning `block(x)` directly would annihilate the signal
-across a deep stack.
-
-One validation rule looks arbitrary and is not. ``image_size //
-vision_patch_size`` must be at least `2 ** n_stages`, so the last stage still
-holds a 2x2 map. At 1x1 the attention pool degenerates to a softmax over a single
-element, whose gradient is identically zero — the pooling layer would still run
-and still produce a plausible vector while learning nothing.
-
-Where a standard CLIP head collapses the tower output to one pooled vector, this
-one keeps two views and combines them through the algebra. Pooling is routed
-through the generic :class:`SequencePooling` for every view, including the vision
-side: the last-stage map is reshaped to a ``(B, H*W, D)`` token sequence so that
-mean pooling over it *is* the old global average pool, and there is a single
-pooling surface rather than one per tower. Four heads are selectable.
-``plain`` uses only the canonical CLIP anchor and leaves the Clifford content in
-the backbone. ``mean_max`` and ``learned_query`` return the geometric product of
-two pooled views outright. The default ``learned_query_residual`` instead adds
-that product back onto the anchor through a per-channel LayerScale gate
-initialised at 1e-5, so training starts numerically indistinguishable from
-``plain`` and the wedge/inner content is introduced only where it lowers the
-contrastive loss. The anchors are the canonical CLIP ones — mean over patches for
-vision, the last non-pad token for text — and ``z_det`` on the text side is the
-*masked* mean, so padding never dilutes the pool.
-
-Numerical placement of the temperature is deliberate at three points.
-``logit_scale`` is created with an explicit ``dtype="float32"`` because under a
-bf16 global policy it would otherwise be a bf16 weight and drift the logits;
-``exp`` is evaluated in float32 because fp16 autocast overflows past
-`log(65504)`; and the result is clipped to ``logit_scale_max`` (OpenCLIP's 100.0)
-before being cast to the features' compute dtype for the matmul. The L2
-normalization in both encoders is likewise computed in float32 with a 1e-8
-epsilon that would underflow to zero in fp16, then cast back — an identity cast
-at float32.
-
-``build`` runs a symbolic forward pass through both encoders before calling
-``super().build``. Sub-layers here are created in ``__init__`` but their weights
-are shape-dependent, and a lazily built sublayer silently loses its weights on a
-``.keras`` round trip; forcing the pass materialises the whole tree first.
-
-The Penguin-VL paper argues against contrastive pretraining as the initialization
-for VLM vision encoders, preferring LLM-initialised encoders under generative
-supervision. This model deliberately does not follow that recommendation — it is
-a CLIP model by request — and borrows from Penguin-VL only the training-schedule
-ideas (cosine LR, 3% warmup, low-to-high resolution curriculum), which live in
-the trainer. Its reconstruction losses need a frozen teacher encoder and are left
-for the trainer to plug in. The contrastive loss itself is not defined here
-either: ``dl_techniques.losses.CLIPContrastiveLoss`` already matches this model's
-output schema.
+The geometric product mixes channels, not positions, so spatial and
+sequential context comes from a depthwise convolution inside each block
+instead — bidirectional in the vision tower, causal in the text tower. The
+vision tower is hierarchical (patch stem, then stages linked by
+`PatchMerging`), the text tower is isotropic, and both use an external
+residual around each transform-only block. The contrastive loss itself is
+not defined here; `dl_techniques.losses.CLIPContrastiveLoss` matches this
+model's output schema.
 
 References:
     - Ji, 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -155,41 +90,14 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 # ---------------------------------------------------------------------------
 
-# DECISION plan-2026-08-19T163559-499b6f0e/D-072
-# This is ONE module-level `Initializer` INSTANCE used as a default argument, so
-# every `CliffordCLIP` in the process -- and every sub-layer inside one -- was
-# handed the same seedless object, which replays its draw. MEASURED on
-# `CliffordCLIP.from_variant("nano", image_size=64, context_length=16,
-# vision_patch_size=4)`: **763 bit-identical same-size weight pairs of 137
-# non-constant tensors**, including
-# `vision_clifford_block_0/linear_det/kernel == text_clifford_block_0/linear_det/kernel`
-# -- the two TOWERS starting as the same function, which is the most extreme
-# different-role collision D-057 convicts anywhere in the tree.
-#
-# The constant STAYS (it is the documented 0.02 truncated-normal default, and
-# `get_config` must keep reporting it), but EVERY consumer below now takes
-# `clone_initializer(...)`. Do NOT pass this object straight to a sub-layer, and
-# do NOT "simplify" the clones away. See decisions.md D-072.
+# DECISION plan-2026-08-19T163559-499b6f0e/D-072: this is one shared Initializer
+# instance; pass `clone_initializer(...)` to every consumer, never the object itself —
+# sharing it gave the two towers 763 bit-identical weight pairs. See decisions.md.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
-# DECISION plan-2026-08-23T091307-9a110062/D-480
-# Vision-stem BatchNorm momentum. This stem mirrors
-# `CliffordNet.model._build_stem`, and it inherited that stem's defect along
-# with its semantics: omitting `momentum` hands the layer Keras' `0.99`, while
-# the shared reference (Ji 2026, https://arxiv.org/abs/2601.06793) specifies
-# `0.9`. Do NOT drop this kwarg; the two modules are ONE root cause and must
-# stay in step -- see `models/vision/cliffordnet/model.py:_STEM_BN_MOMENTUM`.
-#
-# THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY -- do not "correct" 0.9 to 0.1.
-#   Keras: moving = momentum * moving + (1 - momentum) * batch
-#          https://keras.io/api/layers/normalization_layers/batch_normalization/
-#   torch: moving = (1 - momentum) * moving + momentum * batch
-#          https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html
-# so `keras_momentum = 1 - torch_momentum`.
-#
-# Training-only: it does not enter the `training=False` forward pass and changes
-# no weight shape, so pre-existing checkpoints load and infer bit-identically.
-# See decisions.md D-480.
+# DECISION plan-2026-08-23T091307-9a110062/D-480: BatchNorm momentum is 0.9 (torch
+# convention), matching CliffordNet's stem; Keras and torch define momentum oppositely
+# (keras_momentum = 1 - torch_momentum), so do not "correct" this to 0.1. See decisions.md.
 _VISION_STEM_BN_MOMENTUM = 0.9
 _LN_EPS: float = 1e-6
 
@@ -532,7 +440,7 @@ class CliffordCLIP(keras.Model):
                 )
         # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
         # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) —
-        # a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
+        # a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do not relax to 2^(n_stages-1).
         post_stem = image_size // vision_patch_size
         if post_stem < (1 << n_stages):
             raise ValueError(
@@ -916,13 +824,8 @@ class CliffordCLIP(keras.Model):
         self.text_head_geo = None
 
         # DECISION plan-2026-07-15T140843-168d5bac/D-001: pool via generic
-        # SequencePooling (attention_hidden_dim=channels REQUIRED — its default
-        # 256 differs) + shared apply_clifford_head; replaces the duplicated
-        # per-tower head if/else. Do NOT re-wire GlobalAveragePooling2D /
-        # GlobalMaxPooling2D / bespoke AttentionPooling here — SequencePooling
-        # is byte-identical to all of them at fp32 (findings F2) and keeps one
-        # pooling surface. Checkpoint-incompatible by design (user waived BC).
-        # See decisions.md D-001.
+        # SequencePooling (attention_hidden_dim=channels, its default 256 differs) —
+        # do not re-wire GlobalAveragePooling2D/GlobalMaxPooling2D here. See decisions.md.
         self.vision_det_pool = SequencePooling(
             strategy="mean", name="vision_det_pool"
         )
@@ -1036,7 +939,7 @@ class CliffordCLIP(keras.Model):
             return
 
         # DECISION plan_2026-05-31_76981d58/D-001: pin logit_scale to float32.
-        # Do NOT drop dtype="float32" — under a bf16 global policy the learnable
+        # Do not drop dtype="float32" — under a bf16 global policy the learnable
         # temperature would silently be created as bf16, drifting the contrastive
         # logits. float32 temperature is standard CLIP practice. See decisions.md D-001.
         self.logit_scale = self.add_weight(
@@ -1280,7 +1183,7 @@ class CliffordCLIP(keras.Model):
     def _get_logit_scale(self) -> keras.KerasTensor:
         """Return ``exp(logit_scale)`` clipped to ``logit_scale_max``."""
         # Match OpenCLIP: log-temperature is learned, temperature is clipped.
-        # DECISION plan-2026-07-15T114613-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do NOT let this run in compute-dtype.
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do not let this run in compute-dtype.
         ls = ops.cast(self.logit_scale, "float32")
         scale = ops.exp(ls)
         return ops.minimum(scale, ops.cast(self.logit_scale_max, "float32"))

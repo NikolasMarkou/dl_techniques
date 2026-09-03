@@ -1,8 +1,12 @@
-"""LeWM configuration dataclass.
+"""``LeWMConfig``, a dataclass holding every hyperparameter LeWM needs.
 
-Mirrors `/tmp/lewm_source/config_lewm.yaml` defaults so we can reproduce
-upstream behavior by default, but every field is overridable for tests /
-smoke runs.
+Every field has a default that matches the upstream reference config, and
+every field can be overridden independently — there is no named-scale
+table, so retuning LeWM means changing a field, not picking a variant.
+
+Caller note: ``num_frames`` is normally left at its sentinel default (0)
+and gets derived from ``history_size + num_preds`` in ``__post_init__``.
+An explicit ``num_frames`` is accepted only if it is at least that sum.
 """
 
 from dataclasses import dataclass, asdict
@@ -15,7 +19,8 @@ class LeWMConfig:
     img_size: int = 224
     patch_size: int = 14
     img_channels: int = 3
-    encoder_scale: str = "tiny"  # dl_techniques ViT scale; tiny = 192d, 3h, 12L
+    # dl_techniques ViT scale name; "tiny" means 192 dims, 3 heads, 12 layers.
+    encoder_scale: str = "tiny"
 
     # Embeddings
     embed_dim: int = 192
@@ -23,10 +28,8 @@ class LeWMConfig:
     # Temporal setup
     history_size: int = 3
     num_preds: int = 1
-    # num_frames sizes the predictor's positional embedding. It MUST cover the
-    # training sequence length T = history_size + num_preds. Leave at the
-    # sentinel 0 (default) to have it derived in __post_init__; an explicit
-    # value is allowed only if it is >= history_size + num_preds.
+    # Sizes the predictor's positional embedding; must cover history_size + num_preds.
+    # Leave at 0 to derive it in __post_init__.
     num_frames: int = 0
 
     # Predictor transformer
@@ -51,11 +54,7 @@ class LeWMConfig:
     sigreg_num_proj: int = 1024
 
     def __post_init__(self) -> None:
-        # num_frames is a serialized field (not a @property) so to_dict/from_dict
-        # round-trips for old and new configs. Derive it from history_size +
-        # num_preds when the caller left the sentinel 0; reject an explicit value
-        # that cannot cover the training sequence length (would crash
-        # ARPredictor's pos-embedding add).
+        # num_frames is a stored field, not a property, so to_dict/from_dict round-trip it.
         required = self.history_size + self.num_preds
         if self.num_frames <= 0:
             self.num_frames = required

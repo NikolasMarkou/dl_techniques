@@ -1,79 +1,38 @@
 """
-Mamba-2 encoder: a stack of state-space-duality blocks with head-scalar state
-decay, grouped B/C projections and an optional parallel gated-MLP path.
+Mamba-2 encoder: state-space-duality blocks with head-scalar state decay,
+grouped B/C projections and an optional parallel gated-MLP path.
 
-Mamba-1 pays for its selectivity with a shape problem. Because each channel of the
-inner dimension carries its own `d_inner x d_state` transition, the recurrence is a
-sequence of small element-wise products that no matrix-multiply unit can help with,
-and the state must stay small — `d_state = 16` in v1 — or the parameter and memory
-cost explodes. Mamba-2 removes the obstruction by restricting `A` to a *scalar per
-head*: `A_log` has shape `(nheads,)`, so the transition is `a_t * I` rather than a
-diagonal matrix, and the whole recurrence collapses to
+Mamba-1 gives each inner-dimension channel its own `d_inner x d_state`
+transition, so the state must stay small or the parameter cost explodes.
+Mamba-2 restricts the transition `A` to one scalar per head instead of a
+diagonal matrix, which lets `d_state` grow to 128 (eight times v1's default)
+at negligible cost. Unrolled, the resulting recurrence is a lower-triangular
+matrix with a scalar decay mask in place of softmax, which is the
+structured-state-space-duality view the architecture is named for. `B` and
+`C` are shared across `ngroups` head groups and broadcast to the heads each
+group serves, the same grouping grouped-query attention uses. `z`, `x`, `B`,
+`C` and `dt` all come from one `in_proj` at the top of the block, before the
+convolution, rather than after it as in v1, so every projection in the block
+depends only on the block's own input.
 
-`h_t = a_t * h_{t-1} + delta_t * (B_t x_t^T)`,  `y_t = C_t^T h_t`
+Setting `d_ssm < d_inner` routes the first `d_mlp` channels around the SSM
+as a gated MLP (`silu(z0) * x0`), concatenated back before the output
+projection.
 
-This is the structured-state-space-duality view: unrolled, the map from inputs to
-outputs is a lower-triangular matrix whose entries are `C_i^T (prod_{k} a_k) B_j`,
-which is a *masked attention matrix* with a scalar decay mask in place of a
-softmax. The restriction is what buys the freedom elsewhere — with the state
-transition reduced to one number per head, `d_state` can grow to 128 (the default
-here, eight times v1) at negligible cost, and the state is where a recurrent model's
-capacity actually lives.
+The scan runs sequentially with `while_loop`, not the chunked-matmul SSD
+algorithm the paper describes, so treat this as a correctness reference
+rather than a speed benchmark. The model returns only
+`{'last_hidden_state'}`; attach a task head externally. The final
+normalization is always plain `LayerNormalization` — the `rmsnorm` flag
+governs only the in-block SSM-output norm. `MODEL_VARIANTS` follows the
+released Mamba-2 checkpoint configs (`130m/370m/780m/1.3b/2.7b`); the
+Mamba-1 series names (`1.4b`/`2.8b`) still resolve as aliases to the
+matching v2 shapes. `780m` here and `790m` in `mamba_v1.py` are each correct
+for their own series, not a mismatch.
 
-The layer's parameterization follows from that duality. `B` and `C` are shared
-across `ngroups` head groups rather than being per-head, exactly as keys and values
-are shared in grouped-query attention and for the same reason: each group is
-*broadcast* to the `nheads // ngroups` heads it serves. The word "broadcast" is
-load-bearing — the scan summed `B` and `C` over the group axis until 2026-08-19,
-which is not GQA and made `ngroups > 1` a rescaled `ngroups = 1` (D-042). `dt` is emitted
-directly by the input projection as one scalar per head, with no low-rank `dt_rank`
-bottleneck — v1 needed that bottleneck because it produced a `Δ` per inner channel.
-Critically, `z`, `x`, `B`, `C` and `dt` all come out of a *single* `in_proj` at the
-top of the block, before the convolution, whereas v1 computes `Δ, B, C` from the
-post-convolution activations. That reordering is not cosmetic: it makes every
-projection in the block a function of the block input alone, which is what allows
-the block to be sharded across devices without a sequential dependency in the
-middle.
-
-`A` is used as `-exp(A_log)` with `A_log` initialized from `log U(1, 16)`, so decay
-rates are negative by construction and the recurrence is unconditionally stable.
-`dt_bias` is set to the inverse-softplus of a log-uniform draw in `[dt_min, dt_max]`
-so heads begin with a spread of timescales. Setting `d_ssm < d_inner` splits the
-inner width: the first `d_mlp` channels bypass the SSM entirely as a gated MLP
-(`silu(z0) * x0`) and are concatenated back before the output projection, which lets
-a block trade state-space capacity for cheap pointwise capacity.
-
-**The scan here is a sequential `while_loop`, not the SSD chunked-matmul
-algorithm.** The entire practical argument for Mamba-2 is that the scalar-`A`
-structure permits a block-decomposed formulation that runs on matrix-multiply
-hardware and is several times faster than v1's scan. This implementation reproduces
-the architecture and the parameterization but evaluates the recurrence one timestep
-at a time with a `scatter_update` per step, so none of that speedup is present. Use
-it as a correctness reference; do not benchmark it against the paper.
-
-Two behaviours worth knowing before use. The model returns only
-`{'last_hidden_state'}` — there is no LM head and no tied output projection, so a
-task head must be attached externally, and the final normalization is a plain
-`LayerNormalization` regardless of the `rmsnorm` flag (that flag governs the
-in-block SSM-output norm only). And the `'130m'` entry of `MODEL_VARIANTS` carries a
-`'name'` key whose value `'base'` is forwarded verbatim into `keras.Model.__init__`,
-so `from_variant('130m')` yields a model literally named `base`; the key was
-evidently intended as an alias marker and is not one.
-
-`MODEL_VARIANTS` was corrected on 2026-08-18 against the released Mamba-2
-checkpoints' own configs: `370m` carried 24 layers instead of 48 and `780m` carried
-36 instead of 48, so those two rows built roughly half the model their names
-advertise, silently. The row names were corrected at the same time - the Mamba-2
-series ships `130m/370m/780m/1.3b/2.7b`, where Mamba-1 ships
-`130m/370m/790m/1.4b/2.8b`, so this table's former `1.4b`/`2.8b` keys named models
-that do not exist in this series. They still resolve, as aliases onto `1.3b`/`2.7b`,
-whose shapes are identical. Note that `780m` here versus `790m` in
-:mod:`~dl_techniques.models.language.mamba.mamba_v1` is correct in both files, not a typo in
-either.
-
-Residual handling matches v1: blocks return `(output, running_residual)` and the
-final addition is deferred to the model tail, so a caller stacking blocks manually
-must thread the residual through or end up with no skip connections at all.
+Residual handling matches v1: blocks return `(output, running_residual)` and
+the final addition happens once in the model tail, so a caller stacking
+blocks by hand must thread the residual through.
 
 References:
     - Dao and Gu, 2024. Transformers are SSMs: Generalized Models and Efficient
@@ -103,11 +62,25 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.mamba.mamba_v2")
 class Mamba2(keras.Model):
     """
-    Mamba v2 foundation model for efficient sequence modeling.
+    Mamba-2 encoder: a stack of Mamba2ResidualBlocks producing hidden states.
 
-    This model stacks Mamba2ResidualBlocks to form a deep sequence model,
-    implementing the architecture from "Mamba: Linear-Time Sequence
-    Modeling with Selective State Spaces" with V2 block enhancements.
+    Architecture:
+
+    .. code-block:: text
+
+        Input (token IDs)
+               │
+               ▼
+        Token Embedding
+               │
+               ▼
+        Mamba2ResidualBlock x num_layers
+               │
+               ▼
+        Final LayerNorm
+               │
+               ▼
+        Output (hidden states)
 
     :param vocab_size: Size of the vocabulary.
     :param d_model: Dimensionality of the model's hidden states.
@@ -133,37 +106,14 @@ class Mamba2(keras.Model):
     :param bias: Forwarded to every ``Mamba2Layer`` in the stack.
     :param conv_bias: Forwarded to every ``Mamba2Layer`` in the stack.
 
-    .. note::
-       Those six joined ``norm_before_gate`` on 2026-08-19. They are declared,
-       stored and used by ``Mamba2Layer`` but were declared by neither this
-       class nor ``Mamba2ResidualBlock``, so no assembled Mamba-2 model could
-       reach them: ``ngroups`` was pinned at 1, ``conv_bias`` could not be
-       disabled, and the Δ init range could not be widened. Every default
-       matches ``Mamba2Layer``'s, so the default construction path is
-       unchanged. See decisions.md plan-2026-08-18T140459-7991552f/D-036.
+    Note:
+        Every default here matches the corresponding `Mamba2Layer` default,
+        so the default construction path is unchanged. See decisions.md
+        plan-2026-08-18T140459-7991552f/D-036.
     """
 
-    # DECISION plan-2026-08-18T140459-7991552f/D-024: this table is derived from the
-    # Mamba-2 release's own `config.json` files, NOT from `mamba_v1.MODEL_VARIANTS`
-    # and NOT from the Mamba-1 paper. The distinction is load-bearing three times over.
-    #
-    # (1) Mamba-2 is Dao and Gu 2024 (arXiv 2405.21060), not Gu and Dao 2023
-    #     (arXiv 2312.00752, which is Mamba-1). A reviewer citing "Gu and Dao 2023,
-    #     Table 9" for these numbers is citing the wrong paper.
-    # (2) The Mamba-2 series does NOT ship a `1.4b` or a `2.8b`. Its five released
-    #     checkpoints are `state-spaces/mamba2-{130m,370m,780m,1.3b,2.7b}`; the
-    #     Mamba-1 series is `state-spaces/mamba-{130m,370m,790m,1.4b,2.8b}`. The
-    #     `780m` spelling here is CORRECT for v2 and `790m` is correct for v1 - the
-    #     two files disagreeing on that name is not a bug in either. Fetched
-    #     2026-08-18 from https://huggingface.co/state-spaces/mamba2-<size>/raw/main/config.json
-    #     (`1.4b`/`2.8b`/`790m` under the `mamba2-` prefix return HTTP 401: no such repo).
-    # (3) Before this fix the table read 370m -> 24 layers and 780m -> 36 layers, so
-    #     `Mamba2.from_variant("370m")` built HALF the advertised model with no error.
-    #     Do NOT "fix" that by assuming v1's block-count doubling rationale ("one Mamba
-    #     block replaces an attention+MLP pair") transfers - the SSD block has a
-    #     different per-block parameter count, so the rationale does not transfer even
-    #     though the depths happen to coincide. The depths below are what the released
-    #     configs say (`n_layer`), measured, not reasoned from v1.
+    # DECISION plan-2026-08-18T140459-7991552f/D-024: sourced from the Mamba-2
+    # release configs (Dao and Gu 2024), not the Mamba-1 paper. See decisions.md.
     #
     #   variant  d_model  n_layer   released as
     #   130m       768      24      state-spaces/mamba2-130m
@@ -172,8 +122,8 @@ class Mamba2(keras.Model):
     #   1.3b      2048      48      state-spaces/mamba2-1.3b
     #   2.7b      2560      64      state-spaces/mamba2-2.7b
     #
-    # `vocab_size` is deliberately NOT carried here: the checkpoints use 50277 padded
-    # to a multiple of 16, and `from_variant` requires the caller to state it.
+    # vocab_size is not carried here: checkpoints use 50277 padded to a
+    # multiple of 16, and from_variant requires the caller to state it.
     MODEL_VARIANTS = {
         "2.7b": {"d_model": 2560, "num_layers": 64},
         "1.3b": {"d_model": 2048, "num_layers": 48},
@@ -182,11 +132,8 @@ class Mamba2(keras.Model):
         "130m": {"d_model": 768, "num_layers": 24, "name": "base"},
     }
 
-    # Accepted spellings that are not Mamba-2 size names. `base` is the pre-existing
-    # alias for `130m`; `1.4b`/`2.8b` are the Mamba-1 series names, kept accepting
-    # because they were this table's keys before 2026-08-18 and they resolve to the
-    # v2 rows with identical `d_model`/`num_layers`, so no caller silently changes
-    # model. They are aliases, not sizes: they do not appear in `MODEL_VARIANTS`.
+    # Mamba-1 series names, kept resolving to the v2 rows with identical
+    # d_model/num_layers so no caller silently changes model.
     VARIANT_ALIASES = {
         "base": "130m",
         "1.4b": "1.3b",
@@ -234,9 +181,8 @@ class Mamba2(keras.Model):
         self.pad_token_id = pad_token_id
         self.rmsnorm = rmsnorm
         self.norm_before_gate = norm_before_gate
-        # DECISION plan-2026-08-18T140459-7991552f/D-036
-        # Pure pass-throughs to `Mamba2Layer` via `Mamba2ResidualBlock`; the
-        # defaults MUST equal `Mamba2Layer`'s. See the class docstring note.
+        # DECISION plan-2026-08-18T140459-7991552f/D-036: pure pass-throughs to
+        # Mamba2Layer; defaults must equal Mamba2Layer's. See decisions.md.
         self.ngroups = ngroups
         self.dt_min = dt_min
         self.dt_max = dt_max

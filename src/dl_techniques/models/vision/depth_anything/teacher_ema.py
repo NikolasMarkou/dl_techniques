@@ -1,34 +1,27 @@
 """
-Teacher EMA decay schedules + Keras callback for DepthAnything.
+Teacher EMA decay schedules and a Keras callback for DepthAnything.
 
-This module provides on-step EMA decay schedules (cosine and linear, with
-warmup → asymptote) and a small ``keras.callbacks.Callback`` that drives
-``DepthAnything.update_teacher_ema`` once per training batch.
+This file builds two step-indexed EMA decay schedules, cosine and linear, and
+a ``keras.callbacks.Callback`` that drives ``DepthAnything.update_teacher_ema``
+once per training batch. Both schedules ramp per training step rather than per
+epoch, starting low (so the teacher absorbs early student updates quickly) and
+rising to a high asymptotic decay (so the teacher becomes a slowly-moving
+average), following the Mean-Teacher / DINO recipe.
 
-The schedules follow the standard Mean-Teacher / DINO recipe: a low decay at
-the start (so the teacher absorbs early student updates quickly) and a high
-asymptotic decay (so the teacher becomes a slowly-moving average).
+For post-warmup step ``t`` clamped to ``[0, total_steps]``:
 
-Mathematical forms
-------------------
-Let ``t`` be the (post-warmup) step index in ``[0, T]``.
+    cosine: decay(t) = end - (end - start) * 0.5 * (1 + cos(pi * t / total_steps))
+    linear: decay(t) = start + (end - start) * (t / total_steps)
 
-* **Cosine schedule** —
-  ``decay(t) = end - (end - start) * 0.5 * (1 + cos(pi * min(t, T) / T))``
-  Smooth s-curve from ``start`` to ``end``.
+Both clamp at ``end`` once ``t >= total_steps``, so training past
+``total_steps`` cannot overshoot. The callback needs the model to expose
+``update_teacher_ema(decay: float)``; if that method is missing it logs one
+warning and disables itself rather than raising.
 
-* **Linear schedule** —
-  ``decay(t) = start + (end - start) * min(t / T, 1.0)``
-  Constant-rate ramp from ``start`` to ``end``.
-
-Both schedules clamp at ``end`` once ``t >= T`` so multi-epoch training past
-``total_steps`` does not over-shoot.
-
-References
-----------
-- Tarvainen, A., & Valpola, H. (2017). Mean teachers are better role models.
-- Caron, M., et al. (2021). Emerging Properties in Self-Supervised Vision
-  Transformers (DINO). *ICCV*.
+References:
+    - Tarvainen & Valpola, 2017. Mean teachers are better role models.
+    - Caron et al., 2021. Emerging Properties in Self-Supervised Vision
+      Transformers (DINO). ICCV.
 """
 
 from __future__ import annotations

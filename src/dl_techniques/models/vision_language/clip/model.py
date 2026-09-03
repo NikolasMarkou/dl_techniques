@@ -1,83 +1,29 @@
 """
-Contrastive language-image pretraining over two modernized transformer towers
-(grouped-query attention, RMSNorm, SwiGLU, rotary position embeddings).
+`CLIP` builds two independent transformer towers, one for images and one for
+text, and trains them to place matching image-caption pairs close together in
+a shared embedding space.
 
-CLIP addresses a supervision problem rather than an architectural one. Labelled
-image datasets are small and their label sets are closed, so a classifier
-trained on one can only ever name the categories somebody enumerated in
-advance. Image-caption pairs are abundant and their supervision is open-ended,
-but a caption is not a label: predicting it token by token is expensive, and two
-captions of the same picture rarely agree word for word. The contrastive
-formulation extracts a usable signal anyway by asking a much weaker question --
-which caption in this batch belongs to which image. Both modalities are mapped
-into one embedding space, each feature is L2-normalized so an inner product is a
-cosine, and a batch of `N` pairs produces an `N x N` similarity matrix whose
-diagonal must dominate both its row and its column:
+A labeled image dataset can only ever name the categories someone enumerated
+in advance. Image-caption pairs carry open-ended supervision instead: rather
+than predict a caption word by word, the model asks which caption in a batch
+belongs to which image. Each tower ends in a bias-free linear projection into
+a shared `embed_dim` space followed by L2-normalization, so the towers' inner
+product is a cosine similarity, scaled by a learned temperature into the two
+logits matrices this model returns. The contrastive loss itself lives in
+`dl_techniques.losses`, not here.
 
-`S = tau * f_I(I) @ f_T(T)^T`
+The two towers never interact before that final matmul: no cross-attention
+and no shared trunk. Position enters through rotary embeddings inside
+grouped-query attention rather than a learned positional table. The vision
+tower pools a CLS token prepended to a raster-ordered patch sequence; the
+text tower pools the last non-padding token of a causally masked sequence,
+which assumes right padding and pad id 0. Both towers use grouped-query
+attention, RMSNorm, SwiGLU, and RoPE, none of which the original CLIP paper
+uses.
 
-The training objective is the symmetric cross-entropy over `S`'s rows and its
-columns. It scales because the batch supplies its own negatives -- the `N^2 - N`
-mismatched pairs cost nothing to construct -- and it yields zero-shot
-classification for free, since any set of class names can be encoded as text and
-used directly as a classifier weight matrix. The loss itself is not implemented
-here; this module produces the two logits matrices and the temperature, and the
-loss lives in `dl_techniques.losses`.
-
-The two towers never see each other. There is no cross-attention, no shared
-trunk and no fusion layer: the only place the modalities meet is the final
-matmul, and the only thing that forces them into agreement is the contrastive
-gradient. Each tower therefore ends in its own bias-free `Dense(embed_dim)`
-projection out of its native width (768 for vision, 512 for text at base scale)
-into the shared space, followed by L2 normalization. Keeping the projection last
-and the normalization after it is what makes the dot product a cosine and the
-temperature the sole scale in the logits.
-
-The vision tower is a strided convolution patch embedding, a learnable CLS token
-prepended to the patch sequence, `vision_layers` transformer blocks, and a read
-of position 0. The text tower is a token embedding, `text_layers` blocks, and a
-read of the last non-padding position. Neither tower carries a learned
-positional table: position enters only as RoPE inside the grouped-query
-attention, rotating queries and keys by an angle proportional to index. For the
-image side this means patches are positioned along the flattened raster order
-with the CLS token at index 0, which is a real departure from CLIP's learned
-positional embedding and worth knowing before comparing numbers.
-
-Two pooling details are easy to get wrong. The CLS token is a single
-`(1, 1, vision_width)` weight broadcast across the batch, so every image starts
-from the same query vector and the attention blocks are what make its final
-state image-specific; it is created in `build()` alongside the temperature rather
-than in `__init__`. On the text side the pooled position is found by
-`last_non_pad_token`, which counts non-pad tokens and reads index `count - 1`.
-That assumes right padding and pad id `0` -- the id is hard-coded at this call
-site. Left-padded batches, or a tokenizer whose pad id is not zero, will pool the
-wrong position silently rather than raising. Where the tower still differs from
-the reference implementation is *which* position it pools: OpenAI CLIP locates
-the EOT token as the argmax of the token ids, this one counts non-pad tokens.
-The masking now agrees -- `encode_text` builds a lower-triangular causal mask and
-passes it to every text block, so the pooled last real token is the only
-position that has read the whole sentence, which is what makes last-token
-pooling meaningful. The mask is constructed in the masking factory's *block*
-semantics and inverted once to the *attend* semantics the attention layers
-expect, and it is broadcast to rank 3 deliberately: a rank-2 mask is read by
-`GroupedQueryAttention` as a `(batch, seq)` padding mask, not as a
-`(seq, seq)` score mask. The vision tower is bidirectional and stays so -- there
-is no ordering over image patches to respect.
-
-The temperature is stored as its logarithm. `logit_scale` is an unconstrained
-scalar weight and `exp` is applied on every use, which keeps the multiplier
-strictly positive under ordinary gradient descent without a constraint object.
-Its default init of 2.6592 is `ln(1 / 0.07)`, the CLIP paper's starting
-temperature of roughly 14.3. Unlike the MobileCLIP models in this repository,
-this class applies no upper clamp to `exp(logit_scale)`: a diverging temperature
-here produces `inf` logits and a `nan` loss with no other symptom, so a trainer
-that expects OpenCLIP's clamp must supply it.
-
-`call` is deliberately partial. Passing only `image` or only `text` returns just
-that tower's features and omits the logits keys entirely, so encoding a caption
-bank for retrieval does not require fabricating a dummy image batch. The dict
-output shape is therefore input-dependent, which any consumer indexing the
-result must account for.
+Passing only `image` or only `text` to `call` returns just that tower's
+features, so encoding a caption bank for retrieval needs no dummy image
+batch, and the output dict's keys depend on which inputs were given.
 
 References:
     - Radford et al., 2021. Learning Transferable Visual Models From Natural
@@ -120,15 +66,15 @@ class CLIP(keras.Model):
     A Vision Transformer encodes images and a text Transformer encodes
     captions; both project into a shared ``embed_dim`` space, L2-normalize, and
     produce an ``N x N`` cosine similarity matrix scaled by a learnable
-    temperature. The towers share NO parameters and never attend to each other:
+    temperature. The towers share no parameters and never attend to each other:
     the final matmul is the only point of contact, and the contrastive gradient
     is the only thing forcing them into agreement. Both towers are modernized
     relative to Radford et al. -- grouped-query attention, RMSNorm in the
     pre-norm position, SwiGLU feed-forward, and RoPE in place of a learned
-    positional table. The contrastive loss itself is NOT here; this model emits
+    positional table. The contrastive loss itself is not implemented here; this model emits
     the two logits matrices and the temperature.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -139,12 +85,12 @@ class CLIP(keras.Model):
         ┌────────────────────────────┐   ┌────────────────────────────┐
         │ Conv P×P /P  (patchify)    │   │ Embedding(vocab, W_t)      │
         │ → [B, N_patches, W_v]      │   │ → [B, L, W_t]              │
-        │ NO positional table        │   │ NO positional table        │
+        │ no positional table        │   │ no positional table        │
         └─────────────┬──────────────┘   └─────────────┬──────────────┘
                       ▼                                │
         ┌────────────────────────────┐                 │
         │ prepend CLS token          │                 │
-        │ ONE (1,1,W_v) weight,      │                 │
+        │ one (1,1,W_v) weight,      │                 │
         │ broadcast over the batch   │                 │
         │ → [B, N+1, W_v]            │                 │
         └─────────────┬──────────────┘                 │
@@ -153,12 +99,12 @@ class CLIP(keras.Model):
         │ TransformerLayer × L_v     │   │ TransformerLayer × L_t     │
         │  GQA + RoPE, RMSNorm(pre), │   │  GQA + RoPE, RMSNorm(pre), │
         │  SwiGLU FFN                │   │  SwiGLU FFN                │
-        │  BIDIRECTIONAL             │   │  CAUSAL mask (rank 3)      │
+        │  bidirectional             │   │  causal mask (rank 3)      │
         └─────────────┬──────────────┘   └─────────────┬──────────────┘
                       ▼                                ▼
         ┌────────────────────────────┐   ┌────────────────────────────┐
         │ pool position 0 (CLS)      │   │ pool last non-pad token    │
-        │                            │   │ assumes RIGHT padding,     │
+        │                            │   │ assumes right padding,     │
         │                            │   │ pad id 0 (hard-coded)      │
         └─────────────┬──────────────┘   └─────────────┬──────────────┘
                       ▼                                ▼
@@ -173,10 +119,10 @@ class CLIP(keras.Model):
         │  S = exp(logit_scale) · f_I @ f_Tᵀ                       │
         │  logits_per_image [B, B]                                 │
         │  logits_per_text  [B, B]  (the transpose)                │
-        │  the ONLY place the two towers meet                      │
+        │  the only place the two towers meet                      │
         └──────────────────────────────────────────────────────────┘
 
-    **Contrastive objective (loss lives in dl_techniques.losses):**
+    Contrastive objective, loss lives in dl_techniques.losses:
 
     .. code-block:: text
 
@@ -191,18 +137,18 @@ class CLIP(keras.Model):
               I₃   │    │    │    │ ✓  │       loss = ½(CE over rows
                    └────┴────┴────┴────┘              + CE over cols)
 
-        temperature is stored as its LOG: exp() on every use keeps the
+        temperature is stored as its log: exp() on every use keeps the
         multiplier positive with no constraint object.
         default 2.6592 = ln(1 / 0.07) ≈ 14.3
-        NO upper clamp here (unlike MobileCLIP): a diverging temperature
+        no upper clamp here (unlike MobileCLIP): a diverging temperature
         gives inf logits and a nan loss with no other symptom.
 
-    **Text causal mask (semantics inversion and rank):**
+    Text causal mask, semantics inversion and rank:
 
     .. code-block:: text
 
-        create_mask('causal')  BLOCK semantics    attention layers want
-        True = mask OUT                            ATTEND semantics
+        create_mask('causal')  block semantics    attention layers want
+        True = mask out                            attend semantics
               ┌───┬───┬───┬───┐                  ┌───┬───┬───┬───┐
               │ F │ T │ T │ T │                  │ T │ F │ F │ F │
               ├───┼───┼───┼───┤   logical_not    ├───┼───┼───┼───┤
@@ -213,11 +159,11 @@ class CLIP(keras.Model):
               │ F │ F │ F │ F │                  │ T │ T │ T │ T │
               └───┴───┴───┴───┘                  └───┴───┴───┴───┘
 
-        then broadcast to rank 3 [B, L, L] ON PURPOSE: a rank-2 mask is
-        read by GroupedQueryAttention as a (batch, seq) PADDING mask,
+        then broadcast to rank 3 [B, L, L]: a rank-2 mask is
+        read by GroupedQueryAttention as a (batch, seq) padding mask,
         not as a (seq, seq) score mask.
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -228,9 +174,9 @@ class CLIP(keras.Model):
         ViT-H/14      14    32  1280   16    4    24  1024   16   16   1024
 
         L_v/W_v/H_v = vision layers / width / heads, KV = kv heads.
-        H/14 is the one scale where the TEXT tower deepens (24, not 12);
+        H/14 is the one scale where the text tower deepens (24, not 12);
         see the D-112 anchor in MODEL_VARIANTS.
-        The kv-head columns are NOT from any released CLIP: no CLIP
+        The kv-head columns are not from any released CLIP: no CLIP
         checkpoint uses grouped-query attention.
 
     :param image_size: Input image height and width. Must be positive and
@@ -284,7 +230,7 @@ class CLIP(keras.Model):
     :param attention_dropout_rate: Dropout probability for attention weights,
         in ``[0, 1)``. Defaults to 0.0.
     :type attention_dropout_rate: float
-    :param logit_scale_init: Initial value of the LOG temperature. Defaults to
+    :param logit_scale_init: Initial value of the log temperature. Defaults to
         2.6592, i.e. ``ln(1 / 0.07)``, so the initial multiplier is about 14.3.
         No upper clamp is applied on use.
     :type logit_scale_init: float
@@ -304,14 +250,14 @@ class CLIP(keras.Model):
         A tuple ``(images, texts)`` is accepted equivalently.
 
     Output shape:
-        A mapping whose KEYS DEPEND ON THE INPUT:
+        A mapping whose keys depend on which inputs were given:
 
         - ``'image_features'``: ``(batch_size, embed_dim)``, if an image was
           given.
         - ``'text_features'``: ``(batch_size, embed_dim)``, if text was given.
         - ``'logits_per_image'``, ``'logits_per_text'``:
           ``(batch_size, batch_size)``, and ``'logit_scale'``: scalar. Present
-          ONLY when both modalities were given.
+          only when both modalities were given.
 
     :ivar num_patches: ``(image_size // patch_size) ** 2``.
     :vartype num_patches: int
@@ -327,7 +273,7 @@ class CLIP(keras.Model):
     :vartype text_transformer_layers: list[TransformerLayer]
     :ivar text_projection: Bias-free projection into the shared space.
     :vartype text_projection: keras.layers.Dense
-    :ivar logit_scale: Scalar LOG temperature weight, created in ``build``.
+    :ivar logit_scale: Scalar log-temperature weight, created in ``build``.
     :vartype logit_scale: keras.Variable
     :ivar class_token: Learnable ``(1, 1, vision_width)`` CLS token, created in
         ``build``.
@@ -360,7 +306,7 @@ class CLIP(keras.Model):
             loaded_model = keras.models.load_model('clip_model.keras')
 
     Note:
-        Text pooling assumes RIGHT padding with pad id 0. A left-padded batch,
+        Text pooling assumes right padding with pad id 0. A left-padded batch,
         or a tokenizer whose pad id is not zero, pools the wrong position
         silently rather than raising.
     """
@@ -402,26 +348,8 @@ class CLIP(keras.Model):
             "text_kv_heads": 12,
             "embed_dim": 768,
         },
-        # DECISION plan-2026-08-22T035419-a11304c8/D-112
-        # `text_layers` is 24, not 12. FETCHED 2026-08-22 from the only released
-        # ViT-H/14 CLIP,
-        # https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/raw/main/config.json
-        # -- text_config: hidden_size 1024, num_hidden_layers 24,
-        # num_attention_heads 16, projection_dim 1024; vision_config:
-        # hidden_size 1280, num_hidden_layers 32, num_attention_heads 16,
-        # patch_size 14. Every other field in this row already agreed. The 12
-        # was the L/14 row's text depth carried down one line: B/32, B/16 and
-        # L/14 all legitimately have 12 text layers (verified against
-        # `openai/clip-vit-{base-patch32,base-patch16,large-patch14}`), H/14 is
-        # the one scale where the text tower deepens, and copying the previous
-        # row is exactly how that gets missed. Do NOT "restore consistency" by
-        # putting 12 back.
-        # `vision_kv_heads`/`text_kv_heads` are NOT from any released CLIP -- no
-        # CLIP checkpoint uses grouped-query attention. They are this
-        # implementation's declared modernization (GQA + RMSNorm + SwiGLU +
-        # RoPE, module docstring line 3, Ainslie et al. 2023 cited), so they are
-        # deliberately not traced to Radford et al. 2021.
-        # See decisions.md D-112.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-112: text_layers stays 24 here,
+        # not 12 — H/14 is the one scale where the text tower deepens. See decisions.md.
         "ViT-H/14": {
             "patch_size": 14,
             "vision_layers": 32,
@@ -498,7 +426,7 @@ class CLIP(keras.Model):
         :type dropout_rate: float
         :param attention_dropout_rate: Attention-weight dropout probability.
         :type attention_dropout_rate: float
-        :param logit_scale_init: Initial LOG temperature.
+        :param logit_scale_init: Initial log-temperature value.
         :type logit_scale_init: float
         :param kwargs: Additional keyword arguments for ``keras.Model``.
         :raises ValueError: If any divisibility constraint is violated.
@@ -583,7 +511,7 @@ class CLIP(keras.Model):
         """Create every vision-tower sub-layer.
 
         Follows the golden rule: layers are created in ``__init__``, not in
-        ``build``. The CLS token is a WEIGHT and therefore belongs to
+        ``build``. The CLS token is a weight and therefore belongs to
         :meth:`build` instead.
         """
         # Patch embedding layer
@@ -741,7 +669,7 @@ class CLIP(keras.Model):
 
         ``class_token``, ``logit_scale`` and the positional embeddings are
         created in ``build``, which Keras runs on ``__call__``. ``encode_image``
-        is a public entry point that does NOT go through ``__call__``, so on a
+        is a public entry point that does not go through ``__call__``, so on a
         fresh instance it reads ``self.class_token`` as None and fails inside
         ``ops.broadcast_to`` with
 
@@ -750,8 +678,8 @@ class CLIP(keras.Model):
         rather than saying the model is unbuilt. Shapes come from the
         constructor config, so no input is needed to resolve them.
 
-        ``encode_text`` deliberately does NOT call this. It touches none of the
-        weights ``build`` creates, and building there would LOCK the layer, so a
+        ``encode_text`` does not call this. It touches none of the
+        weights ``build`` creates, and building there would lock the layer, so a
         caller that swaps or taps ``text_transformer_layers`` after a first
         ``encode_text`` -- which is exactly how the causality probe in
         ``tests/test_models/test_clip/test_model.py`` reads per-position hidden
@@ -823,9 +751,9 @@ class CLIP(keras.Model):
     ) -> keras.KerasTensor:
         """Encode text into the shared embedding space.
 
-        The tower is CAUSAL: a lower-triangular mask is built here and passed
+        The tower is causal: a lower-triangular mask is built here and passed
         to every block, which is what makes the pooled last real token the only
-        position that has read the whole sentence. Pooling assumes RIGHT
+        position that has read the whole sentence. Pooling assumes right
         padding with pad id 0.
 
         :param text_ids: Token IDs of shape ``(batch_size, sequence_length)``.
@@ -840,14 +768,9 @@ class CLIP(keras.Model):
         # Token embeddings: (batch, seq_len, text_width)
         x = self.token_embedding(text_ids, training=training)
 
-        # Causal mask. `create_mask` returns BLOCK semantics (True = mask out);
-        # the attention layers expect ATTEND semantics, hence the inversion.
-        # Without this the tower is bidirectional and the pooled last token is
-        # not the only position that has read the whole sentence -- which is
-        # both a departure from OpenAI CLIP and the reason last-token pooling
-        # is meaningful at all.
-        # The mask is broadcast to rank 3 (batch, seq, seq) on purpose: the
-        # attention layers read a rank-2 mask as a (batch, seq) PADDING mask.
+        # `create_mask` returns block semantics (True = mask out); attention
+        # layers expect attend semantics, hence the inversion. Broadcast to
+        # rank 3 (batch, seq, seq): a rank-2 mask reads as a (batch, seq) padding mask.
         batch_size = ops.shape(text_ids)[0]
         seq_len = ops.shape(text_ids)[1]
         causal_block = create_mask('causal', seq_len=seq_len, dtype='bool')
@@ -861,8 +784,7 @@ class CLIP(keras.Model):
         for transformer_layer in self.text_transformer_layers:
             x = transformer_layer(x, attention_mask=attend_mask, training=training)
 
-        # Extract features from the last non-padding token
-        # (assuming 0 is the padding id; right-padded sequences).
+        # Assumes pad id 0 and right-padded sequences.
         text_features_raw = last_non_pad_token(x, text_ids, 0)
 
         # Project to shared embedding space
@@ -891,7 +813,7 @@ class CLIP(keras.Model):
         ``'image'`` and ``'text'``; inference may pass either, in which case
         only that tower's features are returned and the logits keys are omitted
         entirely, so encoding a caption bank does not require a dummy image
-        batch. The output structure therefore DEPENDS ON THE INPUT.
+        batch. The output keys depend on which inputs were given.
 
         :param inputs: A mapping with keys ``'image'`` and/or ``'text'``, or a
             tuple ``(images, texts)``.
@@ -904,7 +826,7 @@ class CLIP(keras.Model):
             - ``image_features``: image embeddings, if images were provided.
             - ``text_features``: text embeddings, if texts were provided.
             - ``logits_per_image``, ``logits_per_text``, ``logit_scale``: only
-              when BOTH modalities were provided.
+              when both modalities were provided.
 
         :rtype: Dict[str, keras.KerasTensor]
         """

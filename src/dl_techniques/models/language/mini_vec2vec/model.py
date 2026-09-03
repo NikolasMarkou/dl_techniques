@@ -1,74 +1,30 @@
 """
-Unsupervised alignment of two embedding spaces by a single square linear map, fitted
-with clustering, quadratic assignment and Procrustes rather than by gradient descent.
+Unsupervised alignment of two embedding spaces by a single square linear
+map, fitted with clustering, quadratic assignment and Procrustes rather
+than by gradient descent.
 
-The premise is the universal-geometry, or Platonic representation, hypothesis:
-independently trained encoders of the same underlying data arrive at nearly the same
-*relative* geometry, differing mainly in the arbitrary coordinate frame they express it
-in. If that holds, the map from space A to space B needs no capacity beyond a rotation
-and reflection, and the entire difficulty moves from function fitting to correspondence:
-knowing which point of A is which point of B. Every stage below exists to manufacture a
-correspondence, because once one exists the map is closed-form. Orthogonal Procrustes
-solves `min_W ||X_A W - X_B||_F` subject to `W^T W = I` by `W = U V^T` where
-`U S V^T = SVD(X_A^T X_B)` - no learning rate, no adversarial game, no convergence
-question.
+The premise is that independently trained encoders of the same data arrive
+at nearly the same relative geometry, differing mainly in coordinate frame.
+If so, the map from space A to space B needs no capacity beyond a rotation
+and reflection, and the work moves from function fitting to correspondence:
+knowing which point of A is which point of B. `align` runs five numpy
+stages, none of them a gradient step: center and L2-normalize both spaces,
+build an initial correspondence by clustering each space and matching
+centroids with quadratic assignment, solve orthogonal Procrustes for an
+initial `W`, then refine it with two alternating rounds — one that
+resamples nearest neighbours under the current `W`, one that seeds
+k-means on B from `W`-transformed centroids of A. Each refinement step
+blends into `W` by exponential smoothing rather than replacing it outright,
+which is why the shipped `W` is only approximately orthogonal: a convex
+blend of two orthogonal matrices is not itself orthogonal. Do not assume
+`W^-1 = W^T` when mapping back from B to A.
 
-`align` runs five stages over numpy arrays; nothing here is a gradient step.
-
-Preprocessing mean-centers each space over the arrays it is given and then L2-normalizes
-every row onto the unit sphere. Note what is *not* stored: the two mean vectors are
-local to `align`, and `call` applies only `X @ W`. A caller transforming new embeddings
-must reproduce the same centering and normalization themselves, or the map is being
-applied in a frame it was not fitted in.
-
-Approximate matching produces the first correspondence. Each of `approx_runs` (30)
-rounds clusters both spaces independently into `approx_clusters` (20) centroids, then
-matches the two centroid sets using only frame-invariant information: the centroid Gram
-matrices `C_A C_A^T` and `C_B C_B^T` are unchanged by any orthogonal transform of their
-space, so the permutation that makes them agree is recoverable without knowing the
-transform. That is a quadratic assignment problem, solved by scipy's 2-opt heuristic;
-the first argument is negated because `quadratic_assignment` minimizes, and minimizing
-against `-sim_A` maximizes `tr(P sim_A P^T sim_B)`. With B's centroids permuted into A's
-order, every embedding is re-expressed by its similarities to its own anchor set
-(`X_A C_A^T`, `X_B C_B_perm^T`), coordinates that by construction mean the same thing in
-both spaces. One round of k-means plus a heuristic QAP is far too noisy to trust, so the
-rounds are concatenated along the feature axis: the ensemble of 30 imperfect anchor sets
-is a much more discriminative descriptor than any single one. Pseudo-pairs then come
-from a cosine nearest-neighbour search in that descriptor space, and each source row's
-pseudo-target is the *mean* of its `approx_neighbors` (50) neighbours in B, trading
-precision for immunity to individual mismatches. Every source row is paired; nothing is
-filtered on match quality, and the neighbour distances are discarded.
-
-Refinement then alternates correspondence and map, the self-learning loop that makes
-unsupervised bilingual dictionary induction work. Refine-1 repeats `refine1_iterations`
-(75) times: sample rows from A, push them through the current `W`, take the mean of
-their `refine1_neighbors` cosine neighbours in B as targets, re-solve Procrustes, and
-blend. Because neighbours are recomputed under the improved map each iteration, the
-correspondence and the map bootstrap each other. Refine-2 runs once and gets its
-correspondence for free rather than by search: cluster A into `refine2_clusters` (500)
-centroids, push them through `W`, and use the result as the *initialization* of a
-single-restart k-means on B (`n_init=1`). The i-th B centroid is then by definition the
-one seeded from the i-th A centroid, so the 500 centroid pairs are matched with no
-assignment step at all. The progression is deliberate: 20 coarse anchors to establish
-the frame, 500 fine ones to sharpen it.
-
-The orthogonality of the result is the subtle point. Every Procrustes solve returns an
-exactly orthogonal matrix, but each update is an exponential-smoothing blend
-`W <- (1 - alpha) W + alpha W_new`, and a convex combination of two orthogonal matrices
-is not orthogonal - the orthogonal group is not convex. No re-orthogonalization follows
-the blend. The shipped `W` is therefore only approximately orthogonal, and the
-approximation is good exactly to the extent the iterates have converged and the two
-blended matrices already agree. Treat `W` as a general linear map: in particular do not
-assume `W^-1 = W^T` when mapping back from B to A. The trade is what buys stability,
-since undamped updates would let one bad neighbour draw discard the whole map.
-
-`W` is registered through `add_weight` with an identity initializer and is nominally
-trainable, but it is only ever written by `assign` from numpy; `fit` is not the entry
-point and `align` is. All heavy work runs on CPU through scikit-learn and scipy, so
-sequence length and dimensionality drive the cost, not accelerator memory. `align`
-returns the matrix at three checkpoints (`initial_W`, `refine1_W`, `final_W`), which is
-the practical way to see whether refinement helped or drifted. `get_config` carries only
-`embedding_dim`; the fitted matrix travels in the weights of the saved file.
+`W` is a trainable weight but is only ever written by `assign` from numpy;
+the entry point is `align`, not `fit`. A caller transforming new embeddings
+must reproduce `align`'s centering and normalization itself, since only
+`X @ W` runs in `call`. All heavy work runs on CPU through scikit-learn and
+scipy. `get_config` carries only `embedding_dim`; the fitted matrix travels
+in the saved file's weights.
 
 References:
     - mini-vec2vec: Scaling Universal Geometry Alignment with Linear Transformations,
@@ -104,25 +60,14 @@ class MiniVec2VecAligner(keras.Model):
     """
     Keras implementation of the mini-vec2vec unsupervised alignment algorithm.
 
-    This model learns a linear transformation to align two embedding spaces (A and B)
-    without access to parallel data, following the procedure described in
-    "mini-vec2vec: Scaling Universal Geometry Alignment with Linear Transformations".
+    This model learns a linear transformation to align two embedding spaces
+    (A and B) without parallel data. Alignment runs in three stages: build
+    pseudo-parallel pairs by clustering both spaces and matching centroids
+    with the quadratic assignment problem, fit an initial orthogonal
+    transform `W` from those pairs by Procrustes analysis, then refine `W`
+    with a matching-based round and a clustering-based round.
 
-    The alignment is achieved through a three-stage process:
-
-    1. **Approximate Matching**: Creates pseudo-parallel pairs of embeddings using
-       a robust anchor-based method involving clustering and the Quadratic
-       Assignment Problem (QAP).
-    2. **Mapping Estimation**: Learns an initial orthogonal transformation (W)
-       from these pseudo-pairs using Procrustes analysis.
-    3. **Iterative Refinement**: Refines the transformation matrix W using two
-       complementary strategies: matching-based and clustering-based refinement.
-
-    **Intent**: Provide a robust, efficient, and Keras-native implementation for
-    unsupervised embedding space alignment. The model's primary weight is the
-    transformation matrix `W`.
-
-    **Architecture**:
+    Architecture:
 
     .. code-block:: text
 
@@ -132,16 +77,13 @@ class MiniVec2VecAligner(keras.Model):
                ↓
         Output (Aligned to Space B)
 
-    Args:
-        embedding_dim: Integer, the dimensionality of the embedding spaces to be
-            aligned. This determines the size of the transformation matrix W.
-            Must be positive.
-        **kwargs: Additional arguments for the keras.Model base class.
+    :param embedding_dim: Dimensionality of the embedding spaces to align.
+        Sets the size of the transformation matrix W. Must be positive.
+    :type embedding_dim: int
+    :param kwargs: Additional arguments for the keras.Model base class.
 
-    Attributes:
-        W: keras.Variable, the transformation matrix of shape
-            `(embedding_dim, embedding_dim)`. This is the core learnable weight
-            of the model.
+    :ivar W: The transformation matrix, shape `(embedding_dim, embedding_dim)`.
+    :vartype W: keras.Variable
 
     Example:
         >>> # Create aligner. `align` builds it; an explicit build() is only
@@ -180,12 +122,9 @@ class MiniVec2VecAligner(keras.Model):
         """
         Initialize the MiniVec2VecAligner model.
 
-        Args:
-            embedding_dim: Dimensionality of the embedding spaces.
-            **kwargs: Additional arguments for keras.Model.
-
-        Raises:
-            ValueError: If embedding_dim is not positive.
+        :param embedding_dim: Dimensionality of the embedding spaces.
+        :param kwargs: Additional arguments for keras.Model.
+        :raises ValueError: If embedding_dim is not positive.
         """
         super().__init__(**kwargs)
 
@@ -204,13 +143,10 @@ class MiniVec2VecAligner(keras.Model):
         """
         Create the transformation matrix W.
 
-        Args:
-            input_shape: Shape of input tensor, must have last dimension
-                equal to embedding_dim.
-
-        Raises:
-            ValueError: If input shape's last dimension doesn't match
-                embedding_dim.
+        :param input_shape: Shape of input tensor; last dimension must equal
+            embedding_dim.
+        :raises ValueError: If input shape's last dimension doesn't match
+            embedding_dim.
         """
         if input_shape[-1] != self.embedding_dim:
             raise ValueError(
@@ -236,13 +172,9 @@ class MiniVec2VecAligner(keras.Model):
         """
         Apply the learned linear transformation W to input embeddings.
 
-        Args:
-            inputs: Input embeddings of shape `(batch_size, embedding_dim)`.
-            training: Boolean or None, whether the call is in training mode.
-                Not used in this model but included for API consistency.
-
-        Returns:
-            Transformed embeddings of shape `(batch_size, embedding_dim)`.
+        :param inputs: Input embeddings, shape `(batch_size, embedding_dim)`.
+        :param training: Unused; present for API consistency.
+        :return: Transformed embeddings, shape `(batch_size, embedding_dim)`.
         """
         return ops.matmul(inputs, self.W)
 
@@ -324,18 +256,9 @@ class MiniVec2VecAligner(keras.Model):
 
             # Step 3: Find correspondence with QAP.
             # We maximize Tr(P @ sim_A @ P.T @ sim_B) by setting A=-sim_A.
-            # DECISION plan-2026-08-14T233721-d4f9beb2/D-050: `method='faq'`,
-            # NOT `'2opt'`. MEASURED on EXACTLY solvable instances (sim_B is a
-            # true permutation of sim_A, so the optimum is known and reachable):
-            # over 12 instances at k in {5, 8, 12, 20}, '2opt' recovered the
-            # permutation in 6 and returned a strictly WORSE objective in the
-            # other 6 — at k = 20, this package's own `approx_clusters` default,
-            # it failed 2 of 3 (objective 25.97 vs the optimal 30.72). 'faq'
-            # was exact in 12 of 12. With the anchor permutation wrong the
-            # relative representations of the two spaces are not comparable,
-            # every pseudo-pair is noise, and the whole pipeline returns a map
-            # no better than chance. Do not revert to '2opt' without re-running
-            # that comparison.
+            # DECISION plan-2026-08-14T233721-d4f9beb2/D-050: method='faq', not
+            # '2opt' — '2opt' returned a worse objective on 6 of 12 exactly
+            # solvable test instances. See decisions.md.
             res = quadratic_assignment(
                 -sim_A,
                 sim_B,
@@ -505,40 +428,28 @@ class MiniVec2VecAligner(keras.Model):
         """
         Execute the full mini-vec2vec alignment pipeline (Algorithm 1).
 
-        This method orchestrates all three stages of the alignment procedure:
-        approximate matching, initial mapping estimation, and iterative refinement.
+        Runs all three stages: approximate matching, initial mapping
+        estimation, and iterative refinement.
 
-        Args:
-            XA: Source embeddings, shape `(n_samples_A, embedding_dim)`.
-            XB: Target embeddings, shape `(n_samples_B, embedding_dim)`.
-            approx_clusters: Number of clusters for anchor alignment. Higher values
-                may improve alignment quality but increase computation time.
-            approx_runs: Number of runs for ensembling in anchor alignment. More
-                runs provide robustness to clustering randomness.
-            approx_neighbors: Number of neighbors to average for pseudo-pairs.
-                Higher values create more robust but less precise matches.
-            refine1_iterations: Number of iterations for matching-based refinement.
-                More iterations allow finer adjustments but increase runtime.
-            refine1_sample_size: Number of samples per Refine-1 iteration.
-                Larger samples improve stability but increase per-iteration cost.
-            refine1_neighbors: Number of neighbors for matching in Refine-1.
-            refine2_clusters: Number of clusters for clustering-based refinement.
-                Should be larger than approx_clusters for fine-grained adjustment.
-            smoothing_alpha: Exponential smoothing factor for updating W.
-                Values closer to 1 give more weight to new estimates,
-                closer to 0 preserve previous estimates. Range: (0, 1].
-
-        Returns:
-            Dictionary containing the history of the transformation matrix W
-            at different stages: 'initial_W', 'refine1_W', 'final_W'.
-
-        Raises:
-            ValueError: If input arrays have incompatible shapes or if
-                hyperparameters are invalid.
+        :param XA: Source embeddings, shape `(n_samples_A, embedding_dim)`.
+        :param XB: Target embeddings, shape `(n_samples_B, embedding_dim)`.
+        :param approx_clusters: Number of clusters for anchor alignment.
+        :param approx_runs: Number of ensemble runs for anchor alignment.
+        :param approx_neighbors: Number of neighbors averaged for pseudo-pairs.
+        :param refine1_iterations: Number of matching-based refinement iterations.
+        :param refine1_sample_size: Number of samples per Refine-1 iteration.
+        :param refine1_neighbors: Number of neighbors for matching in Refine-1.
+        :param refine2_clusters: Number of clusters for clustering-based
+            refinement; should exceed approx_clusters.
+        :param smoothing_alpha: Exponential smoothing factor for updating W,
+            in (0, 1]. Closer to 1 weights new estimates more.
+        :return: Dictionary with W's history: 'initial_W', 'refine1_W', 'final_W'.
+        :raises ValueError: If input arrays have incompatible shapes or
+            hyperparameters are invalid.
 
         Note:
-            This method modifies the model's W weight in-place. The embeddings
-            should be preprocessed (centered and normalized) within this method.
+            Modifies the model's W weight in place. Embeddings are
+            centered and normalized within this method.
         """
         # Validate inputs
         if XA.shape[1] != self.embedding_dim or XB.shape[1] != self.embedding_dim:
@@ -552,16 +463,9 @@ class MiniVec2VecAligner(keras.Model):
                 f"smoothing_alpha must be in (0, 1], got {smoothing_alpha}"
             )
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-049: `align` builds the
-        # model itself. Every stage below writes through `self.W.assign(...)`,
-        # so on a FRESH aligner — the state both this method's and the class's
-        # docstring examples start from — it used to die with
-        # `AttributeError: 'NoneType' object has no attribute 'assign'`, from
-        # inside stage 3, after minutes of k-means and QAP work. The shape is
-        # fully determined by `embedding_dim`, which is a constructor argument,
-        # so there is nothing to infer and nothing for the caller to decide.
-        # Do NOT replace this with a raise: `build` takes no information the
-        # object does not already have.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-049: align builds the model
+        # itself — the shape is fully determined by embedding_dim, so there is
+        # nothing for a caller to decide. Do not replace with a raise. See decisions.md.
         if not self.built:
             self.build((None, self.embedding_dim))
 
@@ -626,8 +530,7 @@ class MiniVec2VecAligner(keras.Model):
         """
         Get model configuration for serialization.
 
-        Returns:
-            Dictionary containing the model configuration.
+        :return: Dictionary containing the model configuration.
         """
         config = super().get_config()
         config.update({
@@ -643,12 +546,9 @@ def create_mini_vec2vec_aligner(
     """
     Factory function to create a MiniVec2VecAligner model.
 
-    Args:
-        embedding_dim: Dimensionality of the embedding spaces.
-        **kwargs: Additional arguments for MiniVec2VecAligner.
-
-    Returns:
-        Initialized MiniVec2VecAligner model.
+    :param embedding_dim: Dimensionality of the embedding spaces.
+    :param kwargs: Additional arguments for MiniVec2VecAligner.
+    :return: Initialized MiniVec2VecAligner model.
 
     Example:
         >>> aligner = create_mini_vec2vec_aligner(embedding_dim=128)
