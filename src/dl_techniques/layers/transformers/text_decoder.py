@@ -1,85 +1,20 @@
-"""
-A configurable, Transformer-based text decoder stack.
+"""A configurable Transformer text decoder, built by :class:`TextDecoder`.
 
-This layer serves as a high-level component for building decoder-only
-autoregressive language models, encapsulating the core logic of token
-embedding, positional encoding, and a stack of causal self-attention blocks.
-It is designed to be highly configurable, allowing for the construction of
-various modern transformer architectures by composing different underlying
-mechanisms for embeddings, attention, and normalization.
-
-Architecture and Core Concepts:
-
-The fundamental design follows the decoder side of the original Transformer
-architecture, which has become the de facto standard for large language
-models (LLMs). The primary purpose of this architecture is to model the
-probability distribution of a sequence of tokens, P(x_i | x_1, ..., x_{i-1}),
-making it inherently suited for text generation.
-
-The core operational principles are:
-
-1.  **Input Representation:** The process begins by converting a sequence of
-    integer token IDs into a dense vector space representation. This is
-    achieved by summing a token embedding (which captures semantic meaning)
-    and a positional embedding (which injects information about the token's
-    position in the sequence, compensating for the architecture's lack of
-    inherent sequential awareness).
-
-2.  **Causal Self-Attention:** The sequence of embeddings is then processed by
-    a stack of identical transformer layers. The central mechanism in each
-    layer is masked multi-head self-attention. The "causal" or "look-ahead"
-    mask is the defining feature of a decoder. It ensures that the
-    representation for a token at position `i` can only be influenced by
-    tokens at positions less than or equal to `i`. This restriction is
-    critical for maintaining the autoregressive property, preventing the model
-    from "cheating" by looking at future tokens during training.
-
-3.  **Feed-Forward Networks:** Each attention sub-layer is followed by a
-    pointwise feed-forward network (FFN), which introduces additional
-    non-linearity and capacity, allowing the model to learn more complex
-    transformations of the token representations.
-
-4.  **Layer Normalization and Residuals:** The entire stack is stabilized by
-    residual connections and layer normalization, which are applied around
-    each sub-layer (attention and FFN). This layer supports both "pre-norm"
-    and "post-norm" configurations, a key architectural choice affecting
-    training dynamics and stability.
-
-This layer's configurability allows for the exploration of architectural
-variants popularized by recent research, such as substituting standard Layer
-Normalization with RMSNorm, or replacing the standard FFN with more advanced
-variants like SwiGLU.
-
-Mathematical Foundation:
-
-The attention mechanism calculates a weighted sum of value vectors, where the
-weights are determined by the similarity between query and key vectors. For a
-sequence `X`, the output `Z` is computed as:
-`Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k) + M) V`
-
-Here, `Q`, `K`, and `V` are linear projections of the input `X`. The term `d_k`
-is the dimension of the key vectors, used for scaling. The crucial component
-for a decoder is the mask `M`, a matrix where `M_ij = -inf` for `j > i` and
-`0` otherwise. This ensures that the softmax output for connections to future
-tokens is zero, enforcing causality.
+The layer follows the decoder side of the Transformer: causal self-attention
+restricts each position's representation to tokens at or before it, so the
+stack models P(x_i | x_1, ..., x_{i-1}) and is suited to text generation.
+Embedding type, positional encoding, attention type, normalization type and
+position, and FFN type are all constructor arguments routed through factory
+components, covering architectures from the original GPT decoder to a
+modern RMSNorm + SwiGLU stack. Causal masking is applied automatically inside
+`call()`; an optional padding mask is combined with it.
 
 References:
-
-The architecture implemented here is a configurable version of the decoder
-stack first proposed in:
--   Vaswani, A., et al. (2017). "Attention Is All You Need." This paper
-    introduced the original Transformer architecture.
-
-The decoder-only variant was popularized by the GPT series of models, which
-demonstrated its effectiveness for generative pre-training:
--   Radford, A., et al. (2018). "Improving Language Understanding by
-    Generative Pre-Training."
-
-Modern components available through this layer's configuration options are
-based on subsequent research, such as:
--   Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
--   Shazeer, N. (2020). "GLU Variants Improve Transformer."
-
+    - Vaswani et al., 2017. Attention Is All You Need.
+    - Radford et al., 2018. Improving Language Understanding by Generative
+      Pre-Training.
+    - Zhang & Sennrich, 2019. Root Mean Square Layer Normalization.
+    - Shazeer, 2020. GLU Variants Improve Transformer.
 """
 
 import math
@@ -122,7 +57,7 @@ class TextDecoder(keras.layers.Layer):
     autoregressive text generation. Causal masking is applied automatically;
     an optional padding mask can be combined with it.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -189,21 +124,18 @@ class TextDecoder(keras.layers.Layer):
         output projections of every block (the attention output projection and
         the FFN's contracting projection) are initialized at
         ``initializer_range / sqrt(2 * depth)`` instead of ``initializer_range``,
-        so that the residual stream's variance does not grow with depth. Q/K/V
-        and the FFN expansion are UNAFFECTED. Default: False, which is the
-        behaviour of every consumer written before 2026-08-22. This is GPT-2's
+        so the residual stream's variance does not grow with depth. Q/K/V
+        and the FFN expansion are unaffected. Default: False. This is GPT-2's
         published rule; see ``models/language/gpt2/gpt2.py`` and
         ``huggingface/transformers`` ``modeling_gpt2.py::_init_weights``.
-        Requires ``attention_type='multi_head'`` and ``ffn_type='mlp'`` -- any
-        other choice RAISES from the respective layer factory rather than
+        Requires ``attention_type='multi_head'`` and ``ffn_type='mlp'``; any
+        other choice raises from the respective layer factory rather than
         silently ignoring the request.
     :type scale_residual_initializer_by_depth: bool
     :param layer_norm_eps: Normalization epsilon. Default: 1e-12. Applies to
-        ``embed_norm``, ``final_norm`` AND every one of the ``2 * depth``
-        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):**
-        the in-block norms previously ignored this knob and ran at the
-        normalization factory's ``1e-6`` default. Weight shapes are unchanged --
-        existing ``.keras`` files still load -- but forward values move slightly.
+        ``embed_norm``, ``final_norm``, and every one of the ``2 * depth``
+        in-block norms (see decisions.md D-007 for why the in-block norms
+        need this stated explicitly).
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for the base Layer.
     :type kwargs: Any
@@ -247,32 +179,11 @@ class TextDecoder(keras.layers.Layer):
             raise ValueError(f"attention_dropout must be between 0.0 and 1.0, got {attention_dropout_rate}")
         if not 0.0 <= stochastic_depth_rate <= 1.0:
             raise ValueError(f"stochastic_depth_rate must be between 0.0 and 1.0, got {stochastic_depth_rate}")
-        # Fail loud on an unknown embedding_type: build() only handles these two,
-        # and call() unconditionally reads self.word_embeddings -- an invalid value
-        # would otherwise raise an opaque AttributeError at first forward pass.
-        #
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-017
-        # Do NOT "fix" this by implementing tying here, and do NOT add a
-        # from_config 'shared' -> 'learned' compatibility shim. There is no
-        # output projection in this class to tie to (see below), and no shipped
-        # checkpoint uses 'shared' (grep-clean at 2026-07-31) -- a shim would be
-        # untested surface guarding a file that does not exist. If positive
-        # checkpoint evidence ever appears, flip the scope pin
-        # tests/.../test_text_decoder.py::TestSharedEmbeddingTypeIsRejected::
-        # test_no_from_config_compatibility_shim_maps_shared deliberately.
-        #
-        # F-11: 'shared' used to be accepted here and took the LITERALLY IDENTICAL
-        # branch as 'learned' in _create_word_embeddings -- no tying mechanism, no
-        # accessor, measurably 0 differing output elements between the two. It is
-        # rejected rather than implemented because tying is structurally
-        # inapplicable to this class: TextDecoder has no output/LM-head projection
-        # to tie the embedding TO (call() returns raw hidden states
-        # (B, seq, embed_dim); the only Dense here is the factorized path's
-        # embed_projection, factorized_dim -> embed_dim). Weight tying belongs in
-        # the MODEL that owns the vocabulary projection -- see
-        # models/language/masked_language_model/clm.py (tie_weights), models/language/gpt2/gpt2.py
-        # and models/vision_language/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
-        # they build themselves.
+        # Fail loud on an unknown embedding_type -- otherwise call() raises an
+        # opaque AttributeError at first forward pass instead.
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-017: reject 'shared', don't
+        # implement tying here -- this class has no output projection to tie to.
+        # Tying belongs in the model that owns the vocabulary projection (see decisions.md).
         if embedding_type == 'shared':
             raise ValueError(
                 "embedding_type='shared' is not supported: TextDecoder has no "
@@ -319,41 +230,10 @@ class TextDecoder(keras.layers.Layer):
         )
 
         # Create transformer decoder layers
-        # DECISION plan-2026-08-18T140459-7991552f/D-067
-        # `kernel_initializer` below is LOAD-BEARING and must not be dropped as
-        # redundant: before 2026-08-19 this construction passed no initializer at
-        # all, so `initializer_range` reached only the word/positional embeddings
-        # and every attention and FFN weight in all `depth` blocks silently fell
-        # back to `TransformerLayer`'s `glorot_uniform`. Measured at the time:
-        # a 25x change in `initializer_range` moved the block-kernel std by a
-        # factor of 1.00 (0.12245 in both arms). This is a four-line edit with a
-        # wide blast radius -- it changes the initial weight distribution of every
-        # block in `gpt2`, `qwen` and `nano_vlm`. Post-fix
-        # the GPT-2 blocks' weights are ~1.8x smaller, which attenuated the
-        # two-block cross-position signal ~50x and required
-        # `test_gpt2.py::test_without_the_mask_the_same_tokens_do_leak` to be
-        # re-derived (its bar moved 1e-2 -> 1e-3, still 3900x above the 1e-6 it
-        # must dominate). If that control ever loses its remaining headroom,
-        # RE-DERIVE it against a measurement -- do not loosen the bar again.
-        # See decisions.md D-067.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        # `1/sqrt(2 * depth)`, NOT `1/sqrt(depth)`: the 2 counts the residual
-        # ADDITIONS per block (attention and FFN), which is why the same factor
-        # is applied to both projections. Verbatim upstream --
-        # huggingface/transformers `modeling_gpt2.py::_init_weights`:
-        # `std = self.config.initializer_range / math.sqrt(2 * self.config.n_layer)`
-        # applied to `GPT2Attention.c_proj` and `GPT2MLP.c_proj`; karpathy/nanoGPT
-        # `model.py:145`: `std=0.02/math.sqrt(2 * config.n_layer)` for every
-        # parameter whose name ends `c_proj.weight`.
-        # WHAT NOT TO DO: do not "simplify" by scaling `initializer_range`
-        # itself for the whole block -- that shrinks Q/K/V and the FFN expansion
-        # too, which the reference explicitly does not do, and which was the
-        # documented reason gpt2.py carried this as an unfixed departure until
-        # today. Note also that the std that lands is the TRUNCATED-normal one:
-        # `TruncatedNormal(stddev=s)` has empirical std `0.8796 * s` (2-sigma
-        # truncation), so a test must pin the RATIO or the truncated value, not
-        # the bare `initializer_range / sqrt(2 * depth)`.
-        # See decisions.md D-160.
+        # DECISION plan-2026-08-18T140459-7991552f/D-067: kernel_initializer
+        # below must not be dropped -- without it every block silently fell back to TransformerLayer's glorot_uniform instead of initializer_range. See decisions.md.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160: use 1/sqrt(2 * depth),
+        # not 1/sqrt(depth) -- the 2 counts residual additions per block (attention + FFN), matching upstream GPT-2's _init_weights. See decisions.md.
         residual_output_kernel_initializer = None
         if self.scale_residual_initializer_by_depth:
             residual_output_kernel_initializer = initializers.TruncatedNormal(
@@ -364,17 +244,8 @@ class TextDecoder(keras.layers.Layer):
         for i in range(self.depth):
             # Linearly increase drop rate per layer
             layer_drop_rate = self.stochastic_depth_rate * i / max(1, self.depth - 1)
-            # DECISION plan-2026-08-19T070627-a616f581/D-007
-            # `layer_norm_eps` used to reach ONLY `embed_norm` and `final_norm`.
-            # This loop
-            # passed neither `attention_norm_args` nor `ffn_norm_args`, so all
-            # `2 * depth` block norms inherited
-            # `create_normalization_layer`'s `epsilon=1e-6` default while
-            # `final_norm` ran at this decoder's own 1e-12. MEASURED pre-fix at
-            # `depth=2`: 4 of 4 block norms at 1e-06, final_norm at 1e-12.
-            # WHAT NOT TO DO: do not change the factory's shared 1e-6 default,
-            # and do not hard-code 1e-12 here -- a test asserts the block norms
-            # TRACK `self.layer_norm_eps`. See decisions.md D-007.
+            # DECISION plan-2026-08-19T070627-a616f581/D-007: pass
+            # attention_norm_args/ffn_norm_args so block norms track layer_norm_eps -- they used to fall back to the factory's 1e-6 default while final_norm ran at 1e-12. See decisions.md.
             layer = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
@@ -451,8 +322,8 @@ class TextDecoder(keras.layers.Layer):
         """
         Build the layer and all sub-layers.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        This ensures all weight variables exist before weight restoration during loading.
+        Builds each sub-layer explicitly so every weight variable exists
+        before weight restoration during loading.
 
         :param input_shape: Input shape ``(batch, seq_len)``.
         :type input_shape: Tuple[Optional[int], ...]
@@ -462,28 +333,8 @@ class TextDecoder(keras.layers.Layer):
         if self.built:
             return
 
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-018
-        # Static `seq_len <= max_seq_len` guard. Do NOT move this into `call()`
-        # and do NOT rewrite it against `ops.shape(input_ids)[1]`: that value is
-        # a traced tensor under `@tf.function`/`fit()` and a Python `if` cannot
-        # branch on it. Do NOT relocate it into a lower-level helper either --
-        # `GatedLinearAttentionBlock` did exactly that with its own `max_seq_len`
-        # raise and turned a loud error into a silent wrong answer (52 of 60
-        # timesteps returned all-zero on a symbolic-input model).
-        #
-        # LIMITATION (deliberate, and unfixable at this placement): when the
-        # sequence axis is dynamic (`input_shape[1] is None`) the guard has
-        # nothing to check and CANNOT fire. `build()` also runs only ONCE, so a
-        # later call with a longer sequence on an already-built layer is not
-        # re-checked either. In both cases an over-length sequence reaches the
-        # positional embedding unguarded, and the resulting failure is
-        # DEVICE-DEPENDENT -- MEASURED at max_seq_len=8, seq_len=16:
-        #   positional_type='learned': GPU returns finite, plausible-looking
-        #     garbage with NO exception (`GatherV2` clips out-of-range indices);
-        #     CPU raises `InvalidArgumentError: indices[8] = 8 is not in [0, 8)`.
-        #   positional_type='sincos' : NO exception on EITHER device -- the
-        #     coordinates are simply extrapolated past the declared range.
-        # Callers on a dynamic sequence axis must bound `seq_len` themselves.
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-018: static seq_len guard
+        # stays here, not in call() or a lower-level helper. Cannot fire on a dynamic sequence axis or on a later call to an already-built layer -- callers must bound seq_len themselves. See decisions.md.
         if input_shape is not None and len(input_shape) >= 2:
             static_seq_len = input_shape[1]
             if static_seq_len is not None and static_seq_len > self.max_seq_len:
@@ -566,15 +417,8 @@ class TextDecoder(keras.layers.Layer):
             pos_embed = self.positional_embeddings(positions)
             x = ops.add(x, pos_embed)
         elif self.positional_type == 'sincos':
-            # Reshape positions to (batch, seq_len, 1) for sincos layer
-            # Cast to THIS layer's active compute dtype rather than a hardcoded
-            # "float32", for consistency with the rest of the forward path.
-            # Cosmetic only: measured bit-identical under the float32 policy.
-            # It does NOT make `positional_type='sincos'` work under
-            # mixed_float16 / float64 -- that crash originates inside
-            # `layers/embedding/continuous_sin_cos_embedding.py`, which does its
-            # own forced float32 cast against an autocast weight, and is out of
-            # scope here. Do not add a docstring claiming that gap is closed.
+            # Cast to this layer's compute dtype; measured bit-identical under
+            # float32. Does not fix sincos under mixed_float16/float64 -- that cast lives inside continuous_sin_cos_embedding.py.
             pos_coords = ops.cast(positions, self.compute_dtype)
             pos_coords = ops.expand_dims(pos_coords, axis=-1)
             pos_coords = ops.expand_dims(pos_coords, axis=0)
@@ -586,11 +430,8 @@ class TextDecoder(keras.layers.Layer):
         x = self.embed_norm(x, training=training)
         x = self.embed_dropout_layer(x, training=training)
 
-        # 4. Create Attention Mask using the Masking Factory
-        # The masking factory uses True=block semantics (True means "mask out"),
-        # but the attention layer expects True=attend semantics (True means
-        # "allow attention"). We build the mask in block-semantics and invert
-        # at the end so the attention layer receives the correct convention.
+        # 4. Attention mask: build in block-semantics (True = mask out), then
+        # invert once at the end for the attention layer's attend-semantics (True = allow).
 
         # Create causal mask (True = future position to block)
         causal_mask = create_mask('causal', seq_len=seq_len, dtype='bool')

@@ -1,89 +1,28 @@
-"""
-A highly configurable, Transformer-based text encoder.
+"""A configurable Transformer text encoder, built by :class:`TextEncoder`.
 
-This layer provides a versatile and modular framework for constructing a wide
-range of Transformer encoder architectures. It is designed to create deep,
-bidirectional representations of text, making it suitable for natural
-language understanding tasks like text classification, named entity
-recognition, and question answering. Its primary design principle is
-configurability, allowing researchers and engineers to compose different
-architectural components to build models ranging from classic BERT-style
-architectures to more modern variants.
+The layer follows the standard encoder side of the Transformer: every token
+attends to every other token, with no causal mask, so each position's output
+mixes information from the whole sequence. What differs from a fixed
+BERT-style encoder is that embedding type, positional encoding, attention
+type, normalization type and position, and FFN type are all constructor
+arguments routed through factory components, so one class covers
+architectures from classic BERT to a modern RoPE + SwiGLU stack.
 
-Architecture and Core Concepts:
-
-The layer follows the fundamental architecture of the encoder side of the
-original Transformer model. The core operation is to process an entire
-sequence of text at once, allowing every token to attend to every other token.
-This "bidirectional" self-attention mechanism is what enables the model to
-build a contextually rich understanding of each token based on its complete
-surrounding text.
-
-The architecture is composed of three main stages:
-
-1.  **Input Embedding Stage:** This stage converts input token IDs into a
-    continuous representation that incorporates semantic, positional, and (if
-    applicable) segment information. The key innovation here is the
-    flexibility in positional encoding. Beyond traditional learned or fixed
-    sinusoidal embeddings, it supports modern techniques like Rotary Position
-    Embeddings (RoPE), which inject relative positional information more
-    effectively.
-
-2.  **Transformer Layer Stack:** The core of the encoder is a stack of
-    identical Transformer layers. Each layer refines the token
-    representations through two main sub-layers: a self-attention mechanism
-    and a position-wise feed-forward network (FFN). This class allows for
-    extensive configuration of these layers, including the choice between
-    pre-layer and post-layer normalization (a critical factor for training
-    stability), different normalization techniques (e.g., LayerNorm vs.
-    RMSNorm), and various FFN architectures (e.g., standard MLP vs. gated
-    variants like SwiGLU).
-
-3.  **Output Pooling Stage:** For tasks that require a single, fixed-size
-    vector representation of the entire input sequence, the layer can apply a
-    pooling strategy to the final token representations. This might involve
-    using the representation of a special `[CLS]` token, or applying mean or
-    max pooling across the sequence.
-
-By exposing these architectural choices as configuration parameters, this
-class serves as a factory for a family of encoder models, promoting rapid
-experimentation and adaptation to new research findings.
-
-Mathematical Foundation:
-
-The cornerstone of the encoder is the self-attention mechanism, calculated as:
-`Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V`
-
-Unlike a decoder, the attention mechanism here is not causally masked,
-meaning the softmax is computed over the entire sequence. This allows
-information to flow bidirectionally.
-
-A key mathematical concept supported is Rotary Position Embeddings (RoPE).
-Instead of adding positional vectors to the token embeddings, RoPE rotates
-the query and key vectors based on their absolute position. The rotation is
-designed such that the dot product between a query at position `m` and a key
-at position `n` inherently depends only on their relative position `m-n`.
-This elegantly injects relative positional awareness directly into the
-attention mechanism, often leading to improved performance on long sequences.
+Positional encoding includes Rotary Position Embeddings (RoPE), which rotate
+the query and key vectors by their absolute position so that a query-key dot
+product depends only on their relative position. Note: `positional_type`
+values `'rope'`/`'dual_rope'` are validated but not wired into this encoder's
+factory attention layers and raise `NotImplementedError` at construction;
+use `'learned'` or `'sincos'` for a working model.
 
 References:
-
-The design of this layer is based on a rich history of research in natural
-language processing, primarily originating from:
--   Vaswani, A., et al. (2017). "Attention Is All You Need." This paper
-    introduced the original Transformer architecture.
--   Devlin, J., et al. (2018). "BERT: Pre-training of Deep Bidirectional
-    Transformers for Language Understanding." This work established the
-    Transformer encoder as a dominant paradigm for NLU tasks.
-
-The modern, configurable components are based on subsequent innovations:
--   Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
-    Position Embedding." This paper introduced RoPE.
--   Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer
-    Normalization."
--   Shazeer, N. (2020). "GLU Variants Improve Transformer," which popularized
-    architectures like SwiGLU.
-
+    - Vaswani et al., 2017. Attention Is All You Need.
+    - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
+      Transformers for Language Understanding.
+    - Su et al., 2021. RoFormer: Enhanced Transformer with Rotary Position
+      Embedding.
+    - Zhang & Sennrich, 2019. Root Mean Square Layer Normalization.
+    - Shazeer, 2020. GLU Variants Improve Transformer.
 """
 
 import keras
@@ -123,7 +62,7 @@ class TextEncoder(keras.layers.Layer):
     and output pooling. Factory patterns allow replicating architectures
     from classic BERT to modern RoPE + SwiGLU variants.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -305,32 +244,9 @@ class TextEncoder(keras.layers.Layer):
             raise ValueError(f"initializer_range must be positive, got {initializer_range}")
         if layer_norm_eps <= 0:
             raise ValueError(f"layer_norm_eps must be positive, got {layer_norm_eps}")
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-017
-        # Do NOT "fix" this by implementing tying here, and do NOT add a
-        # from_config 'shared' -> 'learned' compatibility shim. There is no
-        # output projection in this class to tie to (see below), and no shipped
-        # checkpoint uses 'shared' (grep-clean at 2026-07-31) -- a shim would be
-        # untested surface guarding a file that does not exist. If positive
-        # checkpoint evidence ever appears, flip the scope pin
-        # tests/.../test_text_encoder.py::TestSharedEmbeddingTypeIsRejected::
-        # test_no_from_config_compatibility_shim_maps_shared deliberately.
-        #
-        # F-11: 'shared' used to be accepted here and took the LITERALLY IDENTICAL
-        # branch as 'learned' in _create_embedding_layers -- no tying mechanism, no
-        # accessor, measurably 0 differing output elements between the two. It is
-        # rejected rather than implemented because tying is structurally
-        # inapplicable to this class: TextEncoder has no output/vocabulary
-        # projection to tie the embedding TO (the only Dense here is the
-        # factorized path's embed_projection, factorized_dim -> embed_dim). Weight
-        # tying belongs in the MODEL that owns the vocabulary projection -- see
-        # models/language/masked_language_model/clm.py (tie_weights), models/language/gpt2/gpt2.py
-        # and models/vision_language/nano_vlm/model.py, all of which tie to a Dense(vocab_size)
-        # they build themselves.
-        #
-        # The second check is not redundant: _create_embedding_layers routes
-        # everything that is not 'learned'/'shared' into its `else:  # factorized`
-        # branch, so before this guard a typo silently built a FACTORIZED
-        # embedding instead of failing.
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-017: reject 'shared', don't
+        # implement tying here -- this class has no output projection to tie to.
+        # Tying belongs in the model that owns the vocabulary projection (see decisions.md).
         if embedding_type == 'shared':
             raise ValueError(
                 "embedding_type='shared' is not supported: TextEncoder has no "
@@ -493,24 +409,8 @@ class TextEncoder(keras.layers.Layer):
 
     def _create_word_embeddings(self) -> None:
         """Create word embedding layer(s) based on the specified strategy."""
-        # DECISION plan-2026-08-22T035419-a11304c8/D-055
-        # `mask_zero` defaults to FALSE, not True. Do NOT flip it back. This
-        # encoder threads an EXPLICIT `attention_mask` into every
-        # `TransformerLayer` and into `SequencePooling`; the Keras auto-mask an
-        # `Embedding(mask_zero=True)` attaches is consumed by NOTHING in the
-        # chain, because `PositionalEmbedding`, `TransformerLayer`,
-        # `MultiHeadAttention` and `MultiHeadCrossAttention` each drop it.
-        # MEASURED 2026-08-22, `[[5, 7, 0, 0]]` with no `attention_mask`:
-        # `max|f([5,7,0,0])[:, :2] - f([5,7])|` = 1.290977e-02, i.e. attention
-        # DOES see the padding, and it reads the same whether or not
-        # `PositionalEmbedding` declares `supports_masking`. With the explicit
-        # `attention_mask=[[1,1,0,0]]` the same gap is 2.384186e-07. And the
-        # flag is numerically inert: forward output is bit-identical, max abs
-        # diff 0.0, at True vs False. So `mask_zero=True` advertised a masking
-        # mechanism this stack does not implement and whose only observable
-        # effect was Keras' "will destroy the mask information" UserWarning.
-        # Same finding, same repair, as `models/language/distilbert/model.py` (D-018).
-        # Callers who want the flag can still pass `embedding_args`.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-055: mask_zero defaults to
+        # False; nothing downstream consumes the Embedding auto-mask, so True was numerically inert but warned. See decisions.md.
         base_args = {
             'embeddings_initializer': initializers.TruncatedNormal(stddev=self.initializer_range),
             'embeddings_regularizer': self.kernel_regularizer,
@@ -538,9 +438,8 @@ class TextEncoder(keras.layers.Layer):
                 output_dim=factorized_dim,
                 embeddings_initializer=initializers.TruncatedNormal(stddev=self.initializer_range),
                 embeddings_regularizer=self.kernel_regularizer,
-                # DECISION plan-2026-08-22T035419-a11304c8/D-055 -- see the
-                # `base_args` comment above; the factorized path drops the same
-                # unconsumed auto-mask.
+                # DECISION plan-2026-08-22T035419-a11304c8/D-055: same as
+                # base_args above -- factorized path drops the unconsumed auto-mask too.
                 mask_zero=False,
                 name='factorized_embed'
             )
@@ -570,13 +469,8 @@ class TextEncoder(keras.layers.Layer):
             )
 
         elif self.positional_type in ('rope', 'dual_rope'):
-            # DECISION plan_2026-06-15_5e7ae321/D-001: RoPE is NOT wired into this
-            # encoder. RoPE must be applied inside the attention layer, but the
-            # factory attention types selected here do not receive rope parameters.
-            # The previous behaviour silently returned None -> a positionless model.
-            # Fail loud instead of advertising positional encoding that is absent.
-            # Wiring real RoPE is out of scope (expand functionality); use
-            # positional_type='learned' or 'sincos' for a working encoder.
+            # DECISION plan_2026-06-15_5e7ae321/D-001: raise, don't return None --
+            # RoPE isn't wired into the factory attention layers here, so it silently gave a positionless model. See decisions.md.
             raise NotImplementedError(
                 f"positional_type='{self.positional_type}' is not implemented in "
                 f"TextEncoder: RoPE is not wired into the factory attention layers, "
@@ -618,34 +512,8 @@ class TextEncoder(keras.layers.Layer):
                 f"Expected 2D input shape (batch_size, seq_len), got {main_input_shape}"
             )
 
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-018
-        # Static `seq_len <= max_seq_len` guard. Do NOT move this into `call()`
-        # and do NOT rewrite it against `ops.shape(input_ids)[1]`: that value is
-        # a traced tensor under `@tf.function`/`fit()` and a Python `if` cannot
-        # branch on it. Do NOT relocate it into a lower-level helper either --
-        # `GatedLinearAttentionBlock` did exactly that with its own `max_seq_len`
-        # raise and turned a loud error into a silent wrong answer (52 of 60
-        # timesteps returned all-zero on a symbolic-input model).
-        #
-        # The bound is `max_seq_len`, NOT `self.seq_len` (= max_seq_len + 1 when
-        # `use_cls_token`): the extra positional slot exists FOR the prepended
-        # CLS token, so enabling it must not cost the caller an input token.
-        #
-        # LIMITATION (deliberate, and unfixable at this placement): when the
-        # sequence axis is dynamic (`main_input_shape[1] is None`) the guard has
-        # nothing to check and CANNOT fire. `build()` also runs only ONCE, so a
-        # later call with a longer sequence on an already-built layer is not
-        # re-checked either. In both cases an over-length sequence reaches the
-        # positional embedding unguarded, and the resulting failure is
-        # DEVICE-DEPENDENT -- MEASURED at max_seq_len=8, seq_len=16:
-        #   positional_type='learned': both GPU and CPU raise an opaque
-        #     `InvalidArgumentError: Expected size[1] in [0, 8], but got 16
-        #     [Op:Slice]`, naming neither `seq_len` nor `max_seq_len`. (The
-        #     sibling `TextDecoder` diverges harder still: it gathers instead of
-        #     slicing, so its GPU path returns finite garbage with NO exception.)
-        #   positional_type='sincos' : NO exception on EITHER device -- the
-        #     coordinates are simply extrapolated past the declared range.
-        # Callers on a dynamic sequence axis must bound `seq_len` themselves.
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-018: static seq_len guard
+        # stays here, bounded by max_seq_len (not self.seq_len). Cannot fire on a dynamic sequence axis or on a later call to an already-built layer -- callers must bound seq_len themselves. See decisions.md.
         if main_input_shape is not None and len(main_input_shape) >= 2:
             static_seq_len = main_input_shape[1]
             if static_seq_len is not None and static_seq_len > self.max_seq_len:

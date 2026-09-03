@@ -1,70 +1,18 @@
-"""
-A configurable, general-purpose Vision Transformer encoder.
+"""A configurable Vision Transformer encoder, built by :class:`VisionEncoder`.
 
-This layer implements the core architecture of a Vision Transformer (ViT),
-which processes images by treating them as a sequence of flattened patches. It
-provides a flexible and modular framework that can be configured to replicate
-various ViT-style architectures, serving as a unified backbone for a wide
-range of computer vision_heads tasks.
-
-Architectural and Mathematical Underpinnings:
-
-The fundamental innovation of the Vision Transformer is the application of the
-highly successful Transformer architecture, originally designed for natural
-language processing, to image data. This is achieved through a specific
-sequence of transformations that convert a 2D grid of pixels into a 1D sequence
-of vectors that the Transformer can process.
-
-1.  **Patchification and Embedding**: An input image `I ∈ ℝ^(H×W×C)` is first
-    divided into a grid of `N` non-overlapping patches, where each patch
-    `pᵢ ∈ ℝ^(P×P×C)`. These 2D patches are then flattened into vectors and
-    linearly projected into a `D`-dimensional embedding space via a learnable
-    weight matrix `E`. This is the critical step that transforms spatial data
-    into a sequence format.
-
-        `z₀ = [x_class; E*p₁; E*p₂; ...; E*p_N] + E_pos`
-
-    -   **`[x_class]` Token**: Inspired by BERT, a learnable `[CLS]` (class)
-        token embedding is prepended to the sequence of patch embeddings. The
-        final state of this token after passing through the encoder serves as
-        the aggregate image representation for classification tasks.
-    -   **Positional Embeddings `E_pos`**: Since the self-attention mechanism is
-        permutation-invariant, explicit positional information must be added to
-        the patch embeddings to retain their spatial arrangement. These are
-        learnable embeddings, one for each position in the sequence.
-
-2.  **Transformer Encoder Stack**: The resulting sequence of embeddings `z₀` is
-    then processed by a stack of `L` identical Transformer layers. Each layer
-    applies two main sub-layers:
-    -   **Multi-Head Self-Attention (MHSA)**: This allows each patch embedding
-        to be updated by attending to and integrating information from all
-        other patch embeddings in the sequence. It enables the model to learn
-        long-range dependencies and contextual relationships between different
-        parts of the image.
-    -   **Position-wise Feed-Forward Network (FFN)**: A simple MLP applied
-        independently to each patch embedding, providing non-linearity and
-        increasing representational capacity.
-
-    Each sub-layer is enclosed in a residual connection and followed by layer
-    normalization, ensuring stable training of deep models. The output of the
-    final layer, `z_L`, is a sequence of contextually rich patch
-    representations.
-
-3.  **Factory-Based Design Philosophy**: This implementation is intentionally
-    generic, utilizing a factory pattern for its core components (patch
-    embedding, attention, normalization, FFN). This design choice allows the
-    single `VisionEncoder` class to be configured to instantiate a wide variety
-    of architectural variants from the literature (e.g., the standard ViT,
-    SigLIP with its two-stage patch embedder, or efficient models using RMSNorm
-    and SwiGLU). This flexibility supports rapid experimentation and architectural
-    research within a unified and maintainable codebase.
+An input image is split into a grid of non-overlapping patches, each patch
+linearly projected into a `D`-dimensional embedding, and a learnable CLS
+token optionally prepended: `z0 = [x_class; E*p1; ...; E*p_N] + E_pos`. Patch
+embedding, attention type, normalization type and position, and FFN type are
+all constructor arguments routed through factory components, so one class
+covers architectures from the standard ViT to SigLIP's two-stage patch
+embedder or a RMSNorm + SwiGLU variant.
 
 References:
-    - Dosovitskiy, A., et al. (2020). An Image is Worth 16x16 Words:
-      Transformers for Image Recognition at Scale. *ICLR*.
-    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
-    - Zhai, X., et al. (2023). Sigmoid Loss for Language Image Pre-Training.
-      *ICCV*. (Introduced the SigLIP architecture and patch embedder).
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers
+      for Image Recognition at Scale.
+    - Vaswani et al., 2017. Attention Is All You Need.
+    - Zhai et al., 2023. Sigmoid Loss for Language Image Pre-Training.
 """
 
 import keras
@@ -94,74 +42,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 PatchEmbedType = Literal['linear', 'siglip', 'conv', 'hybrid']
 
-# DECISION plan-2026-07-31T132403-b3f540cb/D-003
-# SUPERSEDES `# DECISION plan-2026-07-31T042809-ddc92265/D-013`, which used to
-# live here as a `MASK_INCOMPATIBLE_OUTPUT_MODES` frozenset plus a
-# `_reject_mask_incompatible_pooling` raise in `call()`.
-#
-# D-013 made `VisionEncoder.call` raise `NotImplementedError` for
-# `{'weighted', 'top_k_mean', 'top_k_max'}` whenever an `attention_mask` was
-# supplied, because the pooled output of those three was NOT isolated from a
-# masked patch (finding F-24, measured 2.3e-01 / 2.3e-01 / 4.5e-01 where 0.0 is
-# required). That was explicitly CONTAINMENT of a defect in a different
-# package, not a statement about this layer.
-#
-# The root cause is now FIXED in `layers/sequence_pooling/`
-# (`# DECISION plan-2026-07-31T132403-b3f540cb/D-002`): `WeightedPooling.call`
-# masks the softmax LOGITS with `ops.where` + a finite `-1e4` sentinel, and
-# `SequencePooling._select_top_k` both ranks masked positions last and excludes
-# invalid SELECTED positions from the aggregation. All three modes now measure
-# EXACTLY 0.0 movement under a masked-patch perturbation, at both
-# `use_cls_token` values. Keeping the raise would therefore be OVER-refusal:
-# it would forbid a combination that is now correct.
-#
-# WHAT NOT TO DO, and why:
-#   * Do NOT reintroduce a mode allowlist/denylist here. Whether a pooling
-#     strategy isolates a masked position is a property of
-#     `layers/sequence_pooling/`, and duplicating that judgement in this file is
-#     what made the guard go stale in the first place. The guard against a
-#     regression now lives where the behaviour lives:
-#     `tests/test_layers/test_sequence_pooling.py::TestMaskedPositionIsolation`,
-#     plus `TestMaskedPoolingIsIsolated` in this layer's own test module.
-#   * Do NOT read the removal as "the leak was not real". It was real and is
-#     recorded above; it was closed, and the self-obsoleting guard test that
-#     watched for exactly this moment
-#     (`test_the_leak_the_guard_prevents_is_real`) was removed on its own
-#     instruction, replaced at the same site by an ISOLATION assertion.
-#   * `none` and `flatten` were never refused and still are not: they return the
-#     per-token sequence, so the masked token's own row being present is the
-#     documented meaning of those modes rather than a leak.
-#   * Do NOT read any of the above as "every OTHER `output_mode` isolates a
-#     masked token" — that is a UNIVERSAL claim and it is still false. What is
-#     true is narrower and is stated per mode, in ONE place: the "Positional
-#     strategies and the keep-mask" section of
-#     `layers/sequence_pooling/sequence_pooling.py::SequencePooling`. Read it
-#     there rather than re-deriving it here; a rule restated in two files is a
-#     hand-maintained lockstep invariant, and an earlier revision of THIS
-#     comment is what went stale.
-#
-# F-25 IS CLOSED (plan-2026-07-31T210633-b63a35aa). Two mask entry points were
-# fixed inside `layers/sequence_pooling/`, not here:
-#   * `middle` used to index the FULL PADDED length (`ops.shape(inputs)[1] // 2`)
-#     and `last` used to take `ops.sum(mask) - 1` — the last index of a
-#     contiguous PREFIX and nothing else. Both now derive their index from the
-#     keep-mask: `middle` is the middle of the KEPT positions and `last` the
-#     LAST KEPT index. `cls`/`first` still return index 0 BY INTENT, mask or no
-#     mask — that asymmetry is DELIBERATE and pinned by a test, not an oversight.
-#   * `exclude_positions` used to be a silent no-op for all four positional
-#     modes. It is now honoured by every strategy except `none`/`flatten`.
-# Do NOT re-add a "middle/last leak" warning anywhere in this file: the
-# behaviour is now pinned by `TestPositionalModesIsolateMaskedPositions` and
-# `TestExcludePositionsIsLiveForPositionalModes` in
-# `tests/test_layers/test_sequence_pooling.py`, and by
-# `ISOLATING_OUTPUT_MODES` in this layer's own test module — which is also the
-# ONE home for the measured through-this-layer isolation sweep. No figure from
-# that sweep is repeated here.
-#
-# `output_mode` is validated against `PoolingStrategy` in `__init__` (H-03); a
-# typo raises at construction rather than deferring to the first pooled call.
-# See decisions.md D-003 (plan-2026-07-31T132403-b3f540cb) for the supersede
-# record; the prior plan's D-013 entry is append-only and stays as written.
+# DECISION plan-2026-07-31T132403-b3f540cb/D-003: no mask-incompatible-mode
+# allowlist here (supersedes plan-2026-07-31T042809-ddc92265/D-013) -- masked-patch isolation for weighted/top_k pooling is now fixed inside layers/sequence_pooling/, not guarded per-caller. See decisions.md.
 
 # ---------------------------------------------------------------------
 
@@ -177,7 +59,7 @@ class VisionEncoder(keras.layers.Layer):
     architectures from standard ViT to SigLIP, DeiT, and modern variants
     with RMSNorm + SwiGLU.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -312,12 +194,8 @@ class VisionEncoder(keras.layers.Layer):
             raise ValueError(
                 f"img_size ({img_size}) must be divisible by patch_size ({patch_size})"
             )
-        # The multi-stage stems reach `patch_size` as a PRODUCT of strides, and
-        # integer division silently rounds: 'siglip' is 2*(patch//2) and 'conv' is
-        # 2*2*(patch//4), which equal `patch` only for the divisibilities below.
-        # Without this the encoder constructs, then dies in an opaque reshape at
-        # the first forward because the token count is not `num_patches`.
-        # (Same defect as vit_siglip/model.py, C-15.)
+        # Multi-stage stems reach patch_size as a product of strides, and
+        # integer division silently rounds -- without this check the encoder builds, then dies in an opaque reshape at the first forward.
         _stem_stride_divisor = {'siglip': 2, 'conv': 4}.get(patch_embed_type)
         if _stem_stride_divisor and patch_size % _stem_stride_divisor != 0:
             raise ValueError(
@@ -345,13 +223,8 @@ class VisionEncoder(keras.layers.Layer):
             raise ValueError(f"attention_dropout must be between 0 and 1, got {attention_dropout_rate}")
         if not (0.0 <= pos_dropout_rate <= 1.0):
             raise ValueError(f"pos_dropout must be between 0 and 1, got {pos_dropout_rate}")
-        # H-03: `output_mode` is forwarded verbatim to `SequencePooling(strategy=)`.
-        # Until this check existed, the ONLY `output_mode` validation was the
-        # `use_cls_token` one below, so a typo constructed happily and failed
-        # (if at all) much later, inside the pooling layer. The legal set is
-        # DERIVED from `PoolingStrategy` -- never restate the literal list here,
-        # a value list maintained in two places is a lockstep invariant that
-        # drifts the moment a strategy is added.
+        # H-03: output_mode forwards to SequencePooling(strategy=); without this
+        # check a typo failed later, inside the pooling layer. Derive the legal set from PoolingStrategy rather than restating it here.
         _legal_output_modes = get_args(PoolingStrategy)
         if output_mode not in _legal_output_modes:
             raise ValueError(
@@ -361,7 +234,7 @@ class VisionEncoder(keras.layers.Layer):
         if not use_cls_token and output_mode == 'cls':
             raise ValueError("output_mode='cls' requires use_cls_token=True")
 
-        # Store ALL configuration parameters for serialization
+        # Store configuration parameters for serialization
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -395,7 +268,7 @@ class VisionEncoder(keras.layers.Layer):
         self.seq_len = self.num_patches + (1 if use_cls_token else 0)
         self.intermediate_size = int(embed_dim * mlp_ratio)
 
-        # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
+        # Create sub-layers in __init__ (modern Keras 3 pattern)
 
         # Create patch embedding using factory pattern
         self.patch_embed = self._create_patch_embedding()
@@ -433,18 +306,8 @@ class VisionEncoder(keras.layers.Layer):
                 stochastic_depth_rate=layer_drop_rate,
                 activation=self.activation,
                 use_bias=self.use_bias,
-                # DECISION plan-2026-08-23T091307-9a110062/D-560
-                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
-                # "simplify" this back to `self.kernel_initializer`: one seedless
-                # initializer INSTANCE replays its draw, so every same-shape kernel
-                # it reaches is bit-identical. MEASURED at HEAD before this change,
-                # on a seeded depth-4 encoder: 12 of 24 same-shape kernel pairs at
-                # `max|delta| = 0.0` (all 4 `.../cross_attention/qkv/kernel`
-                # pairwise identical, likewise all 4 `.../proj/kernel`). This is a
-                # SHARED layer: `nano_vlm` and `clip` both
-                # build their vision tower from it, so the defect was theirs too.
-                # `seed=` is not the discriminator; instance identity is.
-                # See decisions.md D-560 (and D-540 for the first three ports).
+                # DECISION plan-2026-08-23T091307-9a110062/D-560: every block gets
+                # its own clone_initializer copy, never a shared instance -- a shared one replays the identical draw at every same-shape kernel. See decisions.md.
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
@@ -490,7 +353,7 @@ class VisionEncoder(keras.layers.Layer):
         """
         base_args = {
             # D-560: a clone per patch-embed stack -- 'hybrid'/'overlapping'
-            # build SEVERAL convs from this one dict.
+            # build several convs from this one dict.
             'kernel_initializer': clone_initializer(self.kernel_initializer),
             'bias_initializer': clone_initializer(self.bias_initializer),
             'kernel_regularizer': self.kernel_regularizer,
@@ -511,9 +374,8 @@ class VisionEncoder(keras.layers.Layer):
             )
 
         elif self.patch_embed_type == 'siglip':
-            # Two-stage patch embedding. NOT a SigLIP feature -- SigLIP is a sigmoid
-            # contrastive LOSS and its tower uses a single-conv stem; see
-            # models/vision/vit_siglip/model.py's module docstring.
+            # Two-stage patch embedding. Not a SigLIP feature -- SigLIP is a
+            # sigmoid contrastive loss and its tower uses a single-conv stem; see models/vision/vit_siglip/model.py's module docstring.
             return keras.Sequential([
                 # Stage 1: Coarse-grained patching
                 layers.Conv2D(
@@ -668,18 +530,8 @@ class VisionEncoder(keras.layers.Layer):
         if attention_mask is None or not self.use_cls_token:
             return attention_mask
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-009
-        # The caller's mask is over PATCHES. The CLS token is not a patch: it is
-        # never masked and always attends, so a ones column is spliced at
-        # position 0 - exactly the pattern `text_encoder.py:640-646` uses.
-        # Do NOT hand the un-extended `(B, num_patches)` mask to the
-        # TransformerLayer stack or to `self.pooling_layer` when
-        # `use_cls_token=True`. The attended/pooled sequence is `1 + num_patches`
-        # long, so an un-extended mask is misaligned by exactly one position: it
-        # masks the WRONG patch wherever the shapes happen to broadcast, and
-        # raises a raw backend `InvalidArgumentError` wherever they do not (13 of
-        # the 18 pooling strategies did exactly that at HEAD - measured, see
-        # decisions.md D-009).
+        # DECISION plan-2026-07-31T042809-ddc92265/D-009: splice a ones column
+        # for the CLS token at position 0 -- an un-extended mask misaligns every downstream index by one (13 of 18 pooling strategies broke on this). See decisions.md.
         cls_mask = ops.ones((batch_size, 1), dtype=attention_mask.dtype)
         return ops.concatenate([cls_mask, attention_mask], axis=1)
 
@@ -753,7 +605,7 @@ class VisionEncoder(keras.layers.Layer):
         :param inputs: Image tensor ``(B, H, W, C)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional keep-mask ``(B, num_patches)``, 1 = attend,
-            0 = mask. The mask is over **patches**: the CLS token is excluded from
+            0 = mask. The mask is over patches: the CLS token is excluded from
             it and is always kept (a ones column is spliced in internally when
             ``use_cls_token=True``). It gates every ``TransformerLayer`` in the
             stack as well as the final pooling.
