@@ -2,81 +2,37 @@
 Gemma 3 decoder with interleaved sliding-window / global attention and sandwich
 normalization, plus generation and classification task heads.
 
-The problem Gemma 3 is built around is not modelling quality but the cost of
-context. Attention is `O(n^2)` in time and, worse for deployment, the key-value
-cache it must retain is `O(n * layers * kv_heads)` in memory — at a 32k context the
-cache, not the weights, is what will not fit. The architecture attacks that cost on
-two independent axes. Grouped-query attention shrinks the cache by the ratio
-`num_attention_heads / num_key_value_heads`, since only the distinct KV heads are
-stored and the repeat up to the query-head count happens at score time. Interleaved
-attention shrinks it again by giving most layers a bounded window: with the 5:1
-pattern the variants encode, only one layer in six ever needs keys older than
-`sliding_window_size`.
+Gemma 3 targets inference memory rather than raw quality: attention costs
+O(n^2) in time, and its key-value cache costs O(n * layers * kv_heads) in
+memory, which is what fails to fit at long context. Grouped-query attention
+shrinks the cache by storing only `num_key_value_heads` distinct KV heads and
+repeating them at score time. Most layers also use a bounded attention window
+(`sliding_window_size`), with the `layer_types` list controlling how often a
+layer instead gets full, unbounded attention. A token's receptive field through
+the windowed layers still grows with depth; the full-attention layers add an
+exact single-hop route to any earlier position.
 
-Windowing would be a poor trade if it truly severed long-range dependence, but it
-does not. A token's receptive field through a stack of windowed layers grows
-roughly as `depth * sliding_window_size`, so information still propagates
-backwards, just indirectly and with a hop count. The interleaved full-attention
-layers then supply what stacking cannot: an exact, single-hop route to any earlier
-position, at the price of a full cache in those layers alone. The `layer_types`
-list is the knob for this trade and is validated element-by-element against
-`{'sliding_window', 'full_attention'}` with its length pinned to `num_layers`. Note
-that leaving `layer_types=None` yields *all* full attention — the interleaving is a
-property of the variant tables, not of the constructor defaults.
+Each block uses sandwich normalization: RMSNorm before and after the sublayer,
+`x = x + PostNorm(Attn(PreNorm(x)))`, so each branch's contribution is capped
+before it joins the residual stream, while the residual path itself stays
+unnormalized. Masking is built per block, since it depends on that block's
+attention type, then inverted once to the attend-semantics the attention layer
+expects. Token embeddings are scaled by `sqrt(hidden_size)` before the first
+block to match the unit-scale activations the rest of the network expects.
 
-Each block uses sandwich normalization: RMSNorm before the sublayer and RMSNorm
-again on the sublayer's output, with the residual added afterwards, so the
-computation is `x = x + PostNorm(Attn(PreNorm(x)))` and likewise for the FFN. The
-pre-norm half is the usual conditioning fix. The post-norm half is the part worth
-explaining: in ordinary pre-norm transformers the residual stream's variance
-accumulates across depth without bound, because nothing ever rescales what each
-branch contributes. Normalizing the branch output before the addition caps each
-block's contribution while leaving the residual path itself free of any
-normalization, so gradients still reach layer zero unattenuated. Four RMSNorm
-layers per block is the cost.
+This implementation omits QK normalization and uses one shared RoPE base for
+every layer rather than a larger base in the global layers, so long-context
+behavior differs from the published report; a reader should not assume
+checkpoint compatibility. The LM head is an independent `Dense`, not the tied
+embedding matrix. This package is text-only; the multimodal vision tower is
+not included. `from_variant` takes no `pretrained` argument, so there is no
+path to a silently random-initialized "pretrained" model.
 
-Masking happens inside each block rather than once at the model, because the mask
-depends on the block's own `attention_type`. `_create_attention_mask` builds it in
-*block* semantics — `j > i` for the causal part, OR-ed with `(i - j) >= window` to
-cut off the far past — and then inverts it once to the *attend* semantics the
-attention layer expects. The inverted mask is explicitly expanded to `(1, q, k)`
-before use: a rank-2 mask would be interpreted downstream as a padding mask rather
-than a full attention bias, silently discarding causality, so the leading axis is
-load-bearing and not merely cosmetic broadcasting. A caller-supplied
-`attention_mask` (1 = attend, 0 = pad) is cast to boolean and AND-ed in as
-`(batch, 1, k)`, which masks padded *keys* only; padded query rows are left to
-produce garbage that the loss is expected to ignore.
-
-Token embeddings are scaled by `sqrt(hidden_size)` before the first block. With a
-`TruncatedNormal(0.02)` initializer the raw embeddings are far smaller than the
-unit-scale activations the rest of the network is tuned for, and the scaling
-restores that match; the factor is computed once in `__init__` against
-`compute_dtype` rather than per call.
-
-Several things here deliberately diverge from the published Gemma 3, and a reader
-should not assume checkpoint compatibility. There is no QK normalization — the
-grouped-query attention layer supports `qk_norm_type` but this block does not pass
-it. A single RoPE base of 10000 is used for every layer, whereas the report uses a
-much larger base in the global layers specifically so that they remain usable at
-long context; consequently the long-context behaviour of the interleaved pattern
-here is not the paper's. The LM head is an independent `Dense` rather than the
-transposed embedding matrix, so input and output vocabularies are untied. And this
-is a text-only decoder: the vision tower of the multimodal Gemma 3 sizes is not
-part of this package.
-
-Unlike most model packages here, `from_variant` exposes no `pretrained` argument at
-all. That is the strongest form of the house rule that a request for pretrained
-weights must never be answerable with a randomly initialized model: there is no
-argument to pass, so there is no silent fallback to write.
-
-The two task factories build functional models over the same backbone.
-`create_gemma3_classification` re-traces the backbone's embedding, blocks and final
-norm into the functional graph instead of calling the backbone as a unit, because
-it needs the hidden states rather than the vocabulary logits; pooling then goes
-through the shared `SequencePooling` layer so that every strategy behaves
-identically to the other decoder packages. It defaults to `last` — the last
-position kept by `attention_mask` — because the blocks are causally masked and
-`cls` would pool a position that attended only to itself.
+`create_gemma3_classification` re-traces the backbone into a functional graph
+to reach hidden states before the LM head, then pools with the shared
+`SequencePooling` layer. It defaults to `last` pooling, the last position kept
+by `attention_mask`, because the causally masked blocks make `cls` pool a
+position that attended only to itself.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
@@ -118,67 +74,77 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.gemma.gemma3")
 class Gemma3(keras.Model):
-    """
-    Gemma 3 Language Model with dual normalization and mixed attention patterns.
+    """Gemma 3 language model with sandwich normalization and mixed attention.
 
-    This model implements Google's Gemma 3 architecture following Modern Keras 3
-    best practices. It features token embeddings with scaling, a series of
-    transformer blocks, and a final projection head.
+    Token embeddings, scaled by sqrt(hidden_size), feed a stack of transformer
+    blocks that alternate sliding-window and full attention per `layer_types`,
+    then a final RMSNorm and a Dense projection to vocabulary logits.
 
-    **Intent**: To provide a complete Gemma 3 implementation that is
-    robust, serializable, and easily integrated with the dl_techniques framework
-    for training, optimization, and analysis.
+    Architecture:
 
-    **Architecture Overview**:
-    ```
-    Input(input_ids: [batch, seq_len])
-           ↓
-    Token Embeddings * √(hidden_size)
-           ↓
-    TransformerBlock₁ (Dual Norm, Mixed Attention)
-           ↓
-          ...
-           ↓
-    TransformerBlockₙ (Dual Norm, Mixed Attention)
-           ↓
-    Final RMSNorm
-           ↓
-    Linear Projection → Logits([batch, seq_len, vocab_size])
-    ```
+        .. code-block:: text
 
-    Args:
-        vocab_size: Integer, size of the vocabulary. Must be positive.
-        hidden_size: Integer, dimensionality of encoder layers. Must be
-            positive.
-        num_layers: Integer, number of transformer blocks. Must be positive.
-        num_attention_heads: Integer, number of attention heads.
-        num_key_value_heads: Integer, number of key-value heads for GQA.
-        ffn_hidden_size: Integer, FFN intermediate size. Must be positive.
-        max_seq_len: Integer, maximum sequence length. Must be positive.
-        sliding_window_size: Integer, sliding window size for local
-            attention.
-        layer_types: List of strings, attention type per layer
-            ('sliding_window' or 'full_attention'). Length must match
-            num_layers.
-        norm_eps: Float, epsilon for normalization layers.
-        dropout_rate: Float, dropout rate for regularization, in [0, 1].
-        use_bias: Boolean, whether to use bias in linear layers.
-        initializer_range: Float, stddev for TruncatedNormal weight
-            initialization.
-        **kwargs: Additional keyword arguments for the Model base class.
+            input_ids [B, S]
+                 │
+                 ▼
+            Embedding * sqrt(hidden_size)
+                 │
+                 ▼
+            ┌────────────────────────────┐
+            │ Gemma3TransformerBlock x N  │  sandwich norm, per-layer
+            │ (sliding_window|full)       │  attention_type from layer_types
+            └────────────────────────────┘
+                 │
+                 ▼
+            final_norm (RMSNorm)
+                 │
+                 ▼
+            lm_head (Dense, untied)
+                 │
+                 ▼
+            logits [B, S, vocab_size]
+
+    :param vocab_size: Vocabulary size. Must be positive.
+    :type vocab_size: int
+    :param hidden_size: Dimensionality of encoder layers. Must be positive.
+    :type hidden_size: int
+    :param num_layers: Number of transformer blocks. Must be positive.
+    :type num_layers: int
+    :param num_attention_heads: Number of attention heads.
+    :type num_attention_heads: int
+    :param num_key_value_heads: Number of key-value heads for GQA.
+    :type num_key_value_heads: int
+    :param ffn_hidden_size: FFN intermediate size. Must be positive.
+    :type ffn_hidden_size: int
+    :param max_seq_len: Maximum sequence length. Must be positive.
+    :type max_seq_len: int
+    :param sliding_window_size: Window size for local attention layers.
+    :type sliding_window_size: int
+    :param layer_types: Attention type per layer, each ``'sliding_window'``
+        or ``'full_attention'``. Length must match ``num_layers``. ``None``
+        (default) yields all ``'full_attention'``.
+    :type layer_types: Optional[List[str]]
+    :param norm_eps: Epsilon for normalization layers.
+    :type norm_eps: float
+    :param dropout_rate: Dropout rate, in [0, 1].
+    :type dropout_rate: float
+    :param use_bias: Whether to use bias in linear layers.
+    :type use_bias: bool
+    :param initializer_range: Stddev for TruncatedNormal weight initialization.
+    :type initializer_range: float
+    :param kwargs: Additional keyword arguments for ``keras.Model``.
+
+    :ivar embeddings: Token embedding layer.
+    :ivar blocks: List of ``Gemma3TransformerBlock`` layers.
+    :ivar final_norm: Final RMSNorm layer before output projection.
+    :ivar lm_head: Language modeling head (Dense layer).
 
     Input shape:
-        2D tensor with shape: `(batch_size, sequence_length)` of token IDs.
+        2D tensor of shape ``(batch_size, sequence_length)`` of token IDs.
 
     Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, vocab_size)`
-        of logits.
-
-    Attributes:
-        embeddings: Token embedding layer.
-        blocks: List of Gemma3TransformerBlock layers.
-        final_norm: Final RMSNorm layer before output projection.
-        lm_head: Language modeling head (Dense layer).
+        3D tensor of shape ``(batch_size, sequence_length, vocab_size)`` of
+        logits.
     """
 
     # Model variant configurations following Gemma 3 specifications
@@ -276,7 +242,6 @@ class Gemma3(keras.Model):
             initializer_range,
         )
 
-        # Store ALL configuration parameters for serialization
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -291,7 +256,6 @@ class Gemma3(keras.Model):
         self.use_bias = use_bias
         self.initializer_range = initializer_range
 
-        # CREATE all sub-layers in __init__
         self._build_architecture()
         self.emb_scale = ops.sqrt(
             ops.cast(self.hidden_size, dtype=self.compute_dtype)
@@ -442,8 +406,7 @@ class Gemma3(keras.Model):
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
         gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
         """
         if self.built:
             return
@@ -557,10 +520,7 @@ def create_gemma3_classification(
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
     # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default "last", not "cls" —
-    # Gemma3's blocks are strictly causally masked (sliding-window and full
-    # layers alike), so `cls` pools a position that attended only to itself.
-    # Same mechanism, same measurement and the same do-not-restore instruction
-    # as `qwen/qwen3.py`. See decisions.md D-029.
+    # causal masking makes 'cls' pool a position that attended only to itself. See decisions.md.
     if pooling_strategy not in ["last", "cls", "mean"]:
         raise ValueError(
             f"pooling_strategy must be 'last', 'cls' or 'mean', got "
@@ -577,7 +537,6 @@ def create_gemma3_classification(
         shape=(None,), dtype="int32", name="attention_mask"
     )
 
-    # Trace the computation graph through the backbone's layers
     hidden_states = gemma3_backbone.embeddings(input_ids) * gemma3_backbone.emb_scale
     for block in gemma3_backbone.blocks:
         hidden_states = block(hidden_states, attention_mask=attention_mask)
@@ -644,7 +603,8 @@ def create_gemma3(
 
     task_keys = ["num_labels", "pooling_strategy", "classifier_dropout_rate"]
     task_kwargs = {k: kwargs.pop(k) for k in task_keys if k in kwargs}
-    config.update(kwargs)  # The rest are model overrides
+    # The rest of kwargs are model overrides.
+    config.update(kwargs)
 
     if task_type == "generation":
         return create_gemma3_generation(config)

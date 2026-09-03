@@ -2,64 +2,36 @@
 FNet, a transformer encoder whose token mixer is an unparameterized Fourier
 transform instead of self-attention.
 
-This model embodies the principle that most of what self-attention contributes
-to an encoder is token mixing, not the specific content-dependent weights it
-computes. Self-attention costs `O(L^2)` time and memory in sequence length and
-carries four projection matrices per layer; if the downstream layers can
-recover the needed interactions from any sufficiently rich mixing of positions,
-then the mixer itself need not be learned at all. FNet takes that idea to its
-limit and replaces the whole attention sublayer with a two-dimensional discrete
-Fourier transform:
+Self-attention costs O(L^2) in sequence length and learns four projection
+matrices per layer to mix tokens. FNet replaces the whole mixing sublayer with
+a fixed 2-D discrete Fourier transform and keeps only the real part:
 
 `y = Re(F_seq(F_hidden(x)))`
 
-The transform is applied along the hidden dimension and then along the sequence
-dimension, and only the real part is kept. Discarding the imaginary component
-is not an approximation to be apologized for: it keeps the sublayer a real-valued
-map with the same shape as its input, so the residual connection and the
-feed-forward network that follow are untouched, and the imaginary part carries
-no information the subsequent layers are set up to consume.
+The mixer has no parameters and no learned state, so a layer's capacity sits
+entirely in its feed-forward network. Every output position is already a
+linear combination of every input position after one layer, giving a global
+receptive field without a pairwise score matrix. This costs a few points of
+accuracy against a BERT baseline in exchange for faster training.
 
-Two consequences follow, and they are the whole argument for the architecture.
-The mixer has zero parameters and zero learned state, so a layer's entire
-capacity sits in its feed-forward network. And because every output position is
-a fixed linear combination of every input position, one layer already achieves
-global receptive field -- the property attention is usually credited with --
-without any pairwise score matrix. The reported cost is a few points of
-accuracy against a BERT baseline in exchange for substantially faster training,
-which is a favourable trade whenever the encoder is a component rather than the
-product.
-
-The consequence that matters in code is that masking works differently here,
-and the difference is easy to get wrong. There is no softmax to add a `-inf`
-bias to, so `attention_mask` is applied MULTIPLICATIVELY and only AFTER mixing:
-a padded position's own output is zeroed, but it has already contributed to the
-mixed values of every real token, because a DFT cannot be told to skip an
-index. The usual "masked tokens are invisible" guarantee therefore does not
-hold. The mask is still forwarded on the output so downstream heads can pool
-correctly.
+Masking works differently here than in attention: there is no softmax to bias,
+so `attention_mask` is applied multiplicatively, after mixing. A padded
+position's own output is zeroed, but it has already contributed to every real
+token's mixed value, because a DFT cannot skip an index. The mask is still
+forwarded on the output so downstream heads can pool correctly.
 
 Everything else is a standard encoder: BERT-style embeddings, then
 `num_layers` blocks of `Fourier mix -> residual -> norm -> FFN -> residual ->
-norm` (post-normalization by default, with optional stochastic depth on each
-branch), emitting `{"last_hidden_state", "attention_mask"}` with no pooler and
-no task head, so a single encoder can back several heads at once. Four preset
-variants span tiny through large.
-
-`normalization_position='pre'` switches every block to `x = input +
-branch(Norm(input))` and adds the stack-final normalization that arrangement
-requires; `position_embedding_type` selects between a learned absolute table and
-a fixed sinusoidal one. Both are real knobs as of 2026-08-15 -- until then each
-was validated, stored and serialized while the value never reached the layer that
-would have honoured it, so `normalization_position='pre'` built a post-norm stack
-and `position_embedding_type` was ignored entirely.
+norm` (post-normalization by default, with optional stochastic depth), emitting
+`{"last_hidden_state", "attention_mask"}` with no pooler and no task head.
+`normalization_position='pre'` switches every block to
+`x = input + branch(Norm(input))` and adds a stack-final normalization;
+`position_embedding_type` selects a learned absolute table or a fixed
+sinusoidal one. Four preset variants span tiny through large.
 
 No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load. Pass
-a local `.keras` path to `pretrained` instead.
+raises `NotImplementedError` instead of returning a randomly initialized model.
+Pass a local `.keras` path to `pretrained` instead.
 
 References:
     - Lee-Thorp et al., 2021. FNet: Mixing Tokens with Fourier Transforms.
@@ -102,7 +74,7 @@ class FNet(keras.Model):
 
     A pure encoder in which the entire self-attention sublayer is replaced by an
     unparameterized 2-D discrete Fourier transform, ``y = Re(F_seq(F_hidden(x)))``.
-    The mixer has ZERO parameters and ZERO learned state, so a layer's whole
+    The mixer has zero parameters and zero learned state, so a layer's whole
     capacity lives in its feed-forward network, and one layer already has global
     receptive field because every output position is a fixed linear combination
     of every input position. Cost drops from ``O(L^2)`` to ``O(L log L)`` with no
@@ -110,7 +82,7 @@ class FNet(keras.Model):
     ``{"last_hidden_state", "attention_mask"}`` and owns no pooler and no task
     head, so the same weights can back several heads at once.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -141,7 +113,7 @@ class FNet(keras.Model):
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
-        │  final_norm   ('pre' ONLY)           │
+        │  final_norm   ('pre' only)           │
         │  a pre-norm stack leaves its last    │
         │  residual sum unnormalized; built    │
         │  only for 'pre' so no post-norm      │
@@ -156,7 +128,7 @@ class FNet(keras.Model):
         │  when no attention_mask is supplied  │
         └──────────────────────────────────────┘
 
-    **Block internals (the mixer is the whole difference from BERT):**
+    Block internals:
 
     .. code-block:: text
 
@@ -174,23 +146,23 @@ class FNet(keras.Model):
 
         FourierMix, in full:
 
-            X ──► DFT along HIDDEN ──► DFT along SEQUENCE ──► Re{·}
+            X --> DFT along hidden --> DFT along sequence --> Re{.}
 
             no weights, no state, no score matrix.
-            the imaginary part is DISCARDED so the sublayer
+            the imaginary part is discarded so the sublayer
             stays a real map of unchanged shape, leaving the
             residual and the FFN untouched.
 
-    **Masking is NOT attention masking:**
+    Masking is not attention masking:
 
     .. code-block:: text
 
-        attention:  scores + (1 − mask)·(−inf)  BEFORE softmax
-                    → a padded token is INVISIBLE to every other
+        attention:  scores + (1 - mask) * (-inf), before softmax
+                    -> a padded token is invisible to every other
 
-        FNet:       output · mask               AFTER mixing
+        FNet:       output * mask, after mixing
                     → a padded token's own output is zeroed, but it
-                      HAS ALREADY CONTRIBUTED to every real token,
+                      has already contributed to every real token,
                       because a DFT cannot be told to skip an index
 
         tok₀  tok₁  PAD   PAD          the DFT mixes all four
@@ -203,7 +175,7 @@ class FNet(keras.Model):
         the mask is still forwarded on the output so downstream
         heads can pool correctly
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -271,7 +243,7 @@ class FNet(keras.Model):
     :vartype embeddings: dl_techniques.layers.embedding.bert_embeddings.BertEmbeddings
     :ivar encoder_layers: A list of `FNetEncoderBlock` instances.
     :vartype encoder_layers: list[dl_techniques.layers.fnet_encoder_block.FNetEncoderBlock]
-    :ivar final_norm: Stack-final normalization, present ONLY when
+    :ivar final_norm: Stack-final normalization, present only when
         ``normalization_position == 'pre'``; ``None`` otherwise.
     :vartype final_norm: Optional[keras.layers.Layer]
 
@@ -307,7 +279,7 @@ class FNet(keras.Model):
 
     Note:
         Masking is multiplicative and post-mix, so the usual "masked tokens are
-        invisible" guarantee does NOT hold. See the masking diagram above.
+        invisible" guarantee does not hold. See the masking diagram above.
     """
 
     # Model variant configurations following FNet paper specifications
@@ -409,10 +381,8 @@ class FNet(keras.Model):
         """
         super().__init__(**kwargs)
 
-        # Validate configuration parameters
         self._validate_config(vocab_size, hidden_size, num_layers, hidden_dropout_rate)
 
-        # Store all configuration parameters
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -423,15 +393,7 @@ class FNet(keras.Model):
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.pad_token_id = pad_token_id
-        # `'absolute'` was this model's default until 2026-08-15, while the value
-        # was never forwarded to `BertEmbeddings` -- which has no such value at
-        # all (`VALID_POSITION_EMBEDDING_TYPES` is `('learned', 'sinusoidal')`)
-        # and defaulted to `'learned'`. Now that the value IS forwarded, the
-        # legacy spelling is normalized ONCE, here, so every stored config and
-        # every `get_config()` carries the single live spelling. This is a rename
-        # of a value that always meant BERT's learned absolute table, not a
-        # silent fallback: anything else `BertEmbeddings` does not recognize
-        # still raises there.
+        # Normalize the legacy spelling once, so every stored config carries 'learned'.
         if position_embedding_type == "absolute":
             position_embedding_type = "learned"
         self.position_embedding_type = position_embedding_type
@@ -441,7 +403,6 @@ class FNet(keras.Model):
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
 
-        # Build the model architecture
         self._build_architecture()
 
         logger.info(
@@ -486,12 +447,8 @@ class FNet(keras.Model):
         The drop-path schedule is computed here and handed to the blocks
         per-index; ``final_norm`` is created only under pre-normalization.
         """
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: `position_embedding_type`
-        # is FORWARDED. It used to be validated, stored and serialized here while
-        # `BertEmbeddings` silently used its own default ('learned'), so
-        # `FNet(position_embedding_type='sinusoidal')` built a learned table. Do
-        # NOT drop the argument from this call to "keep the default stable" --
-        # that is the bug. See decisions.md D-071.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: keep position_embedding_type
+        # forwarded here; dropping it silently reverts every 'sinusoidal' request to 'learned'.
         self.embeddings = BertEmbeddings(
             vocab_size=self.vocab_size,
             hidden_size=self.hidden_size,
@@ -505,10 +462,7 @@ class FNet(keras.Model):
             name="embeddings",
         )
 
-        # Per-block linear drop-path schedule (0 -> stochastic_depth_rate across
-        # the stack). Computed unconditionally because it is pure arithmetic; it
-        # only reaches the blocks as a live rate when use_stochastic_depth is on,
-        # and FNetEncoderBlock ignores the rate entirely when the flag is False.
+        # Linear schedule from 0 to stochastic_depth_rate; blocks ignore it when the flag is off.
         drop_path_rates = linear_drop_path_rates(
             num_blocks=self.num_layers, max_rate=self.stochastic_depth_rate
         )
@@ -527,10 +481,7 @@ class FNet(keras.Model):
             )
             self.encoder_layers.append(encoder_layer)
 
-        # A pre-norm stack leaves its last residual sum unnormalized, so the
-        # model owns the stack-final normalization. Built only for 'pre': adding
-        # it unconditionally would change every existing post-norm checkpoint's
-        # weight tree.
+        # Built only under 'pre'; adding it unconditionally would change post-norm checkpoints.
         self.final_norm = None
         if self.normalization_position == 'pre':
             self.final_norm = create_normalization_layer(
@@ -570,7 +521,7 @@ class FNet(keras.Model):
             and other optional tensors like 'attention_mask'.
         :type inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]]
         :param attention_mask: Mask to avoid attention on padding tokens. Note
-            it is applied MULTIPLICATIVELY and post-mix here; see the class
+            it is applied multiplicatively and post-mix here; see the class
             docstring.
         :type attention_mask: Optional[keras.KerasTensor]
         :param token_type_ids: Token type IDs for distinguishing sequences.
@@ -618,29 +569,9 @@ class FNet(keras.Model):
         if self.final_norm is not None:
             hidden_states = self.final_norm(hidden_states, training=training)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-031
-        # The echoed mask is RESOLVED here so the output structure is the same
-        # two fixed-rank tensors whether or not the caller supplied a mask.
-        # Echoing a bare `None` made `predict()` unusable on the ordinary
-        # single-key dict: MEASURED at HEAD ae2e2aa0a,
-        # `FNet.predict({"input_ids": ids})` -> `ValueError: Structures don't
-        # have the same nested structure` (Keras concatenates per-batch outputs
-        # and a `None` slot has no structure). `model(inputs)` always worked,
-        # which is why no test caught it.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT drop the "attention_mask" key when it is None. That makes
-        #     the OUTPUT structure depend on the INPUT, which is precisely why
-        #     this repair was declined in the 2026-08-17 round.
-        #   * Do NOT resolve the mask BEFORE the encoder loop. It is an exact
-        #     no-op here (measured max|delta| = 0.000000e+00 over the whole
-        #     FNet output, since the mask is multiplicative post-mix) but the
-        #     SAME edit in `modern_bert/model.py` is NOT a no-op -- measured
-        #     6.415714e-01 on a max|out| of 2.67 -- because `WindowAttention`
-        #     zero-pads a rank-2 mask up to its square grid and thereby masks
-        #     out the grid padding that an absent mask leaves attendable. Both
-        #     files therefore resolve at the RETURN only, so the numerics of
-        #     every shipped checkpoint are untouched. See decisions.md D-031.
+        # DECISION plan-2026-08-18T140459-7991552f/D-031: resolve the mask here, at return,
+        # not before the encoder loop or by omitting the key. Either alternative broke predict()
+        # or changed modern_bert's numerics. See decisions.md.
         return {
             "last_hidden_state": hidden_states,
             "attention_mask": (
@@ -690,13 +621,7 @@ class FNet(keras.Model):
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            # Keras 3 removed `by_name` from `Model.load_weights` — the
-            # signature is `(filepath, skip_mismatch=False, **kwargs)` and it
-            # REJECTS the unknown keyword, so this call raised
-            # `ValueError: Invalid keyword arguments: {'by_name': True}` for
-            # every caller. It went unnoticed because the only route here was
-            # `pretrained=<path>` and the enclosing except turned the failure
-            # into a warning that continued with random weights.
+            # Keras 3 dropped `by_name` from `Model.load_weights`; this helper does not pass it.
             report = load_weights_from_checkpoint(
                 target=self,
                 ckpt_path=weights_path,
@@ -716,14 +641,8 @@ class FNet(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
-    # a non-existent host; `from_variant` caught the download failure, logged a
-    # warning and continued with random initialization, so `pretrained=True`
-    # silently produced untrained weights. Do NOT reinstate a warn-and-return
-    # branch here or in `from_variant`. No public FNet weights are distributed
-    # with dl_techniques; pass a local path via
-    # `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
+    # Raises instead of falling back to random init, so a missing download is never
+    # indistinguishable from a real load.
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
@@ -949,12 +868,12 @@ def create_fnet_with_head(
        factory.
     3. Combine them into a single, end-to-end `keras.Model`.
 
-    **Head integration:**
+    Head integration:
 
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │  keras.Input × 3 (ALL required)      │
+        │  keras.Input x 3 (all required)      │
         │    input_ids / attention_mask /      │
         │    token_type_ids                    │
         │  shape = (sequence_length,) or       │
@@ -976,7 +895,7 @@ def create_fnet_with_head(
         │   here, unlike create_bert_with_head)│
         └──────────────────────────────────────┘
 
-        PASS `sequence_length`: the Fourier mixer wants a known
+        Pass `sequence_length`: the Fourier mixer wants a known
         length at build time, so a dynamic (None,) axis may not
         be compatible.
 
@@ -1061,17 +980,14 @@ def create_fnet_with_head(
         ),
     }
 
-    # Get hidden states from the encoder
     encoder_outputs = fnet_encoder(inputs)
 
-    # Pass encoder outputs to the task head
     head_inputs = {
         "hidden_states": encoder_outputs["last_hidden_state"],
         "attention_mask": encoder_outputs["attention_mask"],
     }
     task_outputs = task_head(head_inputs)
 
-    # Create the final model
     model_name = f"fnet_{fnet_variant}_with_{task_config.name}_head"
     model = keras.Model(inputs=inputs, outputs=task_outputs, name=model_name)
 

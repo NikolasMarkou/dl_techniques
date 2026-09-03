@@ -2,69 +2,33 @@
 FFTNet vision encoder: a pure feature-extracting backbone that replaces self-attention
 with adaptive spectral filtering, plus the block and mixer it is built from.
 
-Self-attention mixes tokens by forming an `N x N` score matrix, which costs `O(N^2)`
-in both time and memory and is the reason long sequences and high-resolution images
-are expensive. The convolution theorem offers a different route to global mixing:
-a pointwise multiplication in the frequency domain is a circular convolution in the
-token domain, so multiplying by a length-`N` filter couples every token to every
-other token at `O(N log N)` -- the cost of the transform -- and with `O(N)` parameters
-instead of `O(N^2)` computation.
-
-The catch is that a fixed filter makes the mixing input-independent, which is
-precisely what attention buys and what a plain Fourier mixer gives up. FFTNet
-recovers the adaptivity by conditioning the filter on the input. A global context
-vector `c = mean(x, axis=tokens)` is passed through a small MLP to produce a
-per-feature offset, which is added to a learned base filter:
+Self-attention mixes tokens with an `N x N` score matrix, costing `O(N^2)`.
+FFTNet instead multiplies in the frequency domain, which is a circular
+convolution in the token domain, so every token couples to every other at
+`O(N log N)` cost with `O(N)` parameters. To keep the mixing input-dependent,
+the filter is conditioned on a global context vector:
 
 `W = W_base + MLP(mean(x))`,  `y = IFFT(modReLU(FFT(x) * W))`
 
-so the spectral gains applied to a given image depend on that image's summary
-statistics. It is weaker than attention -- the modulation is one global vector, not a
-per-token-pair score -- and that is the trade: global receptive field and log-linear
-cost, in exchange for content dependence that is global rather than pairwise.
+This is weaker than attention, since the modulation is one global vector, not
+a per-token-pair score, in exchange for log-linear cost. The nonlinearity is
+`modReLU`, which rectifies the magnitude only, leaving the phase untouched,
+so a stack of these layers does not collapse into one linear filter.
 
-The nonlinearity is `modReLU`, which is what keeps a stack of these layers from
-collapsing. Applying a real ReLU to a complex tensor is not meaningful, and applying
-none at all would make consecutive spectral filters compose into a single linear
-filter. `modReLU` acts on the magnitude only -- it shifts `|z|` by a learned
-per-feature bias, rectifies, and rescales `z` by the ratio -- so the phase, which is
-where the spatial arrangement of the signal lives, passes through untouched. The
-magnitude used in the denominator is floored at `1e-8` so a zero-magnitude bin does
-not produce a division by zero. The bias initializes at `-0.1`, a small negative
-value, so the activation starts by suppressing low-magnitude bins rather than acting
-as the identity.
+Each block is a standard pre-norm transformer block with the mixer in the
+attention slot: `x + FFTMixer(norm(x))` then `x + FFN(norm(x))`. The FFT runs
+over the token axis, not the feature axis, so `W_base` is shaped
+`(seq_len, embed_dim)` and the model is tied to the token count it was built
+for, unlike attention. `FFTMixer.call` uses `tf.signal.fft` / `ifft` directly
+on a complex64 tensor, since `keras.ops` has no `ifft`; this is the one raw-TF
+exception in this file.
 
-**Which axis the FFT runs over is the thing to get right, and it was wrong once.**
-`tf.signal.fft` transforms the INNERMOST axis. The token state is `(B, N, D)`, so
-calling it directly transformed `D`, the feature axis, and the layer performed no
-token mixing whatsoever -- the one thing the architecture exists to do. The sequence
-axis is therefore transposed to the end for the transform and transposed back
-afterwards. The shape of `W_base`, `(seq_len, embed_dim)`, is a gain per frequency
-BIN per feature, and it is only meaningful when the bins index the token axis; that
-shape is the check on this. Because `W_base` is sized by `seq_len`, the model is tied
-to the token count it was built for -- a fixed image resolution, unlike attention.
-
-**ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10).** ``FFTMixer.call`` uses
-``tf.signal.fft`` / ``tf.signal.ifft`` on a complex64 tensor. This cannot migrate to
-``keras.ops``: ``keras.ops`` exposes only a real/imag-tuple ``fft`` and has NO
-``ifft``, so a backend-agnostic complex forward+inverse transform is not
-expressible. The raw ``tf.signal`` path is a documented exception to the
-keras.ops-only rule for the forward pass.
-
-Structurally each block is a standard pre-norm transformer block with the mixer in
-the attention slot: `x + FFTMixer(norm(x))` then `x + FFN(norm(x))`. Keeping the
-residual-and-norm skeleton intact is deliberate -- it isolates the mixing mechanism as
-the only variable, so a comparison against an attention baseline measures the mixer
-rather than a differently-tuned block.
-
-The `FFTNet` class is a pure encoder and holds no pooling or classification layer. It
-embeds patches, prepends a CLS token, adds a learned positional embedding, runs the
-block stack, and returns a dictionary of ``last_hidden_state``, ``cls_token`` and
-``patch_features``. Returning all three unconditionally, rather than switching the
-return type on a flag, gives downstream heads a stable interface: a classification
-head reads the CLS token, a dense-prediction head reads the patch features, and
-neither needs the encoder reconfigured. Heads are attached externally through
-``create_fftnet_with_head``.
+`FFTNet` is a pure encoder with no pooling or classification layer. It embeds
+patches, prepends a CLS token, adds a learned positional embedding, runs the
+block stack, and returns ``last_hidden_state``, ``cls_token`` and
+``patch_features`` together, so a classification head and a dense-prediction
+head can both read from the same encoder output. Heads attach externally
+through ``create_fftnet_with_head``.
 
 References:
     - Fein-Ashley, 2025. The FFT Strikes Back: An Efficient Alternative to
@@ -106,11 +70,11 @@ class FFTMixer(keras.layers.Layer):
     a circular convolution over tokens and therefore couples every token to
     every other one. Adaptivity, which a fixed Fourier mixer gives up, is
     recovered by conditioning the filter on a global context vector:
-    ``W = W_base + MLP(mean(x))``. The modulation is ONE global vector, not a
-    per-token-pair score, so this is weaker than attention by construction and
-    that is the trade.
+    ``W = W_base + MLP(mean(x))``. The modulation is one global vector, not a
+    per-token-pair score, so this is weaker than attention, in exchange for
+    log-linear cost.
 
-    **Operation:**
+    Operation:
 
     .. code-block:: text
 
@@ -125,7 +89,7 @@ class FFTMixer(keras.layers.Layer):
         │ transpose → [B,N,D]  │   │ Dense(mlp_hidden, gelu)  │
         │                      │   │        ▼                 │
         │ the transposes are   │   │ Dense(D)  →  ΔW  [B, D]  │
-        │ NOT cosmetic; see    │   │        ▼                 │
+        │ not cosmetic; see    │   │        ▼                 │
         │ the axis note below  │   │ W = W_base + ΔW[:,None,:]│
         └──────────┬───────────┘   └────────────┬─────────────┘
                    │  F [B,N,D] complex         │  W [B,N,D]
@@ -136,7 +100,7 @@ class FFTMixer(keras.layers.Layer):
                 ┌───────────────────────────────────────┐
                 │  modReLU: magnitude only              │
                 │    |z| + b → relu → scale z by ratio  │
-                │    PHASE PASSES THROUGH UNTOUCHED     │
+                │    phase passes through untouched     │
                 └───────────────────┬───────────────────┘
                                     ▼
                 ┌───────────────────────────────────────┐
@@ -149,34 +113,33 @@ class FFTMixer(keras.layers.Layer):
                                     ▼
                         Output Y [B, N, D]  (real)
 
-    **Which axis the FFT runs over (this was wrong once):**
+    Which axis the FFT runs over:
 
     .. code-block:: text
 
-        tf.signal.fft transforms the INNERMOST axis.
+        tf.signal.fft transforms the innermost axis.
 
-        WRONG:  fft(X)                  X is [B, N, D]
-                                        → transforms D, the FEATURE axis
-                                        → NO token mixing at all, i.e. the
-                                          one thing this layer exists to do
+        wrong:  fft(X)                  X is [B, N, D]
+                                        -> transforms D, the feature axis
+                                        -> no token mixing at all, the one
+                                           thing this layer exists to do
 
-        RIGHT:  transpose to [B, D, N] ► fft ► transpose back
+        right:  transpose to [B, D, N] -> fft -> transpose back
 
-        The check on this is W_base's shape, (seq_len, embed_dim):
-        a gain per frequency BIN per feature, meaningful only when
-        the bins index the TOKEN axis.
+        The check on this is W_base's shape, (seq_len, embed_dim): a gain
+        per frequency bin per feature, meaningful only when the bins index
+        the token axis.
 
-        Consequence: W_base is sized by seq_len, so the layer is
-        TIED to the token count it was built for -- a fixed image
-        resolution, unlike attention.
+        Consequence: W_base is sized by seq_len, so the layer is tied to
+        the token count it was built for, a fixed image resolution.
 
-    **modReLU (why not a plain ReLU, and why not nothing):**
+    modReLU, not a plain ReLU:
 
     .. code-block:: text
 
-        plain relu(z) on a complex tensor  →  not meaningful
-        no nonlinearity at all             →  consecutive spectral
-                                              filters COLLAPSE into
+        plain relu(z) on a complex tensor  ->  not meaningful
+        no nonlinearity at all             ->  consecutive spectral
+                                              filters collapse into
                                               one linear filter
 
         modReLU(z) = z · relu(|z| + b) / max(|z|, 1e-8)
@@ -184,8 +147,8 @@ class FFTMixer(keras.layers.Layer):
                             shifted and       zero-magnitude bin
                             rectified
 
-        b initializes at −0.1, a small NEGATIVE value, so the
-        activation starts by SUPPRESSING low-magnitude bins
+        b initializes at -0.1, a small negative value, so the
+        activation starts by suppressing low-magnitude bins
         rather than acting as the identity.
 
     :param embed_dim: Embedding dimension ``D``; preserved through the layer.
@@ -307,18 +270,8 @@ class FFTMixer(keras.layers.Layer):
         :return: Real output tensor of the same shape.
         :rtype: keras.KerasTensor
         """
-        # 1. Fourier Transform along the TOKEN axis.
-        #
-        # ``tf.signal.fft`` transforms the INNERMOST axis. ``inputs`` is
-        # (B, N, D), so calling it directly transformed D — the feature axis —
-        # and the layer performed no token mixing at all, which is the one thing
-        # this architecture exists to do. The sequence axis is therefore moved
-        # to the end for the transform and moved back afterwards.
-        #
-        # ``W_base`` has shape (seq_len, embed_dim), i.e. a gain per frequency
-        # BIN per feature; that shape is only meaningful when the bins index the
-        # token axis. The repo's other Fourier layer does the same thing
-        # explicitly — see layers/attention/fnet_fourier_transform.py:368-374.
+        # Transform along the token axis: tf.signal.fft takes the innermost axis,
+        # so the sequence axis is moved there and back. See the class docstring.
         x_complex = keras.ops.cast(inputs, dtype="complex64")
         F = keras.ops.transpose(
             tf.signal.fft(keras.ops.transpose(x_complex, (0, 2, 1))), (0, 2, 1))
@@ -355,17 +308,8 @@ class FFTMixer(keras.layers.Layer):
             the learned bias and rectified and phases unchanged.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
-        # ``magnitude`` is float32 by construction -- it is ``abs()`` of a
-        # complex64 tensor and TensorFlow's complex ops have no half-precision
-        # kernel. ``self.modrelu_bias`` is an ordinary autocast weight, so under
-        # ``mixed_float16`` it arrived as float16 and this add raised
-        # ``InvalidArgumentError: cannot compute AddV2``. The bias is lifted TO
-        # the magnitude's dtype, never the magnitude cast DOWN to the bias's:
-        # halving the magnitude would put the modReLU threshold and the
-        # ``1e-8`` floor two lines below on different scales (float16 cannot
-        # represent 1e-8 at all -- it is exactly 0.0). The sibling ``eps`` at
-        # :252 already pins float32 for that reason. See decisions.md D-054.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054: cast modrelu_bias up to
+        # magnitude's (float32) dtype, never magnitude down; float16 cannot hold 1e-8. See decisions.md.
         magnitude = keras.ops.abs(z)
 
         if self.modrelu_bias is not None:
@@ -418,12 +362,12 @@ class FFTMixer(keras.layers.Layer):
 class FFTNetBlock(keras.layers.Layer):
     """A pre-norm transformer block with :class:`FFTMixer` in the attention slot.
 
-    The residual-and-norm skeleton is deliberately left intact: keeping
-    everything except the mixer identical to a standard block is what makes a
-    comparison against an attention baseline measure the MIXER rather than a
-    differently-tuned block.
+    The residual-and-norm skeleton is left intact: keeping everything except
+    the mixer identical to a standard block means a comparison against an
+    attention baseline measures the mixer rather than a differently-tuned
+    block.
 
-    **Block structure:**
+    Block structure:
 
     .. code-block:: text
 
@@ -513,20 +457,10 @@ class FFTNetBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.use_bias_in_modrelu = use_bias_in_modrelu
 
-        # Create sub-layers using factories
         self.norm1 = create_normalization_layer(normalization_type, name='norm1')
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-011
-        # ``use_bias_in_modrelu`` MUST be forwarded here. It is a fully wired
-        # ``FFTMixer`` knob -- it decides whether ``modrelu_bias`` is created in
-        # ``FFTMixer.build`` and whether ``_apply_modrelu`` adds it -- but for as
-        # long as this constructor omitted the keyword, ``FFTMixer``'s own
-        # default was the only value ANY ``FFTNetBlock``/``FFTNet``/
-        # ``create_fftnet_*`` caller could reach, and the knob was serialized at
-        # the mixer level while being unreachable from every shipped entry
-        # point. Do not "simplify" this back to a positional-only construction.
-        # The default is pinned to ``FFTMixer``'s own (``True``) so no existing
-        # config changes meaning. See D-011 in decisions.md.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-011: forward use_bias_in_modrelu here.
+        # Omitting it made FFTMixer's own default the only value any caller could reach. See decisions.md.
         self.fft_mixer = FFTMixer(
             embed_dim=embed_dim,
             mlp_hidden_dim=mlp_hidden_dim,
@@ -628,7 +562,7 @@ class FFTNet(keras.Model):
     reads the patch features, and neither needs the encoder reconfigured. Heads
     attach externally through :func:`create_fftnet_with_head`.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -678,7 +612,7 @@ class FFTNet(keras.Model):
         for. Unlike attention, it cannot be re-run at another
         image size.
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -1131,7 +1065,7 @@ def create_fftnet_with_head(
     2. Create a task-specific head.
     3. Combine them into a single, end-to-end ``keras.Model``.
 
-    **Head integration:**
+    Head integration:
 
     .. code-block:: text
 

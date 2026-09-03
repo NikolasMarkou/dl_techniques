@@ -1,96 +1,26 @@
-"""Decoder-only GPT-2 language model with an optionally weight-tied output head.
+"""GPT2 decoder-only causal language model with a weight-tied output head.
 
-GPT-2 makes one claim about language: every supervised NLP task is a subset of
-next-token prediction, so a single objective `p(x) = prod_i p(x_i | x_<i)` trained
-at sufficient scale on sufficiently varied text acquires the tasks as a side
-effect. Nothing in the architecture encodes that claim; what the architecture must
-do is make the factorization *exact*. Each position may condition on everything to
-its left and on nothing to its right, because a single leaked future token turns
-the training loss into a copying shortcut and the model's perplexity into a
-fiction. Causality is therefore not an option of this model, it is the model.
+GPT2 predicts each token from the tokens to its left. A lower-triangular attention
+mask stops any position from seeing its future, so the training loss cannot be
+satisfied by copying. It wraps the library's ``TextDecoder`` for the transformer
+stack and adds a language-model head on top.
 
-The causal constraint is enforced by masking rather than by structure. This
-implementation delegates the whole transformer stack to the library's
-``TextDecoder``, which rebuilds the mask on every forward pass: a lower-triangular
-boolean `causal_mask` in *block* semantics (`True` = suppress), OR-combined with
-the padding mask derived from `attention_mask == 0`, then logically inverted once
-at the end because the attention layers expect *attend* semantics (`True` = allow).
-The inversion is done a single time on the combined mask rather than per component,
-which is why a caller supplying an already-inverted padding mask silently unmasks
-the future — the polarity convention at the model boundary is 1 = attend, 0 = pad.
-The same mask tensor is passed to every layer; there is no per-layer state and no
-KV cache, so autoregressive decoding through this class recomputes the full prefix
-at each step and costs `O(n^2)` per generated token rather than `O(n)`.
+Positions are learned absolute embeddings sized to ``max_seq_len``, so the model
+cannot extrapolate past that length. Normalization is pre-norm, with one final
+LayerNorm before the head, which keeps deep variants (up to 48 layers) trainable
+without a warmup schedule. By default the head reuses the token embedding matrix,
+``logits = h @ E^T``; pass ``tie_word_embeddings=False`` for an independent Dense
+projection. The activation is ``gpt2_gelu``, the tanh approximation GPT-2 uses,
+not Keras' exact-erf ``'gelu'`` string. The two residual-path output projections
+in every block use a depth-scaled initializer std, matching the published recipe.
 
-Positions are learned absolute embeddings of size ``max_seq_len``, added to token
-embeddings before the stack. Extrapolation beyond ``max_seq_len`` is not merely
-degraded but undefined, since those rows do not exist; ``TextDecoder.build`` raises
-when the *static* sequence length exceeds the budget. A dynamic (unknown at build
-time) sequence length slips past that guard, so the check is a development aid, not
-a runtime invariant.
-
-Normalization is pre-norm: each sublayer applies its LayerNorm to the branch input
-and leaves the residual stream unnormalized end to end, with one final LayerNorm
-before the head. Post-norm — the original 2017 encoder-decoder placement, which
-GPT-2 abandoned — puts a normalization on the residual path itself, so gradient
-magnitude at initialization grows with depth and training needs a warmup schedule
-to survive. Pre-norm gives every layer an unobstructed additive path to the loss,
-which is what makes the 48-layer XL variant trainable with a flat schedule. Note
-that ``TextDecoder`` additionally normalizes the embedding sum before the first
-block; the original GPT-2 applies dropout there but no normalization, so this is a
-small deliberate divergence from the reference recipe.
-
-The head is the transposed token embedding matrix by default:
-`logits = h @ E^T`. Tying is not only a parameter saving, though at this
-configuration it is a large one — a 100277-row by 768-column embedding is roughly
-77M weights against the ~85M in the small variant's blocks, so untying nearly
-doubles the model. It also couples the input and output representations of a token,
-which regularizes rare tokens whose output row would otherwise receive gradient
-only from the handful of times they are the target. ``tie_word_embeddings=False``
-substitutes an independent bias-free ``Dense``; that is the modern preference at
-multi-billion-parameter scale, where the embedding is a small fraction of the total
-and the coupling costs more capacity than it saves.
-
-Three departures from the published model are worth stating plainly. The default
-vocabulary is 100277 (Tiktoken ``cl100k_base``), not GPT-2's own 50257-entry BPE
-vocabulary, so a checkpoint from OpenAI will not load against the defaults; pass
-``vocab_size=50257`` for shape compatibility with the original. And ``attention_type``
-and ``ffn_type`` are factory keys rather than fixed choices, so the class describes a
-GPT-2-*shaped* decoder whose mixer and MLP can be swapped; only the defaults
-(``'multi_head'``, ``'mlp'``) reproduce the paper.
-
-The residual-init rule IS implemented, as of 2026-08-22: the two residual-path
-output projections of every block -- the attention output projection
-(``attn.c_proj``) and the FFN's contracting projection (``mlp.c_proj``) -- are
-initialized at ``initializer_range / sqrt(2 * n_layer)``, while Q/K/V and the
-FFN expansion stay at the plain ``initializer_range``, exactly as the reference
-does it (HF ``modeling_gpt2.py::_init_weights``; nanoGPT ``model.py``'s
-``c_proj.weight`` sweep). This closes what the 2026-08-19 revision of this
-docstring listed as a third departure. It required one new optional parameter
-threaded through shared infrastructure --
-``TransformerLayer(residual_output_kernel_initializer=...)`` and
-``TextDecoder(scale_residual_initializer_by_depth=...)`` -- both defaulted so
-that every other consumer is unchanged by construction. Do NOT "simplify" it by
-scaling ``initializer_range`` for the whole block: that shrinks the QKV and FC1
-initializations too, which the reference does not do. The initializers here are
-``TruncatedNormal``, so the std that actually lands is ``0.8796`` times the
-nominal ``stddev`` (2-sigma truncation) -- a test must pin the depth RATIO, not
-the bare ``0.02 / sqrt(2 * n_layer)``. See decisions.md D-160 (and D-130 for the
-history).
-
-The FFN nonlinearity IS fixed here: GPT-2 uses ``gelu_new``, the tanh
-approximation, while Keras' ``'gelu'`` string resolves to the exact-erf form.
-``gpt2_gelu`` below supplies the correct one.
-
-No pretrained weights are distributed with this package. ``pretrained=True`` routes
-to ``_download_weights``, which raises ``NotImplementedError`` rather than logging a
-warning and returning a randomly initialized model — the earlier fallback made an
-unavailable download indistinguishable from a successful one at the call site.
-Local checkpoints load by path, with a dummy forward pass first to materialize the
-lazily-built sublayers, and through
-``utils.weight_transfer.load_weights_or_raise``: the load runs with
-``skip_mismatch=True``, and a checkpoint whose names or shapes do not match this
-model would otherwise restore NOTHING and return normally.
+The default vocabulary is 100277 (Tiktoken ``cl100k_base``), not GPT-2's original
+50257-entry BPE vocabulary; pass ``vocab_size=50257`` for shape compatibility with
+an original checkpoint. ``attention_type`` and ``ffn_type`` select factory
+implementations, so only the defaults (``'multi_head'``, ``'mlp'``) reproduce the
+published architecture exactly. No pretrained weights ship with this package —
+``pretrained=True`` raises ``NotImplementedError``; a local checkpoint loads by
+path.
 
 References:
     - Radford et al., 2019. Language Models are Unsupervised Multitask Learners.
@@ -147,6 +77,40 @@ class GPT2(keras.Model):
     Wraps a ``TextDecoder`` to produce contextual representations and projects
     them to vocabulary logits using the transposed token embedding matrix
     (weight tying).
+
+    Architecture:
+
+        .. code-block:: text
+
+            input_ids [B, S]
+                 │
+                 ▼
+            ┌───────────────────┐
+            │ TextDecoder        │  token + learned position embeds,
+            │ (causal, pre-norm) │  N decoder blocks, final LayerNorm
+            └───────────────────┘
+                 │
+                 ▼  last_hidden_state [B, S, D]
+                 │
+          ┌──────┴──────┐
+          │ tied         │ untied
+          ▼              ▼
+    logits = h @ E^T   lm_head(h)  (Dense, no bias)
+          │              │
+          └──────┬───────┘
+                 ▼
+            logits [B, S, vocab_size]
+
+    Variants:
+
+        .. code-block:: text
+
+            variant   embed_dim  depth  num_heads  max_seq_len  params
+            tiny      256        4      4          512          lightweight
+            small     768        12     12          1024         ~124M
+            medium    1024       24     16          1024         ~355M
+            large     1280       36     20          1024         ~774M
+            xl        1600       48     25          1024         ~1558M
 
     :param vocab_size: Vocabulary size. Default: 100277 (Tiktoken cl100k_base).
     :type vocab_size: int
@@ -262,7 +226,6 @@ class GPT2(keras.Model):
             dropout_rate, attention_dropout_rate,
         )
 
-        # Store configuration
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.depth = depth
@@ -276,7 +239,6 @@ class GPT2(keras.Model):
         self.ffn_type = ffn_type
         self.tie_word_embeddings = tie_word_embeddings
 
-        # Build architecture
         self._build_architecture()
 
         logger.info(
@@ -334,24 +296,14 @@ class GPT2(keras.Model):
             positional_type="learned",
             attention_type=self.attention_type,
             normalization_type="layer_norm",
-            normalization_position="pre",  # GPT-2 uses pre-layer normalization
+            normalization_position="pre",
             ffn_type=self.ffn_type,
             activation=gpt2_gelu,
             dropout_rate=self.dropout_rate,
             attention_dropout_rate=self.attention_dropout_rate,
             initializer_range=self.initializer_range,
-            # DECISION plan-2026-08-22T035419-a11304c8/D-160
-            # GPT-2's published residual-init rule. Hard-coded True rather than
-            # exposed as a `GPT2.__init__` knob: this class exists to reproduce
-            # GPT-2, and the reference has no "off" for it, so a knob would only
-            # buy the ability to build a deliberately unfaithful GPT-2. The
-            # departure it removes was documented in this module's docstring
-            # from 2026-08-19 until today. Do NOT flip it off to make an old
-            # freshly-initialized run reproduce -- initializers are a
-            # fresh-model-only concern (verified: `_download_weights` raises,
-            # `from_variant(pretrained=<path>)` restores weight VALUES and never
-            # re-invokes an initializer), so no checkpoint is affected, only new
-            # training runs' starting point. See decisions.md D-160.
+            # DECISION plan-2026-08-22T035419-a11304c8/D-160: stays hard-coded True, not a knob.
+            # This class reproduces GPT-2, which has no "off" for this rule. See decisions.md.
             scale_residual_initializer_by_depth=True,
             layer_norm_eps=self.layer_norm_eps,
             name="decoder",
@@ -469,12 +421,8 @@ class GPT2(keras.Model):
         })
         return config
 
-    # DECISION plan_2026-05-11_a9e8e6f6/D-001
-    # _download_weights raises NotImplementedError instead of falling back to
-    # random-init. The prior silent random-init (logger.warning + return model)
-    # misled callers into thinking they had pretrained weights. No public GPT-2
-    # weights are distributed with dl_techniques; users must pass a local path
-    # via pretrained="/path/to/file.keras" or pretrained=False (default).
+    # DECISION plan_2026-05-11_a9e8e6f6/D-001: raises instead of silently random-initing.
+    # A silent fallback made a missing download indistinguishable from a real load.
     @staticmethod
     def _download_weights(
         variant: str,
@@ -554,18 +502,12 @@ class GPT2(keras.Model):
                         0, model.vocab_size, (1, 32)
                     ).astype(np.int32)
                     model(dummy, training=False)
-                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: do NOT go back
-                # to a bare `model.load_weights(path, skip_mismatch=True)`. A
-                # checkpoint whose variable names or shapes do not match restores
-                # NOTHING, returns normally, and the log line below then reported
-                # a successful load of an untrained model. See decisions.md D-070.
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: never a bare load_weights call.
+                # A shape/name mismatch there restores nothing and reports success. See decisions.md.
                 load_weights_or_raise(model, weights_path, skip_mismatch=True)
             else:
-                # DECISION plan_2026-05-11_a9e8e6f6/D-001
-                # pretrained=True (boolean) routes through _download_weights,
-                # which raises NotImplementedError. Replaces the prior silent
-                # random-init fallback (logger.warning + return model) that
-                # misled callers (I-01).
+                # DECISION plan_2026-05-11_a9e8e6f6/D-001: pretrained=True raises, never silently
+                # random-inits. See decisions.md.
                 cls._download_weights(variant)
 
         return model
