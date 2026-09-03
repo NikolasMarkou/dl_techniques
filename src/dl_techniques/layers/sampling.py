@@ -1,45 +1,23 @@
 """
-Sample from a latent Normal distribution using the reparameterization trick.
+Three reparameterization samplers for VAE latents: :class:`Sampling`,
+:class:`HypersphereSampling`, and :class:`VMFSampling`, plus an inline
+factory (:func:`create_sampling_layer`).
 
-This layer is the central component that enables the training of Variational
-Autoencoders (VAEs) through gradient-based optimization. In a VAE, the
-encoder network learns to map an input `x` to the parameters of a posterior
-distribution `q_φ(z|x)`, typically a diagonal Gaussian. This layer's role is
-to draw a sample `z` from this learned distribution, which is then passed to
-the decoder.
+A VAE encoder produces the parameters of a posterior over a stochastic
+latent `z`, but backpropagation cannot flow through a random draw directly.
+Each layer here applies the reparameterization trick: it rewrites `z` as a
+deterministic function of the encoder's output and an auxiliary noise
+variable independent of the network's parameters, so gradients reach the
+encoder. ``Sampling`` draws from a Gaussian ball, `z = mu + sigma * epsilon`.
+``HypersphereSampling`` draws from a thin shell around a fixed radius on the
+unit hypersphere. ``VMFSampling`` draws from a true von Mises-Fisher
+posterior on the unit sphere via Wood's 1994 rejection sampler, giving a
+sample that concentrates around the encoder's mean direction rather than
+sitting on a fixed shell. All three share the same stateless 5-method
+Keras 3 skeleton, a raw-int seed convention, and serialization keys.
 
-The primary challenge in this architecture is that the sampling operation is
-stochastic and thus non-differentiable. Standard backpropagation cannot flow
-through a random node, which would prevent the training of the encoder. This
-layer resolves this issue by implementing the "reparameterization trick."
-
-The core mathematical insight is to re-express the random variable `z` as a
-deterministic function of the distribution's parameters (mean `μ` and
-standard deviation `σ`) and an auxiliary, parameter-independent random
-variable `ε`. For a Gaussian distribution, this is formulated as:
-
-`z = μ + σ * ε`,  where `ε ~ N(0, I)`
-
-Here, `μ` and `log_var` (from which `σ` is derived as `exp(0.5 * log_var)`)
-are the outputs of the encoder network. The randomness is sourced entirely
-from `ε`, which is sampled from a fixed standard normal distribution. The
-transformation that produces `z` is now a simple, deterministic computation.
-
-This reformulation makes the entire model differentiable with respect to the
-encoder's parameters `φ`. The gradient of the loss function can flow from the
-decoder, through the sampled `z`, back to `μ` and `σ`, and finally to the
-weights of the encoder. This allows the VAE to be trained end-to-end using
-standard stochastic gradient descent, jointly optimizing the encoder and
-decoder.
-
-This file now hosts two sibling reparameterization samplers. ``Sampling``
-draws from a Gaussian *ball* (``z = mu + sigma * epsilon``), the classic VAE
-posterior sample. ``HypersphereSampling`` instead draws from a thin *shell*
-of a (scaled) unit hypersphere: the direction is obtained from the encoder
-mean plus Gaussian noise, L2-normalized onto the sphere, and the radius is a
-thin Gaussian shell centered at a constructor ``radius`` with per-sample
-thickness derived from ``z_log_var``. Both layers share the same stateless
-5-method Keras-3 skeleton, raw-int seed convention, and serialization keys.
+``VMFSampling`` needs `jit_compile=False` on GPU: its rejection step lowers
+to an op with no XLA-GPU kernel in TensorFlow 2.18.
 
 References:
     - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
@@ -47,22 +25,15 @@ References:
     - Rezende, Mohamed, & Wierstra, 2014. Stochastic Backpropagation and
       Approximate Inference in Deep Generative Models.
       (https://arxiv.org/abs/1401.4082)
-
 """
 
 import math
 import keras
-# ``tf.math.bessel_i0e`` is the SINGLE raw-TensorFlow primitive used in this
-# module: the order-0, exponentially-scaled modified Bessel function. It is
-# stable and differentiable, and ``keras.ops`` has no Bessel function of any
-# order. Every other operation below stays on ``keras.ops``. See D-001.
+# The only raw-TensorFlow op in this module: keras.ops has no Bessel
+# function, so log_iv falls back to tf.math.bessel_i0e. See D-001.
 import tensorflow as tf
 from keras import ops
 from typing import Tuple, Any, Dict, Literal, Optional, Union, List
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -82,7 +53,7 @@ class Sampling(keras.layers.Layer):
     to the encoder parameters, enabling end-to-end training of
     Variational Autoencoders.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -195,20 +166,9 @@ class Sampling(keras.layers.Layer):
         # Get the shape of z_mean for sampling epsilon
         mean_shape = ops.shape(z_mean)
 
-        # Sample epsilon from standard normal distribution
-        # Use the same shape as z_mean
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # `dtype=self.compute_dtype` is load-bearing, not tidiness. Without it
-        # `keras.random.normal` materialises at `backend.floatx()` (float32)
-        # while `z_mean`/`z_log_var` arrive autocast to float16 under
-        # `mixed_float16`, and `std * epsilon` below raises
-        # `InvalidArgumentError: cannot compute Mul as input #1 ... was
-        # expected to be a half tensor but is a float tensor` -- i.e. every VAE
-        # in this repo was unrunnable under mixed precision (measured, step 5.8).
-        # Do NOT "fix" this instead by casting the RESULT of the multiply, and
-        # do NOT hard-code "float32": both re-introduce the mismatch under a
-        # non-default policy. Under the default float32 policy `compute_dtype`
-        # IS float32, so this line is bit-identical there.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: dtype=self.compute_dtype
+        # is required, not cosmetic; without it every mixed_float16 VAE in this
+        # repo raised a dtype-mismatch error at the multiply below. See decisions.md.
         epsilon = keras.random.normal(
             shape=mean_shape,
             seed=self.seed,
@@ -265,26 +225,22 @@ class HypersphereSampling(keras.layers.Layer):
       per-sample modulated by ``exp(0.5 * log_var)``:
       ``r = radius * (1 + shell_thickness * exp(0.5 * log_var) * eta)``, then
       floored at ``radius * 0.05`` (5% of radius) so ``r`` is always positive.
-      Here ``log_var`` is a single scalar per sample (shape ``[B, 1]``) and is
-      clipped to ``[-20, 6]`` to cap ``exp`` blow-ups. This replaces the old
-      ``radius + exp(0.5 * log_var) * eta`` shell whose std collapsed to
-      ``radius`` (the radius-variance KL pulls ``log_var -> 0``), which let
-      ~10% of samples take a negative radius (antipode flip) and ~15% land
-      at/near the origin -> latents that were NOT on the sphere.
+      ``log_var`` is a single scalar per sample (shape ``[B, 1]``) and is
+      clipped to ``[-20, 6]`` to cap ``exp`` blow-ups.
 
     The sample is ``z = r * u``. Because randomness is isolated in the
     auxiliary variables ``epsilon`` and ``eta``, gradients flow through ``z``
-    back to BOTH ``z_mean`` (through ``u``) and ``z_log_var`` (through ``r``),
+    back to both ``z_mean`` (through ``u``) and ``z_log_var`` (through ``r``),
     enabling end-to-end training. Sampling direction via Gaussian noise plus
     L2-normalization is the classic Marsaglia/Muller method for drawing a
     point uniformly from the surface of a sphere.
 
-    **Degenerate direction.** When ``z_mean + epsilon`` is exactly the zero
-    vector, the unit direction is deterministically resolved to the canonical
-    basis vector ``e_0 = [1, 0, ..., 0]`` (not a zero / NaN / eps-floored
-    near-zero), giving a well-defined, gradient-stable output ``z = r * e_0``.
+    When ``z_mean + epsilon`` is exactly the zero vector, the unit direction
+    resolves to the canonical basis vector ``e_0 = [1, 0, ..., 0]`` rather
+    than a zero, NaN, or eps-floored near-zero, giving a well-defined,
+    gradient-stable output ``z = r * e_0``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -433,31 +389,28 @@ class HypersphereSampling(keras.layers.Layer):
         # Small floor to guard the normalization against division by zero.
         eps0 = 1e-12
 
-        # Sample the auxiliary noise. The raw int seed is passed directly to
-        # keras.random.normal (NOT a SeedGenerator) so that same-seed -> same
-        # output, matching the sibling Sampling layer's save/load contract.
-        # DECISION plan_2026-06-04_a114f829/D-002
-        epsilon = keras.random.normal(shape=ops.shape(z_mean), seed=self.seed)  # [B, D]
-        eta = keras.random.normal(shape=ops.shape(z_log_var), seed=self.seed)   # [B, 1]
+        # DECISION plan_2026-06-04_a114f829/D-002: raw int seed passed directly
+        # to keras.random.normal, not a SeedGenerator, matching Sampling's
+        # save/load contract (same seed -> same output). See decisions.md.
+        # epsilon: [B, D]; eta: [B, 1].
+        epsilon = keras.random.normal(shape=ops.shape(z_mean), seed=self.seed)
+        eta = keras.random.normal(shape=ops.shape(z_log_var), seed=self.seed)
 
         # Raw direction = encoder mean + Gaussian noise.
         g = z_mean + epsilon  # [B, D]
         norm = ops.sqrt(ops.sum(ops.square(g), axis=-1, keepdims=True))  # [B, 1]
 
-        # Degenerate-direction handling: when g is exactly the zero vector the
-        # unit direction resolves to the canonical basis vector e_0 =
-        # [1, 0, ..., 0] (a fixed, gradient-stable target), NOT a zero / NaN /
-        # arbitrary eps-floored near-zero. Do NOT replace this with a bare
-        # ops.normalize (it cannot emit e_0 on the zero row).
-        # DECISION plan_2026-06-04_a114f829/D-004
+        # DECISION plan_2026-06-04_a114f829/D-004: on a zero-vector g, resolve
+        # to e_0 = [1,0,...,0], never a bare ops.normalize (it cannot emit e_0
+        # on the zero row). See decisions.md.
         batch = ops.shape(g)[0]
         dim = ops.shape(g)[-1]
         e_0 = ops.one_hot(ops.zeros((batch,), dtype="int32"), dim)  # [B, D], 1 at col 0
         u = ops.where(norm < eps0, e_0, g / ops.maximum(norm, eps0))  # [B, D]
 
-        # DECISION plan_2026-06-04_7ff8ea8b/D-004: thin, strictly-positive radius shell.
-        # The old `radius + exp(0.5*lv)*eta` had shell std ~= radius (KL pulls rlv->0),
-        # giving ~10% negative radii / ~15% near-origin samples => latents off the sphere.
+        # DECISION plan_2026-06-04_7ff8ea8b/D-004: shell floored at radius*0.05,
+        # not an unfloored `radius + exp(0.5*lv)*eta`, which put ~10% of radii
+        # negative and ~15% near the origin. See decisions.md.
         z_log_var_clipped = ops.clip(z_log_var, -20.0, 6.0)   # cap exp() blowups
         shell = self.shell_thickness * ops.exp(0.5 * z_log_var_clipped) * eta   # [B,1]
         r = self.radius * (1.0 + shell)
@@ -494,23 +447,11 @@ class HypersphereSampling(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
-# von Mises-Fisher (vMF) KL Numerics
-# ---------------------------------------------------------------------
-#
-# Closed-form KL divergence between a vMF posterior ``vMF(mu, kappa)`` and the
-# uniform prior on the unit sphere ``S^{dim-1}`` (= vMF with ``kappa = 0``),
-# per Davidson et al. 2018 (https://arxiv.org/abs/1804.00891):
-#
-#     KL = kappa * A_{dim/2}(kappa) + log C_dim(kappa) - log C_dim(0)
-#
-# where ``A_nu(kappa) = I_nu(kappa) / I_{nu-1}(kappa)`` is a ratio of modified
-# Bessel functions of the first kind and ``C_dim`` is the vMF normalizer. The
-# KL depends only on ``kappa`` and ``dim`` (NOT on the mean direction ``mu``).
-#
-# These module-level helpers back the ``vmf`` VAE mode's analytic KL term and
-# are validated against ``scipy.special.ive`` in ``tests/test_layers/
-# test_sampling.py`` (the SC1 gate; max abserr ~6e-6).
+# The three helpers below compute the closed-form KL divergence between a
+# vMF posterior and the uniform prior on the sphere (Davidson et al. 2018):
+# KL = kappa * A_{dim/2}(kappa) + log C_dim(kappa) - log C_dim(0), where
+# A_nu = I_nu/I_{nu-1} is a Bessel ratio. Validated against scipy.special.ive
+# in tests/test_layers/test_sampling.py (max abserr ~6e-6).
 
 
 def _bessel_ratio_cf(
@@ -525,27 +466,25 @@ def _bessel_ratio_cf(
         ``r_n = 1 / (2 * n / kappa + r_{n+1})``,  seed ``r_N = 0``,
 
     recursing from ``N = order + n_extra`` down to ``r_order``. This is stable
-    for ALL real ``order`` (including the half-integer orders of the odd-``dim``
-    path) and all ``kappa``, and is fully differentiable in ``keras.ops``
-    arithmetic with no special-function call.
+    for every real ``order`` (including the half-integer orders of the
+    odd-``dim`` path) and every ``kappa``, and is fully differentiable in
+    ``keras.ops`` arithmetic with no special-function call.
 
-    # DECISION plan_2026-06-04_6196678d/D-001: continued-fraction (downward
-    # Miller) Bessel ratio, NEVER upward recurrence (upward is unstable for
-    # nu>=kappa: relerr 1e2-1e5 + impossible negative ratios at latent_dim
-    # 16/32; verified vs scipy). Do NOT "simplify" this to an upward
-    # recurrence or a bessel_i0e/i1e ratio. See decisions.md D-001.
+    # DECISION plan_2026-06-04_6196678d/D-001: downward Miller recurrence, not upward --
+    # upward has relerr 1e2-1e5 and negative ratios at latent_dim 16/32. See decisions.md.
 
-    Args:
-        kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``, ``> 0``.
-        order: Bessel order ``nu`` of the numerator (Python float; may be
-            half-integer for odd ``dim``).
-        n_extra: Number of extra downward-recurrence steps above ``order``
-            before seeding ``r = 0``. The default of 64 gives float32
-            convergence across the trained ``kappa`` range.
-
-    Returns:
-        The ratio ``I_order(kappa) / I_{order-1}(kappa)``, same shape as
-        ``kappa``.
+    :param kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``, ``> 0``.
+    :type kappa: keras.KerasTensor
+    :param order: Bessel order ``nu`` of the numerator (Python float; may be
+        half-integer for odd ``dim``).
+    :type order: float
+    :param n_extra: Extra downward-recurrence steps above ``order`` before
+        seeding ``r = 0``. The default of 64 gives float32 convergence
+        across the trained ``kappa`` range.
+    :type n_extra: int
+    :return: The ratio ``I_order(kappa) / I_{order-1}(kappa)``, same shape
+        as ``kappa``.
+    :rtype: keras.KerasTensor
     """
     r = ops.zeros_like(kappa)
     n = float(order) + float(n_extra)
@@ -573,12 +512,12 @@ def _log_iv(
     The single ``bessel_i0e`` call (integer path) is the only raw-TF primitive
     in this module (D-001).
 
-    Args:
-        kappa: Concentration tensor, ``> 0``.
-        order: Bessel order ``nu`` (Python float; integer or half-integer).
-
-    Returns:
-        ``log I_order(kappa)``, same shape as ``kappa``.
+    :param kappa: Concentration tensor, ``> 0``.
+    :type kappa: keras.KerasTensor
+    :param order: Bessel order ``nu`` (Python float; integer or half-integer).
+    :type order: float
+    :return: ``log I_order(kappa)``, same shape as ``kappa``.
+    :rtype: keras.KerasTensor
     """
     is_half = abs(order - round(order)) > 1e-6
     if not is_half:
@@ -615,19 +554,19 @@ def vmf_kl_divergence(
     ``log C_dim(0) = -log 2 - (dim/2) log pi + lgamma(dim/2)``.
 
     The Bessel terms use the stable continued-fraction ratio (D-001) and the
-    telescoping log-normalizer, supporting all ``dim`` (even AND odd) via the
+    telescoping log-normalizer, supporting both even and odd ``dim`` via the
     half-integer base case in :func:`_log_iv`.
 
-    Args:
-        kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``. Values are
-            clipped to ``[1e-6, 1e4]`` for numerical safety (the ``kappa -> 0``
-            uniform limit gives ``KL -> 0``).
-        dim: Latent dimensionality ``m`` (Python int; the model passes
-            ``self.latent_dim``). Loop bounds are static so the graph unrolls
-            cleanly.
-
-    Returns:
-        Per-row KL divergence, same shape as ``kappa``.
+    :param kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``. Clipped
+        to ``[1e-6, 1e4]`` for numerical safety (the ``kappa -> 0`` uniform
+        limit gives ``KL -> 0``).
+    :type kappa: keras.KerasTensor
+    :param dim: Latent dimensionality ``m`` (Python int; the model passes
+        ``self.latent_dim``). Loop bounds are static so the graph unrolls
+        cleanly.
+    :type dim: int
+    :return: Per-row KL divergence, same shape as ``kappa``.
+    :rtype: keras.KerasTensor
     """
     m = int(dim)
     nu = m / 2.0
@@ -664,21 +603,21 @@ class VMFSampling(keras.layers.Layer):
 
     This stateless layer is the third sibling of :class:`Sampling` and
     :class:`HypersphereSampling`. It draws a differentiable reparameterized
-    sample from the von Mises-Fisher distribution ``vMF(mu_hat, kappa)`` on the
-    UNIT sphere ``S^{D-1}`` (no radius scaling -- vMF is unit-sphere by
+    sample from the von Mises-Fisher distribution ``vMF(mu_hat, kappa)`` on
+    the unit sphere ``S^{D-1}`` (no radius scaling -- vMF is unit-sphere by
     definition). ``mu_hat`` is the L2-normalized encoder mean ``z_mean`` and
     ``kappa`` is a strictly-positive scalar concentration ``[B, 1]``. As
     ``kappa -> 0`` the sample tends to the uniform distribution on the sphere;
     as ``kappa -> inf`` it concentrates at ``mu_hat``. This is the true S-VAE
     posterior of Davidson et al. (2018), in contrast to the thin-shell
-    :class:`HypersphereSampling` (which has no directional concentration).
+    :class:`HypersphereSampling`, which has no directional concentration.
 
-    **Sampling algorithm (Wood 1994 rejection + Householder).**
+    Sampling algorithm (Wood 1994 rejection + Householder):
 
     1. Draw an axial coordinate ``w in [-1, 1]`` (the cosine of the angle to
        ``mu_hat``) via the Ulrich/Wood Beta-envelope rejection scheme. To avoid
        a dynamic ``while_loop`` the layer draws ``rejection_oversample`` (K)
-       candidate ``w`` per row in one batched shot, accepts the FIRST valid
+       candidate ``w`` per row in one batched shot, accepts the first valid
        candidate per row, and falls back to the mode ``w = 1`` in the
        vanishingly-rare event that all K candidates reject.
     2. Draw a tangent direction ``v`` uniformly on ``S^{D-2}`` orthogonal to
@@ -693,24 +632,24 @@ class VMFSampling(keras.layers.Layer):
     The output ``z`` is unit-norm for every row (``||z|| ~ 1`` to float32
     precision).
 
-    **Gradient (v1 approximation).** The Naesseth et al. (2017) implicit
-    reparameterization correction is OMITTED in this v1 sampler (see
-    ``# DECISION plan_2026-06-04_6196678d/D-004``). The ``kappa`` gradient still
-    flows through the Wood envelope parameter ``b(kappa)`` inside ``w_cand``,
-    and the ``z_mean`` gradient flows through ``mu_hat`` in the Householder
-    reflection. In the VAE the dominant ``kappa`` learning signal is the
-    analytic vMF KL (:func:`vmf_kl_divergence`); the omitted correction only
-    biases the Monte-Carlo gradient of the reconstruction term and was found
-    minor for moderate ``kappa`` by Davidson et al.
+    The Naesseth et al. (2017) implicit reparameterization correction is
+    omitted in this sampler (see ``# DECISION plan_2026-06-04_6196678d/D-004``).
+    The ``kappa`` gradient still flows through the Wood envelope parameter
+    ``b(kappa)`` inside ``w_cand``, and the ``z_mean`` gradient flows through
+    ``mu_hat`` in the Householder reflection. The dominant ``kappa`` learning
+    signal in the VAE is the analytic vMF KL (:func:`vmf_kl_divergence`); the
+    omitted correction only biases the Monte-Carlo gradient of the
+    reconstruction term and was found minor for moderate ``kappa`` by
+    Davidson et al.
 
-    **GPU / XLA limitation.** The rejection sampler draws ``keras.random.beta``,
-    which lowers to ``StatelessRandomGammaV3`` — an op with no XLA-GPU kernel in
-    TF 2.18. A model containing ``VMFSampling`` must therefore run with XLA
-    disabled on GPU: compile with ``jit_compile=False`` (the :class:`VAE` model
-    forces this for ``sampling_type='vmf'``) or use an eager call rather than a
+    The rejection sampler draws ``keras.random.beta``, which lowers to an op
+    with no XLA-GPU kernel in TensorFlow 2.18. A model containing
+    ``VMFSampling`` must run with XLA disabled on GPU: compile with
+    ``jit_compile=False`` (the :class:`VAE` model forces this for
+    ``sampling_type='vmf'``) or call the layer eagerly instead of through a
     ``predict()``/``fit()`` path that XLA-compiles the beta draw.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -871,20 +810,10 @@ class VMFSampling(keras.layers.Layer):
         mu = ops.where(norm < eps0, e0, z_mean / ops.maximum(norm, eps0))
         kap = ops.maximum(kappa, 1e-6)   # [B, 1], keep > 0; NOT stop_gradient
 
-        # DECISION plan_2026-06-04_6196678d/D-002: fixed-K (no while_loop) Wood
-        # 1994 vMF rejection sampler. Draw K candidate axial weights per row in
-        # ONE batched shot via the Beta envelope, accept the FIRST valid
-        # candidate per row, fall back to the mode w=1 if all K reject
-        # (P~3e-16 at K=32). Do NOT replace this with a dynamic keras.ops
-        # while_loop (harder to keep differentiable + XLA-clean). See D-002.
-        # Ulrich (1984) / Wood (1994) exact acceptance form. The envelope mode
-        # is x0 = (1-b)/(1+b) and the log-acceptance offset is
-        # c = kappa*x0 + (D-1)*log(1 - x0^2); accept on
-        # kappa*w + (D-1)*log(1 - x0*w) >= c + log(u). This is the
-        # E[w] == A_{D/2}(kappa)-faithful variant (verified vs scipy's
-        # vonmises_fisher to ~2e-4); do NOT substitute the
-        # d = 4ab/(1+b) - (D-1)log(D-1) / log(1-(1-b)w) variant, which is
-        # systematically under-concentrated by ~0.05 in E[w].
+        # DECISION plan_2026-06-04_6196678d/D-002: fixed-K Wood 1994 rejection,
+        # not a dynamic while_loop -- stays XLA-clean and differentiable. See decisions.md.
+        # Ulrich/Wood acceptance form: envelope mode x0=(1-b)/(1+b),
+        # accept on kappa*w + (D-1)*log(1-x0*w) >= c + log(u).
         m1 = float(D - 1)
         s = ops.sqrt(4.0 * ops.square(kap) + m1 * m1)
         b = (-2.0 * kap + s) / m1                                     # [B, 1]
@@ -907,12 +836,9 @@ class VMFSampling(keras.layers.Layer):
         w = ops.where(any_acc, w_sel, ops.ones_like(w_sel))         # mode fallback
         w = ops.clip(w, -1.0, 1.0)                                  # guard sqrt
 
-        # DECISION plan_2026-06-04_6196678d/D-004: the Naesseth-2017 implicit
-        # reparameterization correction is OMITTED in this v1. The kappa
-        # gradient flows through b(kappa) in w_cand above and the z_mean
-        # gradient through mu in the Householder reflection below; the dominant
-        # kappa signal is the analytic KL. Do NOT add the correction here
-        # without re-evaluating stability (see decisions.md D-004).
+        # DECISION plan_2026-06-04_6196678d/D-004: Naesseth-2017 implicit
+        # reparameterization correction omitted; do not add it without
+        # re-evaluating stability. See decisions.md.
 
         # Tangent direction v ~ uniform on S^{D-2}, orthogonal to e_0.
         t = keras.random.normal((B, D), seed=self.seed)
@@ -960,39 +886,16 @@ class VMFSampling(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------
-# Sampling Layer Factory (inline)
-# ---------------------------------------------------------------------
+# A registry-driven factory for the three reparameterization samplers above.
+# Mirrors the ``sequence_pooling/factory.py`` 4-function surface: validate,
+# merge defaults, filter to constructor params, inject name, instantiate.
 #
-# A registry-driven factory for the two reparameterization samplers defined
-# above. It mirrors the canonical ``sequence_pooling/factory.py`` 4-function
-# surface (validate -> merge defaults -> filter to ctor params -> inject name
-# -> ``cls(**params)``; unknown-type errors name the available types).
-#
-# DECISION plan_2026-06-04_d4ef81f1/D-001: this factory is placed INLINE in
-# sampling.py and NOT promoted to a ``sampling/`` package with a sibling
-# ``factory.py``. Do NOT "tidy" it into a package: ``sampling.py`` is a
-# top-level module imported as ``from dl_techniques.layers.sampling import
-# Sampling`` by >=3 sites, and promotion would break every such caller for no
-# functional gain (the two samplers have only 1-2 ctor params each). The
-# inline placement has a repo precedent (``sparse_autoencoder.py``). See
-# decisions.md D-001.
-
-# ---------------------------------------------------------------------
-# Type Definitions
-# ---------------------------------------------------------------------
+# DECISION plan_2026-06-04_d4ef81f1/D-001: factory stays inline in this file,
+# not promoted to a sampling/ package -- that would break every one of the
+# >=3 sites importing ``Sampling`` from here. See decisions.md.
 
 SamplingType = Literal["gaussian", "hypersphere", "vmf"]
-"""
-Type alias for supported reparameterization-sampler mechanisms.
-
-This literal type provides IDE autocompletion and type checking for valid
-sampler types supported by the factory.
-"""
-
-# ---------------------------------------------------------------------
-# Sampling Layer Registry
-# ---------------------------------------------------------------------
+"""Type alias for the sampler mechanisms this factory supports."""
 
 SAMPLING_REGISTRY: Dict[str, Dict[str, Any]] = {
     "gaussian": {
@@ -1015,12 +918,8 @@ SAMPLING_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         "required_params": [],
         "optional_params": {
-            # F-55: `shell_thickness` is declared, validated and stored by
-            # `HypersphereSampling.__init__` and was missing here. Because
-            # `create_sampling_layer` filtered on this dict, a caller's
-            # `shell_thickness=0.5` was SILENTLY DROPPED and the layer was built
-            # at the 0.1 default. See the DECISION anchor on
-            # `create_sampling_layer`.
+            # Every constructor param must appear here; a missing key lets
+            # create_sampling_layer silently drop a caller's value. See D-017.
             "radius": 1.0,
             "shell_thickness": 0.1,
             "seed": None,
@@ -1058,37 +957,21 @@ Each entry contains:
     - use_case: Scenarios and applications where this sampler excels.
 """
 
-# Substring every strict-drop rejection message carries, so a test can pin the
-# BEHAVIOUR without pinning the whole sentence.
-#
-# DUPLICATION, deliberate and gated: the identical literal is defined in
-# `layers/attention/factory.py`, `layers/ffn/factory.py`,
-# `layers/embedding/factory.py` and `layers/activations/factory.py`. It is not
-# centralised because every candidate home is either a peer package (importing
-# one factory from another drags that package's whole layer tree into this
-# module's import graph) or a new shared module (this plan's abstraction budget
-# is 0). The lockstep is NOT hand-maintained:
-# `tests/test_layers/test_activations/test_activation_factory.py::
-# TestStrictDroppedKeys::test_marker_is_identical_across_all_five_factories`
-# fails if any copy drifts.
+# Substring every strict-drop rejection message carries, so a test can pin
+# the behaviour without pinning the whole sentence. The identical literal is
+# also defined in the attention/ffn/embedding/activations factories; kept
+# duplicated (not centralised) since a shared module here has 0 budget, and
+# a lockstep test (test_activation_factory.py) fails if any copy drifts.
 STRICT_DROPPED_KEY_MARKER: str = "unsupported parameter(s)"
 
 
-# ---------------------------------------------------------------------
-# Public API Functions
-# ---------------------------------------------------------------------
-
 def get_sampling_info() -> Dict[str, Dict[str, Any]]:
-    """
-    Retrieve metadata for all available sampler types.
+    """Retrieve metadata for all available sampler types.
 
-    Provides per-type metadata including the technical description, parameter
-    specifications, and use cases for every supported sampling mechanism.
-
-    Returns:
-        A dictionary mapping each sampler type to its metadata (description,
+    :return: A mapping from each sampler type to its metadata (description,
         required_params, optional_params, use_case). Each entry is a shallow
         copy so callers cannot mutate the registry.
+    :rtype: Dict[str, Dict[str, Any]]
     """
     return {
         sampling_type: info.copy()
@@ -1100,19 +983,17 @@ def validate_sampling_config(
         sampling_type: str,
         **kwargs: Any
 ) -> None:
-    """
-    Validate sampler configuration parameters.
+    """Validate sampler configuration parameters.
 
     Performs type-existence checking, required-parameter completeness, and
-    light value-range validation on any numeric parameters that are present.
+    light value-range validation on any numeric parameters present.
 
-    Args:
-        sampling_type: The sampler type to validate against.
-        **kwargs: Parameter dictionary to validate for the specified type.
-
-    Raises:
-        ValueError: If sampling_type is not supported, required parameters are
-            missing, or a provided parameter value violates its constraint.
+    :param sampling_type: The sampler type to validate against.
+    :type sampling_type: str
+    :param kwargs: Parameter dictionary to validate for the specified type.
+    :type kwargs: Any
+    :raises ValueError: If ``sampling_type`` is not supported, a required
+        parameter is missing, or a provided value violates its constraint.
     """
     if sampling_type not in SAMPLING_REGISTRY:
         available_types = sorted(SAMPLING_REGISTRY.keys())
@@ -1148,58 +1029,33 @@ def create_sampling_layer(
         name: Optional[str] = None,
         **kwargs: Any
 ) -> keras.layers.Layer:
-    """
-    Factory function for creating reparameterization-sampler layers.
+    """Factory function for creating reparameterization-sampler layers.
 
     Provides a centralized, type-safe way to instantiate any sampler layer in
     this module, with parameter validation, default-value handling, and
     detailed error reporting. Dispatch is pure registry lookup (no if/elif on
     type).
 
-    Args:
-        sampling_type: The type of sampler to create (``'gaussian'`` or
-            ``'hypersphere'``).
-        name: Optional name for the layer instance.
-        **kwargs: Type-specific parameters for the sampler layer. See
-            ``get_sampling_info()`` for per-type parameter specs.
-
-    Returns:
-        A fully configured and instantiated sampler layer.
-
-    Raises:
-        ValueError: If sampling_type is invalid, required parameters are
-            missing, parameter values are out of range, an undeclared parameter
-            is passed (the message then carries
-            :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
-        TypeError: If parameter types are incompatible with the target class.
+    :param sampling_type: The sampler type to create (``'gaussian'``,
+        ``'hypersphere'``, or ``'vmf'``).
+    :type sampling_type: SamplingType
+    :param name: Optional name for the layer instance.
+    :type name: Optional[str]
+    :param kwargs: Type-specific parameters for the sampler layer. See
+        :func:`get_sampling_info` for per-type parameter specs.
+    :type kwargs: Any
+    :return: A fully configured and instantiated sampler layer.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If ``sampling_type`` is invalid, required parameters
+        are missing, parameter values are out of range, an undeclared
+        parameter is passed (the message then carries
+        :data:`STRICT_DROPPED_KEY_MARKER`), or layer construction fails.
+    :raises TypeError: If parameter types are incompatible with the target
+        class.
     """
-    # DECISION plan-2026-08-18T140459-7991552f/D-017
-    # Undeclared kwargs used to be SILENTLY DROPPED here, which is the inverse of
-    # what the sibling factories do. `attention`/`ffn`/`embedding` were hardened
-    # against undeclared kwargs by an earlier plan's D-011/D-023
-    # (STRICT_DROPPED_KEY_MARKER); this factory's filter was written the other way
-    # round -- it kept only declared keys and dropped the rest without a word.
-    #
-    # That is exactly how F-55 stayed invisible: `hypersphere`'s registry omitted
-    # `shell_thickness`, so every caller passing it got the 0.1 default and no
-    # diagnostic. MEASURED at HEAD, before this change:
-    #   create_sampling_layer('hypersphere', shell_thickness=0.5).shell_thickness
-    #     -> 0.1      (no raise, no warning)
-    #   create_sampling_layer('gaussian', bogus_param=1)
-    #     -> builds fine (no raise)
-    #
-    # DO NOT restore the silent filter, and DO NOT "fix" a caller that now raises
-    # by adding its key to `optional_params` unless the target class's `__init__`
-    # really declares it -- a registry entry with no matching ctor parameter
-    # recreates the same blindness one level down.
-    #
-    # Pre-flight cost, measured before this edit (decisions.md D-016): 11 call
-    # sites repo-wide, all literal-typed, ZERO of which pass an undeclared kwarg;
-    # and zero undeclared-kwarg calls observed at runtime across the 11,031 tests
-    # of tests/test_layers/. This raise breaks nothing that worked.
-    #
-    # The check runs BEFORE the try so the `except (TypeError, ValueError)`
-    # re-wrapper below cannot bury the marker inside a nested message.
+    # DECISION plan-2026-08-18T140459-7991552f/D-017: reject an undeclared
+    # kwarg (checked before the try, so the re-wrapper below cannot bury the
+    # marker) rather than silently drop it, as the sibling factories do. See decisions.md.
     _info = SAMPLING_REGISTRY.get(sampling_type)
     if _info is not None:
         _valid_param_names = set(_info["required_params"]) | set(
@@ -1275,23 +1131,19 @@ def create_sampling_layer(
 def create_sampling_from_config(
         config: Dict[str, Any]
 ) -> keras.layers.Layer:
-    """
-    Create a sampler layer from a configuration dictionary.
+    """Create a sampler layer from a configuration dictionary.
 
-    Convenience function for instantiating sampler layers from dictionary-based
-    configurations, useful for loading architectures from JSON/YAML files,
-    hyperparameter optimization, and configuration-driven model building.
+    Convenience function for instantiating sampler layers from
+    dictionary-based configurations, e.g. when loading an architecture from
+    JSON/YAML.
 
-    Args:
-        config: Configuration dictionary containing a ``'type'`` key specifying
-            the sampler type and additional keys for layer-specific parameters.
-
-    Returns:
-        Instantiated and configured sampler layer.
-
-    Raises:
-        ValueError: If config is missing the required ``'type'`` key.
-        TypeError: If config parameter types are invalid.
+    :param config: Configuration dictionary with a ``'type'`` key naming the
+        sampler type, plus its layer-specific parameters.
+    :type config: Dict[str, Any]
+    :return: Instantiated and configured sampler layer.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If ``config`` is missing the required ``'type'`` key.
+    :raises TypeError: If a config parameter type is invalid.
     """
     config_copy = config.copy()
     try:

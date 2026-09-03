@@ -1,49 +1,14 @@
 """
-Configurable Building Blocks for Deep Learning Architectures.
+Five configurable building blocks for CNN and MLP architectures: ``ConvBlock``,
+``DenseBlock``, ``ResidualDenseBlock``, ``BasicBlock``, and ``BottleneckBlock``.
 
-This module provides a comprehensive collection of reusable, configurable building
-blocks for constructing modern deep learning architectures. Each block is designed
-with flexibility, composability, and best practices in mind, supporting various
-normalization techniques, activation functions, and architectural patterns.
-
-**Available Blocks**:
-
-1. **ConvBlock**: Flexible 2D convolutional block with configurable normalization,
-   activation, dropout, and optional pooling. Ideal for CNN architectures.
-
-2. **DenseBlock**: Fully connected block with optional normalization, activation,
-   and dropout. Perfect for MLP components and classifier heads.
-
-3. **ResidualDenseBlock**: Dense block with skip connection for deep networks,
-   enabling gradient flow and improved training dynamics.
-
-4. **BasicBlock**: Two-layer 3x3 convolutional block with residual connection,
-   used in ResNet-18 and ResNet-34 architectures.
-
-5. **BottleneckBlock**: Three-layer bottleneck block (1x1→3x3→1x1) with residual
-   connection, used in ResNet-50, ResNet-101, and ResNet-152 architectures.
-
-**Architecture Patterns**:
-
-1. **CNN Backbone**:
-   ```
-   Input → ConvBlock → ConvBlock → ... → GlobalPooling → DenseBlock → Output
-   ```
-
-2. **ResNet-Style Network**:
-   ```
-   Input → Conv → [BasicBlock/BottleneckBlock] × N → GlobalPooling → Dense → Output
-   ```
-
-3. **Deep MLP with Residuals**:
-   ```
-   Input → DenseBlock → [ResidualDenseBlock] × N → DenseBlock → Output
-   ```
-
-4. **Hybrid Architecture**:
-   ```
-   Input → [ConvBlock] × N → Flatten → [ResidualDenseBlock] × M → Output
-   ```
+Each block wires a primitive layer (Conv2D or Dense) to normalization and
+activation chosen by name through the `norms`/`activations` factories,
+rather than hard-coding a specific normalization or activation class. This
+lets a caller swap, say, batch norm for RMSNorm without touching the block
+itself. ``BasicBlock`` and ``BottleneckBlock`` are the ResNet-18/34 and
+ResNet-50/101/152 residual units respectively; ``ResidualDenseBlock`` is
+their dense-layer analogue.
 """
 
 import keras
@@ -70,7 +35,7 @@ class ConvBlock(keras.layers.Layer):
     selection of normalization and activation layers. The processing pipeline is
     Conv2D followed by normalization, activation, optional dropout, and optional pooling.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -267,12 +232,8 @@ class ConvBlock(keras.layers.Layer):
             self.pool = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers explicitly for proper serialization.
-
-        CRITICAL: Explicitly build each sub-layer to ensure weight variables
-        exist before weight restoration during model loading.
-        """
+        """Build each sub-layer explicitly, so its weights exist before
+        restoration during model loading."""
         # Build sub-layers in computational order
         self.conv.build(input_shape)
 
@@ -352,7 +313,7 @@ class DenseBlock(keras.layers.Layer):
     selection of normalization and activation layers. The pipeline is
     Dense, optional normalization, activation, and optional dropout.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -491,12 +452,8 @@ class DenseBlock(keras.layers.Layer):
             self.dropout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers explicitly for proper serialization.
-
-        CRITICAL: Explicitly build each sub-layer to ensure weight variables
-        exist before weight restoration during model loading.
-        """
+        """Build each sub-layer explicitly, so its weights exist before
+        restoration during model loading."""
         # Build sub-layers in computational order
         self.dense.build(input_shape)
 
@@ -573,7 +530,7 @@ class ResidualDenseBlock(keras.layers.Layer):
     dropout, then adds the result to the original input via a skip connection.
     If ``units`` is None, the dense layer matches the input dimension automatically.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -663,12 +620,8 @@ class ResidualDenseBlock(keras.layers.Layer):
         self.add = keras.layers.Add(name=f"{self.name}_add")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers with input-dependent configuration.
-
-        CRITICAL: Create and build the dense layer here because it depends on
-        the input shape to determine the number of units for the residual connection.
-        """
+        """Build the dense layer here, since its unit count depends on the
+        input shape for the residual connection."""
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
 
@@ -784,7 +737,7 @@ class BasicBlock(keras.layers.Layer):
     convolutions with normalization and activation, then adds the result to a
     shortcut connection (optionally projected via 1x1 convolution).
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -925,12 +878,8 @@ class BasicBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers explicitly for proper serialization.
-
-        CRITICAL: Explicitly build each sub-layer to ensure weight variables
-        exist before weight restoration during model loading.
-        """
+        """Build each sub-layer explicitly, so its weights exist before
+        restoration during model loading."""
         # Build main path
         self.conv1.build(input_shape)
         conv1_output_shape = self.conv1.compute_output_shape(input_shape)
@@ -1021,7 +970,7 @@ class BottleneckBlock(keras.layers.Layer):
     with a 1x1 conv, processes with a 3x3 conv, and expands back with a 1x1 conv
     (output channels = ``filters * 4``), then adds to a shortcut connection.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -1183,12 +1132,8 @@ class BottleneckBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build sub-layers explicitly for proper serialization.
-
-        CRITICAL: Explicitly build each sub-layer to ensure weight variables
-        exist before weight restoration during model loading.
-        """
+        """Build each sub-layer explicitly, so its weights exist before
+        restoration during model loading."""
         # Build main path - first conv
         self.conv1.build(input_shape)
         conv1_output_shape = self.conv1.compute_output_shape(input_shape)
