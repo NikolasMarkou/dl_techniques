@@ -1,67 +1,20 @@
-"""An autoregressive language model whose sequence mixer is a geometric product.
+"""An autoregressive language model whose sequence mixer is a Clifford geometric product.
 
-This is the CliffordNet backbone with its spatial machinery reinterpreted along a
-sequence axis. The premise carries over unchanged: instead of an attention block
-followed by an FFN, one bilinear operation — the Clifford geometric product
-between a pointwise *detail* stream and a locally aggregated *context* stream —
-performs both token mixing and channel mixing, so there is no feed-forward
-network anywhere in the stack. The product keeps both the symmetric inner part
-(coherence, the quantity an attention score measures) and the antisymmetric wedge
-part (structural divergence, which attention discards), and only a few diagonals
-of the channel interaction matrix are sampled, by cyclic channel rolls at the
-offsets in `shifts`. Cost is `O(seq_len * D * |shifts|)`: linear in sequence
-length, with no `seq_len^2` term and no KV cache.
-
-The consequence for causality is structural rather than arithmetic, and it is the
-most important thing to understand about this model. There is no attention matrix
-here, so there is no causal mask to build, get the polarity of, or forget under a
-new code path. The context stream is a pair of depthwise convolutions padded on
-the left only, so position `i` mathematically cannot read position `i + 1`. The
-optional global-context branch is the one place where a future leak could enter —
-a global average over the sequence would see everything — and it is replaced in
-the causal blocks by a cumulative mean over positions `0..i`, a summary that
-grows as decoding proceeds instead of being constant across the sequence.
-
-Blocks are transform-only. Each returns just its gated geometric update, and this
-model performs the residual add and the stochastic-depth gate itself:
-`x = x + drop_path(block(x))`. Rewriting that as `x = block(x)` would not simply
-drop a skip connection — with `layer_scale_init` at `1e-5` the signal would decay
-by orders of magnitude per block while every shape and every finiteness check
-still passed. The per-block rates are the shared linear ramp, and
-`StochasticDepth(0.0)` is exactly the identity.
-
-`global_context_period` overrides the model-level `use_global_context` on a
-periodic schedule rather than replacing it: at a period of `n`, blocks at
-1-indexed positions `n, 2n, ...` always get the branch, and every other block
-still follows the model-level flag. This gives the cheap interleaving of local
-blocks with occasional global ones without a per-block list. `-1` is accepted as
-a "disabled" sentinel and normalized to `None`; any other value below 1, or a
-non-integer, raises at construction.
-
-Normalization defaults to `zero_centered_rms_norm`, which is the block's own
-sequence-mode default and deliberately not the `BatchNormalization` the image
-model gets. A norm that reduces over the sequence axis lets every position's
-statistics see the whole sequence, which leaks the future past the convolutional
-padding that was supposed to prevent it; the causal block rejects those types
-outright rather than trusting the caller, so the default here is per-position by
-construction.
-
-Weight tying is on by default: the LM head reuses the transposed token-embedding
-matrix, saving `vocab_size * channels` parameters, and when `use_bias` is set an
-explicit `output_bias` variable supplies the bias that the absent `Dense` would
-have carried. This follows the Press & Wolf recipe used by GPT-2 and by small
-modern LMs; at large scale the current preference runs the other way, hence the
-`tie_word_embeddings=False` path with its own `Dense`.
-
-`call()` returns a dict, `{"logits": (B, seq_len, vocab_size)}`, not a bare
-tensor — losses and trainers must index it. Positions are looked up as
-`arange(seq_len)` against a `max_seq_length`-sized embedding table with no
-guard of its own, so a longer batch fails inside the embedding rather than with a
-message from this class.
-
-The variant ladder grows `channels` and `depth` together, widens `shifts` as
-capacity grows so that deeper models can exploit longer-range channel mixing, and
-raises stochastic depth with depth (`0.05` at `nano` through `0.25` at `xl`).
+This is the CliffordNet backbone reinterpreted along a sequence axis instead of a
+spatial one. The Clifford geometric product between a pointwise detail stream and a
+locally aggregated context stream performs both token mixing and channel mixing, so
+there is no feed-forward network in the stack, and cost is linear in sequence length
+with no attention matrix and no KV cache. Causality follows from the convolutions
+being padded on the left only, so position `i` cannot read position `i + 1`; there is
+no causal mask to build. The optional global-context branch, which would otherwise see
+the whole sequence, is replaced in causal blocks by a cumulative mean over positions
+`0..i`. `global_context_period` turns that branch on periodically (every `n`-th block)
+independent of the model-level `use_global_context` flag. Normalization defaults to
+`zero_centered_rms_norm`, a per-position norm; the causal block rejects a
+sequence-reducing norm outright, since it would leak future positions past the
+convolutions' padding. Weight tying is on by default: the LM head reuses the
+transposed token-embedding matrix. `call()` returns a dict,
+`{"logits": (B, seq_len, vocab_size)}`, not a bare tensor.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
