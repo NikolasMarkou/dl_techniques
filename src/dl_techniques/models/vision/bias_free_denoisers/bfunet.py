@@ -1,68 +1,22 @@
-"""
-A U-Net denoiser from which every additive constant has been removed, with
-optional deep supervision.
+"""A U-Net denoiser built by `create_bfunet_denoiser` with every additive
+constant removed, with optional deep supervision.
 
-This model embodies the bias-free principle, which is a constraint on the
-function class rather than a change to the architecture. A network built only
-from linear maps and ReLU, with no bias in any convolution and no shift in any
-normalization, is positively homogeneous of degree one: scaling its input scales
-its output by the same factor, `f(a*x) = a*f(x)` for `a > 0`. For a denoiser
-that property is exactly what generalization across noise level means. A
-conventional network with biases learns a decision surface calibrated to the
-noise it saw in training, and its behaviour outside that range is
-unconstrained; a bias-free one is forced into a locally linear map whose
-adaptation to the input is entirely multiplicative, so a model trained on one
-range of sigma keeps working well outside it. The same constraint makes the
-network interpretable: its local Jacobian is the operator it is applying, and
-by Miyasawa's relation the residual it predicts is proportional to the score of
-the noisy-image distribution.
+Removing every bias and normalization shift makes the network positively
+homogeneous of degree one: scaling the input scales the output by the same
+factor, `f(a*x) = a*f(x)`. A denoiser with that property generalizes across
+noise levels instead of memorizing the range it trained on, and by
+Miyasawa's relation its residual is proportional to the score of the noisy
+image distribution. The property only holds if nothing in the graph adds a
+constant, so `block_normalization` chooses between the variance-only
+`BiasFreeBatchNorm`, which preserves it, and `layernorm`, which does not.
+Structurally this is a standard U-Net, with an optional frozen Gabor stem
+and an optional Laplacian-pyramid skip split, both off by default.
 
-The constraint is fragile in a way that is easy to miss. Homogeneity is only
-degree-one if *nothing* in the graph adds a constant, and ordinary
-normalization layers do. `block_normalization` therefore selects between the
-variance-only `BiasFreeBatchNorm`, which preserves homogeneity exactly, and
-`layernorm`, which does not -- layer normalization subtracts a per-sample mean
-and divides by a per-sample std, making it scale-*invariant* rather than
-scale-equivariant. Inside this model `batchnorm` is a synonym for
-`bias_free_batchnorm`, resolved once in `resolve_denoiser_normalization`: stock
-`keras.layers.BatchNormalization` subtracts a `moving_mean` that training moves
-off zero, so it is not reachable from this builder at all. Choosing a
-normalization here is choosing whether the model still has the property the
-architecture exists for.
-
-Structurally this is a standard U-Net: an encoder of bias-free convolution
-blocks with downsampling, a bottleneck, and a decoder that upsamples and
-concatenates skip connections. Three features are off by default and additive.
-A frozen Gabor stem replaces the learned first convolution with a fixed
-oriented filter bank plus a 1x1 projection, front-loading the oriented
-band-pass structure a denoiser learns anyway. A Laplacian pyramid splits each
-skip into a low-pass band and a high-frequency residual, and `high_freq_blocks`
-puts extra bias-free residual blocks on the high-frequency band only, where the
-detail a denoiser must preserve lives -- that argument is ignored unless the
-pyramid is enabled. Five preset variants span tiny (depth 3, 16 filters)
-through xlarge (depth 5, 64 filters).
-
-Deep supervision attaches a prediction head at each decoder scale, so gradient
-enters the decoder at several resolutions instead of only at full resolution.
-When enabled the model returns `[full_res, ..., lowest_res]`; inference uses
-index 0. Note that pairing a deep-supervision schedule with a noise curriculum
-makes the minimum-validation-loss checkpoint unreliable -- it can land on an
-epoch under-exposed to high sigma -- so the final checkpoint, not the best one,
-is the one to evaluate.
-
-The builders here are functional: they return `keras.Model(inputs, outputs)`
-and there is no subclass. That is deliberate and load-bearing -- converting
-them to a subclassed model would invalidate every existing checkpoint under
-`results/`.
-
-No pretrained weights are downloadable. `pretrained=True` raises
-`NotImplementedError` rather than warning and returning a randomly initialized
-model, which is a deliberate choice: the previous behaviour read a table of
-unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful one. The
-checkpoints this repo actually uses are the ones `src/train/bfunet/` writes;
-load them by local path via `pretrained="/path/to/file.keras"` or with
-`keras.models.load_model`.
+The builders are functional, returning `keras.Model(inputs, outputs)` with
+no subclass, since converting them would invalidate existing checkpoints.
+`pretrained=True` raises `NotImplementedError`; load a checkpoint written by
+`src/train/bfunet/` with `pretrained="/path/to/file.keras"` or
+`keras.models.load_model` instead.
 
 References:
     - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
@@ -141,27 +95,10 @@ BFUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
 # Builder helpers
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-24T174647-07af0659/D-002: the six `_validate_*` / `_build_*` helpers
-# below are a PURE DECOMPOSITION of `create_bfunet_denoiser`, extracted verbatim. The
-# extraction contract, in three parts, all of which a plain reading of the diff can check:
-# (1) NOT ONE LAYER IS RENAMED and no `name=` string is edited -- both builders in this
-#     package are functional (`keras.Model(inputs, outputs)`), so layer/weight NAMES are the
-#     checkpoint contract for every stored `.keras` under `results/`, and a rename breaks
-#     them silently at `load_model` time, not at build time. MEASURED for this plan: a
-#     one-word rename of `final_output` moved ARM_WEIGHT_NAMES and ARM_LAYER_SEQUENCE while
-#     weight VALUES and the forward pass stayed bit-identical -- the forward pass CANNOT see
-#     this defect class.
-# (2) LAYER CREATION ORDER IS PRESERVED EXACTLY. Keras auto-generates names from creation
-#     order for any layer built without `name=`; the builders here always pass `name=`, but
-#     the Laplacian pyramid's inner `GaussianFilter` picks up a process-order-dependent
-#     name-scope suffix, so order is load-bearing anyway.
-# (3) EVERY HELPER FORWARDS THE CALLER'S `kernel_initializer` / `kernel_regularizer` OBJECT
-#     AS-IS. Do NOT construct, clone, or re-resolve one inside a helper: that changes the
-#     number of RNG draws, so every downstream layer initializes differently while every
-#     name and shape still matches (the trap recorded for the BEiT restructure as D-017).
-# Do NOT collapse the explicitly-forwarded parameters into a shared params object or a
-# `**kwargs` bag -- that was designed and deliberately rejected (decisions.md D-001), and it
-# would turn a greppable interface into an opaque one. See decisions.md D-002.
+# DECISION plan-2026-08-24T174647-07af0659/D-002: keep layer names, creation
+# order, and the caller's initializer/regularizer objects exactly as in the
+# original inline builder — a rename or re-resolved initializer silently
+# breaks checkpoint loading or RNG draws with no error. See decisions.md.
 
 def _validate_bfunet_args(
         input_shape: Tuple[int, int, int],
@@ -175,26 +112,20 @@ def _validate_bfunet_args(
         final_projection_groups: int,
         dropout_rate: float,
 ) -> str:
+    """Validate the builder arguments and resolve the block normalization name.
+
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`.
+    Checks run in the order written; when two arguments are invalid at once,
+    the order determines which error message the caller sees.
+
+    :return: The resolved normalization name every block and deep-supervision head must receive.
+    :rtype: str
+    :raises TypeError: If input_shape is not a tuple of 3 integers.
+    :raises ValueError: If depth < 2, initial_filters <= 0, filter_multiplier < 1,
+        blocks_per_level <= 0, high_freq_blocks < 0, block_normalization is not one
+        of the three accepted names, downsample_pool_type is not 'max'/'average',
+        final_projection_groups < 1, or dropout_rate is outside [0.0, 1.0).
     """
-    Validate the builder arguments and resolve the block normalization.
-
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`. The
-    checks run in the order written and that order is part of the contract: when two
-    arguments are invalid at once, which message a caller sees is observable behaviour.
-
-    Returns:
-        String, the RESOLVED normalization name. This -- not the raw
-        `block_normalization` argument -- is what every block and every
-        deep-supervision head must receive.
-
-    Raises:
-        TypeError: If input_shape is not a tuple of 3 integers.
-        ValueError: If depth < 2, initial_filters <= 0, filter_multiplier < 1,
-            blocks_per_level <= 0, high_freq_blocks < 0, block_normalization is not one
-            of the three accepted names, downsample_pool_type is not 'max'/'average',
-            final_projection_groups < 1, or dropout_rate is outside [0.0, 1.0).
-    """
-    # Input validation
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
@@ -213,20 +144,16 @@ def _validate_bfunet_args(
     if high_freq_blocks < 0:
         raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
 
-    # DECISION plan_2026-07-04_58ac8e73/D-002: additive ConvUNeXt-parity features. Every
-    # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
-    # plain U-Net exactly (same layer names/ops) so the ~30 existing tests + bfunet_conditional
-    # stay green. Do NOT change default behavior.
+    # DECISION plan_2026-07-04_58ac8e73/D-002: every ConvUNeXt-parity kwarg
+    # defaults to a byte-identical no-op, so the off path reproduces the
+    # original plain U-Net exactly. Do not change default behavior. See decisions.md.
     if block_normalization not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
         raise ValueError(
             "block_normalization must be 'batchnorm', 'layernorm' or 'bias_free_batchnorm', "
             f"got {block_normalization}")
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
-    # BiasFreeBatchNorm inside a bias-free denoiser. `block_norm` -- NOT the raw
-    # `block_normalization` argument -- is what every block, and the deep-supervision head,
-    # must receive: the raw value reaches stock BatchNormalization, whose moving_mean
-    # subtraction breaks f(a*x)=a*f(x) once training has moved it off zero. See decisions.md
-    # D-020 and the anchor in layers/bias_free_conv2d.py.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: resolve 'batchnorm' to
+    # BiasFreeBatchNorm rather than passing it straight through — stock
+    # BatchNormalization's moving_mean breaks homogeneity. See decisions.md.
     block_norm = resolve_denoiser_normalization(block_normalization)
     if downsample_pool_type not in ('max', 'average'):
         raise ValueError(
@@ -250,23 +177,18 @@ def _build_gabor_stem(
         kernel_initializer: Union[str, keras.initializers.Initializer],
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
 ) -> keras.KerasTensor:
-    """
-    Build the optional frozen Gabor stem in front of the encoder.
+    """Build the optional frozen Gabor stem in front of the encoder.
 
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`.
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`.
     `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never
-    re-resolved (see the D-002 anchor above).
+    re-resolved.
 
-    Returns:
-        KerasTensor, the tensor the encoder path starts from: `inputs` unchanged when
-        `use_gabor_stem=False` (a true no-op that adds zero layers).
-
-    Raises:
-        ValueError: If `gabor_stem_projection=False` and
-            `input_channels * gabor_filters != initial_filters`.
+    :return: The tensor the encoder path starts from — `inputs` unchanged when
+        `use_gabor_stem=False`, a true no-op that adds zero layers.
+    :rtype: keras.KerasTensor
+    :raises ValueError: If `gabor_stem_projection=False` and
+        `input_channels * gabor_filters != initial_filters`.
     """
-    # Optional frozen Gabor stem (default OFF -> stem_input is inputs, a no-op). Reuses the
-    # shared bias-free gabor bank + mandatory 1x1 projection (mirrors bfconvunext).
     if use_gabor_stem:
         gabor = create_gabor_depthwise_conv2d(
             filters_per_channel=gabor_filters,
@@ -321,15 +243,14 @@ def _build_encoder_path(
         downsample_pool_type: str,
         high_freq_blocks: int,
 ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
-    """
-    Build the contracting path: `depth` levels of blocks, each followed by a junction.
+    """Build the contracting path: `depth` levels of blocks, each followed by a junction.
 
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
-    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`,
+    except `block_norm`, the resolved value from `_validate_bfunet_args`.
 
-    Returns:
-        Tuple of (the downsampled tensor entering the bottleneck, the list of skip
-        connections ordered shallowest-first).
+    :return: Tuple of the downsampled tensor entering the bottleneck and the
+        list of skip connections, ordered shallowest first.
+    :rtype: Tuple[keras.KerasTensor, List[keras.KerasTensor]]
     """
     skip_connections: List[keras.layers.Layer] = []
 
@@ -405,14 +326,9 @@ def _build_encoder_path(
             name=junction_name,
         )(x)
 
-        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
-        # high-frequency band with N bias-free residual blocks before it becomes the
-        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
-        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
-        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
-        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
-        # there is no high band and this would rename/insert layers into the raw-skip path.
-        # The high band is channel-preserving, so filters=current_filters is shape-safe.
+        # DECISION plan_2026-07-06_b17c1f83/D-001: gate on both
+        # use_laplacian_pyramid and high_freq_blocks > 0 — dropping either gate
+        # inserts layers into the raw-skip path when no high band exists. See decisions.md.
         if high_freq_blocks > 0 and use_laplacian_pyramid:
             for hf_idx in range(high_freq_blocks):
                 skip = BiasFreeResidualBlock(
@@ -444,15 +360,14 @@ def _build_bottleneck(
         dropout_rate: float,
         expose_bottleneck: bool,
 ) -> Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]:
-    """
-    Build the bottleneck blocks at the lowest resolution.
+    """Build the bottleneck blocks at the lowest resolution.
 
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
-    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`,
+    except `block_norm`, the resolved value from `_validate_bfunet_args`.
 
-    Returns:
-        Tuple of (the bottleneck tensor, the optional exposed bottleneck tap -- `None`
-        unless `expose_bottleneck=True`).
+    :return: Tuple of the bottleneck tensor and the optional exposed
+        bottleneck tap, `None` unless `expose_bottleneck=True`.
+    :rtype: Tuple[keras.KerasTensor, Optional[keras.KerasTensor]]
     """
     bottleneck_filters = filter_sizes[depth]
     logger.info(f"Building bottleneck with {bottleneck_filters} filters")
@@ -514,16 +429,15 @@ def _build_decoder_path(
         zero_pad_channels: bool,
         enable_deep_supervision: bool,
 ) -> Tuple[keras.KerasTensor, List[keras.KerasTensor]]:
-    """
-    Build the expanding path: upsample, merge the skip, run blocks, optionally tap a
-    deep-supervision head at every level above 0.
+    """Build the expanding path: upsample, merge the skip, run blocks, and
+    optionally tap a deep-supervision head at every level above 0.
 
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`, except
-    `block_norm`, which is the RESOLVED value returned by `_validate_bfunet_args`.
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`,
+    except `block_norm`, the resolved value from `_validate_bfunet_args`.
 
-    Returns:
-        Tuple of (the full-resolution decoder tensor, the deep-supervision outputs in
-        DEEP-TO-SHALLOW order -- the caller reverses them).
+    :return: Tuple of the full-resolution decoder tensor and the
+        deep-supervision outputs in deep-to-shallow order; the caller reverses them.
+    :rtype: Tuple[keras.KerasTensor, List[keras.KerasTensor]]
     """
     deep_supervision_outputs: List[keras.layers.Layer] = []
 
@@ -642,17 +556,14 @@ def _build_final_projection(
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
         final_projection_groups: int,
 ) -> keras.KerasTensor:
-    """
-    Build the primary inference output: a bias-free 1x1 projection to `output_channels`.
+    """Build the primary inference output: a bias-free 1x1 projection to `output_channels`.
 
-    Args mirror the identically-named parameters of `create_bfunet_denoiser`.
+    Arguments mirror the identically-named parameters of `create_bfunet_denoiser`.
 
-    Returns:
-        KerasTensor, the final output, named 'final_output' on BOTH branches.
-
-    Raises:
-        ValueError: If `final_projection_groups > 1` does not divide both the incoming
-            channel count and `output_channels`.
+    :return: The final output, named `'final_output'` on both branches.
+    :rtype: keras.KerasTensor
+    :raises ValueError: If `final_projection_groups > 1` does not divide both
+        the incoming channel count and `output_channels`.
     """
     # Final convolution to output channels (no batch norm, custom activation).
     # OFF (final_projection_groups==1): the original bias-free 1x1 (byte-identical).
@@ -724,87 +635,104 @@ def create_bfunet_denoiser(
         dropout_rate: float = 0.0,
         model_name: str = 'bias_free_unet'
 ) -> keras.Model:
-    """
-    Create a bias-free U-Net model with optional deep supervision.
+    """Build a bias-free U-Net denoiser as a functional `keras.Model`.
 
-    This function creates a complete U-Net architecture using bias-free layers with
-    deep supervision capabilities. The model exhibits scaling-invariant properties:
-    if the input is scaled by α, the output is also scaled by α.
-
-    During training with deep supervision enabled, the model outputs multiple scales:
-    - Output 0: Final inference output (full resolution)
-    - Output 1: Second-to-last decoder level output
-    - Output N: Deepest supervision level output
-
-    During inference, only the final output (index 0) is typically used.
+    The model is homogeneous of degree 1: scaling the input by a scalar
+    scales the output by the same scalar.
 
     Architecture:
-    - Encoder: Bias-free conv blocks + downsampling at each level
-    - Bottleneck: Bias-free conv blocks at the lowest resolution
-    - Decoder: Upsampling + skip connections + bias-free conv blocks
-    - Deep Supervision: Additional outputs at intermediate decoder levels
-    - Skip connections preserve high-resolution features
 
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-        depth: Integer, depth of the U-Net (number of downsampling levels). Defaults to 4.
-        initial_filters: Integer, number of filters in the first level. Defaults to 64.
-        filter_multiplier: Integer, multiplier for filters at each level. Defaults to 2.
-        blocks_per_level: Integer, number of conv blocks per level. Defaults to 2.
-        kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
-        initial_kernel_size: Integer or tuple, size of first convolutional kernels. Defaults to 5.
-        activation: String or callable, activation function. Defaults to 'leaky_relu'.
-        final_activation: String or callable, final activation function. Defaults to 'linear'.
-        kernel_initializer: String or Initializer, weight initializer. Defaults to 'he_normal'.
-        kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
-        use_residual_blocks: Boolean, whether to use residual blocks. Defaults to True.
-        high_freq_blocks: Integer, number of bias-free residual blocks applied to the
-            Laplacian high-frequency skip band at each encoder level before it becomes
-            the decoder skip. **Ignored when use_laplacian_pyramid=False.** Defaults to 0
-            (byte-identical no-op: adds ZERO layers, renames nothing).
-        enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to True.
-        block_normalization: String, one of 'batchnorm', 'layernorm', 'bias_free_batchnorm'.
-            Defaults to 'batchnorm'. **'batchnorm' is an exact synonym of
-            'bias_free_batchnorm' here** — the variance-only ``BiasFreeBatchNorm`` (no
-            moving_mean, no beta, degree-1 homogeneous at inference). Stock
-            ``keras.layers.BatchNormalization`` is deliberately not reachable from this
-            builder: its moving_mean subtraction breaks f(a*x)=a*f(x). 'layernorm' is a
-            per-input normalization and is scale-INVARIANT (degree-0), not homogeneous.
-            Applied to every encoder / bottleneck / decoder block **and to the
-            deep-supervision heads** (unlike ConvUNext, whose head norm is out of scope).
-        dropout_rate: Float in [0.0, 1.0), dropout applied after the activation inside every
-            block and inside the deep-supervision heads. Defaults to 0.0 (no Dropout sublayer).
-        model_name: String, name for the model. Defaults to 'bias_free_unet'.
+    .. code-block:: text
 
-    Returns:
-        keras.Model: Bias-free U-Net model ready for training.
-                    - If deep_supervision=False: Single output tensor
-                    - If deep_supervision=True: List of output tensors [final_output, intermediate_outputs...]
+        input [B, H, W, C]
+           |
+        Gabor stem              (optional)
+           |
+        encoder: conv blocks + downsample  x depth
+           |
+        bottleneck: conv blocks
+           |
+        decoder: upsample + skip concat + conv blocks  x depth
+           |         |
+           |     deep-supervision head    (per decoder level, optional)
+           |
+        final projection        -> [B, H, W, C]
 
-    Raises:
-        ValueError: If depth is less than 2, initial_filters is non-positive,
-                   filter_multiplier is less than 1, or blocks_per_level is non-positive.
-        TypeError: If input_shape is not a tuple of 3 integers.
+        outputs: single tensor (enable_deep_supervision=False)
+              or [final, level_1, ..., level_N] (enable_deep_supervision=True)
+
+    :param input_shape: Shape of input images, `(height, width, channels)`.
+    :type input_shape: Tuple[int, int, int]
+    :param depth: Number of downsampling levels. Defaults to 4.
+    :type depth: int
+    :param initial_filters: Number of filters in the first level. Defaults to 64.
+    :type initial_filters: int
+    :param filter_multiplier: Filter multiplier per level. Defaults to 2.
+    :type filter_multiplier: int
+    :param blocks_per_level: Number of conv blocks per level. Defaults to 2.
+    :type blocks_per_level: int
+    :param kernel_size: Size of the convolutional kernels. Defaults to 3.
+    :param initial_kernel_size: Size of the first convolutional kernel. Defaults to 5.
+    :param activation: Activation function. Defaults to `'leaky_relu'`.
+    :param final_activation: Final activation function. Defaults to `'linear'`.
+    :param kernel_initializer: Weight initializer. Defaults to `'he_normal'`.
+    :param kernel_regularizer: Optional weight regularizer.
+    :param use_residual_blocks: Whether to use residual blocks. Defaults to True.
+    :type use_residual_blocks: bool
+    :param enable_deep_supervision: Whether to add deep-supervision outputs. Defaults to False.
+    :type enable_deep_supervision: bool
+    :param use_gabor_stem: Replace the learned first convolution with a frozen Gabor filter bank. Defaults to False.
+    :param gabor_filters: Number of Gabor filters in the stem. Defaults to 32.
+    :param gabor_kernel_size: Kernel size of the Gabor filters. Defaults to 11.
+    :param gabor_activation: Activation after the Gabor stem, if any.
+    :param gabor_stem_projection: Whether the Gabor stem includes a 1x1 projection. Defaults to True.
+    :param use_laplacian_pyramid: Split each skip into a low-pass and a high-frequency band. Defaults to False.
+    :param high_freq_blocks: Bias-free residual blocks applied to the Laplacian
+        high-frequency skip band at each encoder level, ignored when
+        `use_laplacian_pyramid=False`. Defaults to 0, a byte-identical no-op.
+    :type high_freq_blocks: int
+    :param laplacian_kernel_size: Kernel size of the Laplacian pyramid's Gaussian filter. Defaults to (5, 5).
+    :param zero_pad_channels: Zero-pad instead of projecting channels at a junction. Defaults to False.
+    :param downsample_pool_type: `'max'` or `'average'`. Defaults to `'max'`.
+    :param expose_bottleneck: Also return the bottleneck feature map. Defaults to False.
+    :param block_normalization: One of `'batchnorm'`, `'layernorm'`,
+        `'bias_free_batchnorm'`. Defaults to `'batchnorm'`, which resolves to
+        the variance-only `BiasFreeBatchNorm`, an exact synonym of
+        `'bias_free_batchnorm'` here. Stock `BatchNormalization` is not
+        reachable from this builder, since its `moving_mean` subtraction
+        breaks homogeneity. `'layernorm'` is scale-invariant, not homogeneous.
+        Applied to every encoder, bottleneck and decoder block, and to the
+        deep-supervision heads.
+    :type block_normalization: str
+    :param final_projection_groups: Number of groups in the final projection convolution. Defaults to 1.
+    :param dropout_rate: Dropout rate applied after the activation inside every
+        block and every deep-supervision head. Defaults to 0.0, no Dropout sublayer.
+    :type dropout_rate: float
+    :param model_name: Model name. Defaults to `'bias_free_unet'`.
+    :type model_name: str
+    :return: A single output tensor if `enable_deep_supervision=False`, or a
+        list `[final_output, ...intermediate_outputs]` if True.
+    :rtype: keras.Model
+    :raises ValueError: If depth is less than 2, initial_filters is non-positive,
+        filter_multiplier is less than 1, or blocks_per_level is non-positive.
+    :raises TypeError: If input_shape is not a tuple of 3 integers.
 
     Example:
-        >>> # Create standard bias-free U-Net with deep supervision
-        >>> model = create_bfunet_denoiser(
-        ...     input_shape=(256, 256, 3),
-        ...     depth=4,
-        ...     initial_filters=64,
-        ...     enable_deep_supervision=True
-        ... )
-        >>> # Model outputs: [final_output, supervision_output_1, supervision_output_2, ...]
-        >>>
-        >>> # Create inference-only model (single output)
-        >>> inference_model = create_bfunet_denoiser(
-        ...     input_shape=(None, None, 3),  # Flexible spatial dimensions
-        ...     depth=4,
-        ...     initial_filters=64,
-        ...     enable_deep_supervision=False  # Single output for inference
-        ... )
+        ```python
+        model = create_bfunet_denoiser(
+            input_shape=(256, 256, 3),
+            depth=4,
+            initial_filters=64,
+            enable_deep_supervision=True
+        )
+        inference_model = create_bfunet_denoiser(
+            input_shape=(None, None, 3),
+            depth=4,
+            initial_filters=64,
+            enable_deep_supervision=False
+        )
+        ```
     """
-
     block_norm = _validate_bfunet_args(
         input_shape=input_shape,
         depth=depth,
@@ -818,7 +746,6 @@ def create_bfunet_denoiser(
         dropout_rate=dropout_rate,
     )
 
-    # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
     stem_input = _build_gabor_stem(
@@ -965,35 +892,23 @@ def create_bfunet_denoiser(
 # Pretrained Weights Functions
 # ---------------------------------------------------------------------
 
-# `_download_bfunet_weights` raises instead of falling back to random init. The
-# previous version read a `BFUNET_PRETRAINED_WEIGHTS` table of placeholder URLs
-# on a non-existent host; `create_bfunet_variant` caught the download failure,
-# logged a warning and continued with random initialization, so
-# `pretrained=True` silently returned an untrained denoiser. Do NOT reinstate
-# the table or a warn-and-return branch here or in `create_bfunet_variant`. No
-# public BFUNet weights are distributed with dl_techniques -- the checkpoints
-# this repo actually uses are the ones `src/train/bfunet/` writes under
-# `results/`, and they are loaded by local path via
-# `pretrained="/path/to/file.keras"` or `keras.models.load_model`.
+# Raises rather than falling back to random init, since no public BFUNet
+# weights are distributed; load a local checkpoint from src/train/bfunet/ instead.
 def _download_bfunet_weights(
         variant: str,
         dataset: str = "imagenet_denoising",
         cache_dir: Optional[str] = None
 ) -> str:
-    """
-    Resolve a download path for pretrained BFUNet weights; always raises.
+    """Resolve a download path for pretrained BFUNet weights; always raises.
 
     Not implemented: no public BFUNet weights ship with dl_techniques. Kept so
     `pretrained=True` fails loudly instead of silently returning a
     randomly-initialized denoiser.
 
-    Args:
-        variant: Model variant name (unused).
-        dataset: Dataset identifier (unused).
-        cache_dir: Cache directory (unused).
-
-    Raises:
-        NotImplementedError: Always.
+    :param variant: Model variant name, unused.
+    :param dataset: Dataset identifier, unused.
+    :param cache_dir: Cache directory, unused.
+    :raises NotImplementedError: Always.
     """
     raise NotImplementedError(
         f"No pretrained BFUNet weights are distributed with dl_techniques "
@@ -1008,38 +923,29 @@ def load_pretrained_weights_into_model(
         weights_path: str,
         skip_mismatch: bool = True
 ) -> None:
-    """
-    Load pretrained weights into a BFUNet model.
+    """Load pretrained weights into a BFUNet model, tolerating shape mismatches.
 
-    This function handles loading weights with smart mismatch handling,
-    particularly useful when the input shape, output channels, or deep
-    supervision settings differ between the pretrained and target models.
-
-    Weights are transferred layer-by-layer via
+    Weights are transferred layer by layer via
     :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
-    which is the canonical replacement for ``model.load_weights(by_name=True)``
-    (the latter raises on ``.keras`` files in Keras 3.8+).
+    the replacement for `model.load_weights(by_name=True)`, which raises on
+    `.keras` files in Keras 3.8+.
 
-    Args:
-        model: Keras Model, the BFUNet model to load weights into.
-        weights_path: String, path to the weights file (.keras format).
-        skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-            Useful when loading weights with different input/output shapes
-            or deep supervision settings. Maps to ``strict=not skip_mismatch``.
-
-    Raises:
-        FileNotFoundError: If weights_path doesn't exist.
-        ValueError: If weights cannot be loaded.
+    :param model: The BFUNet model to load weights into.
+    :type model: keras.Model
+    :param weights_path: Path to the weights file, `.keras` format.
+    :type weights_path: str
+    :param skip_mismatch: Whether to skip layers with mismatched shapes, useful
+        when the pretrained and target models differ in input/output shape or
+        deep-supervision settings. Maps to `strict=not skip_mismatch`.
+    :type skip_mismatch: bool
+    :raises FileNotFoundError: If weights_path doesn't exist.
+    :raises ValueError: If weights cannot be loaded.
 
     Example:
-        >>> model = create_bfunet_variant('base', (256, 256, 3))
-        >>> load_pretrained_weights_into_model(model, 'bfunet_base.keras')
-        >>>
-        >>> # Load with different output channels (e.g., 1 channel grayscale)
-        >>> model = create_bfunet_variant('base', (256, 256, 1))
-        >>> load_pretrained_weights_into_model(
-        ...     model, 'bfunet_base_rgb.keras', skip_mismatch=True
-        ... )
+        ```python
+        model = create_bfunet_variant('base', (256, 256, 3))
+        load_pretrained_weights_into_model(model, 'bfunet_base.keras')
+        ```
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -1085,60 +991,51 @@ def create_bfunet_variant(
         cache_dir: Optional[str] = None,
         **kwargs
 ) -> keras.Model:
-    """
-    Create a bias-free U-Net model with a specific variant configuration.
+    """Create a bias-free U-Net model from a named variant configuration.
 
-    Args:
-        variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-        enable_deep_supervision: Boolean, whether to enable deep supervision outputs.
-        pretrained: If a string, a path to a local .keras weights file. If
-            True, raises NotImplementedError -- no public BFUNet weights ship
-            with dl_techniques. If False (default), random initialization.
-        weights_dataset: String, dataset for pretrained weights.
-            Options: "imagenet_denoising", "general_denoising".
-            Only used if pretrained=True.
-        weights_input_shape: Tuple, input shape used during weight pretraining.
-            Only needed if loading pretrained weights with different input_shape.
-            Defaults to (256, 256, 3) for standard denoising weights.
-        cache_dir: Optional string, directory to cache downloaded weights.
-        **kwargs: Additional keyword arguments to override default parameters.
-
-    Returns:
-        keras.Model: Bias-free U-Net model with the specified variant configuration.
-
-    Raises:
-        ValueError: If variant is not recognized.
-        NotImplementedError: If pretrained is True.
+    :param variant: One of `'tiny'`, `'small'`, `'base'`, `'large'`, `'xlarge'`.
+    :type variant: str
+    :param input_shape: Shape of input images, `(height, width, channels)`.
+    :type input_shape: Tuple[int, int, int]
+    :param enable_deep_supervision: Whether to enable deep-supervision outputs.
+    :type enable_deep_supervision: bool
+    :param pretrained: A path to a local `.keras` weights file, or `True` to
+        raise `NotImplementedError` since no public BFUNet weights ship with
+        dl_techniques, or `False`, the default, for random initialization.
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset for pretrained weights, one of
+        `"imagenet_denoising"`, `"general_denoising"`. Used only if pretrained is a path.
+    :type weights_dataset: str
+    :param weights_input_shape: Input shape used during weight pretraining,
+        needed only when loading weights with a different `input_shape`.
+        Defaults to `(256, 256, 3)`.
+    :param cache_dir: Optional directory to cache downloaded weights.
+    :param kwargs: Additional keyword arguments overriding the variant defaults.
+    :return: A bias-free U-Net model with the given variant's configuration.
+    :rtype: keras.Model
+    :raises ValueError: If variant is not recognized.
+    :raises NotImplementedError: If pretrained is True.
 
     Example:
-        >>> # Standard usage with deep supervision
-        >>> model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
-        >>> model.summary()
-        >>>
-        >>> # Inference model (single output)
-        >>> inference_model = create_bfunet_variant('base', (None, None, 3), enable_deep_supervision=False)
-        >>>
-        >>> # With custom parameters
-        >>> model = create_bfunet_variant('large', (224, 224, 1),
-        ...                                     enable_deep_supervision=True,
-        ...                                     activation='gelu',
-        ...                                     use_residual_blocks=False)
-        >>>
-        >>> # Load weights from a local checkpoint
-        >>> model = create_bfunet_variant(
-        ...     'base',
-        ...     (256, 256, 3),
-        ...     pretrained='path/to/weights.keras'
-        ... )
-        >>>
-        >>> # Fine-tune with different input channels (e.g., grayscale)
-        >>> model = create_bfunet_variant(
-        ...     'base',
-        ...     (256, 256, 1),
-        ...     pretrained='path/to/weights.keras',
-        ...     weights_input_shape=(256, 256, 3)  # Pretrained on RGB
-        ... )
+        ```python
+        model = create_bfunet_variant('base', (256, 256, 3), enable_deep_supervision=True)
+        model.summary()
+
+        inference_model = create_bfunet_variant('base', (None, None, 3), enable_deep_supervision=False)
+
+        model = create_bfunet_variant(
+            'base',
+            (256, 256, 3),
+            pretrained='path/to/weights.keras'
+        )
+
+        model = create_bfunet_variant(
+            'base',
+            (256, 256, 1),
+            pretrained='path/to/weights.keras',
+            weights_input_shape=(256, 256, 3)
+        )
+        ```
     """
     if variant not in BFUNET_CONFIGS:
         available_variants = list(BFUNET_CONFIGS.keys())

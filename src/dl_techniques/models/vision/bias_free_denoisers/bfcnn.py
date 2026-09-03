@@ -1,31 +1,27 @@
-"""
-Bias-Free CNN Denoiser Model with Variants
+"""A bias-free ResNet-style CNN for image denoising, built by
+`create_bfcnn_denoiser` and its `create_bfcnn_variant` factory.
 
-Implements a ResNet-style denoising CNN where all additive constants (bias terms)
-have been removed to enable better generalization across different noise levels.
-Provides multiple model variants (tiny, small, base, large, xlarge) for different
-computational requirements and performance targets.
-
-Based on "Robust and Interpretable Blind Image Denoising via Bias-Free
-Convolutional Neural Networks" (Mohan et al., ICLR 2020).
+Every additive constant (bias term) is removed from the forward path, which
+makes the network exactly homogeneous of degree 1: scaling the input by a
+scalar scales the output by the same scalar. A denoiser trained at one noise
+level therefore generalizes across levels instead of memorizing one, and its
+residual is a scaled score estimate in the Miyasawa sense. The architecture
+is a stem convolution, a stack of bias-free residual blocks, and a final
+1x1 projection back to the input's channel count; `normalization_type`
+defaults to `'batchnorm'`, which resolves to the variance-only
+`BiasFreeBatchNorm` rather than stock `BatchNormalization`, whose
+`moving_mean` subtraction would break the homogeneity property.
 
 References:
     - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
       Bias-Free Convolutional Neural Networks. ICLR 2020.
-      (https://arxiv.org/abs/1906.05478) -- the bias-free result this model IS:
-      removing every additive constant makes the network exactly homogeneous of
-      degree 1, so a denoiser trained at one noise level generalizes across
-      levels rather than memorizing one.
+      (https://arxiv.org/abs/1906.05478)
     - He et al., 2015. Deep Residual Learning for Image Recognition.
-      (https://arxiv.org/abs/1512.03385) -- the residual block layout the
-      variants stack.
+      (https://arxiv.org/abs/1512.03385)
     - Zhang et al., 2017. Beyond a Gaussian Denoiser: Residual Learning of Deep
-      CNN for Image Denoising (DnCNN). (https://arxiv.org/abs/1608.03981) --
-      the residual (noise-predicting) denoiser this is the bias-free form of.
+      CNN for Image Denoising (DnCNN). (https://arxiv.org/abs/1608.03981)
     - Miyasawa, 1961. An empirical Bayes estimator of the mean of a normal
-      population. Bull. Inst. Internat. Statist. 38, 181-188 -- with Robbins
-      (1956), the identity that makes the residual of a bias-free denoiser a
-      scaled score estimate.
+      population. Bull. Inst. Internat. Statist. 38, 181-188.
 """
 
 import keras
@@ -78,29 +74,10 @@ BFCNN_CONFIGS: Dict[str, Dict[str, Any]] = {
 # Builder helpers
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-24T174647-07af0659/D-002: the `_validate_bfcnn_args` /
-# `_build_bfcnn_backbone` helpers below are a PURE DECOMPOSITION of `create_bfcnn_denoiser`,
-# extracted verbatim. Same three-part extraction contract as the bfunet helpers in this
-# package (see the D-002 anchor in bfunet.py for the measurements behind it):
-# (1) NOT ONE LAYER IS RENAMED and no `name=` string is edited -- this builder is functional
-#     (`keras.Model(inputs, outputs)`), so layer/weight NAMES are the checkpoint contract for
-#     every stored `.keras` under `results/`, and a rename breaks them silently at
-#     `load_model` time, not at build time. MEASURED for this plan on the sibling builder: a
-#     one-word layer rename moved the name arms while weight VALUES and the forward pass
-#     stayed bit-identical -- the forward pass CANNOT see this defect class.
-# (2) LAYER CREATION ORDER IS PRESERVED EXACTLY (stem -> `num_blocks` residual blocks ->
-#     final 1x1 projection). Keras auto-generates names from creation order for any layer
-#     built without `name=`, and name scopes are uniquified against a process-global counter.
-# (3) THE CALLER'S `kernel_initializer` / `kernel_regularizer` OBJECT IS FORWARDED AS-IS. Do
-#     NOT construct, clone, or re-resolve one inside a helper: that changes the number of RNG
-#     draws, so every downstream layer initializes differently while every name and shape
-#     still matches (the trap recorded for the BEiT restructure as D-017).
-# The stem, the residual stack and the final projection live in ONE helper on purpose: they
-# always co-change (same filters/kernel/activation/initializer) and the projection is two
-# statements, so splitting it out would be a pass-through helper -- an Ousterhout red flag.
-# Do NOT collapse the explicitly-forwarded parameters into a shared params object or a
-# `**kwargs` bag; that was designed and deliberately rejected (decisions.md D-001). See
-# decisions.md D-002.
+# DECISION plan-2026-08-24T174647-07af0659/D-002: keep layer names, creation
+# order, and the caller's initializer/regularizer objects exactly as in the
+# original inline builder — a rename or re-resolved initializer silently
+# breaks checkpoint loading or RNG draws with no error. See decisions.md.
 
 def _validate_bfcnn_args(
         input_shape: Tuple[int, int, int],
@@ -108,22 +85,21 @@ def _validate_bfcnn_args(
         filters: int,
         normalization_type: str,
 ) -> str:
+    """Validate the builder arguments and resolve the block normalization name.
+
+    Arguments mirror the identically-named parameters of `create_bfcnn_denoiser`.
+    Checks run in the order written; when two arguments are invalid at once,
+    the order determines which error message the caller sees.
+
+    :param input_shape: Shape of input images, `(height, width, channels)`.
+    :param num_blocks: Number of residual blocks.
+    :param filters: Number of filters in residual blocks.
+    :param normalization_type: Normalization requested by the caller.
+    :return: The resolved normalization name every residual block must receive.
+    :rtype: str
+    :raises ValueError: If num_blocks is negative or filters is zero or negative.
+    :raises TypeError: If input_shape is not a tuple of 3 integers.
     """
-    Validate the builder arguments and resolve the block normalization.
-
-    Args mirror the identically-named parameters of `create_bfcnn_denoiser`. The checks run
-    in the order written and that order is part of the contract: when two arguments are
-    invalid at once, which message a caller sees is observable behaviour.
-
-    Returns:
-        String, the RESOLVED normalization name. This -- not the raw `normalization_type`
-        argument -- is what every residual block must receive.
-
-    Raises:
-        ValueError: If num_blocks is negative or filters is zero or negative.
-        TypeError: If input_shape is not a tuple of 3 integers.
-    """
-    # Input validation
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
@@ -133,11 +109,9 @@ def _validate_bfcnn_args(
     if filters <= 0:
         raise ValueError(f"filters must be positive, got {filters}")
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: 'batchnorm' names the homogeneous
-    # BiasFreeBatchNorm inside a bias-free denoiser. Do NOT pass `normalization_type`
-    # straight through to BiasFreeResidualBlock -- that reaches stock BatchNormalization,
-    # whose moving_mean subtraction breaks f(a*x)=a*f(x) once training has moved it off
-    # zero. See decisions.md D-020 and the anchor in layers/bias_free_conv2d.py.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-020: resolve 'batchnorm' to
+    # BiasFreeBatchNorm rather than passing it straight through — stock
+    # BatchNormalization's moving_mean breaks homogeneity. See decisions.md.
     block_normalization_type = resolve_denoiser_normalization(normalization_type)
 
     return block_normalization_type
@@ -155,35 +129,32 @@ def _build_bfcnn_backbone(
         kernel_initializer: Union[str, keras.initializers.Initializer],
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
 ) -> keras.KerasTensor:
-    """
-    Build the whole bias-free backbone: stem, residual stack, final projection.
+    """Build the bias-free backbone: stem, residual stack, final projection.
 
-    Args mirror the identically-named parameters of `create_bfcnn_denoiser`, except
-    `block_normalization_type` (the RESOLVED name returned by `_validate_bfcnn_args`) and
-    `output_channels` (the channel count the final 1x1 projection must emit).
-    `kernel_initializer` / `kernel_regularizer` are forwarded as objects, never re-resolved
-    (see the D-002 anchor above).
+    Arguments mirror the identically-named parameters of `create_bfcnn_denoiser`,
+    except `block_normalization_type` (the resolved name from
+    `_validate_bfcnn_args`) and `output_channels` (the final projection's
+    channel count). `kernel_initializer` / `kernel_regularizer` are forwarded
+    as objects, never re-resolved.
 
     Note:
-        `num_blocks=0` is a permitted degenerate configuration -- `_validate_bfcnn_args`
-        rejects only NEGATIVE block counts -- and the loop below simply never runs, leaving
-        stem -> final projection.
+        `num_blocks=0` is a permitted degenerate configuration; the loop
+        below simply never runs, leaving stem directly followed by the
+        final projection.
 
-    Returns:
-        KerasTensor, the model output.
+    :return: The model output tensor.
+    :rtype: keras.KerasTensor
     """
-    # Initial convolution to project to feature space
     x = BiasFreeConv2D(
         filters=filters,
         kernel_size=initial_kernel_size,
         activation=activation,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
-        use_batch_norm=False,  # First layer typically no batch norm
+        use_batch_norm=False,
         name='stem'
     )(inputs)
 
-    # Stack of bias-free residual blocks
     for i in range(num_blocks):
         x = BiasFreeResidualBlock(
             filters=filters,
@@ -195,14 +166,13 @@ def _build_bfcnn_backbone(
             name=f'residual_block_{i}'
         )(x)
 
-    # Final convolution to output channels (no activation, no batch norm)
     outputs = BiasFreeConv2D(
         filters=output_channels,
         kernel_size=1,
         activation=final_activation,
         kernel_initializer=kernel_initializer,
         kernel_regularizer=kernel_regularizer,
-        use_batch_norm=False,  # Last layer typically no batch norm
+        use_batch_norm=False,
         name='final_conv'
     )(x)
 
@@ -225,59 +195,61 @@ def create_bfcnn_denoiser(
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         model_name: str = 'bfcnn_denoiser'
 ) -> keras.Model:
-    """
-    Create a bias-free CNN model for image denoising using ResNet architecture.
+    """Build a bias-free CNN denoiser as a functional `keras.Model`.
 
-    This function creates a complete Keras model using bias-free residual blocks.
-    The model implements the scaling-invariant property described in the paper:
-    if you scale the input by α, the output is scaled by α as well.
+    The model is homogeneous of degree 1: scaling the input by a scalar
+    scales the output by the same scalar.
 
     Architecture:
-    - Initial bias-free convolution
-    - Multiple bias-free residual blocks
-    - Final bias-free convolution to output channels
 
-    Args:
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-        num_blocks: Integer, number of residual blocks. Defaults to 8.
-        filters: Integer, number of filters in residual blocks. Defaults to 64.
-        initial_kernel_size: Integer or tuple, size of the first convolutional kernels. Defaults to 5.
-        kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
-        activation: String or callable, activation function. Defaults to 'relu'.
-        normalization_type: String, normalization used inside the residual blocks; one of
-            ``'batchnorm'``, ``'layernorm'``, ``'bias_free_batchnorm'``. Defaults to
-            ``'batchnorm'``. **In this bias-free denoiser, ``'batchnorm'`` means the
-            variance-only ``BiasFreeBatchNorm``** (no ``moving_mean``, no beta), i.e. it is
-            an exact synonym of ``'bias_free_batchnorm'``; the resolution happens in
-            ``resolve_denoiser_normalization``. Stock ``keras.layers.BatchNormalization``
-            subtracts ``moving_mean`` at inference and is NOT degree-1 homogeneous, so it is
-            not reachable from this builder. ``'layernorm'`` is a per-input normalization and
-            is scale-INVARIANT (degree-0), not homogeneous.
-        final_activation: String or callable, final activation function. Defaults to 'linear'.
-        kernel_initializer: String or Initializer, weight initializer. Defaults to 'glorot_uniform'.
-        kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
-        model_name: String, name for the model. Defaults to 'bfcnn_denoiser'.
+    .. code-block:: text
 
-    Returns:
-        keras.Model: Compiled Keras model ready for training.
+        input [B, H, W, C]
+           |
+        BiasFreeConv2D (stem)          -> [B, H, W, filters]
+           |
+        BiasFreeResidualBlock x num_blocks
+           |
+        BiasFreeConv2D 1x1 (final_conv) -> [B, H, W, C]
 
-    Raises:
-        ValueError: If num_blocks is negative or filters is zero or negative.
-        TypeError: If input_shape is not a tuple of 3 integers.
+    :param input_shape: Shape of input images, `(height, width, channels)`.
+    :type input_shape: Tuple[int, int, int]
+    :param num_blocks: Number of residual blocks. Defaults to 8.
+    :type num_blocks: int
+    :param filters: Number of filters in residual blocks. Defaults to 64.
+    :type filters: int
+    :param initial_kernel_size: Size of the stem convolution kernel. Defaults to 5.
+    :param kernel_size: Size of the residual block kernels. Defaults to 3.
+    :param activation: Activation function. Defaults to `'relu'`.
+    :param normalization_type: Normalization used inside the residual blocks: one
+        of ``'batchnorm'``, ``'layernorm'``, ``'bias_free_batchnorm'``. Defaults
+        to ``'batchnorm'``, which resolves to the variance-only
+        `BiasFreeBatchNorm` (no `moving_mean`, no beta), an exact synonym of
+        `'bias_free_batchnorm'`. Stock `BatchNormalization` subtracts
+        `moving_mean` at inference and is not reachable from this builder,
+        since it breaks degree-1 homogeneity. `'layernorm'` is scale-invariant
+        (degree 0), not homogeneous.
+    :type normalization_type: str
+    :param final_activation: Final activation function. Defaults to `'linear'`.
+    :param kernel_initializer: Weight initializer. Defaults to `'glorot_uniform'`.
+    :param kernel_regularizer: Optional weight regularizer.
+    :param model_name: Model name. Defaults to `'bfcnn_denoiser'`.
+    :type model_name: str
+    :return: A compiled-ready Keras model.
+    :rtype: keras.Model
+    :raises ValueError: If num_blocks is negative or filters is zero or negative.
+    :raises TypeError: If input_shape is not a tuple of 3 integers.
 
     Example:
-        >>> # Create model for grayscale images
-        >>> model = create_bfcnn_denoiser(
-        ...     input_shape=(None, None, 1),
-        ...     num_blocks=10,
-        ...     filters=64
-        ... )
-        >>> model.compile(optimizer='adam', loss='mse', metrics=['psnr'])
-        >>>
-        >>> # The model exhibits scaling invariance
-        >>> # If input is scaled by α, output is also scaled by α
+        ```python
+        model = create_bfcnn_denoiser(
+            input_shape=(None, None, 1),
+            num_blocks=10,
+            filters=64
+        )
+        model.compile(optimizer='adam', loss='mse', metrics=['psnr'])
+        ```
     """
-
     block_normalization_type = _validate_bfcnn_args(
         input_shape=input_shape,
         num_blocks=num_blocks,
@@ -285,10 +257,7 @@ def create_bfcnn_denoiser(
         normalization_type=normalization_type,
     )
 
-    # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
-
-    # Output same number of channels as input
     output_channels = input_shape[-1]
 
     outputs = _build_bfcnn_backbone(
@@ -305,7 +274,6 @@ def create_bfcnn_denoiser(
         kernel_regularizer=kernel_regularizer,
     )
 
-    # Create the model
     model = keras.Model(
         inputs=inputs,
         outputs=outputs,
@@ -326,23 +294,22 @@ def create_bfcnn_variant(
         input_shape: Tuple[int, int, int],
         **kwargs
 ) -> keras.Model:
-    """
-    Create a BFCNN model with a specific variant configuration.
+    """Create a BFCNN model from a named variant configuration.
 
-    Args:
-        variant: String, one of 'tiny', 'small', 'base', 'large', 'xlarge'.
-        input_shape: Tuple of integers, shape of input images (height, width, channels).
-        **kwargs: Additional keyword arguments to override default parameters.
-
-    Returns:
-        keras.Model: BFCNN model with the specified variant configuration.
-
-    Raises:
-        ValueError: If variant is not recognized.
+    :param variant: One of `'tiny'`, `'small'`, `'base'`, `'large'`, `'xlarge'`.
+    :type variant: str
+    :param input_shape: Shape of input images, `(height, width, channels)`.
+    :type input_shape: Tuple[int, int, int]
+    :param kwargs: Overrides for the variant's default parameters.
+    :return: A BFCNN model with the given variant's configuration.
+    :rtype: keras.Model
+    :raises ValueError: If variant is not recognized.
 
     Example:
-        >>> model = create_bfcnn_variant('base', (256, 256, 3))
-        >>> model.summary()
+        ```python
+        model = create_bfcnn_variant('base', (256, 256, 3))
+        model.summary()
+        ```
     """
     if variant not in BFCNN_CONFIGS:
         available_variants = list(BFCNN_CONFIGS.keys())
@@ -351,10 +318,8 @@ def create_bfcnn_variant(
     config = BFCNN_CONFIGS[variant].copy()
     description = config.pop('description')
 
-    # Override config with any provided kwargs
     config.update(kwargs)
 
-    # Set model name if not provided
     if 'model_name' not in config:
         config['model_name'] = f'bfcnn_{variant}'
 

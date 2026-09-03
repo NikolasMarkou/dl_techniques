@@ -1,22 +1,21 @@
-"""Bias-free denoisers — public API re-exports.
+"""Bias-free denoisers: public API re-exports for three denoiser architectures.
 
-Three denoiser architectures as sibling modules, all functional builders rather
-than `keras.Model` subclasses: converting them would break every existing
-checkpoint, and these checkpoints are actively used by `src/train/bfunet/` and
-`src/applications/`. Bias-free means no additive constants anywhere in the
-forward path, which is what makes the residual degree-1 homogeneous in the
-input and therefore equal to a scaled score (Miyasawa).
+All three builders are functional (`keras.Model(inputs, outputs)`) rather
+than `keras.Model` subclasses, since converting them would break existing
+checkpoints used by `src/train/bfunet/` and `src/applications/`. Bias-free
+means no additive constants anywhere in the forward path, which makes the
+residual degree-1 homogeneous in the input and therefore equal to a scaled
+score, in the Miyasawa sense.
 
-One documented exception to that last sentence: homogeneity is also
-NORM-dependent, and `create_convunext_denoiser`'s `block_normalization` default
-is LayerNorm, which divides by a per-sample std that itself scales with the
-input and is therefore scale-INVARIANT (degree 0), not degree-1. Removing the
-biases is necessary but not sufficient. That builder now defaults the argument
-to a `None` sentinel and WARNS when the choice was not made; the five other
-entry points here (`create_bfcnn_*`, `create_bfunet_*`,
-`create_convunext_variant`) default to `'batchnorm'` -> `BiasFreeBatchNorm` and
-are homogeneous. Pass `block_normalization='batchnorm'` to
-`create_convunext_denoiser` when the Miyasawa reading is what you need.
+One exception: homogeneity also depends on the normalization used.
+`create_convunext_denoiser`'s `block_normalization` defaults to LayerNorm,
+which divides by a per-sample std that scales with the input, making the
+residual scale-invariant (degree 0) rather than degree-1. That builder
+defaults the argument to a `None` sentinel and warns when the choice was
+not made explicitly. The other five entry points here default to
+`'batchnorm'`, `BiasFreeBatchNorm`, and stay homogeneous. Pass
+`block_normalization='batchnorm'` to `create_convunext_denoiser` for the
+Miyasawa reading.
 """
 from .bfcnn import create_bfcnn_denoiser, create_bfcnn_variant
 from .bfconvunext import create_convunext_denoiser, create_convunext_variant
