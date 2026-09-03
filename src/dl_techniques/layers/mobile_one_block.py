@@ -1,67 +1,29 @@
-"""
-MobileOne block using structural reparameterization.
+"""``MobileOneBlock``, a multi-branch convolution block for structural reparameterization.
 
-This layer embodies the principle of structural reparameterization, a design
-paradigm that decouples the training-time architecture from the
-inference-time architecture. The core idea is to use a more complex,
-over-parameterized, multi-branch structure during training to enhance model
-representation and ease optimization, and then mathematically fuse these
-branches into a single, computationally efficient layer for fast inference.
-
-Architecturally, during training, this block consists of multiple parallel
-branches whose outputs are summed. These typically include:
-1.  One or more main branches, each a `k x k` convolution followed by a
-    Batch Normalization layer.
-2.  A 1x1 convolution branch, also followed by Batch Normalization, acting
-    as a "scale" branch.
-3.  An optional identity skip-connection, also passed through Batch
-    Normalization if the input and output dimensions match.
-
-This over-parameterization creates a richer gradient landscape, which can
-lead to better model convergence and final accuracy.
-
-For inference, these parallel affine operations are fused into a single
-`Conv2D` operation. This fusion is possible due to the linear properties of
-convolution and batch normalization. The fusion process relies on two key
-mathematical principles:
-
-First, a `Conv2D` layer followed by a `BatchNormalization` layer can be
-converted into a single `Conv2D` layer with a new kernel and bias. Given a
-convolution kernel `W` and a batch norm with mean `μ`, variance `σ²`, scale
-`γ`, and shift `β`, the fused kernel `W'` and bias `b'` are:
-
-`W' = (γ / sqrt(σ² + ε)) * W`
-`b' = β - (γ * μ / sqrt(σ² + ε))`
-
-Second, the sum of outputs from parallel convolutions (with identical stride
-and padding) is equivalent to a single convolution whose kernel and bias are
-the sum of the individual fused kernels and biases. The 1x1 and identity
-branches are first converted to equivalent `k x k` convolutions (by centering
-their kernels in a padded `k x k` tensor) before this summation. The result
-is a standard, hardware-friendly `Conv2D` layer that is mathematically
-equivalent to the complex training-time block, but with significantly lower
-latency and memory access costs.
+During training the block sums several parallel branches: one or more
+``k x k`` Conv+BatchNorm branches, an optional ``1x1`` scale branch, and an
+optional identity skip, each with its own BatchNorm. The extra branches give
+training a richer gradient landscape than a single convolution would. Every
+branch is a linear (affine) operation, so at inference the branches can be
+folded into one ``Conv2D``: each Conv+BatchNorm pair collapses to a new
+kernel and bias, and summed convolutions with the same stride and padding
+collapse into one convolution with summed kernels and biases. Folding is
+not implemented in this module; the file only defines the block used at
+training time.
 
 References:
     - Vasu et al., 2022. MobileOne: An Improved One millisecond Mobile
       Backbone. (https://arxiv.org/abs/2206.04040)
     - Ding et al., 2021. RepVGG: Making VGG-style ConvNets Great Again.
       (https://arxiv.org/abs/2101.03697)
-
 """
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import layers, initializers, regularizers, activations
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 def resolve_num_groups(group_size: int, in_channels: int) -> int:
@@ -74,7 +36,7 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
     message differs per layer.
 
     :param group_size: ``0`` for a dense convolution (``groups = 1``); ``k > 0``
-        for ``groups = in_channels // k``, so ``1`` is DEPTHWISE.
+        for ``groups = in_channels // k``, so ``1`` is depthwise.
     :type group_size: int
     :param in_channels: Number of input channels; only known at build time.
     :type in_channels: int
@@ -92,14 +54,9 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
     return in_channels // group_size
 
 
-# DECISION plan-2026-08-13T183738-24486492/D-007
-# `norm_epsilon` and `padding_mode` both default to TODAY'S KERAS BEHAVIOUR
-# (1e-3 and asymmetric `'same'`), which is NOT the MobileOne/FastViT reference
-# (1e-5 and PyTorch's symmetric `padding = k // 2`). Do NOT "fix" the defaults:
-# `models/vision_language/fastvlm/` consumes this block through `layers/repmixer_block.py` and
-# ships numerics that depend on both, and a defaults-unchanged value-identity
-# test pins it. The faithful port passes both explicitly from
-# `layers/fastvit/reference.py`. See decisions.md D-007.
+# DECISION plan-2026-08-13T183738-24486492/D-007: norm_epsilon and padding_mode
+# default to Keras' own behaviour (1e-3, asymmetric 'same'), not the MobileOne/FastViT
+# reference (1e-5, symmetric k//2) -- fastvlm depends on the current defaults. See decisions.md.
 #: Accepted values for the ``padding_mode`` knob shared by :class:`MobileOneBlock`
 #: and the FastViT blocks.
 PADDING_MODES = ('keras_same', 'reference')
@@ -118,13 +75,13 @@ def resolve_conv_padding(
     convention identically or they sample different pixels.
 
     ``'keras_same'`` is Keras' native ``padding='same'``, which pads
-    ASYMMETRICALLY (the extra row/column goes to the bottom/right). At stride > 1
+    asymmetrically (the extra row/column goes to the bottom/right). At stride > 1
     that makes the sampled grid depend on the kernel size, so a ``k x k`` branch
-    and a ``1 x 1`` branch summed in the same block read DIFFERENT input pixels.
+    and a ``1 x 1`` branch summed in the same block read different input pixels.
     ``'reference'`` reproduces PyTorch's ``padding=kernel_size // 2``: a symmetric
     explicit pad followed by a ``'valid'`` convolution, which puts every kernel
     size on the same grid (output pixel ``i`` is centred on input pixel
-    ``i * stride``). For an ODD kernel at stride 1 the two are identical.
+    ``i * stride``). For an odd kernel at stride 1 the two are identical.
 
     :param kernel_size: Spatial size of the convolution kernel.
     :type kernel_size: int
@@ -133,7 +90,7 @@ def resolve_conv_padding(
     :param padding_mode: One of :data:`PADDING_MODES`.
     :type padding_mode: str
     :return: ``(pad_amount, keras_padding)``. ``pad_amount`` is the symmetric
-        :class:`keras.layers.ZeroPadding2D` amount to apply BEFORE the convolution
+        :class:`keras.layers.ZeroPadding2D` amount to apply before the convolution
         (``0`` means no padding layer at all), and ``keras_padding`` is the value
         to pass to ``Conv2D(padding=...)``.
     :rtype: Tuple[int, str]
@@ -181,8 +138,6 @@ def conv_output_size(
     return (size + 2 * pad - kernel_size) // stride + 1
 
 
-# ---------------------------------------------------------------------
-
 @register_dl_technique("dl_techniques.layers.mobile_one_block")
 class MobileOneBlock(keras.layers.Layer):
     """MobileOne building block with structural reparameterization.
@@ -196,7 +151,7 @@ class MobileOneBlock(keras.layers.Layer):
     properties of convolution and batch normalization:
     ``W' = (gamma / sqrt(var + eps)) * W``, ``b' = beta - gamma * mu / sqrt(var + eps)``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -239,13 +194,13 @@ class MobileOneBlock(keras.layers.Layer):
     :type padding: str
     :param padding_mode: How ``padding='same'`` is realised — see
         :func:`resolve_conv_padding`. ``'keras_same'`` (the default, and this
-        layer's historical behaviour) uses Keras' ASYMMETRIC ``'same'``, under
+        layer's historical behaviour) uses Keras' asymmetric ``'same'``, under
         which a strided ``k x k`` branch and the strided ``1 x 1`` scale branch
-        sample DIFFERENT input pixels and are therefore not fusible.
+        sample different input pixels and are therefore not fusible.
         ``'reference'`` uses PyTorch's symmetric ``padding = kernel_size // 2``
         (explicit :class:`keras.layers.ZeroPadding2D` + a ``'valid'``
         convolution), which puts every branch on the same grid. Ignored when
-        ``padding='valid'``. For an ODD kernel at ``stride=1`` the two modes are
+        ``padding='valid'``. For an odd kernel at ``stride=1`` the two modes are
         value-identical. Defaults to ``'keras_same'``.
     :type padding_mode: str
     :param use_se: Whether to include Squeeze-and-Excitation. Defaults to False.
@@ -258,7 +213,7 @@ class MobileOneBlock(keras.layers.Layer):
     :param group_size: Grouped-convolution control using timm's ``num_groups``
         semantics: ``0`` means ``groups = 1`` (a dense convolution, the default);
         ``k > 0`` means ``groups = in_channels // k``, so ``group_size=1`` is a
-        DEPTHWISE convolution. ``in_channels`` is only known at build time, so the
+        depthwise convolution. ``in_channels`` is only known at build time, so the
         resolved group count is computed in :meth:`build` and exposed as ``self.groups``.
         The group count is applied to the ``k x k`` branches AND to the 1x1 scale
         branch. Defaults to 0.
@@ -275,7 +230,7 @@ class MobileOneBlock(keras.layers.Layer):
     :param se_use_bias: Whether the Squeeze-and-Excitation convolutions use bias
         vectors. Forwarded to :class:`SqueezeExcitation`. Defaults to False.
     :type se_use_bias: bool
-    :param norm_epsilon: Variance epsilon for EVERY BatchNormalization the block
+    :param norm_epsilon: Variance epsilon for every BatchNormalization the block
         creates (the ``k x k`` branches, the ``1 x 1`` scale branch and the
         identity skip branch). Defaults to ``1e-3`` — Keras' own default, i.e.
         this layer's historical behaviour. The FastViT / MobileOne reference uses
@@ -386,17 +341,9 @@ class MobileOneBlock(keras.layers.Layer):
         # historical dense path.
         self.groups = 1 if self.group_size == 0 else None
 
-        # CREATE all sub-layers in __init__ (unbuilt).
-        #
-        # Exception, deliberate: `groups` must be passed to Conv2D at CONSTRUCTION
-        # time, but timm's `num_groups` semantics derive it from `in_channels`, which
-        # is unknown until build(). So the convolutional branches are constructed here
-        # ONLY for the `group_size == 0` (groups == 1) case — the historical default
-        # path, which is left bit-for-bit as it was — and are otherwise constructed in
-        # build() once `in_channels` is known. Construction is still driven purely by
-        # config flags plus the channel count, and sub-layer names are deterministic,
-        # so `.keras` round-tripping is unaffected (Keras calls build() from
-        # `build_from_config` before restoring weights).
+        # `groups` must reach Conv2D at construction time, but timm's `num_groups`
+        # depends on `in_channels`, unknown until build(). So branches are built here
+        # only when group_size == 0 (groups == 1); otherwise build() constructs them.
         self.conv_branches = []
         self.scale_branch = None
         if self.groups is not None:
@@ -604,13 +551,8 @@ class MobileOneBlock(keras.layers.Layer):
                 "configuration where stride == 1 and out_channels == in_channels."
             )
 
-        # DECISION plan-2026-08-13T183738-24486492/D-002
-        # SE ordering. `'post_act'` — se(act(x)) — is this layer's HISTORICAL order and
-        # MUST remain the default: `models/vision_language/fastvlm/` (via layers/repmixer_block.py's
-        # ConvolutionalStem) ships trained-against numerics that depend on it. Do NOT
-        # "fix" the default to match timm. `'pre_act'` — act(se(x)) — is the
-        # FastViT/timm reference order and is available opt-in for the faithful port.
-        # See decisions.md D-002 (the divergence is DISCLOSED, not repaired in place).
+        # DECISION plan-2026-08-13T183738-24486492/D-002: 'post_act' (se(act(x))) stays
+        # the default -- fastvlm ships numerics trained against it, not timm's 'pre_act' order. See decisions.md.
         if self.se_position == 'pre_act':
             if self.se_block is not None:
                 x = self.se_block(x, training=training)
@@ -679,5 +621,3 @@ class MobileOneBlock(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

@@ -1,58 +1,20 @@
-"""
-Vector quantization layer for learning discrete latent representations.
+"""``VectorQuantizer``, mapping continuous encoder outputs to a learned discrete codebook.
 
-This layer embodies the principle of discrete representation learning, a design
-paradigm that replaces a continuous latent space with a finite set of learned
-prototype vectors. The core idea is to constrain the encoder's output to lie on
-a discrete codebook, which yields compact, index-addressable latents that can
-be modeled autoregressively by a downstream prior, while avoiding the posterior
-collapse commonly observed in continuous variational autoencoders.
+The layer holds a codebook of ``K`` embedding vectors and replaces each
+input vector with its nearest codebook entry (by squared Euclidean
+distance), giving compact, index-addressable latents. Since nearest-neighbor
+lookup has no gradient, the forward pass emits the quantized vector while a
+straight-through estimator copies the gradient straight to the input:
 
-Architecturally, the layer maintains a learnable codebook `e` of `K` embedding
-vectors, each of dimension `D`. During the forward pass:
-1.  The input tensor `z_e` is flattened across all non-channel dimensions to
-    shape `[N, D]`.
-2.  Squared Euclidean distances to every codebook entry are computed, and the
-    nearest entry is selected per position via an `argmin`.
-3.  The selected embeddings are gathered and reshaped back to the original
-    input shape, producing the quantized output `z_q`.
+    z_q = z_e + stop_gradient(e_k* - z_e)
 
-The central difficulty of this construction is that `argmin` has zero gradient
-almost everywhere, so the encoder receives no learning signal through the
-quantization step. This is resolved with the straight-through estimator, which
-decouples the forward and backward computations:
-
-`z_q = z_e + stop_gradient(e_k* - z_e)`
-
-The forward pass emits the codebook vector, while the backward pass sees the
-identity map and therefore copies the gradient of the reconstruction loss
-directly onto `z_e`. Because gradients bypass the codebook entirely, the
-embeddings must be trained by auxiliary objectives. Two terms are added, each
-using `stop_gradient` to route its gradient to exactly one operand:
-
-`L_codebook   = ||stop_gradient(z_e) - e||²`
-`L_commit     = β * ||z_e - stop_gradient(e)||²`
-
-The codebook loss pulls the selected embeddings toward the encoder outputs
-assigned to them, while the commitment loss, weighted by `β`, pulls the encoder
-outputs toward their assigned embeddings and prevents the latent magnitudes
-from growing without bound.
-
-As an alternative to gradient-based codebook updates, the layer supports
-exponential moving average estimation, which treats the codebook as an online
-k-means problem rather than a set of trainable parameters. Per-embedding
-assignment counts `N` and assigned-vector sums `m` are tracked with decay `γ`,
-and each embedding is set to their ratio:
-
-`N⁽ᵗ⁾ = γ * N⁽ᵗ⁻¹⁾ + (1 - γ) * n⁽ᵗ⁾`
-`m⁽ᵗ⁾ = γ * m⁽ᵗ⁻¹⁾ + (1 - γ) * Σ z_e⁽ᵗ⁾`
-`e⁽ᵗ⁾ = m⁽ᵗ⁾ / (N⁽ᵗ⁾ + ε)`
-
-This decouples codebook adaptation from the optimizer's learning rate and
-momentum state, which typically gives more stable convergence and better
-codebook utilization. In this mode the embeddings are marked non-trainable and
-the codebook loss no longer drives them. The epsilon term guards against
-division by zero for embeddings that receive no assignments in recent batches.
+Two losses train the codebook: a codebook loss that pulls embeddings toward
+their assigned inputs, and a commitment loss, weighted by ``commitment_cost``,
+that pulls inputs toward their assigned embeddings. As an alternative,
+``use_ema=True`` updates the codebook with an exponential moving average of
+assignment counts and sums instead of gradients, treating it as an online
+k-means problem; embeddings then become non-trainable and the codebook loss
+no longer drives them.
 
 References:
     - van den Oord et al., 2017. Neural Discrete Representation Learning.
@@ -62,19 +24,13 @@ References:
     - Bengio et al., 2013. Estimating or Propagating Gradients Through
       Stochastic Neurons for Conditional Computation.
       (https://arxiv.org/abs/1308.3432)
-
 """
 
 import keras
 from typing import Optional, Tuple, Dict, Any, Union
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.vector_quantizer")
 class VectorQuantizer(keras.layers.Layer):
@@ -91,7 +47,7 @@ class VectorQuantizer(keras.layers.Layer):
     from growing unbounded. Optional EMA-based codebook updates provide more
     stable training.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -215,20 +171,8 @@ class VectorQuantizer(keras.layers.Layer):
         # Create EMA variables if needed
         if self.use_ema:
             # Track cluster sizes for each embedding
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # EMA accumulators are STATE, not activations: they must stay in
-            # float32 and must NOT be autocast to `compute_dtype`. Two reasons,
-            # both measured at step 5.8:
-            #   (1) `cluster_size` counts assignments and half precision is
-            #       exact on integers only up to 2048 -- a batch*H*W larger than
-            #       that starts SILENTLY losing counts, and the counts are the
-            #       denominator of the codebook update.
-            #   (2) with autocast on, `self.ema_decay * self.ema_cluster_size`
-            #       (float16) + `(1 - decay) * cluster_size` (float32) raises
-            #       `InvalidArgumentError: cannot compute AddV2` under
-            #       `mixed_float16` -- how the sibling rotation-trick quantizer
-            #       died before this fix.
-            # `_update_ema` casts its arguments up to float32 to match.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: EMA accumulators stay
+            # float32, never autocast -- float16 counts silently lose precision above 2048. See decisions.md.
             self.ema_cluster_size = self.add_weight(
                 name="ema_cluster_size",
                 shape=(self.num_embeddings,),
@@ -239,15 +183,9 @@ class VectorQuantizer(keras.layers.Layer):
             )
 
             # Track sum of assigned encoder outputs for each embedding.
-            # DECISION plan-2026-08-18T140459-7991552f/D-012
-            # This accumulator MUST start at ZERO, not at `self.initializer`.
-            # It is the numerator of an EMA that `_update_ema` debiases by
-            # `1 - decay**t`; a non-zero start is a bias the debias step
-            # AMPLIFIES by `decay**t / (1 - decay**t)` = 99x at t=1. MEASURED:
-            # with `initializer=self.initializer` here and the debias below,
-            # `max|codebook|` after 5 epochs was 47283 (vs 4521 with neither
-            # correction, and 0.264 with both). See decisions.md D-012.
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
+            # DECISION plan-2026-08-18T140459-7991552f/D-012: this accumulator starts
+            # at zero, not self.initializer -- a non-zero start amplifies 99x through the debias step. See decisions.md.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: float32, never autocast. See decisions.md.
             self.ema_embeddings = self.add_weight(
                 name="ema_embeddings",
                 shape=(self.num_embeddings, self.embedding_dim),
@@ -257,34 +195,9 @@ class VectorQuantizer(keras.layers.Layer):
                 autocast=False,
             )
 
-            # DECISION plan-2026-08-18T140459-7991552f/D-012
-            # This counter exists ONLY to debias the two EMA accumulators in
-            # `_update_ema`. Do NOT delete it as an unused scalar: without it the
-            # accumulators are read at their un-debiased values, and on step 1 a
-            # code that received zero assignments evaluates to
-            # `0.99 * init[k] / 1e-5` ~= 99000 * init[k] -- a codebook blown up
-            # by ~1e5 that collapses every input onto a single code. MEASURED at
-            # HEAD before this fix, 5 epochs on the tiny sinusoid fixture:
-            # `len(np.unique(encode_to_indices(images)))` == 1 and
-            # `max|codebook|` == 4521; after this fix 18 and 0.264. It costs one
-            # float scalar and changes the `use_ema=True` weight set from 3 to 4.
-            # It is deliberately NOT `dtype="int32"`: TF places an int32
-            # variable on the CPU, and the resulting CPU/GPU split raises
-            # `Trying to access resource .../ema_step ... from device GPU:0`
-            # inside the jit-compiled train function (MEASURED -- fit() died).
-            #
-            # COMPATIBILITY, MEASURED not assumed. This BREAKS every
-            # pre-2026-08-18 `use_ema=True` artifact, and it breaks LOUDLY in
-            # both directions: a by-name `load_weights` AND a full
-            # `keras.models.load_model()` of an old `.keras` file both raise
-            # `ValueError: A total of 1 objects could not be loaded`. The
-            # earlier belief that a full `load_model` would silently
-            # re-initialize the counter is WRONG -- it was tested by saving
-            # under the pre-fix source and loading under this one. No such
-            # artifact exists under `results/` (checked), and any that did
-            # would hold a codebook blown up by ~1e5 and be worthless.
-            # See decisions.md D-012.
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `ema_cluster_size`).
+            # DECISION plan-2026-08-18T140459-7991552f/D-012: this counter debiases
+            # the two EMA accumulators; without it step-1 codes blow up ~1e5x. Not int32 -- that forces a CPU/GPU split under jit. See decisions.md.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: float32, never autocast. See decisions.md.
             self.ema_step = self.add_weight(
                 name="ema_step",
                 shape=(),
@@ -329,16 +242,8 @@ class VectorQuantizer(keras.layers.Layer):
         encoding_indices = keras.ops.argmin(distances, axis=1)
 
         # Convert indices to one-hot for gathering
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # `dtype=self.compute_dtype` is load-bearing. `keras.ops.one_hot`
-        # defaults to `backend.floatx()` (float32); the `matmul` below then
-        # PROMOTES to float32 (measured: matmul(f32 one_hot, f16 codebook) ->
-        # f32, it does NOT raise), so `quantized` silently leaves this
-        # expression at float32 and the codebook/commitment `Sub` two blocks
-        # down raises `InvalidArgumentError: cannot compute Sub ... expected to
-        # be a half tensor but is a float tensor` under `mixed_float16`.
-        # Do NOT chase this at the `Sub`: the dtype is decided HERE, and a cast
-        # at the Sub would leave the matmul running in float32.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: dtype=self.compute_dtype here
+        # avoids a silent float32 promotion that later raises under mixed_float16 at the Sub. See decisions.md.
         encodings = keras.ops.one_hot(
             encoding_indices,
             self.num_embeddings,
@@ -390,12 +295,8 @@ class VectorQuantizer(keras.layers.Layer):
             ``(batch*spatial, num_embeddings)``.
         :type encodings: keras.KerasTensor
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # Accumulate in float32 regardless of `compute_dtype`. Under
-        # `mixed_float16` `encodings`/`flat_inputs` arrive as float16; summing
-        # assignment counts in float16 is exact only to 2048, and the counts
-        # are the denominator of the codebook update. The EMA variables are
-        # declared `autocast=False, dtype="float32"` in `build()` to match.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: accumulate in float32
+        # regardless of compute_dtype -- float16 assignment counts are exact only to 2048. See decisions.md.
         encodings = keras.ops.cast(encodings, "float32")
         flat_inputs = keras.ops.cast(flat_inputs, "float32")
 
@@ -424,29 +325,8 @@ class VectorQuantizer(keras.layers.Layer):
         )
         self.ema_embeddings.assign(new_ema_embeddings)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-012
-        # Do NOT "simplify" the block below back to
-        #     self.ema_embeddings / (self.ema_cluster_size + self.epsilon)
-        # It looks equivalent and is not. Two separate corrections are needed:
-        #
-        # (1) BIAS CORRECTION. `ema_cluster_size` starts at zeros while
-        #     `ema_embeddings` starts at `self.initializer` (NOT zeros -- see
-        #     build()). For a code that receives no assignments on step 1 the
-        #     naive ratio is `0.99 * init[k] / 1e-5` ~= 99000 * init[k]. This is
-        #     a step-1 blow-up, not a slow drift, so no amount of extra training
-        #     fixes it. Dividing BOTH accumulators by `1 - decay^t` puts them on
-        #     a common, unbiased scale from the first step.
-        # (2) LAPLACE SMOOTHING. Bare `+ epsilon` in the denominator is not a
-        #     stabiliser, it is an unbounded gain: as the count -> 0 the ratio
-        #     -> numerator / 1e-5. Smoothing the counts toward a uniform prior
-        #     while preserving their total N keeps every denominator O(N/K).
-        #
-        # Both corrections are load-bearing and neither works alone. MEASURED,
-        # 5 epochs on the tiny sinusoid fixture (unique codes, max|codebook|):
-        #   neither correction (HEAD)                    -> 1,  4521
-        #   this block, `ema_embeddings` init unchanged  -> 1,  47283  (WORSE)
-        #   this block + zero-init `ema_embeddings`      -> 18, 0.264
-        # See decisions.md D-012.
+        # DECISION plan-2026-08-18T140459-7991552f/D-012: needs both bias correction
+        # (accumulators start at different values) and Laplace smoothing (bare +epsilon is an unbounded gain near 0); neither alone fixes the step-1 blow-up. See decisions.md.
         self.ema_step.assign_add(1.0)
         bias_correction = 1.0 - keras.ops.power(
             keras.ops.cast(self.ema_decay, self.ema_step.dtype), self.ema_step

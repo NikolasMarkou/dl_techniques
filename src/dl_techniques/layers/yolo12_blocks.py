@@ -1,91 +1,33 @@
-"""
-YOLOv12 Core Building Blocks.
+"""Core building blocks of the YOLOv12 object detection architecture.
 
-This module provides a collection of custom Keras layers and blocks that form the
-fundamental components of the YOLOv12 object detection architecture. These blocks
-are designed to be modular, efficient, and fully serializable following modern
-Keras 3 best practices.
-
-The key components include:
-
-- **YOLO12_NORM_KWARGS**: The single home for the D-067 BatchNorm pair
-  (``epsilon=1e-3``, ``momentum=0.97``), threaded to every consumer as data.
-
-- **yolo12_conv_block()**: The standard base unit for all convolutions in the
-  network -- a Conv2D followed by Batch Normalization and a SiLU
-  (Sigmoid-weighted Linear Unit) activation. It is a thin, YOLOv12-configured
-  factory over the shared :class:`dl_techniques.layers.standard_blocks.ConvBlock`;
-  this module no longer defines a ``ConvBlock`` of its own.
-
-- **Bottleneck**: A classic residual block used in many modern CNNs. It consists
-  of two sequential conv blocks with a shortcut (residual) connection that adds
-  the input to the output. This helps to mitigate the vanishing gradient problem
-  and allows for the construction of very deep networks.
-
-- **C3k2Block**: A CSP (Cross-Stage Partial) inspired block that splits the input
-  features into two paths. One path is processed through a series of `Bottleneck`
-  layers, while the other remains unchanged. The two paths are then concatenated,
-  fusing the processed and original features to enhance the gradient flow and
-  learning capacity without a significant increase in computational cost.
-
-- **A2C2fBlock**: An attention-enhanced feature fusion block inspired by ELAN
-  (Efficient Layer Aggregation Network) principles. It processes an input through
-  a series of :class:`~dl_techniques.layers.transformers.area_attention_block.AreaAttentionBlock`
-  pairs, progressively concatenating the output of each stage. This creates a
-  rich feature hierarchy, allowing the network to learn complex representations
-  by combining features from different levels of abstraction.
-
-The attention machinery this module used to own now lives in the shared packages
-it belongs to, and is imported from there rather than redefined here:
-
-- ``AreaAttention`` -> :mod:`dl_techniques.layers.attention.area_attention`,
-  reachable as ``create_attention_layer('area', ...)``.
-- ``AttentionBlock`` -> :mod:`dl_techniques.layers.transformers.area_attention_block`,
-  renamed ``AreaAttentionBlock`` on relocation.
-
+Provides ``yolo12_conv_block()`` (a Conv2D + BatchNorm + SiLU unit built on
+the shared :class:`~dl_techniques.layers.standard_blocks.ConvBlock`),
+``Bottleneck`` (two conv blocks plus an optional residual add),
+``C3k2Block`` (a CSP-style block splitting input into a bottleneck-processed
+path and a passthrough path, then concatenating), and ``A2C2fBlock`` (an
+ELAN-style block stacking pairs of
+:class:`~dl_techniques.layers.transformers.area_attention_block.AreaAttentionBlock`
+and concatenating every stage's output). ``YOLO12_NORM_KWARGS`` is the single
+source of the BatchNorm epsilon/momentum pair every block in this module
+uses; every convolution here is bias-free and He-initialised.
 """
 
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from . import standard_blocks
 from .transformers.area_attention_block import AreaAttentionBlock
 
-# ---------------------------------------------------------------------
-# The one home for the D-067 BatchNorm pair
-# ---------------------------------------------------------------------
-
-# DECISION plan-2026-09-01T055648-e6d380a5/D-005
-# This dict is the ONLY home for the epsilon/momentum pair, and it exists so
-# that the pair is threaded to every consumer as DATA. Do NOT "simplify" it
-# back into per-site `epsilon=1e-3, momentum=0.97` literals: the swap onto
-# `standard_blocks.ConvBlock` puts 26 construction sites across four modules
-# behind these two numbers, two of those modules sit in packages that must not
-# import `yolo12_blocks` (the dependency direction I5 exists to fix), and
-# `create_normalization_layer` SILENTLY falls back to Keras' 1e-6/0.99 when the
-# kwargs are omitted -- no raise, no shape change, only different inference.
-# See decisions.md D-005, and the D-067 rationale for the values themselves:
+# DECISION plan-2026-09-01T055648-e6d380a5/D-005: keep epsilon/momentum in one
+# dict, not per-site literals -- 26 construction sites across 4 modules depend
+# on it, and create_normalization_layer silently falls back to 1e-6/0.99 if omitted. See decisions.md.
 #
-# DECISION plan-2026-08-19T163559-499b6f0e/D-067
-# These two values are the Ultralytics YOLO port, not Keras defaults
-# that nobody looked at, and they are load-bearing TOGETHER. PyTorch
-# `nn.BatchNorm2d` and Keras `BatchNormalization` define `momentum`
-# with OPPOSITE senses, so Ultralytics' `momentum=0.03` is Keras'
-# `momentum=0.97`; `eps=1e-3` is Ultralytics' own value and is NOT the
-# 1e-5 that most transformer-family references use. Do NOT "correct"
-# the epsilon to 1e-5 in the belief that it is an unreviewed Keras
-# default -- it agrees with Keras' default by coincidence. MEASURED:
-# all 134 norm sites of `create_yolov12_multitask(scale="n")` are at
-# 1e-03, pinned in
-# `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py`.
-# See decisions.md D-067.
+# DECISION plan-2026-08-19T163559-499b6f0e/D-067: these values are the
+# Ultralytics port (momentum sense is flipped vs PyTorch: 0.03 -> 0.97), not
+# unreviewed Keras defaults. See decisions.md.
 YOLO12_NORM_KWARGS: Dict[str, Any] = {"epsilon": 1e-3, "momentum": 0.97}
 
 
@@ -153,8 +95,6 @@ def yolo12_conv_block(
     )
 
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class Bottleneck(keras.layers.Layer):
@@ -164,7 +104,7 @@ class Bottleneck(keras.layers.Layer):
     Two sequential 3x3 ``yolo12_conv_block`` layers with an optional shortcut connection
     that adds the input to the output when channels match.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -209,12 +149,10 @@ class Bottleneck(keras.layers.Layer):
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
 
-        # Store ALL configuration parameters
         self.filters = filters
         self.shortcut = shortcut
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = yolo12_conv_block(
             filters=self.filters,
             kernel_size=3,
@@ -243,7 +181,6 @@ class Bottleneck(keras.layers.Layer):
         cv1_output_shape = self.cv1.compute_output_shape(input_shape)
         self.cv2.build(cv1_output_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -297,8 +234,6 @@ class Bottleneck(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class C3k2Block(keras.layers.Layer):
@@ -310,7 +245,7 @@ class C3k2Block(keras.layers.Layer):
     unchanged. Both paths are concatenated and fused through a final 1x1
     convolution.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -361,14 +296,12 @@ class C3k2Block(keras.layers.Layer):
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
 
-        # Store ALL configuration parameters
         self.filters = filters
         self.n = n
         self.shortcut = shortcut
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.hidden_filters = filters // 2
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
@@ -426,7 +359,6 @@ class C3k2Block(keras.layers.Layer):
         concat_shape[-1] = current_shape[-1] + cv2_output_shape[-1]  # Concatenate channel dimension
         self.cv3.build(tuple(concat_shape))
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -484,8 +416,6 @@ class C3k2Block(keras.layers.Layer):
         return config
 
 
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.layers.yolo12_blocks")
 class A2C2fBlock(keras.layers.Layer):
@@ -497,7 +427,7 @@ class A2C2fBlock(keras.layers.Layer):
     layers, progressively concatenating outputs from each stage to build a rich
     feature hierarchy. A final 1x1 convolution fuses all features.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -551,14 +481,12 @@ class A2C2fBlock(keras.layers.Layer):
         if area <= 0:
             raise ValueError(f"area must be positive, got {area}")
 
-        # Store ALL configuration parameters
         self.filters = filters
         self.n = n
         self.area = area
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.hidden_filters = filters // 2
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.cv1 = yolo12_conv_block(
             filters=self.hidden_filters,
             kernel_size=1,
@@ -628,7 +556,6 @@ class A2C2fBlock(keras.layers.Layer):
         concat_shape[-1] = concat_channels
         self.cv2.build(tuple(concat_shape))
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -689,4 +616,3 @@ class A2C2fBlock(keras.layers.Layer):
         })
         return config
 
-# ---------------------------------------------------------------------

@@ -1,77 +1,18 @@
-"""
-A bit-quantized linear layer for efficient inference.
+"""``BitLinear``, a bit-quantized dense layer for quantization-aware training.
 
-This layer simulates low-bit quantization during training, a technique known
-as Quantization-Aware Training (QAT). The goal of QAT is to train a model
-that is robust to the precision loss incurred when weights and activations
-are converted to low-bit integer formats for deployment. This process
-significantly reduces the model's memory footprint and enables the use of
-highly efficient integer-based arithmetic on specialized hardware, leading
-to faster inference and lower power consumption.
+The layer replaces the plain matmul ``y = matmul(x, W)`` with a quantized
+version: both the input and the kernel are scaled and quantized on every
+forward pass, and the result is rescaled by the inverse of both scales.
+Scaling never reduces over the batch axis, so the layer computes the same
+function at any batch size. Gradients cross the non-differentiable round
+step through a straight-through estimator, so the underlying full-precision
+weights still train while the forward pass runs on quantized values.
 
-Architecturally, this layer replaces the standard floating-point matrix
-multiplication `y = matmul(x, W)` with a quantized equivalent. The core
-idea is to dynamically scale and quantize both the input activations (`x`)
-and the weights (`W`) during each forward pass, and to fold the inverse
-scaling into the output.
+    y = matmul(round(x / gamma_x), round(W / gamma_w)) * gamma_x * gamma_w
 
-The mathematical formulation for a given tensor `T` (either `x` or `W`)
-involves three main steps:
-1.  **Scaling:** The full-precision tensor `T` is first scaled into the
-    target integer range `[Q_min, Q_max]`. This is achieved by multiplying
-    it with a scaling factor `alpha = Q_max / gamma`, where `gamma` is a
-    representative value of the tensor's magnitude (the absolute maximum,
-    mean or median). This ensures that the bulk of the tensor's values are
-    mapped into the limited integer range. The BitNet paper advocates the
-    mean of the absolute values for `gamma` for its robustness, which is
-    why ``abs_mean`` is the default for weights here.
-
-    `gamma` is **never** reduced over the batch axis. Activations are scaled
-    per token (`gamma` reduced over the feature axis, giving one factor per
-    row), and weights either per output channel or per tensor. A statistic
-    taken across the batch would make the quantization of one sample depend
-    on the other samples in its batch, so the layer would compute a
-    different function at `batch_size=1` than the one it was trained with.
-
-    In the implementation the scale is applied as `T / gamma * Q_max` rather
-    than `T * (Q_max / gamma)`. The two are algebraically identical, but the
-    former never materialises `Q_max / gamma`, which overflows float16 for
-    any `gamma` below `Q_max / 65504` (about `1.9e-3` at 8 bits).
-
-2.  **Quantization:** The scaled tensor is quantized by rounding to the
-    nearest integer and clipping values that fall outside the target range.
-    `T_quant = clip(round(T_scaled), Q_min, Q_max)`
-    For "1.58-bit" quantization, this corresponds to a ternary range
-    `{-1, 0, 1}`, effectively mapping the scaled weights to one of three
-    possible values. True binary quantization (`bits=1`, the set `{-1, +1}`)
-    is a distinct code path built on `sign`, because rounding into the range
-    `[-1, 1]` can reach zero and would therefore yield ternary values.
-
-3.  **Matrix Multiplication:** The quantized activations and weights are used
-    in the matrix multiplication, and the result is rescaled to approximate
-    the original full-precision output.
-    `y = matmul(x_quant, W_quant) / (alpha_x * alpha_W)`
-    Because `alpha_x` carries one factor per row and `alpha_W` one factor per
-    column, neither is contracted away by the matmul and both survive the
-    fold to the output.
-
-A critical challenge in training such a network is that the `round`
-function has zero gradients almost everywhere, which stalls learning via
-backpropagation. This layer overcomes this by using a Straight-Through
-Estimator (STE). During the backward pass, the gradient is allowed to flow
-through the quantization function as if it were an identity function.
-Essentially, the non-differentiable `round` operation is replaced with a
-simple identity mapping (`dy/dx = 1`) for the gradient calculation. This
-trick allows the underlying full-precision weights to be updated by the
-optimizer, while the forward pass continues to use the quantized values,
-thus making the model "aware" of the effects of quantization.
-
-The STE is written as `stop_gradient(quantized - lambda * T) + lambda * T`,
-so that the forward value is **exactly** `quantized` for every `ste_lambda`
-and only the gradient is scaled. Writing it as
-`stop_gradient(quantized - T) + lambda * T` instead leaks `(lambda - 1) * T`
-into the forward pass, which silently de-quantizes the layer whenever
-`ste_lambda != 1`.
+By default weights use 1.58-bit (ternary) quantization and drop the bias,
+matching the BitNet paper; activations use 8-bit quantization. See
+``weight_bits`` and the class docstring for other bit widths.
 
 References:
     - Wang et al., 2024. The Era of 1-bit LLMs: All Large Language Models
@@ -79,19 +20,12 @@ References:
     - Bengio et al., 2013. Estimating or Propagating Gradients Through
       Stochastic Neurons for Conditional Computation.
       (https://arxiv.org/abs/1308.3432)
-
 """
 
 import keras
 from typing import Optional, Dict, Any, Callable, Union, Tuple, Sequence
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.bitlinear_layer")
@@ -112,7 +46,7 @@ class BitLinear(keras.layers.Layer):
     whole kernel otherwise. Neither statistic crosses the batch axis, so the
     layer computes the same function at every batch size.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -320,9 +254,8 @@ class BitLinear(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.kernel_constraint = keras.constraints.get(kernel_constraint)
 
-        # Convert bit specifications to ranges. ``*_is_binary`` selects the
-        # ``sign`` path, which is the only way to reach the two-valued set
-        # {-1, +1}: rounding into [-1, 1] can land on zero.
+        # ``*_is_binary`` selects the ``sign`` path, needed to reach the
+        # two-valued set {-1, +1}: rounding into [-1, 1] can land on zero.
         self.weight_range, self._weight_is_binary = self._parse_bits(
             weight_bits, "weight_bits"
         )
@@ -330,8 +263,7 @@ class BitLinear(keras.layers.Layer):
             activation_bits, "activation_bits"
         )
 
-        # Stochastic rounding needs an owned, serializable RNG so that a
-        # traced/JIT-compiled forward pass stays reproducible.
+        # A traced/JIT-compiled forward pass needs a serializable RNG.
         self.seed_generator = keras.random.SeedGenerator(seed)
 
         # The transformation is elementwise on the feature axis and every
@@ -572,7 +504,6 @@ class BitLinear(keras.layers.Layer):
         if self.use_input_norm and self.input_norm is not None:
             self.input_norm.build(input_shape)
 
-        # Always call parent build at the end (MUST be last)
         super().build(input_shape)
 
     def call(
@@ -704,5 +635,3 @@ class BitLinear(keras.layers.Layer):
             )
 
         return cls(**config)
-
-# ---------------------------------------------------------------------
