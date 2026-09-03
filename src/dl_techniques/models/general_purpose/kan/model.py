@@ -1,55 +1,20 @@
 """
-Kolmogorov-Arnold Networks, which put the learnable nonlinearity on the edges
-of the graph rather than on its nodes.
+Kolmogorov-Arnold Network (KAN): a stack of `KANLinear` layers built by
+`KAN` or the `create_kan_model` factory.
 
-This model embodies a different answer to where a network's expressive power
-should live. An MLP fixes the activation function -- ReLU, GELU, whatever --
-and learns only the linear maps between layers, so every unit in a layer
-applies the identical nonlinearity and all adaptation happens in the weights. A
-KAN inverts that: there are no weight matrices and no fixed activations, only a
-learnable univariate function on each connection, and nodes do nothing but sum
-what arrives. The motivating result is the Kolmogorov-Arnold representation
-theorem, which states that any continuous multivariate function can be written
-as a finite composition of continuous univariate functions and addition. That
-theorem is an existence statement about a two-layer construction, not a recipe
-for a deep network, so it should be read as the intuition behind the design
-rather than a guarantee about it.
+An MLP fixes the activation function and learns only the linear maps
+between layers. A KAN puts a learnable univariate function on every edge
+instead: a B-spline of order `spline_order` over `grid_size` intervals,
+added to a fixed base activation. Each node just sums what arrives. The
+base activation keeps the gradient well behaved while the spline
+coefficients are still near zero.
 
-Each edge function is a B-spline of order `spline_order` over a grid of
-`grid_size` intervals, added to a fixed base activation. The spline is what
-makes the function learnable and locally adjustable: moving one control point
-changes the function only near that knot, so different regions of an edge's
-input range can be shaped independently without the global interference a
-single parameterized activation would suffer. The additive base activation
-matters more than it looks -- it keeps a well-conditioned gradient path through
-the edge in regions where the spline coefficients are still near zero, which is
-what makes the layer trainable from initialization rather than only after the
-splines have found signal.
-
-The grid is the part of this architecture a caller can silently get wrong.
-Splines are only defined over their knot range, and the default grid is set at
-construction time from nothing but a guess about input scale. If the data
-occupies a different range, every edge spends its capacity on the wrong
-interval and extrapolates outside it. `update_kan_grids(x)` re-fits the knot
-positions to the empirical distribution of a data sample and should be run
-before training on any new dataset; it is not optional tuning, it is part of
-setup. The failure mode when it is skipped is silence rather than an error:
-`KANLinear` sums over the input axis, activations grow roughly 30x per layer
-and leave `grid_range=(-2.0, 2.0)` after layer 0, the spline basis is then
-identically zero, and with `base_scaler` initialized to a constant the whole
-model collapses to a constant function. `grids_adapted` exposes that state on
-the object so it is readable rather than inferred from a flat loss curve.
-
-Structurally the model is a stack of `KANLinear` layers driven by a list of
-per-layer config dicts, with an optional final activation. The last layer is
-forced linear and the network-level activation is applied as its own
-`Activation` layer, so a `softmax` in a variant preset cannot be applied twice.
-Five preset variants span micro (`[16, 8]`, grid 3) through xlarge
-(`[512, 256, 128, 64]`, grid 12), trading grid resolution and width together,
-since a fine grid on a narrow layer tends to overfit and a coarse grid on a wide
-one wastes it. The variant table is named `VARIANT_CONFIGS` here rather than the
-house `MODEL_VARIANTS`; trainers and tests reference the existing spelling, and
-`MODEL_VARIANTS` is a class-level alias to the same object.
+Splines are only defined over their knot range. Data outside that range
+drifts past `grid_range` after the first layer and the model collapses
+to a constant output, so `update_kan_grids(x)` must run on a
+representative sample before training; `grids_adapted` reports whether
+that has happened. Five preset variants (micro through xlarge) live in
+`VARIANT_CONFIGS`, aliased as `MODEL_VARIANTS`.
 
 References:
     - Liu et al., 2024. KAN: Kolmogorov-Arnold Networks.
@@ -97,43 +62,44 @@ class KAN(keras.Model):
     :meth:`update_kan_grids` must be run on a representative data sample before
     training, and :attr:`grids_adapted` reports whether it has been.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌──────────────────────────────────────┐
-        │     Input [B, input_features]        │
-        └───────────────┬──────────────────────┘
-                        │
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  KANLinear 0  (features₀)            │──┐
-        └───────────────┬──────────────────────┘  │
-                        ▼                         │
-        ┌──────────────────────────────────────┐  │
-        │  KANLinear 1  (features₁)            │  │  edge, not node:
-        └───────────────┬──────────────────────┘  │
-                        ▼                         │  x ──► base_act(x)·wᵦ ──┐
-                       ...                        │  │                      ▼
-                        ▼                         │  └► Σ cᵢ·Bᵢ(x)·wₛ ───► (+)
-        ┌──────────────────────────────────────┐  │                         │
-        │  KANLinear N-1 (output features)     │──┘   node = Σ over edges ◄─┘
-        │  activation forced to 'linear'       │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Activation(final_activation)        │
-        │  (omitted when 'linear')             │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output [B, features₍N-1₎]           │
-        └──────────────────────────────────────┘
+        Input [B, input_features]
+                  │
+                  ▼
+        ┌────────────────────────────┐
+        │  KANLinear 0 (features₀)   │
+        └──────────────┬─────────────┘
+                       ▼
+                      ...
+                       ▼
+        ┌────────────────────────────┐
+        │  KANLinear N-1 (out feats) │
+        │  activation forced 'linear'│
+        └──────────────┬─────────────┘
+                       ▼
+        ┌────────────────────────────┐
+        │  Activation(final_act)     │  (omitted when 'linear')
+        └──────────────┬─────────────┘
+                       ▼
+        Output [B, features₍N-1₎]
 
-        grids: knots span grid_range; update_kan_grids(x) re-fits them
-               per layer by quantile matching on that layer's own inputs
+        knots span grid_range; update_kan_grids(x) re-fits them per
+        layer by quantile matching on that layer's own inputs
 
-    **Variants:**
+    KANLinear edge (one input to one output unit):
+
+    .. code-block:: text
+
+        x ──┬─► base_act(x)·w_base ─────────┐
+            │                               ▼
+            └─► Σᵢ cᵢ·Bᵢ(x)·w_spline ─────►(+)──► edge output
+
+        node output = sum of every incoming edge output
+
+    Variants:
 
     .. code-block:: text
 
@@ -187,11 +153,12 @@ class KAN(keras.Model):
         ``pretrained='/path/to/weights.keras'`` instead.
 
     Warning:
-        A freshly constructed model **cannot be trained as-is at the documented
-        defaults**. Measured: the output is exactly ``1 / output_features`` for
-        every input with ``std == 0.0``, and 0 of 12 trainable weights receive a
-        non-zero gradient. After :meth:`update_kan_grids` the same model has
-        12 of 12 live gradients.
+        A freshly constructed model cannot be trained as-is at the
+        documented defaults. Measured: the output is exactly
+        ``1 / output_features`` for every input with ``std == 0.0``, and
+        0 of 12 trainable weights receive a non-zero gradient. After
+        :meth:`update_kan_grids` the same model has 12 of 12 live
+        gradients.
     """
 
     VARIANT_CONFIGS = {
@@ -202,13 +169,8 @@ class KAN(keras.Model):
         "xlarge": {"hidden_features": [512, 256, 128, 64], "grid_size": 12, "spline_order": 3, "activation": "gelu"},
     }
 
-    #: Canonical alias of ``VARIANT_CONFIGS`` (models/CLAUDE.md Axis 2: "where one
-    #: of those is the package's only variant table, add MODEL_VARIANTS as a
-    #: class-level alias to the same dict"). An ALIAS, never a rename -- the same
-    #: object under both names, so ``from_variant`` and every existing reader stay
-    #: on one table. ``src/train/kan/`` and this package's own tests reference the
-    #: ``VARIANT_CONFIGS`` spelling, and the module docstring above explains why
-    #: that spelling stays; adding the alias is what the rule actually asks for.
+    #: Alias of ``VARIANT_CONFIGS`` — same dict, both names stay in sync.
+    #: ``src/train/kan/`` and this package's tests use ``VARIANT_CONFIGS``.
     MODEL_VARIANTS = VARIANT_CONFIGS
 
     def __init__(
@@ -227,7 +189,6 @@ class KAN(keras.Model):
         self.input_features = input_features
         self.num_layers = len(self.layer_configs)
 
-        # Build the functional graph
         inputs, outputs = self._build_functional_model()
 
         super().__init__(
@@ -237,22 +198,9 @@ class KAN(keras.Model):
             **kwargs
         )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-052
-        # `grids_adapted` is REAL, INSPECTABLE STATE, not decoration. A KAN built
-        # at the documented defaults and trained without a grid pass is a CONSTANT
-        # FUNCTION — measured: output exactly `1/output_features` for every input,
-        # `std == 0.0` over the batch, and 0 of 12 trainable weights receiving a
-        # non-zero gradient; the same model after `update_kan_grids` is 12 of 12.
-        # That state is pinned by `tests/test_models/test_kan/test_model.py`'s
-        # `xfail(strict=True)` pair and is NOT re-litigated here. What this flag
-        # closes is the SILENCE: the failure mode is a flat loss curve with no
-        # error, so the untrainable state is now readable from the object and
-        # announced once at construction. Do NOT set this to `True` anywhere but
-        # `update_kan_grids`, and do NOT "fix" the constant-function finding by
-        # flipping an initializer: the spline basis is identically zero after
-        # layer 0 because the activations leave `grid_range`, so symmetry
-        # breaking alone would leave the spline weights just as dead.
-        # See decisions.md D-052.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-052: unadapted grids make
+        # this a constant function (0 of 12 live gradients). Only update_kan_grids
+        # may set this True. See decisions.md.
         self._grids_adapted = False
 
         self._log_model_creation()
@@ -261,10 +209,9 @@ class KAN(keras.Model):
     def grids_adapted(self) -> bool:
         """Whether ``update_kan_grids`` has been run on this instance.
 
-        ``False`` on a freshly constructed model. A KAN whose knot grids have not
-        been fitted to the data is not merely under-tuned — at the documented
-        defaults it is a constant function with identically-zero gradients — so
-        this is a training precondition, not a tuning knob.
+        ``False`` on a freshly constructed model. At the documented defaults,
+        unfitted knot grids make the model a constant function with zero
+        gradients everywhere, so fitting them is required before training.
 
         :return: ``True`` once :meth:`update_kan_grids` has completed.
         :rtype: bool
@@ -337,8 +284,7 @@ class KAN(keras.Model):
             is_last_layer = (i == self.num_layers - 1)
 
             if is_last_layer:
-                # Extract the final network activation (e.g., 'softmax')
-                # and force the KAN layer itself to be linear to avoid double activation.
+                # Force this layer linear so the final activation is not applied twice.
                 final_activation_fn = kan_args.pop('activation', 'linear')
                 kan_args['activation'] = 'linear'
 
@@ -373,24 +319,17 @@ class KAN(keras.Model):
             logger.warning("No KANLinear layers found to update.")
             return
 
-        # To update hidden layers, we need their inputs.
-        # We build a temporary model to extract intermediate activations.
-        # For a functional model, layer.input gives the symbolic tensor feeding the layer.
+        # layer.input is the symbolic tensor feeding each layer in a functional model.
         layer_inputs = [layer.input for layer in kan_layers]
 
-        # Create a temporary extraction model
-        # Note: self.input corresponds to the model's main input
         extraction_model = keras.Model(inputs=self.input, outputs=layer_inputs)
 
-        # Run inference to get actual values
-        # verbose=0 prevents progress bars for this utility op
         intermediate_values = extraction_model.predict(x_data, verbose=0)
 
-        # Handle singleton case (predict returns array instead of list if 1 output)
+        # predict() returns a bare array, not a list, when there is one output.
         if len(kan_layers) == 1:
             intermediate_values = [intermediate_values]
 
-        # Update each layer with its corresponding input distribution
         for layer, data in zip(kan_layers, intermediate_values):
             layer.update_grid_from_samples(data)
 
@@ -445,12 +384,8 @@ class KAN(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
-    # `_download_weights` raises instead of falling back to random init, so an
-    # unavailable checkpoint is never silently indistinguishable from a
-    # successful load. Do NOT reinstate a warn-and-return branch here or in
-    # `from_variant`. No public KAN weights are distributed with dl_techniques;
-    # pass a local path via `pretrained="/path/to/file.keras"` or use
-    # `pretrained=False` (default).
+    # Raises rather than falling back to random init, so a missing checkpoint
+    # is never silently indistinguishable from a successful load.
     @staticmethod
     def _download_weights(
         variant: str,
@@ -528,7 +463,7 @@ class KAN(keras.Model):
         :type override_config: Optional[Dict[str, Any]]
         :param kwargs: Additional arguments passed to the constructor.
 
-        :return: A KAN instance whose knot grids are NOT yet adapted.
+        :return: A KAN instance whose knot grids are not yet adapted.
         :rtype: KAN
 
         :raises ValueError: If ``variant`` is not recognized.
@@ -588,9 +523,8 @@ class KAN(keras.Model):
                 )
                 skip_mismatch = True
 
-            # A checkpoint's head width follows its dataset; a different
-            # `output_features` means the affected layer must be skipped rather
-            # than refused.
+            # A checkpoint's head width follows its dataset; mismatched output_features
+            # skips that layer instead of refusing the whole load.
             pretrained_classes = 10
             if weights_dataset == "cifar100":
                 pretrained_classes = 100
@@ -647,7 +581,7 @@ class KAN(keras.Model):
         :param kan_layer_kwargs: Additional keyword arguments forwarded to every
             ``KANLinear``.
 
-        :return: A KAN instance whose knot grids are NOT yet adapted.
+        :return: A KAN instance whose knot grids are not yet adapted.
         :rtype: KAN
 
         :raises ValueError: If ``layer_sizes`` has fewer than two elements.
@@ -668,7 +602,7 @@ class KAN(keras.Model):
                 **kan_layer_kwargs
             }
 
-            # Last layer logic
+            # Only the output layer gets a distinct final activation.
             if i == len(output_feature_sizes) - 1:
                 if final_activation:
                     config["activation"] = final_activation
@@ -696,7 +630,7 @@ class KAN(keras.Model):
         lines.append("-" * 50)
 
         for i, config in enumerate(self.layer_configs):
-            # Determine what the activation effectively is for display
+            # Falls back to KANLinear's own default when config omits 'activation'.
             is_last = (i == self.num_layers - 1)
             if is_last:
                 act_display = config.get('activation', 'linear')
@@ -734,14 +668,8 @@ class KAN(keras.Model):
             order = config.get("spline_order", 3)
             num_basis = grid + order
 
-            # Param count logic:
-            # 1. Spline weights: in * out * basis
-            # 2. Spline scalers: in * out
-            # 3. Base scalers:   in * out
-            # Note: KANLinear does not currently implement a bias vector.
-
+            # KANLinear has no bias vector: spline weights plus a spline and a base scaler.
             layer_params = (curr_in * curr_out * num_basis) + (2 * curr_in * curr_out)
-
             total_params += layer_params
             curr_in = curr_out
 
@@ -819,7 +747,7 @@ def create_kan_model(
     :type cache_dir: Optional[str]
     :param model_kwargs: Additional arguments passed to the model constructor.
 
-    :return: Uncompiled KAN model whose knot grids are NOT yet adapted
+    :return: Uncompiled KAN model whose knot grids are not yet adapted
         (``model.grids_adapted is False``).
     :rtype: KAN
 
@@ -835,7 +763,7 @@ def create_kan_model(
         ...                          output_activation="linear")
 
     Warning:
-        The returned model **cannot be trained as-is at these defaults.**
+        The returned model cannot be trained as-is at these defaults.
         ``KANLinear`` sums over the input axis, so activations grow roughly 30x
         per layer and leave ``grid_range=(-2.0, 2.0)`` after the first layer; the
         B-spline basis is then identically zero and, with ``base_scaler``

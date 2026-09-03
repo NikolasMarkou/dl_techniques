@@ -1,59 +1,30 @@
 """
-MothNet: a three-stage model of the insect olfactory network trained by Hebbian
-association, used as a feature generator for conventional classifiers.
+MothNet: a three-stage model of the insect olfactory network, built by the
+`MothNet` class and used as a feature generator via `create_cyborg_features`.
 
-Gradient descent needs many examples because it improves a shared parameter set by
-small increments, and a class seen five times contributes five small increments.
-Insects do not have that budget: a moth learns a new odor from a handful of
-exposures. The olfactory circuit achieves this with a specific three-stage
-arrangement, and MothNet is that arrangement made computational — the claim being
-that few-shot ability is architectural rather than a property of the learning rule
-alone.
+Gradient descent needs many examples per class because it moves a shared
+parameter set by small increments. A moth learns a new odor from a handful
+of exposures using a different arrangement: an antennal lobe stage does
+competitive inhibition (each unit's output is measured against the
+population mean, removing the common, non-discriminative part of the
+input), then a mushroom body stage expands the signal through a frozen
+random sparse projection and keeps only the top-k activations, turning
+each input into a small, nearly disjoint set of active units. Because two
+classes then barely share active units, a single Hebbian readout weight
+per unit is enough to tell them apart, and there is nothing for the
+projection to learn — it stays frozen.
 
-The antennal lobe performs competitive inhibition. Each unit computes its excitation
-`h = Wx + b`, and the population mean `mu = mean(h)` is subtracted in proportion to
-an inhibition strength `alpha`, so a unit's output reflects how far it stands above
-the crowd rather than its absolute drive. This is contrast enhancement: it removes
-the component of the input common to all channels, which is exactly the component
-that carries no discriminative information, and it makes the representation invariant
-to overall intensity.
+The readout trains by a Hebbian rule, `W <- W + alpha * (1/N) *
+mb_output^T y`, not by backpropagation, so labels must be one-hot: the
+rule reads `y` as the post-synaptic activation, not as a class index.
+`train_hebbian` runs a plain Python loop, not a Keras `train_step`, since
+there is no gradient to compute. The cross-entropy it reports is for
+monitoring only and is not what drives the weight updates.
 
-The mushroom body expands that signal into a much wider layer through a *frozen*
-random sparse projection — roughly a tenth of the connections exist and none of them
-are trained — and then enforces sparse firing by keeping only the top
-`k = floor(sparsity * units)` activations. Expansion plus sparsification is what makes
-one-shot learning work. In a high-dimensional space a random projection keeps distinct
-inputs far apart (the Johnson-Lindenstrauss argument), and top-k thresholding turns
-each input into a small, nearly disjoint set of active units — a combinatorial code in
-which two different classes overlap very little. Once classes barely share active
-units, a single readout weight per unit suffices to separate them, and there is
-nothing for the projection itself to learn. Freezing it is the point, not an omission.
-
-The readout is trained by a Hebbian rule rather than by backpropagation:
-
-`W <- W + alpha * (1/N) * mb_output^T y`
-
-with `y` the one-hot target. Weights simply accumulate the correlation between an
-active mushroom-body unit and the class present when it fired, which is why a few
-epochs suffice and why the labels **must** be one-hot — the rule reads `y` as the
-post-synaptic activation, not as an index. There is no loss being minimized. The
-cross-entropy reported by `train_hebbian` is monitoring only; it generally falls as
-associations strengthen, but nothing optimizes it, and it is not a convergence
-criterion.
-
-The intended use is as a feature generator. `create_cyborg_features` concatenates the
-model's output onto the original input and hands the result to a conventional
-classifier, the argument being that Hebbian-associated bio-mimetic features are
-complementary to what a statistical learner extracts rather than a substitute for it.
-Note what is concatenated: `extract_features` returns the *readout* activations, so
-the augmentation is `num_classes` values wide, not `mb_units`. The wide sparse code is
-available separately through `extract_mb_features` for callers who want it, but it is
-not what the cyborg helper uses.
-
-`train_hebbian` is a plain Python loop over mini-batches rather than a Keras
-`train_step`, because there is no gradient to compute and no optimizer to drive — the
-update is a direct `assign` on the readout weights. The model remains a normal
-`keras.Model` for inference and serialization; only its training path is unusual.
+`create_cyborg_features` concatenates the model's readout activations
+(`num_classes` wide, not `mb_units`) onto the original input for use by a
+conventional classifier. The wider sparse code is available separately
+through `extract_mb_features`.
 
 References:
     - Delahunt & Kutz, 2019. Putting a bug in ML: The moth olfactory network learns
@@ -95,171 +66,83 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.mothnet.model")
 class MothNet(keras.Model):
     """
-    Complete MothNet architecture combining AL, MB, and Hebbian readout layers.
+    Antennal lobe, mushroom body, and Hebbian readout, chained into one model.
 
-    This model implements a bio-mimetic feature generator inspired by the moth
-    olfactory network. It transforms input features through three stages that
-    mimic insect brain processing: contrast enhancement, high-dimensional sparse
-    coding, and associative learning. The model can be used as a standalone
-    classifier or as a feature extractor to augment other ML models in the
-    "insect cyborg" paradigm.
+    Use it either as a standalone classifier trained by :meth:`train_hebbian`,
+    or as a feature generator: pass a trained instance to
+    :func:`create_cyborg_features` to concatenate its readout activations onto
+    the original input for a conventional classifier.
 
-    **Intent**: Provide a complete implementation of the moth
-    olfactory network for few-shot learning applications. The model extracts
-    features that standard ML methods struggle to find, particularly effective
-    when training data is scarce (1-100 samples per class).
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input Features (shape=[batch, input_dim])
-           ↓
-    ┌─────────────────────────────────────┐
-    │  Antennal Lobe (AL)                 │
-    │  - Competitive inhibition           │
-    │  - Contrast enhancement             │
-    │  - Shape: [batch, al_units]         │
-    └─────────────────────────────────────┘
-           ↓
-    ┌─────────────────────────────────────┐
-    │  Mushroom Body (MB)                 │
-    │  - 20-50x dimensional expansion     │
-    │  - Sparse random projection (10%)   │
-    │  - Winner-take-all (5-15% active)   │
-    │  - Shape: [batch, mb_units]         │
-    └─────────────────────────────────────┘
-           ↓
-    ┌─────────────────────────────────────┐
-    │  Hebbian Readout                    │
-    │  - Correlation-based learning       │
-    │  - No backpropagation               │
-    │  - Shape: [batch, num_classes]      │
-    └─────────────────────────────────────┘
-           ↓
-    Class Logits or Features for "Cyborg" Augmentation
-    ```
+    .. code-block:: text
 
-    **Usage Paradigms**:
+        Input [B, input_dim]
+               │
+               ▼
+        ┌─────────────────────────┐
+        │  Antennal Lobe (AL)     │  competitive inhibition
+        │  [B, al_units]          │
+        └────────────┬────────────┘
+                      ▼
+        ┌─────────────────────────┐
+        │  Mushroom Body (MB)     │  frozen sparse projection, top-k
+        │  [B, mb_units]          │
+        └────────────┬────────────┘
+                      ▼
+        ┌─────────────────────────┐
+        │  Hebbian Readout        │  trained by train_hebbian, not fit()
+        │  [B, num_classes]       │
+        └────────────┬────────────┘
+                      ▼
+        Class logits, or features for create_cyborg_features
 
-    1. **Standalone Classifier** (Hebbian training):
-       ```python
-       mothnet = MothNet(num_classes=10, mb_units=4000)
-       mothnet.train_hebbian(x_train, y_train_onehot, epochs=5)
-       predictions = mothnet.predict(x_test)
-       ```
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param al_units: Number of antennal-lobe units. Defaults to the input
+        dimension (no compression) when ``None``.
+    :type al_units: Optional[int]
+    :param mb_units: Number of mushroom-body units; 2000-4000 gives a
+        20-50x expansion over a typical ``al_units``.
+    :type mb_units: int
+    :param mb_sparsity: Fraction of mushroom-body units that fire per input.
+    :type mb_sparsity: float
+    :param connection_sparsity: Fraction of nonzero AL-to-MB connections.
+    :type connection_sparsity: float
+    :param hebbian_learning_rate: Learning rate for the Hebbian readout update.
+    :type hebbian_learning_rate: float
+    :param inhibition_strength: Competitive-inhibition strength in the
+        antennal lobe, in ``[0, 1]``.
+    :type inhibition_strength: float
+    :param al_activation: Activation function for the antennal-lobe layer.
+    :type al_activation: str
+    :param mb_activation: Activation function for the mushroom-body layer.
+    :type mb_activation: str
+    :param kwargs: Additional keyword arguments for the base ``keras.Model``.
 
-    2. **Feature Extractor for "Cyborg" Models**:
-       ```python
-       # Train MothNet
-       mothnet.train_hebbian(x_train, y_train_onehot, epochs=5)
+    :ivar antennal_lobe: Competitive-inhibition layer.
+    :vartype antennal_lobe: AntennalLobeLayer
+    :ivar mushroom_body: Sparse projection layer.
+    :vartype mushroom_body: MushroomBodyLayer
+    :ivar readout: Hebbian readout layer.
+    :vartype readout: HebbianReadoutLayer
 
-       # Extract features
-       features = mothnet.extract_features(x_data)
+    Input shape:
+        ``(batch_size, input_dim)``.
 
-       # Augment original features
-       x_cyborg = np.concatenate([x_data, features], axis=1)
+    Output shape:
+        ``(batch_size, num_classes)`` class logits, before softmax.
 
-       # Train conventional ML model on augmented features
-       svm = SVC()
-       svm.fit(x_cyborg_train, y_train)
-       # Typically achieves 20-60% error reduction!
-       ```
+    Example:
+        >>> model = MothNet(num_classes=10, al_units=85, mb_units=4000)
+        >>> model.build((None, 784))
+        >>> y_onehot = keras.utils.to_categorical(y_train, 10)
+        >>> model.train_hebbian(x_train, y_onehot, epochs=5, batch_size=32)
+        >>> features = model.extract_features(x_train)
 
-    Parameters
-    ----------
-    num_classes : int
-        Number of output classes.
-    al_units : Optional[int], default=None
-        Number of AL units. If None, uses input dimension (no compression).
-    mb_units : int, default=2000
-        Number of MB units. Typical range: 2000-4000 for 20-50x expansion.
-    mb_sparsity : float, default=0.1
-        Fraction of MB neurons that fire for any input (5-15% typical).
-    connection_sparsity : float, default=0.1
-        Sparsity of AL→MB projection (10% non-zero typical).
-    hebbian_learning_rate : float, default=0.01
-        Learning rate for Hebbian updates (0.001-0.1 typical).
-    inhibition_strength : float, default=0.5
-        Competitive inhibition strength in AL (0-1 range).
-    al_activation : str, default='relu'
-        Activation function for AL layer.
-    mb_activation : str, default='relu'
-        Activation function for MB layer.
-    **kwargs
-        Additional keyword arguments for the base Model class.
-
-    Input shape
-        (batch_size, input_dim): 2D tensor of feature vectors.
-        Example: (32, 784) for vectorized MNIST.
-
-    Output shape
-        (batch_size, num_classes): Class logits (before softmax).
-
-    Attributes
-    ----------
-    antennal_lobe : AntennalLobeLayer
-        Competitive inhibition layer for contrast enhancement.
-    mushroom_body : MushroomBodyLayer
-        High-dimensional sparse projection layer.
-    readout : HebbianReadoutLayer
-        Hebbian learning readout layer.
-
-    Example
-    -------
-    >>> # Create MothNet for MNIST-like task (10 classes, 784 input features)
-    >>> model = MothNet(
-    ...     num_classes=10,
-    ...     al_units=85,  # Compress to 85 features
-    ...     mb_units=4000,  # 47x expansion
-    ...     mb_sparsity=0.1,  # 400 active neurons per sample
-    ...     hebbian_learning_rate=0.01
-    ... )
-    >>>
-    >>> # Build model
-    >>> model.build((None, 784))
-    >>> print(f"Parameters: {model.count_params():,}")
-    >>>
-    >>> # Train with Hebbian learning (requires one-hot labels)
-    >>> y_train_onehot = keras.utils.to_categorical(y_train, 10)
-    >>> history = model.train_hebbian(
-    ...     x_train, y_train_onehot,
-    ...     epochs=5, batch_size=32
-    ... )
-    >>>
-    >>> # Use as feature extractor for "cyborg" models
-    >>> train_features = model.extract_features(x_train)
-    >>> x_cyborg = np.concatenate([x_train, train_features], axis=1)
-    >>>
-    >>> # Train SVM on augmented features
-    >>> from sklearn.svm import SVC
-    >>> svm = SVC(kernel='rbf')
-    >>> svm.fit(x_cyborg, y_train)
-
-    Notes
-    -----
-    **Key Performance Insights from Original Research**:
-
-    1. **Error Reduction**: "Cyborg" models (ML + MothNet features) achieve
-       20-60% relative error reduction compared to baseline ML models.
-
-    2. **Data Efficiency**: A cyborg trained on 30 samples/class can match
-       the accuracy of a baseline trained on 100 samples/class (>3x reduction
-       in data requirements).
-
-    3. **Orthogonal Information**: MothNet extracts features that are
-       complementary to what norm-based ML methods find, explaining why
-       simple concatenation is so effective.
-
-    4. **Superiority Over Alternatives**: MothNet features outperform PCA,
-       PLS, and standard neural network features for augmentation.
-
-    **When to Use MothNet**:
-
-    - ✓ Limited training data (1-100 samples per class)
-    - ✓ Need for rapid learning from few examples
-    - ✓ High-dimensional input (images, spectra, omics data)
-    - ✓ Want to boost existing ML models without retraining from scratch
-    - ✗ Abundant training data (deep learning may be better)
-    - ✗ Need for online/incremental learning (Hebbian learning is batch-based)
+    Note:
+        Labels passed to :meth:`train_hebbian` must be one-hot: the update
+        rule reads ``y`` as a post-synaptic activation, not a class index.
     """
 
     def __init__(
@@ -292,15 +175,11 @@ class MothNet(keras.Model):
         self.readout = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Create and build all sub-layers.
+        """Create and explicitly build the three sub-layers, for reliable serialization.
 
-        CRITICAL: Explicitly builds each sub-layer for robust serialization.
-
-        Parameters
-        ----------
-        input_shape : tuple
-            Shape of the input tensor.
+        :param input_shape: Shape of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If the last dimension of ``input_shape`` is ``None``.
         """
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -308,7 +187,6 @@ class MothNet(keras.Model):
 
         al_units = self.al_units if self.al_units is not None else input_dim
 
-        # Create sub-layers
         self.antennal_lobe = AntennalLobeLayer(
             units=al_units,
             inhibition_strength=self.inhibition_strength,
@@ -331,7 +209,6 @@ class MothNet(keras.Model):
             name='hebbian_readout'
         )
 
-        # Explicitly build sub-layers in computational order
         self.antennal_lobe.build(input_shape)
 
         al_output_shape = self.antennal_lobe.compute_output_shape(input_shape)
@@ -347,66 +224,37 @@ class MothNet(keras.Model):
         inputs: keras.KerasTensor,
         training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through MothNet (AL → MB → Readout).
+        """Run the antennal lobe, mushroom body, and readout in sequence.
 
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-        training : bool, optional
-            Whether the model is in training mode.
-
-        Returns
-        -------
-        keras.KerasTensor
-            Class logits of shape (batch_size, num_classes).
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Class logits of shape ``(batch_size, num_classes)``.
+        :rtype: keras.KerasTensor
         """
-        # Stage 1: Competitive inhibition (contrast enhancement)
         al_output = self.antennal_lobe(inputs, training=training)
-
-        # Stage 2: High-dimensional sparse projection
         mb_output = self.mushroom_body(al_output, training=training)
-
-        # Stage 3: Hebbian readout
         output = self.readout(mb_output, training=training)
-
         return output
 
     def extract_features(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Extract MothNet features (readout activations) for "cyborg" augmentation.
+        """Return readout activations for concatenation via `create_cyborg_features`.
 
-        This method is used to generate features that can be concatenated with
-        original inputs to create augmented feature vectors for conventional ML.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        keras.KerasTensor
-            Feature tensor of shape (batch_size, num_classes).
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Feature tensor of shape ``(batch_size, num_classes)``.
+        :rtype: keras.KerasTensor
         """
         return self(inputs, training=False)
 
     def extract_mb_features(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Extract Mushroom Body activations (sparse codes before readout).
+        """Return the mushroom-body sparse code, before the readout layer.
 
-        Useful for analysis or using MB representations directly as features.
-
-        Parameters
-        ----------
-        inputs : keras.KerasTensor
-            Input tensor of shape (batch_size, input_dim).
-
-        Returns
-        -------
-        keras.KerasTensor
-            MB feature tensor of shape (batch_size, mb_units) with sparse activations.
+        :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
+        :type inputs: keras.KerasTensor
+        :return: Sparse feature tensor of shape ``(batch_size, mb_units)``.
+        :rtype: keras.KerasTensor
         """
         al_output = self.antennal_lobe(inputs, training=False)
         mb_output = self.mushroom_body(al_output, training=False)
@@ -420,69 +268,33 @@ class MothNet(keras.Model):
         batch_size: int = 32,
         verbose: int = 1
     ) -> Dict[str, list]:
+        """Train the readout weights by the Hebbian update rule, not backpropagation.
+
+        :param x: Training data of shape ``(num_samples, input_dim)``.
+        :type x: np.ndarray
+        :param y: Training labels of shape ``(num_samples, num_classes)``. Must be
+            one-hot; use ``keras.utils.to_categorical(labels, num_classes)``.
+        :type y: np.ndarray
+        :param epochs: Number of training epochs. 1-5 is typically enough.
+        :type epochs: int
+        :param batch_size: Batch size for training.
+        :type batch_size: int
+        :param verbose: 0 silent, 1 one line per epoch, 2 same as 1.
+        :type verbose: int
+        :return: Training history with a ``'loss'`` key holding one value per epoch.
+        :rtype: Dict[str, list]
+
+        Example:
+            >>> y_onehot = keras.utils.to_categorical(y_train, num_classes=10)
+            >>> history = model.train_hebbian(x_train, y_onehot, epochs=5)
+
+        Note:
+            The reported loss is cross-entropy for monitoring only; the Hebbian
+            update does not minimize it.
         """
-        Train the model using Hebbian learning.
-
-        This is the primary training method for MothNet. Unlike standard Keras
-        training, this uses the Hebbian update rule for the readout layer instead
-        of backpropagation.
-
-        Parameters
-        ----------
-        x : np.ndarray
-            Training data of shape (num_samples, input_dim).
-        y : np.ndarray
-            Training labels of shape (num_samples, num_classes).
-            MUST be one-hot encoded. Use keras.utils.to_categorical(labels, num_classes).
-        epochs : int, default=1
-            Number of training epochs. In the original research, 1-5 epochs
-            were typically sufficient.
-        batch_size : int, default=32
-            Batch size for training. Affects update frequency and memory usage.
-        verbose : int, default=1
-            Verbosity level:
-            - 0: Silent
-            - 1: Progress bar with loss per epoch
-            - 2: One line per epoch
-
-        Returns
-        -------
-        dict
-            Training history with 'loss' key containing list of epoch losses.
-
-        Example
-        -------
-        >>> # Prepare one-hot labels
-        >>> y_train_onehot = keras.utils.to_categorical(y_train, num_classes=10)
-        >>>
-        >>> # Train MothNet
-        >>> history = model.train_hebbian(
-        ...     x_train, y_train_onehot,
-        ...     epochs=5, batch_size=32, verbose=1
-        ... )
-        >>>
-        >>> print(f"Final loss: {history['loss'][-1]:.4f}")
-
-        Notes
-        -----
-        The loss computed here (cross-entropy) is for monitoring only. Weight
-        updates are performed via the Hebbian rule, not gradient descent on
-        this loss. The loss should generally decrease as the Hebbian associations
-        strengthen, but it's not being directly optimized.
-        """
-        # DECISION plan-2026-08-17T183311-79c63e38/D-017
-        # `build()` is what CREATES the three sublayers; `__init__` leaves them
-        # `None`. Every documented path -- the "Usage Paradigms" above and all
-        # four README snippets -- goes straight from the constructor to here.
-        #
-        # WHAT NOT TO DO: do not remove this, and do not "simplify" it to a
-        # `self(x[:1])` warm-up call. Without it the first mini-batch below is
-        # `None(batch_x_tensor, training=True)` -> `TypeError: 'NoneType' object
-        # is not callable`, and the only path that ever worked was the class
-        # docstring's `Example`, which calls `model.build(...)` by hand.
-        # The guard is `self.built`, so an already-built model keeps its learned
-        # Hebbian weights -- rebuilding would silently discard them.
-        # See decisions.md D-017.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-017: build() creates the
+        # sublayers, so an unbuilt model here would call None(...) and crash.
+        # Do not remove this guard. See decisions.md.
         if not self.built:
             self.build((None, x.shape[-1]))
 
@@ -493,32 +305,24 @@ class MothNet(keras.Model):
             epoch_loss = 0.0
             num_batches = 0
 
-            # Shuffle data each epoch
             indices = np.random.permutation(num_samples)
             x_shuffled = x[indices]
             y_shuffled = y[indices]
 
-            # Mini-batch Hebbian training
             for i in range(0, num_samples, batch_size):
                 batch_x = x_shuffled[i:i+batch_size]
                 batch_y = y_shuffled[i:i+batch_size]
 
-                # Cast, do not merely convert: `keras.utils.to_categorical` --
-                # which this method's own docstring instructs callers to use --
-                # returns float64, and `hebbian_update` then raised
-                # "`x` and `y` must have the same dtype, got tf.float64 !=
-                # tf.float32" against the float32 mushroom-body output.
+                # to_categorical returns float64; hebbian_update requires it to match
+                # the float32 mushroom-body output.
                 batch_x_tensor = keras.ops.cast(batch_x, self.compute_dtype)
                 batch_y_tensor = keras.ops.cast(batch_y, self.compute_dtype)
 
-                # Forward pass through AL and MB to get pre-synaptic activations
                 al_output = self.antennal_lobe(batch_x_tensor, training=True)
                 mb_output = self.mushroom_body(al_output, training=True)
 
-                # Apply Hebbian update to readout weights
                 self.readout.hebbian_update(mb_output, batch_y_tensor)
 
-                # Compute loss for monitoring (cross-entropy)
                 logits = self.readout(mb_output, training=True)
                 loss = keras.ops.mean(
                     keras.losses.categorical_crossentropy(
@@ -537,13 +341,10 @@ class MothNet(keras.Model):
         return history
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return model configuration for serialization.
+        """Return the model configuration for serialization.
 
-        Returns
-        -------
-        dict
-            Configuration dictionary containing all constructor parameters.
+        :return: Configuration dictionary of every constructor parameter.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -561,79 +362,45 @@ class MothNet(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'MothNet':
-        """
-        Create model from configuration dictionary.
+        """Create a model from a `get_config()` dictionary.
 
-        Parameters
-        ----------
-        config : dict
-            Configuration dictionary from get_config().
-
-        Returns
-        -------
-        MothNet
-            New model instance with the specified configuration.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new `MothNet` instance.
+        :rtype: MothNet
         """
         return cls(**config)
 
-
-# Utility Functions
 
 def create_cyborg_features(
     mothnet: MothNet,
     x_data: np.ndarray
 ) -> np.ndarray:
+    """Concatenate a trained MothNet's readout activations onto the original input.
+
+    :param mothnet: A `MothNet` instance already trained via `train_hebbian`.
+    :type mothnet: MothNet
+    :param x_data: Original feature data of shape ``(num_samples, input_dim)``.
+    :type x_data: np.ndarray
+    :return: Augmented features of shape
+        ``(num_samples, input_dim + num_classes)``: the first ``input_dim``
+        columns are the original features, the rest are readout activations.
+    :rtype: np.ndarray
+
+    Example:
+        >>> mothnet.train_hebbian(x_train, y_train_onehot, epochs=5)
+        >>> x_train_cyborg = create_cyborg_features(mothnet, x_train)
+        >>> x_test_cyborg = create_cyborg_features(mothnet, x_test)
+
+    Note:
+        The concatenated features tend to be complementary to what a
+        norm-based ML method finds on its own, which is why the plain
+        concatenation improves SVM, kNN, and neural network accuracy alike.
     """
-    Create augmented 'cyborg' features by concatenating original features with MothNet outputs.
-
-    This is the key operation for creating "insect cyborg" models that combine
-    conventional ML with bio-mimetic feature extraction.
-
-    Parameters
-    ----------
-    mothnet : MothNet
-        Trained MothNet model (must have been trained via train_hebbian).
-    x_data : np.ndarray
-        Original feature data of shape (num_samples, input_dim).
-
-    Returns
-    -------
-    np.ndarray
-        Augmented features of shape (num_samples, input_dim + num_classes).
-        First input_dim columns are original features, last num_classes columns
-        are MothNet readout activations.
-
-    Example
-    -------
-    >>> # Train MothNet
-    >>> mothnet.train_hebbian(x_train, y_train_onehot, epochs=5)
-    >>>
-    >>> # Create cyborg features for train and test sets
-    >>> x_train_cyborg = create_cyborg_features(mothnet, x_train)
-    >>> x_test_cyborg = create_cyborg_features(mothnet, x_test)
-    >>>
-    >>> # Train conventional ML on augmented features
-    >>> from sklearn.svm import SVC
-    >>> svm = SVC()
-    >>> svm.fit(x_train_cyborg, y_train)
-    >>> accuracy = svm.score(x_test_cyborg, y_test)
-    >>> print(f"Cyborg accuracy: {accuracy:.3f}")
-
-    Notes
-    -----
-    The original research showed that simple concatenation of MothNet features
-    with original features consistently improves accuracy across multiple ML
-    methods (SVM, kNN, Neural Networks). This suggests MothNet extracts
-    complementary information not captured by standard ML feature spaces.
-    """
-    # Extract MothNet features
     mothnet_features = keras.ops.convert_to_numpy(
         mothnet.extract_features(x_data)
     )
-
-    # Concatenate with original features
     cyborg_features = np.concatenate([x_data, mothnet_features], axis=1)
-
     return cyborg_features
 
 

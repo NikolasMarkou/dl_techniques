@@ -1,81 +1,24 @@
 """
-Graph Energy Transformer — a shared graph trunk plus node-anomaly and graph-classification
-heads, built on the same recurrent energy-descent block as the image models.
+Graph Energy Transformer: a shared trunk, :class:`GraphEnergyTransformerBackbone`,
+plus two heads, :class:`GraphAnomalyDetector` and :class:`GraphClassifier`, built on
+the same recurrent energy-descent block as the image Energy Transformer models.
 
-A message-passing GNN propagates information one hop per layer, so reaching a node `k` hops
-away requires `k` stacked layers with `k` parameter sets, and depth past a few layers
-oversmooths — repeated neighbourhood averaging drives every node representation toward the
-same value. The Energy Transformer takes a different route. A single scalar energy `E` is
-defined over the node states and the forward pass is `T` steps of gradient descent on it,
+A message-passing GNN propagates information one hop per layer and oversmooths past
+a few layers, as repeated neighbourhood averaging pulls every node toward the same
+value. This model instead defines one scalar energy `E` over the node states and runs
+`T` steps of gradient descent on it, `x <- x - alpha * dE/dg` with `g =
+EnergyLayerNorm(x)`, reusing one block's weights at every step. The energy sums an
+attention term, whose gradient mixes tokens along the graph, with a Hopfield term over
+a tied memory matrix, whose gradient pulls each node toward a stored pattern on its
+own. That second term is what keeps the states from collapsing to a neighbourhood mean.
 
-`x <- x - alpha * dE/dg`,  `g = EnergyLayerNorm(x)`,
-
-so propagation is iterative refinement of one objective rather than a stack of distinct
-transforms, and one block's weights are reused across all `T` steps. What stops the states
-from collapsing is that they are descending toward *attractors* of an associative memory,
-not toward their neighbourhood mean: the energy is the sum of an attention term `E_ATT`,
-whose gradient mixes tokens along the graph, and a Hopfield term `E_HN` over a tied memory
-matrix, whose gradient pulls each node toward the nearest stored pattern independently of
-its neighbours. The second term is the restoring force the averaging lacks.
-
-**THE GRAPH ADJACENCY IS THE RANK-3 ``attention_mask``.** A binary ``(B, N, N)`` adjacency is
-fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep), which is what turns
-the block's dense all-pairs attention into message passing restricted to real edges — the
-whole graph adaptation, with no new gradient on the default path, because the block already
-supports exactly this masking. PAD nodes are excluded from ``E_HN`` (and from attention) via
-the rank-2 ``(B, N)`` ``node_mask``. The paper's eq.-25 learned per-edge WEIGHTED adjacency is
-available **opt-in** via ``use_weighted_adjacency=True`` (Branch A: a
-``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively into the
-attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the default
-and stays byte-identical.
-
-**The graph trunk defaults to ``attn_self=True``, unlike the image backbone.** With
-``attn_self=False`` ``EnergyAttention`` masks the adjacency DIAGONAL, so the self-loops that
-the graph loaders add become a measured no-op (bit-identical energy whether the diagonal is 1
-or 0) and a node can never attend to its own features. On images that is harmless; on graphs,
-where a node's own attributes are often the strongest signal, it is not. The flag stays
-configurable, with ``False`` recovering the image default.
-
-This module holds the trunk and both heads:
-
-* :class:`GraphEnergyTransformerBackbone` — node projection -> [Laplacian PE] -> [mask token]
-  -> [CLS] -> ``num_blocks`` ET blocks. Exposes three seams: ``embed`` (tokens only), ``call``
-  (the standard stacked descent), and ``descend_capture``, which drives a single block's
-  descent manually through its public ``.norm`` / ``.attention.update`` / ``.hopfield.update``
-  surface so intermediate LayerNormed states can be read without copying block internals.
-* :class:`GraphAnomalyDetector` — variant B. One block, and the readout concatenates the
-  target node's state at the FIRST descent step with its state at the LAST, ``g_1 || g_T``.
-  The early state still carries the raw one-hop neighbourhood; the converged one carries the
-  settled attractor, and the pair is a strictly richer readout than either alone. This is the
-  reason ``descend_capture`` exists.
-* :class:`GraphClassifier` — variant C-lite. ``S`` stacked blocks over a prepended learnable
-  CLS token, with Laplacian positional encodings and eq.-27 saddle-escape Langevin noise
-  (training only). The CLS token, its mask augmentation and the PE add all live in the
-  BACKBONE, not the head — CLS is prepended after the PE add (so CLS gets no PE) and the
-  rank-3 adjacency is augmented with an all-ones CLS row and column, leaving the original
-  adjacency in the ``[1:, 1:]`` block unchanged.
-
-Both heads slice index 0 statically — the CLS token, and the target node, which the fraud
-subgraph sampler always places first. A runtime gather would be the general solution but
-``take_along_axis`` with a broadcast index is rejected by tf2xla
-(``BroadcastArgs must be compile-time constant``), so the static slice is what keeps the
-fp16/XLA training path compilable. ``target_index`` remains in the input contract for
-forward-compatibility and is ignored. Both heads emit LOGITS with no sigmoid or softmax
-in-graph, per the house convention.
-
-**THE fp16/XLA DTYPE FIX IS REPLICATED VERBATIM FROM THE IMAGE BACKBONE (D-010/D-011).** Each
-block is built with ``dtype=self.dtype_policy.variable_dtype`` (NOT ``self.dtype_policy``) and
-:meth:`call` casts tokens IN to the block's variable dtype and back OUT. ``EnergyLayerNorm``'s
-backward forms ``(var + eps)^(-3/2)``, which overflows fp16's 65504 under XLA and SILENTLY
-freezes training — the loss stays finite while no weight moves. It is NOT fixed at the layer
-source; the consumer must do it, exactly as here. Under float32/float64 the two spellings are
-identical, so no checkpoint is affected.
-
-Variant B and variant C backbones are INTENTIONALLY not weight-compatible: C owns a
-``pe_proj`` Dense and a ``cls_token`` that B does not, and the CLS token changes ``N``. A
-cross-variant warm-start is expected to transfer nothing. ``MaskTokenApply``, by contrast, is
-always created and always built even for a head that never masks nodes, so the trunk's weight
-surface does not depend on whether a masked-node pretext is used.
+The adjacency is passed as each block's rank-3 `attention_mask`, restricting dense
+attention to real edges; padding nodes are excluded via a rank-2 `node_mask`. Each
+block runs internally in `self.dtype_policy.variable_dtype` rather than the model's
+compute dtype, because `EnergyLayerNorm`'s backward pass overflows float16 under XLA
+otherwise and freezes training without an error. Both heads emit logits, with no
+sigmoid or softmax applied in the graph. `GraphAnomalyDetector` and `GraphClassifier`
+backbones are not weight-compatible with each other.
 
 References:
     - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§4-§5, graph model).
@@ -276,13 +219,9 @@ class GraphEnergyTransformerBackbone(keras.Model):
         self.hopfield_beta = float(hopfield_beta)
         self.noise_std = float(noise_std)
         self.norm_epsilon = float(norm_epsilon)
-        # DECISION plan-2026-07-15T015824-3c2159eb/D-004: the GRAPH trunk defaults attn_self=True.
-        # WHAT NOT TO DO: do NOT "align" this back to the image MIM default (False). The graph
-        # loaders (tudataset.py, fraud.py) set add_self_loops=True to let a node attend to its own
-        # features; with attn_self=False, EnergyAttention masks the adjacency DIAGONAL, so E_ATT is
-        # bit-identical whether the diagonal is 1 or 0 (measured diff 0.0, iter-2 REFLECT) — the
-        # self-loops become a dead no-op and a node can NEVER see itself. Keep it configurable
-        # (False recovers the image default) but graph-default it to True. See decisions.md D-004.
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-004: the graph trunk defaults
+        # attn_self=True, unlike the image default. At False the self-loops the graph
+        # loaders add become a measured no-op. See decisions.md.
         self.attn_self = bool(attn_self)
         # eq.-25 weighted adjacency (Branch A). Default-off preserves the C-lite binary model
         # byte-identically; the three knobs thread straight into each ET block via `_make_block`.
@@ -338,26 +277,11 @@ class GraphEnergyTransformerBackbone(keras.Model):
     # -----------------------------------------------------------------
 
     def _make_block(self, index: int) -> EnergyTransformer:
-        """Construct ET block ``index``. **Overridable seam** for the proven-RED fp16 guard.
+        """Construct ET block ``index``. Overridable seam for the fp16 guard test.
 
-        # DECISION plan-2026-07-15T015824-3c2159eb/D-002
-        The block is built with ``dtype=self.dtype_policy.variable_dtype`` (its fp32 VARIABLE
-        dtype under ``mixed_float16``), NOT ``self.dtype_policy`` (whose COMPUTE dtype is fp16);
-        :meth:`call` / :meth:`descend_capture` then cast tokens IN to the block's compute dtype
-        and back OUT. Under float32/float64 the two spellings are identical (compute == variable),
-        so nothing outside a mixed policy changes and every checkpoint is untouched. This is the
-        image backbone's fix, replicated VERBATIM (D-010/D-011 of
-        plan-2026-07-14T163315-29a4fef4): ``EnergyLayerNorm``'s backward forms
-        ``(var + eps)^(-3/2)``, which OVERFLOWS fp16's 65504 under XLA and SILENTLY freezes
-        training (loss finite, all weights move exactly 0.0). It is NOT fixed at the layer —
-        the consumer MUST do it here.
-
-        WHAT NOT TO DO: (1) do NOT "simplify" this to ``dtype=self.dtype_policy``; (2) do NOT drop
-        the token casts in :meth:`call` / :meth:`descend_capture`; (3) do NOT "fix" it instead by
-        raising ``norm_epsilon`` to 1e-3 (that trains a DIFFERENT network than fp32); (4) this
-        method is overridable ONLY so the ``tests/test_models/test_graph_energy_transformer``
-        fp16 guard can subclass it to build the fp16-unsafe control and PROVE the guard bites —
-        production code MUST NOT override it. See decisions.md D-002.
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-002: build with
+        # ``dtype=self.dtype_policy.variable_dtype``, not ``self.dtype_policy`` --
+        # ``EnergyLayerNorm``'s backward overflows float16 under XLA otherwise. See decisions.md.
         """
         return EnergyTransformer(
             embed_dim=self.embed_dim,
@@ -527,38 +451,28 @@ class GraphEnergyTransformerBackbone(keras.Model):
             capture_steps,
             training: Optional[bool] = None,
     ) -> Dict[int, keras.KerasTensor]:
-        """Variant B: run ``blocks[0]``'s descent MANUALLY and capture LayerNormed states.
+        """Variant B: run ``blocks[0]``'s descent manually and capture LayerNormed states.
 
-        # DECISION plan-2026-07-15T015824-3c2159eb/D-002
-        This replicates ``EnergyTransformer.call``'s descent loop EXACTLY, through the block's
-        PUBLIC methods only — ``.norm`` / ``._weighted_adjacency`` / ``.attention.update`` /
-        ``.hopfield.update`` — so the block's ``layers/`` source stays frozen (0 changes) and no
-        gradient is re-derived. That parity INCLUDES the opt-in weighted adjacency (eq. 25):
-        ``Ŵ`` is hoisted ONCE from the block INPUT tokens (Branch A, constant across the T
-        steps) and forwarded to ``attention.update`` at every step, exactly as ``call()`` does
-        (see plan-2026-07-15T053724-78001af1/D-003 at the hoist site below). The per-step update
-        is byte-for-byte the block's own::
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-002: call the block's public
+        # .norm / .attention.update / .hopfield.update, never its internal descent math,
+        # so a future block fix propagates for free. See decisions.md.
 
-            W_hat = block._weighted_adjacency(x0, adj)          # None unless flag on (Branch A)
+        This replicates ``EnergyTransformer.call``'s descent loop through the block's
+        public methods only, so the block's own source stays unchanged::
+
+            W_hat = block._weighted_adjacency(x0, adj)          # None unless flag on
             g     = block.norm(x)
             upd   = block.attention.update(g, attention_mask=adj, mask=node_mask,
                                            adjacency_weight=W_hat)
                     + block.hopfield.update(g, mask=node_mask)
             x     = x + block.step_size * upd
 
-        (The block internally derives the Hopfield's per-token keep as
-        ``_hopfield_token_mask(rank3 adj, node_mask)`` == ``_token_keep(node_mask)``; passing
-        ``node_mask_2d`` straight to ``hopfield.update`` is identical because ``_token_keep`` is
-        an idempotent cast.) After each step ``t`` in ``capture_steps`` the LayerNormed state
-        ``g_t = block.norm(x_t)`` is recorded.
+        After each step ``t`` in ``capture_steps`` the LayerNormed state
+        ``g_t = block.norm(x_t)`` is recorded. ``noise_std`` stays 0 here (variant B is
+        deterministic); enabling it would diverge from the block's own noisy ``call()``.
 
-        WHAT NOT TO DO: (1) do NOT copy the block's internal descent math here — call its public
-        methods, so a future block fix propagates for free; (2) do NOT enable ``noise_std`` for
-        variant B — this noiseless manual loop would then diverge from the block's own (noisy)
-        ``call()``; keep ``noise_std=0`` (default). See decisions.md D-002.
-
-        Runs in the block's VARIABLE dtype (the sub-layers were built there); captured states
-        are cast back to ``self.compute_dtype``.
+        Runs in the block's variable dtype (the sub-layers were built there); captured
+        states are cast back to ``self.compute_dtype``.
 
         :param tokens: ``(B, N, D)`` embedded tokens (typically :meth:`embed`'s output).
         :param adjacency_mask: rank-3 ``(B, N, N)`` binary adjacency (the ``attention_mask``).
@@ -574,22 +488,12 @@ class GraphEnergyTransformerBackbone(keras.Model):
         x = ops.cast(tokens, block.compute_dtype)
         captured: Dict[int, keras.KerasTensor] = {}
 
-        # DECISION plan-2026-07-15T053724-78001af1/D-003
-        # Variant B's SECOND descent path must forward the per-block-constant weighted
-        # adjacency `Ŵ` too, or `use_weighted_adjacency=True` trains a projector that feeds
-        # NOTHING — a silently dead feature that still serializes (the LESSONS "feature that
-        # does nothing" pattern; the classifier path via `block.call()` was already correct).
-        # `Ŵ` is hoisted ONCE from the block INPUT tokens `x` (Branch A: constant across the T
-        # steps, `dŴ/dg == 0`), mirroring `EnergyTransformer.call` (energy_transformer.py:1528),
-        # and the SAME tensor is fed to `attention.update` at EVERY step below. It is `None`
-        # when the flag is off or no rank-3 adjacency is present -> byte-identical to before.
-        # WHAT NOT TO DO: do NOT recompute `Ŵ` per step from the evolving `g` — that adds a
-        # `dŴ/dg` term the oracle-verified closed form (step 1, D-001) does not carry. See
-        # decisions.md D-003 (and D-001/D-002).
+        # DECISION plan-2026-07-15T053724-78001af1/D-003: hoist Ŵ once from the input
+        # tokens, not per step from the evolving g -- a per-step recompute adds a dŴ/dg
+        # term the closed form does not carry. See decisions.md.
         adjacency_weight = block._weighted_adjacency(x, adjacency_mask)
 
-        # Static `range` over the fixed step count — graph-safe. `t in capture` is a
-        # trace-time Python test over the captured-step SET, never a test on tensor values.
+        # t in capture is a trace-time Python test over the step set, not a tensor value.
         for t in range(1, self.num_steps + 1):
             g = block.norm(x)
             update = (
@@ -824,15 +728,8 @@ class GraphAnomalyDetector(keras.Model):
             training=training,
         )                                                              # {1: g_1, T: g_T}
 
-        # DECISION plan-2026-07-15T015824-3c2159eb/D-003
-        # STATIC index-0 target readout (XLA-safe). The fraud subgraph sampler ALWAYS places the
-        # target node at index 0 (verified plan step 3), so the target's state is a static
-        # `g[:, 0, :]` slice that compiles under `jit_compile=True`. `target_index` stays in the
-        # input contract for forward-compat but is INTENTIONALLY IGNORED here.
-        # WHAT NOT TO DO: do NOT restore the dynamic `take_along_axis(g, target_index)` gather —
-        # its runtime-broadcast index is not a compile-time constant, so tf2xla rejects it
-        # (`BroadcastArgs must be compile-time constant`) and the whole fp16/XLA training path
-        # (the exact defect surface this plan guards) becomes uncompilable. See decisions.md D-003.
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-003: static g[:, 0, :] readout, not
+        # a dynamic take_along_axis gather -- tf2xla rejects a runtime-broadcast index. See decisions.md.
         g1_t = caps[1][:, 0, :]                                       # (B, D)
         gT_t = caps[t_last][:, 0, :]                                  # (B, D)
 

@@ -1,63 +1,22 @@
 """
-Relational Graph Transformer: multi-element node tokenization over sampled subgraphs,
-with local self-attention combined with cross-attention to learnable global centroids.
+Relational Graph Transformer, built by the `RELGT` class, with size presets in
+`create_relgt_model`.
 
-A relational database is a graph, but not one a standard graph transformer handles
-well. Its nodes come from different tables and so carry different feature schemas and
-different meanings; edges encode foreign keys rather than a single relation; rows
-carry timestamps, so an edge's usefulness depends on when it was created relative to
-the prediction time. Flattening all of that into one node-feature vector throws away
-exactly the structure that makes the data relational, and running full attention over
-a real database is impossible anyway — the graph does not fit.
+A relational database is a graph whose nodes come from different tables and whose
+edges encode foreign keys and timestamps. RELGT keeps that structure instead of
+flattening it into one node vector: each sampled node is split into five elements
+(its features, table type, hop distance from the seed, time relative to the seed,
+and structural position) embedded separately and summed, so attention can weigh
+them as separable signals. Cost stays independent of database size because full
+self-attention runs only inside a small sampled subgraph around each seed node;
+each block also cross-attends the seed to a bank of learnable global centroids
+that act as a database-wide codebook.
 
-RELGT's answer to the first problem is to stop treating a node as one vector.
-Each node in a sampled subgraph is decomposed into five elements, each embedded
-separately and summed:
-
-`T = Norm(Dropout(E_feat(x) + E_type(t) + E_hop(h) + E_time(tau) + E_pe(A)))`
-
-carrying, in order, its own features, which table it came from, how many hops it sits
-from the seed node, its timestamp relative to the seed's, and its structural position.
-Because the components are summed after independent embedding, attention can weigh
-"same table as the seed", "two hops away" and "recent" as separable signals rather
-than having to disentangle them from a concatenated blob. The positional element is
-computed by a small GNN run over random features propagated through the subgraph's
-adjacency — a learned structural fingerprint, since a relational graph has no
-canonical node ordering to index a positional table with.
-
-The second problem, scale, is handled by attending locally and summarizing globally.
-Local attention runs only over the sampled subgraph around the seed node, so cost is
-governed by the sample size rather than by the database. That alone would confine
-every prediction to its own neighbourhood, so each block also cross-attends from the
-seed node to a bank of learnable global centroids — `K = V = centroids`, `Q = seed` —
-which act as a small learned codebook of database-wide structure. The two are then
-combined, `output = Norm(FFN([h_local; h_global]) + ResidualProj([h_local; h_global]))`,
-where `h_local` is the mean-pooled output of local self-attention and `h_global` the
-single vector produced by the centroid cross-attention. The centroids are parameters,
-not statistics: they are shaped by the task, and their count is the knob that trades
-global expressiveness against parameters.
-
-Two structural facts about this implementation are worth stating plainly. The first
-is how the blocks stack. A block's headline output is a single `(B, E)` vector, so
-chaining *that* across blocks would hand every block after the first a one-token
-sequence to self-attend over — depth in name only. What is chained instead is a
-`(B, K, E)` token sequence: the block's local transformer output with the block's
-own combined `(B, E)` summary broadcast-added onto every token, which the block
-returns alongside that summary when constructed with `return_tokens=True`. Block
-`i+1` therefore attends over block `i`'s full, processed token set, `K` is preserved
-at every level, and `num_transformer_blocks` buys real depth rather than only
-parameters. The summary is folded in rather than dropped so that a non-final block's
-global/centroid half is not computed and discarded — chaining the local tokens alone
-left 32% of a 3-block model's parameters without any gradient at all, which is what
-`test_no_trainable_variable_is_gradient_less` now pins. The seed embedding is deliberately *not* chained:
-it is only ever the cross-attention query, no block emits an updated seed, and it is
-the fixed anchor identifying the node being predicted about. Second, the seed node is
-taken to be index 0 of `node_features` — the subgraph sampler's contract, not
-something the model verifies.
-
-The prediction head's final activation follows `problem_type`, and when there are no
-transformer blocks at all the model falls back to mean-pooling the tokens, so the
-degenerate configuration still produces a well-shaped output rather than failing.
+A block's local-attention output and its local/centroid summary are both carried
+forward as a `(B, K, E)` token sequence, so stacking blocks adds real depth
+instead of collapsing to a one-token sequence after the first block. The seed
+node is assumed to be index 0 of `node_features`, a contract of the subgraph
+sampler that the model itself does not check.
 
 References:
     - Dwivedi et al., 2025. Relational Graph Transformer.
@@ -93,110 +52,114 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.relgt.model")
 class RELGT(keras.Model):
     """
-    Complete Relational Graph Transformer model for multi-table relational data.
+    Multi-element tokenization plus hybrid local-global transformer blocks for
+    predictive modeling on relational (multi-table) data.
 
-    RELGT integrates multi-element tokenization with hybrid local-global transformer
-    processing to capture complex structural patterns, temporal dynamics, and
-    long-range dependencies in relational databases. It establishes Graph Transformers
-    as a powerful architecture for Relational Deep Learning.
+    Architecture:
 
-    **Intent**: Provide predictive modeling on relational data by
-    combining the expressiveness of graph transformers with relational-specific
-    innovations in tokenization and attention mechanisms.
+    .. code-block:: text
 
-    **Architecture**:
-    ```
-    Graph Data (Features, Types, Hops, Times, Adjacency)
-                    ↓
-    RELGTTokenEncoder: Multi-element tokenization
-                    ↓
-    RELGTTransformerBlock(s): Hybrid local-global processing
-                    ↓
-    Prediction Head: Task-specific output layer
-    ```
+        features, types, hops, times, adjacency
+                        │
+                        ▼
+        ┌───────────────────────────┐
+        │  RELGTTokenEncoder         │  five embeddings, summed
+        │  [B, K, E] local tokens    │
+        └────────────┬───────────────┘
+                      ▼
+        ┌───────────────────────────┐
+        │  TransformerBlock x N     │  local self-attn + centroid
+        │  tokens in [B, K, E]      │  cross-attn, tokens chained
+        │  out       (B, E) summary │
+        └────────────┬───────────────┘
+                      ▼
+        ┌───────────────────────────┐
+        │  Prediction head (FFN)     │
+        └────────────┬───────────────┘
+                      ▼
+        output [B, output_dim]
 
-    Args:
-        output_dim: Integer, dimension of final output (e.g., number of classes).
-            Must be positive.
-        problem_type: String, either 'classification' or 'regression'.
-            Determines final activation function.
-        embedding_dim: Integer, main embedding dimension used throughout model.
-            Defaults to 128.
-        num_node_types: Integer, total number of unique entity types. Defaults to 10.
-        max_hops: Integer, maximum hop distance to encode. Defaults to 2.
-        gnn_pe_dim: Integer, dimension for GNN positional encoding. Defaults to 32.
-        gnn_pe_layers: Integer, number of GNN PE layers. Defaults to 2.
-        num_transformer_blocks: Integer, number of transformer blocks to stack.
-            Defaults to 2. **Bounded above by measurement at ~4** (the depth
-            `create_relgt_model("repo_medium")` ships): each block broadcast-adds its
-            summary onto every token at `SUMMARY_BROADCAST_SCALE`, and that
-            token-invariant component grows relative to the token-varying signal
-            with every block (measured untrained at `embedding_dim=32`: ratio
-            0.23-0.49 at block 0, 0.32-1.02 at block 3 over 20 draws, and past
-            1.0 at blocks 4-7 of an 8-block model). Deeper models are not
-            rejected — only `> 0` is validated — but re-measure the ratio at the
-            deepest block before going past 4. See the DEPTH LIMIT note on
-            `SUMMARY_BROADCAST_SCALE` in
-            `layers/graphs/relational_graph_transformer_blocks.py`.
-        num_heads: Integer, number of attention heads. Defaults to 4.
-        num_global_centroids: Integer, number of learnable global tokens. Defaults to 64.
-        ffn_dim: Integer, hidden dimension for FFNs. Defaults to 256.
-        dropout_rate: Float between 0 and 1, dropout rate. Defaults to 0.1.
-        ffn_type: String, type of FFN to use. Defaults to 'mlp'.
-        normalization_type: String, type of normalization. Defaults to 'layer_norm'.
-        **kwargs: Additional arguments for Model base class.
+    Variants (``MODEL_VARIANTS``, used by :func:`create_relgt_model`):
+
+    .. code-block:: text
+
+        name          embed_dim  heads  centroids  ffn_dim  blocks
+        small                64      2         16      128       1
+        base                512      4       4096     1024       1
+        repo_medium         256      8         64      512       4
+
+    :param output_dim: Dimension of the final output, e.g. number of classes.
+        Must be positive.
+    :type output_dim: int
+    :param problem_type: ``'classification'`` or ``'regression'``; sets the
+        final activation.
+    :type problem_type: str
+    :param embedding_dim: Main embedding dimension used throughout the model.
+        Defaults to ``128``.
+    :type embedding_dim: int
+    :param num_node_types: Number of unique table/entity types. Defaults to ``10``.
+    :type num_node_types: int
+    :param max_hops: Maximum hop distance encoded. Defaults to ``2``.
+    :type max_hops: int
+    :param gnn_pe_dim: Dimension of the GNN positional encoding. Defaults to ``32``.
+    :type gnn_pe_dim: int
+    :param gnn_pe_layers: Number of GNN positional-encoding layers. Defaults to ``2``.
+    :type gnn_pe_layers: int
+    :param num_transformer_blocks: Number of stacked transformer blocks.
+        Defaults to ``2``. Each block broadcast-adds its summary onto every
+        token, so that token-invariant component grows relative to the
+        token-varying signal with depth (measured untrained: ratio 0.23-0.49
+        at block 0, past 1.0 by block 4 of an 8-block model). Only ``> 0`` is
+        validated; re-measure the ratio before going past the 4-block depth
+        this file's own ``repo_medium`` preset ships.
+    :type num_transformer_blocks: int
+    :param num_heads: Number of attention heads. Defaults to ``4``.
+    :type num_heads: int
+    :param num_global_centroids: Number of learnable global centroid tokens.
+        Defaults to ``64``.
+    :type num_global_centroids: int
+    :param ffn_dim: Hidden dimension of the FFN blocks. Defaults to ``256``.
+    :type ffn_dim: int
+    :param dropout_rate: Dropout rate, in ``[0, 1)``. Defaults to ``0.1``.
+    :type dropout_rate: float
+    :param ffn_type: FFN variant passed to :func:`create_ffn_layer`. Defaults
+        to ``'mlp'``.
+    :type ffn_type: str
+    :param normalization_type: Normalization variant used throughout. Defaults
+        to ``'layer_norm'``.
+    :type normalization_type: str
+    :param kwargs: Forwarded to ``keras.Model``.
+    :raises ValueError: If ``output_dim`` or ``embedding_dim`` is not positive,
+        if ``problem_type`` is invalid, or if ``num_transformer_blocks`` is
+        not positive.
 
     Input shape:
-        Dictionary with tensor inputs as required by RELGTTokenEncoder.
+        A dict of tensors matching :class:`RELGTTokenEncoder`'s inputs.
 
     Output shape:
-        Tensor with shape `(batch_size, output_dim)`.
+        ``(batch_size, output_dim)``.
 
     Example:
-        ```python
-        # Create model for node classification
-        model = RELGT(
-            output_dim=10,
-            problem_type='classification',
-            embedding_dim=128,
-            num_node_types=5,
-            num_transformer_blocks=3,
-            num_heads=8
-        )
+        .. code-block:: python
 
-        # Compile and train
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        ```
+            model = RELGT(
+                output_dim=10,
+                problem_type='classification',
+                embedding_dim=128,
+                num_node_types=5,
+                num_transformer_blocks=3,
+                num_heads=8,
+            )
+            model.compile(
+                optimizer='adam',
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy'],
+            )
     """
 
-    #: DECISION plan-2026-08-23T091307-9a110062/D-464
-    #: ``base`` is the official default configuration of snap-stanford/relgt, the
-    #: paper authors' own release, quoted from its argparse defaults:
-    #:   --channels 512  --num_heads 4  --num_centroids 4096  --num_layers 1
-    #:   https://raw.githubusercontent.com/snap-stanford/relgt/main/main_node_ddp.py
-    #: This file's References block heads with Dwivedi et al. 2025 and carries no
-    #: "inspired by" disclaimer, so these numbers are a citation and must stay one.
-    #: What is quoted and what is NOT:
-    #:   quoted     embedding_dim (channels), num_heads, num_global_centroids
-    #:              (num_centroids), num_transformer_blocks (num_layers -- 1 is the
-    #:              argparse DEFAULT; the official expts/ scripts sweep it over
-    #:              {1, 4, 8}, so it is a default rather than a single canonical depth)
-    #:   NOT quoted ffn_dim: the official argparse defines no FFN width, so 1024
-    #:              preserves this table's own 2x-embedding_dim ratio and is a repo
-    #:              choice. Also unresolved: the constructor's gnn_pe_dim=32 sits
-    #:              opposite an official `--pos_enc_dim 128`, but that mapping was
-    #:              never verified against the upstream code, so it is flagged here
-    #:              rather than silently "corrected".
-    #: ``small`` and ``repo_medium`` have NO upstream counterpart: the official repo
-    #: publishes no model-size ladder at all (its own "small"/"large" scripts name
-    #: RelBench DATASET-size categories, not model sizes). ``repo_medium`` was called
-    #: ``large`` until 2026-08-23; at the published 512-wide ``base`` a 256-wide row
-    #: could no longer be called large in this table's own terms.
-    #: Pinned by tests/test_variant_tables_match_upstream_references.py.
+    #: DECISION plan-2026-08-23T091307-9a110062/D-464: ``base`` mirrors
+    #: upstream argparse defaults for channels/heads/centroids/layers only.
+    #: Do not "correct" the unresolved gnn_pe_dim/pos_enc_dim mismatch. See decisions.md.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         # Repo-original. Smallest tier; used by the package's own smoke tests.
         "small": {
@@ -246,7 +209,6 @@ class RELGT(keras.Model):
     ):
         super().__init__(**kwargs)
 
-        # Validate inputs
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
         if problem_type not in ["classification", "regression"]:
@@ -256,7 +218,6 @@ class RELGT(keras.Model):
         if num_transformer_blocks <= 0:
             raise ValueError(f"num_transformer_blocks must be positive, got {num_transformer_blocks}")
 
-        # Store configuration
         self.output_dim = output_dim
         self.problem_type = problem_type
         self.embedding_dim = embedding_dim
@@ -272,9 +233,6 @@ class RELGT(keras.Model):
         self.ffn_type = ffn_type
         self.normalization_type = normalization_type
 
-        # CREATE all components
-
-        # Token encoder
         self.token_encoder = RELGTTokenEncoder(
             embedding_dim=embedding_dim,
             num_node_types=num_node_types,
@@ -286,7 +244,6 @@ class RELGT(keras.Model):
             name="TokenEncoder",
         )
 
-        # Transformer blocks
         self.transformer_blocks = []
         for i in range(num_transformer_blocks):
             block = RELGTTransformerBlock(
@@ -302,13 +259,11 @@ class RELGT(keras.Model):
             )
             self.transformer_blocks.append(block)
 
-        # Seed node feature encoder
         self.seed_encoder = layers.Dense(
             embedding_dim,
             name="SeedEncoder"
         )
 
-        # Prediction head using FFN factory
         final_activation = "softmax" if problem_type == "classification" else None
         self.prediction_head = keras.Sequential([
             create_ffn_layer(
@@ -330,8 +285,8 @@ class RELGT(keras.Model):
         ``call()`` on symbolic inputs, so what gets built cannot drift from what
         gets called.
 
-        Args:
-            input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :param input_shape: Shape (or nest of shapes) of the input to ``call``.
+        :type input_shape: Any
         """
         if self.built:
             return
@@ -343,22 +298,24 @@ class RELGT(keras.Model):
             inputs: Dict[str, keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Forward pass through the complete RELGT model."""
+        """Run the token encoder and transformer blocks, then the prediction head.
 
-        # Extract and encode seed node features (assumed to be first token)
-        seed_node_features = inputs["node_features"][:, 0:1, :]  # (batch, 1, feature_dim)
-        seed_node_embedding = self.seed_encoder(seed_node_features)  # (batch, 1, embed_dim)
+        :param inputs: Dict of tensors matching :class:`RELGTTokenEncoder`'s inputs.
+        :type inputs: Dict[str, keras.KerasTensor]
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Predictions of shape ``(batch_size, output_dim)``.
+        :rtype: keras.KerasTensor
+        """
+        # Seed node is index 0 of node_features, per the subgraph sampler's contract.
+        seed_node_features = inputs["node_features"][:, 0:1, :]
+        seed_node_embedding = self.seed_encoder(seed_node_features)
 
         local_tokens = self.token_encoder(inputs, training=training)
 
-        # DECISION plan-2026-08-14T183218-f4c612aa/D-009
-        # What is chained is the (B, K, E) TOKEN SEQUENCE, not the block's (B, E)
-        # summary. Chaining the summary (via expand_dims) is type-correct and
-        # defeats the purpose: every block after the first would self-attend over
-        # a single token. Do NOT chain `seed_node_embedding` either -- it is only
-        # ever the cross-attention query and no block emits an updated seed, so a
-        # "chained seed" would have to be invented rather than read. See
-        # decisions.md D-009.
+        # DECISION plan-2026-08-14T183218-f4c612aa/D-009: chain the (B, K, E) tokens,
+        # not the (B, E) summary alone -- that collapses every later block to one token.
+        # See decisions.md.
         current_representation = None
         current_tokens = local_tokens
 
@@ -369,7 +326,7 @@ class RELGT(keras.Model):
             )
 
         if current_representation is None:
-            # Handle case with no transformer blocks
+            # No transformer blocks: fall back to mean-pooling the local tokens.
             current_representation = ops.mean(local_tokens, axis=1)
 
         predictions = self.prediction_head(current_representation, training=training)
@@ -377,7 +334,11 @@ class RELGT(keras.Model):
         return predictions
 
     def get_config(self) -> Dict[str, Any]:
-        """Get model configuration for serialization."""
+        """Return the config needed to reconstruct this model.
+
+        :return: Constructor arguments.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "output_dim": self.output_dim,
@@ -399,7 +360,13 @@ class RELGT(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'RELGT':
-        """Create model from configuration."""
+        """Build a model from a config dict produced by :meth:`get_config`.
+
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: New model instance.
+        :rtype: RELGT
+        """
         return cls(**config)
 
 # ---------------------------------------------------------------------
@@ -410,25 +377,25 @@ def create_relgt_model(
         model_size: str = "base",
         **kwargs
 ) -> RELGT:
-    """
-    Factory function to create RELGT models with predefined configurations.
+    """Build an RELGT model from one of the named size presets.
 
-    Args:
-        output_dim: Dimension of final output.
-        problem_type: 'classification' or 'regression'.
-        model_size: 'small', 'base', or 'repo_medium'. Only 'base' has an
-            upstream counterpart; see RELGT.MODEL_VARIANTS.
-        **kwargs: Additional arguments to override defaults.
-
-    Returns:
-        Configured RELGT model.
+    :param output_dim: Dimension of the final output.
+    :type output_dim: int
+    :param problem_type: ``'classification'`` or ``'regression'``.
+    :type problem_type: str
+    :param model_size: ``'small'``, ``'base'``, or ``'repo_medium'``. Only
+        ``'base'`` has an upstream counterpart; see :attr:`RELGT.MODEL_VARIANTS`.
+    :type model_size: str
+    :param kwargs: Overrides merged into the preset config.
+    :return: A configured model.
+    :rtype: RELGT
+    :raises ValueError: If ``model_size`` is not a known preset.
     """
     size_configs = RELGT.MODEL_VARIANTS
 
     if model_size not in size_configs:
         raise ValueError(f"model_size must be one of {list(size_configs.keys())}, got {model_size}")
 
-    # Merge configurations
     config = size_configs[model_size].copy()
     config.update(kwargs)
     config.update({
