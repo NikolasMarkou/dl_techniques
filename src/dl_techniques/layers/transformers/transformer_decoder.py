@@ -1,38 +1,26 @@
 """Canonical cross-attention transformer decoder block.
 
-This module provides :class:`TransformerDecoderLayer`, the encoder-decoder
-counterpart to :class:`~dl_techniques.layers.transformers.transformer.TransformerLayer`.
-Where ``TransformerLayer`` implements a single self-attention sub-block (and is
-therefore self-attention only), the decoder block composes **three** residual
-sub-blocks:
-
-1. Masked / causal self-attention over the decoder sequence.
-2. Cross-attention from the decoder sequence (queries) to an external encoder
-   memory (keys / values).
-3. A position-wise feed-forward network.
-
-All three sub-components are constructed through the shared component factories
-(:func:`create_attention_layer`, :func:`create_ffn_from_config`,
-:func:`create_normalization_layer`), so attention / FFN / normalization variants
-are configurable without subclassing. The cross-attention sub-block is built on
-:class:`~dl_techniques.layers.attention.multi_head_cross_attention.MultiHeadCrossAttention`
-(factory key ``'multi_head_cross'``), which performs cross-attention when given
-distinct ``query_input`` and ``kv_input`` tensors.
+Implements :class:`TransformerDecoderLayer`, the encoder-decoder counterpart
+to :class:`~dl_techniques.layers.transformers.transformer.TransformerLayer`.
+Where ``TransformerLayer`` runs one self-attention sub-block, this layer
+composes three residual sub-blocks: masked self-attention over the decoder
+sequence, cross-attention from the decoder sequence to an external encoder
+memory, then a feed-forward network. All three are built through the shared
+component factories, so attention, FFN and normalization types are
+configurable without subclassing, and cross-attention is built on
+``MultiHeadCrossAttention`` (factory key ``'multi_head_cross'``), which
+cross-attends given distinct query and key/value tensors.
 
 ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V``
 
-The block exists to make cross-attention transformer blocks elsewhere in the
-repo (e.g. DETR-style decoders, VLM / denoiser / memory cross-attention) replaceable
-by a canonical, fully-serializable implementation.
+Every self-attention type in the attention factory's registry is accepted by
+the constructor, but only a subset actually works with this block's
+cross-attention and masking plumbing; see the class docstring for which.
 """
 
 import keras
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from ..ffn import create_ffn_from_config, FFNType
 from .transformer import (
@@ -45,52 +33,37 @@ from ..norms import create_normalization_layer, NormalizationType
 from ...utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
 NormalizationPositionType = Literal['post', 'pre']
-
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.transformer_decoder")
 class TransformerDecoderLayer(keras.layers.Layer):
     """Encoder-decoder transformer block: masked self-attention + cross-attention + FFN.
 
-    Implements a standard transformer *decoder* layer. Each of the three
-    sub-blocks (self-attention, cross-attention, FFN) is wrapped in a residual
-    connection and a normalization layer; the data flow is determined by
-    ``normalization_position`` (``'pre'`` or ``'post'``), mirroring
+    Each of the three sub-blocks (self-attention, cross-attention, FFN) is
+    wrapped in a residual connection and a normalization layer; the data flow
+    follows ``normalization_position`` (``'pre'`` or ``'post'``), mirroring
     :class:`TransformerLayer` exactly so the two compose predictably in a stack.
 
     Self-attention types listed in :attr:`_MASKLESS_ATTENTION_TYPES` take no
-    ``attention_mask`` at all; for those, ``use_causal_mask`` cannot be honoured
-    and the block is **not** autoregressive (a warning is logged at
+    ``attention_mask`` at all; for those, ``use_causal_mask`` cannot be
+    honoured and the block is not autoregressive (a warning is logged at
     construction).
 
     .. warning::
-       **``self_attention_type='window'`` is causal only at
-       ``seq_len == window_size ** 2``.** MEASURED (2026-07-31), not assumed:
-       the layer behind the ``'window'`` key (``WindowAttention``, built by
-       ``create_grid_window_attention``) DOES accept and genuinely HONOUR this
-       block's rank-3 causal keep-mask -- perturbing the last token moved
-       positions ``0..T-2`` by exactly ``0.0`` while the unmasked control moved
-       by ``1.97e+02`` -- but ONLY when the sequence length equals
-       ``window_size ** 2``, because that is the one case where its internal
-       spatial grid is a single window and the mask's coordinates line up. At
-       any other length it raises ``ValueError`` at CALL time
-       (*"received a rank-3 pairwise attention_mask ... but the sequence length
-       is N rather than window_size**2"*). It is therefore NOT a maskless type
-       -- putting it in :attr:`_MASKLESS_ATTENTION_TYPES` would silently DROP a
-       mask the layer would have honoured -- and it is not a general-purpose
-       causal decoder attention either. Either size the block so
-       ``window_size = int(sqrt(seq_len))`` (via
-       ``attention_args={'window_size': ...}``; the default is
-       ``TransformerLayer``'s ``8``, i.e. ``seq_len == 64``), or pass
-       ``use_causal_mask=False`` and accept a non-autoregressive block, in which
-       case any sequence length works.
+       ``self_attention_type='window'`` is causal only when
+       ``seq_len == window_size ** 2``. Measured 2026-07-31: the layer behind
+       the ``'window'`` key genuinely honours this block's rank-3 causal
+       keep-mask at that sequence length (perturbing the last token moved
+       earlier positions by exactly ``0.0``), but at any other length it
+       raises ``ValueError`` at call time. It is not a maskless type, and it
+       is not a general-purpose causal decoder attention either. Either size
+       the block so ``window_size = int(sqrt(seq_len))`` (via
+       ``attention_args={'window_size': ...}``; the default gives
+       ``seq_len == 64``), or pass ``use_causal_mask=False`` and accept a
+       non-autoregressive block, which works at any sequence length.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -115,31 +88,25 @@ class TransformerDecoderLayer(keras.layers.Layer):
         Default ``'multi_head'``. Non-default keys must be self-attention
         compatible and may require ``attention_args``.
 
-        **The annotation is wider than what works.** It is the full 33-key
-        ``AttentionType`` literal; measured 2026-08-27, one decoder per registry
-        key on a ``(2, 16, 32)`` input with ``encoder_output`` supplied, THIRTEEN
-        are usable: ``anchor``, ``differential``, ``energy``, ``fnet``, ``gated``,
-        ``group_query``, ``lighthouse``, ``multi_head``, ``multi_head_cross``,
-        ``multi_head_latent``, ``perceiver``, ``ring``, ``window_band``.
+        The type annotation is the full 33-key ``AttentionType`` literal, but
+        only 13 keys are usable here: ``anchor``, ``differential``, ``energy``,
+        ``fnet``, ``gated``, ``group_query``, ``lighthouse``, ``multi_head``,
+        ``multi_head_cross``, ``multi_head_latent``, ``perceiver``, ``ring``,
+        ``window_band`` (measured 2026-08-27, one decoder per registry key on
+        a ``(2, 16, 32)`` input with ``encoder_output`` supplied). Of the other
+        20: 12 raise ``ValueError`` at construction because the layer does not
+        take ``dim``/``num_heads`` (``capsule_routing``, ``cbam``, ``channel``,
+        ``hopfield``, ``non_local``, ``single_window``, ``spatial``,
+        ``tripse1..4``); 4 raise a bare ``TypeError`` from inside ``call``
+        because the sub-layer does not accept the ``attention_mask`` this
+        block passes when ``use_causal_mask=True`` (``linear``, ``performer``,
+        ``rpc``, ``shared_weights_cross``); 4 fail on shape or dtype inside the
+        sub-layer (``beit``, ``mobile_mqa``, ``wave_field``, ``window``,
+        ``window_zigzag``).
 
-        The other 20 fail in three different ways, and only the first is a clean
-        refusal:
-
-        * 12 raise ``ValueError: Failed to create self-attention layer of type
-          '<k>'`` -- the layer does not take ``dim``/``num_heads``
-          (``capsule_routing``, ``cbam``, ``channel``, ``hopfield``,
-          ``non_local``, ``single_window``, ``spatial``, ``tripse1..4``);
-        * 4 raise a bare ``TypeError`` from deep inside ``call`` because the
-          sub-layer's ``call`` does not accept the ``attention_mask`` this block
-          passes when ``use_causal_mask=True`` (``linear``, ``performer``,
-          ``rpc``, ``shared_weights_cross``). Nothing pre-checks that, so the
-          traceback comes from Keras internals rather than a named error;
-        * 4 fail on shape or dtype inside the sub-layer (``beit``,
-          ``mobile_mqa``, ``wave_field``, ``window``, ``window_zigzag``).
-
-        The maskless types ARE handled loudly: selecting ``anchor``, ``fnet`` or
-        ``lighthouse`` emits a named warning that ``use_causal_mask=True`` cannot
-        be honoured and the block is not causal.
+        Selecting a maskless type (``anchor``, ``fnet`` or ``lighthouse``)
+        logs a warning that ``use_causal_mask=True`` cannot be honoured and
+        the block is not causal.
     :param cross_attention_type: Factory key for the cross-attention sub-block.
         Default ``'multi_head_cross'`` (the canonical cross-attention primitive).
     :param attention_args: Extra args forwarded to the self-attention factory
@@ -149,10 +116,9 @@ class TransformerDecoderLayer(keras.layers.Layer):
     :param normalization_position: ``'pre'`` or ``'post'``. Default ``'post'``.
     :param ffn_type: FFN architecture type. Default ``'mlp'``.
     :param ffn_args: Extra args forwarded to the FFN factory. These are the
-        CALLER's explicit keys and are merged LAST, after this layer's own
-        generic conveniences have been intersected with what ``ffn_type``
-        accepts; they are never pre-filtered and always reach
-        ``create_ffn_layer``.
+        caller's explicit keys, merged last, after this layer's own generic
+        conveniences have been intersected with what ``ffn_type`` accepts;
+        they are never pre-filtered and always reach ``create_ffn_layer``.
     :param dropout_rate: FFN output dropout rate. Default 0.1.
     :param attention_dropout_rate: Attention dropout rate. Default 0.1.
     :param use_causal_mask: If True and no ``self_attention_mask`` is supplied at
@@ -168,14 +134,9 @@ class TransformerDecoderLayer(keras.layers.Layer):
     :raises ValueError: If dimension parameters are invalid.
     """
 
-    # Self-attention types whose `call()` takes NO `attention_mask`. This is an
-    # ALIAS, deliberately not a re-declaration: `TransformerLayer` owns the set
-    # and both dispatchers must read the same frozenset OBJECT, so that adding a
-    # fourth maskless type cannot update one dispatcher and not the other. This
-    # file already had to unwind exactly that class of hand-maintained duplicate
-    # once (D-018, the per-type FFN parameter table). Do NOT write
-    # `frozenset({...})` here -- `TestMasklessSelfAttentionTypes` asserts object
-    # identity, not equality, precisely to catch that.
+    # Alias, not a re-declaration: both dispatchers must read the same
+    # frozenset object so a fourth maskless type can't update one and not the
+    # other. TestMasklessSelfAttentionTypes asserts identity, not equality.
     _MASKLESS_ATTENTION_TYPES = TransformerLayer._MASKLESS_ATTENTION_TYPES
 
     def __init__(
@@ -204,7 +165,6 @@ class TransformerDecoderLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # --- Input Validation ---
         if hidden_size <= 0:
             raise ValueError(f"hidden_size must be positive, got {hidden_size}")
         if num_heads <= 0:
@@ -220,7 +180,6 @@ class TransformerDecoderLayer(keras.layers.Layer):
                 f"normalization_position must be 'pre' or 'post', got {normalization_position}"
             )
 
-        # --- Configuration Storage ---
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
@@ -238,10 +197,8 @@ class TransformerDecoderLayer(keras.layers.Layer):
 
         if (self.self_attention_type in self._MASKLESS_ATTENTION_TYPES
                 and self.use_causal_mask):
-            # Not a raise: a non-autoregressive decoder over a maskless mixer is
-            # a legitimate configuration. What is NOT acceptable is the silence
-            # -- `use_causal_mask=True` is the default, so a caller reaches this
-            # combination without ever asking for it.
+            # A non-autoregressive decoder over a maskless mixer is legitimate;
+            # what needs a warning is that use_causal_mask defaults to True, so a caller reaches this combination without asking for it.
             logger.warning(
                 f"self_attention_type='{self.self_attention_type}' takes no "
                 f"attention mask, so use_causal_mask=True cannot be honoured: "
@@ -257,7 +214,6 @@ class TransformerDecoderLayer(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # --- Sub-layer creation (unbuilt) ---
         self.self_attention = self._create_attention_layer(
             attention_type=self.self_attention_type,
             params=self._self_attention_params('self_attention'),
@@ -265,10 +221,8 @@ class TransformerDecoderLayer(keras.layers.Layer):
             caller_args=self.attention_args,
             caller_args_name='attention_args',
         )
-        # DECISION plan_2026-06-12_0bb1729b/D-001: cross-attention is built on
-        # MultiHeadCrossAttention ('multi_head_cross'); given distinct
-        # query_input/kv_input it performs cross-attention. 'multi_head' (self)
-        # cannot cross-attend, hence a distinct factory key here.
+        # DECISION plan_2026-06-12_0bb1729b/D-001: cross-attention uses the
+        # 'multi_head_cross' factory key, not 'multi_head' -- 'multi_head' cannot cross-attend. See decisions.md.
         self.cross_attention = self._create_attention_layer(
             attention_type=self.cross_attention_type,
             params=self._cross_attention_params('cross_attention'),
@@ -289,8 +243,6 @@ class TransformerDecoderLayer(keras.layers.Layer):
         )
         self.dropout = keras.layers.Dropout(self.dropout_rate, name='ffn_dropout')
 
-    # --- Sub-layer param builders ---
-
     def _create_attention_layer(
             self,
             *,
@@ -303,19 +255,19 @@ class TransformerDecoderLayer(keras.layers.Layer):
         """Construct one attention sub-layer with a friendly failure message.
 
         Mirrors :meth:`TransformerLayer._create_attention_layer`, with one
-        addition the encoder does not need: this block builds TWO attention
-        layers, so the message must say WHICH one failed and which of the two
+        addition the encoder does not need: this block builds two attention
+        layers, so the message must say which one failed and which of the two
         caller-supplied arg dicts (``attention_args`` vs
         ``cross_attention_args``) fed it. Without that, a caller who
         mis-configured the cross side sees a message about ``'multi_head'`` and
         no indication of which half of the block raised it.
 
-        The attention factory's own error already names the type and lists the
-        required/provided parameter names; what it CANNOT know is which of the
-        caller's keys are overrides rather than block defaults. That is the
-        whole value added here -- see
-        ``TestDecoderAttentionConstructionErrorIsFriendly``, which RED-proves it
-        by injecting an invalid override.
+        The attention factory's own error already names the type and lists
+        the required/provided parameter names; it cannot say which of the
+        caller's keys are overrides rather than block defaults, which is the
+        value added here -- see
+        ``TestDecoderAttentionConstructionErrorIsFriendly``, which proves it
+        red-first by injecting an invalid override.
 
         :param attention_type: The registry key to construct.
         :type attention_type: str
@@ -343,30 +295,13 @@ class TransformerDecoderLayer(keras.layers.Layer):
 
     def _self_attention_params(self, name: str) -> Dict[str, Any]:
         if self.self_attention_type == 'fnet':
-            # FNetFourierTransform is parameter-free -- no `dim`, no `num_heads`
-            # -- exactly as `TransformerLayer._get_attention_params` already
-            # handles it. HISTORICAL, and the prediction in it came true: the
-            # attention factory USED TO DROP the two keys silently rather than
-            # rejecting them (measured), so injecting them was not what made
-            # 'fnet' fail -- but it was called out here as a latent break,
-            # because the sibling FFN factory had already turned that same
-            # silent drop into a hard raise (D-023). As of 2026-08-17
-            # (plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer`
-            # raises too, which is exactly why this branch must keep returning
-            # `{'name': ..., **attention_args}` and must NOT inject
-            # `dim`/`num_heads` for 'fnet'. Keep the two dispatchers
-            # in agreement -- `test_fnet_self_attention_params_match_TransformerLayer`
-            # compares them.
+            # FNetFourierTransform is parameter-free: no dim, no num_heads.
+            # create_attention_layer raises on extra keys, so this branch must not inject them. See test_fnet_self_attention_params_match_TransformerLayer.
             return {'name': name, **self.attention_args}
 
         params: Dict[str, Any] = {'dim': self.hidden_size, 'num_heads': self.num_heads, 'name': name}
-        # F-07: the type-specific params the attention factory REQUIRES. Read
-        # from `transformer.py`'s ONE table (D-015) rather than re-listed here:
-        # this method used to stop at `dim`/`num_heads`, which is precisely why
-        # `window`, `group_query`, `differential` and `multi_head_latent` were
-        # unconstructable on the decoder while `TransformerLayer` handled all
-        # four. Do NOT inline the four values -- `TestF07DecoderAttentionDefaults`
-        # compares this dispatcher against the encoder's for every type.
+        # Type-specific required params come from transformer.py's one shared
+        # table (D-015), not re-listed here -- TestF07DecoderAttentionDefaults compares this dispatcher against the encoder's for every type.
         params.update(build_transformer_attention_required_params(
             attention_type=self.self_attention_type,
             hidden_size=self.hidden_size,
@@ -388,18 +323,9 @@ class TransformerDecoderLayer(keras.layers.Layer):
         return {**params, **self.cross_attention_args}
 
     def _get_ffn_config(self, name: str) -> Dict[str, Any]:
-        # DECISION plan-2026-07-30T140922-8af1028f/D-018
-        # This method used to carry its OWN hand-maintained copy of the per-type
-        # parameter-injection table, and that copy is what produced D-016 (the
-        # `differential`/`activation` silent drop, live for the whole life of
-        # this file) plus five decoder-only coverage gaps -- `lowrank`,
-        # `monarch`, `squared_relu`, `reglu` and `bilinear` RAISED here with
-        # "Required parameters missing ... ['hidden_dim', 'output_dim']" while
-        # `TransformerLayer` handled all five. Both dispatchers now call the ONE
-        # policy function, so a divergence has to be introduced deliberately.
-        # Do NOT re-inline the table here. See decisions.md D-018, and
-        # `TestEncoderDecoderFFNConfigParity`, which compares the two over every
-        # `FFN_REGISTRY` key.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-018: call the one shared
+        # policy function; a hand-maintained local copy previously caused a
+        # silent activation drop and 5 decoder-only coverage gaps. See decisions.md.
         return build_transformer_ffn_config(
             ffn_type=self.ffn_type,
             name=name,
@@ -476,22 +402,19 @@ class TransformerDecoderLayer(keras.layers.Layer):
             ``self_attention_type='differential'`` consumes it, for the paper's
             per-layer lambda schedule
             (``clip(lambda_param * (0.8 - 0.6*exp(-0.3*max(idx-1, 0))), 0.1, 0.9)``);
-            every other type ignores it. It is a ``call()`` argument, NOT a
-            constructor parameter, and therefore does not appear in
-            :meth:`get_config` -- mirroring
-            :meth:`TransformerLayer.call`, which has carried the same parameter
-            all along.
+            every other type ignores it. It is a ``call()`` argument, not a
+            constructor parameter, so it does not appear in :meth:`get_config`,
+            mirroring :meth:`TransformerLayer.call`.
 
             .. warning::
-               **The caller owns this value.** Leaving it at the default ``0``
-               makes an entire stack of ``differential`` decoder layers share one
-               lambda and be provably depth-invariant, which is exactly the defect
-               this parameter closed (MEASURED before the fix: two
-               identically-weighted layers differed by ``0.0`` while
-               ``get_lambda(0) = 0.1600`` vs ``get_lambda(5) = 0.4954``).
+               The caller owns this value. Leaving it at the default ``0``
+               makes an entire stack of ``differential`` decoder layers share
+               one lambda and be provably depth-invariant (measured before
+               the fix: two identically-weighted layers differed by ``0.0``
+               while ``get_lambda(0) = 0.1600`` vs ``get_lambda(5) = 0.4954``).
                ``TransformerDecoderLayer`` has no stack builder in this repo
-               today, so nothing supplies a real index yet; any future stack must
-               pass its own loop index here.
+               today, so nothing supplies a real index yet; any future stack
+               must pass its own loop index here.
         :param training: Training mode flag.
         :return: Decoder output ``(B, T, H)``.
         """
@@ -504,8 +427,8 @@ class TransformerDecoderLayer(keras.layers.Layer):
             # 1. Self-attention
             residual = inputs
             x = self.self_attention_norm(inputs, training=training)
-            # Branch order mirrors `TransformerLayer.call` exactly (DRY): the
-            # `differential` type is the ONE type that takes `layer_idx`.
+            # Branch order mirrors TransformerLayer.call: differential is the
+            # only type that takes layer_idx.
             if self.self_attention_type == 'differential':
                 x = self.self_attention(
                     x, attention_mask=self_mask, layer_idx=layer_idx, training=training)
@@ -530,9 +453,8 @@ class TransformerDecoderLayer(keras.layers.Layer):
         else:
             # 1. Self-attention
             residual = inputs
-            # Same three-way branch as the pre-norm path above; `call()` has TWO
-            # self-attention call sites and a fix applied to only one of them
-            # leaves the default `normalization_position` broken.
+            # Same three-way branch as the pre-norm path above; a fix applied
+            # to only one of the two call sites leaves the default 'post' path broken.
             if self.self_attention_type == 'differential':
                 x = self.self_attention(
                     inputs, attention_mask=self_mask, layer_idx=layer_idx, training=training)

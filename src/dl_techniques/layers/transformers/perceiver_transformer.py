@@ -1,75 +1,31 @@
-"""
-Perceiver-style Transformer block with decoupled cross-attention.
+"""Perceiver-style transformer block with decoupled cross-attention.
 
-This layer is a fundamental component of the Perceiver architecture, designed to
-address the quadratic complexity bottleneck of standard Transformers when dealing
-with very large input sequences (e.g., flattened image patches, audio samples).
-It achieves this by decoupling the main processing pathway from the input data
-through an asymmetric cross-attention mechanism.
+Implements :class:`PerceiverTransformerLayer`, a pre-norm transformer block
+that attends a small, fixed-size latent array to a separate key/value array
+instead of running self-attention on one sequence. A standard block costs
+``O(N^2)`` in the sequence length; this block costs ``O(M*N)``, where ``M``
+is the latent length and ``N`` the key/value length, so cost stays linear in
+input size for a fixed latent size. Both halves keep the usual pre-norm,
+residual shape:
 
-Architectural and Mathematical Underpinnings:
+``L' = L + CrossAttention(LN(L), LN(X))``
+``L_out = L' + MLP(LN(L'))``
 
-The core innovation of the Perceiver architecture, encapsulated in this block,
-is the use of a small, fixed-size latent array that acts as the query in the
-attention mechanism. This latent array attends to the much larger input data
-array, which provides the keys and values. This design transforms the attention
-mechanism from self-attention to cross-attention.
-
-1.  **Asymmetric Cross-Attention**: A standard Transformer block performs
-    self-attention, where the queries, keys, and values are all derived from the
-    same input sequence `X`:
-
-        `Output = Attention(Q=X, K=X, V=X)`
-
-    The computational complexity of this operation is `O(N²)`, where `N` is the
-    sequence length of `X`. This is prohibitive for large `N`. This Perceiver
-    block, however, uses a separate, smaller latent array `L` for queries:
-
-        `L_updated = Attention(Q=L, K=X, V=X)`
-
-    The complexity is now `O(M*N)`, where `M` is the sequence length of the
-    latent array and `N` is the length of the input array. Since `M` is typically
-    small and constant (e.g., 256 or 512), the complexity scales linearly with
-    the input size `N`, making it tractable for very high-dimensional data.
-
-2.  **Information Bottleneck**: The latent array serves as an information
-    bottleneck. It is forced to iteratively distill the most salient information
-    from the large input array via the cross-attention mechanism. This process
-    effectively compresses the input into a compact, fixed-size latent
-    representation.
-
-3.  **Standard Transformer Structure**: Beyond the critical modification to the
-    attention mechanism, the rest of the block follows the standard, robust design
-    of a modern Transformer layer. It employs pre-normalization (applying Layer
-    Normalization before each sub-layer) and residual connections around both the
-    cross-attention module and the subsequent position-wise Feed-Forward Network
-    (FFN). This ensures stable training and efficient gradient flow.
-
-        `L' = L + CrossAttention(LN(L), LN(X))`
-        `L_out = L' + FFN(LN(L'))`
-
-This architectural pattern allows the model to process vast amounts of raw sensory
-data while maintaining a manageable computational cost in its main processing
-pathway.
+``call()`` accepts one tensor (self-attention, query and key/value share the
+input) or a ``[query, kv]`` pair (cross-attention).
 
 References:
-    - Jaegle, A., et al. (2021). Perceiver: General Perception with Iterative
-      Attention. *ICML*.
-    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
+    - Jaegle et al., 2021. Perceiver: General Perception with Iterative
+      Attention. (https://arxiv.org/abs/2103.03206)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras
 from typing import Optional, Any, Dict, Tuple, Union, List
 
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..attention.perceiver_attention import PerceiverAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.perceiver_transformer")
@@ -85,7 +41,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
     ``L' = L + CrossAttention(LN(L), LN(X))``
     ``L_out = L' + MLP(LN(L'))``
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -164,7 +120,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout must be between 0 and 1, got {dropout_rate}")
 
-        # Store ALL configuration
+        # Store configuration
         self.dim = dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
@@ -179,7 +135,7 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         # Calculate MLP hidden dimension
         self.mlp_hidden_dim = int(dim * mlp_ratio)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
+        # Sub-layers are unbuilt until build() runs.
         self.norm1_q = keras.layers.LayerNormalization(
             epsilon=1e-6,
             name="norm1_q"
@@ -237,14 +193,11 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         :param input_shape: Single shape or list of ``[query_shape, kv_shape]``.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
-        # Handle different input formats
         if self.built:
             return
 
-        # A list/tuple whose first element is itself a shape (list/tuple) means
-        # two separate [query, kv] inputs; a bare single shape is a flat
-        # sequence of ints. This disambiguation is required because Keras passes
-        # the stored single-input shape back as a JSON list on deserialization.
+        # A list whose first element is itself a shape means two separate
+        # [query, kv] inputs; Keras passes a stored single-input shape back as a plain list on deserialization, so a bare list of ints is not enough to tell them apart.
         is_multi_input = (
             isinstance(input_shape, (list, tuple))
             and len(input_shape) > 0
@@ -386,5 +339,3 @@ class PerceiverTransformerLayer(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------

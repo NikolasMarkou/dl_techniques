@@ -1,74 +1,37 @@
-"""
-A Transformer encoder layer for joint patch-query processing.
+"""A transformer encoder layer for joint patch-query processing.
 
-This layer forms the core computational block of the Encoder-only Mask
-Transformer (EoMT). It adapts the standard Vision Transformer (ViT) encoder
-architecture to simultaneously process a concatenated sequence of image patch
-tokens and learnable object query tokens. This unified processing allows for
-rich, bidirectional information flow, enabling queries to aggregate evidence
-from image patches and patches to be contextualized by object-level hypotheses.
-
-Architectural and Mathematical Foundations:
-The layer follows the canonical pre-normalization Transformer design,
-consisting of a Multi-Head Self-Attention (MHSA) block followed by a
-feed-forward Multi-Layer Perceptron (MLP). Both sub-layers employ residual
-connections and optional layer normalization.
-
-The central mechanism is the scaled dot-product self-attention:
-    `Attention(Q, K, V) = softmax( (Q @ K^T) / sqrt(d_k) ) @ V`
-
-In this context, the Query (Q), Key (K), and Value (V) matrices are
-linearly projected from the input sequence of all patch and query tokens.
-The attention mechanism allows every token to attend to every other token,
-building context-aware representations.
-
-The key innovation of this layer is the **Masked Self-Attention** mechanism,
-which provides a strong supervisory signal for segmentation during training.
-When enabled, it selectively constrains the attention patterns based on
-ground-truth object masks. Specifically, the attention scores from a given
-object query to the set of image patch tokens are masked. If a patch does
-not belong to the object instance associated with the query, its attention
-score is set to negative infinity before the softmax operation.
-
-This forces each query to learn representations by exclusively attending to
-the spatial regions of its designated object instance. This explicit guidance
-is crucial for training the queries to become specialized object detectors.
-The application of this mask can be probabilistic, governed by
-`mask_probability`, allowing for a curriculum learning strategy where the
-model first learns more general features before being constrained to focus on
-specific object regions.
+Implements :class:`EomtTransformer`, the core block of the Encoder-only Mask
+Transformer (EoMT). It runs a standard pre-norm transformer block (attention
+then FFN, both with residuals) over a concatenated sequence of image patch
+tokens and learnable object query tokens, so queries and patches exchange
+information in the same self-attention pass instead of through a separate
+cross-attention decoder. During training, an optional masked-attention mode
+constrains each query to attend only to the patches inside its ground-truth
+object mask, scored to negative infinity elsewhere before the softmax; this
+mask can be applied probabilistically and annealed over training steps via
+``mask_probability`` and ``mask_annealing_steps``. ``use_masked_attention``
+requires an ``attention_type`` whose attention layer accepts an
+``attention_mask``; combining it with a maskless type (``fnet``, ``anchor``,
+``lighthouse``) raises at construction.
 
 References:
-    - Vaswani et al. "Attention Is All You Need". The original paper that
-      introduced the Transformer architecture.
-      https://arxiv.org/abs/1706.03762
-
-    - Dosovitskiy et al. "An Image is Worth 16x16 Words". This work
-      established the Vision Transformer (ViT) by applying the Transformer
-      architecture directly to sequences of image patches.
-      https://arxiv.org/abs/2010.11929
-
-    - Li et al. "Your ViT is Secretly a Segmentation Model". This paper
-      introduced the Encoder-only Mask Transformer (EoMT), which uses the
-      joint patch-query processing and masked attention mechanism implemented
-      in this layer.
-      https://arxiv.org/abs/2312.02113
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words.
+      (https://arxiv.org/abs/2010.11929)
+    - Li et al., 2023. Your ViT is Secretly a Segmentation Model.
+      (https://arxiv.org/abs/2312.02113)
 """
 
 import keras
 from keras import ops, initializers, regularizers
 from typing import Optional, Any, Tuple, Union, Dict, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from ..ffn import FFNType
 from ..norms import NormalizationType
 from .transformer import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.transformers.eomt_transformer")
 class EomtTransformer(keras.layers.Layer):
@@ -81,7 +44,7 @@ class EomtTransformer(keras.layers.Layer):
     attention can be constrained by ground-truth object masks with
     configurable probability and optional linear annealing.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -165,15 +128,9 @@ class EomtTransformer(keras.layers.Layer):
         this layer builds could never reach them.
     """
 
-    # Attention types whose `call()` takes NO `attention_mask`, so
-    # `TransformerLayer.call` drops the mask argument entirely for them. This
-    # is an ALIAS, deliberately not a re-declaration: `TransformerLayer` owns
-    # the set, and a locally written `frozenset({...})` would compare EQUAL
-    # today and then silently drift the day a fourth maskless type is added on
-    # one side only -- at which point the guard below would stop firing for it.
-    # `TransformerDecoderLayer` aliases it the same way for the same reason,
-    # and `TestMasklessSelfAttentionTypes` there asserts object identity, not
-    # equality, precisely to catch a re-declaration.
+    # Alias, not a re-declaration: a local frozenset would compare equal to
+    # TransformerLayer's today and silently drift if a maskless type is added
+    # on only one side. TransformerDecoderLayer aliases it the same way.
     _MASKLESS_ATTENTION_TYPES = TransformerLayer._MASKLESS_ATTENTION_TYPES
 
     def __init__(
@@ -247,16 +204,9 @@ class EomtTransformer(keras.layers.Layer):
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
         if self.use_masked_attention and self.attention_type in self._MASKLESS_ATTENTION_TYPES:
-            # A RAISE, not a warning -- unlike `TransformerDecoderLayer`, whose
-            # conflicting flag (`use_causal_mask=True`) is the DEFAULT and is
-            # therefore reached passively, BOTH flags here are non-default
-            # opt-ins (`use_masked_attention=False`, `attention_type='multi_head'`).
-            # A caller must explicitly ask for both to land here, so there is no
-            # passive path to protect and nothing is served by continuing: the
-            # `(B, seq, seq)` keep-mask built in `_compute_attention_keep_mask`
-            # would be handed to `TransformerLayer.call`, which drops the
-            # `attention_mask` argument for these types, making the whole
-            # masked-attention feature a silent no-op.
+            # Both flags are non-default opt-ins, so this only fires when a
+            # caller explicitly asks for both; the keep-mask would otherwise
+            # be built and then silently dropped by TransformerLayer.call.
             raise ValueError(
                 f"use_masked_attention=True requires a maskable attention_type, "
                 f"but attention_type='{self.attention_type}' takes no attention "
@@ -266,12 +216,9 @@ class EomtTransformer(keras.layers.Layer):
                 f"use_masked_attention=False to run this mixer unmasked."
             )
 
-        # Training step counter for mask annealing (set as keras.Variable in build())
-        self.current_step = None  # set in build()
+        # Training step counter for mask annealing, set as a keras.Variable in build().
+        self.current_step = None
 
-        # CREATE all sub-layers in __init__
-
-        # Create the base transformer layer using the factory-enabled TransformerLayer
         self.base_transformer = TransformerLayer(
             hidden_size=self.hidden_size,
             num_heads=self.num_heads,
@@ -334,14 +281,15 @@ class EomtTransformer(keras.layers.Layer):
         """Build a ``(B, seq, seq)`` keep-mask for true masked self-attention.
 
         Implements the EoMT masked-attention scheme: each object query attends
-        ONLY to the patch tokens inside its predicted segmentation region (plus
+        only to the patch tokens inside its predicted segmentation region (plus
         all object queries), while patch tokens attend freely. The mask is fed
         into the underlying attention layer via ``base_transformer(..., attention_mask=...)``.
 
         Keep-mask convention (consumed by the factory attention layer as
-        ``scores + (1 - mask) * large_negative``): **1.0 = attend, 0.0 = blocked**.
-        The query-to-query block is kept all-ones so no attention row is ever
-        fully masked (which would make ``softmax`` over all ``-inf`` produce NaN).
+        ``scores + (1 - mask) * large_negative``): ``1.0`` attends, ``0.0`` is
+        blocked. The query-to-query block is kept all-ones so no attention row
+        is ever fully masked, which would make ``softmax`` over all ``-inf``
+        produce NaN.
 
         Masking fires probabilistically with optional annealing; the gate is a
         graph-safe arithmetic blend (no python branch on a traced tensor).
@@ -377,15 +325,16 @@ class EomtTransformer(keras.layers.Layer):
         # Flatten spatial mask -> (B, num_queries, H*W); keep the first num_patches
         # columns (one entry per patch token). Threshold to a hard keep-mask.
         mask_flat = ops.reshape(mask, [batch_size, num_queries, -1])
-        query_patch = mask_flat[:, :, :num_patches]               # (B, nq, num_patches)
+        query_patch = mask_flat[:, :, :num_patches]
         query_patch_keep = ops.cast(query_patch >= 0.5, inputs.dtype)
 
         # Patch rows attend to everything; query rows attend to their patches plus
         # all queries (query->query block all-ones => no fully-masked row).
         top = ops.ones((batch_size, num_patches, seq_len), dtype=inputs.dtype)
         query_query = ops.ones((batch_size, num_queries, num_queries), dtype=inputs.dtype)
-        bottom = ops.concatenate([query_patch_keep, query_query], axis=-1)  # (B, nq, seq)
-        keep = ops.concatenate([top, bottom], axis=1)             # (B, seq, seq)
+        # bottom is (B, nq, seq); keep is (B, seq, seq).
+        bottom = ops.concatenate([query_patch_keep, query_query], axis=-1)
+        keep = ops.concatenate([top, bottom], axis=1)
 
         # Probabilistic gate: should_mask=0 -> attend-all; should_mask=1 -> computed keep.
         keep = 1.0 - should_mask * (1.0 - keep)

@@ -1,51 +1,26 @@
-"""
-Progressive Focused Transformer (PFT) Block Module.
+"""The Progressive Focused Transformer (PFT) block.
 
-This module implements a complete PFT transformer block that combines:
-- Progressive Focused Attention (PFA) for hierarchical attention refinement
-- Configurable Feed-Forward Network (FFN) via factory pattern
-- Pre-normalization architecture for training stability
-- Residual connections for gradient flow
-- Stochastic depth regularization to prevent overfitting
+Implements :class:`PFTBlock`, a pre-norm transformer block (norm then
+attention, norm then FFN, both with residuals and optional stochastic
+depth) built around Progressive Focused Attention. Each block receives the
+attention map produced by the previous block and uses it to refine which
+window regions the current block focuses on, so focus sharpens across
+depth instead of each layer starting from scratch. Attention runs over
+non-overlapping windows, with alternating blocks shifting the window
+partition (SW-MSA) so information can cross window boundaries. The FFN
+type, normalization type, and stochastic depth rate are all configurable
+via factory arguments.
 
-The block follows the pre-normalization architecture (norm -> attention/FFN -> residual)
-which has been shown to improve training stability in deep transformer networks compared
-to post-normalization.
+``x' = x + DropPath(PFA(Norm1(x), prev_attn_map))``
+``y  = x' + DropPath(FFN(Norm2(x')))``
 
-Architecture Flow:
------------------
-Input (B, H, W, C)
-    ↓
-[Norm1] → [Progressive Focused Attention] → [+residual]
-    ↓
-[Norm2] → [Feed-Forward Network] → [+residual]
-    ↓
-Output (B, H, W, C) + Attention Map
-
-Both attention and FFN outputs can optionally go through stochastic depth,
-which randomly drops entire layers during training for regularization.
-
-Key Features:
-------------
-1. **Progressive Focused Attention**: Uses attention maps from previous layers
-   to progressively refine focus on relevant features
-2. **Windowed Attention**: Efficient computation through non-overlapping windows
-3. **Shifted Windows**: Alternating shift patterns enable cross-window connections
-4. **Factory Patterns**: Easy experimentation with different normalization and FFN types
-5. **Stochastic Depth**: Layer-wise dropout for improved regularization
-
-References
-----------
-    Long, Wei, et al. "Progressive Focused Transformer for Single Image Super-Resolution."
-    CVPR 2025.
+References:
+    - Long et al., 2025. Progressive Focused Transformer for Single Image
+      Super-Resolution. (CVPR)
 """
 
 import keras
 from typing import Optional, Tuple, Literal, Union, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from ..ffn.factory import create_ffn_layer
 from ..norms import create_normalization_layer
@@ -57,10 +32,6 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-# Type definitions
-# ---------------------------------------------------------------------
-
 NormalizationType = Literal[
     'layer_norm', 'rms_norm', 'zero_centered_rms_norm',
     'band_rms', 'adaptive_band_rms', 'dynamic_tanh'
@@ -69,8 +40,6 @@ FFNType = Literal[
     'mlp', 'swiglu', 'geglu', 'glu', 'swin_mlp',
     'differential', 'residual', 'orthoglu'
 ]
-
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.layers.transformers.progressive_focused_transformer")
@@ -88,7 +57,7 @@ class PFTBlock(keras.layers.Layer):
     ``x' = x + DropPath(PFA(Norm1(x), prev_attn_map))``
     ``y  = x' + DropPath(FFN(Norm2(x')))``
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -167,7 +136,6 @@ class PFTBlock(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # ============ Store Configuration Parameters ============
         self._dim = dim
         self._num_heads = num_heads
         self._window_size = window_size
@@ -184,11 +152,8 @@ class PFTBlock(keras.layers.Layer):
         self._ffn_activation = deserialize_activation(ffn_activation)
         self._use_lepe = use_lepe
 
-        # ============ Validate Configuration ============
-        # Check for invalid parameter combinations early
         self._validate_config()
 
-        # ============ Create Sublayers ============
         # All sublayers depend only on config params, not on input_shape.
         mlp_hidden_dim = int(self._dim * self._mlp_ratio)
 
@@ -284,47 +249,33 @@ class PFTBlock(keras.layers.Layer):
             ``[x_shape, attn_map_shape]``.
         :type input_shape: Union[tuple, list]
         """
-        # ============ Extract Input Shape ============
-        # Handle both single tensor and tuple inputs
         if self.built:
             return
 
-        # DECISION plan_2026-06-15_2a23a001/D-002: accept a tuple OF SHAPES too (mirror
-        # call:452); strictly widens accepted types — backward-compatible. A bare
-        # single-input shape is a tuple of ints (e.g. (B,H,W,dim)), so only treat the
-        # input as multi-input when its first element is itself a shape sequence.
+        # DECISION plan_2026-06-15_2a23a001/D-002: a bare single-input shape is
+        # a tuple of ints, so only treat input_shape as [x, attn_map] when its first element is itself a shape sequence. See decisions.md.
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
                 and isinstance(input_shape[0], (list, tuple)):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
 
-        # Guard: if input_shape is None or not a subscriptable sequence
-        # (e.g. called from build_from_config with a None shape during load),
-        # derive a minimal shape from config params so sublayers can still build.
+        # A None or non-subscriptable shape means build_from_config loaded
+        # with no shape; derive a minimal one from config so sublayers can still build.
         if not hasattr(x_shape, '__len__') or x_shape is None:
             x_shape = (None, None, None, self._dim)
 
-        # Coerce to a tuple: on deserialization Keras passes shapes back as JSON
-        # lists, and tuple-concatenation below requires a tuple.
+        # Deserialization passes shapes back as JSON lists; the concatenation
+        # below requires a tuple.
         x_shape = tuple(x_shape)
 
-        # ============ Explicitly Build Sub-layers ============
-        # This ensures all weights are created and properly initialized
-        # Shape: (batch, H, W, dim)
         norm_shape = (None,) + x_shape[1:]
 
-        # Build normalization layers
         self._norm1.build(norm_shape)
         self._norm2.build(norm_shape)
-
-        # Build attention layer
         self._attn.build(x_shape)
-
-        # Build FFN layer
         self._ffn.build(norm_shape)
 
-        # Build stochastic depth if present
         if self._drop_path is not None:
             self._drop_path.build(norm_shape)
 
@@ -338,13 +289,9 @@ class PFTBlock(keras.layers.Layer):
         :return: Configured FFN layer.
         :rtype: keras.layers.Layer
         """
-        # Prepare FFN configuration by copying user-provided kwargs
         ffn_config = self._ffn_kwargs.copy()
 
-        # ============ Configure FFN Based on Type ============
-
         if self._ffn_type == 'mlp':
-            # Standard MLP: Linear -> Activation -> Dropout -> Linear
             return create_ffn_layer(
                 ffn_type='mlp',
                 hidden_dim=hidden_dim,
@@ -356,8 +303,7 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'swiglu':
-            # SwiGLU: State-of-the-art gated activation
-            # Uses its own expansion factor instead of hidden_dim
+            # Uses its own expansion factor instead of hidden_dim.
             return create_ffn_layer(
                 ffn_type='swiglu',
                 output_dim=self._dim,
@@ -368,7 +314,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'geglu':
-            # GeGLU: Alternative gated activation (GELU-based)
             return create_ffn_layer(
                 ffn_type='geglu',
                 hidden_dim=hidden_dim,
@@ -379,7 +324,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'glu':
-            # GLU: Gated Linear Unit (flexible activation)
             return create_ffn_layer(
                 ffn_type='glu',
                 hidden_dim=hidden_dim,
@@ -391,7 +335,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'swin_mlp':
-            # Swin MLP: Optimized for vision transformers
             return create_ffn_layer(
                 ffn_type='swin_mlp',
                 hidden_dim=hidden_dim,
@@ -403,7 +346,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'orthoglu':
-            # OrthoGLU: GLU with orthogonal regularization
             return create_ffn_layer(
                 ffn_type='orthoglu',
                 hidden_dim=hidden_dim,
@@ -414,7 +356,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'differential':
-            # Differential FFN: Uses difference computations
             return create_ffn_layer(
                 ffn_type='differential',
                 hidden_dim=hidden_dim,
@@ -424,7 +365,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         elif self._ffn_type == 'residual':
-            # Residual FFN: Additional residual connections within FFN
             return create_ffn_layer(
                 ffn_type='residual',
                 hidden_dim=hidden_dim,
@@ -434,8 +374,6 @@ class PFTBlock(keras.layers.Layer):
             )
 
         else:
-            # Fallback: use factory with the specified type
-            # This allows for future FFN types without code changes
             return create_ffn_layer(
                 ffn_type=self._ffn_type,
                 hidden_dim=hidden_dim,
@@ -461,58 +399,32 @@ class PFTBlock(keras.layers.Layer):
             ``(B, H, W, dim)`` and ``attn_map`` is passed to the next block.
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # ============ Unpack Inputs ============
-        # Handle both single tensor and tuple inputs
         if isinstance(inputs, (list, tuple)):
             x, prev_attn_map = inputs
         else:
             x = inputs
             prev_attn_map = None
 
-        # ============ Attention Sub-block ============
-        # Store input for residual connection
         shortcut = x
-
-        # Pre-normalization: normalize before attention
         x_norm = self._norm1(x)
-
-        # Progressive Focused Attention
-        # Passes previous attention map for hierarchical focusing
         attn_output, attn_map = self._attn(
             x_norm,
             prev_attn_map=prev_attn_map,
             training=training
         )
-
-        # Apply stochastic depth to attention output
-        # During training, randomly drops the entire attention transformation
         if self._drop_path is not None:
             attn_output = self._drop_path(attn_output, training=training)
-
-        # First residual connection: add attention output to input
-        # This preserves gradient flow and enables very deep networks
         x = shortcut + attn_output
 
-        # ============ FFN Sub-block ============
-        # Store current state for second residual connection
         shortcut = x
-
-        # Pre-normalization: normalize before FFN
         x_norm = self._norm2(x)
-
-        # Feed-Forward Network
-        # Point-wise transformation to increase model capacity
         ffn_output = self._ffn(x_norm, training=training)
-
-        # Apply stochastic depth to FFN output
-        # Same stochastic depth layer is reused (drops both or neither)
+        # The same stochastic-depth layer is reused here, so it drops both
+        # sub-blocks together or neither.
         if self._drop_path is not None:
             ffn_output = self._drop_path(ffn_output, training=training)
-
-        # Second residual connection: add FFN output to input
         x = shortcut + ffn_output
 
-        # Return transformed features and attention map for next layer
         return x, attn_map
 
     def get_config(self) -> Dict[str, Any]:
@@ -563,23 +475,18 @@ class PFTBlock(keras.layers.Layer):
         :return: Tuple ``(output_shape, attn_map_shape)``.
         :rtype: Tuple[tuple, tuple]
         """
-        # Extract x shape (see D-002 in build: accept a tuple OF SHAPES, but a bare
-        # single-input shape is itself a tuple of ints — only index when the first
-        # element is a shape sequence).
+        # See D-002 in build(): only index input_shape[0] when it is itself a
+        # shape sequence, not a bare tuple of ints.
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
                 and isinstance(input_shape[0], (list, tuple)):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
 
-        # Output shape is same as input x shape
         output_shape = x_shape
-
-        # Compute attention map shape
         batch = x_shape[0]
         h, w = x_shape[1], x_shape[2]
 
-        # Calculate number of windows and tokens per window
         if h is not None and w is not None:
             num_windows = (h // self._window_size) * (w // self._window_size)
             window_area = self._window_size * self._window_size
@@ -595,6 +502,3 @@ class PFTBlock(keras.layers.Layer):
         attn_map_shape = (attn_batch, self._num_heads, window_area, window_area)
 
         return output_shape, attn_map_shape
-
-
-# ---------------------------------------------------------------------
