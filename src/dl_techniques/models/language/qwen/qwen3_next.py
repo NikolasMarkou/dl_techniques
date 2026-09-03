@@ -1,75 +1,39 @@
 """
-Qwen3-Next hybrid decoder: blocks of three gated linear-attention sublayers followed
-by one full gated-attention sublayer, each with its own normalization and optional
-mixture-of-experts feed-forward.
+Qwen3-Next hybrid decoder: blocks of three gated linear-attention sublayers
+followed by one full gated-attention sublayer, each with its own
+normalization and optional mixture-of-experts feed-forward.
 
-Softmax attention and linear recurrence fail in opposite directions. Attention can
-retrieve any earlier token exactly, but it stores every key and value, so both its
-compute and its cache grow with the sequence. A gated linear-attention layer folds
-the past into a fixed-size matrix state via an outer-product update, giving `O(L)`
-time and `O(1)` state — but that state is a lossy summary, and exact recall of a
-specific distant token is precisely what a bounded summary cannot promise. Qwen3-Next
-declines to choose. Each `Qwen3NextBlock` runs three linear-attention sublayers and
-then one softmax-attention sublayer, so within every block the cheap mixers do the
-bulk of the contextualization and the expensive one supplies exact global lookup.
-The cost ratio is what makes the hybrid worth building: only one sublayer in four
-holds a KV cache, so cache memory falls to roughly a quarter of a uniformly
-attentive stack of the same effective depth.
+Softmax attention can retrieve any earlier token exactly but its compute
+and cache both grow with sequence length. A gated linear-attention layer
+folds the past into a fixed-size matrix state instead, giving `O(L)` time
+and `O(1)` state at the cost of exact recall. Each `Qwen3NextBlock` runs
+three linear-attention sublayers and then one softmax-attention sublayer,
+so the cheap mixers do most of the contextualization and the expensive one
+supplies exact global lookup. Only one sublayer in four holds a KV cache, so
+cache memory falls to roughly a quarter of a uniformly attentive stack of
+the same effective depth. `num_layers` counts blocks, not sublayers — the
+`80b_a3b` variant's 12 blocks are 48 effective layers.
 
-`num_layers` counts *blocks*, not sublayers — the `80b_a3b` variant's 12 blocks are
-48 effective layers. Anyone comparing depth or parameter counts against a
-conventional transformer configuration must apply the factor of four.
+Mixture-of-experts, when configured, replaces the FFN with `num_experts`
+experts of which `num_experts_per_tok` are routed, decoupling parameter
+count from per-token arithmetic; the `80b` variant sets `num_experts=1` to
+express a dense configuration instead of using a separate flag.
 
-Normalization is `zero_centered_rms_norm` by default rather than plain RMSNorm. RMS
-normalization divides by the root-mean-square without subtracting a mean, so a
-persistent additive offset in the residual stream survives every layer and eats into
-the dynamic range that the scale weights are calibrated for; the zero-centered
-variant removes it. Every sublayer is pre-norm with its own normalization instance,
-its own optional MoE, and its own residual add — the block is four independent
-residual updates, not one.
+`call` builds a combined causal-plus-padding mask once and passes it only
+to the gated-attention sublayer. The three linear-attention sublayers get
+no mask: their scan is a strictly left-to-right recurrence with causal
+depthwise convolutions and cannot read forward, so causality holds
+structurally, but padding does not — padded positions enter the recurrent
+state, so left-padding contaminates a token's summary while right-padding
+does not.
 
-Mixture-of-experts is applied per sublayer when configured, replacing the FFN with
-`num_experts` experts of which `num_experts_per_tok` are routed. This decouples
-parameter count from per-token arithmetic: the `80b_a3b` variant routes 10 of 512 --
-the released ratio, fetched 2026-08-22, `2.0%` active -- so it carries fifty times
-the FFN capacity it pays for at inference. The `80b` variant
-sets `num_experts=1`, which is how a dense configuration is expressed here rather
-than by a separate flag. FFN keyword dicts pass through `assemble_ffn_config` rather
-than being written as literals, because the FFN factory raises on a key its target
-type does not accept and `ffn_expansion_factor` is accepted by only a minority of
-the registered types.
-
-Two properties of the masking are important and asymmetric. `call` builds a combined
-causal-plus-padding mask once via `build_causal_attention_mask` — in block semantics
-(`True` = suppress), OR-ing causal with padding, inverted once to the attend
-semantics the attention layers expect — and passes it to each block. The block
-forwards it *only to the gated-attention sublayer*. The three linear-attention
-sublayers receive no mask at all. Causality is still intact there, because a gated
-linear-attention scan is a strictly left-to-right recurrence with causal depthwise
-convolutions and cannot read forward. Padding, however, is not excluded: padded
-positions do enter the recurrent state, so with left-padding the summary a token
-sees is contaminated. Right-padding leaves each valid prefix's state correct. This
-is a property of the architecture as implemented, not an oversight to be patched by
-handing the mask to layers that have no notion of one.
-
-Note that there is no model-level positional embedding. Earlier revisions of this
-package constructed a `self.rope_embedding` and never used it; it was removed.
-Position enters through RoPE inside the gated-attention sublayer and through the
-causal convolutions and ordered recurrence of the linear-attention sublayers. Any
-diagram showing "Token Embeddings -> RoPE" as a model-level stage describes code that
-does not exist.
-
-Stochastic depth, when enabled, uses a linear rate schedule across blocks, so early
-blocks are dropped rarely and late blocks often. The LM head is an independent
-bias-free `Dense`; input and output embeddings are untied. `from_variant` exposes no
-`pretrained` argument, so a request for trained weights cannot be answered silently
-with a random initialization.
-
-With `return_dict=False` (the default) the model returns logits, and
-`create_qwen3_next_classification` pools that return value — so the classifier sits
-on the `vocab_size`-wide logits rather than on hidden states. It works, but it is a
-different and much wider pooling input than the usual recipe, and a classifier
-trained one way is not transferable to the other.
+There is no model-level positional embedding; position enters through RoPE
+inside the gated-attention sublayer and through the causal convolutions and
+ordered recurrence of the linear-attention sublayers. `from_variant`
+exposes no `pretrained` argument. With `return_dict=False` (the default)
+the model returns logits, and `create_qwen3_next_classification` pools that
+vocab_size-wide tensor rather than hidden states, so a classifier trained
+one way does not transfer to the other.
 
 References:
     - Qwen Team, 2025. Qwen3 Technical Report.
@@ -114,96 +78,58 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique("dl_techniques.models.qwen.qwen3_next")
 class Qwen3Next(keras.Model):
     """
-    Qwen3 Next (Mixture of Experts) model with correct architecture.
+    Qwen3-Next model: N hybrid blocks of gated linear attention and gated attention.
 
-    This implementation follows the exact pattern shown in the architecture diagram:
-    - Token embeddings + RoPE position embeddings
-    - N blocks, each containing 3x GatedLinearAttentionBlock + 1x GatedAttention
-    - Each layer has its own Zero-Centered RMSNorm and MoE
-    - Final normalization and language modeling head
+    Architecture:
 
-    **Architecture Overview:**
-    ```
-    Input(input_ids)
-           │
-           ▼
-    Token Embeddings (vocab_size=151k, dim=2048)
-           │
-           ▼          (no model-level positional stage: position enters inside
-           │           the blocks, via RoPE in the gated-attention sublayer and
-           │           the causal convolutions of the linear-attention ones)
-    Qwen3NextBlock₁:
-        3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
-        1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
-           │
-           ▼
-          ...
-           │
-           ▼
-    Qwen3NextBlockₙ:
-        3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
-        1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
-           │
-           ▼
-    Final Zero-Centered RMSNorm
-           │
-           ▼
-    Linear Projection → Logits (vocab_size=151k)
-    ```
+    .. code-block:: text
 
-    Args:
-        vocab_size: Integer, size of the vocabulary. Defaults to 151936.
-        hidden_size: Integer, dimensionality of encoder layers. Defaults to 2048.
-        num_layers: Integer, number of transformer blocks. Defaults to 12.
-        num_attention_heads: Integer, number of attention heads. Defaults to 16.
-        num_key_value_heads: Integer, number of key/value heads for grouped-query
-            attention in each block's gated-attention sublayer. Must divide
-            num_attention_heads. Defaults to 4, so the default model has a KV
-            cache num_attention_heads // num_key_value_heads times smaller than
-            plain MHA. Live as of 2026-08-15: before that this value was
-            validated, stored, serialized and printed by summary() while never
-            reaching the attention layer, so every model was plain MHA.
-        max_seq_len: Integer, maximum sequence length. Defaults to 8192.
-        num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
-        num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
-        moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
-        norm_eps: Float, epsilon for normalization layers. Defaults to 1e-6.
-        dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
-        initializer_range: Float, standard deviation for weight initialization. Defaults to 0.02.
-        normalization_type: String, type of normalization layer. Defaults to "zero_centered_rms_norm".
-        ffn_type: String, type of feed-forward network in experts. Defaults to "swiglu".
-        use_stochastic_depth: Boolean, whether to enable stochastic depth. Defaults to False.
-        stochastic_depth_rate: Float, drop path rate for stochastic depth. Defaults to 0.1.
-        **kwargs: Additional keyword arguments for the `keras.Model` base class.
+        Input (input_ids)
+               │
+               ▼
+        Token Embeddings [vocab_size, dim]
+               │
+               ▼   (no model-level positional stage: position enters inside
+               │    the blocks, via RoPE in the gated-attention sublayer and
+               │    the causal convolutions of the linear-attention ones)
+        Qwen3NextBlock x num_layers:
+            3x [Zero-Centered RMSNorm → GatedLinearAttentionBlock → MoE → Residual]
+            1x [Zero-Centered RMSNorm → GatedAttention → MoE → Residual]
+               │
+               ▼
+        Final Zero-Centered RMSNorm
+               │
+               ▼
+        Linear Projection → Logits [vocab_size]
+
+    :param vocab_size: Size of the vocabulary. Defaults to 151936.
+    :param hidden_size: Dimensionality of encoder layers. Defaults to 2048.
+    :param num_layers: Number of transformer blocks. Defaults to 12.
+    :param num_attention_heads: Number of attention heads. Defaults to 16.
+    :param num_key_value_heads: Number of key/value heads for grouped-query
+        attention in each block's gated-attention sublayer. Must divide
+        num_attention_heads. Defaults to 4, so the default model's KV cache
+        is num_attention_heads // num_key_value_heads times smaller than plain MHA.
+    :param max_seq_len: Maximum sequence length. Defaults to 8192.
+    :param num_experts: Total number of experts in MoE layers. Defaults to 64.
+    :param num_experts_per_tok: Number of experts activated per token. Defaults to 8.
+    :param moe_intermediate_size: Individual expert intermediate size. Defaults to 1408.
+    :param norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
+    :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
+    :param initializer_range: Standard deviation for weight initialization. Defaults to 0.02.
+    :param normalization_type: Type of normalization layer. Defaults to "zero_centered_rms_norm".
+    :param ffn_type: Type of feed-forward network in experts. Defaults to "swiglu".
+    :param use_stochastic_depth: Whether to enable stochastic depth. Defaults to False.
+    :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
+    :param kwargs: Additional keyword arguments for the `keras.Model` base class.
     """
 
     # Model variant configurations following Qwen3 Next specifications
     MODEL_VARIANTS = {
-        # DECISION plan-2026-08-22T035419-a11304c8/D-112
-        # Every value below is the RELEASED config, fetched 2026-08-22 from
-        # https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/raw/main/config.json
-        # Five of them used to be something else, and the row still called
-        # itself "80B-A3B": num_key_value_heads 4 (released 2), num_experts 64
-        # (released 512), num_experts_per_tok 8 (released 10),
-        # moe_intermediate_size 1408 (released 512), max_seq_len 8192 (released
-        # max_position_embeddings 262144). A 64-expert router is not the
-        # 512-expert router the name promises, and `active = 8/64 = 12.5%` is
-        # not the released `10/512 = 2.0%` -- the sparsity headline of this
-        # architecture. Do NOT shrink these back "so it instantiates": nothing
-        # in the repo builds this variant at full size (the tests override
-        # `num_layers`/`hidden_size` down, see
-        # `test_qwen3_next.py:280`), and a variant table's job is to state the
-        # reference, with `from_variant("80b_a3b", num_experts=64)` available
-        # for anyone who wants a feasible stand-in.
-        #
-        # CLOSED 2026-08-23 by D-204 (N-10). The divergence this note used to
-        # record -- released `head_dim: 256` DECOUPLED from
-        # `hidden_size / num_attention_heads = 2048/16 = 128`, so this model had
-        # HALF the released per-head width -- is fixed. `head_dim` is now a
-        # constructor argument defaulting to `None` (= the quotient), and the row
-        # below carries the released 256. Re-fetched 2026-08-23 from the same
-        # URL: `"head_dim": 256, "hidden_size": 2048, "num_attention_heads": 16`.
-        # See decisions.md D-112 and D-204.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-112 and D-204: every value
+        # below is the released Qwen3-Next-80B-A3B config, fetched 2026-08-22;
+        # do not shrink for feasibility, use from_variant(num_experts=...) instead.
+        # See decisions.md.
         "80b_a3b": {
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -303,15 +229,9 @@ class Qwen3Next(keras.Model):
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-204 -- head_dim is DECOUPLED
-        # upstream and must stay an explicit override here. The released
-        # Qwen3-Next config (fetched 2026-08-23) sets `head_dim: 256` alongside
-        # `hidden_size: 2048` and `num_attention_heads: 16`, whose quotient is
-        # 128. Do NOT "simplify" this back to the bare quotient: that silently
-        # halves the per-head width of the 80b_a3b variant, and the resulting
-        # model is not the architecture its variant name claims. `None` keeps the
-        # quotient, so every other variant and every existing caller is unchanged
-        # BY CONSTRUCTION.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-204: head_dim is decoupled
+        # upstream (released 256 vs quotient 128) and must stay an explicit
+        # override; None keeps the quotient for every other variant. See decisions.md.
         self.head_dim = (
             int(head_dim)
             if head_dim is not None
@@ -396,12 +316,9 @@ class Qwen3Next(keras.Model):
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
-                    # DECISION plan-2026-07-30T140922-8af1028f/D-037
-                    # Model-owned conveniences, pre-filtered against `ffn_type`.
-                    # Do NOT unwrap: `FFNExpert` forwards this dict to
-                    # `create_ffn_from_config` verbatim and the factory RAISES on
-                    # a key the type does not accept. Full reasoning at the twin
-                    # anchor in `models/language/qwen/qwen3.py`.
+                    # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter
+                    # against ffn_type — the factory raises on an unaccepted key.
+                    # Full reasoning at the twin anchor in qwen3.py. See decisions.md.
                     ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
@@ -423,29 +340,9 @@ class Qwen3Next(keras.Model):
             block = Qwen3NextBlock(
                 dim=self.hidden_size,
                 num_heads=self.num_attention_heads,
-                # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: this is the line
-                # that was missing. `num_key_value_heads` was validated (:313),
-                # stored (:258), serialized (:502) and printed by `summary()`
-                # (:540) while reaching nothing, so every model was plain MHA and
-                # `num_key_value_heads=1` bought no KV-cache saving at all.
-                #
-                # Wiring it up is a CHECKPOINT BREAK, and deliberately so: every
-                # variant here ships `num_attention_heads=16,
-                # num_key_value_heads=4`, which narrows `k_linear`, `v_linear`,
-                # `k_norm` and `v_norm` 4x per block. Any `.keras` file written
-                # from this model before 2026-08-15 no longer loads; it must be
-                # retrained.
-                #
-                # MEASURED 2026-08-17: `load_weights(skip_mismatch=False)` -- the
-                # default -- raises with "A total of 4 objects could not be
-                # loaded" PER BLOCK, so that path fails loudly. But
-                # `skip_mismatch=True` RETURNS SUCCESSFULLY with only 3 of every
-                # 10 variables restored, and `load_weights_or_raise` does NOT
-                # catch it: its condition is `changed == 0`, and a partial
-                # restore is not zero. Do NOT pass `skip_mismatch=True` when
-                # loading a checkpoint into this model -- it will hand you a
-                # model whose K/V projections and K/V norms are random.
-                # See decisions.md D-071.
+                # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: wiring this in is
+                # a checkpoint break — never pass skip_mismatch=True loading an old
+                # checkpoint, it silently randomizes K/V projections. See decisions.md.
                 num_kv_heads=self.num_key_value_heads,
                 head_dim=self.head_dim,
                 max_seq_len=self.max_seq_len,
@@ -476,38 +373,15 @@ class Qwen3Next(keras.Model):
             name='lm_head'
         )
 
+    # DECISION plan-2026-08-23T091307-9a110062/D-421: coerce the sequence axis
+    # to a concrete 1 before tracing — materialize_sublayers calls `call` on
+    # KerasTensor placeholders where seq_len is None. No weight shape here
+    # depends on seq_len. Do not generalize this into materialize_sublayers
+    # itself; other models on that helper have not been checked. See decisions.md.
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from an explicit `build` call.
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-421
-        The sequence axis is coerced to a concrete `1` before the trace, and
-        that is the whole fix. `materialize_sublayers` invokes `self.call`
-        DIRECTLY on `KerasTensor` placeholders, and on that path
-        `keras.ops.shape(hidden_states)[1]` is the Python value `None`, which
-        `build_causal_attention_mask` rejects with `ValueError: seq_len
-        required for causal mask`. Real callers hit exactly this: both
-        `create_qwen3_next_*` factories embed the backbone in a functional
-        graph built from `keras.Input(shape=(None,))`, so `build` is entered
-        with a `None` sequence axis. The subsequent functional trace goes
-        through `Layer.__call__` -> `compute_output_spec`, which under the
-        TensorFlow backend traces `call` with real graph placeholders where
-        `ops.shape(...)[1]` is a dynamic scalar tensor, so the dynamic sequence
-        length survives untouched.
-
-        `1` is safe because NO weight shape here depends on `seq_len`: the RoPE
-        tables are sized from `self.max_seq_len` (config), not from the traced
-        input. MEASURED: build at the coerced `seq_len=1`, then call at
-        `seq_len=20` -> 97 weights both times, output `(2, 20, 64)`.
-
-        WHAT NOT TO DO: do not push this substitution into
-        `materialize_sublayers` as a generic "retry with a concrete sequence
-        axis". It is safe HERE because the seq-independence of every weight
-        shape was measured HERE; the other 20 models on that helper have not
-        been checked and one of them sizing a positional table from the traced
-        length would be silently mis-built. See `decisions.md` D-421.
-
-        Args:
-            input_shape: Shape, or nest of shapes, of `call`'s `inputs`.
+        :param input_shape: Shape, or nest of shapes, of `call`'s `inputs`.
         """
         if self.built:
             return
@@ -524,16 +398,13 @@ class Qwen3Next(keras.Model):
         """
         Forward pass of the Qwen3 Next model.
 
-        Args:
-            inputs: Input token IDs or dictionary containing inputs.
-            attention_mask: Mask to avoid attention on padding tokens.
-            training: Boolean, whether the model is in training mode.
-            return_dict: Boolean, whether to return outputs as a dictionary.
-
-        Returns:
-            Model outputs. The format depends on `return_dict`:
-            - `return_dict=False`: `logits` tensor of shape (batch, seq_len, vocab_size).
-            - `return_dict=True`: Dictionary with keys `logits` and optionally others.
+        :param inputs: Input token IDs or dictionary containing inputs.
+        :param attention_mask: Mask to avoid attention on padding tokens.
+        :param training: Whether the model is in training mode.
+        :param return_dict: Whether to return outputs as a dictionary.
+        :return: With `return_dict=False`, the logits tensor, shape
+            (batch, seq_len, vocab_size). With `return_dict=True`, a
+            dictionary with key `logits` and optionally others.
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -581,12 +452,9 @@ class Qwen3Next(keras.Model):
         """
         Create a Qwen3 Next model from a predefined variant.
 
-        Args:
-            variant: String, one of "80b_a3b", "80b", "small", "tiny"
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            Qwen3Next model instance
+        :param variant: One of "80b_a3b", "80b", "small", "tiny".
+        :param kwargs: Additional arguments passed to the constructor.
+        :return: Qwen3Next model instance.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -680,12 +548,8 @@ def create_qwen3_next_generation(config: Dict[str, Any]) -> keras.Model:
     `attention_mask` and returns token logits, suitable for autoregressive
     text generation.
 
-    Args:
-        config: A dictionary containing the complete configuration for the
-            `Qwen3Next` base model.
-
-    Returns:
-        A compiled Keras `Model` ready for generation tasks.
+    :param config: Complete configuration for the `Qwen3Next` base model.
+    :return: A compiled Keras `Model` ready for generation tasks.
     """
     logger.info("Creating Qwen3 Next model for text generation.")
     logger.debug(f"Generation model config: {config}")
@@ -725,26 +589,19 @@ def create_qwen3_next_classification(
     It supports different pooling strategies for aggregating sequence
     information.
 
-    Args:
-        config: A dictionary containing the complete configuration for the
-            `Qwen3Next` base model.
-        num_labels: The number of output labels for the classification task.
-        pooling_strategy: The method to pool the sequence output.
-            - "last": Use the output at the LAST position kept by
-              `attention_mask` — the only position that has attended to the
-              whole sequence under this backbone's causal mask.
-            - "mean": Use the mean of all token outputs (respecting attention mask).
-            - "cls": Use the output of the first token. Under a causal mask this
-              position attends only to itself, so the pooled vector is a
-              function of the first token id ALONE; it is kept only for
-              bidirectional-era checkpoints.
-            Defaults to "last".
-        classifier_dropout_rate: The dropout rate for the classification head. If
-            `None`, it defaults to the `dropout_rate` from the main `config`.
-            Defaults to `None`.
-
-    Returns:
-        A compiled Keras `Model` ready for classification tasks.
+    :param config: Complete configuration for the `Qwen3Next` base model.
+    :param num_labels: Number of output labels for the classification task.
+    :param pooling_strategy: Method to pool the sequence output. "last" uses
+        the output at the last position kept by `attention_mask` — the only
+        position that has attended to the whole sequence under this
+        backbone's causal mask. "mean" averages all token outputs,
+        respecting the attention mask. "cls" uses the first token's output;
+        under a causal mask that position attends only to itself, so the
+        pooled vector is a function of the first token id alone, and this
+        mode is kept only for bidirectional-era checkpoints. Defaults to "last".
+    :param classifier_dropout_rate: Dropout rate for the classification
+        head. If None, defaults to the `dropout_rate` from `config`.
+    :return: A compiled Keras `Model` ready for classification tasks.
     """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
@@ -824,41 +681,37 @@ def create_qwen3_next(
     2. Overridden by `config_or_variant` if it's a dictionary.
     3. Finally, overridden by any explicit `**kwargs`.
 
-    Args:
-        config_or_variant: Either a variant string (e.g., "tiny", "small")
-            or a dictionary with custom model configuration.
-        task_type: The type of model to create. Supported values are:
-            - "generation": For autoregressive language modeling.
-            - "classification": For sequence classification.
-        **kwargs: Additional keyword arguments to override configuration
-            parameters or provide task-specific settings.
-            - For base model: `hidden_size`, `num_layers`, etc.
-            - For classification task: `num_labels`, `pooling_strategy`,
-              `classifier_dropout_rate`.
-
-    Returns:
-        A Keras `Model` configured for the specified task.
+    :param config_or_variant: Either a variant string (e.g., "tiny", "small")
+        or a dictionary with a custom model configuration.
+    :param task_type: Type of model to create: "generation" for
+        autoregressive language modeling, or "classification" for sequence
+        classification.
+    :param kwargs: Additional keyword arguments to override configuration
+        parameters (e.g. `hidden_size`, `num_layers`) or provide
+        task-specific settings for classification (`num_labels`,
+        `pooling_strategy`, `classifier_dropout_rate`).
+    :return: A Keras `Model` configured for the specified task.
 
     Example:
-        ```python
-        # Create a standard 'tiny' model for generation
-        gen_model = create_qwen3_next("tiny")
+        .. code-block:: python
 
-        # Create a 'small' model for classification with 5 labels
-        clf_model = create_qwen3_next("small", task_type="classification", num_labels=5)
+            # Create a standard 'tiny' model for generation
+            gen_model = create_qwen3_next("tiny")
 
-        # Create a custom 'tiny' model with fewer layers for generation
-        custom_gen = create_qwen3_next("tiny", num_layers=2)
+            # Create a 'small' model for classification with 5 labels
+            clf_model = create_qwen3_next("small", task_type="classification", num_labels=5)
 
-        # Create a custom classification model from a dictionary with mean pooling
-        my_config = {"hidden_size": 128, "num_layers": 2, ...}
-        custom_clf = create_qwen3_next(
-            my_config,
-            task_type="classification",
-            num_labels=10,
-            pooling_strategy="mean"
-        )
-        ```
+            # Create a custom 'tiny' model with fewer layers for generation
+            custom_gen = create_qwen3_next("tiny", num_layers=2)
+
+            # Create a custom classification model from a dictionary with mean pooling
+            my_config = {"hidden_size": 128, "num_layers": 2, ...}
+            custom_clf = create_qwen3_next(
+                my_config,
+                task_type="classification",
+                num_labels=10,
+                pooling_strategy="mean"
+            )
     """
     # 1. Determine base configuration from variant or dict
     if isinstance(config_or_variant, str):

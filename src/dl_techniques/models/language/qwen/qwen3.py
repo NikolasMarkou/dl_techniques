@@ -2,77 +2,34 @@
 Qwen3 decoder-only language model with grouped-query attention, RoPE, and
 mixture-of-experts feed-forward layers at selectable depths.
 
-A dense transformer ties two quantities that a language model would rather keep
-apart. Knowledge lives in parameters, so quality wants the parameter count large;
-serving cost lives in the FLOPs spent per token, so deployment wants it small. In a
-dense model there is one number, and raising it raises both. Sparse
-mixture-of-experts breaks the tie: the FFN of a block is replaced by `num_experts`
-independent FFNs plus a linear router that selects `num_experts_per_tok` of them for
-each token. Parameters scale with `num_experts`; arithmetic scales with
-`num_experts_per_tok`. The 30B-coder variant routes 8 of 128 experts, so it carries
-roughly sixteen times the FFN capacity it pays for at inference.
+A dense transformer's parameter count and its per-token FLOP cost are the
+same number, so raising quality always raises serving cost. Sparse
+mixture-of-experts breaks that tie: a block's FFN becomes `num_experts`
+independent FFNs plus a router that selects `num_experts_per_tok` of them
+per token, so parameters scale with `num_experts` while arithmetic scales
+with `num_experts_per_tok`. `moe_layers` names which block indices get this
+treatment — the variants interleave dense and sparse blocks rather than
+making every layer sparse, so a stable dense pathway exists at every depth.
 
-The saving is not free, and where it is spent shows in the configuration. Routing
-is discrete, so the loss surface has a combinatorial component that the router must
-learn under gradient signal it only receives for the experts it already selected;
-expert utilization can collapse, and memory bandwidth rather than arithmetic becomes
-the binding constraint. This is why `moe_layers` is a list of *indices* rather than
-a flag: the variants interleave — every third layer for 30b-coder, layers 3/6/9 for
-small — leaving the remaining blocks dense so that a stable, fully-trained pathway
-exists at every depth. A layer not named in `moe_layers` receives `moe_config=None`
-and is an ordinary SwiGLU block.
+Attention is grouped-query with RoPE: GQA shares each key/value head across
+several query heads, shrinking the KV cache by that ratio, which is what
+lets the 30B-coder variant quote a 262144-token context. `rope_theta` scales
+with context length across variants (10,000 at 4096 tokens up to
+10,000,000 at 262144) so the slowest rotation's wavelength stays ahead of
+the context — otherwise distant positions become numerically
+indistinguishable from near ones.
 
-Attention is grouped-query with rotary position embeddings. GQA shares each key/value
-head across `num_attention_heads // num_key_value_heads` query heads, which shrinks
-the KV cache by exactly that ratio — the dominant memory cost at long context, and
-the reason the 30b-coder variant can quote a 262144-token window at all. RoPE encodes
-position as a rotation of query and key pairs by an angle proportional to absolute
-position, so the score between positions `i` and `j` depends only on `i - j`.
-`rope_theta` is the base of the geometric frequency ladder and is deliberately scaled
-with the context length across variants — 10,000 at 4096 tokens up to 10,000,000 at
-262144. The reason is concrete: the slowest rotation has wavelength on the order of
-`2*pi*theta`, and once the context exceeds it the angles wrap, making distant
-positions numerically indistinguishable from near ones. A large context with a small
-theta is not merely untrained, it is ambiguous.
-
-Causality is imposed at the model, not by the blocks. `TransformerLayer` defaults
-`attention_mask=None`, and both `GroupQueryAttention` and the gated attention used by
-Qwen3Next mask only when a mask is handed to them — neither manufactures a causal
-one. `call` therefore builds the mask once via `build_causal_attention_mask` and
-passes the same tensor to every block. That helper works in *block* semantics
-(`True` = suppress), OR-ing the lower-triangular causal mask with the padding mask
-derived from `attention_mask == 0`, and inverts once at the end to the *attend*
-semantics (`True` = may attend) the attention layers expect. This is a repair, not
-an embellishment: before it existed the stack forwarded only the padding mask, so
-every token attended to its own future and `task_type="generation"` was training
-next-token prediction on a model that had already been shown the answer. Removing or
-bypassing this call reintroduces exactly that.
-
-The FFN keyword dicts are routed through `assemble_ffn_config` rather than passed as
-literals, because they are this model's conveniences rather than the caller's
-request and the FFN factory raises on a key its target type does not accept. Only 6
-of the 21 registered FFN types take `ffn_expansion_factor`, so an unfiltered literal
-made `ffn_type=` fail for most of the registry, blaming a key the user never wrote.
-
-Blocks are pre-norm with RMSNorm and no biases anywhere. Stochastic depth, when
-enabled, follows a linear rate schedule from 0 to `stochastic_depth_rate` across
-depth, so early layers — whose outputs everything downstream depends on — are
-dropped rarely and late layers often. The LM head is an independent bias-free
-`Dense`, not the transposed embedding matrix, so input and output embeddings are
-untied.
-
-One consequence of the `call` signature is worth stating because it is easy to
-misread. With `return_dict=False` (the default) the model returns *logits*, and
-`create_qwen3_classification` pools that returned tensor — so the classifier head
-sits on top of the `vocab_size`-dimensional logits rather than the `hidden_size`
-hidden states. That differs from `models/language/gemma/gemma3.py`, whose classification
-factory re-traces the backbone's sublayers specifically to reach the hidden states.
-It works, but it is a much wider and differently-conditioned pooling input than the
-usual recipe, and a checkpoint's classifier is not portable between the two shapes.
-
-No pretrained-weight path exists in this package: `from_variant` takes no
-`pretrained` argument, so there is no way for a request for trained weights to be
-answered silently with a random initialization.
+Causality is imposed once at the model level: `call` builds a combined
+causal-plus-padding mask via `build_causal_attention_mask` and passes the
+same tensor to every block, since neither `TransformerLayer` nor the
+attention layers it wraps manufacture one on their own. Blocks are pre-norm
+RMSNorm with no biases; the LM head is an independent bias-free `Dense`, so
+input and output embeddings are untied. With `return_dict=False` (the
+default) the model returns logits, and `create_qwen3_classification` pools
+that vocab_size-dimensional tensor rather than the hidden_size hidden
+states — a checkpoint's classifier head is not portable to a model that
+pools hidden states instead. `from_variant` takes no `pretrained` argument;
+no pretrained-weight path exists in this package.
 
 References:
     - Qwen Team, 2025. Qwen3 Technical Report.
@@ -117,60 +74,50 @@ class Qwen3(keras.Model):
     """
     Qwen3 model with standard transformer architecture and optional MoE layers.
 
-    This implementation follows the same pattern as Qwen3Next but uses standard
-    TransformerLayer blocks instead of custom Qwen3NextBlock. Some layers can
-    use Mixture of Experts while others use standard dense FFN.
+    Uses standard TransformerLayer blocks rather than the custom
+    Qwen3NextBlock. Some layers can use Mixture of Experts while others use
+    a standard dense FFN.
 
-    **Architecture Overview:**
-    ```
-    Input(input_ids)
-           │
-           ▼
-    Token Embeddings (vocab_size, hidden_size)
-           │
-           ▼
-    TransformerLayer₁:
-        GroupedQueryAttention (with RoPE) → RMSNorm → SwiGLU/MoE → Residual
-           │
-           ▼
-          ...
-           │
-           ▼
-    TransformerLayerₙ:
-        GroupedQueryAttention (with RoPE) → RMSNorm → SwiGLU/MoE → Residual
-           │
-           ▼
-    Final RMSNorm
-           │
-           ▼
-    Linear Projection → Logits (vocab_size)
-    ```
+    Architecture:
 
-    Args:
-        vocab_size: Integer, size of the vocabulary. Defaults to 151936.
-        hidden_size: Integer, dimensionality of encoder layers. Defaults to 2048.
-        num_layers: Integer, number of transformer blocks. Defaults to 12.
-        num_attention_heads: Integer, number of attention heads. Defaults to 16.
-        num_key_value_heads: Integer, number of key-value heads for GQA. Defaults to 4.
-        max_seq_len: Integer, maximum sequence length. Defaults to 8192.
-        moe_layers: List of integers, layer indices that use MoE. Defaults to empty list.
-        num_experts: Integer, total number of experts in MoE layers. Defaults to 64.
-        num_experts_per_tok: Integer, number of experts activated per token. Defaults to 8.
-        moe_intermediate_size: Integer, individual expert intermediate size. Defaults to 1408.
-        norm_eps: Float, epsilon for normalization layers. Defaults to 1e-6.
-            Applies to `final_norm` AND to every one of the `2 * num_layers`
-            in-block norms. Numerics change (2026-08-19, decisions.md D-007):
-            the in-block norms previously ignored this knob and ran at the
-            normalization factory's own 1e-6 default -- invisible at the default
-            `norm_eps=1e-6`, a silent mismatch at any other value. Weight shapes
-            are unchanged, so existing `.keras` files still load.
-        dropout_rate: Float, dropout rate for regularization. Defaults to 0.0.
-        initializer_range: Float, standard deviation for weight initialization. Defaults to 0.02.
-        normalization_type: String, type of normalization layer. Defaults to "rms_norm".
-        ffn_type: String, type of feed-forward network in experts. Defaults to "swiglu".
-        use_stochastic_depth: Boolean, whether to enable stochastic depth. Defaults to False.
-        stochastic_depth_rate: Float, drop path rate for stochastic depth. Defaults to 0.1.
-        **kwargs: Additional keyword arguments for the `keras.Model` base class.
+    .. code-block:: text
+
+        Input (input_ids)
+               │
+               ▼
+        Token Embeddings [vocab_size, hidden_size]
+               │
+               ▼
+        TransformerLayer x num_layers:
+            GroupedQueryAttention (RoPE) → RMSNorm → SwiGLU/MoE → Residual
+               │
+               ▼
+        Final RMSNorm
+               │
+               ▼
+        Linear Projection → Logits [vocab_size]
+
+    :param vocab_size: Size of the vocabulary. Defaults to 151936.
+    :param hidden_size: Dimensionality of encoder layers. Defaults to 2048.
+    :param num_layers: Number of transformer blocks. Defaults to 12.
+    :param num_attention_heads: Number of attention heads. Defaults to 16.
+    :param num_key_value_heads: Number of key-value heads for GQA. Defaults to 4.
+    :param max_seq_len: Maximum sequence length. Defaults to 8192.
+    :param moe_layers: Layer indices that use MoE. Defaults to empty list.
+    :param num_experts: Total number of experts in MoE layers. Defaults to 64.
+    :param num_experts_per_tok: Number of experts activated per token. Defaults to 8.
+    :param moe_intermediate_size: Individual expert intermediate size. Defaults to 1408.
+    :param norm_eps: Epsilon for normalization layers. Defaults to 1e-6.
+        Applies to `final_norm` and to every one of the `2 * num_layers`
+        in-block norms (decisions.md D-007). Weight shapes are unchanged, so
+        existing `.keras` files still load.
+    :param dropout_rate: Dropout rate for regularization. Defaults to 0.0.
+    :param initializer_range: Standard deviation for weight initialization. Defaults to 0.02.
+    :param normalization_type: Type of normalization layer. Defaults to "rms_norm".
+    :param ffn_type: Type of feed-forward network in experts. Defaults to "swiglu".
+    :param use_stochastic_depth: Whether to enable stochastic depth. Defaults to False.
+    :param stochastic_depth_rate: Drop path rate for stochastic depth. Defaults to 0.1.
+    :param kwargs: Additional keyword arguments for the `keras.Model` base class.
     """
 
     # Model variant configurations following Qwen3 specifications
@@ -370,14 +317,9 @@ class Qwen3(keras.Model):
             moe_config = MoEConfig(
                 num_experts=self.num_experts,
                 expert_config=ExpertConfig(
-                    # DECISION plan-2026-07-30T140922-8af1028f/D-037
-                    # Same case as the `ffn_args` site below: these two keys are
-                    # THIS MODEL's conveniences, not the user's request, and
-                    # `FFNExpert` hands the dict to `create_ffn_from_config`
-                    # verbatim. Do NOT drop the `assemble_ffn_config` wrapper --
-                    # `ffn_expansion_factor` is accepted by only 6 of the 21
-                    # registry types, so without it every other `ffn_type` dies
-                    # at construction blaming a key the user never wrote.
+                    # DECISION plan-2026-07-30T140922-8af1028f/D-037: keep the
+                    # assemble_ffn_config wrapper — an unfiltered literal fails
+                    # for the 15 of 21 FFN types that reject ffn_expansion_factor.
                     ffn_config=assemble_ffn_config(self.ffn_type, {
                         "type": self.ffn_type,
                         "output_dim": self.hidden_size,
@@ -407,19 +349,9 @@ class Qwen3(keras.Model):
                 'rope_theta': self.rope_theta
             }
 
-            # DECISION plan-2026-07-30T140922-8af1028f/D-037
-            # This dict is THIS MODEL's own generic convenience set, not an end
-            # user's explicit request, so it must be pre-filtered against the
-            # target `ffn_type` before it enters `TransformerLayer.ffn_args`.
-            # Do NOT "simplify" this back to a bare dict literal: `ffn_args` is
-            # the ONE channel `assemble_ffn_config` deliberately forwards
-            # UNFILTERED (D-017), and `create_ffn_layer` now RAISES on a key the
-            # type does not accept (D-023). `ffn_expansion_factor` is accepted by
-            # only 6 of the 21 registry types, so the bare literal made
-            # `Qwen3(ffn_type=...)` fail for 11 of the 12 types that used to
-            # work -- measured, both sides, against pristine `f013c232`.
-            # Pinned by `TestModelBuiltFFNKwargDictSweep` in
-            # `tests/test_layers/test_ffn/test_factory.py`.
+            # DECISION plan-2026-07-30T140922-8af1028f/D-037: pre-filter through
+            # assemble_ffn_config — a bare dict literal fails Qwen3(ffn_type=...)
+            # for 11 of 12 previously-working types. See decisions.md.
             ffn_args = assemble_ffn_config(self.ffn_type, {
                 'output_dim': self.hidden_size,
                 'ffn_expansion_factor': 4,  # Standard 4x expansion
@@ -427,18 +359,10 @@ class Qwen3(keras.Model):
                 'use_bias': False
             })
 
-            # DECISION plan-2026-08-19T070627-a616f581/D-007
-            # `norm_eps` used to reach ONLY `final_norm` below (F-10). This
-            # construction passed neither `attention_norm_args` nor
-            # `ffn_norm_args`, so all `2 * num_layers` block norms inherited
-            # `create_normalization_layer`'s own `epsilon=1e-6` default.
-            # The trap here: `norm_eps`'s DEFAULT is ALSO 1e-6, so at default
-            # construction the defect is invisible -- measured pre-fix at
-            # `norm_eps=1e-6` the block norms read 1e-06 and looked correct.
-            # Only a non-default knob exposes it (pre-fix at `norm_eps=1e-3`:
-            # 0 of 4 block norms at 1e-3, all at 1e-06). Any test for this MUST
-            # therefore use a non-default `norm_eps`.
-            # See decisions.md D-007.
+            # DECISION plan-2026-08-19T070627-a616f581/D-007: norm_eps must reach
+            # the block norms via attention_norm_args/ffn_norm_args, not just
+            # final_norm — default norm_eps equals the factory default (1e-6),
+            # which hid this for any test at default. See decisions.md.
             block = TransformerLayer(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_attention_heads,
@@ -488,16 +412,13 @@ class Qwen3(keras.Model):
         """
         Forward pass of the Qwen3 model.
 
-        Args:
-            inputs: Input token IDs or dictionary containing inputs.
-            attention_mask: Mask to avoid attention on padding tokens.
-            training: Boolean, whether the model is in training mode.
-            return_dict: Boolean, whether to return outputs as a dictionary.
-
-        Returns:
-            Model outputs. The format depends on `return_dict`:
-            - `return_dict=False`: `logits` tensor of shape (batch, seq_len, vocab_size).
-            - `return_dict=True`: Dictionary with keys `logits` and optionally others.
+        :param inputs: Input token IDs or dictionary containing inputs.
+        :param attention_mask: Mask to avoid attention on padding tokens.
+        :param training: Whether the model is in training mode.
+        :param return_dict: Whether to return outputs as a dictionary.
+        :return: With `return_dict=False`, the logits tensor, shape
+            (batch, seq_len, vocab_size). With `return_dict=True`, a
+            dictionary with key `logits` and optionally others.
         """
         # Parse inputs
         if isinstance(inputs, dict):
@@ -545,12 +466,9 @@ class Qwen3(keras.Model):
         """
         Create a Qwen3 model from a predefined variant.
 
-        Args:
-            variant: String, one of "30b-coder", "medium", "small", "tiny"
-            **kwargs: Additional arguments passed to the constructor
-
-        Returns:
-            Qwen3 model instance
+        :param variant: One of "30b-coder", "medium", "small", "tiny".
+        :param kwargs: Additional arguments passed to the constructor.
+        :return: Qwen3 model instance.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -644,12 +562,8 @@ def create_qwen3_generation(config: Dict[str, Any]) -> keras.Model:
     `attention_mask` and returns token logits, suitable for autoregressive
     text generation.
 
-    Args:
-        config: A dictionary containing the complete configuration for the
-            `Qwen3` base model.
-
-    Returns:
-        A compiled Keras `Model` ready for generation tasks.
+    :param config: Complete configuration for the `Qwen3` base model.
+    :return: A compiled Keras `Model` ready for generation tasks.
     """
     logger.info("Creating Qwen3 model for text generation.")
     logger.debug(f"Generation model config: {config}")
@@ -689,39 +603,25 @@ def create_qwen3_classification(
     It supports different pooling strategies for aggregating sequence
     information.
 
-    Args:
-        config: A dictionary containing the complete configuration for the
-            `Qwen3` base model.
-        num_labels: The number of output labels for the classification task.
-        pooling_strategy: The method to pool the sequence output.
-            - "last": Use the output at the LAST position kept by
-              `attention_mask` — the only position that has attended to the
-              whole sequence under this backbone's causal mask.
-            - "mean": Use the mean of all token outputs (respecting attention mask).
-            - "cls": Use the output of the first token. Under a causal mask this
-              position attends only to itself, so the pooled vector is a
-              function of the first token id ALONE; it is kept only for
-              bidirectional-era checkpoints.
-            Defaults to "last".
-        classifier_dropout_rate: The dropout rate for the classification head. If
-            `None`, it defaults to the `dropout_rate` from the main `config`.
-            Defaults to `None`.
-
-    Returns:
-        A compiled Keras `Model` ready for classification tasks.
+    :param config: Complete configuration for the `Qwen3` base model.
+    :param num_labels: Number of output labels for the classification task.
+    :param pooling_strategy: Method to pool the sequence output. "last" uses
+        the output at the last position kept by `attention_mask` — the only
+        position that has attended to the whole sequence under this
+        backbone's causal mask. "mean" averages all token outputs,
+        respecting the attention mask. "cls" uses the first token's output;
+        under a causal mask that position attends only to itself, so the
+        pooled vector is a function of the first token id alone, and this
+        mode is kept only for bidirectional-era checkpoints. Defaults to "last".
+    :param classifier_dropout_rate: Dropout rate for the classification
+        head. If None, defaults to the `dropout_rate` from `config`.
+    :return: A compiled Keras `Model` ready for classification tasks.
     """
     if num_labels <= 0:
         raise ValueError(f"num_labels must be positive, got {num_labels}")
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: the default is "last", not
-    # "cls". `Qwen3` is STRICTLY CAUSALLY MASKED, so position 0 attends only to
-    # itself and `cls` pooling makes the classifier a function of the first token
-    # id alone — measured on CPU at HEAD: changing token 3 of an 8-token input
-    # moved the logits by exactly 0.000e+00 under `cls`, while changing token 0
-    # moved them by 3.519e-02. The failure is SILENT (loss decreases; accuracy
-    # plateaus at the first-token prior). Do NOT restore "cls" as the default,
-    # and do NOT "simplify" `last` to `inputs[:, -1, :]`: SequencePooling's
-    # `last` resolves the last position KEPT BY THE MASK, so it skips right
-    # padding, which a bare -1 index does not. See decisions.md D-029.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-029: default is "last", not
+    # "cls" — Qwen3 is causally masked, so "cls" pools only the first token id.
+    # Do not simplify "last" to inputs[:, -1, :]. See decisions.md.
     if pooling_strategy not in ["last", "cls", "mean"]:
         raise ValueError(
             f"pooling_strategy must be 'last', 'cls' or 'mean', got "
@@ -741,13 +641,9 @@ def create_qwen3_classification(
     )
 
     # Apply the selected pooling strategy via the shared SequencePooling layer.
-    # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via shipped SequencePooling
-    # (byte-identical cls/mean; parameter-free -> no checkpoint change) -- was a duplicated
-    # hand-rolled cls/mean if/else across qwen3/qwen3_next/gemma3 (and qwen3_som, deleted at
-    # plan-2026-08-10-3649c19e). Do NOT re-inline
-    # a bespoke masked-mean here; SequencePooling('mean') reproduces it exactly (probe: 0.0).
-    # The `mask=attention_mask` argument is LOAD-BEARING for `last` (D-029): it is
-    # what makes the gather land on the last REAL token rather than on padding.
+    # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via shipped
+    # SequencePooling, not a hand-rolled cls/mean. mask=attention_mask is
+    # required for "last" (D-029) to land on the last real token. See decisions.md.
     pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
         sequence_output, mask=attention_mask
     )
@@ -799,41 +695,37 @@ def create_qwen3(
     2. Overridden by `config_or_variant` if it's a dictionary.
     3. Finally, overridden by any explicit `**kwargs`.
 
-    Args:
-        config_or_variant: Either a variant string (e.g., "tiny", "small")
-            or a dictionary with custom model configuration.
-        task_type: The type of model to create. Supported values are:
-            - "generation": For autoregressive language modeling.
-            - "classification": For sequence classification.
-        **kwargs: Additional keyword arguments to override configuration
-            parameters or provide task-specific settings.
-            - For base model: `hidden_size`, `num_layers`, etc.
-            - For classification task: `num_labels`, `pooling_strategy`,
-              `classifier_dropout_rate`.
-
-    Returns:
-        A Keras `Model` configured for the specified task.
+    :param config_or_variant: Either a variant string (e.g., "tiny", "small")
+        or a dictionary with a custom model configuration.
+    :param task_type: Type of model to create: "generation" for
+        autoregressive language modeling, or "classification" for sequence
+        classification.
+    :param kwargs: Additional keyword arguments to override configuration
+        parameters (e.g. `hidden_size`, `num_layers`) or provide
+        task-specific settings for classification (`num_labels`,
+        `pooling_strategy`, `classifier_dropout_rate`).
+    :return: A Keras `Model` configured for the specified task.
 
     Example:
-        ```python
-        # Create a standard 'tiny' model for generation
-        gen_model = create_qwen3("tiny")
+        .. code-block:: python
 
-        # Create a 'small' model for classification with 5 labels
-        clf_model = create_qwen3("small", task_type="classification", num_labels=5)
+            # Create a standard 'tiny' model for generation
+            gen_model = create_qwen3("tiny")
 
-        # Create a custom 'tiny' model with fewer layers for generation
-        custom_gen = create_qwen3("tiny", num_layers=2)
+            # Create a 'small' model for classification with 5 labels
+            clf_model = create_qwen3("small", task_type="classification", num_labels=5)
 
-        # Create a custom classification model from a dictionary with mean pooling
-        my_config = {"hidden_size": 128, "num_layers": 2, ...}
-        custom_clf = create_qwen3(
-            my_config,
-            task_type="classification",
-            num_labels=10,
-            pooling_strategy="mean"
-        )
-        ```
+            # Create a custom 'tiny' model with fewer layers for generation
+            custom_gen = create_qwen3("tiny", num_layers=2)
+
+            # Create a custom classification model from a dictionary with mean pooling
+            my_config = {"hidden_size": 128, "num_layers": 2, ...}
+            custom_clf = create_qwen3(
+                my_config,
+                task_type="classification",
+                num_labels=10,
+                pooling_strategy="mean"
+            )
     """
     # 1. Determine base configuration from variant or dict
     if isinstance(config_or_variant, str):

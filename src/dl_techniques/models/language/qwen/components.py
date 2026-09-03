@@ -18,9 +18,9 @@ its causality is pinned in both directions by a positive and a negative test.
 `Qwen3NextBlock` is four residual updates, not one: three gated linear-attention
 sublayers followed by one gated softmax-attention sublayer, each with its own
 pre-normalization, its own optional mixture-of-experts FFN, and its own optional
-stochastic-depth gate. The asymmetry is deliberate — the linear sublayers summarize
-the past into a fixed-size recurrent state at `O(L)` cost, and the single attention
-sublayer supplies the exact global lookup a bounded summary cannot. Only that
+stochastic-depth gate. The linear sublayers summarize the past into a
+fixed-size recurrent state at `O(L)` cost, and the single attention sublayer
+supplies the exact global lookup a bounded summary cannot. Only that
 sublayer holds a KV cache, so the 3:1 ratio is what caps cache memory at roughly a
 quarter of a uniformly attentive stack.
 
@@ -91,8 +91,8 @@ def build_causal_attention_mask(
     :param attention_mask: Optional padding mask, shape ``(batch, seq_len)``,
         ``1`` for real tokens and ``0`` for padding.
     :type attention_mask: keras.KerasTensor or None
-    :return: Boolean mask of shape ``(batch, seq_len, seq_len)`` in ATTEND
-        semantics — ``True`` means "may attend" — which is the convention the
+    :return: Boolean mask of shape ``(batch, seq_len, seq_len)`` in attend
+        semantics — ``True`` means "may attend" — the convention the
         attention layers expect.
     :rtype: keras.KerasTensor
     """
@@ -126,123 +126,104 @@ class Qwen3NextBlock(keras.layers.Layer):
     """
     Qwen3 Next transformer block implementing the exact architectural pattern.
 
-    This block implements a sophisticated transformer architecture consisting of
-    3 cascaded Gated DeltaNet layers followed by 1 Gated Attention layer. Each
-    layer is preceded by Zero-Centered RMSNorm and followed by optional MoE
-    processing, with residual connections throughout.
+    This block cascades 3 gated DeltaNet sublayers with 1 gated attention
+    sublayer. Each is preceded by zero-centered RMSNorm and followed by
+    optional MoE processing, with residual connections throughout. The
+    DeltaNet sublayers summarize the sequence into a fixed-size recurrent
+    state cheaply; the attention sublayer supplies the exact global lookup
+    that summary cannot.
 
-    **Intent**: Implement the next-generation Qwen3 transformer block that combines
-    DeltaNet's efficient sequence modeling with gated attention mechanisms for
-    enhanced representational power while maintaining computational efficiency.
+    Architecture:
 
-    **Architecture Flow**:
-    ```
-    Input(shape=[batch_size, seq_len, dim])
-           ↓
-    [Block 1] RMSNorm → Gated DeltaNet → MoE → Residual
-           ↓
-    [Block 2] RMSNorm → Gated DeltaNet → MoE → Residual
-           ↓
-    [Block 3] RMSNorm → Gated DeltaNet → MoE → Residual
-           ↓
-    [Block 4] RMSNorm → Gated Attention → MoE → Residual
-           ↓
-    Output(shape=[batch_size, seq_len, dim])
-    ```
+    .. code-block:: text
 
-    **Component Details**:
-    - **Gated DeltaNet**: Efficient sequence modeling with gating mechanisms
-    - **Gated Attention**: Multi-head attention with gating for selective focus
-    - **Zero-Centered RMSNorm**: Enhanced stability normalization for large models
-    - **MoE**: Optional Mixture of Experts for conditional computation
-    - **Stochastic Depth**: Optional training regularization via random layer dropping
+        Input [B, L, D]
+               │
+               ▼
+        RMSNorm → Gated DeltaNet → MoE → Residual   (x3)
+               │
+               ▼
+        RMSNorm → Gated Attention → MoE → Residual
+               │
+               ▼
+        Output [B, L, D]
 
-    The 3+1 structure allows for hierarchical feature learning where the DeltaNet
-    layers capture sequential patterns at different levels before the attention
-    layer performs global contextualization.
-
-    Args:
-        dim: Integer, model dimension size. Must be positive and typically
-            divisible by num_heads for efficient attention computation.
-        num_heads: Integer, number of attention heads. Must be positive and
-            should divide evenly into dim for optimal head dimension.
-        num_kv_heads: Optional integer, number of key/value heads for
-            grouped-query attention in the block's `GatedAttention` sublayer.
-            None (the default) means one K/V head per query head, i.e. plain
-            multi-head attention. Must divide num_heads.
-        head_dim: Optional integer, dimension per attention head. If None,
-            defaults to dim // num_heads. Must be positive if specified.
-        max_seq_len: Integer, maximum sequence length for RoPE embeddings
-            in the attention layer. Defaults to 4096.
-        moe_config: Optional MoEConfig instance for Mixture of Experts layers.
-            If provided, each sub-layer will be followed by MoE processing.
-            Can also be a dictionary that will be converted to MoEConfig.
-            Defaults to None (no MoE).
-        normalization_type: String, type of normalization layer to use.
-            Supported types: 'zero_centered_rms_norm', 'layer_norm', 'rms_norm',
-            'band_rms', etc. Defaults to 'zero_centered_rms_norm' for stability.
-        norm_eps: Float, epsilon value for numerical stability in normalization.
-            Should be small positive value. Defaults to 1e-6.
-        dropout_rate: Float, dropout rate for regularization. Must be in [0, 1].
-            Applied within the sub-layers. Defaults to 0.0.
-        use_stochastic_depth: Boolean, whether to apply stochastic depth
-            regularization. When True, randomly drops entire sub-layers during
-            training. Defaults to False.
-        stochastic_depth_rate: Float, probability of dropping layers when
-            use_stochastic_depth=True. Must be in [0, 1]. Defaults to 0.1.
-        **kwargs: Additional arguments for Layer base class (name, trainable, etc.).
+    :param dim: Model dimension size. Must be positive and typically
+        divisible by num_heads.
+    :param num_heads: Number of attention heads. Must be positive and
+        should divide evenly into dim.
+    :param num_kv_heads: Number of key/value heads for grouped-query
+        attention in the block's `GatedAttention` sublayer. None (default)
+        means one K/V head per query head, plain multi-head attention. Must
+        divide num_heads.
+    :param head_dim: Dimension per attention head. If None, defaults to
+        dim // num_heads.
+    :param max_seq_len: Maximum sequence length for RoPE embeddings in the
+        attention layer. Defaults to 4096.
+    :param moe_config: Optional MoEConfig for Mixture of Experts layers, or
+        a dict converted to one. Defaults to None (no MoE).
+    :param normalization_type: Type of normalization layer to use, e.g.
+        'zero_centered_rms_norm', 'layer_norm', 'rms_norm', 'band_rms'.
+        Defaults to 'zero_centered_rms_norm'.
+    :param norm_eps: Epsilon for numerical stability in normalization.
+        Defaults to 1e-6.
+    :param dropout_rate: Dropout rate for regularization, in [0, 1].
+        Defaults to 0.0.
+    :param use_stochastic_depth: Whether to randomly drop entire sublayers
+        during training. Defaults to False.
+    :param stochastic_depth_rate: Probability of dropping a sublayer when
+        use_stochastic_depth=True, in [0, 1]. Defaults to 0.1.
+    :param kwargs: Additional arguments for the Layer base class.
 
     Input shape:
         3D tensor with shape: `(batch_size, sequence_length, dim)`
 
     Output shape:
         3D tensor with shape: `(batch_size, sequence_length, dim)`
-        Shape is preserved through all processing stages.
 
-    Attributes:
-        delta_norms: List of normalization layers for DeltaNet blocks.
-        delta_layers: List of GatedLinearAttentionBlock layers.
-        delta_moe_layers: List of optional MoE layers for DeltaNet blocks.
-        attention_norm: Normalization layer for attention block.
-        attention_layer: GatedAttention layer.
-        attention_moe: Optional MoE layer for attention block.
-        stochastic_depth_layers: List of StochasticDepth layers if enabled.
+    :ivar delta_norms: Normalization layers for the DeltaNet sublayers.
+    :ivar delta_layers: GatedLinearAttentionBlock sublayers.
+    :ivar delta_moe_layers: Optional MoE layers for the DeltaNet sublayers.
+    :ivar attention_norm: Normalization layer for the attention sublayer.
+    :ivar attention_layer: The GatedAttention sublayer.
+    :ivar attention_moe: Optional MoE layer for the attention sublayer.
+    :ivar stochastic_depth_layers: StochasticDepth layers, if enabled.
 
     Example:
-        ```python
-        from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
+        .. code-block:: python
 
-        # Basic usage without MoE
-        block = Qwen3NextBlock(
-            dim=768,
-            num_heads=12,
-            max_seq_len=2048,
-            dropout_rate=0.1
-        )
+            from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
-        # With MoE configuration
-        moe_config = MoEConfig(
-            num_experts=8,
-            expert_config=ExpertConfig(
-                ffn_config={'type': 'swiglu', 'output_dim': 768}
-            ),
-            gating_config=GatingConfig(top_k=2)
-        )
+            # Basic usage without MoE
+            block = Qwen3NextBlock(
+                dim=768,
+                num_heads=12,
+                max_seq_len=2048,
+                dropout_rate=0.1
+            )
 
-        advanced_block = Qwen3NextBlock(
-            dim=1024,
-            num_heads=16,
-            max_seq_len=8192,
-            moe_config=moe_config,
-            use_stochastic_depth=True,
-            stochastic_depth_rate=0.1
-        )
+            # With MoE configuration
+            moe_config = MoEConfig(
+                num_experts=8,
+                expert_config=ExpertConfig(
+                    ffn_config={'type': 'swiglu', 'output_dim': 768}
+                ),
+                gating_config=GatingConfig(top_k=2)
+            )
 
-        # Process sequences
-        inputs = keras.Input(shape=(512, 768))
-        outputs = block(inputs)
-        model = keras.Model(inputs, outputs)
-        ```
+            advanced_block = Qwen3NextBlock(
+                dim=1024,
+                num_heads=16,
+                max_seq_len=8192,
+                moe_config=moe_config,
+                use_stochastic_depth=True,
+                stochastic_depth_rate=0.1
+            )
+
+            # Process sequences
+            inputs = keras.Input(shape=(512, 768))
+            outputs = block(inputs)
+            model = keras.Model(inputs, outputs)
 
     Note:
         This implementation follows the composite layer pattern with explicit
@@ -288,10 +269,7 @@ class Qwen3NextBlock(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: forwarded to
-        # `GatedAttention`. `None` keeps one K/V head per query head (plain MHA),
-        # which is what this block did unconditionally until 2026-08-15 while
-        # `Qwen3Next` validated, stored and serialized a `num_key_value_heads`
-        # that reached nothing. See decisions.md D-071.
+        # GatedAttention; None keeps plain MHA. See decisions.md.
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim if head_dim is not None else dim // num_heads
         self.max_seq_len = max_seq_len
@@ -425,13 +403,10 @@ class Qwen3NextBlock(keras.layers.Layer):
         """
         Forward pass through the Qwen3Next block.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, seq_len, dim)
-            attention_mask: Optional attention mask for the attention layer
-            training: Training mode flag for dropout and normalization
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, dim)
+        :param inputs: Input tensor, shape (batch_size, seq_len, dim).
+        :param attention_mask: Optional attention mask for the attention layer.
+        :param training: Training mode flag for dropout and normalization.
+        :return: Output tensor, shape (batch_size, seq_len, dim).
         """
         x = inputs
 

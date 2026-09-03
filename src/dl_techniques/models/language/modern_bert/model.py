@@ -203,8 +203,7 @@ class ModernBERT(keras.Model):
     :param global_attention_interval: Interval for inserting a global attention
         layer. E.g., 3 means every 3rd layer is global. Defaults to 3, and all
         three shipped presets use a hybrid schedule (``tiny`` 2, ``base``/``large`` 3);
-        see the D-135 anchors in ``MODEL_VARIANTS`` for the measurement that
-        restored 3.
+        see decisions.md D-135 for the measurement that restored 3.
 
         The hybrid schedule matches the published architecture rather than
         minimizing memory, and past L ~ 2048 it costs slightly more than
