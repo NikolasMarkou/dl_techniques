@@ -21,6 +21,7 @@ import pytest
 from train.levjepa.train_levjepa import (
     TrainingConfig,
     _build_config,
+    _build_model,
     _SMOKE_OVERRIDES,
     parse_arguments,
     main,
@@ -55,6 +56,26 @@ class TestTrainingConfigValidation:
         with pytest.raises(ValueError, match="patch_size"):
             TrainingConfig(variant="vit_tiny", img_size=17)
 
+    def test_unknown_attn_mode_raises(self):
+        with pytest.raises(ValueError, match="attn_mode"):
+            TrainingConfig(attn_mode="not_a_mode")
+
+    def test_token_drop_rate_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="token_drop_rate"):
+            TrainingConfig(token_drop_rate=1.0)
+        with pytest.raises(ValueError, match="token_drop_rate"):
+            TrainingConfig(token_drop_rate=-0.1)
+
+    def test_default_config_exercises_the_risky_attention_config(self):
+        """CRITICAL-2 regression guard (D-023): the DEFAULT config -- the one
+        every real run gets unless a flag overrides it -- must already be
+        the risky config (block_causal + RoPE + nonzero token drop), not the
+        encoder's own degenerate constructor defaults."""
+        config = TrainingConfig()
+        assert config.attn_mode == "block_causal"
+        assert config.use_rope is True
+        assert config.token_drop_rate > 0.0
+
 
 class TestParseArguments:
     def test_help_exits_zero_with_usage_line(self, capsys):
@@ -80,6 +101,58 @@ class TestParseArguments:
         config = _build_config(args)
         assert config.dataset == "synthetic_drone"
         assert config.batch_size == 2
+
+    def test_attn_mode_use_rope_token_drop_flags_parse(self):
+        args = parse_arguments(
+            ["--attn-mode", "full", "--no-use-rope", "--token-drop-rate", "0.1"]
+        )
+        assert args.attn_mode == "full"
+        assert args.use_rope is False
+        assert args.token_drop_rate == pytest.approx(0.1)
+
+    def test_attn_mode_use_rope_token_drop_default_to_the_risky_config(self):
+        args = parse_arguments([])
+        assert args.attn_mode == "block_causal"
+        assert args.use_rope is True
+        assert args.token_drop_rate > 0.0
+
+    def test_smoke_pins_the_risky_config_explicitly(self):
+        args = parse_arguments(["--smoke"])
+        assert args.attn_mode == "block_causal"
+        assert args.use_rope is True
+        assert args.token_drop_rate > 0.0
+
+    def test_explicit_flag_still_wins_under_smoke(self):
+        args = parse_arguments(["--smoke", "--attn-mode", "full"])
+        assert args.attn_mode == "full"
+
+
+class TestSmokeConfigWiring:
+    """CRITICAL-2 regression guard (D-023): builds the model the smoke
+    preset would actually construct and asserts the encoder was built with
+    attn_mode='block_causal', use_rope=True, token_drop_rate>0.0 -- not
+    just that a run completes, but that it ran with the RIGHT config. This
+    is the config-wiring test the adversarial review found missing.
+    """
+
+    def test_smoke_preset_builds_encoder_with_the_risky_config(self):
+        args = parse_arguments(["--smoke"])
+        config = _build_config(args)
+        model = _build_model(config)
+        assert model.encoder.attn_mode == "block_causal"
+        assert model.encoder.use_rope is True
+        assert model.encoder.token_drop_rate == pytest.approx(0.5)
+
+    def test_explicit_full_attn_mode_reaches_the_encoder(self):
+        """Anti-vacuity arm: an explicit override must actually reach the
+        encoder, proving _build_model does not silently ignore the config."""
+        args = parse_arguments(["--smoke", "--attn-mode", "full", "--no-use-rope",
+                                 "--token-drop-rate", "0.0"])
+        config = _build_config(args)
+        model = _build_model(config)
+        assert model.encoder.attn_mode == "full"
+        assert model.encoder.use_rope is False
+        assert model.encoder.token_drop_rate == pytest.approx(0.0)
 
 
 @pytest.mark.integration
