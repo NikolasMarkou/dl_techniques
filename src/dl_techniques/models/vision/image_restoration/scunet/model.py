@@ -1,58 +1,23 @@
-"""
-SCUNet — Swin-Conv-UNet for image restoration.
+"""SCUNet: Swin-Conv-UNet for image restoration.
 
-A U-Net architecture that fuses Swin Transformer self-attention with convolutional
-operations, designed for image restoration tasks (denoising, deblurring, etc.). Each
-stage stacks `SwinConvBlock`s that split their channels between a convolutional branch
-and a windowed-attention (W) / shifted-window (SW) transformer branch, alternating block
-type for cross-window connectivity.
+Defines :class:`SCUNet`, a U-Net for denoising, deblurring, and similar
+restoration tasks.
 
-Key Features
-------------
-- Symmetric encoder-decoder (3 down stages, a bottleneck, 3 up stages) with additive
-  skip connections.
-- Strided Conv2D downsampling / Conv2DTranspose upsampling (factor 2 per stage → total
-  factor 64 = 2^6).
-- Reflection padding so arbitrary input resolutions meet the divisible-by-64
-  constraint, cropped back to the original size on output. The pad is computed with
-  `keras.ops`, so a dynamic build — `SCUNet()(keras.Input((None, None, 3)))` — works
-  and one built model serves every concrete size. Two limits survive on that path:
-  a reflect pad must be strictly smaller than the extent it pads, so heights or
-  widths below 33 still fail inside `MirrorPad` (statically-shaped calls get a named
-  `ValueError` instead), and `window_size` divisibility is checked at construction
-  against `input_resolution`, not against the tensor.
-- Linearly-scheduled stochastic depth across all blocks.
+Each stage stacks ``SwinConvBlock``s that split their channels between a
+convolutional branch and a windowed-attention transformer branch, alternating
+plain and shifted windows for cross-window connectivity. The encoder-decoder
+is symmetric, with 3 down stages, a bottleneck, and 3 up stages joined by
+additive skip connections, and downsamples by a total factor of 64 (2^6).
 
-Architecture
-------------
-::
+An input whose resolution is not a multiple of 64 is reflect-padded before
+the encoder and cropped back to the original size on output, so
+``SCUNet()(keras.Input((None, None, 3)))`` builds one model that serves every
+concrete size. A reflect pad must be strictly smaller than the extent it
+pads, so heights or widths below 33 still fail inside ``MirrorPad``.
 
-    input (B, H, W, C)
-        │  reflect-pad to multiple of 64
-        ▼
-    head Conv2D ───────────────┐ x1
-        ▼                      │
-    down1 (blocks + ↓2) ───────┤ x2
-        ▼                      │
-    down2 (blocks + ↓2) ───────┤ x3
-        ▼                      │
-    down3 (blocks + ↓2) ───────┤ x4
-        ▼                      │
-    body (bottleneck blocks)   │
-        ▼  + x4                │
-    up3  (↑2 + blocks)         │
-        ▼  + x3                │
-    up2  (↑2 + blocks)         │
-        ▼  + x2                │
-    up1  (↑2 + blocks)         │
-        ▼  + x1 ◄──────────────┘
-    tail Conv2D
-        ▼  crop to (H, W)
-    output (B, H, W, C)
-
-Reference
----------
-- Zhang et al., "Practical Blind Denoising via Swin-Conv-UNet and Data Synthesis" (2022).
+References:
+    - Zhang et al., 2022. Practical Blind Denoising via Swin-Conv-UNet and
+      Data Synthesis.
 """
 
 import keras
@@ -75,23 +40,47 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 class SCUNet(keras.Model):
     """Swin-Conv-UNet for image restoration tasks.
 
-    A U-Net architecture that combines Swin Transformer blocks with convolutional
-    operations for effective image restoration.
+    A U-Net that combines Swin Transformer blocks with convolutional
+    operations for image restoration.
 
-    Args:
-        in_nc: Number of input channels. Defaults to 3.
-        config: Configuration list specifying number of blocks per stage.
-               Defaults to [4, 4, 4, 4, 4, 4, 4].
-        dim: Base dimension for feature channels. Defaults to 64.
-        head_dim: Dimension of each attention head. Defaults to 32.
-        window_size: Size of attention window. Defaults to 8.
-        stochastic_depth_rate: Maximum stochastic depth rate. Defaults to 0.0.
-        input_resolution: Expected input resolution, forwarded to every
-            ``SwinConvBlock`` (halved per stage). **Advisory only** — since
-            plan ``plan-2026-07-31T210633-b63a35aa`` step 9 it changes no
-            attention geometry, and the model accepts any static ``(H, W)``
-            regardless of it. Defaults to 256.
-        **kwargs: Additional keyword arguments for Model base class.
+    Architecture:
+
+    .. code-block:: text
+
+        input [B, H, W, C]
+            |  reflect-pad to a multiple of 64
+        head Conv2D -----------------+ x1
+            |                        |
+        down1 (blocks + /2) ---------+ x2
+            |                        |
+        down2 (blocks + /2) ---------+ x3
+            |                        |
+        down3 (blocks + /2) ---------+ x4
+            |                        |
+        body (bottleneck blocks)     |
+            |  + x4                  |
+        up3  (x2 + blocks)           |
+            |  + x3                  |
+        up2  (x2 + blocks)           |
+            |  + x2                  |
+        up1  (x2 + blocks) <---------+
+            |  + x1
+        tail Conv2D
+            |  crop to [H, W]
+        output [B, H, W, C]
+
+    :param in_nc: Number of input channels. Defaults to 3.
+    :param config: Number of blocks per stage, 7 entries (3 down, 1 bottleneck,
+        3 up). Defaults to ``[4, 4, 4, 4, 4, 4, 4]``.
+    :param dim: Base dimension for feature channels. Defaults to 64.
+    :param head_dim: Dimension of each attention head. Defaults to 32.
+    :param window_size: Size of the attention window. Defaults to 8.
+    :param stochastic_depth_rate: Maximum stochastic depth rate. Defaults to 0.0.
+    :param input_resolution: Expected input resolution, forwarded to every
+        ``SwinConvBlock`` (halved per stage). Advisory only: it changes no
+        attention geometry, and the model accepts any static ``(H, W)``
+        regardless of it. Defaults to 256.
+    :param kwargs: Additional keyword arguments for the Model base class.
     """
 
     def __init__(
@@ -147,17 +136,15 @@ class SCUNet(keras.Model):
     ) -> None:
         """Validate constructor arguments, raising ``ValueError`` on invalid input.
 
-        Args:
-            in_nc: Number of input channels.
-            config: Per-stage block counts (must have exactly 7 entries).
-            dim: Base feature dimension.
-            head_dim: Attention head dimension.
-            window_size: Attention window size.
-            stochastic_depth_rate: Maximum stochastic-depth drop rate.
-            input_resolution: Expected input resolution.
+        :param in_nc: Number of input channels.
+        :param config: Per-stage block counts (must have exactly 7 entries).
+        :param dim: Base feature dimension.
+        :param head_dim: Attention head dimension.
+        :param window_size: Attention window size.
+        :param stochastic_depth_rate: Maximum stochastic-depth drop rate.
+        :param input_resolution: Expected input resolution.
 
-        Raises:
-            ValueError: If any argument is outside its valid range.
+        :raises ValueError: If any argument is outside its valid range.
         """
         if in_nc <= 0:
             raise ValueError(f"in_nc must be positive, got {in_nc}")
@@ -203,8 +190,7 @@ class SCUNet(keras.Model):
     def _build_network(self, dpr: List[float]) -> None:
         """Build the network architecture.
 
-        Args:
-            dpr: List of drop path rates for each layer.
+        :param dpr: List of drop path rates for each layer.
         """
         # Head
         self.m_head = keras.layers.Conv2D(
@@ -398,16 +384,14 @@ class SCUNet(keras.Model):
     ) -> List[keras.layers.Layer]:
         """Create blocks for a stage.
 
-        Args:
-            num_blocks: Number of blocks in the stage.
-            conv_dim: Convolutional dimension.
-            trans_dim: Transformer dimension.
-            dpr: Drop path rates for blocks in this stage.
-            input_res: Input resolution for this stage.
-            stage_name: Name of the stage for block naming.
+        :param num_blocks: Number of blocks in the stage.
+        :param conv_dim: Convolutional dimension.
+        :param trans_dim: Transformer dimension.
+        :param dpr: Drop path rates for blocks in this stage.
+        :param input_res: Input resolution for this stage.
+        :param stage_name: Name of the stage for block naming.
 
-        Returns:
-            List of layer blocks for the stage.
+        :return: List of layer blocks for the stage.
         """
         blocks = []
         for i in range(num_blocks):
@@ -429,30 +413,13 @@ class SCUNet(keras.Model):
     def build(self, input_shape: Any) -> None:
         """Materialize every sub-layer from an explicit `build` call.
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-422
-        The spatial axes are coerced to `self.input_resolution` before the
-        trace, and only when they arrive as `None`. `materialize_sublayers`
-        invokes `self.call` DIRECTLY on `KerasTensor` placeholders; on that
-        path `ops.shape(x)[1]` is the Python value `None`, not the scalar
-        tensor the D-004 block below correctly describes for a real graph
-        trace, so `(-h) % 64` dies with `TypeError: bad operand type for unary
-        -: 'NoneType'`.
+        :param input_shape: Shape of `call`'s `x`, `(B, H, W, C)`.
 
-        This is a BUILD-TIME probe and nothing else. The model stays fully
-        convolutional at call time: `Layer.__call__` -> `compute_output_spec`
-        traces `call` with genuine graph placeholders where the same
-        expressions are dynamic. MEASURED: build at `(None, 64, 64, 3)` ->
-        148 weights, then call at `(1, 96, 96, 3)` -> succeeds, output
-        `(1, 96, 96, 3)`, still 148 weights. `test_dynamic_spatial_dims.py`
-        remains the contract for the call-time behaviour.
-
-        `self.input_resolution` rather than an arbitrary constant: it is
-        already the number every stage's `input_res` is derived from
-        (`__init__` above), so the window/shift geometry the probe exercises
-        is the geometry the sub-layers were configured for.
-
-        Args:
-            input_shape: Shape of `call`'s `x`, `(B, H, W, C)`.
+        Note:
+            DECISION plan-2026-08-23T091307-9a110062/D-422: spatial axes are
+            coerced to `self.input_resolution` before the trace so `(-h) % 64`
+            does not see a `None` from the build-time placeholder. Real calls
+            stay fully dynamic. See decisions.md.
         """
         if self.built:
             return
@@ -471,48 +438,21 @@ class SCUNet(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass of the SCUNet model.
 
-        Args:
-            x: Input tensor of shape (B, H, W, C).
-            training: Boolean indicating whether the model should behave in
-                training mode or inference mode.
+        :param x: Input tensor of shape (B, H, W, C).
+        :param training: Boolean indicating whether the model should behave in
+            training mode or inference mode.
 
-        Returns:
-            Output tensor of shape (B, H, W, C).
+        :return: Output tensor of shape (B, H, W, C).
 
-        Raises:
-            ValueError: If a statically-known spatial extent is so small that
-                the reflect pad up to the next multiple of 64 would be at least
-                as large as the extent itself. See the D-004 block below.
+        :raises ValueError: If a statically-known spatial extent is so small that
+            the reflect pad up to the next multiple of 64 would be at least
+            as large as the extent itself. See the D-004 block below.
         """
-        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
-        # `mode="REFLECT"` below is not total. TensorFlow's `MirrorPad` requires
-        # every pad amount to be STRICTLY LESS than the dimension it pads, so a
-        # small enough H or W dies inside the op with a raw, site-free
-        # `InvalidArgumentError: paddings must be less than the dimension size:
-        # 0, 56 not less than 8 [Op:MirrorPad]`. Measured on TF 2.18 / CPU:
-        # SCUNet raised at H = 32, 31, 8 (and at W likewise) and worked at 33,
-        # 65, 100x70, 63. Because the pad is `(-H) % 64`, the boundary is
-        # exactly `64 // 2 + 1 = 33`.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT "fix" this with an automatic fallback -- a two-stage pad,
-        #     or `mode="symmetric"`. Both silently INVENT pad content for a
-        #     geometry that today fails loudly, and reflect-vs-other content is
-        #     real data to the encoder (it is not masked out anywhere in this
-        #     model). A clear raise is the honest answer.
-        #   * Do NOT promote this to a helper shared with
-        #     `models/vision/thera/tails.py`, which carries the identical constraint.
-        #     Two sites duplicate; a THIRD triggers promotion. A shared helper
-        #     here buys a three-line dedup for a new cross-package dependency
-        #     edge between two model packages.
-        #   * Do NOT make this a runtime (`ops`) check. It is deliberately
-        #     STATIC-ONLY and skips a `None` extent: a symbolic build must stay
-        #     legal, and a graph-mode raise on a traced tensor is not a raise.
-        # BACKEND SCOPE: the constraint was measured only on the TensorFlow
-        # backend (CPU). It is a `MirrorPad` op constraint and another backend
-        # may not share it; this guard is therefore stricter than strictly
-        # necessary elsewhere, which is the safe direction.
-        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004: TensorFlow's MirrorPad
+        # requires every pad amount strictly less than the dimension it pads, so
+        # H or W below 33 raises here rather than failing inside the op. Do not
+        # add an automatic fallback (invents pad content) or make this a runtime
+        # check (breaks symbolic build). See decisions.md.
         for axis_name, extent in (("height", x.shape[1]), ("width", x.shape[2])):
             if extent is None:
                 continue
@@ -530,17 +470,9 @@ class SCUNet(keras.Model):
         h, w = ops.shape(x)[1], ops.shape(x)[2]
 
         # Padding to ensure divisibility by 64 (2^6 for 6 downsampling steps).
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-045: computed with `%`,
-        # UNCONDITIONALLY, and never through numpy. `ops.shape` yields a scalar
-        # TENSOR for any extent that is `None`, so the previous
-        # `int(np.ceil(h / 64) * 64 - h)` raised inside numpy — with no
-        # model-level message — for the natural fully-convolutional build
-        # `SCUNet()(keras.Input((None, None, 3)))`, which the module docstring
-        # advertises as supported. Do NOT reintroduce the `if padding > 0`
-        # guard around the pad or the crop either: it is a Python branch on a
-        # possibly-symbolic value, and a zero-width pad/full-extent crop is
-        # already a no-op. On a fully static input `h`/`w` are plain ints and
-        # `(-h) % 64` is the same number `ceil` produced.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-045: pad computed with `%`
+        # via `ops`, never numpy — numpy raised on the symbolic `None` extent
+        # from `SCUNet()(keras.Input((None, None, 3)))`. See decisions.md.
         padding_bottom = (-h) % 64
         padding_right = (-w) % 64
 
@@ -570,8 +502,7 @@ class SCUNet(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Returns the model configuration for serialization.
 
-        Returns:
-            Dictionary containing the model configuration.
+        :return: Dictionary containing the model configuration.
         """
         config = super().get_config()
         config.update({
@@ -605,24 +536,21 @@ def create_scunet(
     editing those two arguments, so there are no named scales to enumerate.
     This factory therefore constructs the class with the paper's defaults.
 
-    Args:
-        in_nc: Number of input (and output) channels. Defaults to 3.
-        config: Per-stage block counts; exactly 7 entries (3 down + bottleneck
-            + 3 up). ``None`` resolves to the paper's ``[4, 4, 4, 4, 4, 4, 4]``.
-        dim: Base feature dimension. Must be positive and even.
-        head_dim: Attention head dimension.
-        window_size: Swin attention window size.
-        stochastic_depth_rate: Maximum stochastic-depth drop rate, scheduled
-            linearly across all blocks.
-        input_resolution: Advisory resolution hint forwarded to every
-            ``SwinConvBlock``; it changes no attention geometry.
-        **kwargs: Additional arguments forwarded to the model constructor.
+    :param in_nc: Number of input (and output) channels. Defaults to 3.
+    :param config: Per-stage block counts; exactly 7 entries (3 down + bottleneck
+        + 3 up). ``None`` resolves to the paper's ``[4, 4, 4, 4, 4, 4, 4]``.
+    :param dim: Base feature dimension. Must be positive and even.
+    :param head_dim: Attention head dimension.
+    :param window_size: Swin attention window size.
+    :param stochastic_depth_rate: Maximum stochastic-depth drop rate, scheduled
+        linearly across all blocks.
+    :param input_resolution: Advisory resolution hint forwarded to every
+        ``SwinConvBlock``; it changes no attention geometry.
+    :param **kwargs: Additional arguments forwarded to the model constructor.
 
-    Returns:
-        A configured SCUNet instance.
+    :return: A configured SCUNet instance.
 
-    Raises:
-        ValueError: If any argument is outside its valid range.
+    :raises ValueError: If any argument is outside its valid range.
 
     Examples:
         >>> model = create_scunet(dim=32, head_dim=16, config=[1] * 7)
