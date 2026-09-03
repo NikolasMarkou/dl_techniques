@@ -1,90 +1,25 @@
-"""
-An isotropic image classifier built from geometric-algebra blocks and no FFN.
+"""CliffordNet, an isotropic image classifier built from geometric-algebra blocks and no FFN.
 
-Every mainstream vision backbone factors a block into two engineered halves: a
-token mixer (attention or convolution) that moves information across space, and a
-channel mixer (an MLP, usually the majority of the parameters) that recombines
-features in place. CliffordNet's claim is that this factorization is unnecessary
-because one algebraic operation already does both jobs. For two per-pixel channel
-vectors `u` and `v` the Clifford geometric product decomposes as
-`u v = u . v + u ^ v`. The symmetric inner part measures coherence — how much the
-local context agrees with the pixel's own features — and is exactly the quantity
-a dot-product attention score keeps. The antisymmetric wedge part is the oriented
-bivector spanned by the two vectors; it measures *structural disagreement* and
-fires on edges and texture where context diverges from the centre. Attention
-discards it. Retaining both halves is what the paper calls algebraic
-completeness, and it is why a block with no FFN can still mix channels: the
-product is bilinear in the two streams, so channel `c` of the output already
-depends on products of different input channels.
+A standard vision block splits into a token mixer (attention or convolution) and a
+separate channel mixer (an MLP). CliffordNet replaces both with one operation, the
+Clifford geometric product `u v = u . v + u ^ v` of two per-pixel channel streams: the
+symmetric part plays the role of an attention score, and the antisymmetric part, which
+attention normally discards, captures edges and texture where the streams disagree.
+Because the product is bilinear, a block with no FFN still mixes channels. Each block
+computes a pointwise detail stream and a depthwise-convolved context stream, and
+samples only a few offsets of their pairwise product (`shifts`) instead of the full
+`O(D^2)` interaction, giving `O(N * D * |shifts|)` cost. `CliffordNetBlock` itself
+returns only the gamma-scaled update, not `x + update`; the residual add and the
+stochastic-depth gate live in this model's `call()`.
 
-Each block derives a detail stream (a pointwise projection, no spatial mixing)
-and a context stream (two stacked depthwise 3x3 convolutions, a 5x5 effective
-field), optionally coupled differentially as `ctx <- ctx - det`. The full
-channel-pairwise product would cost `O(D^2)`; instead only a few diagonals of
-that interaction matrix are sampled by cyclically rolling the context stream by
-each offset in `shifts`, giving `O(N * D * |shifts|)` — linear in both pixels and
-channels. Exponentially spaced offsets `[1, 2, 4, 8, 16]` impose a ring topology
-whose mixing range grows logarithmically, which is the entire difference between
-the `nano` and `lite` variants. The block closes with a gated geometric residual,
-an Euler step `H + gamma * (SiLU(H_norm) + alpha * G_feat)` in which LayerScale
-`gamma` starts near zero so a deep stack begins as near-identity.
-
-The model is isotropic in the MetaFormer sense: one patch-embedding stem, then
-`depth` identical blocks at a constant width with no downsampling and no stage
-structure. The stem shape depends on `patch_size` — a single 3x3 stride-2
-convolution at `patch_size=2` (the CIFAR-scale default), two-stage
-`Conv + BN + SiLU + Conv` at 1 and 4, and a generic `kernel=stride=patch_size`
-convolution otherwise — with a `BatchNormalization` after every variant. Note
-that the two-stage stems force `use_bias=False` on their convolutions regardless
-of the model-level `use_bias`, since a bias immediately preceding a BatchNorm is
-redundant; the single-conv stems honour the flag.
-
-The one thing a reader must not get wrong is that `CliffordNetBlock` is
-transform-only. It returns just the gamma-scaled update, *not* `x + update`. The
-residual addition and the stochastic-depth gate live in this model's `call()` as
-`x = x + drop_path(block(x))`. The split is deliberate — it keeps the graph
-explicit — but it also means that rewriting the loop as the innocuous-looking
-`x = block(x)` does not merely remove a skip connection: with `layer_scale_init`
-at `1e-5` it annihilates the signal by roughly five orders of magnitude per
-block, silently. The per-block drop-path rates are the shared linear ramp from
-`utils/drop_path.py`, and `StochasticDepth(0.0)` is exactly the identity, so at
-the default rate the loop is precisely `x + block(x)`.
-
-The head pools before it normalizes: `GlobalAveragePooling2D` first, then
-`LayerNormalization` over the pooled `(B, channels)` vector. This is the
-reference's order and the inverse of the usual norm-then-pool convention; the
-norm therefore standardizes across channels of one image-level descriptor rather
-than across tokens.
-
-Two reproduction caveats are worth stating as choices. The constructor's
-`kernel_initializer` default is Keras' `glorot_uniform`, while every entry of
-`MODEL_VARIANTS` overrides it with the reference's `TruncatedNormal(0.02)` — so a
-directly constructed `CliffordNet(...)` is not initialized like a
-`from_variant(...)` one, and because the block's output is quadratic in its
-activations, initialization scale matters more here than in a linear-in-`x`
-block. Separately, this model leaves the *block's* context normalization at its
-image-mode default (`BatchNormalization`), which reaches the layer with Keras'
-`momentum=0.99` and the norm factory's `epsilon=1e-6` rather than the reference's
-`0.9`/`1e-5`; pass `normalization_kwargs` through to change that. The *stem*'s
-three `BatchNormalization` sites no longer share that gap: they are pinned to the
-reference's `momentum=0.9` via `_STEM_BN_MOMENTUM`. Note that Keras and PyTorch
-define momentum oppositely (`keras_momentum = 1 - torch_momentum`), so a
-torch-side `0.1` is this `0.9` — see the constant's comment before "correcting"
-it. Momentum is a training-time tracking constant only; it changes no weight
-shape and does not enter the `training=False` forward pass, so checkpoints saved
-before this pin still load and infer bit-identically.
-
-No pretrained weights are distributed. `_download_weights` raises
-`NotImplementedError`, and `from_variant`'s fallback only catches `IOError`,
-`OSError` and `ValueError` — so `pretrained=True` propagates the error instead of
-warning and handing back a randomly initialized model that the caller would have
-no way to distinguish from a real one. Local checkpoints load by path via
-`pretrained='/path/to/weights.keras'`, with classifier weights skipped by name
-when `num_classes` differs from the 100 the weights are assumed to have.
-
-Measured parameter counts, `num_classes=100`: `nano` 1.44M (`shifts=[1, 2]`),
-`lite` 2.62M (`shifts=[1, 2, 4, 8, 16]`), `lite_g` 3.40M (`lite` plus the
-global-average-pool context branch).
+The model is isotropic (MetaFormer-style): one patch-embedding stem, then `depth`
+identical blocks at constant width, no downsampling or stage structure. The head pools
+before it normalizes (`GlobalAveragePooling2D` then `LayerNormalization`), the reverse
+of the usual order. A directly constructed `CliffordNet(...)` uses Keras'
+`glorot_uniform` initializer by default, while every `MODEL_VARIANTS` entry overrides
+it with `TruncatedNormal(0.02)` to match the reference. No pretrained weights are
+distributed: `pretrained=True` raises `NotImplementedError`; pass a local
+`.keras` path instead.
 
 References:
     - Ji, Z., 2026. CliffordNet: All You Need is Geometric Algebra.
@@ -123,26 +58,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 
-# DECISION plan-2026-08-23T091307-9a110062/D-480
-# Stem BatchNorm momentum. Do NOT drop this kwarg and let
-# `keras.layers.BatchNormalization` supply its own default: that default is
-# `0.99`, and the reference (Ji 2026, https://arxiv.org/abs/2601.06793 — the
-# same citation this module's docstring already carried) uses `0.9`. The
-# docstring named 0.9 as the target before the code did; this constant is what
-# finally makes the code follow it.
-#
-# THE TWO FRAMEWORKS DEFINE MOMENTUM OPPOSITELY -- do not "correct" 0.9 to 0.1.
-#   Keras: moving = momentum * moving + (1 - momentum) * batch
-#          https://keras.io/api/layers/normalization_layers/batch_normalization/
-#   torch: moving = (1 - momentum) * moving + momentum * batch
-#          https://docs.pytorch.org/docs/2.13/generated/torch.nn.BatchNorm2d.html
-# so `keras_momentum = 1 - torch_momentum` and a torch-side 0.1 is 0.9 here.
-#
-# Training-only: momentum governs how fast `moving_mean`/`moving_variance`
-# track the batch statistics under `training=True`. It does not appear in the
-# `training=False` forward pass and does not change any weight shape, so every
-# existing checkpoint loads and infers bit-identically.
-# See decisions.md D-480.
+# DECISION plan-2026-08-23T091307-9a110062/D-480: stem BatchNorm momentum pinned to
+# 0.9 to match the reference (Keras and torch define momentum oppositely — a torch-side 0.1 is this 0.9, do not "correct" it). See decisions.md.
 _STEM_BN_MOMENTUM = 0.9
 
 
@@ -160,20 +77,30 @@ _STEM_BN_MOMENTUM = 0.9
 class CliffordNet(keras.Model):
     """Isotropic CliffordNet vision backbone.
 
-    Follows the columnar (MetaFormer-isotropic) design: patch embedding to
-    a fixed ``channels`` feature map, then *L* identical
-    :class:`~dl_techniques.layers.geometric.clifford_block.CliffordNetBlock`
-    layers, global average pooling, layer normalisation, and a Dense
-    classifier.
+    Architecture:
 
-    The patch embedding uses the same ``GeometricStem`` design as the
-    original: a ``BatchNormalization`` (not ``LayerNormalization``) follows
-    the convolution(s), and for ``patch_size=2`` the convolution uses
-    ``kernel_size=3`` with ``strides=2``.
+    .. code-block:: text
 
-    The head applies ``GlobalAveragePooling2D`` first, then
-    ``LayerNormalization`` on the resulting ``(B, channels)`` vector, which
-    matches the original ``CliffordNet.forward()`` order.
+        input [B, H, W, C_in]
+          |
+          v
+        GeometricStem (patch_size-dependent conv(s) + BatchNorm)  -> [B, H', W', channels]
+          |
+          v
+        CliffordNetBlock x depth (constant width, transform-only)
+          |
+          v
+        GlobalAveragePooling2D  -> [B, channels]
+          |
+          v
+        LayerNormalization
+          |
+          v
+        Dense(num_classes)  -> [B, num_classes]
+
+    The patch embedding is a ``GeometricStem``: a ``BatchNormalization`` (not
+    ``LayerNormalization``) follows the convolution(s), and for ``patch_size=2`` the
+    convolution uses ``kernel_size=3`` with ``strides=2``.
 
     :param num_classes: Number of output classes.
     :param channels: Feature dimensionality ``D`` (constant throughout).
@@ -851,23 +778,19 @@ def create_cliffordnet(
     for consistency across the model zoo: a thin module-level factory that
     delegates to :meth:`CliffordNet.from_variant`.
 
-    Args:
-        variant: String, model variant ("nano", "lite", "lite_g").
-        num_classes: Integer, number of output classes.
-        pretrained: Boolean or string. If ``True``, attempts to load pretrained
-            weights for the chosen ``weights_dataset`` (currently raises
-            :class:`NotImplementedError` — no public CliffordNet weights are
-            hosted). If a string, treated as a path to a local ``.keras``
-            weights file.
-        weights_dataset: String, dataset key for pretrained weights (kept for
-            API parity with other foundation models).
-        cache_dir: Optional string, directory to cache downloaded weights.
-        **kwargs: Additional arguments forwarded to
-            :meth:`CliffordNet.from_variant` (e.g. ``stochastic_depth_rate``,
-            ``dropout_rate``).
-
-    Returns:
-        CliffordNet model instance.
+    :param variant: Model variant, one of ``"nano"``, ``"lite"``, ``"lite_g"``.
+    :type variant: str
+    :param num_classes: Number of output classes.
+    :type num_classes: int
+    :param pretrained: A local ``.keras`` weights path, or True to raise `NotImplementedError` (no public CliffordNet weights are hosted).
+    :type pretrained: Union[bool, str]
+    :param weights_dataset: Dataset key for pretrained weights, kept for API parity with other models.
+    :type weights_dataset: str
+    :param cache_dir: Directory to cache downloaded weights.
+    :type cache_dir: Optional[str]
+    :param kwargs: Additional arguments forwarded to `CliffordNet.from_variant` (e.g. `stochastic_depth_rate`, `dropout_rate`).
+    :return: A `CliffordNet` instance.
+    :rtype: CliffordNet
 
     Example:
         >>> # Create CliffordNet-Lite with random init for CIFAR-100
