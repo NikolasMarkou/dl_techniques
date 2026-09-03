@@ -1,56 +1,27 @@
 """
-The two layers that turn a token encoder into a late-interaction retriever.
+The two layers that turn a token encoder into a late-interaction retriever:
+:class:`ColBERTProjection` and :class:`MaxSimScorer`.
 
-Dense retrieval forces a choice between two failure modes. Single-vector
-bi-encoders compress a whole passage into one embedding, which is cheap to
-index but throws away term-level evidence, so a passage that answers exactly
-one clause of a query is indistinguishable from one that answers none of it.
-Cross-encoders keep every term interaction but must run the transformer once
-per (query, document) pair at search time, which is unaffordable over a real
-corpus. *Late interaction* refuses the choice: query and document are encoded
-independently -- so documents can be encoded once, offline, and stored -- and
-their token embeddings meet only afterwards, in a cheap similarity reduction
-that keeps the term-level structure the single-vector encoder discarded.
-
-The reduction is MaxSim. Each query token is scored against its single best
-document token, and those per-term maxima are summed::
+Late interaction encodes the query and the document independently, so a
+document can be encoded once, offline, and compares their token embeddings
+only afterwards, with a cheap similarity: each query token is scored against
+its single best document token, and those per-term maxima are summed::
 
     S(q, d) = sum_i  max_j  E_q[i] . E_d[j]
 
-Because the encoder is shared and the embeddings are L2-normalized, each inner
-product is a cosine similarity in [-1, 1], and the score is bounded by the
-query length. The two layers here are exactly the two halves of that pipeline:
+The encoder is shared and the embeddings are L2-normalized, so each inner
+product is a cosine similarity in [-1, 1], bounded by the query length.
 :class:`ColBERTProjection` produces the normalized per-token embeddings from a
-transformer's ``last_hidden_state``, and :class:`MaxSimScorer` performs the
+transformer's ``last_hidden_state``; :class:`MaxSimScorer` performs the
 reduction.
 
-Two details in this file are not cosmetic, and both are places where a
-plausible-looking rearrangement is silently wrong.
-
-**Order of masking and normalization.** The projection multiplies its padding /
-punctuation mask onto the projected vectors *before* L2-normalizing, never
-after. Normalizing first and masking second yields the same zeros at the masked
-positions but different values at the *unmasked* ones only in the sense that
-the mask can no longer zero anything the normalizer has already rescaled -- and
-more importantly it inverts the reference's semantics, where a filtered token
-is a zero vector that contributes an inner product of exactly zero. The
-consequence of masking first is that a fully-masked row is normalized from a
-zero vector, which is why this module normalizes through
-:func:`_safe_l2_normalize` rather than ``keras.ops.normalize``: the latter was
-measured returning ``NaN`` for a zero row under ``mixed_float16``, because its
-internal ``max(norm, epsilon)`` floor underflows at half precision. Masked rows
-here are all-zero by construction, so that is the common path.
-
-**Sentinel masking, not additive masking.** :class:`MaxSimScorer` replaces the
-scores of masked document positions with a finite large-negative sentinel via
-``where`` before the max-reduce. It never adds ``(1 - mask) * -1e9``. The
-additive form is the documented ``float16`` NaN family in this repository: at
-half precision ``-1e9`` is not representable and becomes ``-inf``, a row that
-is entirely masked then reduces to ``-inf``, and any subsequent softmax or
-subtraction turns that into ``NaN``. The sentinel here is finite, is chosen to
-be exactly representable in ``float16``, and is clamped into range if a caller
-supplies something that is not, so an all-padding document produces a large,
-finite, deterministic score instead of a poisoned batch.
+Masking happens before normalizing, never after, so a fully-masked row starts
+from a zero vector; normalization runs through :func:`_safe_l2_normalize`
+rather than ``keras.ops.normalize``, which returns ``NaN`` for a zero row
+under ``mixed_float16`` because its epsilon floor underflows at half
+precision. :class:`MaxSimScorer` overwrites masked document scores with a
+finite sentinel via ``where`` rather than adding ``(1 - mask) * -1e9``, since
+the additive form underflows to ``-inf`` at float16 and turns into ``NaN``.
 
 References:
     - Khattab and Zaharia, 2020. ColBERT: Efficient and Effective Passage
@@ -95,18 +66,8 @@ _L2_NORM_SQUARED_FLOOR = 1e-12
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-08-25T121346-c71fc3ad/D-006
-# Do NOT replace this with `keras.ops.normalize(x, axis=-1)`. That call NaNs on
-# an all-zero row under mixed_float16 -- MEASURED here, 2026-08-25, Keras 3.8:
-# a fully-masked projection row came back `nan` in float16 while the identical
-# input returned exact zeros in float32. Its internal `max(norm, epsilon)` guard
-# uses `backend.epsilon()` (1e-7), which underflows in half precision, so the
-# guard is silently absent in exactly the dtype where it is needed. Masked rows
-# are all-zero BY CONSTRUCTION here (the mask multiply runs before the
-# normalize), so this is the common path, not an edge case -- and a NaN row
-# poisons every MaxSim score in its batch. Reducing in float32 also removes the
-# secondary hazard that a large float16 vector overflows when squared.
-# See decisions.md D-006.
+# DECISION plan-2026-08-25T121346-c71fc3ad/D-006: not keras.ops.normalize(x, axis=-1) — it NaNs
+# an all-zero row under mixed_float16 since its epsilon floor underflows at half precision. See decisions.md.
 def _safe_l2_normalize(x: Any) -> Any:
     """L2-normalize the last axis, returning exact zeros for a zero row.
 
@@ -137,12 +98,12 @@ class ColBERTProjection(keras.layers.Layer):
     surviving token vector to unit length so that a later inner product is a
     cosine similarity.
 
-    The projection is a single ``Dense`` with **no bias and no activation**.
-    That is exact in the reference implementation
-    (``nn.Linear(hidden_size, dim, bias=False)``), not an approximation: an
-    activation would break the linearity the MaxSim score's geometric reading
-    depends on, and a bias would give a fully-masked position a non-zero
-    embedding, defeating the mask.
+    The projection is a single ``Dense`` with no bias and no activation,
+    matching the reference implementation
+    (``nn.Linear(hidden_size, dim, bias=False)``): an activation would break
+    the linearity the MaxSim score's geometric reading depends on, and a bias
+    would give a fully-masked position a non-zero embedding, defeating the
+    mask.
 
     The same layer instance is intended to serve the query path and the
     document path. Two instances would be two sets of weights and would no
@@ -201,8 +162,8 @@ class ColBERTProjection(keras.layers.Layer):
 
         :param hidden_states: ``(batch, seq_len, hidden)`` encoder outputs.
         :type hidden_states: keras tensor
-        :param mask: optional rank-2 ``(batch, seq_len)`` mask where **1 means
-            keep** and 0 means padding or filtered. Broadcast over the feature
+        :param mask: optional rank-2 ``(batch, seq_len)`` mask where 1 means
+            keep and 0 means padding or filtered. Broadcast over the feature
             axis and multiplied onto the projected vectors *before*
             normalization.
         :type mask: keras tensor or None
@@ -242,11 +203,11 @@ class MaxSimScorer(keras.layers.Layer):
     """Late-interaction MaxSim reduction over a dense query-by-document matrix.
 
     Computes ``S(q, d) = sum_i max_j E_q[i] . E_d[j]``: the full dense
-    ``(batch, query_len, doc_len)`` similarity matrix, a max over the
-    **document** axis, then a sum over the **query** axis. The order matters and
-    is not symmetric -- summing first and maxing second would score a document
-    by its single best-matching token overall rather than by how well it covers
-    every query term, which is the property late interaction exists to measure.
+    ``(batch, query_len, doc_len)`` similarity matrix, a max over the document
+    axis, then a sum over the query axis. The order is not symmetric: summing
+    first and maxing second would score a document by its single
+    best-matching token overall rather than by how well it covers every query
+    term, which is the property late interaction exists to measure.
 
     Padded or punctuation-filtered document positions are removed from
     contention by overwriting their scores with a finite large-negative
@@ -294,17 +255,8 @@ class MaxSimScorer(keras.layers.Layer):
         """Stateless layer; no weights to create."""
         super().build(args[0] if args else None)
 
-    # DECISION plan-2026-08-25T121346-c71fc3ad/D-007
-    # Do NOT "simplify" this by masking and reducing in the compute dtype. The
-    # reduction sums `query_len` sentinels for a fully-masked document, and at
-    # ColBERT's own default `query_maxlen = 32` that is 32 * -1e4 = -3.2e5,
-    # which is NOT representable in binary16 (max 65504) and becomes -inf --
-    # MEASURED here, 2026-08-25: a two-term query with an out-of-range sentinel
-    # already returned -inf in float16. Clamping the sentinel instead was tried
-    # first and does not work, because the overflow happens in the SUM, not in
-    # the sentinel. Promoting the reduction is also the standard mixed-precision
-    # rule for loss-facing outputs. Consequence, deliberately accepted: this
-    # layer returns float32 under mixed_float16. See decisions.md D-007.
+    # DECISION plan-2026-08-25T121346-c71fc3ad/D-007: reduce in float32 under mixed_float16,
+    # never the compute dtype — summing query_len sentinels (32 * -1e4) overflows binary16 to -inf. See decisions.md.
     def _reduction_dtype(self, dtype: Any) -> str:
         """Dtype the masking and the two reductions are performed in.
 
@@ -312,15 +264,8 @@ class MaxSimScorer(keras.layers.Layer):
         :return: ``"float32"`` for a reduced-precision compute dtype, otherwise
             the incoming dtype unchanged.
         """
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-014
-        # NOT `keras.backend.standardize_dtype`: `keras.backend.*` is a Keras-2
-        # residue banned across all of `src/` by
-        # `tests/test_the_keras2_backend_calls_are_gone.py`, and this call site
-        # was the tree's only live offender under the ban's older, `models/`-only
-        # scope. A `tf.DType` stringifies as
-        # "<dtype: 'float16'>", so read `.name` when it is there and fall back
-        # to `str` for a plain-string dtype -- the same two-step
-        # `tests/test_models/gradient_flow_oracle.py:default_loss` uses.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-014: not keras.backend.standardize_dtype
+        # (banned Keras-2 residue) — read .name for a tf.DType, fall back to str for a plain string.
         standardized = getattr(dtype, "name", None) or str(dtype)
         if standardized in _LOW_PRECISION_DTYPES:
             return "float32"
@@ -339,11 +284,11 @@ class MaxSimScorer(keras.layers.Layer):
         :type query_embeddings: keras tensor
         :param doc_embeddings: ``(batch, doc_len, dim)``.
         :type doc_embeddings: keras tensor
-        :param doc_mask: optional rank-2 ``(batch, doc_len)`` mask, **1 = keep**.
+        :param doc_mask: optional rank-2 ``(batch, doc_len)`` mask, 1 = keep.
             Masked positions are sentinel-filled before the max.
         :type doc_mask: keras tensor or None
         :param query_mask: optional rank-2 ``(batch, query_len)`` mask,
-            **1 = keep**. Masked query terms are zeroed before the sum so a
+            1 = keep. Masked query terms are zeroed before the sum so a
             padding query term contributes exactly 0 rather than its own best
             match. Required for correctness whenever queries are padded, since
             the reference pads queries with ``[MASK]`` rather than with zeros,

@@ -1,112 +1,24 @@
 """
-Host-side text preparation for ColBERT's two asymmetric input paths.
+Host-side text preparation for ColBERT's two asymmetric input paths, built by
+:class:`ColBERTTokenizer`.
 
-ColBERT encodes queries and documents with **one** set of weights. Nothing in
-the network distinguishes the two; the entire asymmetry lives here, in how the
-token stream is assembled before it ever reaches the encoder. There are exactly
-three asymmetries, and every one of them is a documented mechanism from the
-paper rather than an implementation convenience.
+ColBERT encodes queries and documents with one set of weights; the asymmetry
+lives entirely in how each token stream is assembled. A query is
+``[CLS] [Q] <content> [SEP]``, padded with ``[MASK]`` rather than ``[PAD]``,
+so every padding slot becomes a real transformer position the query can learn
+to fill with expansion terms. A document is ``[CLS] [D] <content> [SEP]``,
+padded normally, and has punctuation tokens flagged in a separate
+``skiplist_mask`` rather than folded into ``attention_mask``, since a
+punctuation mark can otherwise win a MaxSim match against a query term.
 
-**1. Marker tokens.** A query is ``[CLS] [Q] <content> [SEP]``; a document is
-``[CLS] [D] <content> [SEP]``. The marker sits at position 1, immediately after
-``[CLS]``, and is the only signal the shared encoder receives about which side
-of the retrieval problem it is looking at. Without it the same sentence encodes
-identically as a query and as a document, and the two projections collapse onto
-each other.
-
-**2. Query augmentation with ``[MASK]``.** A query is padded to
-``query_maxlen`` and then *every* padding slot is overwritten with ``[MASK]``.
-This is not padding hygiene -- it is the paper's query-expansion mechanism. Each
-``[MASK]`` position is a real position in the transformer: it attends to the
-query's actual terms and produces a contextualized embedding of its own, which
-then participates in MaxSim exactly like a real query token. The model is free
-to learn to place, at those slots, embeddings that match terms the user did not
-type -- a learned, differentiable re-weighting and expansion of the query. Short
-queries therefore get *more* expansion capacity than long ones, which is the
-intended behaviour. Documents are never augmented this way: a document is padded
-with ``[PAD]`` and the padding is masked out. Asserting both directions is the
-only way to pin this, because a tokenizer that augments both sides looks
-perfectly healthy from the query side alone.
-
-**3. Punctuation filtering on documents only.** ColBERT drops punctuation tokens
-from the *document* representation, on the grounds that a punctuation mark
-carries no retrievable content but can still win a MaxSim max against a query
-term and pollute the score. Queries pass an empty skiplist and are never
-filtered. This module reports the filter as a separate ``skiplist_mask`` output
-rather than folding it into ``attention_mask``, so that each returned array
-means exactly one thing: ``attention_mask`` is "this position exists",
-``skiplist_mask`` is "this position carries content". The consumer forms the
-reference's participation mask as their product::
-
-    participation = attention_mask * skiplist_mask
-
-Named deviations from the reference
------------------------------------
-
-**No WordPiece.** The reference allocates ``[Q]`` and ``[D]`` to BERT
-WordPiece's reserved ``[unused0]`` / ``[unused1]`` slots. This repository has no
-WordPiece tokenizer anywhere; its NLP stack is Tiktoken ``cl100k_base``
-(``n_vocab == 100277``), whose special tokens are allocated downward from the
-top of the vocabulary by :func:`dl_techniques.utils.tokenizer.get_special_token_ids`
-(``cls = n_vocab - 20`` through ``unk = n_vocab - 17``). The markers here
-therefore take the next two free slots by that same convention,
-``n_vocab - 16`` and ``n_vocab - 15``, derived from the live vocabulary size
-rather than hardcoded. Id-for-id parity with published ColBERT checkpoints is
-permanently forfeited by this choice -- and was already unreachable for an
-independent reason, since this repository's BERT runs ``gelu_tanh`` rather than
-exact GELU. Both facts are stated rather than implied away. The markers are
-control ids that no ``encode`` call can produce and that ``decode`` will drop;
-nothing here depends on decoding them.
-
-**Space-prefixed punctuation.** The reference builds its skiplist as
-``{encode(symbol)[0] for symbol in string.punctuation}``. That is sufficient for
-WordPiece, where ``"cat, sat"`` yields ``","`` as its own token. It is *not*
-sufficient for a byte-pair encoding: ``cl100k_base`` tokenizes the same text
-with a leading-space token ``" ,"`` (id 1174), which is a different id from bare
-``","`` (id 11), so a literal port of the reference rule would build a skiplist
-that matches almost nothing in ordinary prose. This module therefore also adds
-the first id of ``encode(" " + symbol)`` for each symbol. Measured on
-``cl100k_base``: all 32 space-prefixed forms are single tokens, and the bare and
-space-prefixed sets are disjoint (32 + 32 = 64 ids). This is a deliberate,
-recorded widening of the reference rule to preserve its *intent* under a
-different tokenizer, not a transcription of it.
-
-Attention over augmented ``[MASK]`` slots
------------------------------------------
-
-The reference exposes ``attend_to_mask_tokens`` (``QuerySettings``, default
-``False``), which controls whether the transformer's attention mask is 1 at the
-augmented ``[MASK]`` positions. It is worth being precise about what that flag
-does and does not do in the reference, because the two masks involved are
-easily conflated:
-
-* The reference's *participation* mask for queries -- the one multiplied onto
-  the projected embeddings before L2-normalization -- is computed as
-  ``x != pad_token_id`` **after** the pad ids have already been overwritten with
-  ``[MASK]``. It is therefore **all ones**, at every ``query_maxlen`` position,
-  regardless of the flag. Augmented ``[MASK]`` embeddings always participate in
-  MaxSim. That is the whole point of the mechanism.
-* The reference's ``attend_to_mask_tokens`` flag governs only the *transformer*
-  attention mask, i.e. whether the ``[MASK]`` positions are visible as keys to
-  the other positions.
-
-This class emits a single ``attention_mask`` that a consumer will naturally use
-for both purposes. Defaulting it to 0 at the augmented slots would therefore
-silently annihilate query augmentation the moment the mask is used as the
-projection's participation mask -- the MaxSim contribution of every ``[MASK]``
-slot would be exactly zero, the suite would stay green, and the paper's headline
-mechanism would be dead. Given the choice between reproducing the reference's
-transformer-side default and preserving the reference's participation
-semantics, this module preserves the semantics:
-
-    ``attend_to_mask_tokens`` defaults to **True** here. Augmented ``[MASK]``
-    positions get ``attention_mask == 1``.
-
-**Consequence.** Relative to the reference's default, the ``[MASK]`` slots are
-additionally visible as attention *keys* to the real query terms. Set the flag
-to ``False`` to reproduce the reference's transformer-side masking exactly, at
-the cost of those positions being excluded from any consumer that derives its
-participation mask from ``attention_mask``. Both settings are pinned by test.
+This module diverges from the reference in three ways: it has no WordPiece
+tokenizer, so ``[Q]``/``[D]`` take the next two free slots above Tiktoken
+``cl100k_base``'s reserved ids rather than BERT's ``[unused0]``/``[unused1]``;
+its punctuation skiplist also includes the space-prefixed form of each
+symbol, since ``cl100k_base`` tokenizes `` ,`` and ``,`` as different ids;
+and ``attend_to_mask_tokens`` defaults to ``True`` here rather than the
+reference's ``False``, so the augmented ``[MASK]`` positions stay visible to
+the participation mask a consumer derives from ``attention_mask``.
 
 References:
     - Khattab and Zaharia, 2020. ColBERT: Efficient and Effective Passage
@@ -164,9 +76,9 @@ _DOC_MARKER_OFFSET: int = 15
 class ColBERTTokenizer:
     """Build ColBERT's asymmetric query and document token streams.
 
-    A plain Python class, deliberately **not** a ``keras.Layer``: everything it
-    does is host-side ``str`` -> ``int`` work that runs once, outside the
-    compute graph, and it owns a Tiktoken encoding that is not a Keras variable.
+    A plain Python class, not a ``keras.Layer``: everything it does is
+    host-side ``str`` -> ``int`` work that runs once, outside the compute
+    graph, and it owns a Tiktoken encoding that is not a Keras variable.
 
     :param encoding_name: Tiktoken encoding to wrap.
     :type encoding_name: str
@@ -272,13 +184,8 @@ class ColBERTTokenizer:
             specials["unk"] if unk_token_id is None else int(unk_token_id)
         )
 
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-010
-        # Markers are DERIVED from the live n_vocab, never hardcoded to
-        # 100261 / 100262. A different cl100k_base revision would shift
-        # n_vocab, and a hardcoded literal would then silently land on a real
-        # content token -- a collision that produces perfectly shaped tensors
-        # and wrong retrieval forever. Do NOT "simplify" these to constants.
-        # See decisions.md D-008 and D-022.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-010: markers derive from live n_vocab, never
+        # hardcoded — a cl100k_base revision shift would land a hardcoded id on a real content token. See decisions.md.
         self.query_marker_token_id: int = (
             n_vocab - _QUERY_MARKER_OFFSET
             if query_marker_token_id is None
@@ -367,13 +274,8 @@ class ColBERTTokenizer:
             representation.
         :rtype: frozenset
         """
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-009
-        # The space-prefixed form is NOT redundant and must not be deleted as
-        # "belt and braces". The reference's rule (bare symbol only) is a
-        # WordPiece rule; under cl100k_base BPE, ordinary prose emits " ," (id
-        # 1174), never bare "," (id 11), so a literal port builds a skiplist
-        # that matches essentially nothing and the punctuation filter is dead
-        # while every test on the id SET still passes. See decisions.md D-009.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-009: the space-prefixed form is required —
+        # cl100k_base BPE emits " ," (id 1174) in ordinary prose, never bare "," (id 11). See decisions.md.
         token_ids = set()
         for symbol in string.punctuation:
             token_ids.add(self._encoding.encode(symbol)[0])
@@ -443,15 +345,8 @@ class ColBERTTokenizer:
         input_ids = np.where(
             augmented, np.int32(self.mask_token_id), input_ids
         ).astype(np.int32)
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-008
-        # Do NOT "restore fidelity" by flipping this default to the
-        # reference's False. This class emits ONE attention_mask that a
-        # consumer uses both as the transformer mask and as the projection's
-        # participation mask; the reference's participation mask over queries
-        # is all-ones by construction. A False default therefore zeroes every
-        # augmented [MASK] embedding's MaxSim contribution and silently kills
-        # query augmentation with a green suite. See decisions.md D-008 and
-        # the module docstring's "Attention over augmented [MASK] slots".
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-008: attend_to_mask_tokens stays True —
+        # a False default zeroes every augmented [MASK] embedding's MaxSim contribution with a green suite. See decisions.md.
         if self.attend_to_mask_tokens:
             attention_mask = np.where(
                 augmented, np.int32(1), attention_mask

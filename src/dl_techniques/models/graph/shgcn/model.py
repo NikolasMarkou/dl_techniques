@@ -1,33 +1,25 @@
 """
-Complete Simplified Hyperbolic Graph Convolutional Neural Network Model.
-
-This module provides a flexible model wrapper for sHGCN that can be configured
-for different graph learning tasks:
-- Node classification (generative: node embeddings)
-- Link prediction (predictive: edge probabilities)
-
-The model stacks multiple SHGCNLayer instances and provides appropriate output
-layers based on the task.
+SHGCNModel stacks SHGCNLayer instances into node-embedding, node-classification and
+link-prediction models for graphs in hyperbolic space. Each layer transforms features in
+the Poincare ball instead of Euclidean space, and the stack collapses the per-layer
+nonlinearity into one aggregation step, extending Wu et al.'s SGC simplification to
+hyperbolic geometry. A model call takes a dense feature tensor and a dense adjacency
+tensor (or, on the TensorFlow backend only, a sparse one) as a two-item list. A whole
+graph is one training sample, so training loops call ``train_on_batch``, not ``fit``,
+because ``fit`` batches axis 0 of every input and would slice the adjacency tensor along
+with the features.
 
 References:
-    - Arevalo et al., 2025. sHGCN: Simplified hyperbolic graph convolutional
-      neural networks. (https://arxiv.org/abs/2506.14438) -- the sHGCN formulation
-      this model stacks; the package README section 16 carries the BibTeX.
-      Both were corrected on 2026-08-26: the id here pointed at an unrelated
-      space-structures paper and the README BibTeX named the wrong title,
-      authors, venue and year.
-    - Chami et al., 2019. Hyperbolic Graph Convolutional Neural Networks.
-      NeurIPS 2019. (https://arxiv.org/abs/1910.12933) -- HGCN, the model sHGCN
-      simplifies: hyperbolic feature transform, aggregation and activation.
-    - Wu et al., 2019. Simplifying Graph Convolutional Networks (SGC). ICML
-      2019. (https://arxiv.org/abs/1902.07153) -- the "collapse the nonlinear
-      layers" argument, transplanted to the hyperbolic setting.
+    - Arevalo et al., 2025. sHGCN: Simplified hyperbolic graph convolutional neural
+      networks. (https://arxiv.org/abs/2506.14438)
+    - Chami et al., 2019. Hyperbolic Graph Convolutional Neural Networks. NeurIPS 2019.
+      (https://arxiv.org/abs/1910.12933)
+    - Wu et al., 2019. Simplifying Graph Convolutional Networks (SGC). ICML 2019.
+      (https://arxiv.org/abs/1902.07153)
     - Nickel and Kiela, 2017. Poincare Embeddings for Learning Hierarchical
-      Representations. NeurIPS 2017. (https://arxiv.org/abs/1705.08039) -- the
-      Poincare-ball geometry the exp/log maps in
-      ``dl_techniques.utils.geometry.poincare_math`` implement.
-    - Kipf and Welling, 2017. Semi-Supervised Classification with Graph
-      Convolutional Networks. ICLR 2017. (https://arxiv.org/abs/1609.02907)
+      Representations. NeurIPS 2017. (https://arxiv.org/abs/1705.08039)
+    - Kipf and Welling, 2017. Semi-Supervised Classification with Graph Convolutional
+      Networks. ICLR 2017. (https://arxiv.org/abs/1609.02907)
 """
 
 import keras
@@ -45,129 +37,93 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNModel(keras.Model):
-    """
-    Multi-layer Simplified Hyperbolic Graph Convolutional Neural Network.
+    """Stack of sHGCN layers producing node embeddings or logits.
 
-    This model stacks multiple sHGCN layers to create a deep graph neural network
-    that operates efficiently by leveraging both Euclidean and hyperbolic geometries.
-    The model can be configured for different downstream tasks through the output
-    layer configuration.
+    Each hidden layer applies ``relu``; the output layer's activation is
+    configurable so the same class serves node classification (``softmax``
+    or ``linear`` for raw embeddings) and link prediction (``linear``
+    embeddings, paired with a decoder such as :class:`FermiDiracDecoder`).
 
-    **Architecture**:
-    ```
-    Input: [Features [N, D_in], Adjacency [N, N] dense]
-            ↓
-    sHGCN Layer 1: [N, D_in] → [N, hidden_dims[0]]
-            ↓
-    sHGCN Layer 2: [N, hidden_dims[0]] → [N, hidden_dims[1]]
-            ↓
-    ...
-            ↓
-    sHGCN Layer L: [N, hidden_dims[-1]] → [N, output_dim]
-            ↓
-    Output: [N, output_dim]
-    ```
+    Architecture:
 
-    **Task Configurations**:
+        .. code-block:: text
 
-    1. **Node Classification** (output_activation='linear' or 'softmax'):
-       - Produces node embeddings or class logits
-       - Typically followed by a task-specific head
-       - Use 'linear' for embeddings, 'softmax' for direct classification
+            features [N, D_in]      adjacency [N, N]
+                  │                        │
+                  ▼                        │
+            ┌──────────────┐               │
+            │ sHGCN layer 1├───────────────┤
+            └──────┬───────┘               │
+                    │ [N, hidden[0]]        │
+                   ...                      │
+                    │ [N, hidden[-1]]       │
+                    ▼                        │
+            ┌──────────────┐               │
+            │ sHGCN layer L├───────────────┘
+            │  (output)    │
+            └──────┬───────┘
+                    ▼
+             output [N, output_dim]
 
-    2. **Link Prediction** (output_activation='linear'):
-       - Produces node embeddings in Euclidean space
-       - Pair with FermiDiracDecoder for edge probability prediction
-       - Embeddings should be unit-normalized for best results
+    :param hidden_dims: Per-layer hidden dimensions, e.g. ``[64, 32]``. At
+        least one positive value.
+    :type hidden_dims: List[int]
+    :param output_dim: Output dimensionality: class count for
+        classification, embedding size for link prediction. Must be
+        positive.
+    :type output_dim: int
+    :param output_activation: Activation of the output layer. ``'linear'``
+        for embeddings, ``'softmax'`` for classification, or ``None``.
+        Defaults to ``'linear'``.
+    :type output_activation: Optional[Union[str, callable]]
+    :param dropout_rate: Dropout probability inside each layer, in
+        ``[0, 1)``. Defaults to ``0.5``.
+    :type dropout_rate: float
+    :param use_bias: Whether every layer uses a hyperbolic bias. Defaults
+        to ``True``.
+    :type use_bias: bool
+    :param use_curvature: Whether every layer learns its own curvature.
+        Defaults to ``True``.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to ``keras.Model``.
+    :raises ValueError: If ``hidden_dims`` is empty or has a non-positive
+        entry, if ``output_dim`` is not positive, or if ``dropout_rate``
+        is outside ``[0, 1)``.
 
-    Args:
-        hidden_dims: List of hidden layer dimensions, e.g., [64, 32]. Must contain
-            at least one value. Each value must be positive.
-        output_dim: Output dimensionality. For node classification, this is the
-            number of classes or embedding size. For link prediction, this is
-            the embedding size. Must be positive.
-        output_activation: Activation for output layer. Use 'linear' for embeddings,
-            'softmax' for classification, or None. Defaults to 'linear'.
-        dropout_rate: Dropout probability applied within each layer. Range [0, 1).
-            Higher values increase regularization. Defaults to 0.5.
-        use_bias: Whether to use hyperbolic bias in all layers. Defaults to True.
-        use_curvature: Whether curvature is learnable in all layers. When True,
-            each layer learns its own curvature. Defaults to True.
-        **kwargs: Additional keyword arguments for Model base class.
+    Input shape:
+        Two dense tensors ``[features, adjacency]``: features
+        ``(num_nodes, input_dim)``, adjacency ``(num_nodes, num_nodes)``,
+        normalized. Both accept a leading batch axis. A
+        ``tf.sparse.SparseTensor`` adjacency works only on the TensorFlow
+        backend.
 
-    Input:
-        List of two tensors:
-        - features: Dense tensor of shape (num_nodes, input_dim)
-        - adjacency: Dense tensor of shape (num_nodes, num_nodes), normalized.
-          A leading batch axis is supported throughout: (B, N, D_in) with
-          (B, N, N). A tf.sparse.SparseTensor is also accepted, but only on the
-          TensorFlow backend -- see SHGCNLayer's aggregation step.
+    Output shape:
+        ``(num_nodes, output_dim)`` -- embeddings in tangent space, or
+        class logits/probabilities depending on ``output_activation``.
 
-    Output:
-        Dense tensor of shape (num_nodes, output_dim).
-        - For embeddings: Euclidean vectors in tangent space
-        - For classification: Class logits or probabilities
-
-    Attributes:
-        hidden_layers: List of SHGCNLayer instances for hidden representations.
-        output_layer: Final SHGCNLayer for task-specific output.
+    :ivar hidden_layers: List of :class:`SHGCNLayer` instances.
+    :ivar output_layer: Final :class:`SHGCNLayer` producing the model output.
 
     Example:
-        ```python
-        # Node classification model (3 classes)
-        model = SHGCNModel(
-            hidden_dims=[64, 32],
-            output_dim=3,
-            output_activation='softmax',
-            dropout_rate=0.5
-        )
+        .. code-block:: python
 
-        # Compile for classification
-        model.compile(
-            optimizer='adam',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-
-        # Train -- FULL GRAPH, one step per epoch. Do NOT call
-        # model.fit(x=[features, adj], ...): Keras batches axis 0 of EVERY
-        # input, so it slices the [N, N] adjacency alongside the features and
-        # the run dies in the data pipeline. One graph is one sample.
-        for _ in range(100):
-            model.train_on_batch([features, adj], labels)
-
-        # Link prediction model (embedding dimension 16)
-        model = SHGCNModel(
-            hidden_dims=[32, 16],
-            output_dim=16,
-            output_activation='linear',  # Embeddings
-            dropout_rate=0.3
-        )
-
-        # Get embeddings
-        embeddings = model([features, adj], training=False)
-
-        # Use with decoder
-        from dl_techniques.layers.graphs.fermi_diract_decoder import (
-            FermiDiracDecoder,
-        )
-        decoder = FermiDiracDecoder()
-
-        u_embed = tf.gather(embeddings, u_indices)
-        v_embed = tf.gather(embeddings, v_indices)
-        edge_probs = decoder([u_embed, v_embed])
-        ```
+            model = SHGCNModel(
+                hidden_dims=[64, 32],
+                output_dim=3,
+                output_activation='softmax',
+                dropout_rate=0.5,
+            )
+            model.compile(
+                optimizer='adam',
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy'],
+            )
+            for _ in range(100):
+                model.train_on_batch([features, adj], labels)
 
     Note:
-        - All hidden layers use 'relu' activation by default
-        - Output layer activation is configurable for task flexibility
-        - For link prediction, embeddings are in Euclidean space
-        - Aggregation is a dense keras.ops.matmul; a tf.sparse.SparseTensor
-          adjacency also works on the TensorFlow backend only
-        - Each layer can learn its own curvature if use_curvature=True
-
-    References:
-        Arevalo et al. "Simplified Hyperbolic Graph Convolutional Neural Networks"
+        Aggregation is a dense ``keras.ops.matmul``; a sparse adjacency
+        works only on the TensorFlow backend.
     """
 
     def __init__(
@@ -221,10 +177,10 @@ class SHGCNModel(keras.Model):
         )
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Materialise every sHGCN layer from ``[features, adjacency]`` shapes.
+        """Build every sHGCN layer from the ``[features, adjacency]`` shapes.
 
-        Args:
-            input_shape: List of ``[features_shape, adjacency_shape]``.
+        :param input_shape: ``[features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         feat_shape, adj_shape = input_shape
 
@@ -241,7 +197,13 @@ class SHGCNModel(keras.Model):
             self,
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """Return ``(..., num_nodes, output_dim)``."""
+        """Return ``(..., num_nodes, output_dim)``.
+
+        :param input_shape: ``[features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         feat_shape = input_shape[0]
         return tuple(feat_shape[:-1]) + (self.output_dim,)
 
@@ -250,17 +212,15 @@ class SHGCNModel(keras.Model):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through all sHGCN layers.
+        """Run every sHGCN layer in sequence.
 
-        Args:
-            inputs: List of [features, adjacency].
-                - features: [num_nodes, input_dim]
-                - adjacency: [num_nodes, num_nodes] dense
-            training: Whether in training mode (affects dropout).
-
-        Returns:
-            Node embeddings or logits of shape [num_nodes, output_dim].
+        :param inputs: ``[features, adjacency]`` with shapes
+            ``[num_nodes, input_dim]`` and ``[num_nodes, num_nodes]``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether dropout is active.
+        :type training: Optional[bool]
+        :return: Node embeddings or logits, shape ``[num_nodes, output_dim]``.
+        :rtype: keras.KerasTensor
         """
         x, adj = inputs
 
@@ -272,11 +232,10 @@ class SHGCNModel(keras.Model):
         return x
 
     def get_config(self) -> dict:
-        """
-        Get model configuration for serialization.
+        """Return the config needed to reconstruct this model.
 
-        Returns:
-            Dictionary containing all constructor arguments.
+        :return: Constructor arguments.
+        :rtype: dict
         """
         config = super().get_config()
         config.update({
@@ -298,70 +257,77 @@ class SHGCNModel(keras.Model):
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNNodeClassifier(keras.Model):
-    """
-    Complete node classification model with sHGCN backbone and classification head.
+    """sHGCN feature extractor with a softmax classification head.
 
-    This is a convenience wrapper that combines the sHGCN feature extractor with
-    a final classification layer, providing a ready-to-use model for supervised
-    node classification tasks.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input: [Features, Adjacency]
-            ↓
-    sHGCN Backbone: Multi-layer feature extraction
-            ↓
-    Classification Head: Dense(num_classes, activation='softmax')
-            ↓
-    Output: Class probabilities [N, num_classes]
-    ```
+        .. code-block:: text
 
-    Args:
-        num_classes: Number of output classes. Must be >= 2.
-        hidden_dims: List of hidden layer dimensions for sHGCN backbone.
-        embedding_dim: Dimension of node embeddings before classification.
-            Defaults to 16.
-        dropout_rate: Dropout rate for regularization. Defaults to 0.5.
-        use_bias: Whether to use hyperbolic bias in sHGCN layers. Defaults to True.
-        use_curvature: Whether to learn curvature in sHGCN layers. Defaults to True.
-        **kwargs: Additional keyword arguments for Model base class.
+            features, adjacency
+                  │
+                  ▼
+            ┌───────────────┐
+            │ sHGCN backbone│
+            └──────┬────────┘
+                    │ [N, embedding_dim]
+                    ▼
+            ┌───────────────┐
+            │ Dense+softmax │
+            └──────┬────────┘
+                    ▼
+            probabilities [N, num_classes]
 
-    Input:
-        List of [features, adjacency] as for SHGCNModel.
+    :param num_classes: Number of output classes. Must be at least 2.
+    :type num_classes: int
+    :param hidden_dims: Per-layer hidden dimensions for the sHGCN backbone.
+    :type hidden_dims: List[int]
+    :param embedding_dim: Dimension of node embeddings before
+        classification. Defaults to ``16``.
+    :type embedding_dim: int
+    :param dropout_rate: Dropout rate for regularization. Defaults to
+        ``0.5``.
+    :type dropout_rate: float
+    :param use_bias: Whether sHGCN layers use a hyperbolic bias. Defaults
+        to ``True``.
+    :type use_bias: bool
+    :param use_curvature: Whether sHGCN layers learn curvature. Defaults
+        to ``True``.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to ``keras.Model``.
+    :raises ValueError: If ``num_classes`` is less than 2.
 
-    Output:
-        Class probabilities of shape (num_nodes, num_classes), values sum to 1.
+    Input shape:
+        ``[features, adjacency]`` as for :class:`SHGCNModel`.
+
+    Output shape:
+        ``(num_nodes, num_classes)``, rows summing to 1.
 
     Example:
-        ```python
-        # Create classifier
-        model = SHGCNNodeClassifier(
-            num_classes=7,  # Citation network classes
-            hidden_dims=[64, 32],
-            embedding_dim=16,
-            dropout_rate=0.5
-        )
+        .. code-block:: python
 
-        # Compile
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.01),
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
+            model = SHGCNNodeClassifier(
+                num_classes=7,
+                hidden_dims=[64, 32],
+                embedding_dim=16,
+                dropout_rate=0.5,
+            )
+            model.compile(
+                optimizer=keras.optimizers.Adam(learning_rate=0.01),
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy'],
+            )
+            for _ in range(200):
+                model.train_on_batch([features, adj], train_labels)
+                val_metrics = model.test_on_batch([features, adj], val_labels)
+            predictions = model.predict_on_batch([features, adj])
+            predicted_classes = ops.argmax(predictions, axis=-1)
 
-        # Train -- FULL GRAPH, one step per epoch. model.fit(x=[features, adj])
-        # does NOT work: Keras batches axis 0 of every input, so it slices the
-        # [N, N] adjacency alongside the features.
-        for _ in range(200):
-            model.train_on_batch([features, adj], train_labels)
-            val_metrics = model.test_on_batch([features, adj], val_labels)
-
-        # Predict -- predict_on_batch, NOT predict: predict batches axis 0 too,
-        # and it does so silently while N <= 32 (the default batch size), which
-        # is exactly how this example read as working.
-        predictions = model.predict_on_batch([features, adj])
-        predicted_classes = ops.argmax(predictions, axis=-1)
-        ```
+    Note:
+        Use ``train_on_batch`` / ``test_on_batch`` / ``predict_on_batch``,
+        not ``fit`` / ``predict``: a whole graph is one sample, and the
+        batching APIs slice axis 0 of every input -- including the
+        adjacency matrix -- which silently corrupts the graph on any
+        node count that happens to fit inside the default batch size.
     """
 
     def __init__(
@@ -387,11 +353,10 @@ class SHGCNNodeClassifier(keras.Model):
         self.use_bias = use_bias
         self.use_curvature = use_curvature
 
-        # sHGCN backbone for feature extraction
         self.backbone = SHGCNModel(
             hidden_dims=hidden_dims,
             output_dim=embedding_dim,
-            output_activation='relu',  # Embeddings with non-linearity
+            output_activation='relu',
             dropout_rate=dropout_rate,
             use_bias=use_bias,
             use_curvature=use_curvature,
@@ -405,10 +370,10 @@ class SHGCNNodeClassifier(keras.Model):
         )
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Materialise backbone and classification head.
+        """Build the backbone and the classification head.
 
-        Args:
-            input_shape: List of ``[features_shape, adjacency_shape]``.
+        :param input_shape: ``[features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         self.backbone.build(input_shape)
         self.classifier.build(self.backbone.compute_output_shape(input_shape))
@@ -418,7 +383,13 @@ class SHGCNNodeClassifier(keras.Model):
             self,
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """Return ``(..., num_nodes, num_classes)``."""
+        """Return ``(..., num_nodes, num_classes)``.
+
+        :param input_shape: ``[features_shape, adjacency_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         feat_shape = input_shape[0]
         return tuple(feat_shape[:-1]) + (self.num_classes,)
 
@@ -427,28 +398,29 @@ class SHGCNNodeClassifier(keras.Model):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass for node classification.
+        """Run the backbone then the classification head.
 
-        Args:
-            inputs: List of [features, adjacency].
-            training: Whether in training mode.
-
-        Returns:
-            Class probabilities of shape [num_nodes, num_classes].
+        :param inputs: ``[features, adjacency]``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether dropout is active.
+        :type training: Optional[bool]
+        :return: Class probabilities, shape ``[num_nodes, num_classes]``.
+        :rtype: keras.KerasTensor
         """
         embeddings = self.backbone(inputs, training=training)
 
-        # NOT `logits`: `self.classifier` is
-        # `Dense(num_classes, activation='softmax')`, so these rows already sum
-        # to 1. The name mattered -- a caller who compiled
-        # `from_logits=True` on the strength of it got a silently wrong loss.
+        # These rows already sum to 1 (softmax head): treat as
+        # probabilities, not logits, when compiling a loss.
         probabilities = self.classifier(embeddings)
 
         return probabilities
 
     def get_config(self) -> dict:
-        """Get model configuration for serialization."""
+        """Return the config needed to reconstruct this model.
+
+        :return: Constructor arguments.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'num_classes': self.num_classes,
@@ -463,86 +435,81 @@ class SHGCNNodeClassifier(keras.Model):
 
 @register_dl_technique("dl_techniques.models.shgcn.model")
 class SHGCNLinkPredictor(keras.Model):
-    """
-    Complete link prediction model with sHGCN backbone and Fermi-Dirac decoder.
+    """sHGCN backbone paired with a Fermi-Dirac edge-probability decoder.
 
-    This model combines node embedding generation via sHGCN with edge probability
-    prediction using the Fermi-Dirac decoder. It provides an end-to-end solution
-    for link prediction tasks on graphs.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input: [Features, Adjacency, Edge_Pairs]
-            ↓
-    sHGCN Backbone: Generate node embeddings
-            ↓
-    Gather: Select embeddings for edge pairs
-            ↓
-    Fermi-Dirac Decoder: Compute edge probabilities
-            ↓
-    Output: Edge probabilities [num_edges,]
-    ```
+        .. code-block:: text
 
-    Args:
-        hidden_dims: List of hidden layer dimensions for sHGCN backbone.
-        embedding_dim: Dimension of node embeddings. Should be large enough to
-            capture graph structure (typically 16-64). Defaults to 16.
-        dropout_rate: Dropout rate for regularization. Defaults to 0.3.
-        use_bias: Whether to use hyperbolic bias. Defaults to True.
-        use_curvature: Whether to learn curvature. Defaults to True.
-        **kwargs: Additional keyword arguments for Model base class.
+            features, adjacency        edge_pairs [E, 2]
+                  │                          │
+                  ▼                          │
+            ┌───────────────┐                │
+            │ sHGCN backbone│                │
+            └──────┬────────┘                │
+                    │ embeddings [N, D]        │
+                    ▼                          │
+            ┌────────────────────────────┐     │
+            │ gather src/tgt embeddings  │◄────┘
+            └──────┬─────────────────────┘
+                    ▼
+            ┌───────────────────┐
+            │ Fermi-Dirac decoder│
+            └──────┬─────────────┘
+                    ▼
+            edge probabilities [E]
 
-    Input:
-        List of three tensors:
-        - features: [num_nodes, input_dim]
-        - adjacency: [num_nodes, num_nodes] sparse
-        - edge_pairs: [num_edges, 2] with [source_idx, target_idx] per row
+    :param hidden_dims: Per-layer hidden dimensions for the sHGCN backbone.
+    :type hidden_dims: List[int]
+    :param embedding_dim: Node embedding dimension, typically 16-64 to
+        capture graph structure. Defaults to ``16``.
+    :type embedding_dim: int
+    :param dropout_rate: Dropout rate for regularization. Defaults to
+        ``0.3``.
+    :type dropout_rate: float
+    :param use_bias: Whether sHGCN layers use a hyperbolic bias. Defaults
+        to ``True``.
+    :type use_bias: bool
+    :param use_curvature: Whether sHGCN layers learn curvature. Defaults
+        to ``True``.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to ``keras.Model``.
 
-    Output:
-        Edge probabilities of shape (num_edges,) with values in [0, 1].
+    Input shape:
+        ``[features, adjacency, edge_pairs]``: features
+        ``[num_nodes, input_dim]``, adjacency ``[num_nodes, num_nodes]``,
+        edge_pairs ``[num_edges, 2]`` holding ``[source_idx, target_idx]``
+        per row.
+
+    Output shape:
+        ``(num_edges,)``, values in ``[0, 1]``.
 
     Example:
-        ```python
-        # Create link predictor
-        model = SHGCNLinkPredictor(
-            hidden_dims=[64, 32],
-            embedding_dim=16,
-            dropout_rate=0.3
-        )
+        .. code-block:: python
 
-        # Compile
-        model.compile(
-            optimizer='adam',
-            loss='binary_crossentropy',
-            metrics=['accuracy', keras.metrics.AUC()]
-        )
-
-        # Prepare edge pairs
-        # Positive edges: actual edges in graph
-        pos_edges = np.array([[0, 1], [1, 2], [2, 3]])
-        # Negative edges: non-existent edges (sampled)
-        neg_edges = np.array([[0, 5], [1, 7], [3, 9]])
-
-        edge_pairs = np.vstack([pos_edges, neg_edges])
-        labels = np.array([1, 1, 1, 0, 0, 0])  # 1=exists, 0=doesn't exist
-
-        # Train -- FULL GRAPH, one step per epoch. model.fit(...) does NOT
-        # work here either: `features` and `adj` are whole-graph inputs, so
-        # Keras' axis-0 batching would slice them along with `edge_pairs`.
-        for _ in range(100):
-            model.train_on_batch([features, adj, edge_pairs], labels)
-
-        # Predict on new edge pairs
-        test_pairs = np.array([[0, 2], [4, 6]])
-        probs = model.predict_on_batch([features, adj, test_pairs])
-        print(probs)  # e.g., [0.85, 0.12] - first edge likely exists
-        ```
+            model = SHGCNLinkPredictor(
+                hidden_dims=[64, 32], embedding_dim=16, dropout_rate=0.3,
+            )
+            model.compile(
+                optimizer='adam',
+                loss='binary_crossentropy',
+                metrics=['accuracy', keras.metrics.AUC()],
+            )
+            pos_edges = np.array([[0, 1], [1, 2], [2, 3]])
+            neg_edges = np.array([[0, 5], [1, 7], [3, 9]])
+            edge_pairs = np.vstack([pos_edges, neg_edges])
+            labels = np.array([1, 1, 1, 0, 0, 0])
+            for _ in range(100):
+                model.train_on_batch([features, adj, edge_pairs], labels)
+            probs = model.predict_on_batch([features, adj, test_pairs])
 
     Note:
-        - Edge pairs should be [source, target] integer indices
-        - Model outputs probabilities, use threshold (e.g., 0.5) for binary prediction
-        - Training requires both positive and negative edge samples
-        - Embeddings are in Euclidean space, decoder uses Euclidean distance
+        Training needs both positive and negative edge samples. Use
+        ``train_on_batch`` / ``predict_on_batch``, never ``fit`` /
+        ``predict``: ``features`` and ``adjacency`` are whole-graph
+        inputs, and axis-0 batching would slice them along with
+        ``edge_pairs``. Embeddings live in Euclidean space; the decoder
+        scores them by Euclidean distance.
     """
 
     def __init__(
@@ -563,11 +530,10 @@ class SHGCNLinkPredictor(keras.Model):
         self.use_bias = use_bias
         self.use_curvature = use_curvature
 
-        # sHGCN backbone for node embeddings
         self.backbone = SHGCNModel(
             hidden_dims=hidden_dims,
             output_dim=embedding_dim,
-            output_activation='linear',  # Raw embeddings
+            output_activation='linear',
             dropout_rate=dropout_rate,
             use_bias=use_bias,
             use_curvature=use_curvature,
@@ -577,24 +543,15 @@ class SHGCNLinkPredictor(keras.Model):
         self.decoder = FermiDiracDecoder(name='fermi_dirac_decoder')
 
     def build(self, input_shape: List[Tuple[Optional[int], ...]]) -> None:
-        """Materialise the backbone AND the Fermi-Dirac decoder.
+        """Build the backbone and the Fermi-Dirac decoder.
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-029
-        This method exists for SERIALIZATION, not for eager convenience -- do not
-        delete it on the grounds that the model already runs without it. Keras
-        restores a sub-layer's variables only if that sub-layer is BUILT at load
-        time. With no `build()` here, `FermiDiracDecoder` was unbuilt when the
-        archive was read, its `load_own_variables` was skipped, and the reloaded
-        model silently fell back to the class defaults r=2.0 / t=1.0. MEASURED:
-        the archive was COMPLETE (8 of 8 datasets, both scalars stored at the
-        perturbed 3.75) and the RELOAD was lossy -- 6 of 8 tensors identical, a
-        forward delta of 1.497385e-01 against an output range of 7.310586e-01,
-        and NO warning of any kind. An archive-content check alone cannot see
-        this; the guard must compare reloaded VALUES. See decisions.md D-029.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-029: build() must stay; without
+        # it FermiDiracDecoder loads unbuilt and silently reverts to r=2.0/t=1.0
+        # on reload (measured delta 1.497e-01). See decisions.md D-029.
 
-        Args:
-            input_shape: List of ``[features_shape, adjacency_shape,
-                edge_pairs_shape]``.
+        :param input_shape: ``[features_shape, adjacency_shape,
+            edge_pairs_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
         """
         feat_shape, adj_shape, edge_shape = input_shape
 
@@ -612,7 +569,14 @@ class SHGCNLinkPredictor(keras.Model):
             self,
             input_shape: List[Tuple[Optional[int], ...]]
     ) -> Tuple[Optional[int], ...]:
-        """Return ``(num_edges,)``."""
+        """Return ``(num_edges,)``.
+
+        :param input_shape: ``[features_shape, adjacency_shape,
+            edge_pairs_shape]``.
+        :type input_shape: List[Tuple[Optional[int], ...]]
+        :return: Output shape.
+        :rtype: Tuple[Optional[int], ...]
+        """
         return (input_shape[2][0],)
 
     def call(
@@ -620,24 +584,19 @@ class SHGCNLinkPredictor(keras.Model):
             inputs: List[keras.KerasTensor],
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass for link prediction.
+        """Embed nodes, gather edge endpoints, and decode edge probability.
 
-        Args:
-            inputs: List of [features, adjacency, edge_pairs].
-                - features: [num_nodes, input_dim]
-                - adjacency: [num_nodes, num_nodes] dense
-                - edge_pairs: [num_edges, 2] integer indices
-            training: Whether in training mode.
-
-        Returns:
-            Edge probabilities of shape [num_edges,].
+        :param inputs: ``[features, adjacency, edge_pairs]``.
+        :type inputs: List[keras.KerasTensor]
+        :param training: Whether dropout is active.
+        :type training: Optional[bool]
+        :return: Edge probabilities, shape ``[num_edges]``.
+        :rtype: keras.KerasTensor
         """
         features, adjacency, edge_pairs = inputs
 
         embeddings = self.backbone([features, adjacency], training=training)
 
-        # edge_pairs: [num_edges, 2] with [src, tgt] indices
         src_indices = edge_pairs[:, 0]
         tgt_indices = edge_pairs[:, 1]
 
@@ -649,7 +608,11 @@ class SHGCNLinkPredictor(keras.Model):
         return probabilities
 
     def get_config(self) -> dict:
-        """Get model configuration for serialization."""
+        """Return the config needed to reconstruct this model.
+
+        :return: Constructor arguments.
+        :rtype: dict
+        """
         config = super().get_config()
         config.update({
             'hidden_dims': self.hidden_dims,
@@ -674,28 +637,30 @@ def create_shgcn(
         use_curvature: bool = True,
         **kwargs: Any
 ) -> SHGCNModel:
-    """Create a base sHGCN feature-extraction model.
+    """Build a base sHGCN feature-extraction model.
 
-    There is no ``MODEL_VARIANTS`` table and none was invented: sHGCN is
-    specified by a per-layer hidden-dimension list chosen for the dataset at
-    hand, and the paper publishes no named scale family. This factory therefore
-    constructs the class with a sensible two-layer default.
+    sHGCN has no named scale family in the paper -- it is specified by a
+    per-layer hidden-dimension list chosen for the dataset at hand -- so
+    this factory has no ``MODEL_VARIANTS`` table and applies a plain
+    two-layer default instead.
 
-    Args:
-        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
-            ``[64, 32]``.
-        output_dim: Dimension of the output layer.
-        output_activation: Activation applied to the output layer.
-        dropout_rate: Dropout applied between layers.
-        use_bias: Whether the sHGCN layers use a bias term.
-        use_curvature: Whether learnable curvature is enabled.
-        **kwargs: Additional arguments forwarded to the model constructor.
-
-    Returns:
-        A configured SHGCNModel. It is called with ``[features, adjacency]``.
-
-    Raises:
-        ValueError: If any argument is outside its valid range.
+    :param hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+        ``[64, 32]``.
+    :type hidden_dims: Optional[List[int]]
+    :param output_dim: Dimension of the output layer.
+    :type output_dim: int
+    :param output_activation: Activation applied to the output layer.
+    :type output_activation: Optional[Union[str, callable]]
+    :param dropout_rate: Dropout applied between layers.
+    :type dropout_rate: float
+    :param use_bias: Whether the sHGCN layers use a bias term.
+    :type use_bias: bool
+    :param use_curvature: Whether learnable curvature is enabled.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to the model constructor.
+    :return: A configured model, called with ``[features, adjacency]``.
+    :rtype: SHGCNModel
+    :raises ValueError: If any argument is outside its valid range.
     """
     if hidden_dims is None:
         hidden_dims = [64, 32]
@@ -719,28 +684,30 @@ def create_shgcn_node_classifier(
         use_curvature: bool = True,
         **kwargs: Any
 ) -> SHGCNNodeClassifier:
-    """Create an sHGCN node-classification model.
+    """Build an sHGCN node-classification model.
 
-    Args:
-        num_classes: Number of target classes. Required -- it is a property of
-            the dataset, not something a default can guess.
-        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
-            ``[64, 32]``.
-        embedding_dim: Dimension of the node embedding fed to the classifier
-            head.
-        dropout_rate: Dropout applied between layers.
-        use_bias: Whether the sHGCN layers use a bias term.
-        use_curvature: Whether learnable curvature is enabled.
-        **kwargs: Additional arguments forwarded to the model constructor.
-
-    Returns:
-        A configured SHGCNNodeClassifier. It is called with
-        ``[features, adjacency]`` and returns class PROBABILITIES -- its head
-        is ``Dense(num_classes, activation='softmax')``, so compile with
-        ``from_logits=False`` (the Keras default).
-
-    Raises:
-        ValueError: If any argument is outside its valid range.
+    :param num_classes: Number of target classes. Required -- it is a
+        property of the dataset, not something a default can guess.
+    :type num_classes: int
+    :param hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+        ``[64, 32]``.
+    :type hidden_dims: Optional[List[int]]
+    :param embedding_dim: Dimension of the node embedding fed to the
+        classifier head.
+    :type embedding_dim: int
+    :param dropout_rate: Dropout applied between layers.
+    :type dropout_rate: float
+    :param use_bias: Whether the sHGCN layers use a bias term.
+    :type use_bias: bool
+    :param use_curvature: Whether learnable curvature is enabled.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to the model constructor.
+    :return: A configured model. It is called with
+        ``[features, adjacency]`` and returns class probabilities -- its
+        head is ``Dense(num_classes, activation='softmax')``, so compile
+        with ``from_logits=False`` (the Keras default).
+    :rtype: SHGCNNodeClassifier
+    :raises ValueError: If any argument is outside its valid range.
     """
     if hidden_dims is None:
         hidden_dims = [64, 32]
@@ -763,24 +730,25 @@ def create_shgcn_link_predictor(
         use_curvature: bool = True,
         **kwargs: Any
 ) -> SHGCNLinkPredictor:
-    """Create an sHGCN link-prediction model.
+    """Build an sHGCN link-prediction model.
 
-    Args:
-        hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
-            ``[64, 32]``.
-        embedding_dim: Dimension of the node embeddings scored by the
-            Fermi-Dirac decoder.
-        dropout_rate: Dropout applied between layers.
-        use_bias: Whether the sHGCN layers use a bias term.
-        use_curvature: Whether learnable curvature is enabled.
-        **kwargs: Additional arguments forwarded to the model constructor.
-
-    Returns:
-        A configured SHGCNLinkPredictor. It is called with
-        ``[features, adjacency, edge_pairs]`` and returns edge probabilities.
-
-    Raises:
-        ValueError: If any argument is outside its valid range.
+    :param hidden_dims: Per-layer hidden dimensions. ``None`` resolves to
+        ``[64, 32]``.
+    :type hidden_dims: Optional[List[int]]
+    :param embedding_dim: Node embedding dimension scored by the
+        Fermi-Dirac decoder.
+    :type embedding_dim: int
+    :param dropout_rate: Dropout applied between layers.
+    :type dropout_rate: float
+    :param use_bias: Whether the sHGCN layers use a bias term.
+    :type use_bias: bool
+    :param use_curvature: Whether learnable curvature is enabled.
+    :type use_curvature: bool
+    :param kwargs: Forwarded to the model constructor.
+    :return: A configured model, called with
+        ``[features, adjacency, edge_pairs]``; returns edge probabilities.
+    :rtype: SHGCNLinkPredictor
+    :raises ValueError: If any argument is outside its valid range.
     """
     if hidden_dims is None:
         hidden_dims = [64, 32]

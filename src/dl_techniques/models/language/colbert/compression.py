@@ -1,62 +1,29 @@
 """
-Residual compression: the one artifact-level thing ColBERTv2 adds to ColBERT.
+Residual compression: the one artifact-level addition ColBERTv2 makes to
+ColBERT. :class:`ResidualCompressionCodec` is a plain Python object, not a
+Keras layer, used to shrink a trained index after training finishes.
 
-ColBERTv2 does not change the network. The encoder, the bias-free 128-d
-projection, the L2 normalization and the MaxSim reduction are byte-for-byte the
-same objects v1 used -- the official repository ships a single
-``colbert/modeling/colbert.py`` for both. What v2 adds is (a) a training recipe
-(cross-encoder distillation, which lives in :mod:`dl_techniques.losses`) and
-(b) *this*: a lossy codec that shrinks the stored index.
+A late-interaction index stores one vector per token rather than one per
+passage, so a 128-d ``float16`` embedding costs 256 bytes and a large
+collection needs terabytes. Token embeddings of a trained ColBERT cluster
+tightly, so each one is stored as an integer centroid id from k-means plus a
+small residual, crushed to one or two bits per dimension. At ``nbits=1`` a
+128-d vector compresses to 16 bytes of residual plus a code.
 
-The arithmetic that motivates it is blunt. A late-interaction index stores one
-vector per *token*, not one per passage, so a 128-d ``float16`` embedding costs
-256 bytes and a 100M-passage collection at ~80 tokens each needs terabytes. The
-paper's observation is that the token embeddings of a trained ColBERT cluster
-tightly: pick a few thousand centroids by k-means, and every embedding is its
-nearest centroid plus a *small* residual. The centroid costs an integer id, and
-the residual -- being small -- survives being crushed to one or two bits per
-dimension. At ``nbits=1`` a 128-d vector becomes 16 bytes of residual plus a
-code, a 10-20x reduction against ``float16``.
+This is index-time only: nothing here is differentiable or reachable from
+:meth:`ColBERT.call` or from either ColBERT loss. Compression runs once, over
+an already-trained encoder's outputs; decompression runs in the search
+engine when candidate vectors are read back.
 
-**This is index-time only, and that boundary is load-bearing.** Nothing here is
-a :class:`keras.Layer`, nothing here is differentiable, and nothing here is
-reachable from :meth:`ColBERT.call` or from either ColBERT loss. Compression
-happens once, when an already-trained encoder's outputs are written to disk;
-decompression happens in the search engine when candidate vectors are read back.
-Putting a quantizer inside the forward pass would be a different (and much
-worse) model -- quantization-aware training -- and the reference does not do it.
-The accompanying test asserts this structurally rather than trusting the comment.
+:meth:`fit` runs spherical k-means over a sample of embeddings to get
+centroids. :meth:`encode` finds the nearest centroid by inner product and
+bucketizes the residual per dimension into equiprobable levels. :meth:`decode`
+unpacks the levels, adds the centroid, and re-normalizes, since a decoded
+vector generally lands off the unit sphere and MaxSim needs it back on it.
 
-Mechanics, following ``colbert/indexing/codecs/residual.py``:
-
-1. **fit** -- k-means over a sample of document embeddings gives ``centroids``,
-   themselves L2-normalized.
-2. **encode** -- nearest centroid by ``argmax(centroids @ v.T)``. Maximum inner
-   product is the correct nearest-neighbour rule *only* because every vector and
-   every centroid is unit-norm, which makes ``||v - c||^2 = 2 - 2 v.c``
-   monotone in ``-v.c``; this module normalizes on the way in so the premise
-   holds. The residual ``v - c`` is then bucketized per dimension into
-   ``2**nbits`` levels and the level indices are bit-packed.
-3. **decode** -- unpack the bits, map each level back through
-   ``bucket_weights``, add the centroid, and **re-L2-normalize**. That final
-   renormalization is in the reference *code* and nowhere in the paper text; it
-   matters because MaxSim is defined over unit vectors and a decoded vector is
-   generally off the sphere.
-
-**Provenance of the bucket boundaries.** The reference's ``bucket_cutoffs`` /
-``bucket_weights`` are computed in ``colbert/indexing/collection_indexer.py``,
-which was *not* fetched during this plan's research pass. The derivation below
-is therefore **this implementation's own, not a transcription of the reference**,
-and no claim of numerical parity with the official codec is made. It is the
-equiprobable-bin quantizer: cutoffs are the ``j / L`` quantiles of the observed
-residual distribution for ``j = 1 .. L-1``, so every level receives the same
-share of residual mass, and each level's reconstruction value is the
-``(j + 0.5) / L`` quantile, i.e. the conditional median of the mass it
-represents. Choosing the conditional median (rather than the conditional mean)
-minimizes reconstruction error in L1 and is robust to the heavy tails a
-residual distribution has near the cluster boundaries. The quantiles are taken
-over all dimensions pooled, matching the reference's single shared cutoff
-vector rather than a per-dimension codebook.
+The bucket-boundary derivation here is this implementation's own, not a
+transcription of the reference's undisclosed cutoff computation: cutoffs are
+equiprobable quantiles of the pooled residual distribution.
 
 References:
     - Santhanam et al., 2022. ColBERTv2: Effective and Efficient Retrieval via
@@ -90,9 +57,9 @@ _NORM_EPSILON: float = 1e-12
 # ---------------------------------------------------------------------------
 # Private helpers
 #
-# Names here are deliberately distinctive (``_colbert_codec_*``) so that the
-# index-time boundary test can grep every symbol this module defines against
-# ``model.py`` and the loss module without generic-name false positives.
+# Names here use the ``_colbert_codec_*`` prefix so the index-time boundary
+# test can grep every symbol this module defines against ``model.py`` and the
+# loss module.
 # ---------------------------------------------------------------------------
 
 
@@ -227,11 +194,10 @@ def _colbert_codec_unpack_levels(
 class ResidualCompressionCodec:
     """Index-time residual compressor for ColBERTv2 token embeddings.
 
-    A plain Python object, deliberately **not** a :class:`keras.Layer`: it holds
-    no trainable state, appears in no computation graph, and must never be
-    reachable from :meth:`ColBERT.call` or from any loss. See the module
-    docstring for why that boundary exists and for the provenance of the bucket
-    derivation.
+    A plain Python object, not a :class:`keras.Layer`: it holds no trainable
+    state, appears in no computation graph, and must never be reachable from
+    :meth:`ColBERT.call` or from any loss. See the module docstring for the
+    provenance of the bucket derivation.
 
     Usage::
 
@@ -479,18 +445,8 @@ class ResidualCompressionCodec:
         residuals = self.bucket_weights[levels]
         reconstructed = self.centroids[code_array] + residuals
 
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-018
-        # The reconstruction is re-L2-normalized here, and this line is not
-        # optional bookkeeping. Do NOT drop it, and do NOT "optimize" it away on
-        # the grounds that the centroid was already unit-norm: adding a
-        # quantized residual moves the point off the sphere, by a margin that
-        # grows as nbits shrinks. MaxSim is defined over unit vectors and its
-        # scores are only cosine similarities while that holds, so an
-        # un-normalized decode silently rescales every score in the index by a
-        # per-vector factor -- a defect no shape check and no finiteness check
-        # can see. This detail exists ONLY in the reference code
-        # (colbert/indexing/codecs/residual.py, decompress()); the ColBERTv2
-        # paper does not mention it, so it cannot be re-derived from the text.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-018: re-normalize the reconstruction —
+        # adding a quantized residual moves it off the unit sphere, which silently rescales MaxSim. See decisions.md.
         return _colbert_codec_l2_normalize(reconstructed)
 
     def reconstruction_error(self, vectors: np.ndarray) -> float:

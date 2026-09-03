@@ -1,69 +1,36 @@
 """
-ColBERT, late interaction retrieval, packaged as one shared encoder.
+ColBERT late-interaction retrieval, in the `ColBERT` class and its
+`create_colbert` / `create_colbert_v1` / `create_colbert_v2` factories.
 
-Dense single-vector retrieval compresses a whole passage into one embedding and
-scores it with a dot product. That is cheap -- one vector per document, one
-approximate-nearest-neighbour probe per query -- and it is lossy in a specific
-way: every term of the passage has to be averaged into the same 768 numbers, so
-a query term that matches one rare word in a long document is diluted by every
-other word around it. Cross-encoders sit at the other extreme. They feed the
-query and the document through a transformer together, so every query term can
-attend to every document term, and they are correspondingly accurate and
-unusable at scale: nothing can be precomputed, and each (query, document) pair
-costs a full forward pass.
-
-Late interaction is the resolution of that tension, and it is a factorization
-argument rather than a modelling trick. The encoder is run **independently** on
-the query and on the document -- so every document embedding can be computed
-once, offline, and stored -- and the only thing that happens at query time is a
-cheap similarity between two already-computed matrices of per-token vectors:
+A dense single-vector retriever compresses a whole passage into one embedding,
+so a query term matching one rare word gets diluted by every other word around
+it. A cross-encoder avoids that by attending query and document together, but
+nothing can be precomputed and every pair costs a full forward pass. Late
+interaction runs the encoder independently on each side, so document
+embeddings are computed once and stored, and scores a pair with a cheap
+similarity between two per-token embedding matrices:
 
 .. math::
 
     S(q, d) = \\sum_{i \\in |E_q|} \\max_{j \\in |E_d|} E_{q_i} \\cdot E_{d_j}^{T}
 
-Each query term takes its single best match in the document (the ``max``) and
-those per-term bests are summed. Term-level evidence therefore survives to
-scoring time, which is what the single-vector average destroys, while the
-expensive interaction between the two texts never happens inside the network,
-which is what the cross-encoder cannot avoid. The per-token vectors are
-projected to 128 dimensions and L2-normalized, so each inner product is a
-cosine and the whole score matrix is bounded -- that boundedness is what lets
-padded and filtered document positions be masked with a finite sentinel rather
-than ``-inf``.
+Each query term takes its best match in the document and those bests are
+summed, so term-level evidence survives to scoring time. Per-token vectors are
+projected to 128 dimensions and L2-normalized, so every inner product is a
+bounded cosine.
 
-**v1 and v2 are the same network.** This is a design fact of the reference
-implementation, not a simplification made here: the official
-``stanford-futuredata/ColBERT`` repository ships a single
-``colbert/modeling/colbert.py`` for both papers, and v1 behaviour is v2's code
-with ``use_ib_negatives=False``, ``nway=2``, no distillation scores and no
-residual compression applied at indexing time
-(https://github.com/stanford-futuredata/ColBERT/blob/main/colbert/modeling/colbert.py).
-ColBERTv2's own architecture section restates v1's encoder and the identical
-MaxSim formula. What v2 changed is the *supervision* -- cross-encoder KL
-distillation over ``nway`` tuples, plus in-batch negatives -- and it added an
-index-time residual codec that never appears in ``call()`` and never appears in
-any loss. Accordingly this module exports one :class:`ColBERT` class and two
-genuine factories, :func:`create_colbert_v1` and :func:`create_colbert_v2`,
-which build the same architecture and differ in the training recipe they are
-documented to pair with. They are not aliases and they are not two networks;
-the distinction lives in the trainers and in the v2-only codec.
+v1 and v2 build the same network: the reference `stanford-futuredata/ColBERT`
+repository ships one `colbert/modeling/colbert.py` for both, and v1 is v2's
+code with `use_ib_negatives=False`, `nway=2`, no distillation and no residual
+compression. `create_colbert_v1` and `create_colbert_v2` build identical
+weights and differ only in the training recipe they pair with.
 
-Deliberate deviations from the reference, stated here rather than implied away:
-
-- **Markers.** The reference marks queries and documents with ``[Q]`` / ``[D]``,
-  implemented as BERT WordPiece's ``[unused0]`` / ``[unused1]`` slots. There is
-  no WordPiece tokenizer in this library; the NLP stack is Tiktoken
-  ``cl100k_base``, so :class:`~.tokenization.ColBERTTokenizer` allocates the two
-  markers from free slots at the top of that vocabulary. Token-id parity with
-  published ColBERT checkpoints is therefore permanently forfeited.
-- **Backbone activation.** This library's :class:`~...bert.model.BERT` defaults
-  to ``gelu_tanh``, the tanh approximation, not the exact erf form.
-- **No pretrained weights.** None ship for ColBERT and none ship for the BERT
-  backbone either; ``from_variant(pretrained=True)`` raises
-  ``NotImplementedError`` on both. Every number produced by training this model
-  is consequently a **wiring result** -- evidence that gradients flow and the
-  loss decreases -- and never a retrieval-quality claim.
+This implementation diverges from the reference: `[Q]`/`[D]` markers use free
+slots in the Tiktoken `cl100k_base` vocabulary rather than BERT WordPiece
+`[unused]` slots, so token-id parity with published checkpoints is lost; the
+BERT backbone defaults to `gelu_tanh` rather than the exact erf form; and no
+pretrained weights ship for ColBERT or for the backbone, so
+`from_variant(pretrained=True)` raises on both.
 
 References:
     - Khattab & Zaharia, 2020. ColBERT: Efficient and Effective Passage Search
@@ -136,6 +103,30 @@ class ColBERT(keras.Model):
     (:class:`~.tokenization.ColBERTTokenizer`); this class consumes the arrays
     it emits.
 
+    Architecture:
+
+    .. code-block:: text
+
+        query_ids [B, Sq]          doc_ids [B, Sd], skiplist_mask
+              │                          │
+              ▼                          ▼
+        ┌──────────────────────────────────────┐
+        │  BERT encoder (shared weights)       │
+        └───────────────┬──────────────────────┘
+                        │  [B, S, H]
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  ColBERTProjection (shared weights)  │
+        │    H -> dim, mask, L2 normalize      │
+        └───────────────┬──────────────────────┘
+                        │  [B, S, dim]
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  MaxSimScorer                        │
+        └───────────────┬──────────────────────┘
+                        ▼
+        score [B], query_embeddings, doc_embeddings
+
     :param vocab_size: Backbone vocabulary size.
     :type vocab_size: int
     :param hidden_size: Backbone hidden width.
@@ -185,25 +176,10 @@ class ColBERT(keras.Model):
             outputs["score"].shape  # (batch,)
     """
 
-    # Variant table. TWO PROVENANCE CLASSES, deliberately not blended
-    # (guide v3 §13.2):
-    #
-    #   * The ColBERT-side numbers -- `dim=128`, `query_maxlen=32`,
-    #     `doc_maxlen=220` -- are CLASS A: the official reference defaults, read
-    #     from `colbert/infra/config/settings.py` in
-    #     https://github.com/stanford-futuredata/ColBERT
-    #     (`dim: int = 128`, `query_maxlen: int = 32`, `doc_maxlen: int = 220`).
-    #     They are identical in every row because ColBERT does not scale them
-    #     with the backbone; the reference ships one value for all sizes.
-    #
-    #   * The backbone geometry (`hidden_size`, `num_layers`, `num_heads`,
-    #     `intermediate_size`) is NOT from any ColBERT source. It is copied from
-    #     THIS repository's own `BERT.MODEL_VARIANTS`, which tracks the Turc et
-    #     al. 2019 released checkpoints. Published ColBERT uses `bert-base` only;
-    #     `tiny`/`small`/`large` are this library's capacity ladder, offered for
-    #     cheap tests and for scaling, and no ColBERT paper reports them.
-    #
-    # Do NOT "unify" the two by citing one source for the whole table.
+    # dim/query_maxlen/doc_maxlen come from the reference's settings.py and are
+    # constant across rows. hidden_size/num_layers/num_heads/intermediate_size
+    # come from this repo's own BERT.MODEL_VARIANTS ladder, not from ColBERT --
+    # published ColBERT uses bert-base only.
     MODEL_VARIANTS = {
         "large": {
             "hidden_size": 1024,
@@ -269,17 +245,9 @@ class ColBERT(keras.Model):
         dim: int = DEFAULT_DIM,
         query_maxlen: int = DEFAULT_QUERY_MAXLEN,
         doc_maxlen: int = DEFAULT_DOC_MAXLEN,
-        # DECISION plan-2026-08-25T165753-704a9bcb/D-002
-        # Do NOT re-add a model-side ``mask_punctuation`` parameter here (nor to
-        # ``get_config``, nor to ``MODEL_VARIANTS``). It existed until 2026-08-25
-        # and had no reader anywhere in the tree: the model applies whatever
-        # ``doc_skiplist_mask`` it is handed, so the flag changed nothing while
-        # serializing an intent nothing honored. The live flag is
-        # ``ColBERTTokenizer.mask_punctuation`` (``tokenization.py:296``), which
-        # gates skiplist construction; the trainer hardcodes it on the tokenizer
-        # (``src/train/language/colbert/common.py:549``) and never reads a model
-        # flag. Passing ``mask_punctuation=`` now raises ``ValueError`` from
-        # Keras, which is the intended loud rejection.
+        # DECISION plan-2026-08-25T165753-704a9bcb/D-002: no model-side
+        # mask_punctuation param; the live flag is ColBERTTokenizer.mask_punctuation.
+        # See decisions.md.
         max_position_embeddings: int = 512,
         hidden_dropout_rate: float = 0.1,
         attention_probs_dropout_rate: float = 0.1,
@@ -324,19 +292,9 @@ class ColBERT(keras.Model):
             name="encoder",
         )
 
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-011
-        # ONE projection instance, deliberately shared by BOTH towers. Do NOT
-        # give the document path its own `ColBERTProjection` -- not "for
-        # symmetry", not "so each tower can be tuned". The reference builds a
-        # single `nn.Linear(hidden, dim, bias=False)` and routes `query()` and
-        # `doc()` through it, and the late-interaction score is only a cosine
-        # between comparable spaces BECAUSE both sides land in the same one. Two
-        # instances would train two independent projections into two unrelated
-        # 128-d spaces while every shape, every serialization round trip and
-        # every gradient test stayed green -- the score would just be
-        # meaningless. Pinned by `test_the_query_and_document_share_one
-        # _projection_instance`, which asserts object identity with `is` rather
-        # than comparing configs. See decisions.md D-011.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-011: one projection instance
+        # shared by both towers; two instances would train unrelated 128-d spaces
+        # with every shape/serialization test still green. See decisions.md.
         self.projection = ColBERTProjection(dim=dim, name="projection")
 
         self.scorer = MaxSimScorer(mask_value=self.mask_value, name="maxsim")
@@ -397,7 +355,7 @@ class ColBERT(keras.Model):
         """Materialize the encoder, the projection and the scorer.
 
         A subclassed ``keras.Model`` that leaves ``build`` unimplemented is
-        marked built while holding **zero** variables, and both
+        marked built while holding zero variables, and both
         ``model.build(shape)`` and ``.keras`` deserialization land on that
         defaulted path. Every sub-component is therefore built explicitly here.
 
@@ -412,18 +370,8 @@ class ColBERT(keras.Model):
         if self.built:
             return
 
-        # The sub-layer tree is materialized by tracing `call()` symbolically
-        # (`utils.model_build.materialize_sublayers`), NOT by a hand-written
-        # chain of `sublayer.build(shape)` / `compute_output_shape(shape)`. A
-        # hand-walk is a second, hand-maintained encoding of the forward
-        # topology and it drifts from `call()` silently. MEASURED here,
-        # 2026-08-25 on CPU: the symbolic trace succeeds on this model and
-        # materializes 18 weights at a 1-layer test geometry -- the same
-        # population a real forward call produces -- so the documented blocker
-        # for the helper (a `call()` that reaches a raw-backend op or
-        # `add_loss()`) does not apply. The float32 KerasTensor placeholders it
-        # feeds `input_ids` are harmless: nothing here indexes by dtype, and no
-        # weight shape depends on the ids.
+        # Materialized by symbolically tracing call(), not a hand-written chain
+        # of sublayer.build() calls, so it cannot drift from call()'s topology.
         materialize_sublayers(self, input_shape)
 
         super().build(input_shape)
@@ -496,14 +444,14 @@ class ColBERT(keras.Model):
     ) -> Any:
         """Run the shared encoder and the shared projection.
 
-        The two masks are deliberately DISTINCT tensors, see the anchor below.
+        The two masks below are distinct tensors; see the D-029 anchor.
 
         :param input_ids: ``(batch, seq_len)`` integer token ids.
         :type input_ids: keras tensor
-        :param attention_mask: ``(batch, seq_len)`` **padding** mask,
-            **1 = visible**, and nothing else. This is what the backbone sees.
+        :param attention_mask: ``(batch, seq_len)`` padding mask, 1 = visible.
+            This is what the backbone sees.
         :type attention_mask: keras tensor
-        :param participation_mask: ``(batch, seq_len)`` mask, **1 = keep**,
+        :param participation_mask: ``(batch, seq_len)`` mask, 1 = keep,
             multiplied onto the projected pre-normalization embeddings and used
             as the MaxSim candidate set. Defaults to ``attention_mask`` when the
             caller has no extra filter to apply (the query path).
@@ -513,33 +461,8 @@ class ColBERT(keras.Model):
         :return: ``(batch, seq_len, dim)`` L2-normalized embeddings, exactly
             zero at positions ``participation_mask`` zeroes.
         """
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-029
-        # These two masks must stay SEPARATE. Do NOT collapse them back into one
-        # tensor and pass it to both `self.encoder` and `self.projection` -- that
-        # is the exact defect this signature exists to fix. Collapsing them feeds
-        # the punctuation skiplist to the backbone as its ATTENTION mask, which
-        # hides punctuation from every other token's self-attention; the
-        # reference keeps punctuation fully visible as context and removes it
-        # only from the MaxSim candidate set, by multiplying the skiplist onto
-        # the projected pre-normalization embeddings. MEASURED over 40 SEEDED
-        # random inits (`keras.utils.set_random_seed(0..39)`, 2-layer `tiny`, 10
-        # doc positions, skiplist zeroing 3 and 7): under the collapsed ordering
-        # the KEPT positions' embeddings moved purely because two OTHER
-        # positions were skiplisted, by max|delta| min 0.00035694 / median
-        # 0.00094578 / max 0.00241351 -- NEVER zero; under this split ordering
-        # the same delta is exactly 0.0 at ALL 40 seeds. The magnitude is a
-        # property of one random init, so the reproducible claim is "nonzero
-        # before, exactly 0.0 after" -- not any single draw.
-        #
-        # The converse is equally load-bearing and equally easy to break: the
-        # PADDING mask must reach `self.encoder`. Passing
-        # `keras.ops.ones_like(attention_mask)` below makes the backbone attend
-        # to padding as if it were content and, before 2026-08-25, reddened
-        # NOTHING in the suite. Both directions are pinned now --
-        # `test_a_kept_position_is_untouched_by_a_skiplist_elsewhere` and
-        # `test_a_padded_document_position_cannot_influence_a_real_one`. Both
-        # pre-existing skiplist guards pass under EITHER ordering, which is why
-        # the collapse shipped. See decisions.md D-029 and D-030.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-029: attention_mask and participation_mask
+        # must stay separate — collapsing them feeds the skiplist to the backbone's attention (measured max|delta| 0.0024). See decisions.md.
         if participation_mask is None:
             participation_mask = attention_mask
         encoded = self.encoder(
@@ -702,7 +625,7 @@ class ColBERT(keras.Model):
         :type inputs: Dict[str, keras tensor]
         :param training: Keras training flag.
         :type training: Optional[bool]
-        :return: Mapping with a **fixed** key set: ``score`` ``(batch,)``,
+        :return: Mapping with a fixed key set: ``score`` ``(batch,)``,
             ``query_embeddings`` ``(batch, query_len, dim)`` and
             ``doc_embeddings`` ``(batch, doc_len, dim)``.
         :rtype: Dict[str, keras tensor]
@@ -743,17 +666,9 @@ class ColBERT(keras.Model):
             training=training,
         )
 
-        # DECISION plan-2026-08-25T121346-c71fc3ad/D-012
-        # The output STRUCTURE is fixed here and resolved ONCE, at the return.
-        # Do NOT drop a key when its optional input was absent, and do NOT return
-        # a bare score tensor for a mask-less call: an output structure that
-        # depends on which inputs were supplied breaks `.predict()`, which
-        # concatenates per-batch outputs and cannot align a slot that exists in
-        # one batch and not another. `model(inputs)` keeps working either way,
-        # which is exactly why the defect ships -- BERT itself shipped it, and
-        # its `D-032` records the same rule for the same reason. Every optional
-        # input is resolved to a concrete tensor ABOVE, so this dict is
-        # unconditional. See decisions.md D-012.
+        # DECISION plan-2026-08-25T121346-c71fc3ad/D-012: the output dict's keys
+        # are fixed regardless of which optional inputs were supplied; a
+        # conditional structure breaks `.predict()`'s batch concatenation. See decisions.md.
         return {
             "score": self.scorer(
                 query_embeddings,
@@ -903,21 +818,19 @@ def create_colbert_v1(
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> ColBERT:
-    """Build a ColBERT **v1** encoder, for the pairwise-softmax recipe.
+    """Build a ColBERT v1 encoder, for the pairwise-softmax recipe.
 
     Pairs with ``ColBERTPairwiseSoftmaxLoss`` and
     ``src/train/language/colbert/train_colbert_v1.py``: softmax cross-entropy
     over the ``nway`` candidate scores of a ``<query, positive, negatives...>``
     tuple, positive first, ``nway=2`` in the original recipe.
 
-    **This builds exactly the same network as** :func:`create_colbert_v2` --
-    same class, same weights, same ``MODEL_VARIANTS`` row. That is not a
-    shortcut taken here: the official ``stanford-futuredata/ColBERT``
-    repository has no v1-only code path, and v1 behaviour is v2's code with
-    ``use_ib_negatives=False``, ``nway=2``, no distillation scores and no
-    residual compression. The v1/v2 distinction is the training recipe and the
-    v2-only index-time codec, and a test asserts the two factories produce
-    identical weight-path sets.
+    This builds exactly the same network as :func:`create_colbert_v2` -- same
+    class, same weights, same ``MODEL_VARIANTS`` row. The official
+    ``stanford-futuredata/ColBERT`` repository has no v1-only code path; v1 is
+    v2's code with ``use_ib_negatives=False``, ``nway=2``, no distillation
+    scores and no residual compression. A test asserts the two factories
+    produce identical weight-path sets.
 
     :param variant: ``"tiny"``, ``"small"``, ``"base"`` or ``"large"``.
     :type variant: str
@@ -943,7 +856,7 @@ def create_colbert_v2(
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> ColBERT:
-    """Build a ColBERT **v2** encoder, for the distillation recipe.
+    """Build a ColBERT v2 encoder, for the distillation recipe.
 
     Pairs with ``ColBERTDistillationLoss`` and
     ``src/train/language/colbert/train_colbert_v2.py``: KL divergence between
@@ -953,9 +866,9 @@ def create_colbert_v2(
     (``compression.ResidualCompressionCodec``) is the other v2 addition; it is
     never part of the forward pass or of any loss.
 
-    **This builds exactly the same network as** :func:`create_colbert_v1` --
-    see that docstring for the citation. v2 changed the supervision and the
-    index, not the encoder.
+    This builds exactly the same network as :func:`create_colbert_v1` -- see
+    that docstring for the citation. v2 changed the supervision and the index,
+    not the encoder.
 
     :param variant: ``"tiny"``, ``"small"``, ``"base"`` or ``"large"``.
     :type variant: str

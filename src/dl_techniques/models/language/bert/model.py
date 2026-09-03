@@ -1,51 +1,17 @@
 """
-BERT, a bidirectional transformer encoder, packaged as a pure foundation model.
-
-This model embodies the principle of bidirectional pre-training: a token's
-representation should be conditioned on context from both directions at once,
-not on a left-to-right prefix. Autoregressive language models are forced into
-one direction because the training objective would otherwise let a token see
-itself. BERT escapes that constraint by changing the objective rather than the
-architecture -- masked language modelling corrupts a fraction of the input and
-asks the model to reconstruct it, so every layer may attend over the whole
-sequence without leaking the answer. The result is a representation in which
-each position carries evidence from its full surroundings, which is what makes
-a single pre-trained encoder transferable to tagging, span extraction and
-sentence classification alike.
-
-The encoder here is deliberately just the encoder. It emits
-`{"last_hidden_state", "attention_mask"}` and owns no pooler and no
-classification head, so the same weights serve several heads simultaneously
-during multi-task fine-tuning, and a head can be swapped without touching the
-foundation. The forwarded `attention_mask` is part of the contract: downstream
-heads need to know which positions are padding, and recomputing it from the
-inputs at every call site is how mask bugs get introduced.
-
-Architecturally the stack is the standard one -- embeddings (word + learned
-absolute position + token type, then normalization and dropout) followed by
-`num_layers` identical transformer blocks. What is not standard is that the
-block internals are supplied by factories rather than hard-coded: attention
-type, FFN type, normalization type and normalization position are all
-constructor arguments routed through `TransformerLayer`. The default is the
-published configuration (multi-head attention, an MLP feed-forward, post-layer
-normalization), but a caller can substitute a modern variant without forking
-the file. The embedding layer is likewise the shared
-`layers.embedding.bert_embeddings.BertEmbeddings` rather than a private copy;
-`distilbert/` and `modern_bert/` build on the same layer, so a change there is
-felt by three packages.
-
-Four preset variants span the usual capacity range, from BERT-Tiny (4 layers,
-256 hidden) through BERT-Large (24 layers, 1024 hidden). Parameter counts are
-not restated here; `README.md` section 7 holds the single measured table and
-the one-liner that re-derives it.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load. Local
-checkpoints are loaded by path, with mismatched embedding shapes skipped by
-name when `vocab_size` or the architecture differs from the checkpoint's.
+BERT implements a bidirectional transformer encoder as a pure foundation model, in the
+`BERT` class and its `create_bert` / `create_bert_with_head` factories. Masked language
+modeling lets every layer attend over the whole input sequence, unlike an autoregressive
+model that must hide future tokens from each position. The class stays a pure encoder: it
+returns `{"last_hidden_state", "attention_mask"}` with no pooler or head, so several task
+heads can share one set of weights during fine-tuning. Attention type, FFN type,
+normalization type and normalization position are constructor arguments routed through
+`TransformerLayer`, so a caller can swap in a different block variant without forking the
+file; the embedding layer is the shared `BertEmbeddings`, also used by `distilbert/` and
+`modern_bert/`. Four preset variants span BERT-Tiny (4 layers, 256 hidden) to BERT-Large
+(24 layers, 1024 hidden); see `README.md` for parameter counts. No pretrained weights ship
+with this package -- `pretrained=True` raises `NotImplementedError`. Local checkpoints load
+by path, skipping mismatched embedding shapes by name.
 
 References:
     - Devlin et al., 2018. BERT: Pre-training of Deep Bidirectional
@@ -100,7 +66,7 @@ class BERT(keras.Model):
     outputs a dictionary containing the 'last_hidden_state' and the forwarded
     'attention_mask'.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -152,7 +118,7 @@ class BERT(keras.Model):
         │  when no attention_mask is supplied  │
         └──────────────────────────────────────┘
 
-    **Variants:**
+    Variants:
 
     .. code-block:: text
 
@@ -162,12 +128,12 @@ class BERT(keras.Model):
         base        12        768     12        3072
         large       24       1024     16        4096
 
-    **Head integration (create_bert_with_head):**
+    Head integration (create_bert_with_head):
 
     .. code-block:: text
 
         ┌──────────────────────────────────────┐
-        │  keras.Input × 3 (ALL required)      │
+        │  keras.Input × 3 (all required)      │
         │    input_ids / attention_mask /      │
         │    token_type_ids                    │
         └───────────────┬──────────────────────┘
@@ -211,7 +177,7 @@ class BERT(keras.Model):
         (feed-forward) layer. Defaults to 3072.
     :type intermediate_size: int
     :param hidden_act: The non-linear activation function in the encoder.
-        Defaults to ``"gelu_tanh"``, the **tanh approximation** used by the
+        Defaults to ``"gelu_tanh"``, the tanh approximation used by the
         original release this class ports
         (https://github.com/google-research/bert/blob/master/modeling.py).
         Pass ``"gelu"`` for the exact/erf form instead; the two differ by up to
@@ -240,27 +206,23 @@ class BERT(keras.Model):
         all weight matrices. Defaults to 0.02.
     :type initializer_range: float
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-12.
-        Applies to the embedding norm AND to every one of the ``2 * num_layers``
-        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):** the
-        in-block norms previously ignored this knob and ran at the normalization
-        factory's ``1e-6`` default. Weight shapes are unchanged -- existing
-        ``.keras`` files still load -- but forward values move slightly
+        Applies to the embedding norm and to every one of the
+        ``2 * num_layers`` in-block norms. Before 2026-08-19 the in-block
+        norms ignored this value and ran at the normalization factory's
+        ``1e-6`` default instead; weight shapes are unchanged, so existing
+        ``.keras`` files still load, but forward values move slightly
         (measured at ``hidden_size=64, num_layers=4``: max |delta| 1.9e-06,
-        mean 4.0e-07, i.e. ~6e-07 relative).
+        mean 4.0e-07). See ``decisions.md`` D-007.
     :type layer_norm_eps: float
-    :param pad_token_id: ID of padding token. Defaults to 0.
-        **ADVISORY ONLY -- nothing in this model reads it.** It is stored and
-        serialized for tokenizer/config round-tripping and for nothing else. In
-        particular NO attention mask is derived from it: if you call the model
-        without an ``attention_mask``, padding tokens are attended to exactly
-        like real tokens. Supply ``attention_mask`` yourself. MEASURED at
-        ``hidden_size=32, num_layers=2`` on a batch padded with token id 5: two
-        models differing only in ``pad_token_id`` (0 vs 5) give
-        ``max|delta| = 0.0``, a mask-less call equals an all-ones-mask call
-        exactly, and the real ``(ids != 5)`` mask moves the output by 0.0216 --
-        i.e. masking works, it is just never inferred. See ``decisions.md``
-        D-007 (plan-2026-08-23T203721-009b7ccf) and
-        ``tests/test_models/test_bert/test_pad_token_id_is_advisory_only.py``.
+    :param pad_token_id: ID of padding token. Defaults to 0. Nothing in
+        this model reads it during the forward pass -- it is stored and
+        serialized for tokenizer/config round-tripping only. No attention
+        mask is derived from it: a call without an ``attention_mask``
+        attends to padding tokens like real tokens, so supply
+        ``attention_mask`` explicitly. Measured at ``hidden_size=32,
+        num_layers=2``: two models differing only in ``pad_token_id``
+        give ``max|delta| = 0.0``, while a real mask moves the output by
+        0.0216. See ``decisions.md`` D-007 (plan-2026-08-23T203721-009b7ccf).
     :type pad_token_id: int
     :param position_embedding_type: ``'learned'`` (default) or
         ``'sinusoidal'``; forwarded to :class:`BertEmbeddings`, which raises on
@@ -336,22 +298,8 @@ class BERT(keras.Model):
             "intermediate_size": 2048,
             "description": "BERT-Small: Lightweight variant for resource-constrained environments"
         },
-        # DECISION plan-2026-08-22T035419-a11304c8/D-110
-        # `intermediate_size` is 1024, NOT 512. 512 was a 2x-hidden entry in a
-        # table whose other three rows are all 4x-hidden, and it disagreed with
-        # the released checkpoint this row names. MEASURED 2026-08-22 by fetching
-        # https://huggingface.co/google/bert_uncased_L-4_H-256_A-4/raw/main/config.json
-        # (Turc et al. 2019, "Well-Read Students Learn Better" -- the release
-        # that publishes every (L, H) combination): hidden_size=256,
-        # num_hidden_layers=4, num_attention_heads=4, intermediate_size=1024.
-        # The sibling rows were fetched in the same pass and all AGREE at 4x
-        # (base 768->3072, large 1024->4096, small L-6_H-512_A-8 -> 2048), so 512
-        # was the single outlier, not a deliberate ladder. Do NOT "restore" 512
-        # for parameter-budget reasons: this row exists to mirror a named public
-        # checkpoint, and halving its FFN makes `from_variant("tiny")` unable to
-        # accept those weights. Use `from_variant("tiny", intermediate_size=512)`
-        # if a smaller FFN is wanted.
-        # See decisions.md D-110.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-110: intermediate_size stays 1024;
+        # the public checkpoint this row mirrors uses 1024, not the 4x-hidden 512. See decisions.md.
         "tiny": {
             "hidden_size": 256,
             "num_layers": 4,
@@ -367,17 +315,8 @@ class BERT(keras.Model):
     DEFAULT_TYPE_VOCAB_SIZE = 2
     DEFAULT_INITIALIZER_RANGE = 0.02
     DEFAULT_LAYER_NORM_EPSILON = 1e-12
-    # DECISION plan-2026-08-23T091307-9a110062/D-500
-    # The default is the TANH APPROXIMATION, not the bare string "gelu".
-    # Keras' "gelu" resolves to keras.activations.gelu with approximate=False,
-    # i.e. the exact/erf form, while the original release this class ports
-    # computes 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))):
-    #   https://github.com/google-research/bert/blob/master/modeling.py
-    # Do NOT "simplify" this back to "gelu" -- that is inference-changing
-    # (max|erf - tanh| = 4.732e-04 per call, compounding over 12-24 layers),
-    # not a cosmetic rename. The sibling ports distilbert/modern_bert track
-    # HuggingFace, whose configs DO specify the exact form, so this must stay
-    # BERT-specific and must not be propagated to them. See decisions.md D-500.
+    # DECISION plan-2026-08-23T091307-9a110062/D-500: stays "gelu_tanh", not "gelu";
+    # the two differ by max|erf - tanh| = 4.732e-04 per call. See decisions.md.
     DEFAULT_HIDDEN_ACT = "gelu_tanh"
     DEFAULT_PAD_TOKEN_ID = 0
 
@@ -474,39 +413,11 @@ class BERT(keras.Model):
         self.type_vocab_size = type_vocab_size
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
-        # DECISION plan-2026-08-23T203721-009b7ccf/D-007
-        # pad_token_id is stored and serialized but DELIBERATELY never read.
-        # Do NOT "fix" this by deriving `attention_mask = input_ids !=
-        # pad_token_id` in call() when no mask is supplied. Three reasons, and
-        # the first is measured: that mutation moves the output of every
-        # mask-less forward pass that exists today by max|delta| = 0.0216 at a
-        # 2-layer config -- silently, with no error and no shape change.
-        # Second, upstream HF BERT does not do it either (it defaults the mask
-        # to all-ones), so wiring it would be a divergence from the reference,
-        # not a fidelity fix. Third, the natural home for such a derivation is
-        # the shared `BertEmbeddings`, which `fnet`, `distilbert` and
-        # `modern_bert` also use -- a HIGH-blast-radius edit for a knob nobody
-        # has asked to work. The footgun is documented in the class docstring
-        # instead, exactly as `distilbert` documents its own under D-003
-        # (plan-2026-08-10T183739-b007f435), and pinned by
-        # tests/test_models/test_bert/test_pad_token_id_is_advisory_only.py.
-        # See decisions.md D-007 (plan-2026-08-23T203721-009b7ccf).
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-007: pad_token_id stays unread;
+        # deriving a mask from it moves every mask-less forward pass by max|delta|=0.0216. See decisions.md.
         self.pad_token_id = pad_token_id
-        # DECISION plan-2026-08-17T183311-79c63e38/D-015
-        # `'absolute'` was this model's default while the value was never
-        # forwarded to `BertEmbeddings` -- which has no such value at all
-        # (`VALID_POSITION_EMBEDDING_TYPES` is `('learned', 'sinusoidal')`), so
-        # wiring the shipped default up naively would have RAISED. The legacy
-        # spelling is normalized ONCE, here, so every stored config and every
-        # `get_config()` carries the single live spelling.
-        #
-        # WHAT NOT TO DO: do not drop `position_embedding_type` from the
-        # `BertEmbeddings(...)` call in `_build_architecture` "to keep the
-        # default stable" -- that is the defect this closes, and it is the same
-        # one FNet closed as D-071. Do not reinstate `use_cache`: BERT here is a
-        # bidirectional encoder with no incremental-decoding path and no KV
-        # cache in the stack, so it named a mechanism that does not exist.
-        # See decisions.md D-015.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-015: normalize 'absolute' to 'learned' here, once;
+        # BertEmbeddings only accepts ('learned', 'sinusoidal') and would raise otherwise. See decisions.md.
         if position_embedding_type == "absolute":
             position_embedding_type = "learned"
         self.position_embedding_type = position_embedding_type
@@ -591,21 +502,8 @@ class BERT(keras.Model):
             name="embeddings"
         )
 
-        # DECISION plan-2026-08-19T070627-a616f581/D-007
-        # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above). The
-        # `TransformerLayer` loop below passed neither `attention_norm_args` nor
-        # `ffn_norm_args`, so `TransformerLayer._create_normalization_layer`
-        # fell through to `create_normalization_layer`'s own `epsilon=1e-6`
-        # default and all `2 * num_layers` encoder norms ran at 1e-6 while the
-        # embedding norm ran at BERT's own 1e-12 -- a 1e6x split INSIDE one
-        # model. MEASURED pre-fix at `num_layers=2`: 4 of 4 block norms at
-        # 1e-06, embeddings at 1e-12.
-        # WHAT NOT TO DO: do not "fix" this by changing the factory's 1e-6
-        # default -- that factory is shared by every transformer in the repo.
-        # These two dicts are the per-site channel it already provides. Do not
-        # write 1e-12 as a literal here either; `self.layer_norm_eps` is the
-        # model's knob and a test asserts the block norms TRACK it.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-19T070627-a616f581/D-007: pass layer_norm_eps to both norm
+        # args dicts; without it the block norms silently ran at the factory's 1e-6 default. See decisions.md.
         _norm_args = {'epsilon': self.layer_norm_eps}
 
         self.encoder_layers: List[TransformerLayer] = []
@@ -641,18 +539,8 @@ class BERT(keras.Model):
             mapping/sequence of shapes whose ``input_ids`` entry has that shape.
         :type input_shape: Any
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-049
-        # `BERT` had NO `build()`. Keras therefore marked it built with ZERO
-        # variables, and every consumer that inspects a backbone's variables
-        # BEFORE calling it saw an empty model. That is not a cosmetic contract
-        # gap: `CausalLanguageModel.build` locates the embedding matrix by shape
-        # over `backbone.variables`, so weight tying — ON BY DEFAULT — silently
-        # fell back to an untied `Dense`, AND the save/load halves took different
-        # branches, which is why the `.keras` round trip raised
-        # "expected 2 variables, but received 0".
-        # Do NOT replace this with a dummy forward pass: a forward pass under a
-        # `StatelessScope` (which is where Keras rebuilds a model on load) does
-        # not persist the variables it creates. See decisions.md D-049.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-049: build() must stay; without it
+        # Keras marks the model built with zero variables and weight tying silently breaks. See decisions.md.
         if self.built:
             return
 
@@ -762,29 +650,8 @@ class BERT(keras.Model):
                 training=training
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-032
-        # The echoed mask is RESOLVED HERE, at the return, and nowhere else.
-        # This is the fourth and last member of the F-87 family; `fnet` and
-        # `modern_bert` were repaired under D-031 and `distilbert` under D-062,
-        # and `bert` -- the family's namesake -- was MISSED by both. Echoing a
-        # possibly-`None` `attention_mask` makes the output STRUCTURE depend on
-        # the INPUT, so `BERT.predict({"input_ids": ids})` raised
-        # `ValueError: Structures don't have the same nested structure` (Keras
-        # concatenates per-batch outputs and a `None` slot has no structure).
-        # `model(inputs)` always worked, which is why no test caught it.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT drop the "attention_mask" key when it is None -- that is
-        #     the same input-dependent output structure wearing different
-        #     clothes, and downstream heads read the key unconditionally.
-        #   * Do NOT resolve the mask BEFORE the encoder loop. For BERT it is
-        #     an exact no-op (MEASURED max|delta| = 0.000000e+00 over the whole
-        #     output, 2 layers, seq 12, against max|out| = 3.027470e+00), but
-        #     the SAME edit in `modern_bert/model.py` measured 6.415714e-01,
-        #     because `WindowAttention._call_grid` zero-pads a rank-2 mask up to
-        #     its synthetic grid. All four siblings resolve at the RETURN only,
-        #     so no shipped checkpoint's numerics move and the rule is uniform
-        #     rather than per-model. See decisions.md D-032.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-032: resolve the echoed mask only
+        # here, at the return, never before the encoder loop. See decisions.md.
         return {
             "last_hidden_state": hidden_states,
             "attention_mask": (
@@ -808,27 +675,9 @@ class BERT(keras.Model):
         trace over ``keras.Input(shape=(None,))``); there is nothing to check
         at that point and the concrete-shape call that follows will do it.
         """
-        # DECISION plan-2026-08-23T203721-009b7ccf/D-023
-        # WITHOUT this check the model was silently wrong, and DIFFERENTLY
-        # wrong per device. MEASURED at `max_position_embeddings=16`, seq_len
-        # 17: on GPU the forward returned a finite result with no warning (an
-        # out-of-range position gather reads zeros), while on CPU the same call
-        # raised `InvalidArgumentError` from `Embedding.call()`. A silent wrong
-        # answer on the device this repo trains on is the worst of the three
-        # outcomes, so it is converted into a loud one here.
-        #
-        # This is the RIGHT home for it, which was re-derived rather than
-        # assumed. `BERT.call` is on EVERY entry path: MEASURED, Keras 3
-        # executes a Functional graph by calling each operation's `call()` with
-        # real tensors, so `create_bert_with_head(...).predict(x)` reaches this
-        # line with a fully static `TensorShape([2, 17])` even though the graph
-        # was BUILT over `keras.Input(shape=(None,))`. Do NOT move this into
-        # `create_bert_with_head`: the factory only ever sees the symbolic
-        # `None` sequence axis and could not check anything, and the bare
-        # `BERT(...)` path would lose the guard entirely.
-        #
-        # Do NOT "fix" the underlying gather by clamping or wrapping the
-        # position ids -- that would keep the wrong answer and hide it.
+        # DECISION plan-2026-08-23T203721-009b7ccf/D-023: without this check an
+        # over-length sequence fails differently per device (finite garbage on
+        # GPU, InvalidArgumentError on CPU). See decisions.md.
         shape = getattr(input_ids, "shape", None)
         if shape is None or len(shape) < 2:
             return
@@ -920,16 +769,8 @@ class BERT(keras.Model):
         except Exception as e:
             raise ValueError(f"Failed to load weights from {weights_path}: {str(e)}")
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs
-    # pointing at a non-existent host; `from_variant` caught the download
-    # failure, logged a warning and returned a randomly-initialized model, so
-    # `pretrained=True` silently produced untrained weights. Do NOT reinstate a
-    # warn-and-return branch here or in
-    # `from_variant`: the except clause there is deliberately narrow (see the
-    # D-001 anchor) so this NotImplementedError propagates to the caller. No
-    # public BERT weights are distributed with dl_techniques; pass a local path
-    # via `pretrained="/path/to/file.keras"` or use `pretrained=False` (default).
+    # No public BERT weights are distributed with dl_techniques; this raises rather
+    # than falling back to a random-init model. Pass a local path via `pretrained="/path/to/file.keras"`.
     @staticmethod
     def _download_weights(
         variant: str,
@@ -975,15 +816,13 @@ class BERT(keras.Model):
             weights ship with ``dl_techniques``. If False (default), the model
             is randomly initialized.
         :type pretrained: Union[bool, str]
-        :param weights_dataset: UNREACHABLE, exactly like ``cache_dir``. It is
+        :param weights_dataset: unreachable, exactly like ``cache_dir``. It is
             forwarded only to ``_download_weights``, which raises
             ``NotImplementedError`` before reading it, and ``pretrained=True``
-            is the only route there. The docstring said "Only used if
-            pretrained=True", which is true and misleading: that path never
-            returns. Kept for signature stability with the house
-            ``from_variant`` shape, not because any value of it does anything.
+            is the only route there. Kept for signature stability with the
+            house ``from_variant`` shape; no value of it changes anything.
         :type weights_dataset: str
-        :param cache_dir: UNREACHABLE for the same reason; the
+        :param cache_dir: unreachable for the same reason; the
             ``_download_weights`` docstring already marks it ``(unused)``.
         :type cache_dir: Optional[str]
         :param kwargs: Additional arguments to override the variant's defaults.
@@ -1027,12 +866,8 @@ class BERT(keras.Model):
                 load_weights_path = pretrained
                 logger.info(f"Will load weights from local file: {load_weights_path}")
             else:
-                # DECISION plan_2026-05-11_9357982a/D-001
-                # Do NOT broaden this except clause. Catching `Exception` here
-                # was an I-01 bug: it silently swallowed `NotImplementedError`
-                # from `_download_weights` and returned a random-init model
-                # masquerading as pretrained. Only catch concrete I/O errors
-                # that legitimately indicate a missing/corrupt local mirror.
+                # DECISION plan_2026-05-11_9357982a/D-001: keep this except clause narrow;
+                # a bare Exception once swallowed NotImplementedError and returned an untrained model. See decisions.md.
                 try:
                     load_weights_path = cls._download_weights(
                         variant=variant,
@@ -1193,13 +1028,13 @@ def create_bert(
         ``True`` will raise ``NotImplementedError``. If a string path, loads
         local weights from that path. If ``False`` (default), random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: UNREACHABLE. Forwarded to ``BERT.from_variant``,
+    :param weights_dataset: unreachable. Forwarded to ``BERT.from_variant``,
         which forwards it to ``_download_weights``, which raises
         ``NotImplementedError`` before reading it -- and ``pretrained=True`` is
         the only route there. No value of this argument does anything. Kept for
         signature stability. Defaults to ``"uncased"``.
     :type weights_dataset: str
-    :param cache_dir: UNREACHABLE for the same reason. Defaults to ``None``.
+    :param cache_dir: unreachable for the same reason. Defaults to ``None``.
     :type cache_dir: Optional[str]
     :param kwargs: Additional keyword arguments forwarded to
         :meth:`BERT.from_variant` (e.g. ``dropout_rate``, ``max_position_embeddings``).
@@ -1258,11 +1093,11 @@ def create_bert_with_head(
         If True, raises ``NotImplementedError`` -- no public BERT weights ship
         with ``dl_techniques``. If False (default), random init.
     :type pretrained: Union[bool, str]
-    :param weights_dataset: UNREACHABLE. See ``create_bert``: it reaches
+    :param weights_dataset: unreachable. See ``create_bert``: it reaches
         ``_download_weights``, which raises ``NotImplementedError`` before
         reading it. No value does anything.
     :type weights_dataset: str
-    :param cache_dir: UNREACHABLE for the same reason.
+    :param cache_dir: unreachable for the same reason.
     :type cache_dir: Optional[str]
     :param bert_config_overrides: Optional dictionary to override default BERT
         configuration for the chosen variant. Defaults to None.
@@ -1274,53 +1109,45 @@ def create_bert_with_head(
         ``NLPTaskType.MULTIPLE_CHOICE``. That head needs a
         ``(batch, num_choices, hidden)`` input this factory cannot produce; see
         the ``D-024`` anchor in the body for the actionable alternative.
-    :return: A complete `keras.Model` ready for the specified task.
+    :return: A complete ``keras.Model`` ready for the specified task.
 
-        **All THREE inputs are required**, by name:
-        ``input_ids``, ``attention_mask`` and ``token_type_ids``. The
-        Functional wrapper declares one ``keras.Input`` per key, and Keras
-        matches a data dict against that declaration exactly. MEASURED --
-        ``predict({"input_ids": ..., "attention_mask": ...})`` raises
-        ``ValueError: Missing data for input "token_type_ids". You passed a
-        data dictionary with keys ['input_ids', 'attention_mask']. Expected the
-        following keys: ['attention_mask', 'input_ids', 'token_type_ids']``.
+        All three inputs are required, by name: ``input_ids``,
+        ``attention_mask`` and ``token_type_ids``. The functional wrapper
+        declares one ``keras.Input`` per key, so a data dict missing one
+        raises ``ValueError: Missing data for input "token_type_ids"``.
         For a single-segment task pass ``np.zeros_like(input_ids)``.
 
-        This is STRICTER than the encoder it wraps, deliberately.
-        :class:`BERT` itself treats both of the other two as optional --
-        MEASURED, ``BERT.from_variant("tiny")({"input_ids": ids})`` forwards
-        fine and returns ``['last_hidden_state', 'attention_mask']`` -- and
-        upstream HuggingFace treats ``token_type_ids`` as optional too. The
-        difference is not fixed here because relaxing a public factory's input
-        signature is a breaking change for a convenience gap; see
-        ``decisions.md`` D-009 (plan-2026-08-23T203721-009b7ccf). Call the
-        encoder directly when you want the two-key form.
+        This is stricter than the encoder it wraps: :class:`BERT` itself
+        treats the other two inputs as optional, and so does upstream
+        HuggingFace. The difference is not fixed here, since relaxing a
+        public factory's input signature is a breaking change for a
+        convenience gap; see ``decisions.md`` D-009
+        (plan-2026-08-23T203721-009b7ccf). Call the encoder directly for
+        the two-key form.
 
-        **Output contract.** The head's dict is post-processed by exactly two
-        rules, in order. (1) If it contains `logits`, the derived duplicates
-        `probabilities` (`softmax(logits)`) and `predictions`
-        (`argmax(logits, axis=-1)`, int32, unusable as a loss target) are
-        dropped. (2) **ANY** dict that is left with a single key is then
-        unwrapped to that bare tensor -- this includes `{"embeddings": ...}`,
-        not only `{"logits": ...}`.
+        The head's output dict is post-processed by two rules, in order.
+        First, if it contains ``logits``, the derived duplicates
+        ``probabilities`` (``softmax(logits)``) and ``predictions``
+        (``argmax(logits, axis=-1)``, unusable as a loss target) are
+        dropped. Second, any dict left with a single key is unwrapped to
+        that bare tensor, including ``{"embeddings": ...}``, not only
+        ``{"logits": ...}``.
 
-        So of the 23 task types this factory BUILDS, **21 give a bare tensor
-        and 2 give a dict**. (24 task types are reachable through
-        `get_head_class`; `MULTIPLE_CHOICE` is refused here with a
-        `ValueError` -- see the D-024 anchor above.)
-        The two are `QUESTION_ANSWERING` and `SPAN_EXTRACTION`, which
-        keep `{"start_logits": ..., "end_logits": ...}` because those are
-        genuinely independent tensors. Worth calling out explicitly, because
-        rule (2) is easy to miss: the three `TextSimilarityHead` tasks
-        (`TEXT_SIMILARITY`, `PARAPHRASE_DETECTION`, `DUPLICATE_DETECTION`)
-        return a **bare embeddings tensor** `(None, embedding_dim)`, NOT a
-        dict and NOT logits -- this factory always feeds the head a single
-        sequence, so the head's pair branch (which would emit three tensors) is
-        unreachable from here.
+        Of the 23 task types this factory builds, 21 give a bare tensor
+        and 2 give a dict (``QUESTION_ANSWERING`` and ``SPAN_EXTRACTION``,
+        which keep ``{"start_logits": ..., "end_logits": ...}`` since
+        those are two independent tensors; ``MULTIPLE_CHOICE`` is refused
+        with a ``ValueError``, see the D-024 anchor above). The three
+        ``TextSimilarityHead`` tasks (``TEXT_SIMILARITY``,
+        ``PARAPHRASE_DETECTION``, ``DUPLICATE_DETECTION``) return a bare
+        embeddings tensor ``(None, embedding_dim)``, not a dict and not
+        logits, since this factory always feeds the head a single
+        sequence and the head's pair branch is unreachable from here.
 
         The bare-tensor form is what makes
-        `loss="sparse_categorical_crossentropy"` and `metrics=["accuracy"]`
-        compile, and what makes `model.predict(x).shape` read.
+        ``loss="sparse_categorical_crossentropy"`` and
+        ``metrics=["accuracy"]`` compile, and what makes
+        ``model.predict(x).shape`` read.
     :rtype: keras.Model
 
     Example:
@@ -1359,19 +1186,8 @@ def create_bert_with_head(
         **bert_config_overrides
     )
 
-    # DECISION plan-2026-08-23T203721-009b7ccf/D-024
-    # MULTIPLE_CHOICE builds without error here and produces a SEMANTICALLY
-    # WRONG graph, which is worse than a raise. `MultipleChoiceHead` expects
-    # `(batch, num_choices, hidden)` and scores each CHOICE; this factory can
-    # only ever feed it the token sequence `(batch, seq_len, hidden)`, so
-    # MEASURED, `logits` comes out `(None, None)` -- one score per TOKEN -- and
-    # `num_classes` is ignored entirely. Step 4's bare-tensor contract made
-    # that output look MORE legitimate, not less. `get_head_class` in
-    # `layers/heads/nlp/factory.py` already set the precedent for this subsystem
-    # ("NO SILENT FALLBACK"); refusing here matches it.
-    # Do NOT relax this to a warning: a warning in a factory is a silent wrong
-    # answer with a log line. The head itself is NOT deprecated -- build it
-    # directly with `create_nlp_head` and feed it a rank-3 choices tensor.
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-024: raise on MULTIPLE_CHOICE rather than
+    # build a wrong graph; this factory can only feed the head a rank-3 token sequence, not choices. See decisions.md.
     if task_config.task_type == NLPTaskType.MULTIPLE_CHOICE:
         raise ValueError(
             "create_bert_with_head cannot build a MULTIPLE_CHOICE model. "
@@ -1410,49 +1226,8 @@ def create_bert_with_head(
     }
     task_outputs = task_head(head_inputs)
 
-    # DECISION plan-2026-08-23T203721-009b7ccf/D-018
-    # A head's `probabilities` entry is exactly `softmax(logits)` and its
-    # `predictions` entry is exactly `argmax(logits, axis=-1)`, so exposing
-    # either beside `logits` makes the model's output a dict for no information
-    # gain -- and a dict output is what made this factory impossible to
-    # compile: MEASURED,
-    # `metrics=['accuracy']`, `metrics={'logits': ...}` and the dict+list forms
-    # ALL raise, `loss='sparse_categorical_crossentropy'` raises `KeyError:
-    # The path: ('logits',)`, and `model.predict(x).shape` raises
-    # `AttributeError: 'dict' object has no attribute 'shape'`. Only
-    # `loss={'logits': ...}` with NO metrics compiled, i.e. there was no way to
-    # attach a metric at all. Do NOT "fix" this by editing
-    # `layers/heads/nlp/factory.py` to stop emitting `probabilities`: that file
-    # is HIGH blast radius (~20 model packages) and the heads' own dict
-    # contract is used directly by callers that never go through this factory.
-    # Do NOT collapse unconditionally either -- `QuestionAnsweringHead` emits
-    # `{'start_logits', 'end_logits'}`, two genuinely independent tensors, and
-    # that dict is KEPT. The two names below are the complete derived set,
-    # RE-DERIVED by an AST walk over every `call()` in
-    # `layers/heads/nlp/factory.py` rather than assumed: only
-    # `TextClassificationHead` / `MultipleChoiceHead` (`probabilities`) and
-    # `TokenClassificationHead` (`predictions`, an int32 argmax no loss can
-    # consume) put a pure function of `logits` beside it.
-    #
-    # CORRECTED 2026-08-24 (step 13.2). This anchor used to say
-    # "`TextSimilarityHead` emits three independent tensors; those keep their
-    # dicts". That is the opposite of what the code does, and it named a branch
-    # this factory CANNOT REACH. `TextSimilarityHead.call` has two branches: the
-    # PAIR branch (`hidden_states_1`/`hidden_states_2`) returns
-    # `{'similarity_score', 'embeddings_1', 'embeddings_2'}`, and the
-    # SINGLE-SEQUENCE branch returns `{'embeddings': ...}`. `head_inputs` above
-    # is always the single-sequence form, so the pair branch is unreachable from
-    # here and TEXT_SIMILARITY / PARAPHRASE_DETECTION / DUPLICATE_DETECTION all
-    # arrive at the `len(...) == 1` unwrap and come out as a BARE TENSOR
-    # `(None, embedding_dim)` -- MEASURED. The rule this code actually
-    # implements, and the one to keep, is: drop the derived duplicates when
-    # `logits` is present, then unwrap ANY remaining single-key dict, INCLUDING
-    # `{'embeddings'}`. That is the right rule -- a one-key dict carries exactly
-    # one informative tensor, and leaving it wrapped would make the model
-    # non-compilable with plain `metrics=[...]` for no gain. Restricting the
-    # unwrap to logits-bearing dicts was considered and REJECTED for exactly
-    # that reason. Every reachable NLPTaskType's resulting contract is pinned by
-    # `tests/test_models/test_bert/test_every_head_family_output_contract.py`.
+    # DECISION plan-2026-08-23T203721-009b7ccf/D-018: drop probabilities/predictions when
+    # logits is present, then unwrap any remaining single-key dict; a dict output made this factory uncompilable. See decisions.md.
     derived_from_logits = ("probabilities", "predictions")
 
     model_outputs = task_outputs

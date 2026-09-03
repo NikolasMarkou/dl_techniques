@@ -1,56 +1,20 @@
 """
-DistilBERT, a BERT encoder compressed by knowledge distillation rather than by
-retraining a smaller model from scratch.
-
-This model embodies the principle that a large pre-trained encoder's value is
-concentrated in its output distribution, not in its depth. A small model
-trained from scratch on the same corpus sees only hard targets -- one correct
-token per masked position -- and must rediscover from data which of the wrong
-answers were nearly right. A distilled model instead fits the teacher's full
-soft distribution, which carries that near-miss structure directly, and so
-extracts far more supervision from each example. The published result is a
-6-layer student retaining roughly 97% of BERT-base's GLUE score at 40% fewer
-parameters and 60% faster inference. Those are the *paper's* numbers for the
-*published checkpoint*; this module builds the architecture and ships no
-trained weights, so nothing here reproduces them.
-
-The compression is entirely in the depth: layers are halved (6 instead of 12
-for base) while hidden size, head count and FFN width are left at BERT's
-values. That choice is deliberate and worth understanding. Width is what a
-student initialized from the teacher can inherit -- every other one of the
-teacher's layers can be copied verbatim -- whereas narrowing would leave no
-tensor the right shape to copy. Halving depth also halves the sequential work
-per token, which is what the latency claim rests on; halving width would mainly
-reduce memory.
-
-Two components of BERT are removed rather than shrunk. Token type embeddings go
-because DistilBERT is trained on single-segment input, so the second segment
-they encode never occurs. The pooler goes because it exists only to serve
-BERT's next-sentence-prediction objective, which distillation drops; a
-downstream head that needs a sentence vector pools `last_hidden_state` itself.
-The embedding stage is NOT a DistilBERT-private layer: it is the shared
-`layers.embedding.bert_embeddings.BertEmbeddings`, constructed through
-`create_embedding_layer('bert_embeddings', ...)` with
-`use_token_type_embeddings=False` and `mask_zero=False` (see
-`DistilBERT._build_architecture`), so a change to that layer is felt by three
-packages. Sinusoidal position embeddings are available as an option.
-
-The class is a pure foundation model, emitting `{"last_hidden_state",
-"attention_mask"}` with no head attached, and `create_distilbert_with_head`
-wires it to a task head from `layers.heads.nlp`. Note that such a head returns
-a DICT (e.g. `{'logits', 'probabilities'}`), not a single tensor. Three preset
-variants: base (the paper's configuration), small and tiny.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, so a
-caller who did not read logs could not tell an unavailable checkpoint from a
-successful load. `pretrained="<path>.keras"` does work, loading into THIS
-configuration, so the architecture must match; `keras.models.load_model(path)`
-is simpler when you only want a model you saved back as it was. A load that
-restores nothing raises rather than succeeding quietly. Worked examples and
-measured parameter counts are in the package README.
+DistilBERT compresses a BERT encoder by knowledge distillation, in the `DistilBERT` class
+and its `create_distilbert_with_head` factory. Where a small model trained from scratch on
+the same corpus sees only hard targets, a distilled model fits the teacher's full soft
+output distribution, which carries near-miss structure a from-scratch model would have to
+rediscover from data. The compression is entirely in depth: layers are halved (6 instead of
+12 for base) while hidden size, head count and FFN width stay at BERT's values, so a student
+initialized from the teacher can copy every other layer verbatim. Token type embeddings and
+the pooler are removed rather than shrunk, since DistilBERT trains on single-segment input
+and drops the next-sentence-prediction objective the pooler served. The class is a pure
+foundation model, emitting `{"last_hidden_state", "attention_mask"}` with no head attached;
+`create_distilbert_with_head` wires it to a task head that returns a dict, not a single
+tensor. Three preset variants: base (the paper's configuration), small and tiny. No
+pretrained weights ship with this package -- `pretrained=True` raises
+`NotImplementedError`. `pretrained="<path>.keras"` loads a local checkpoint into this
+configuration; `keras.models.load_model(path)` is simpler when you just want a saved model
+back as it was.
 
 References:
     - Sanh et al., 2019. DistilBERT, a distilled version of BERT: smaller,
@@ -113,7 +77,7 @@ class DistilBERT(keras.Model):
     ``predict({"input_ids": ...})`` work). The encoder still sees ``None``, so
     the echo is numerically inert — it is not a mask being applied.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -163,22 +127,21 @@ class DistilBERT(keras.Model):
     :param initializer_range: Stddev for weight initialization. Defaults to 0.02.
     :type initializer_range: float
     :param layer_norm_eps: Epsilon for normalization layers. Defaults to 1e-12.
-        Applies to the embedding norm AND to every one of the ``2 * num_layers``
-        in-block norms. **Numerics change (2026-08-19, decisions.md D-007):** the
-        in-block norms previously ignored this knob and ran at the normalization
-        factory's ``1e-6`` default. Weight shapes are unchanged -- existing
-        ``.keras`` files still load -- but forward values move slightly.
+        Applies to the embedding norm and to every one of the
+        ``2 * num_layers`` in-block norms. Before 2026-08-19 the in-block
+        norms ignored this value and ran at the normalization factory's
+        ``1e-6`` default instead; weight shapes are unchanged, so existing
+        ``.keras`` files still load, but forward values move slightly. See
+        ``decisions.md`` D-007.
     :type layer_norm_eps: float
-    :param pad_token_id: ID of the padding token. Defaults to 0.
-        **ADVISORY ONLY — nothing in this model reads it.** It is stored and
-        serialized for tokenizer/config round-tripping and for nothing else. In
-        particular NO attention mask is derived from it: if you call the model
-        without an ``attention_mask``, padding tokens are attended to exactly
-        like real tokens. Supply ``attention_mask`` yourself. (Measured: the
-        same input with and without an explicit mask gives DIFFERENT outputs;
-        see ``decisions.md`` D-003.)
+    :param pad_token_id: ID of the padding token. Defaults to 0. Nothing
+        in this model reads it -- it is stored and serialized for
+        tokenizer/config round-tripping only. No attention mask is
+        derived from it: a call without an ``attention_mask`` attends to
+        padding tokens like real tokens, so supply ``attention_mask``
+        explicitly. See ``decisions.md`` D-003.
     :type pad_token_id: int
-    :param normalization_type: Type of normalization layer, applied at BOTH the
+    :param normalization_type: Type of normalization layer, applied at both the
         embedding stage and the encoder blocks. Defaults to "layer_norm".
         The embedding stage is the shared ``BertEmbeddings``, which accepts
         exactly four types — ``layer_norm``, ``rms_norm``, ``band_rms``,
@@ -316,10 +279,10 @@ class DistilBERT(keras.Model):
         :type initializer_range: float
         :param layer_norm_eps: Epsilon for normalization layers.
         :type layer_norm_eps: float
-        :param pad_token_id: ID of the padding token. ADVISORY ONLY: it is
-            stored and serialized but never read, and no attention mask is
-            derived from it -- without an explicit ``attention_mask`` padding is
-            fully attended to. See the class docstring for the full rule.
+        :param pad_token_id: ID of the padding token. Stored and
+            serialized but never read; no attention mask is derived from
+            it -- without an explicit ``attention_mask`` padding is fully
+            attended to. See the class docstring for the full rule.
         :type pad_token_id: int
         :param normalization_type: Type of normalization layer. Constrained to
             the four types the shared ``BertEmbeddings`` accepts; see the class
@@ -358,14 +321,8 @@ class DistilBERT(keras.Model):
         self.sinusoidal_pos_embds = sinusoidal_pos_embds
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
-        # DECISION plan-2026-08-10T183739-b007f435/D-003
-        # pad_token_id is stored and serialized but DELIBERATELY never read.
-        # Do NOT "fix" this by deriving `attention_mask = input_ids !=
-        # pad_token_id` in call() when no mask is supplied: that silently
-        # changes the output of every mask-less forward pass that exists today,
-        # and upstream HF DistilBERT does not do it either (it defaults the mask
-        # to all-ones). The footgun is documented in the class docstring and in
-        # README.md instead. See decisions.md D-003.
+        # DECISION plan-2026-08-10T183739-b007f435/D-003: pad_token_id stays unread;
+        # deriving a mask from it would silently change every mask-less forward pass. See decisions.md.
         self.pad_token_id = pad_token_id
         self.normalization_type = normalization_type
         self.normalization_position = normalization_position
@@ -435,49 +392,10 @@ class DistilBERT(keras.Model):
 
     def _build_architecture(self) -> None:
         """Build all model components (embeddings and encoder layers)."""
-        # DECISION plan-2026-08-10T183739-b007f435/D-011
-        # Every value below is passed EXPLICITLY. Do NOT "simplify" any of the
-        # four that look droppable -- each one differs from the shared layer's
-        # default, which is BERT's behaviour, not DistilBERT's:
-        #   * use_token_type_embeddings=False -- BertEmbeddings defaults to True.
-        #     Dropping it silently allocates a token_type_embeddings weight and
-        #     adds a third term to the embedding sum.
-        #   * type_vocab_size=None -- mandatory once token types are off (D-002).
-        #   * mask_zero=False -- BertEmbeddings defaults to True. DistilBERT
-        #     threads an EXPLICIT attention_mask into every TransformerLayer.
-        #     What is MEASURED (step 10.2, at c6ab51084): BertEmbeddings NEVER
-        #     propagates a Keras mask at EITHER setting -- supports_masking is
-        #     False, it defines no compute_mask, and the inner Embedding's mask
-        #     is dropped at the `word_embeds + position_embeds` sum; the forward
-        #     output is bit-identical (max abs diff 0.0) with mask_zero True vs
-        #     False, eagerly and in a functional graph. So this kwarg is INERT
-        #     downstream today and its only observable effects are get_config()
-        #     and embeddings.word_embeddings.mask_zero. It is passed anyway
-        #     because it is the ONLY place DistilBERT's "no auto-mask" intent is
-        #     recorded, and omitting it would flip the flag to BERT's True --
-        #     silently correct today, silently wrong the day BertEmbeddings
-        #     gains mask propagation. Do NOT restate this as a live
-        #     two-masks-collide hazard: that claim was measured FALSE.
-        #   * layer_norm_eps -- I-2. Omitting it does NOT inherit this model's
-        #     1e-12; BertEmbeddings' own default is 1e-8.
-        # create_embedding_layer USED TO SILENTLY DROP any kwarg not registered
-        # in EMBEDDING_REGISTRY['bert_embeddings'] (measured, findings/
-        # step1-premise-rederivation.md (f)), so a misspelt kwarg here WAS a
-        # silent no-op. SUPERSEDED 2026-08-14 by
-        # plan-2026-08-14T042537-ff96c6c6/D-002: the factory now RAISES
-        # `ValueError: ... unsupported parameter(s) [...]` on any kwarg outside
-        # `required_params | optional_params`, so a misspelling here is a loud
-        # construction failure, not a quiet one. The testing rule below is
-        # UNCHANGED and is the durable half: a REGISTERED-but-unwired parameter
-        # still reaches the ctor and still does nothing, which no raise can
-        # catch -- any test covering these must assert the EFFECT, never that
-        # construction succeeded.
-        # DECISION plan-2026-08-10T183739-b007f435/D-018
-        # See decisions.md D-011, whose stated mask_zero rationale is SUPERSEDED
-        # by D-018: the "two masking mechanisms collide" hazard was re-measured
-        # and does not exist. The executable pin on the corrected claim is
-        # tests/test_layers/test_embedding/test_bert_embedding.py::
-        # TestOptionalBranches::test_mask_zero_is_not_propagated_out_of_this_layer.
+        # DECISION plan-2026-08-10T183739-b007f435/D-011: pass use_token_type_embeddings,
+        # type_vocab_size, mask_zero and layer_norm_eps explicitly; each differs from BertEmbeddings' own default. See decisions.md.
+        # DECISION plan-2026-08-10T183739-b007f435/D-018: mask_zero has no live masking effect
+        # (BertEmbeddings never propagates a Keras mask); it only records DistilBERT's no-auto-mask intent. See decisions.md.
         self.embeddings = create_embedding_layer(
             'bert_embeddings',
             name="embeddings",
@@ -496,17 +414,8 @@ class DistilBERT(keras.Model):
             normalization_type=self.normalization_type,
         )
 
-        # DECISION plan-2026-08-19T070627-a616f581/D-007
-        # `layer_norm_eps` used to reach ONLY `BertEmbeddings` (above); the
-        # `TransformerLayer` loop passed neither `attention_norm_args` nor
-        # `ffn_norm_args`, so every one of the `2 * num_layers` block norms ran
-        # at `create_normalization_layer`'s own `epsilon=1e-6` default instead of
-        # DistilBERT's 1e-12. MEASURED pre-fix at `num_layers=2`: 4 of 4 block
-        # norms at 1e-06.
-        # WHAT NOT TO DO: do not change the factory's 1e-6 default (shared by
-        # every transformer in the repo) and do not hard-code 1e-12 here -- a
-        # test asserts the block norms TRACK `self.layer_norm_eps`.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-19T070627-a616f581/D-007: pass layer_norm_eps into
+        # attention_norm_args/ffn_norm_args — without it every block norm ran at the factory's 1e-6 default, not DistilBERT's 1e-12. See decisions.md.
         _norm_args = {'epsilon': self.layer_norm_eps}
 
         self.encoder_layers: List[TransformerLayer] = []
@@ -615,30 +524,8 @@ class DistilBERT(keras.Model):
                 training=training
             )
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-062
-        # The echoed mask is RESOLVED HERE, at the return, and nowhere else.
-        # Echoing a possibly-`None` `attention_mask` made the output structure
-        # depend on the input, so `DistilBERT.predict({"input_ids": ids})`
-        # raised `ValueError: Structures don't have the same nested structure`
-        # (Keras concatenates per-batch outputs and a `None` slot has no
-        # structure). `model(inputs)` always worked, which is why no test
-        # caught it -- worse, `test_model.py` PINNED `... is None` as a
-        # contract.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT drop the "attention_mask" key when it is None. That makes
-        #     the OUTPUT structure depend on the INPUT, which is the same
-        #     defect wearing different clothes, and it breaks
-        #     `create_distilbert_with_head`, which reads the key unconditionally.
-        #   * Do NOT resolve the mask BEFORE the encoder loop. It is an exact
-        #     no-op for DistilBERT (measured max|delta| = 0.000000e+00 over the
-        #     whole output on a 2-layer model, seq 12, against max|out| = 2.76)
-        #     but the SAME edit in `modern_bert/model.py` measured 6.415714e-01,
-        #     because `WindowAttention._call_grid` zero-pads a rank-2 mask up to
-        #     its synthetic grid. All three siblings therefore resolve at the
-        #     RETURN only, so no shipped checkpoint's numerics move and the rule
-        #     is uniform rather than per-model. See decisions.md D-062 (and
-        #     D-031 for the FNet/ModernBERT half).
+        # DECISION plan-2026-08-18T140459-7991552f/D-062: resolve the echoed mask here, at the
+        # return, never earlier or conditionally — a possibly-None key broke predict()'s batch concatenation. See decisions.md.
         return {
             "last_hidden_state": hidden_states,
             "attention_mask": (
@@ -694,24 +581,10 @@ class DistilBERT(keras.Model):
                     skip_mismatch=True,
                 )
         """
-        # DECISION plan-2026-08-10T183739-b007f435/D-024
-        # The dummy input uses keras.random.randint, NOT
-        # keras.random.uniform(..., dtype="int32") -- Keras rejects an integer
-        # dtype on uniform ("requires a floating point dtype"), which made this
-        # whole method raise on every unbuilt model. And there is no `by_name`
-        # argument: Keras 3's Model.load_weights has NO by_name parameter and
-        # raises `Invalid keyword arguments: {'by_name': True}`.
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-070
-        # The restored-variable count that used to be inline here now lives in
-        # `utils.weight_transfer.load_weights_or_raise`, because gpt2 and
-        # wave_field had the same unconditional `skip_mismatch=True` load with no
-        # check at all. Do NOT re-inline it: this method was the repo's ONLY
-        # implementation of the check, which is exactly why the other three sites
-        # never got one. See decisions.md D-012, D-024 and D-070.
-        # The existence check is repeated here, ahead of the build, on purpose:
-        # `load_weights_or_raise` also performs it, but only AFTER this method has
-        # spent a full forward pass materializing the model. Fail on a bad path
-        # before paying for that.
+        # DECISION plan-2026-08-10T183739-b007f435/D-024: dummy input uses randint, not
+        # uniform(dtype="int32") -- Keras rejects an integer dtype on uniform. See decisions.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-070: restored-variable count lives in
+        # load_weights_or_raise, not inline here, since gpt2/wave_field had the same unchecked load. See decisions.md.
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
@@ -734,16 +607,8 @@ class DistilBERT(keras.Model):
 
         load_weights_or_raise(self, weights_path, skip_mismatch=skip_mismatch)
 
-    # `_download_weights` raises instead of falling back to random init. The
-    # previous version held a `PRETRAINED_WEIGHTS` table of placeholder URLs on
-    # a non-existent host; `from_variant` caught the download failure, logged a
-    # warning and continued with random initialization, so `pretrained=True`
-    # silently returned an untrained model (measured 2026-08-11:
-    # `load_pretrained_weights` was invoked 0 times on that path). Do NOT
-    # reinstate the table or a warn-and-return branch here or in
-    # `from_variant`. No public DistilBERT weights are distributed with
-    # dl_techniques; pass a local path via `pretrained="/path/to/file.keras"`
-    # or use `pretrained=False` (default).
+    # No public DistilBERT weights are distributed with dl_techniques; this raises rather
+    # than falling back to a random-init model. Pass a local path via `pretrained="/path/to/file.keras"`.
     @staticmethod
     def _download_weights(
         variant: str,

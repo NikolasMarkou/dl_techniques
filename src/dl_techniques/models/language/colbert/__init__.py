@@ -1,8 +1,8 @@
 """
 ColBERT: late-interaction retrieval, one shared encoder, two training recipes.
 
-Late interaction runs the encoder **independently** on the query and on the
-document -- so every document embedding is computed once, offline -- and scores
+Late interaction runs the encoder independently on the query and on the
+document, so every document embedding is computed once, offline, and scores
 a pair with a cheap similarity between two already-computed matrices of
 per-token vectors:
 
@@ -10,21 +10,19 @@ per-token vectors:
 
     S(q, d) = \\sum_{i \\in |E_q|} \\max_{j \\in |E_d|} E_{q_i} \\cdot E_{d_j}^{T}
 
-**v1 and v2 build the same network.** That is a fact about the reference
-implementation, not a simplification adopted here: the official
+v1 and v2 build the same network. The official
 ``stanford-futuredata/ColBERT`` repository ships a single
 ``colbert/modeling/colbert.py`` for both papers, and v1 behaviour is v2's code
 with ``use_ib_negatives=False``, ``nway=2``, no distillation scores and no
-residual compression. What separates the two here is the *training recipe*
+residual compression. What separates the two here is the training recipe
 (``ColBERTPairwiseSoftmaxLoss`` versus ``ColBERTDistillationLoss``) plus the
 v2-only, index-time :class:`ResidualCompressionCodec`. Both
-:func:`create_colbert_v1` and :func:`create_colbert_v2` are therefore real,
-exported, documented factories over one class -- not aliases, and not two
-architectures.
+:func:`create_colbert_v1` and :func:`create_colbert_v2` are real, exported,
+documented factories over one class.
 
-**No pretrained weights exist**, for ColBERT or for the BERT backbone;
+No pretrained weights exist, for ColBERT or for the BERT backbone;
 ``from_variant(pretrained=True)`` raises on both. Any number produced by
-training this model is a **wiring result**, never a retrieval-quality claim.
+training this model is a wiring result, not a retrieval-quality claim.
 
 ``README.md`` in this directory carries the usage guide, the variant table with
 its two labelled provenance classes, and the full list of deviations from the
