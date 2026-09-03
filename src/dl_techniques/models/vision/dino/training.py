@@ -1,75 +1,48 @@
 """
-DINO self-distillation training model — student + EMA teacher under stock `fit()`.
+`DINOTrainingModel`, wrapping student and EMA teacher so DINO trains under
+stock `model.compile(loss=DINOLoss(...))` + `model.fit()`, with no custom
+`train_step`.
 
-This module holds `DINOTrainingModel`, the object that turns the DINO backbones in
-this package into something `model.compile(loss=DINOLoss(...))` + `model.fit()` can
-actually train, with **no custom `train_step` and no bespoke training loop**.
+`call()` takes one fixed-shape tensor `(batch, n_views, height, width,
+channels)`, where `n_views = n_global_views + n_local_views`, `n_global_views`
+is always 2, views 0 and 1 are the global crops the teacher sees, and views
+2 onward are local crops the student alone sees. Every view shares one pixel
+resolution, since local crops are resized up to the global size rather than
+kept at native resolution, letting one backbone and one positional-embedding
+table serve every view at the cost of local views costing as much compute as
+global ones (plan decision D-002). `call()` returns a single tensor of shape
+`(batch * n_pairs, 2 * out_dim)`, one row per (teacher global view, student
+view) pair excluding same-view pairs, each row
+`concatenate([student_logits, teacher_logits], axis=-1)`; see the D-009
+anchor on `DINOTrainingModel.call` for why a single tensor rather than a
+dict.
 
-Multi-crop input contract (the whole contract, stated once)
------------------------------------------------------------
-`call()` takes ONE fixed-shape tensor::
+The teacher starts as a weight-for-weight copy of the student (`__init__`
+synchronizes it, D-034), matching the reference implementation. It is not
+trained by backpropagation: it is an EMA of the student, advanced once per
+training batch by `depth_anything.teacher_ema.TeacherEMACallback`, which
+calls `update_teacher_ema(decay=...)` on this model and is reused unchanged
+from that module.
 
-    (batch, n_views, height, width, channels)
+Example:
+    .. code-block:: python
 
-* `n_views == n_global_views + n_local_views`, and `n_global_views` is 2 (DINO).
-* **Views `0` and `1` are the GLOBAL crops**; views `2 ...` are the local crops.
-  The teacher sees only views 0 and 1; the student sees all of them.
-* Every view is at the SAME pixel resolution `(height, width)`. This is plan
-  decision D-002: local crops crop a smaller AREA of the source image and are
-  resized up to the global size, so one backbone, one positional-embedding table
-  and `tf.data`'s fixed-shape batching serve every view with no
-  positional-embedding interpolation. The cost is that local views are as
-  expensive as global ones — the paper's compute saving on locals is given up.
-* `src/dl_techniques/datasets/vision/multi_crop.py`'s `make_multi_crop_map_fn`
-  produces exactly this element shape (its augmentation is deliberately weaker
-  than the paper's; that module's docstring lists what it does NOT do).
+        from dl_techniques.models.vision.dino import create_dino_training_model
+        from dl_techniques.losses.dino_loss import DINOLoss
+        from dl_techniques.models.vision.depth_anything.teacher_ema import (
+            TeacherEMACallback, cosine_ema_schedule,
+        )
 
-Output contract
----------------
-`call()` returns a SINGLE tensor of shape ``(batch * n_pairs, 2 * out_dim)``,
-where ``n_pairs == n_global_views * n_views - n_global_views`` — every
-(teacher global view, student view) pair with the same-view pair removed. Each
-row is ``concatenate([student_logits, teacher_logits], axis=-1)``, built by
-`dl_techniques.losses.dino_loss.pack_student_teacher`, and split again inside
-`DINOLoss`.
-
-Why a single tensor rather than the obvious `{"student_logits": ...,
-"teacher_logits": ...}` dict: see the D-009 anchor on `DINOTrainingModel.call`.
-
-Teacher updates
----------------
-The teacher STARTS as a weight-for-weight copy of the student — `__init__`
-synchronizes it (D-034), matching the reference implementation's
-`teacher.load_state_dict(student.state_dict())` before step 0. Without that the
-"EMA teacher" is an EMA between two unrelated random networks for the first
-several hundred steps.
-
-The teacher is NOT trained by backpropagation. It is an EMA of the student,
-advanced once per training batch by
-`dl_techniques.models.vision.depth_anything.teacher_ema.TeacherEMACallback`, which calls
-`update_teacher_ema(decay=...)` on this model. That module's
-`cosine_ema_schedule` / `linear_ema_schedule` / `TeacherEMACallback` are reused
-UNCHANGED — do not copy them here.
-
-Example
--------
-```python
-from dl_techniques.models.vision.dino import create_dino_training_model
-from dl_techniques.losses.dino_loss import DINOLoss
-from dl_techniques.models.vision.depth_anything.teacher_ema import (
-    TeacherEMACallback, cosine_ema_schedule,
-)
-
-model = create_dino_training_model(
-    "tiny", image_size=96, patch_size=16, n_local_views=4, dino_out_dim=4096,
-)
-model.compile(optimizer="adamw", loss=DINOLoss(out_dim=4096))
-model.fit(                          # NOTE: never pass validation_data -- the
-    train_ds,                       # centering EMA fires on validation batches
-    epochs=100,                     # too (see DINOLoss's class docstring).
-    callbacks=[TeacherEMACallback(cosine_ema_schedule(0.996, 0.9999, 10000))],
-)
-```
+        model = create_dino_training_model(
+            "tiny", image_size=96, patch_size=16, n_local_views=4, dino_out_dim=4096,
+        )
+        model.compile(optimizer="adamw", loss=DINOLoss(out_dim=4096))
+        # Never pass validation_data: the centering EMA fires on validation
+        # batches too (see DINOLoss's class docstring).
+        model.fit(
+            train_ds, epochs=100,
+            callbacks=[TeacherEMACallback(cosine_ema_schedule(0.996, 0.9999, 10000))],
+        )
 """
 
 import keras
@@ -192,34 +165,15 @@ class DINOTrainingModel(keras.Model):
         self.student = student
         self.teacher = teacher
 
-        # The teacher is never trained by backpropagation. This is re-applied
-        # on EVERY construction, INCLUDING `from_config`, on purpose: a
-        # `keras.Model`'s `trainable` flag is not part of the config a
-        # sub-model round-trips through, so a teacher that silently reloaded
-        # trainable would produce bit-identical outputs and a quietly wrong
-        # training run (a recorded repo gotcha).
+        # The teacher is never trained by backpropagation. This is re-applied on
+        # every construction, including `from_config`, because a `keras.Model`'s
+        # `trainable` flag is not part of the config a sub-model round-trips
+        # through, so a teacher that silently reloaded trainable would produce
+        # bit-identical outputs and a quietly wrong training run.
         self.teacher.trainable = False
 
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-034
-        # The teacher STARTS as a weight-for-weight copy of the student. Do not
-        # remove this, and do not hide it behind a constructor flag.
-        #   * The measurement, the reference-implementation citation and the
-        #     "30.66% of an unrelated network survives epoch 1" arithmetic live
-        #     at `common.sync_teacher_to_student`.
-        #   * It runs on EVERY construction, `from_config` included, and that is
-        #     SAFE rather than destructive: MEASURED, `keras.models.load_model`
-        #     restores the saved weights into the reconstructed object AFTER
-        #     `from_config` returns, and the restore is authoritative -- a
-        #     deliberately-perturbed teacher saved and reloaded came back
-        #     bit-identical (max|delta| 0.000e+00) while still differing from
-        #     its student by 2.397e+00. `test_reload_keeps_a_trained_teacher`
-        #     pins that, because the alternative -- a `from_config`-only
-        #     exemption -- would be a second code path with no test able to see
-        #     it fail.
-        #   * Anything that legitimately needs a DIVERGENT pair (an EMA test
-        #     needs a gap to close) must create the divergence EXPLICITLY after
-        #     construction. Relying on construction leaving them apart is what
-        #     made the original defect invisible to this package's test suite.
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-034: sync the teacher to the student unconditionally, on every construction, never behind a flag.
+        # `from_config` reconstruction is safe because `load_model`'s weight restore runs after and is authoritative. See decisions.md and `common.sync_teacher_to_student`.
         sync_teacher_to_student(self.teacher, self.student)
 
         self.n_local_views = int(n_local_views)
@@ -301,33 +255,8 @@ class DINOTrainingModel(keras.Model):
         Returns:
             `(batch * n_pairs, 2 * out_dim)` — see the module docstring.
         """
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-009
-        # This returns a SINGLE, RANK-2 tensor. Do NOT "improve" it into the
-        # structured dict `{"student_logits": ..., "teacher_logits": ...}`
-        # that plan decision D-005 originally specified, and do NOT return the
-        # un-flattened `(batch, n_pairs, 2 * out_dim)` form.
-        #   * The DICT is refused by Keras 3.8.0: `CompileLoss.build`
-        #     broadcasts one `Loss` object across every leaf of a nested
-        #     `y_pred` (`tree.map_structure(lambda x: loss, y_pred)`,
-        #     compile_utils.py:653) and raises `KeyError: "The path:
-        #     ('student_logits',) in the 'loss' argument, can't be found in
-        #     either the model's output ('y_pred') or in the labels
-        #     ('y_true')."` The `CLIPContrastiveLoss` precedent cited for the
-        #     dict has only ever run under a hand-rolled loop, never stock
-        #     `fit()`, so it was never evidence.
-        #   * The RANK-3 form was MEASURED to fail inside the loss: `DINOLoss`
-        #     reduces its centering statistic over `axis=0` only, so a
-        #     `(batch, n_pairs, ...)` y_pred makes the batch centre
-        #     `(1, n_pairs, out_dim)` and `center.assign()` dies with
-        #     `NotImplementedError: numpy() is only available when eager
-        #     execution is enabled` -- a shape error disguised as a backend
-        #     error, mid-`fit()`.
-        #   * `sample_weight` (the other candidate) cannot carry the teacher
-        #     at all: MEASURED, `fit()` sources `sample_weight` from the
-        #     DATASET tuple, and the teacher's logits are produced by this
-        #     model from the same batch. `iBOTPatchLoss` additionally REFUSES
-        #     a non-None `sample_weight` (D-008).
-        # The flatten below is therefore load-bearing, not cosmetic.
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-009: return a single rank-2 tensor, never a `{"student_logits": ..., "teacher_logits": ...}` dict or the un-flattened rank-3 form.
+        # Keras 3.8.0's `CompileLoss.build` refuses the dict form (KeyError), and `DINOLoss` centering breaks on rank-3 input. See decisions.md.
         image_shape = self._image_shape
 
         # Student: every view. Fold views into the batch axis so one forward

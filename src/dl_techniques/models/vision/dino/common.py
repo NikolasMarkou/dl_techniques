@@ -75,83 +75,36 @@ def _path_suffix(weight: Any) -> str:
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-08-01T105809-dc0c402e/D-034
-# Copy the STUDENT into the TEACHER, never the other way round, and do it
-# UNCONDITIONALLY at pair construction. Do NOT "improve" this into an opt-in
-# flag (`sync_teacher=False`), and do NOT delete it because the two networks
-# "are the same architecture anyway".
-#   * DINO's teacher is defined as an exponential moving average OF THE
-#     STUDENT'S OWN TRAJECTORY, starting from the student's own
-#     initialization. Reference `main_dino.py` runs
-#     `teacher_without_ddp.load_state_dict(student.module.state_dict())`
-#     BEFORE step 0.
-#   * MEASURED without this copy, at `create_dino_training_model("tiny",
-#     image_size=32, patch_size=16, n_local_views=2, dino_out_dim=64)`:
-#     55 of 157 weight tensors differ, and the two networks' outputs on the
-#     same input differ by max|d| = 0.3002. The other 102 tensors agree only
-#     because they are zero-initialized biases and unit-initialized norm
-#     scales -- every tensor carrying information differed.
-#   * The corruption does not wash out quickly. At `ema_decay_start=0.996`,
-#     `0.996**295 = 30.66%` of the UNRELATED initial teacher is still present
-#     after the smoke run's first epoch, so the first 1-3 epochs distil the
-#     student against a network that has nothing to do with it.
-#   * A flag would invite the defect straight back, and there is no caller for
-#     whom an unrelated random teacher is correct.
+# DECISION plan-2026-08-01T105809-dc0c402e/D-034: copy student into teacher unconditionally, on every construction, never an opt-in flag.
+# Without it 55/157 weight tensors differed and outputs diverged by max|d|=0.3002; a flag would let a caller reintroduce that. See decisions.md.
 def sync_teacher_to_student(teacher: Any, student: Any) -> None:
     """Assign every student weight into its teacher counterpart, in place.
 
-    Interface contract:
-        Parameters:
-            teacher: The EMA target network (a `keras.Model`). MUTATED. Typed
-                `Any` rather than `keras.Model` so this module stays free of a
-                Keras import — it is imported by all four DINO modules and by
-                the package-surface test, which enumerates its public names.
-            student: The trainable network (a `keras.Model`). Read only.
-        Returns:
-            ``None``. On return every teacher weight equals its student
-            counterpart exactly.
-        Failure mode:
-            ``ValueError`` when the copy could not be performed, would be
-            performed against the wrong counterpart, or did not take effect —
-            an empty weight list (an unbuilt model, where the copy would
-            silently no-op), a weight-count mismatch (the ``zip`` would
-            silently copy a prefix), a per-weight path-suffix or shape
-            disagreement (the ``zip`` would copy into the wrong slot), or a
-            surviving difference after the assignment.
+    Called unconditionally by every `DINOTrainingModel` construction, so any
+    teacher values already held by the object passed in are discarded. Safe
+    after `keras.models.load_model` on a saved `DINOTrainingModel`, since the
+    weight restore runs after `from_config` and overwrites this copy. Unsafe
+    when resuming by rebuilding the two backbones separately and wrapping
+    them afterward: this call would overwrite the restored teacher with the
+    restored student and discard its EMA history, and a trained teacher is
+    structurally indistinguishable from a fresh one, so nothing would detect
+    it. Resume from the ``.keras`` file instead.
 
-    **The guards are not belt-and-braces.** The failure this function exists to
-    fix is a silent one, and the two ways a "fix" for it reproduces the defect
-    are (1) running against a model whose weights do not exist yet — `zip()`
-    over two empty lists completes happily and copies nothing — and (2) running
-    against a correctly-sized but MIS-ORDERED pair, where every tensor is
-    copied into a same-shaped neighbour's slot.
+    The per-weight path-suffix and shape check happens during the copy loop,
+    not only in the trailing equality sweep: that sweep reuses the same
+    positional pairing the copy used, so it can only confirm the pairing it
+    was given, and a mis-paired copy that lands every tensor in a
+    same-shaped neighbour's slot would otherwise pass it.
 
-    The per-weight check is in the COPY loop, deliberately, not in the trailing
-    equality sweep. That sweep re-uses the same positional `zip` the copy used,
-    so it can only ever confirm the pairing it was given: a mis-paired copy
-    makes the teacher equal to the student *under that pairing* and the sweep
-    reports success. It is retained as a did-the-assignment-land check, which
-    is all it can honestly be. REPRODUCED before this guard existed, on two
-    `keras.Sequential([Dense(4), Dense(4)])` models whose layers were named in
-    opposite order: the teacher's `b` received the student's `a` values and the
-    function returned without raising.
-
-    This is a CONSTRUCTION-time operation only, and it is unconditional —
-    `DINOTrainingModel.__init__` calls it on EVERY construction, so any
-    teacher values held by the object passed in are discarded. Safe and unsafe
-    uses, measured:
-
-    * **SAFE — `keras.models.load_model` on a saved `DINOTrainingModel`.** The
-      restore happens AFTER `from_config` returns and is authoritative; a
-      deliberately-perturbed teacher survived a round-trip bit-identically
-      (drift 0.0, teacher-student gap preserved). Pinned by
-      `test_reload_keeps_a_trained_teacher`.
-    * **UNSAFE — resuming by rebuilding the two backbones separately** (two
-      `create_dino_v1(...)` calls, `load_weights` into each, then wrapping them
-      in `DINOTrainingModel`). The sync overwrites the restored teacher with
-      the restored student and the EMA history is gone. Nothing can detect
-      this: a trained teacher is structurally indistinguishable from a fresh
-      one. Resume from the `.keras` file instead.
+    :param teacher: The EMA target network (a ``keras.Model``), mutated in
+        place. Typed ``Any`` rather than ``keras.Model`` so this module stays
+        free of a Keras import.
+    :type teacher: Any
+    :param student: The trainable network (a ``keras.Model``), read only.
+    :type student: Any
+    :raises ValueError: If either model is unbuilt, if the two have a
+        different weight count, if a weight pair disagrees in path suffix or
+        shape, or if a difference survives the assignment.
     """
     if not teacher.weights or not student.weights:
         raise ValueError(

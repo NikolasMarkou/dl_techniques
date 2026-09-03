@@ -1,39 +1,22 @@
-"""
-DINO's published weight-initialization convention, in one place.
+"""DINO's published weight-initialization convention, in one place.
 
-Reference (fetched):
-    https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
-        def _init_weights(self, m):
-            if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=.02)
-    The same ``std=.02`` ViT/``Mlp`` convention carries through ``dinov2`` and
-    ``dinov3``:
-    https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py
+This module holds `DINO_KERNEL_INITIALIZER`, a config dict for
+`trunc_normal_(std=.02)`, the initializer the reference DINO, DINOv2 and
+DINOv3 implementations all use for every `nn.Linear`. `dino_v1.py` and
+`dino_v3.py` previously spelled this four different ways across two files,
+including a bare `"truncated_normal"` string, which names the right
+distribution family but silently carries Keras' own default scale
+(`stddev=0.05`, 2.5x wider than the reference).
 
-Why this module exists
-----------------------
-``dino_v1.py`` and ``dino_v3.py` previously spelled this **four** ways across two
-files: a bare ``"truncated_normal"`` string (twice) and ``"glorot_uniform"``
-(once), plus a second bare string on a classifier head. The bare string is the
-subtle one -- it names the right *distribution family* while silently carrying
-Keras' own default scale:
+This is a dict, not an `Initializer` instance, because a seedless
+`RandomInitializer` resolves its seed once at construction and then replays
+the identical draw on every call: a module-level instance used as a default
+argument would hand every model built in the process the same weights.
+`keras.initializers.get` resolves this dict to a fresh instance per consumer.
 
-    keras/src/initializers/random_initializers.py -- TruncatedNormal(mean=0.0, stddev=0.05)
-
-which is **2.5x wider** than the reference. A string that looks correct and is
-not is exactly the kind of value that must have one home rather than four.
-
-Why a dict rather than an ``Initializer`` instance
---------------------------------------------------
-A seedless ``RandomInitializer`` resolves ``seed=None`` to a concrete seed **at
-construction time** (``random_initializers.py:12-14``), so one instance REPLAYS
-the identical draw on every call. MEASURED: two calls of a single
-``TruncatedNormal(stddev=0.02)`` instance at the same shape differ by exactly
-``0.0``; two instances resolved from this dict differ by ``6.1e-02``. A module
-constant that is an instance, used as a default argument (evaluated once at
-import), would therefore hand every model built in the process the same weights.
-``keras.initializers.get`` resolves an inert dict to a fresh instance per
-consumer. Same hazard as D-072 / D-481.
+References:
+    - https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
+    - https://github.com/facebookresearch/dinov3/blob/main/dinov3/models/vision_transformer.py
 """
 
 from typing import Any, Dict

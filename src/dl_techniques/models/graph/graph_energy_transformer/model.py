@@ -121,7 +121,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
     :param node_feature_dim: Input node-feature dimension ``F``.
     :param embed_dim: Token dimension ``D``.
     :param num_heads: Attention heads ``H``.
-    :param head_dim: Per-head key/query dim ``Y`` (a FREE parameter — ET has no value matrix).
+    :param head_dim: Per-head key/query dim ``Y``, free to choose since ET has no value matrix.
     :param hopfield_dim: Hopfield memory count ``K``.
     :param num_blocks: Number of ET blocks (``1`` for variant B, ``S=4`` for variant C).
     :param num_steps: Descent steps ``T`` per block.
@@ -357,8 +357,8 @@ class GraphEnergyTransformerBackbone(keras.Model):
     ) -> keras.KerasTensor:
         """Node projection -> [+PE] -> [mask-token] -> [CLS prepend] -> ``(B, N', D)`` tokens.
 
-        Graph-safe: ``keras.ops`` only, static structure. The optional pieces are TRACE-TIME
-        structural choices (config flags / key presence), never Python ``if`` on tensor values.
+        Graph-safe: ``keras.ops`` only, static structure. The optional pieces are trace-time
+        structural choices (config flags / key presence), never a Python ``if`` on tensor values.
 
         :param inputs: The graph dict (see the class docstring). Reads ``node_features`` and,
             when configured, ``pe`` and ``node_replace_mask``.
@@ -520,7 +520,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
     # -----------------------------------------------------------------
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
-        """Output shape ``(batch, N', embed_dim)`` from stored config — valid UNBUILT."""
+        """Output shape ``(batch, N', embed_dim)`` from stored config, valid before build."""
         nf_shape: Any = None
         if isinstance(input_shape, dict):
             nf_shape = input_shape.get("node_features")
@@ -913,13 +913,12 @@ class GraphClassifier(keras.Model):
 
         :param inputs: The variant-C graph dict (see the class docstring).
         :param training: Keras training flag. eq.-27 saddle-escape noise inside the backbone is
-            active ONLY when ``training`` is true, so two inference forwards are deterministic.
+            active only when ``training`` is true, so two inference forwards are deterministic.
         :return: ``(B, num_classes)`` class logits (no softmax — ``from_logits`` loss).
         """
         tokens = self.backbone(inputs, training=training)             # (B, N+1, D)
 
-        # STATIC index-0 CLS slice — the backbone prepends the CLS token first, so index 0 is
-        # always the CLS token. XLA-safe (unlike variant B's dynamic take_along_axis gather).
+        # Static index-0 slice: the backbone always prepends the CLS token first.
         cls = tokens[:, 0, :]                                         # (B, D)
 
         h = self.head_norm(cls, training=training)                   # (B, D)

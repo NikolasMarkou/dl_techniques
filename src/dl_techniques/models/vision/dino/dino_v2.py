@@ -1,69 +1,40 @@
 """
 DINOv2 vision transformer with register tokens, LayerScale, and an iBOT mask input.
 
-DINOv2 keeps DINOv1's label-free self-distillation and adds what is needed to make
-it hold up at scale on curated data. Three changes matter. The image-level DINO
-objective is joined by a patch-level one taken from iBOT: some patch embeddings
-are replaced by a learnable mask token before the trunk runs, and the student must
-predict the teacher's output for exactly those positions, which forces the
-representation to carry local detail the [CLS] objective alone never asks for. A
-KoLeo regularizer spreads features within a batch by penalizing nearest-neighbour
-crowding, which stops the encoder from packing everything into a narrow cone.
-Register tokens — extra learnable tokens that carry no positional signal and are
-discarded at the output — give the network somewhere to park the global,
-image-wide summaries that would otherwise be smuggled into a handful of arbitrary
-patch tokens and show up as high-norm artifacts in attention maps.
+DINOv2 keeps DINOv1's label-free self-distillation and adds three things to
+hold up at scale on curated data. A patch-level objective from iBOT joins the
+image-level DINO one: some patch embeddings are replaced by a learnable mask
+token before the trunk runs, and the student must predict the teacher's
+output for exactly those positions, pushing the representation to carry
+local detail the [CLS] objective alone never asks for. A KoLeo regularizer
+spreads features within a batch by penalizing nearest-neighbour crowding.
+Register tokens, extra learnable tokens carrying no positional signal and
+discarded at the output, give the network somewhere to park global
+image-wide summaries that would otherwise show up as high-norm artifacts in
+ordinary patch tokens.
 
-**What lives where.** This file is architecture only. The DINO, iBOT and KoLeo
-losses are `DINOLoss`, `iBOTPatchLoss` and `KoLeoLoss` in
-`dl_techniques.losses.dino_loss`; the teacher EMA is in
-`dl_techniques.models.vision.dino.training`. Sinkhorn-Knopp centering is **not
-implemented anywhere in this repository** — `DINOLoss` offers EMA centering only.
-Variable-resolution positional-embedding interpolation is **not implemented
-either**: `interpolate_antialias` and `interpolate_offset` are accepted, stored
-and serialized, but nothing reads them, and the positional table is sized for one
-resolution.
+This file is architecture only. The DINO, iBOT and KoLeo losses are
+`DINOLoss`, `iBOTPatchLoss` and `KoLeoLoss` in `dl_techniques.losses.dino_loss`;
+the teacher EMA is in `dl_techniques.models.vision.dino.training`.
+Sinkhorn-Knopp centering is not implemented anywhere in this repository
+(`DINOLoss` offers EMA centering only), and variable-resolution
+positional-embedding interpolation is not implemented either:
+`interpolate_antialias` and `interpolate_offset` are accepted, stored and
+serialized, but nothing reads them, and the positional table is sized for
+one resolution.
 
-The backbone's input contract is a 2-element list `[images, masks]`, where `masks`
-is a boolean `(batch, num_patches)` tensor marking the iBOT positions. The mask
-input is mandatory even at inference; pass an all-`False` mask to disable masking.
-Its output is **always** the same 5-key dictionary — `x_norm_clstoken`,
-`x_norm_regtokens`, `x_norm_patchtokens`, `x_prenorm`, `masks` — regardless of
-`training`. That is a deliberate choice: an earlier version returned the dict when
-training and a bare tensor otherwise, which is a mismatched nested structure that
-`keras.ops.cond` rejects outright and an output whose *structure* depends on a
-runtime flag. Each key is produced by its own single-tensor `Lambda`, because one
-`Lambda` returning a Python dict cannot always be shape-inferred. The echoed
-`masks` output is routed through an identity op rather than passed straight
-through, otherwise the same tensor is both an input and an output of the
-functional graph and nesting the backbone inside `DINOv2` raises a cycle error.
-
-Token order inside the trunk is patch embedding, mask-token substitution, [CLS]
-prepend, positional embedding, then register-token insertion. The positional table
-is sized `num_patches + 1` and is applied *before* the registers are concatenated,
-so registers receive no positional signal at all. This looks like an off-by-R bug
-and is not: position-free is what a register is. Enlarging the table to `1 + R + N`
-or moving the insertion earlier would give registers a spatial identity they are
-defined not to have.
-
-Each block is pre-norm with a layer-scale gain on both branches, implemented
-with the `LayerScale` layer in `CHANNEL` mode. Note a deviation from the reference:
-these multipliers are created with `constraint='non_neg'`, so a LayerScale gamma
-that wants to be negative is clamped to zero; the paper's LayerScale is
-unconstrained. One `StochasticDepth` instance is shared by the attention and FFN
-branches rather than two. That is equivalence, not sloppiness — the layer draws a
-fresh mask per call and holds no seed state or variables, so the two branches get
-independent masks, and a second instance would only add a serialized sub-layer.
-
-The factories treat `None` as "defer to the variant" and any explicit value as
-final. This distinction is load-bearing for `ffn_type` and `num_register_tokens`:
-when `'mlp'` was both the default and the promotion trigger for `giant`'s SwiGLU,
-a caller who explicitly asked `giant` for MLP was silently upgraded with no way to
-opt out. `patch_size=None` resolves to 14 for every v2 variant, since
-`MODEL_VARIANTS` carries no per-variant patch size. No DINOv2 weights are shipped
-with this repository, so `pretrained=True` raises `NotImplementedError` rather
-than returning a randomly initialized model; warm-start from a local checkpoint
-with `model.load_weights(path)` instead.
+The backbone takes a 2-element list `[images, masks]`, where `masks` is a
+boolean `(batch, num_patches)` tensor marking the iBOT positions; pass an
+all-`False` mask to disable masking. Its output is always the same 5-key
+dictionary (`x_norm_clstoken`, `x_norm_regtokens`, `x_norm_patchtokens`,
+`x_prenorm`, `masks`) regardless of `training`. The positional table is
+sized `num_patches + 1` and applied before register tokens are concatenated,
+so registers carry no positional signal at all, matching their definition
+rather than an off-by-R bug. LayerScale gains are created with
+`constraint='non_neg'`, unlike the unconstrained reference. `patch_size=None`
+resolves to 14 for every v2 variant. No DINOv2 weights ship with this
+repository, so `pretrained=True` raises `NotImplementedError`; warm-start
+from a local checkpoint with `model.load_weights(path)` instead.
 
 References:
     - Oquab et al., 2023. DINOv2: Learning Robust Visual Features without
@@ -120,93 +91,88 @@ _DEFAULT_PATCH_SIZE = 14
 
 @register_dl_technique("dl_techniques.models.dino.dino_v2")
 class DINOv2Block(keras.layers.Layer):
-    """
-    DINOv2 Transformer Block with LayerScale gains and configurable components.
+    """Pre-norm transformer block with LayerScale gains on both branches.
 
-    This block implements the DINOv2 transformer architecture with:
-    - Pre-normalization layout (LayerNorm → Attention → Residual)
-    - LayerScale gains on both residual branches, for training stability
-    - Configurable attention mechanisms via factory
-    - Configurable FFN types via factory
-    - Optional stochastic depth regularization
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input x (B, N, D) ────────────────────────────────────────────────────+
-       ↓                                                        │
-    LayerNorm → MultiHeadAttention → LayerScale → DropPath ───────────(+)─→ x_mid
-       ↓                                                                   │
-    LayerNorm → FFN → LayerScale → DropPath ───────────────────────────────(+)─→ Output
-    ```
+    .. code-block:: text
 
-    **Intent**: Implement the core transformer block used in DINOv2 with modern
-    enhancements like learnable scaling and stochastic depth for improved training
-    stability and regularization.
+        Input x [B, N, D] ────────────────────────────┐
+              │                                        │
+              ▼                                        │
+        LayerNorm → Attention → LayerScale → DropPath  │
+              │                                        │
+              ▼                                        │
+             (+) ◄──────────────────────────────────────
+              │
+              ▼
+        LayerNorm → FFN → LayerScale → DropPath ──┐
+              │                                    │
+              ▼                                    │
+        (+) ◄────────────────────────────────────────
+              │
+              ▼
+        Output [B, N, D]
 
-    **Note on the shared `drop_path` instance**: the two ``DropPath`` boxes above are
-    ONE `StochasticDepth` object called twice, not two objects. This is deliberate and
-    MEASURED-equivalent to two instances -- `StochasticDepth.call` draws a fresh
-    `keras.random.uniform` mask on every invocation and holds no seed state or
-    variables, so the attention-branch and FFN-branch masks are independent. Measured
-    on keras 3.8.0: 40 successive calls on one instance produced 0 identical pairs out
-    of 780, keep-fraction 0.505 at `drop_path_rate=0.5`. Do NOT "fix" this by creating
-    a second instance -- it would add a second serialized sub-layer for no behavioural
-    difference. See decisions.md D-014.
+    Attention, FFN and normalization are each selected by string through the
+    shared factories. `drop_path` is one `StochasticDepth` instance called
+    twice (once per branch): the layer draws a fresh mask per call and holds
+    no seed state or variables, so the two branches still get independent
+    masks (measured: 40 successive calls produced 0 identical mask pairs out
+    of 780). See decisions.md D-014.
 
-    Args:
-        dim: Embedding dimension. Must be positive and divisible by num_heads.
-        num_heads: Number of attention heads. Must be positive.
-        mlp_ratio: Ratio of MLP hidden dimension to embedding dimension. Must be positive.
-        attention_type: Type of attention mechanism ('multi_head', etc.). Must be
-            a key of ATTENTION_REGISTRY; 'multi_head_attention' is NOT one.
-        ffn_type: Type of FFN ('mlp', 'swiglu', etc.).
-        normalization_type: Type of normalization ('layer_norm', 'rms_norm', etc.).
-        qkv_bias: Whether to use bias in QKV projection.
-        proj_bias: **DEAD KNOB.** Stored, serialized and forwarded, but read by
-            nothing: `build` maps `qkv_bias` onto the attention layer's
-            `use_bias` and never consults `proj_bias`, and no attention type in
-            `ATTENTION_REGISTRY` separates the output projection's bias from the
-            QKV one. The projection's bias therefore follows `qkv_bias`
-            regardless of what is passed here. MEASURED 2026-08-18, two
-            `DINOv2Block(dim=32, num_heads=4)` built under the same seed: both
-            have 12 weights and 12,704 parameters, and their outputs on the same
-            input differ by exactly **0.0**. Kept for config compatibility; do
-            not read it as a control. (The module docstring names the other
-            two dead DINOv2 knobs, `interpolate_antialias` and
-            `interpolate_offset`, and was silent about this one.)
-        ffn_bias: Whether to use bias in FFN layers.
-        stochastic_depth_rate: Stochastic depth drop probability.
-        init_values: LayerScale initialization value (None disables scaling).
-        attention_dropout_rate: Dropout rate for attention.
-        ffn_dropout_rate: Dropout rate for FFN.
-        **kwargs: Additional keyword arguments for the Layer base class.
+    :param dim: Embedding dimension. Must be positive and divisible by `num_heads`.
+    :type dim: int
+    :param num_heads: Number of attention heads. Must be positive.
+    :type num_heads: int
+    :param mlp_ratio: Ratio of MLP hidden dimension to embedding dimension.
+    :type mlp_ratio: float
+    :param attention_type: Attention mechanism, a key of `ATTENTION_REGISTRY`
+        (`'multi_head_attention'` is not one; use `'multi_head'`).
+    :type attention_type: str
+    :param ffn_type: FFN type, e.g. ``"mlp"``, ``"swiglu"``.
+    :type ffn_type: str
+    :param normalization_type: Normalization type, e.g. ``"layer_norm"``, ``"rms_norm"``.
+    :type normalization_type: str
+    :param qkv_bias: Whether to use bias in the QKV projection.
+    :type qkv_bias: bool
+    :param proj_bias: Has no effect. `build` maps `qkv_bias` onto the
+        attention layer's `use_bias` and never consults `proj_bias`; no
+        attention type in `ATTENTION_REGISTRY` separates the output
+        projection's bias from the QKV one. Kept for config compatibility.
+    :type proj_bias: bool
+    :param ffn_bias: Whether to use bias in FFN layers.
+    :type ffn_bias: bool
+    :param stochastic_depth_rate: Stochastic depth drop probability.
+    :type stochastic_depth_rate: float
+    :param init_values: LayerScale initialization value; ``None`` disables scaling.
+    :type init_values: Optional[float]
+    :param attention_dropout_rate: Dropout rate for attention.
+    :type attention_dropout_rate: float
+    :param ffn_dropout_rate: Dropout rate for FFN.
+    :type ffn_dropout_rate: float
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     Input shape:
-        3D tensor with shape: `(batch_size, sequence_length, embedding_dim)`.
+        3D tensor ``(batch_size, sequence_length, embedding_dim)``.
 
     Output shape:
-        3D tensor with shape: `(batch_size, sequence_length, embedding_dim)`.
-        Same shape as input due to residual connections.
+        3D tensor ``(batch_size, sequence_length, embedding_dim)``, same
+        shape as input due to residual connections.
 
     Example:
-        ```python
-        # Standard DINOv2 block
-        block = DINOv2Block(
-            dim=768,
-            num_heads=12,
-            mlp_ratio=4.0,
-            stochastic_depth_rate=0.1,
-            init_values=1e-5
-        )
+        .. code-block:: python
 
-        # With SwiGLU FFN (for giant model)
-        block = DINOv2Block(
-            dim=1536,
-            num_heads=24,
-            ffn_type='swiglu',
-            stochastic_depth_rate=0.3
-        )
-        ```
+            # Standard DINOv2 block
+            block = DINOv2Block(
+                dim=768, num_heads=12, mlp_ratio=4.0,
+                stochastic_depth_rate=0.1, init_values=1e-5
+            )
+
+            # With SwiGLU FFN (for giant model)
+            block = DINOv2Block(
+                dim=1536, num_heads=24, ffn_type='swiglu', stochastic_depth_rate=0.3
+            )
     """
 
     def __init__(
@@ -321,12 +287,8 @@ class DINOv2Block(keras.layers.Layer):
             self.ls2 = None
 
         # Stochastic depth (optional)
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-014: ONE StochasticDepth instance is
-        # shared by the attention branch and the FFN branch in call(). MEASURED equivalent
-        # to two instances (fresh keras.random.uniform per call, no seed state, no
-        # variables): 0/780 identical mask pairs over 40 calls. Do NOT split this into
-        # drop_path1/drop_path2 -- it changes the serialized sub-layer set for no
-        # behavioural gain. See decisions.md D-014 and the class docstring.
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-014: share one StochasticDepth instance between the attention and FFN branches.
+        # Measured equivalent to two instances (0/780 identical mask pairs over 40 calls); splitting only adds a serialized sub-layer. See decisions.md.
         if self.stochastic_depth_rate > 0.0:
             self.drop_path = StochasticDepth(self.stochastic_depth_rate, name="drop_path")
         else:
@@ -336,7 +298,7 @@ class DINOv2Block(keras.layers.Layer):
         """
         Build the transformer block with all sub-components.
 
-        **Critical**: Explicitly builds all sub-layers for proper serialization.
+        Explicitly builds all sub-layers for proper serialization.
         Following the modern Keras 3 pattern from the refined guide.
         """
         logger.debug(f"Building DINOv2Block with input_shape: {input_shape}")
@@ -433,8 +395,10 @@ class DINOv2VisionTransformer(keras.Model):
     the entire model architecture in a _build_model method using keras.Input and
     functional connections.
 
-    **Architecture**:
-    ```
+    Architecture:
+
+    .. code-block:: text
+
     Input Image (B, H, W, C)
          ↓
     PatchEmbed → (B, N, D)
@@ -446,7 +410,7 @@ class DINOv2VisionTransformer(keras.Model):
     LayerNorm → Split: [CLS] | [REG] | [Patches]
     ```
 
-    **Intent**: Provide the core Vision Transformer backbone used in DINOv2,
+    Provides the core Vision Transformer backbone used in DINOv2,
     supporting both self-supervised pre-training and downstream fine-tuning
     with configurable architecture and modern training enhancements.
 
@@ -459,7 +423,7 @@ class DINOv2VisionTransformer(keras.Model):
         num_heads: Number of attention heads. Must be positive.
         mlp_ratio: Ratio of MLP hidden dim to embedding dim. Must be positive.
         qkv_bias: Enable bias for QKV projections.
-        proj_bias: **DEAD KNOB** -- forwarded to every `DINOv2Block` and read by
+        proj_bias: Has no effect. Forwarded to every `DINOv2Block` and read by
             none of them; see `DINOv2Block`'s Args. The output projection's bias
             follows `qkv_bias`.
         ffn_bias: Enable bias for FFN layers.
@@ -611,12 +575,8 @@ class DINOv2VisionTransformer(keras.Model):
         self.num_patches = (self.image_size[0] // self.patch_size[0]) * (self.image_size[1] // self.patch_size[1])
 
         # Set input shape
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: the RAW argument is kept,
-        # not the derived `(*image_size, in_chans)`. `get_config` serializes THIS,
-        # so a caller-supplied override survives a round trip and a `None` stays
-        # `None` (re-derived identically on reload). Do NOT store the derived
-        # tuple instead: that pins a shape into every config, including the ones
-        # that were meant to follow `image_size`/`in_chans`.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: store the raw `input_shape` argument, never the derived `(*image_size, in_chans)`.
+        # `get_config` serializes this field, so a caller override survives a round trip and `None` re-derives identically on reload. See decisions.md.
         self._input_shape_arg = input_shape
         if input_shape is None:
             input_shape = (*self.image_size, self.in_chans)
@@ -631,35 +591,18 @@ class DINOv2VisionTransformer(keras.Model):
         self.pos_embed = None
         self.norm = None
 
-        # DECISION plan_2026-06-15_e2759fbc/D-009: the iBOT mask token is a GENUINE
-        # learnable (1,1,embed_dim) weight via MaskTokenApply (owns its weight in build(),
-        # like ClassTokenPrepend), NOT a Dense(use_bias=False, kernel_initializer='zeros')
-        # applied to ones(1,N,1). The old Dense-on-ones produced a CONSTANT-ZERO vector at
-        # init (degenerate: ops.where(mask, zeros, patch) merely ZEROED masked patches) —
-        # the exact "projection-on-ones" hack D-002 already rejected for the CLS token. Do
-        # NOT revert to a zero Dense-on-ones; the mask token must be a real add_weight so it
-        # learns a non-degenerate iBOT replacement vector. MaskTokenApply is safe to assign
-        # pre-super (lazy build). See decisions.md D-009.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the iBOT mask token is a genuine learnable weight via MaskTokenApply, never a Dense-on-ones hack.
+        # A Dense(use_bias=False, kernel_initializer='zeros') applied to ones produced a constant-zero vector at init, degenerating to zeroing masked patches. See decisions.md.
         self.mask_token_layer = MaskTokenApply(name='mask_token')
 
-        # DECISION plan_2026-06-15_e2759fbc/D-002: CLS token is a real learnable token via
-        # ClassTokenPrepend (owns its (1,1,dim) weight in build()), NOT a Dense-on-ones
-        # projection hack. ClassTokenPrepend is safe to assign pre-super (lazy build).
-        # Do NOT replace with a Dense(name='cls_token_projection') on ones. See decisions.md D-002.
+        # DECISION plan_2026-06-15_e2759fbc/D-002: CLS token is a real learnable token via ClassTokenPrepend, never a Dense-on-ones projection hack.
+        # ClassTokenPrepend is safe to assign pre-super (lazy build). See decisions.md.
         self.cls_token_layer = ClassTokenPrepend(name="cls_token")
 
-        # DECISION plan_2026-06-15_e2759fbc/D-003: register-token layer hoisted to
-        # __init__ (guarded by num_register_tokens>0), same no-weight-creating-layer-in-Lambda
-        # rule as D-001. Insertion uses Concatenate, not a Lambda. See decisions.md D-003.
-        #
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-064: the token bank is a real
-        # (1, R, D) add_weight inside RegisterTokens. Do NOT go back to
-        # Dense(embed_dim, use_bias=False) applied to ones((1, R, 1)): the input
-        # feature dim is 1, so the kernel is (1, D) and every one of the R rows is
-        # 1.0 * kernel[0] -- R bit-identical copies of ONE vector on ONE gradient
-        # accumulator, D parameters where the architecture needs R*D. This is the
-        # same "projection-on-ones" hack D-002/D-009 already rejected for the CLS
-        # and mask tokens. See decisions.md D-064.
+        # DECISION plan_2026-06-15_e2759fbc/D-003: register tokens are hoisted to __init__ behind a `num_register_tokens>0` guard.
+        # See decisions.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-064: RegisterTokens owns a real (1, R, D) add_weight, never a Dense on ones((1, R, 1)).
+        # That form gives R bit-identical copies of one vector, D parameters where R*D are needed. See decisions.md.
         self.register_token_layer = None
         if self.num_register_tokens > 0:
             self.register_token_layer = RegisterTokens(
@@ -672,23 +615,15 @@ class DINOv2VisionTransformer(keras.Model):
         # Create inputs and build model using functional API
         inputs = keras.Input(shape=input_shape, name="input_images")
 
-        # DECISION plan_2026-06-15_e2759fbc/D-009: the model contract is 2-input
-        # [images, masks]. The former 3rd `is_training` Input was SPURIOUS — once B5/D-005
-        # made the output structure always the 5-key dict (no training-dependent branch),
-        # nothing in the graph reads `is_training`, so it was dead weight carried only to
-        # be coerced by a fragile DINOv2.call override (#13). Do NOT re-add an `is_training`
-        # Input here or to the wrapper; there is no branch that needs it. See decisions.md D-009.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the model contract is 2-input [images, masks], never a 3rd `is_training` Input.
+        # Once the output structure became always the 5-key dict, nothing in the graph reads `is_training`. See decisions.md.
         masks_input = keras.Input(shape=(self.num_patches,), dtype="bool", name="input_masks")
 
         # Build the model
         outputs = self._build_model(inputs, masks_input)
 
-        # DECISION plan_2026-06-15_e2759fbc/D-007: backbone name was hardcoded in
-        # super().__init__ while the wrapper (DINOv2._build_model) ALSO passed
-        # name='dinov2_backbone' into **kwargs -> duplicate `name` kwarg TypeError on the
-        # first-ever wrapper->backbone construction. Fixed on the BACKBONE side: honor a
-        # caller-supplied name via kwargs.pop, falling back to the variant-derived default.
-        # Do NOT re-add a hardcoded name= alongside **kwargs (re-introduces the collision).
+        # DECISION plan_2026-06-15_e2759fbc/D-007: honor a caller-supplied name via kwargs.pop, never a hardcoded name= alongside **kwargs.
+        # The wrapper also passes name='dinov2_backbone' into **kwargs; a hardcoded name here raised a duplicate-keyword TypeError. See decisions.md.
         name = kwargs.pop('name', f'dinov2_vit_{embed_dim}d_{depth}l')
 
         # Initialize the Model
@@ -755,23 +690,19 @@ class DINOv2VisionTransformer(keras.Model):
         """Build token preparation with CLS, register tokens, and positional embeddings."""
         # B1: apply iBOT masking via MaskTokenApply, which owns the learnable (1,1,D)
         # mask-token weight in its build() and performs the elementwise select internally.
-        # DECISION plan_2026-06-15_e2759fbc/D-009: the masked positions are replaced by a
-        # REAL learnable mask token (not a Dense-on-ones zero vector, and not a raw
-        # weight-creating layer inside a Lambda). MaskTokenApply((patch_emb, mask)) returns
-        # where(expand_dims(mask,-1), mask_token, patch_emb) with mask_token broadcast over
-        # the batch. Do NOT revert to a zero Dense-on-ones + an apply_masks ops.where Lambda.
-        # See decisions.md D-009.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: mask replacement is a real learnable token via MaskTokenApply, never a Dense-on-ones zero vector.
+        # `where(mask, mask_token, patch_emb)` broadcasts the token over the batch. See decisions.md.
         x = self.mask_token_layer([patch_embeddings, masks])
 
         # B2: prepend a real learnable CLS token (B,N,D)->(B,N+1,D) via ClassTokenPrepend,
         # after masking, before pos-embed.
-        # DECISION plan_2026-06-15_e2759fbc/D-002: use ClassTokenPrepend, not a Dense-on-ones
-        # hack. Do NOT reintroduce a Dense(name='cls_token_projection'). See decisions.md D-002.
+        # DECISION plan_2026-06-15_e2759fbc/D-002: use ClassTokenPrepend here too, never a Dense-on-ones projection hack.
+        # See decisions.md.
         x = self.cls_token_layer(x)
 
         # B4/B7: positional embeddings. The weight is sized num_patches + num_tokens (CLS),
         # so it accounts for the prepended CLS; PositionalEmbedding.call slices to the seq
-        # length. Variable-resolution interpolation is OUT OF SCOPE.
+        # length. Variable-resolution interpolation is out of scope.
         pos_embed_seq_len = self.num_patches + self.num_tokens
         self.pos_embed = create_embedding_layer(
             'positional_learned',
@@ -779,31 +710,16 @@ class DINOv2VisionTransformer(keras.Model):
             dim=self.embed_dim,
             name='pos_embed'
         )
-
-        # DECISION plan_2026-06-15_e2759fbc/D-004: flatten pos-embed to x = self.pos_embed(x).
-        # The deleted path nested a Lambda inside a Lambda (illegal layer-creation-in-trace),
-        # read the WRONG attribute self.pos_embed.pos_embed (correct is .pos_embedding), and
-        # ran a Python assert on a symbolic tensor (a trace-time no-op). Do NOT reintroduce
-        # _get_interpolated_pos_embed or an add_pos_embed Lambda; var-res is out of scope.
-        # See decisions.md D-004.
+        # DECISION plan_2026-06-15_e2759fbc/D-004: call as `x = self.pos_embed(x)`, never a nested Lambda or `_get_interpolated_pos_embed`.
+        # A nested Lambda-in-Lambda is illegal layer creation in trace, and variable-resolution interpolation is out of scope. See decisions.md.
         x = self.pos_embed(x)
 
-        # B3: insert register tokens after CLS via Concatenate (NOT a Lambda). Cold path on
+        # B3: insert register tokens after CLS via Concatenate (not a Lambda). Cold path on
         # the smoke (num_register_tokens=0); 'large'/'giant' auto-enable 4 registers.
-        # DECISION plan_2026-06-15_e2759fbc/D-003: reg_tokens via the hoisted Dense OUTSIDE any
-        # Lambda; insertion via Concatenate([cls, reg, rest]). Do NOT use a Lambda or an
-        # in-Lambda Dense for register tokens. See decisions.md D-003.
-        #
-        # DECISION plan_2026-06-15_e2759fbc/D-009: register tokens are inserted AFTER the
-        # positional embedding (pos_embed above is sized num_patches + num_tokens = CLS+patches
-        # and applied to the (B, N+1, D) post-CLS tensor at line ~688, BEFORE this concat). This
-        # is INTENTIONAL: register tokens are DELIBERATELY position-free learnable tokens (Darcet
-        # et al. 2023, "Vision Transformers Need Registers") -- they receive NO positional signal
-        # by design. The resulting (B, 1+R+N, D) sequence is accepted by the length-agnostic
-        # attention blocks + final norm (empirically verified: a 'tiny'+4-register model forwards
-        # finite (2,10) and is input-sensitive). Do NOT "fix" this by enlarging pos_embed to
-        # 1+R+N or by moving register insertion before pos_embed -- that would WRONGLY give
-        # registers a positional signal. See decisions.md D-009 + tests::test_register_tokens_forward.
+        # DECISION plan_2026-06-15_e2759fbc/D-003: build register tokens via the hoisted layer and insert with Concatenate, never a Lambda.
+        # See decisions.md.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: insert register tokens after positional embedding is applied, never before.
+        # Registers are defined position-free (Darcet et al., 2023); moving insertion earlier would wrongly give them a positional signal. See decisions.md.
         if self.num_register_tokens > 0:
             # RegisterTokens reads only the batch size of `x` and emits the
             # (B, R, D) bank, so no Lambda broadcast is needed any more.
@@ -861,18 +777,8 @@ class DINOv2VisionTransformer(keras.Model):
         else:
             x_norm = x
 
-        # DECISION plan_2026-06-15_e2759fbc/D-005: ALWAYS return the 5-key dict; do NOT
-        # branch on `is_training` via keras.ops.cond. The original code returned a 5-key
-        # dict in the training branch but a bare CLS tensor in the inference branch — a
-        # mismatched nested structure that keras.ops.cond rejects, and an output whose
-        # STRUCTURE depended on `training` (the training-dependent-output anti-pattern).
-        # This is a Functional model with a fixed `is_training` Input, so the runtime
-        # branch never earned its keep. Each output key is produced by its OWN tensor op
-        # (a per-key Lambda returning a single tensor) so Keras can shape-infer each one;
-        # a single Lambda returning a Python dict cannot always infer its output shape
-        # ("could not infer the shape of the Lambda's output"). The output structure is
-        # config-fixed (always the 5-key dict). Do NOT reintroduce ops.cond, a bare-tensor
-        # inference branch, an `is_training` Input, or a dict-returning Lambda.
+        # DECISION plan_2026-06-15_e2759fbc/D-005: always return the 5-key dict, never branch on `is_training` via keras.ops.cond.
+        # A training-dependent output structure is rejected by ops.cond; each key is produced by its own shape-inferable Lambda instead of one dict-returning Lambda. See decisions.md.
         num_reg = self.num_register_tokens
 
         cls_token = layers.Lambda(
@@ -894,14 +800,8 @@ class DINOv2VisionTransformer(keras.Model):
                 lambda t: t[:, 1:], name='slice_patch_tokens'
             )(x_norm)
 
-        # DECISION plan_2026-06-15_e2759fbc/D-008: route the `masks` input through an
-        # identity Lambda before echoing it as an output. Passing the RAW `masks` input
-        # KerasTensor straight into the outputs dict makes it both an input AND an output
-        # of this Functional model; when the DINOv2 wrapper nests this backbone and feeds
-        # its own masks input in, Keras's _build_map sees the input tensor reachable from
-        # the backbone op that consumes it and raises "Tensor input_masks ... is part of a
-        # cycle". Wrapping in an identity op makes the echoed mask a DISTINCT node, breaking
-        # the input-is-output aliasing. Do NOT put the bare `masks` input back in the dict.
+        # DECISION plan_2026-06-15_e2759fbc/D-008: route `masks` through an identity Lambda before echoing it as an output, never the bare input tensor.
+        # A bare input-as-output makes it both an input and output of this Functional model, which raises a "part of a cycle" error once the wrapper nests it. See decisions.md.
         masks_out = layers.Lambda(lambda t: t, name='masks_passthrough')(masks)
 
         outputs = {
@@ -966,11 +866,8 @@ class DINOv2VisionTransformer(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
-        # FIRST, then the model's own keys. Without it `name` and
-        # `trainable` are dropped and silently restored to their DEFAULTS on
-        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
-        # with a literal dict again.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: call `super().get_config()` first, never a literal dict.
+        # Without it, `name` and `trainable` reload at their defaults, so a frozen model comes back unfrozen. See decisions.md.
         config = super().get_config()
         config.update({
             'image_size': self.image_size,
@@ -1025,8 +922,10 @@ class DINOv2(keras.Model):
     input/output handling and model variant support. Uses the functional API
     pattern for consistent architecture building.
 
-    **Architecture**:
-    ```
+    Architecture:
+
+    .. code-block:: text
+
     Input (B, H, W, C)
          ↓
     DINOv2VisionTransformer → Features (B, D)
@@ -1034,7 +933,7 @@ class DINOv2(keras.Model):
     Dense Classifier (optional) → Predictions (B, num_classes)
     ```
 
-    **Intent**: Provide a complete model interface that can be used for both
+    Provides a complete model interface that can be used for both
     pre-training and fine-tuning, with proper functional API implementation
     following modern Keras 3 best practices.
 
@@ -1094,14 +993,8 @@ class DINOv2(keras.Model):
         if num_classes <= 0 and include_top:
             raise ValueError(f"num_classes must be positive when include_top=True, got {num_classes}")
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: the three Keras base
-        # keys are taken OUT of `**backbone_kwargs` before anything else. They
-        # arrive there because `from_config` calls `cls(**config)` and the
-        # config now (correctly) carries them -- and forwarding them to the
-        # BACKBONE raised `DINOv2VisionTransformer() got multiple values for
-        # keyword argument 'name'`, which is the same compounding shape a
-        # hard-coded `name=` produced in `coshnet` (D-066). Do NOT let them fall
-        # through into `backbone_kwargs`: `get_config` spreads that dict.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: pop `name`/`trainable`/`dtype` out of `**backbone_kwargs` before anything else.
+        # Forwarding them to the backbone raised a duplicate-keyword TypeError on `from_config`'s `cls(**config)` path. See decisions.md.
         base_kwargs = {key: backbone_kwargs.pop(key)
                        for key in ("name", "trainable", "dtype")
                        if key in backbone_kwargs}
@@ -1114,10 +1007,8 @@ class DINOv2(keras.Model):
         self.backbone_kwargs = backbone_kwargs
 
         # Set input shape
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: same rule as the backbone
-        # -- keep the RAW argument for `get_config`. Without this key the composite
-        # reloaded SILENTLY at the 3-channel default, which is why 11 existing
-        # `.save(` call sites never caught it: they all use the default arm.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-115: keep the raw `input_shape` argument for `get_config`, same rule as the backbone.
+        # Without this key the composite silently reloaded at the 3-channel default. See decisions.md.
         self._input_shape_arg = input_shape
         if input_shape is None:
             in_chans = backbone_kwargs.get('in_chans', 3)
@@ -1128,16 +1019,10 @@ class DINOv2(keras.Model):
         self.classifier = None
 
         # Create inputs
-        # DECISION plan_2026-06-15_e2759fbc/D-008: the wrapper's keras.Input names MUST
-        # be UNIQUE from the backbone sub-model's internal input names ("input_images",
-        # "input_masks"). Sharing names makes Keras alias the wrapper's symbolic inputs with
-        # the nested backbone's inputs at super().__init__, producing a graph cycle
-        # ("input_masks" collision). Do NOT rename these back to match the backbone —
-        # prefix with "dinov2_" so the two input layers stay distinct. See D-008.
-        # DECISION plan_2026-06-15_e2759fbc/D-009: the wrapper contract is 2-input
-        # [images, masks]. The former 3rd `dinov2_is_training` Input was spurious (unused
-        # under the always-dict backbone) and only existed to feed the fragile DINOv2.call
-        # rank-0 coercion override (#13), which is now removed. Do NOT re-add it.
+        # DECISION plan_2026-06-15_e2759fbc/D-008: prefix wrapper `keras.Input` names with "dinov2_", never reuse the backbone's own names.
+        # Sharing names aliases the wrapper's symbolic inputs with the nested backbone's at `super().__init__`, raising a graph-cycle error. See decisions.md.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the wrapper contract is 2-input [images, masks], never a 3rd `dinov2_is_training` Input.
+        # See decisions.md.
         inputs = keras.Input(shape=input_shape, name="dinov2_input_images")
 
         # For inference, we typically don't need masks, so provide default
@@ -1180,12 +1065,8 @@ class DINOv2(keras.Model):
             **self.backbone_kwargs
         )
 
-        # DECISION plan_2026-06-15_e2759fbc/D-006: the backbone output is ALWAYS a
-        # 5-key dict (see D-005) — slice ["x_norm_clstoken"] directly by subscripting the
-        # functional output. Do NOT wrap this in a Lambda + keras.ops.cond on
-        # `is_training`: the old code ran a cond whose inference branch returned the WHOLE
-        # dict (not the CLS tensor), which is both wrong and a mismatched-structure cond.
-        # Dict subscription on a Functional model's output is legal and shape-inferable.
+        # DECISION plan_2026-06-15_e2759fbc/D-006: subscript the backbone's 5-key dict output directly, never wrap it in a Lambda + `keras.ops.cond`.
+        # A cond on `is_training` previously returned the whole dict in the inference branch instead of the CLS tensor. See decisions.md.
         backbone_output = self.backbone([inputs, masks])
         features = backbone_output["x_norm_clstoken"]
 
@@ -1250,11 +1131,8 @@ class DINOv2(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
-        # FIRST, then the model's own keys. Without it `name` and
-        # `trainable` are dropped and silently restored to their DEFAULTS on
-        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
-        # with a literal dict again.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: call `super().get_config()` first, never a literal dict.
+        # Without it, `name` and `trainable` reload at their defaults, so a frozen model comes back unfrozen. See decisions.md.
         config = super().get_config()
         config.update({
             'image_size': self.image_size,
@@ -1305,7 +1183,7 @@ def create_dino_v2(
     ``input_shape=`` raises ``TypeError`` rather than silently disagreeing with
     ``image_size``.
 
-    **Variant-defers precedence rule** (shared by all three factories): a parameter
+    Variant-defers precedence rule, shared by all three factories: a parameter
     passed as ``None`` defers to the variant's own ``MODEL_VARIANTS`` entry (or, if
     the entry says nothing, to this version's default). An EXPLICIT non-``None``
     value ALWAYS wins over the variant's. Three parameters use it here:
@@ -1320,9 +1198,9 @@ def create_dino_v2(
     - ``num_register_tokens``: ``None`` gives 4 on ``large``/``giant`` and 0
       elsewhere; an explicit ``0`` on ``giant`` now genuinely means zero.
 
-    **Recommended Configurations**:
-    - **tiny/small/base/large**: 'mlp' FFN, 0 or 4 register tokens
-    - **giant**: 'swiglu' FFN, 4 register tokens, higher stochastic_depth_rate
+    Recommended configurations:
+    - tiny/small/base/large: 'mlp' FFN, 0 or 4 register tokens
+    - giant: 'swiglu' FFN, 4 register tokens, higher stochastic_depth_rate
 
     Args:
         variant: Size variant ('tiny', 'small', 'base', 'large', 'giant').
@@ -1369,12 +1247,8 @@ def create_dino_v2(
     """
     reject_input_shape(kwargs, "create_dino_v2")
 
-    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise instead of warning.
-    # Do NOT go back to `logger.warning(...)` and continuing: the call then
-    # succeeds, the weights are random, and the ONLY thing separating that from a
-    # real load is a log line the caller usually never sees. Do NOT "fix" this by
-    # widening `pretrained` to accept a path string either — build with
-    # `pretrained=False` and call `model.load_weights(path)`. See decisions.md D-069.
+    # DECISION plan-2026-08-14T233721-d4f9beb2/D-069: raise on `pretrained=True`, never `logger.warning(...)` and continue with random weights.
+    # A warning-only path lets a caller silently ship an untrained model. Build with `pretrained=False` and call `model.load_weights(path)` instead. See decisions.md.
     if pretrained:
         raise NotImplementedError(
             f"No pretrained DINOv2 weights are distributed with dl_techniques "
@@ -1390,13 +1264,8 @@ def create_dino_v2(
     if patch_size is None:
         patch_size = _DEFAULT_PATCH_SIZE
 
-    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `None` means "defer to the
-    # variant", an explicit value always wins. Do NOT go back to
-    # `ffn_type: str = 'mlp'` plus `if variant == 'giant' and ffn_type == 'mlp':
-    # ffn_type = 'swiglu'` — that form cannot distinguish "the caller said mlp"
-    # from "the caller said nothing", so an explicit `ffn_type='mlp'` on `giant`
-    # was silently overridden with no way to opt out. Same for
-    # `num_register_tokens == 0` as the promotion trigger. See decisions.md D-017.
+    # DECISION plan-2026-08-01T105809-dc0c402e/D-017: `None` means "defer to the variant"; an explicit value always wins.
+    # A `ffn_type='mlp'` default couldn't distinguish "caller said mlp" from "caller said nothing", so `giant` silently overrode an explicit `'mlp'`. See decisions.md.
     variant_config = DINOv2VisionTransformer.MODEL_VARIANTS.get(variant, {})
     if ffn_type is None:
         ffn_type = variant_config.get('ffn_type', 'mlp')

@@ -1,102 +1,45 @@
 """
-Energy Transformer image models — a shared backbone plus masked-image-completion and
-classification heads, built on one recurrent energy-descent block.
+Energy Transformer image models: a shared backbone plus masked-image-completion
+and classification heads, built on one recurrent energy-descent block.
 
-A standard transformer layer is a feedforward map: attention mixes tokens, an MLP
-transforms them, and stacking `L` distinct layers with `L` distinct parameter sets is
-what gives the model depth. Nothing constrains what the stack computes beyond the
-training objective, and there is no scalar quantity the forward pass is known to be
-improving. The Energy Transformer replaces that with a dynamical system. A single
-scalar energy `E` is defined over the token states, and the forward pass is `T` steps
-of gradient descent on it:
+A standard transformer stacks `L` distinct feedforward layers to get depth,
+with no scalar quantity the forward pass is known to improve. The Energy
+Transformer instead defines a single scalar energy `E` over the token states
+and runs the forward pass as `T` steps of gradient descent on it,
+`x <- x - alpha * dE/dg` with `g = EnergyLayerNorm(x)`, reusing one block's
+weights across all `T` steps. Depth becomes an inference-time knob (`T`)
+rather than a parameter count. The energy sums two terms: an attention
+energy `E_ATT` whose gradient is a token-mixing update letting an occluded
+token pull information from its neighbours, and a Hopfield associative-memory
+energy `E_HN` over a tied memory matrix that pulls each token toward the
+nearest stored pattern. Descending their sum both propagates evidence
+between tokens and snaps each token to a memorized prototype, which is what
+completing a corrupted input needs. Gradients are hand-derived in closed
+form with `keras.ops`, not autodiff (`keras.ops.grad` does not exist in
+Keras 3.8), so `energy()` is the specification and `update()` must match it.
 
-`x <- x - alpha * dE/dg`,  `g = EnergyLayerNorm(x)`
+This module supplies the block's image-domain consumers: `EnergyTransformerBackbone`
+(patch embedding, optional learnable mask token, learned positional embedding,
+one `EnergyTransformer` block) feeding either `EnergyTransformerMIM` (LayerNorm
+plus an affine decoder to patch pixels, the paper's masked-image-completion
+model) or `EnergyTransformerClassifier` (LayerNorm, mean-pool, a `Dense`
+classifier head, warm-startable from an MIM checkpoint). Classification
+mean-pools the token states rather than reading a CLS token, since no CLS
+token exists in this backbone.
 
-so every step is guaranteed to move the tokens toward lower energy, and the "depth" of
-the model is the number of descent steps rather than a number of parameter blocks. One
-block's weights are reused across all `T` steps. Recurrence in place of depth is the
-architectural trade: parameters are constant in `T`, and `T` becomes an inference-time
-knob rather than a training-time commitment.
-
-The energy has two additive terms, and the split is what makes the model useful for
-completion. `E_ATT` is an attention energy,
-`E_ATT = -(1/beta) * sum_h sum_m logsumexp_n(beta * A_{h,n,m})`, whose logsumexp runs
-over the *key* axis; its gradient is a token-mixing update, the analogue of attention,
-and it is what lets an occluded token pull information from its neighbours. `E_HN` is a
-Hopfield associative-memory energy over a tied `(K, D)` memory matrix `xi`, with
-`h = xi g`, and either `-0.5 * sum relu(h)^2` or a softmax/logsumexp form over the
-*memory* axis; it acts strictly per token and pulls each token toward the nearest stored
-pattern. Descending their sum therefore does two things at once — propagate evidence
-between tokens and snap each token to a memorized prototype — which is exactly the
-computation an associative memory performs when completing a corrupted input.
-
-The gradients are hand-derived in closed form with `keras.ops`, not taken by autodiff:
-`keras.ops.grad` does not exist in Keras 3.8 and a backend-specific tape is not
-permitted in `src/`. That means `energy()` is the specification and `update()` must
-match it; correctness is held by an autodiff oracle test rather than by construction,
-and the energy formulas must never be edited to make that oracle pass.
-
-This module supplies the block's image-domain consumers — one shared backbone and two
-task heads:
-
-* :class:`EnergyTransformerBackbone` — patch-embed -> (optional learnable MASK token) ->
-  learnable positional embedding -> ONE ``EnergyTransformer`` block running ``T`` internal
-  descent steps -> ``(B, N, D)`` token states.
-* :class:`EnergyTransformerMIM` — backbone -> LayerNorm -> affine ``Dense(P*P*C)`` decoder ->
-  ``(B, N, P*P*C)``, the paper's §3 masked-image-completion model.
-* :class:`EnergyTransformerClassifier` — the SAME backbone -> LayerNorm -> mean-pool ->
-  ``Dense(num_classes)`` **logits**, warm-startable from an MIM checkpoint.
-
-Classification mean-pools the token states rather than reading a CLS token: no CLS token
-is prepended anywhere in this backbone, and inventing one would change the token count
-the MIM checkpoint was trained with.
-
-**Architecture**::
-
-    image (B, H, W, C)              input_mask (B, N) bool   [MIM only]
-          |                                |
-    PatchEmbedding2D  ---------------------+
-          |                                |
-          v                                v
-    (B, N, D)  ----------------->  MaskTokenApply   (skipped when no mask is passed,
-          |                                |         but ALWAYS created AND built)
-          +--------------------------------+
-                          |
-                  PositionalEmbedding (learned)
-                          |
-                  EnergyTransformer  (T descent steps on ONE scalar energy)
-                          |
-                    (B, N, D) tokens
-                    /              \\
-        decoder_norm                head_norm
-        decoder_proj -> (B,N,P*P*C) head_pool -> head_dense -> (B, num_classes) logits
-
-**THE DATA CONTRACT (do not "simplify" it).** The MIM model is trained through STOCK
-``model.compile(loss='mse')`` + ``model.fit(ds)``. There is no ``train_step``, no
-``test_step`` and no ``compute_loss`` anywhere in this file, and none may be added. The
-occlusion mask reaches the LOSS as a Keras ``sample_weight``, supplied as the third element
-of each ``tf.data`` batch (built by ``datasets/vision/masked_patches.py``)::
-
-    ((image (B,H,W,C), input_mask (B,N) bool), target_patches (B,N,P*P*C), loss_weight (B,N))
-
-with ``loss_weight = 1{i in S} * (N / n_loss)``, which makes Keras' ``sum_over_batch_size``
-reduction equal ``mean_{i in S} MSE`` exactly. ``input_mask`` is a STRICT SUBSET of the loss
-set ``S`` (the paper's 90/10 rule: ~10% of the loss tokens keep their true patch embedding),
-so the two masks are NOT interchangeable.
-
-**Weight-compatibility invariant.** ``MaskTokenApply`` is created AND built by EVERY backbone,
-including the classifier's, which never calls it. This is the authoring guide's §9 "ALWAYS
-CREATE / CONDITIONALLY USE" rule and it is what keeps the MIM trunk and the classifier trunk
-weight-identical, so ``load_weights_from_checkpoint(..., skip_prefixes=("decoder_",))``
-transfers the trunk 1:1. Removing the "dead" mask token from the classifier would silently
-break the warm-start.
-
-**Both heads refuse a ``return_energy=True`` backbone** rather than forwarding the energy
-trace. This is structural, not stylistic: ``EnergyTransformer.energy()`` always computes in
-at least float32 because an O(-1e5) trace is ``-inf`` in fp16 at realistic token counts, and
-a default-policy head that ingested that trace under ``mixed_float16`` would autocast it back
-down and overflow to nan. The fix cannot live in the block, so the constraint is enforced
-where the trace would be consumed.
+The MIM model trains through stock `model.compile(loss='mse')` plus
+`model.fit(ds)`: no `train_step`, `test_step` or `compute_loss` exists here.
+The occlusion mask reaches the loss as a Keras `sample_weight`, the third
+element of each `tf.data` batch, with `loss_weight = 1{i in S} * (N / n_loss)`
+so Keras' `sum_over_batch_size` reduction equals `mean_{i in S} MSE` exactly;
+`input_mask` is a strict subset of the loss set `S` (the paper's 90/10 rule),
+so the two masks are not interchangeable. `MaskTokenApply` is created and
+built by every backbone, including the classifier's (which never calls it),
+so the MIM and classifier trunks stay weight-identical and
+`load_weights_from_checkpoint(..., skip_prefixes=("decoder_",))` transfers
+the trunk 1:1. Both heads refuse a `return_energy=True` backbone: the energy
+trace always computes in at least float32 (it overflows fp16), and a
+default-policy head would autocast it back down and overflow to nan.
 
 References:
     - Hoover et al., 2023. Energy Transformer. NeurIPS 2023 (§3, Table 4).
@@ -172,35 +115,8 @@ def _resolve_scale(variant: str) -> str:
     )
 
 
-# DECISION plan-2026-07-14T163315-29a4fef4/D-009
-# `create_embedding_layer()` SILENTLY DROPS a `dtype=` kwarg. Its registry filters the call
-# down to `required_params | optional_params` (embedding/factory.py:350-351) and `dtype` is
-# in NEITHER, so the obvious-looking
-#     create_embedding_layer('patch_2d', ..., dtype=self.dtype_policy)
-# is a NO-OP: the layer silently keeps the GLOBAL policy. Executed control (keras 3.8):
-# passing `dtype='float64'` yields a layer whose `dtype_policy` is still `float32`. That
-# breaks H4 — under `EnergyTransformerBackbone(dtype='float64')` (or any explicit non-global
-# policy) the patch/positional embeddings would compute in float32 while the ET block computes
-# in float64, and the add would die with an InvalidArgumentError; the mirror-image failure
-# under `mixed_float16` is the one that already bit this feature once.
-# Keras' `Layer.dtype_policy` SETTER does not recurse either, so setting it on the returned
-# layer alone leaves the inner Conv2D / Dropout at the global policy. Hence this helper walks
-# the layer tree. `layers/` is frozen for this plan (I8), so the factory cannot be fixed here.
-# WHAT NOT TO DO: do NOT pass `dtype=` to `create_embedding_layer` and assume it landed, and
-# do NOT "simplify" this to `layer.dtype_policy = policy` — see decisions.md D-009.
-#
-# SUPERSEDED 2026-08-14 by plan-2026-08-14T042537-ff96c6c6/D-002 — ONLY on the "SILENTLY"
-# half. `create_embedding_layer` no longer drops an unregistered kwarg: it now RAISES
-# `ValueError: ... unsupported parameter(s) ['dtype']` (embedding/factory.py, the strict
-# dropped-kwarg raise). MEASURED at this plan's HEAD:
-# `create_embedding_layer('patch_2d', patch_size=4, embed_dim=32, dtype='float64')` raises.
-# The original text above is kept verbatim because the HISTORY is the point — the no-op was
-# real, and it is why this helper exists. Everything else in it still holds and this helper is
-# MORE necessary, not less: `dtype=` is now a hard error rather than a quiet miss, so the tree
-# walk below remains the only way to push a policy into the returned layer, and Keras'
-# `Layer.dtype_policy` setter still does not recurse. The WHAT-NOT-TO-DO stands unchanged in
-# force, with a different failure mode: passing `dtype=` no longer silently does nothing, it
-# breaks the call.
+# DECISION plan-2026-07-14T163315-29a4fef4/D-009: push a dtype policy onto a layer by walking its sub-layer tree here, never via `create_embedding_layer(..., dtype=...)`.
+# `create_embedding_layer` does not accept `dtype`, and `Layer.dtype_policy`'s setter does not recurse into sub-layers either. See decisions.md.
 def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.Layer:
     """Force ``policy`` onto ``layer`` AND every sub-layer, before anything is built."""
     if hasattr(layer, "_flatten_layers"):
@@ -218,11 +134,11 @@ def _apply_dtype_policy(layer: keras.layers.Layer, policy: Any) -> keras.layers.
 class EnergyTransformerBackbone(keras.Model):
     """Shared Energy Transformer trunk: patch-embed -> [mask token] -> pos-embed -> ET block.
 
-    **Intent**: give the ``EnergyTransformer`` block a single, separately-checkpointable image
+    Gives the ``EnergyTransformer`` block a single, separately-checkpointable image
     trunk that BOTH the masked-completion model and the classifier compose under the same name,
     so a pretrained encoder transfers into the classifier layer-for-layer.
 
-    **Call signature** — ``backbone(image)`` OR ``backbone((image, input_mask))``. Passing the
+    Call signature: ``backbone(image)`` or ``backbone((image, input_mask))``. Passing the
     mask is a TRACE-TIME structural choice (a Python ``if`` on whether the caller supplied a
     second tensor), not a runtime ``ops.where`` on tensor values: the MIM model always passes
     one, the classifier never does.
@@ -231,7 +147,7 @@ class EnergyTransformerBackbone(keras.Model):
     never calls it. That is deliberate (authoring guide §9): it is what makes the two trunks
     weight-identical so the warm-start is complete. Do not "optimize" it away.
 
-    **Descent sign**: the ET block's ``update()`` returns ``-dE/dg`` and the block ADDS it.
+    Descent sign: the ET block's ``update()`` returns ``-dE/dg`` and the block adds it.
     Nothing here re-derives or re-signs the descent — see the block's class docstring.
 
     :param input_shape: Image shape ``(height, width, channels)``. Defaults to ``(224,224,3)``.
@@ -270,7 +186,7 @@ class EnergyTransformerBackbone(keras.Model):
     :param pos_dropout_rate: Dropout after the positional embedding. Defaults to ``0.0``.
     :type pos_dropout_rate: float
     :param return_energy: If ``True``, :meth:`call` returns ``(tokens, energies)`` with
-        ``energies`` of shape ``(B, num_steps + 1)`` and dtype **float32 even under
+        ``energies`` of shape ``(B, num_steps + 1)`` and dtype float32 even under
         mixed_float16**. Used by the out-of-graph energy-trace probe; the TRAINING models are
         always built with ``False``.
     :type return_energy: bool
@@ -403,35 +319,8 @@ class EnergyTransformerBackbone(keras.Model):
             self.dtype_policy,
         )
 
-        # DECISION plan-2026-07-14T163315-29a4fef4/D-011
-        # `dtype=self.dtype_policy.variable_dtype`, NOT `self.dtype_policy`. Under
-        # `mixed_float16` this runs the ET block in float32 (its variable dtype) rather than
-        # float16; `call()` casts the tokens in and back out. Under float32/float64 the two
-        # spellings are IDENTICAL (compute == variable), so nothing outside a mixed policy
-        # changes, and the block's variables were float32 under either spelling — the weight
-        # count, the weight dtypes and every checkpoint are untouched.
-        #
-        # WHY (executed control, N=196, tiny/small/base, XLA): `EnergyLayerNorm`'s BACKWARD
-        # forms `(var + eps)^(-3/2)`. In fp16 that intermediate OVERFLOWS `65504` whenever
-        # `eps < 65504^(-2/3) ~ 6.1e-4` — at the default `eps = 1e-5` it is 3.2e7 -> `inf`,
-        # and `0 * inf` -> `NaN`. The occlusion mask is what supplies the near-constant
-        # (`var ~ 0`) tokens that reach the cliff, and XLA is what keeps the intermediate in
-        # fp16 (it is finite eagerly and at `jit_compile=False`) — so the bug needs the TRIPLE
-        # fp16 x mask x XLA, and `fit` turns XLA on BY DEFAULT.
-        # The failure is SILENT: the loss stays FINITE, `TerminateOnNaN` never fires, the
-        # energy trace still descends, `LossScaleOptimizer` just rejects 100% of steps (dynamic
-        # scale 2^15 -> 2.98e-08), every weight moves by EXACTLY 0.0, and the user ships a
-        # random-init checkpoint on top of a plausible flat loss curve.
-        #
-        # WHAT NOT TO DO: (1) do NOT "simplify" this back to `dtype=self.dtype_policy`, and do
-        # not drop the casts in `call()`. (2) Do NOT "fix" it instead by raising `norm_epsilon`
-        # to 1e-3 (which does clear the overflow): that silently makes the fp16 model train a
-        # DIFFERENT network than the fp32 one (the norm's Jacobian ceiling is `gamma/sqrt(eps)`,
-        # so 1e-5 -> 1e-3 cuts it 10x) and it sits 2x from the cliff. (3) Casting around
-        # `MaskTokenApply` does NOT work — `where` is a select, so an fp32 round-trip there is
-        # forward-identical and the NaN is manufactured DOWNSTREAM, in the block's backward.
-        # Guarded by `test_model.py::TestMixedPrecisionBackwardPass` (a BACKWARD-pass test — the
-        # forward-only fp16 test passed throughout). See decisions.md D-011.
+        # DECISION plan-2026-07-14T163315-29a4fef4/D-011: build the ET block with `dtype=self.dtype_policy.variable_dtype`, never the bare `self.dtype_policy`.
+        # Under mixed_float16, EnergyLayerNorm's backward overflows fp16 and silently produces zero gradients; running the block at its variable dtype (float32) avoids it. See decisions.md.
         self.et_block = EnergyTransformer(
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
@@ -590,17 +479,8 @@ def _coerce_backbone(backbone: Any) -> EnergyTransformerBackbone:
     )
 
 
-# DECISION plan-2026-07-14T163315-29a4fef4/D-010
-# Both heads REFUSE a `return_energy=True` backbone instead of passing the trace through.
-# This enforces I5 STRUCTURALLY rather than by convention. `EnergyTransformer.energy()` is
-# >= float32 ALWAYS (an O(-1e5) trace is `-inf` in fp16 at a realistic N), so under
-# `mixed_float16` a default-policy head that ingests the trace autocasts it DOWN to fp16 and
-# overflows to nan/inf. That mechanism has already been falsified-and-re-derived once on this
-# feature, and it is NOT fixable inside the block — the fix is consumer-side.
-# WHAT NOT TO DO: do not "helpfully" forward or ignore the energies here, and do not make the
-# model dict-output so the trace can ride along. The trace is read OUT OF GRAPH by
-# `EnergyTraceCallback`, which rebuilds a probe BACKBONE (not a head) with
-# `return_energy=True`. See decisions.md D-010.
+# DECISION plan-2026-07-14T163315-29a4fef4/D-010: both heads refuse a `return_energy=True` backbone, never forward or silently ignore the trace.
+# `EnergyTransformer.energy()` is always at least float32; a default-policy head ingesting it under mixed_float16 autocasts it down and overflows to nan. See decisions.md.
 def _reject_energy_backbone(backbone: EnergyTransformerBackbone, owner: str) -> None:
     if backbone.return_energy:
         raise ValueError(
@@ -614,7 +494,7 @@ def _reject_energy_backbone(backbone: EnergyTransformerBackbone, owner: str) -> 
 class EnergyTransformerMIM(keras.Model):
     """Masked-image-completion model: ET backbone -> LayerNorm -> affine ``Dense(P*P*C)``.
 
-    **Intent**: the paper's §3 image model. Reconstructs raw (normalized) patch pixels for
+    Implements the paper's §3 image model. Reconstructs raw (normalized) patch pixels for
     EVERY token; the loss is restricted to the occluded set by the ``sample_weight`` carried
     in the ``tf.data`` batch, NOT by anything in this class (H6: no ``train_step``).
 
@@ -703,16 +583,16 @@ class EnergyTransformerMIM(keras.Model):
 class EnergyTransformerClassifier(keras.Model):
     """Classifier: the SAME ET backbone -> LayerNorm -> mean-pool -> ``Dense(num_classes)``.
 
-    **Intent**: demonstrate that the MIM-pretrained trunk transfers. The backbone is composed
+    Demonstrates that the MIM-pretrained trunk transfers. The backbone is composed
     under the identical name (``"et_backbone"``) and identical config path, so
     ``load_weights_from_checkpoint(model, mim_ckpt, skip_prefixes=("decoder_",))`` moves the
     whole trunk and nothing else.
 
-    **Mean-pool, not a CLS token** — the ET block has no CLS concept, and a CLS token would
+    Mean-pools rather than reading a CLS token, since the ET block has no CLS concept and one would
     make ``N = 197`` here versus ``196`` in the MIM model, changing the positional-embedding
     table's shape and BREAKING the very transfer this model exists to show (D-004).
 
-    **The head emits LOGITS** (no softmax). Compile with
+    The head emits logits, with no softmax. Compile with
     ``SparseCategoricalCrossentropy(from_logits=True)`` — the house convention.
 
     :param backbone: An :class:`EnergyTransformerBackbone` (named ``"et_backbone"``), or its

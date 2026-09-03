@@ -1,85 +1,44 @@
 """
-DINOv1 vision transformer trunk, its projection head, and the teacher/student pair.
+DINOv1 vision transformer trunk, its projection head, and a factory that
+builds a correctly-initialized teacher/student pair.
 
-DINO learns visual features with no labels by asking one network to predict what
-another network — a slowly moving copy of itself — says about a different crop of
-the same image. Both networks end in a projection to `dino_out_dim` prototypes,
-and the objective is the cross-entropy `-sum_k p_t(k) log p_s(k)` between the two
-softmax distributions. Self-distillation of this kind has one failure mode that
-dominates everything else: collapse, where the network maps every image to the
-same output and the loss is trivially minimized. DINO resolves it with two
-opposing forces applied to the teacher only. Centering subtracts an
-exponential-moving-average of the teacher's own logits, which penalizes any single
-prototype from dominating and pushes the output toward uniform. Sharpening divides
-by a low teacher temperature, which pushes it toward one-hot. Neither alone is
-stable — centering alone collapses to uniform, sharpening alone to a single
-dimension — and the balance between them is what keeps training alive.
+DINO learns visual features with no labels by training a student network to
+predict what a teacher, a slowly moving copy of the student, says about a
+different crop of the same image. Both networks end in a projection to
+`dino_out_dim` prototypes, matched by cross-entropy between the two softmax
+distributions. The centering and sharpening that keep this from collapsing
+to a trivial constant output, and the teacher's EMA weight update, are not
+in this file: they live in `dl_techniques.losses.dino_loss.DINOLoss` and
+`DINOTrainingModel.update_teacher_ema`. This module supplies only the ViT
+trunk, the projection head, and the pair factory.
 
-**None of that machinery is in this file.** Centering, sharpening and the teacher
-temperature schedule live in `dl_techniques.losses.dino_loss.DINOLoss`; the EMA
-update of the teacher's weights lives in
-`dl_techniques.models.vision.dino.training.DINOTrainingModel.update_teacher_ema`. This
-module supplies only the pieces those need: the ViT trunk, the projection head,
-and a factory that returns a correctly-initialized teacher/student pair.
+The trunk is a plain pre-normalized ViT: patch embedding, a prepended [CLS]
+token, a learned absolute positional table, `depth` transformer blocks with
+linearly increasing stochastic depth, and a final normalization. Attention,
+FFN and normalization are each selected by string through the shared
+factories. Features are the [CLS] row when `use_cls_token=True`, otherwise
+the mean over patch tokens. `include_projection_head` takes precedence over
+`include_top`: the DINO head, else a classifier `Dense` when
+`num_classes > 0`, else raw features.
 
-Architecturally the trunk is a plain pre-normalized ViT: `PatchEmbedding2D`
-tokenizes the image, `ClassTokenPrepend` prepends a learnable [CLS], a learned
-absolute positional table is added, `depth` `TransformerLayer` blocks follow with
-a linearly increasing stochastic-depth rate, and a final normalization precedes
-feature extraction. Attention, FFN and normalization are all selected by string
-through the shared factories, so the same class covers several block variants.
-Features are the [CLS] row when `use_cls_token=True` and the mean over patch
-tokens otherwise. Exactly one head is attached, and `include_projection_head`
-takes precedence over `include_top`: the DINO head, else a classifier `Dense` when
-`num_classes > 0`, else the raw features.
+`norm_last_layer` is enforced as an invariant, not the reference's weight-norm
+reparameterization: a `UnitNorm(axis=0)` kernel constraint plus a one-off
+build-time normalization gives the same `||kernel[:, j]|| == 1` invariant
+without adding forward-path arithmetic to a 256 x 65536 kernel at paper
+scale. `get_last_selfattention` raises `NotImplementedError` rather than
+returning zeros, since the `multi_head` attention path exposes no attention
+probabilities and a zero-tensor stub previously rendered attention-map
+visualizations as an indistinguishable all-black image. The `giant` variant
+is not in the DINOv1 paper (which stops at ViT-B/8); it exists so
+`DINOv1`, `DINOv2VisionTransformer` and `DINOv3` share one `MODEL_VARIANTS`
+key set, carrying the shared ViT-g/14 dimensions with no version-specific
+extras.
 
-Two places in the code look wrong until you know why they are not. First,
-`qkv_bias` is forwarded to the attention factory spelled `use_bias`, not
-`qkv_bias`, and unconditionally. The attention registry USED TO silently drop an
-unrecognized keyword rather than raising, so the natural spelling built a bias-free
-attention while the caller believed otherwise; since 2026-08-17
-(plan-2026-08-17T183311-79c63e38/D-011) `create_attention_layer` raises on such a
-key, so the same mistake would now fail loudly at construction — the spelling here
-is still `use_bias` because that is the name the registry accepts. Second, the projection head's
-pre-projection L2 normalization is computed in `variable_dtype` rather than
-`compute_dtype`. Under `mixed_float16` the sum of squares over `bottleneck_dim`
-overflows fp16 long before any individual activation does, and `x / inf` is zero —
-the head would return exactly zero for every sample, with no NaN and no error.
-
-`norm_last_layer` is honoured as an invariant rather than as a
-reparameterization. The reference wraps the final projection in weight norm
-`w = g * v / ||v||` with `g` pinned to 1; here a `UnitNorm(axis=0)` kernel
-constraint plus a one-off normalization at build time gives the identical
-invariant (`||kernel[:, j]|| == 1` for every prototype `j`) without adding
-forward-path arithmetic to a kernel that is 256 x 65536 at paper scale. The
-optimization path differs — a constraint projects after each step where weight
-norm reparameterizes before it — and the build-time normalization exists because
-a Keras constraint is applied by the optimizer, so a never-trained head would
-otherwise violate the invariant the flag promises.
-
-`create_dino_teacher_student_pair` synchronizes the teacher to the student before
-returning. This is deliberate and not an optimization: DINO defines the teacher as
-an EMA of the student's own trajectory from the student's own initialization, so
-without the copy the "EMA teacher" is an average of two unrelated random networks
-for the first several hundred steps.
-
-`get_last_selfattention` raises `NotImplementedError` instead of returning zeros.
-The `multi_head` attention path exposes no attention probabilities, and the
-previous zero-tensor stub made an attention-map visualization render an all-black
-image that a caller could not distinguish from uniform attention.
-
-The `giant` variant is not from the DINOv1 paper, which stops at ViT-B/8. It
-exists so the `MODEL_VARIANTS` key sets of `DINOv1`, `DINOv2VisionTransformer` and
-`DINOv3` match, and it carries the shared ViT-g/14 dimensions with no
-version-specific extras — v2's giant adds `ffn_type='swiglu'` and v3's adds
-`patch_size=(14, 14)` and `stochastic_depth_rate=0.4`, both of which are v2/v3
-mechanisms rather than v1's.
-
-The three `create_dino_v*` factories share one parameter scheme. `input_shape` is
-not among them and raises `TypeError`; the input shape is always derived from
-`image_size`, because the two spellings could disagree and silently build a model
-with the wrong patch count. `patch_size=None` defers to the variant's own entry,
-and `DINOv1.MODEL_VARIANTS` defines none, so it resolves to 16 for every variant.
+The three `create_dino_v*` factories share one parameter scheme: `input_shape`
+is not among them and raises `TypeError`, since the input shape is always
+derived from `image_size` to prevent the two spellings from disagreeing.
+`patch_size=None` defers to the variant's own entry; `DINOv1.MODEL_VARIANTS`
+defines none, so it resolves to 16 for every variant.
 
 References:
     - Caron et al., 2021. Emerging Properties in Self-Supervised Vision
@@ -140,70 +99,79 @@ _DEFAULT_PATCH_SIZE = 16
 
 @register_dl_technique("dl_techniques.models.dino.dino_v1")
 class DINOHead(keras.layers.Layer):
-    """
-    DINO projection head for self-supervised learning.
+    """DINO projection head: MLP, L2 normalize, unit-norm-constrained projection.
 
-    This head projects the [CLS] token representation to a higher-dimensional
-    space and applies normalization and a final linear layer for contrastive learning.
+    Architecture:
 
-    Args:
-        in_dim: Integer, input dimension (backbone output dimension).
-        out_dim: Integer, output dimension for contrastive learning.
-        use_bn: Boolean, whether to use batch normalization in intermediate layers.
-        norm_last_layer: Boolean, whether to constrain the final projection's
-            weights to unit L2 norm per output unit. See the "Last-layer weight
-            normalization" note below for exactly what is and is not implemented.
-        nlayers: Integer, number of layers in the projection head (minimum 1).
-        hidden_dim: Integer, hidden dimension in intermediate layers.
-        bottleneck_dim: Integer, dimension before the final projection layer.
-        normalization_type: String, type of normalization to use.
-        activation: String or callable, activation function to use.
-        dropout_rate: Float, dropout rate for regularization.
-        kernel_initializer: String, config dict or initializer, weight
-            initialization scheme. Defaults to ``TruncatedNormal(stddev=0.02)``,
-            DINO's published ``trunc_normal_(std=.02)``
-            (https://github.com/facebookresearch/dino/blob/main/vision_transformer.py).
-        **kwargs: Additional keyword arguments for the Layer base class.
+    .. code-block:: text
+
+        Input [B, in_dim]
+              │
+              ▼
+        (nlayers - 1) x [Dense(hidden_dim) -> norm? -> activation -> dropout?]
+              │
+              ▼
+        Dense(bottleneck_dim)
+              │
+              ▼
+        L2 normalize (variable_dtype)
+              │
+              ▼
+        Dense(out_dim, use_bias=False, kernel_constraint=UnitNorm if norm_last_layer)
+              │
+              ▼
+        Output [B, out_dim]
+
+    `norm_last_layer` reproduces the reference DINO implementation's frozen
+    weight-norm reparameterization (`w = g * v / ||v||` with `g` pinned to 1)
+    as a `keras.constraints.UnitNorm(axis=0)` constraint plus a one-off
+    build-time normalization, giving the same invariant
+    (`||kernel[:, j]||_2 == 1` for every output unit `j`) through a different
+    optimization path: the constraint projects after each optimizer step,
+    where the reference reparameterizes before it.
+
+    :param in_dim: Input dimension (backbone output dimension).
+    :type in_dim: int
+    :param out_dim: Output dimension for contrastive learning.
+    :type out_dim: int
+    :param use_bn: Whether to use batch normalization in intermediate layers.
+    :type use_bn: bool
+    :param norm_last_layer: Whether to constrain the final projection's
+        weights to unit L2 norm per output unit.
+    :type norm_last_layer: bool
+    :param nlayers: Number of layers in the projection head, minimum 1.
+    :type nlayers: int
+    :param hidden_dim: Hidden dimension in intermediate layers.
+    :type hidden_dim: int
+    :param bottleneck_dim: Dimension before the final projection layer.
+    :type bottleneck_dim: int
+    :param normalization_type: Normalization type used in intermediate layers.
+    :type normalization_type: str
+    :param activation: Activation function.
+    :type activation: Union[str, callable]
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param kernel_initializer: Weight initialization scheme. Defaults to
+        `TruncatedNormal(stddev=0.02)`, DINO's published `trunc_normal_(std=.02)`.
+    :type kernel_initializer: Union[str, Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     Input shape:
-        2D tensor with shape: `(batch_size, in_dim)`
+        2D tensor ``(batch_size, in_dim)``.
 
     Output shape:
-        2D tensor with shape: `(batch_size, out_dim)`
-
-    Last-layer weight normalization (``norm_last_layer``):
-        The reference DINO implementation wraps the final projection in PyTorch's
-        weight-norm reparameterization ``w = g * v / ||v||`` and, when
-        ``norm_last_layer=True``, pins ``g = 1`` and freezes it — so every output
-        prototype has unit L2 norm throughout training.
-
-        Here that INVARIANT is reproduced with a
-        ``keras.constraints.UnitNorm(axis=0)`` on the final ``Dense`` kernel plus
-        a one-off normalization at ``build()`` time, NOT with a ``(g, v)``
-        reparameterization. The invariant (``||kernel[:, j]||_2 == 1`` for every
-        output unit ``j``) is identical; the optimization path is not — the
-        constraint PROJECTS after each optimizer step where the reference
-        reparameterizes before it. ``norm_last_layer=False`` leaves the kernel
-        unconstrained, matching the reference's trainable-``g`` branch only in
-        that the norms are then free.
+        2D tensor ``(batch_size, out_dim)``.
 
     Example:
-        ```python
-        # Create DINO head for 384-dim input to 65536-dim output
-        dino_head = DINOHead(
-            in_dim=384,
-            out_dim=65536,
-            use_bn=False,
-            norm_last_layer=True,
-            nlayers=3,
-            hidden_dim=2048,
-            bottleneck_dim=256
-        )
+        .. code-block:: python
 
-        # Forward pass
-        cls_token = keras.Input(shape=(384,))
-        projection = dino_head(cls_token)
-        ```
+            dino_head = DINOHead(
+                in_dim=384, out_dim=65536, use_bn=False,
+                norm_last_layer=True, nlayers=3,
+                hidden_dim=2048, bottleneck_dim=256
+            )
+            cls_token = keras.Input(shape=(384,))
+            projection = dino_head(cls_token)
     """
 
     def __init__(
@@ -218,14 +186,8 @@ class DINOHead(keras.layers.Layer):
             normalization_type: str = "batch_norm",
             activation: str = "gelu",
             dropout_rate: float = 0.0,
-            # DECISION plan-2026-08-23T091307-9a110062/D-504
-            # NOT the bare string "truncated_normal". That string resolves to
-            # Keras' TruncatedNormal(stddev=0.05) -- 2.5x wider than DINO's
-            # published trunc_normal_(std=.02):
-            #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
-            # The string names the right distribution family and the wrong
-            # scale, which is why it survived review. TRAINING-ONLY.
-            # See decisions.md D-504.
+            # DECISION plan-2026-08-23T091307-9a110062/D-504: default to DINO_KERNEL_INITIALIZER, never the bare string "truncated_normal".
+            # That string resolves to Keras' TruncatedNormal(stddev=0.05), 2.5x wider than DINO's published std=.02. See decisions.md.
             kernel_initializer: Union[str, Dict[str, Any]] = DINO_KERNEL_INITIALIZER,
             **kwargs
     ):
@@ -260,11 +222,8 @@ class DINOHead(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Build the DINO head layers."""
-        # DECISION plan_2026-06-14_8c7365d0/D-006
-        # Reset the sublayer accumulators to their __init__ empty state BEFORE
-        # appending. build() must be idempotent: a second build (functional-API
-        # reuse or from_config reconstruction) would otherwise duplicate every
-        # sublayer/weight. Do NOT append without clearing first.
+        # DECISION plan_2026-06-14_8c7365d0/D-006: reset the sublayer accumulators before appending, every build.
+        # build() must be idempotent; a second build without this duplicates every sublayer/weight. See decisions.md.
         self.mlp_layers = []
         self.last_layer = None
 
@@ -354,17 +313,8 @@ class DINOHead(keras.layers.Layer):
             self.mlp_layers.append(final_mlp_layer)
 
         # Final projection layer (bottleneck_dim -> out_dim)
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-011
-        # `norm_last_layer` is honoured by a UnitNorm(axis=0) CONSTRAINT on the
-        # Dense kernel, not by a (g, v) weight-norm reparameterization. Do NOT
-        # "upgrade" this to PolarWeightNorm or a hand-rolled g/v split: both add
-        # forward-path arithmetic on a kernel that is (256 x 65536) at paper
-        # scale, and a post-build `radius.trainable = False` does NOT survive a
-        # .keras reload (build() recreates the variable trainable). Also do NOT
-        # drop the build-time normalize below: a Keras constraint is applied by
-        # the OPTIMIZER, so without it a freshly built or never-trained head
-        # violates the invariant this flag promises (MEASURED: column norms
-        # 0.089-0.136 before the first step, 1.0 +/- 2.4e-07 after).
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-011: enforce `norm_last_layer` with a UnitNorm(axis=0) constraint, not weight-norm reparameterization.
+        # A constraint avoids extra forward-path arithmetic on a 256x65536 kernel; keep the build-time normalize below too, since a constraint only applies after an optimizer step. See decisions.md.
         self.last_layer = keras.layers.Dense(
             units=self.out_dim,
             use_bias=False,  # DINO typically doesn't use bias in the last layer
@@ -387,18 +337,8 @@ class DINOHead(keras.layers.Layer):
                 current_shape = layer.compute_output_shape(current_shape)
         self.last_layer.build(current_shape)
 
-        # Apply the constraint once at build time so the unit-norm invariant
-        # holds for a never-trained head too (see D-011 above). On a .keras
-        # reload this runs BEFORE the saved weights are restored, and those
-        # weights already satisfy the constraint, so it does not perturb them.
-        # The claim is path-qualified (finding C-1,
-        # plan-2026-08-17T183311-79c63e38/D-024): it is measured on the path
-        # `DINOv1(include_projection_head=True)` takes, which builds this head
-        # DIRECTLY -- column norms [0.999999, 1.000000]; a head built from
-        # inside a parent LAYER's `call()` runs in a StatelessScope that records
-        # and DISCARDS `.assign()`, giving 0.119-0.245, and nothing in this tree
-        # does that today (pinned by
-        # `tests/test_models/test_dino/test_head_unit_norm_invariant.py`).
+        # Apply the constraint once at build time so a never-trained head also satisfies the unit-norm invariant (see D-011).
+        # On a .keras reload this runs before the saved weights are restored, and they already satisfy it.
         if self.norm_last_layer:
             self.last_layer.kernel.assign(
                 self.last_layer.kernel_constraint(self.last_layer.kernel)
@@ -411,15 +351,14 @@ class DINOHead(keras.layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass of the DINO head.
+        """Run the MLP stack, L2-normalize, then apply the final projection.
 
-        Args:
-            inputs: Input tensor of shape (batch_size, in_dim).
-            training: Boolean indicating whether the model is in training mode.
-
-        Returns:
-            Projected tensor of shape (batch_size, out_dim).
+        :param inputs: Input tensor, shape ``(batch_size, in_dim)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the layer runs in training or inference mode.
+        :type training: Optional[bool]
+        :return: Projected tensor, shape ``(batch_size, out_dim)``.
+        :rtype: keras.KerasTensor
         """
         x = inputs
 
@@ -431,22 +370,8 @@ class DINOHead(keras.layers.Layer):
                 x = layer(x)
 
         # L2 normalize before final projection (as in DINO paper).
-        #
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-020
-        # The normalization runs in `variable_dtype`, NOT in `compute_dtype`. Do
-        # NOT "simplify" this back to a bare
-        # `keras.utils.normalize(x, axis=-1, order=2)`: under `mixed_float16`
-        # that reduces `sum(x**2)` over `bottleneck_dim` in fp16, and the sum
-        # overflows 65504 long before any individual value does. Overflow gives
-        # `x / inf == 0`, so the head returns EXACTLY ZERO for every sample --
-        # no NaN, no Inf, no error, a silently dead projection head.
-        # MEASURED at the ordinary DINO head scale (in_dim=384, hidden=2048,
-        # bottleneck=256, weights ~N(0, 0.5)): pre-normalize `sum(x**2)` reaches
-        # 1.649e+09, fp16 output absmax 0.0 (100% of entries exactly zero) vs
-        # float32 absmax 0.2536 on bit-identical weights.
-        # `variable_dtype` is float32 under `mixed_float16` and equals
-        # `compute_dtype` under float32/float64, so this is a no-op outside
-        # mixed precision (float32 outputs are unchanged).
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-020: normalize in `variable_dtype`, never bare `compute_dtype`.
+        # Under mixed_float16, `sum(x**2)` over bottleneck_dim overflows fp16 and `x / inf == 0` silently zeros the head. See decisions.md.
         x = keras.ops.cast(x, self.variable_dtype)
         x = keras.utils.normalize(x, axis=-1, order=2)
         x = keras.ops.cast(x, self.compute_dtype)
@@ -481,74 +406,113 @@ class DINOHead(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.dino.dino_v1")
 class DINOv1(keras.Model):
-    """
-    DINO Vision Transformer model for self-supervised learning.
+    """DINOv1 Vision Transformer trunk, for feature extraction or SSL pretraining.
 
-    This model implements the Vision Transformer backbone used in DINO
-    (DIstillation with NO labels) self-supervised learning framework.
-    It can be used both for feature extraction and with the DINO head
-    for contrastive self-supervised training.
+    Architecture:
 
-    Args:
-        embed_dim: Integer, embedding dimension of the model.
-        depth: Integer, number of transformer layers.
-        num_heads: Integer, number of attention heads.
-        patch_size: Integer or tuple, size of image patches.
-        image_size: Integer or tuple, input image size. Default is 224.
-        in_channels: Integer, number of input channels. Default is 3.
-        num_classes: Integer, number of output classes for classification.
-            Set to 0 for feature extraction only.
-        mlp_ratio: Float, ratio of MLP hidden dimension to embedding dimension.
-        qkv_bias: Boolean, whether to use bias in the attention QKV/output
-            projections. Forwarded to the attention factory as `use_bias`.
-        dropout_rate: Float, dropout rate.
-        attention_dropout_rate: Float, attention dropout rate.
-        stochastic_depth_rate: Float, stochastic depth rate.
-        normalization_type: String, normalization layer type.
-        attention_type: String, type of attention mechanism to use.
-        ffn_type: String, type of feed-forward network to use.
-        include_top: Boolean, whether to include classification head.
-        include_projection_head: Boolean, whether to include DINO projection head.
-        dino_out_dim: Integer, output dimension for DINO head.
-        dino_hidden_dim: Integer, hidden dimension for DINO head.
-        dino_bottleneck_dim: Integer, bottleneck dimension for DINO head.
-        dino_nlayers: Integer, number of layers in DINO head.
-        use_cls_token: Boolean, whether to use [CLS] token.
-        **kwargs: Additional keyword arguments for the Model base class.
+    .. code-block:: text
+
+        Input [B, H, W, C]
+              │
+              ▼
+        ┌──────────────────────┐
+        │ PatchEmbedding2D     │
+        └──────────┬────────────┘
+                   ▼
+        ┌──────────────────────┐
+        │ ClassTokenPrepend    │  (if use_cls_token)
+        └──────────┬────────────┘
+                   ▼
+        ┌──────────────────────┐
+        │ PositionalEmbedding  │
+        └──────────┬────────────┘
+                   ▼
+        depth x TransformerLayer (linear stochastic depth)
+                   ▼
+        ┌──────────────────────┐
+        │ final normalization  │
+        └──────────┬────────────┘
+                   ▼
+        [CLS] row, or mean over patch tokens
+                   │
+        ┌──────────┼──────────────────┐
+        ▼          ▼                  ▼
+     DINOHead   Dense(num_classes)   raw features
+   (if include_  (if include_top     (otherwise)
+   projection_    and num_classes>0)
+   head)
+
+    :param embed_dim: Embedding dimension of the model.
+    :type embed_dim: int
+    :param depth: Number of transformer layers.
+    :type depth: int
+    :param num_heads: Number of attention heads.
+    :type num_heads: int
+    :param patch_size: Size of image patches.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param image_size: Input image size.
+    :type image_size: Union[int, Tuple[int, int]]
+    :param in_channels: Number of input channels.
+    :type in_channels: int
+    :param num_classes: Number of output classes for classification; 0 for
+        feature extraction only.
+    :type num_classes: int
+    :param mlp_ratio: Ratio of MLP hidden dimension to embedding dimension.
+    :type mlp_ratio: float
+    :param qkv_bias: Whether to use bias in the attention QKV/output
+        projections. Forwarded to the attention factory as `use_bias`.
+    :type qkv_bias: bool
+    :param dropout_rate: Dropout rate.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention dropout rate.
+    :type attention_dropout_rate: float
+    :param stochastic_depth_rate: Stochastic depth rate.
+    :type stochastic_depth_rate: float
+    :param normalization_type: Normalization layer type.
+    :type normalization_type: str
+    :param attention_type: Attention mechanism type.
+    :type attention_type: str
+    :param ffn_type: Feed-forward network type.
+    :type ffn_type: str
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param include_projection_head: Whether to include the DINO projection head.
+    :type include_projection_head: bool
+    :param dino_out_dim: Output dimension for the DINO head.
+    :type dino_out_dim: int
+    :param dino_hidden_dim: Hidden dimension for the DINO head.
+    :type dino_hidden_dim: int
+    :param dino_bottleneck_dim: Bottleneck dimension for the DINO head.
+    :type dino_bottleneck_dim: int
+    :param dino_nlayers: Number of layers in the DINO head.
+    :type dino_nlayers: int
+    :param use_cls_token: Whether to use a [CLS] token.
+    :type use_cls_token: bool
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        4D tensor ``(batch_size, height, width, channels)``.
 
     Output shape:
-        - If include_projection_head=True: 2D tensor `(batch_size, dino_out_dim)`
-        - If include_top=True and num_classes>0: 2D tensor `(batch_size, num_classes)`
-        - Otherwise: 2D tensor `(batch_size, embed_dim)`
+        - ``include_projection_head=True``: 2D tensor ``(batch_size, dino_out_dim)``.
+        - ``include_top=True`` and ``num_classes>0``: 2D tensor ``(batch_size, num_classes)``.
+        - Otherwise: 2D tensor ``(batch_size, embed_dim)``.
 
     Example:
-        ```python
-        # Feature extraction model
-        model = DINOv1(
-            embed_dim=384,
-            depth=12,
-            num_heads=6,
-            patch_size=16,
-            num_classes=0,
-            include_top=False,
-            image_size=224
-        )
+        .. code-block:: python
 
-        # Self-supervised learning model with DINO head
-        model = DINOv1(
-            embed_dim=384,
-            depth=12,
-            num_heads=6,
-            patch_size=16,
-            num_classes=0,
-            include_projection_head=True,
-            dino_out_dim=65536,
-            image_size=224
-        )
-        ```
+            # Feature extraction model
+            model = DINOv1(
+                embed_dim=384, depth=12, num_heads=6, patch_size=16,
+                num_classes=0, include_top=False, image_size=224
+            )
+
+            # Self-supervised learning model with DINO head
+            model = DINOv1(
+                embed_dim=384, depth=12, num_heads=6, patch_size=16,
+                num_classes=0, include_projection_head=True,
+                dino_out_dim=65536, image_size=224
+            )
     """
 
     # Model variant configurations
@@ -698,12 +662,8 @@ class DINOv1(keras.Model):
 
         # Add CLS token if requested
         if self.use_cls_token:
-            # DECISION plan_2026-06-15_39a31d4a/D-001: add_weight (cls_token) must
-            # not fire before super().__init__ in a Functional model. The CLS token
-            # is owned by the ClassTokenPrepend sub-layer (its build() runs add_weight),
-            # called inside this functional graph, so DINOv1 itself creates no weight
-            # before super().__init__(inputs=, outputs=). Do NOT inline self.add_weight
-            # here — that re-introduces the pre-super crash.
+            # DECISION plan_2026-06-15_39a31d4a/D-001: own the CLS token via ClassTokenPrepend, never an inline `self.add_weight` here.
+            # An inline add_weight fires before `super().__init__` in this functional model and crashes. See decisions.md.
             self.cls_token_layer = ClassTokenPrepend(name="cls_token")
             x = self.cls_token_layer(x)
 
@@ -722,21 +682,8 @@ class DINOv1(keras.Model):
         dpr = linear_drop_path_rates(self.depth, self.stochastic_depth_rate)
 
         for i in range(self.depth):
-            # DECISION plan-2026-08-01T105809-dc0c402e/D-010
-            # Forward qkv_bias UNCONDITIONALLY and spell it `use_bias` — the
-            # name the attention registry actually accepts. Do NOT reinstate
-            # either half of the old form
-            # (`{"qkv_bias": ...} if attention_type == "multi_head_attention"`):
-            # the gate string was never a registry key (the key is
-            # `multi_head`), and `create_attention_layer` USED TO SILENTLY DROP
-            # an unrecognized kwarg rather than raising (MEASURED at the time:
-            # passing qkv_bias=True yielded a layer with use_bias=False and zero
-            # bias weights) — so both halves were independently dead. HISTORICAL
-            # as of 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011): the
-            # factory now RAISES on an undeclared key, in line with
-            # `create_ffn_layer`, so the old form would fail at construction
-            # rather than quietly. The instruction stands either way: never
-            # infer a factory's drop-or-raise behaviour, execute it.
+            # DECISION plan-2026-08-01T105809-dc0c402e/D-010: forward qkv_bias unconditionally, spelled `use_bias` (the registry's actual key).
+            # A gate on `attention_type == "multi_head_attention"` was dead code; that string was never the registry key. See decisions.md.
             block = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
@@ -788,9 +735,8 @@ class DINOv1(keras.Model):
             outputs = self.head(features)
         elif self.include_top and self.num_classes > 0:
             # Standard classification head
-            # DECISION plan-2026-08-23T091307-9a110062/D-504
-            # Same trap as the DINOHead default above: the bare string is
-            # Keras' stddev=0.05, not DINO's 0.02. See decisions.md D-504.
+            # DECISION plan-2026-08-23T091307-9a110062/D-504: use DINO_KERNEL_INITIALIZER here too, never the bare string.
+            # Same trap as the DINOHead default above: the bare string is Keras' stddev=0.05, not DINO's 0.02. See decisions.md.
             self.head = keras.layers.Dense(
                 units=self.num_classes,
                 kernel_initializer=keras.initializers.get(DINO_KERNEL_INITIALIZER),
@@ -808,34 +754,19 @@ class DINOv1(keras.Model):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
+        """Get attention probabilities from the last transformer layer.
+
+        Not implemented; see :raises:. This method exists so the DINO
+        attention-map visualization API fails loudly rather than silently
+        returning something useless.
+
+        :param inputs: Input tensor, shape ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :raises NotImplementedError: Always; see the message for the missing
+            capability.
         """
-        Get attention probabilities from the last transformer layer.
-
-        NOT IMPLEMENTED — see `Raises`. This method exists so that the DINO
-        attention-map visualization API of the reference implementation fails
-        loudly rather than silently returning something useless.
-
-        Args:
-            inputs: Input tensor of shape (batch_size, height, width, channels).
-
-        Raises:
-            NotImplementedError: Always. See the message for the missing
-                capability.
-        """
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-012
-        # RAISE. Do NOT restore the previous body (log a warning, then
-        # `return keras.ops.zeros((batch, heads, seq, seq))`): it made an
-        # attention-map visualization silently render an all-black map, and a
-        # caller could not tell "uniform attention" from "no implementation".
-        # Implementing it truthfully is blocked at the layer level, MEASURED on
-        # keras 3.8.0 by signature inspection: neither `TransformerLayer.call`
-        # (inputs, attention_mask, layer_idx, training), nor
-        # `MultiHeadAttention.call` (inputs, attention_mask, training), nor the
-        # `MultiHeadCrossAttention.call` it delegates to (query_input, kv_input,
-        # attention_mask, training) accepts a `return_attention_scores` flag or
-        # caches the probabilities on an attribute. Other registry types DO
-        # (`performer`, `rpc`, `hopfield`) — so the fix is to add that flag to
-        # `multi_head`/`TransformerLayer`, in layers/, not to fake it here.
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-012: raise, never restore the old zero-tensor fallback.
+        # That fallback rendered an attention-map visualization as an indistinguishable all-black map. See decisions.md.
         raise NotImplementedError(
             "get_last_selfattention() is not implemented for DINOv1. The "
             "'multi_head' attention path does not expose its attention "
@@ -856,40 +787,36 @@ class DINOv1(keras.Model):
             input_shape: Optional[Tuple[int, ...]] = None,
             **kwargs
     ) -> "DINOv1":
-        """
-        Create a DINO model from a predefined variant.
+        """Create a DINO model from a predefined variant.
 
-        Args:
-            variant: String, one of "tiny", "small", "base", "large", "giant".
-            num_classes: Integer, number of output classes.
-            patch_size: Integer or tuple, size of image patches.
-            input_shape: Tuple, an explicit input shape. Prefer `image_size`
-                (passed through **kwargs); if this is None the constructor
-                derives `(*image_size, in_channels)`. The two spellings can
-                DISAGREE, which is why the `create_dino_v1` factory refuses
-                this one outright.
-            **kwargs: Additional arguments passed to the constructor.
+        :param variant: One of ``"tiny"``, ``"small"``, ``"base"``, ``"large"``, ``"giant"``.
+        :type variant: ModelVariant
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param patch_size: Size of image patches.
+        :type patch_size: Union[int, Tuple[int, int]]
+        :param input_shape: An explicit input shape. Prefer ``image_size``
+            (passed through ``**kwargs``); if this is ``None`` the
+            constructor derives ``(*image_size, in_channels)``. The two
+            spellings can disagree, which is why `create_dino_v1` refuses
+            this one outright.
+        :type input_shape: Optional[Tuple[int, ...]]
+        :param kwargs: Additional arguments passed to the constructor.
 
-        Returns:
-            DINOv1 model instance.
+        :return: DINOv1 model instance.
+        :rtype: DINOv1
 
         Example:
-            ```python
-            # Create DINO-Small for feature extraction
-            model = DINOv1.from_variant(
-                "small",
-                num_classes=0,
-                patch_size=16
-            )
+            .. code-block:: python
 
-            # Create DINO-Base with projection head
-            model = DINOv1.from_variant(
-                "base",
-                num_classes=0,
-                include_projection_head=True,
-                dino_out_dim=65536
-            )
-            ```
+                # DINO-Small for feature extraction
+                model = DINOv1.from_variant("small", num_classes=0, patch_size=16)
+
+                # DINO-Base with projection head
+                model = DINOv1.from_variant(
+                    "base", num_classes=0,
+                    include_projection_head=True, dino_out_dim=65536
+                )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -897,18 +824,8 @@ class DINOv1(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        # DECISION plan-2026-08-01T105809-dc0c402e/D-033
-        # An explicit architecture override in **kwargs WINS over the variant
-        # table; it does not collide with it. Do NOT go back to spelling the
-        # four table keys out as `embed_dim=config["embed_dim"], ...` next to a
-        # bare `**kwargs` -- that form raised
-        #   TypeError: DINOv1() got multiple values for keyword argument
-        #   'embed_dim'
-        # for `from_variant("tiny", embed_dim=32)` and for every caller that
-        # reaches it, including `create_dino_teacher_student_pair`. `DINOv2`
-        # and `DINOv3` already used the merge form, so this is a convergence
-        # on the majority spelling, not a new convention. See decisions.md
-        # D-033 (and D-017, the same explicit-value-must-be-honoured rule).
+        # DECISION plan-2026-08-01T105809-dc0c402e/D-033: merge `**kwargs` over the variant table's copy, never spell out table keys beside `**kwargs`.
+        # The latter raised a duplicate-keyword TypeError on any override, e.g. `from_variant("tiny", embed_dim=32)`. See decisions.md.
         config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
 
@@ -923,11 +840,8 @@ class DINOv1(keras.Model):
 
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: `super().get_config()`
-        # FIRST, then the model's own keys. Without it `name` and
-        # `trainable` are dropped and silently restored to their DEFAULTS on
-        # reload -- a frozen model comes back UNFROZEN. Do NOT replace this
-        # with a literal dict again.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-082: call `super().get_config()` first, never a literal dict.
+        # Without it, `name` and `trainable` reload at their defaults, so a frozen model comes back unfrozen. See decisions.md.
         config = super().get_config()
         config.update({
             "embed_dim": self.embed_dim,
@@ -998,55 +912,46 @@ def create_dino_v1(
         dino_out_dim: int = 65536,
         **kwargs
 ) -> DINOv1:
-    """
-    Convenience function to create DINO Vision Transformer models.
+    """Build a DINOv1 model from a named variant.
 
-    Signature note (converged surface): ``create_dino_v1``, ``create_dino_v2`` and
-    ``create_dino_v3`` share ``(variant, *, image_size, patch_size, num_classes,
-    include_top, **kwargs)``. The redundant ``input_shape`` spelling was removed —
-    the input shape is always derived as ``(*image_size, in_channels)``. Passing
-    ``input_shape=`` raises ``TypeError`` rather than silently disagreeing with
-    ``image_size`` (a mismatch used to build a model with the wrong patch count).
+    Shares its parameter scheme with `create_dino_v2` and `create_dino_v3`:
+    `input_shape` is not among them, since the input shape is always derived
+    as `(*image_size, in_channels)` and passing `input_shape=` raises
+    `TypeError` rather than letting the two spellings disagree. `patch_size`
+    follows the same precedence in all three: an explicit value always wins
+    over the variant's; `None` defers to the variant's own entry if its
+    `MODEL_VARIANTS` defines one, else to this version's default. v1 defines
+    no per-variant `patch_size`, so `None` resolves to 16.
 
-    ``patch_size`` precedence rule (shared by all three factories):
-    ``None`` means "use the variant's own ``patch_size`` if its ``MODEL_VARIANTS``
-    entry defines one, otherwise this version's default". An explicitly passed
-    ``patch_size`` ALWAYS wins over the variant's. ``DINOv1.MODEL_VARIANTS`` defines
-    no per-variant ``patch_size``, so ``None`` resolves to 16 for every v1 variant.
-
-    Args:
-        variant: String, model variant ("tiny", "small", "base", "large", "giant").
-        image_size: Integer or ``(height, width)``, input image size.
-        patch_size: Integer or tuple, size of image patches. ``None`` defers to the
-            variant (v1 has no per-variant patch size, so ``None`` -> 16).
-        num_classes: Integer, number of output classes. Set to 0 for feature extraction.
-        include_top: Boolean, whether to include classification head.
-        include_projection_head: Boolean, whether to include DINO projection head.
-        dino_out_dim: Integer, output dimension for DINO head.
-        **kwargs: Additional arguments passed to the model constructor.
-
-    Returns:
-        DINOv1 model instance.
-
-    Raises:
-        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
+    :param variant: Model variant, one of ``"tiny"``, ``"small"``, ``"base"``, ``"large"``, ``"giant"``.
+    :type variant: ModelVariant
+    :param image_size: Input image size.
+    :type image_size: Union[int, Tuple[int, int]]
+    :param patch_size: Size of image patches. ``None`` defers to the variant.
+    :type patch_size: Optional[Union[int, Tuple[int, int]]]
+    :param num_classes: Number of output classes; 0 for feature extraction.
+    :type num_classes: int
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param include_projection_head: Whether to include the DINO projection head.
+    :type include_projection_head: bool
+    :param dino_out_dim: Output dimension for the DINO head.
+    :type dino_out_dim: int
+    :param kwargs: Additional arguments passed to the model constructor.
+    :return: DINOv1 model instance.
+    :rtype: DINOv1
+    :raises TypeError: If ``input_shape`` is passed; use ``image_size`` instead.
 
     Example:
-        ```python
-        # Create DINO-Small for self-supervised learning
-        model = create_dino_v1(
-            variant="small",
-            include_projection_head=True,
-            dino_out_dim=65536,
-        )
+        .. code-block:: python
 
-        # Create DINO-Base for fine-tuning
-        model = create_dino_v1(
-            variant="base",
-            image_size=224,
-            num_classes=1000,
-        )
-        ```
+            # DINO-Small for self-supervised learning
+            model = create_dino_v1(
+                variant="small", include_projection_head=True, dino_out_dim=65536,
+            )
+
+            # DINO-Base for fine-tuning
+            model = create_dino_v1(variant="base", image_size=224, num_classes=1000)
     """
     reject_input_shape(kwargs, "create_dino_v1")
 
@@ -1078,54 +983,49 @@ def create_dino_teacher_student_pair(
     """
     Create teacher-student pair for DINO self-supervised learning.
 
-    **The returned teacher is a WEIGHT-FOR-WEIGHT COPY of the returned student.**
-    This factory synchronizes them before returning (`common.sync_teacher_to_student`),
-    because DINO's teacher is defined as an exponential moving average of the
-    STUDENT'S OWN trajectory starting from the student's own initialization — the
-    reference implementation runs `teacher.load_state_dict(student.state_dict())`
-    before the first step. The two are still DISTINCT objects with DISTINCT
-    variables; only their VALUES agree at construction, and `update_teacher_ema`
-    moves them apart from there. See plan decision D-034.
+    The returned teacher is a weight-for-weight copy of the returned student:
+    this factory synchronizes them before returning
+    (`common.sync_teacher_to_student`), because DINO's teacher is defined as
+    an exponential moving average of the student's own trajectory starting
+    from the student's own initialization. The two remain distinct objects
+    with distinct variables; only their values agree at construction, and
+    `update_teacher_ema` moves them apart from there. See plan decision D-034.
+    `DINOTrainingModel.__init__` performs the same synchronization for pairs
+    that did not come from this factory, so calling both is harmless.
 
-    `DINOTrainingModel.__init__` performs the same synchronization for pairs that
-    did not come from this factory, so calling both is harmless (the second copy
-    is a no-op).
+    Follows the same converged parameter scheme as `create_dino_v1`:
+    `image_size` (int or tuple), `patch_size` with the `None`-defers-to-variant
+    rule, and no `input_shape`.
 
-    Follows the same converged parameter scheme as ``create_dino_v1``:
-    ``image_size`` (int or tuple), ``patch_size`` with the ``None``-defers-to-variant
-    rule, and no ``input_shape``.
-
-    Args:
-        variant: String, model variant for both teacher and student.
-        teacher_temp: Float, temperature for teacher model (not used in model creation).
-        student_temp: Float, temperature for student model (not used in model creation).
-        image_size: Integer or ``(height, width)``, input image size.
-        patch_size: Integer or tuple, size of image patches. ``None`` -> 16 (v1 has no
-            per-variant patch size).
-        dino_out_dim: Integer, output dimension for DINO heads.
-        **kwargs: Additional arguments passed to both model constructors.
-
-    Raises:
-        TypeError: If ``input_shape`` is passed — use ``image_size`` instead.
-
-    Returns:
-        Tuple of (teacher_model, student_model). The teacher's weight VALUES are
-        identical to the student's; the objects and variables are distinct.
-
-    Note:
-        The temperature parameters are provided for API compatibility but are
-        typically applied during loss computation, not in the model architecture.
+    :param variant: Model variant for both teacher and student.
+    :type variant: ModelVariant
+    :param teacher_temp: Teacher temperature; not used in model creation,
+        provided for API compatibility with loss computation.
+    :type teacher_temp: float
+    :param student_temp: Student temperature; not used in model creation.
+    :type student_temp: float
+    :param image_size: Input image size.
+    :type image_size: Union[int, Tuple[int, int]]
+    :param patch_size: Size of image patches. ``None`` resolves to 16 (v1 has
+        no per-variant patch size).
+    :type patch_size: Optional[Union[int, Tuple[int, int]]]
+    :param dino_out_dim: Output dimension for the DINO heads.
+    :type dino_out_dim: int
+    :param kwargs: Additional arguments passed to both model constructors.
+    :return: Tuple of ``(teacher_model, student_model)``. The teacher's
+        weight values are identical to the student's; the objects and
+        variables are distinct.
+    :rtype: Tuple[DINOv1, DINOv1]
+    :raises TypeError: If ``input_shape`` is passed; use ``image_size`` instead.
 
     Example:
-        ```python
-        teacher, student = create_dino_teacher_student_pair(
-            variant="small",
-            teacher_temp=0.04,
-            student_temp=0.1,
-            dino_out_dim=65536
-        )
+        .. code-block:: python
 
-        # The teacher starts EQUAL to the student and is thereafter updated by
+            teacher, student = create_dino_teacher_student_pair(
+                variant="small", teacher_temp=0.04, student_temp=0.1, dino_out_dim=65536
+            )
+
+        # The teacher starts equal to the student and is thereafter updated by
         # EMA from the student during training.
         ```
     """
