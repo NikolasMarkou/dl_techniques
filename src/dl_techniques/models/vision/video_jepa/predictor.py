@@ -1,49 +1,20 @@
-"""Video-JEPA-Clifford predictor (D-002, D-013).
+"""Video-JEPA-Clifford predictor: factorized spatial and causal-temporal stack.
 
-Factorized spatial + causal-temporal stack. Pixels-only — no telemetry
-conditioning (D-013, iter-3).
+`VideoJEPAPredictor` takes per-frame patch latents `z` of shape `(B, T, H_p,
+W_p, D)` and predicts the next-frame latents. Each of its `depth` pairs
+alternates a spatial pass (`CliffordNetBlock` applied independently per
+frame) with a causal temporal pass (causal self-attention plus MLP, then
+`CausalCliffordNetBlock`, both over the `T` axis). A learned 1D temporal
+position embedding is added to `z` once before the first pair. The model
+takes pixels only: no telemetry conditioning.
 
-Architecture
-------------
+A perturbation at frame `k` never alters any output at frame `< k`: the
+spatial pass is independent per frame, the temporal attention uses a causal
+mask, and `CausalCliffordNetBlock` uses only left-context over `T`.
 
-Input:
-    z  : (B, T, H_p, W_p, D)  — per-frame patch latents
-
-Per predictor "pair", we alternate:
-
-1. **Spatial pass** — (B, T, H_p, W_p, D) → reshape (B*T, H_p, W_p, D) →
-   ``CliffordNetBlock`` → reshape back. Acts independently per frame;
-   strictly causal (no cross-frame info).
-
-2. **Temporal pass** — transpose (B, T, H_p, W_p, D) → (B, H_p, W_p, T, D) →
-   reshape (B*H_p*W_p, T, D) → ``CausalSelfAttnMLPBlock`` (causal MHA + MLP
-   wrapped in LayerScale γ=1e-5 residual for identity-at-init)
-   → ``CausalCliffordNetBlock`` (consumes (B*H_p*W_p, T, D) natively)
-   → reshape/transpose back to (B, T, H_p, W_p, D).
-
-A learned 1D temporal positional embedding ``pos_t: (1, T_max, D)``
-is added to ``z`` **once** before block 0.
-
-Causality invariant
--------------------
-A perturbation at frame ``k`` must not alter any output at frame ``< k``.
-
-- Spatial pass: trivially independent across ``T``.
-- Temporal attention: ``MultiHeadAttention(use_causal_mask=True)``.
-- CausalCliffordNetBlock: left-only causal context over the T axis
-  (see ``layers/geometric/clifford_block.py``).
-- Temporal PE: applied once, additive — causal-safe by construction.
-
-See ``tests/test_models/test_video_jepa/test_video_jepa.py::TestPredictor::
-test_causality``.
-
-Identity-at-init invariant
---------------------------
-At init, every ``CausalSelfAttnMLPBlock`` residual path is scaled by
-LayerScale γ=1e-5 on both the attention and MLP branches, making the
-block near-identity. ``CausalCliffordNetBlock`` is near-identity via
-its own LayerScale γ=1e-5, and each spatial ``CliffordNetBlock`` is
-similarly near-identity. So at init the predictor is ``z + pos_t + eps``.
+At initialization every residual branch (attention, MLP, causal Clifford,
+spatial Clifford) is scaled by a LayerScale gamma of `1e-5`, so the predictor
+starts as `z + pos_t` plus a near-zero correction.
 """
 
 from __future__ import annotations
@@ -74,22 +45,59 @@ _NORM_EPSILON: float = 1e-6
 
 @register_dl_technique("dl_techniques.models.video_jepa.predictor")
 class CausalSelfAttnMLPBlock(keras.layers.Layer):
-    """Plain causal self-attention + MLP block with LayerScale-identity init.
+    """Causal self-attention and MLP block, pre-norm, LayerScale-identity init.
 
-    Structure (pre-norm + residual):
-        y = x + gamma_a * Attn(LN(x))
-        out = y + gamma_m * MLP(LN(y))
+    Architecture:
 
-    where ``gamma_a``, ``gamma_m`` are per-channel learnable scales
-    initialized to ``1e-5`` so the block is near-identity at init.
+    .. code-block:: text
 
-    :param dim: Channel dimension ``D``.
+        x [B, T, D]
+        ├─────────────────────────────┐ (residual)
+        ▼                              │
+        ┌─────────────┐                │
+        │ layernorm     │                │
+        └─────┬───────┘                │
+              ▼                        │
+        ┌─────────────────────┐        │
+        │ causal self-attention │        │
+        └─────┬───────────────┘        │
+              ▼                        │
+        gamma_a (LayerScale)            │
+              ▼                        │
+             add ◄──────────────────────┘
+              │
+              ├─────────────────────────────┐ (residual)
+              ▼                              │
+        ┌─────────────┐                      │
+        │ layernorm     │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+        ┌─────────────┐                      │
+        │ MLP           │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+        gamma_m (LayerScale)                  │
+              ▼                              │
+             add ◄──────────────────────────┘
+              ▼
+        out [B, T, D]
+
+    `gamma_a` and `gamma_m` are per-channel learnable scales initialized to
+    `layer_scale_init`, so the block is near-identity at initialization.
+
+    :param dim: Channel dimension `D`.
+    :type dim: int
     :param num_heads: Number of attention heads.
-    :param dim_head: Per-head dimension (``key_dim`` of MHA).
+    :type num_heads: int
+    :param dim_head: Per-head dimension, the `key_dim` of the attention layer.
+    :type dim_head: int
     :param mlp_dim: Hidden dimension of the MLP.
+    :type mlp_dim: int
     :param dropout_rate: Dropout rate inside both attention and MLP.
-    :param layer_scale_init: Initial value of the LayerScale γ (default 1e-5).
-    :param kwargs: passthrough.
+    :type dropout_rate: float
+    :param layer_scale_init: Initial value of the LayerScale gamma.
+    :type layer_scale_init: float
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
     """
 
     def __init__(
@@ -119,21 +127,9 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.layer_scale_init = layer_scale_init
 
-        # Sub-layers.
-        # DECISION plan-2026-08-17T183311-79c63e38/D-028
-        # `epsilon` is EXPLICIT on both LayerNorms of this block. Left at Keras'
-        # default they were 1e-3, while every OTHER normalization in the same
-        # forward pass runs at 1e-6: the spatial and causal `CliffordNetBlock`s
-        # this predictor is built from construct
-        # `LayerNormalization(epsilon=1e-6)` directly
-        # (`layers/geometric/clifford_block.py:1443`, chosen there to match
-        # `layers/norms/factory.py`'s `setdefault('epsilon', 1e-6)`). A 1000x
-        # spread inside one stack is not a design choice, it is an omission.
-        # WHAT NOT TO DO: do not drop the argument again — an epsilon is
-        # invisible to every shape, dtype and finiteness assertion in the
-        # suite, so nothing here would go red. Existing `.keras` checkpoints are
-        # unaffected: `epsilon` round-trips in the layer config, so a reloaded
-        # model keeps the value it was saved with. See decisions.md D-028.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-028: epsilon is explicit on
+        # both LayerNorms, matching the 1e-6 the spatial/causal CliffordNetBlocks
+        # use, not Keras' 1e-3 default -- an epsilon mismatch is invisible to shape/dtype/finiteness tests. See decisions.md.
         self.ln1 = keras.layers.LayerNormalization(
             epsilon=_NORM_EPSILON, name="ln_attn"
         )
@@ -148,12 +144,9 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         )
         self.mlp_hidden = keras.layers.Dense(mlp_dim, activation="gelu",
                                              name="mlp_hidden")
-        # DECISION plan_2026-05-24_ca745a6c/D-005: mirror encoder.py:112-116 pattern.
-        # `keras.layers.Dropout.call(training=<symbolic tensor>)` raises
-        # OperatorNotAllowedInGraphError under @tf.function even at rate=0.0.
-        # At production default (dropout_rate=0.0) the layer is identity, so we skip
-        # instantiation entirely. Residual @tf.function-with-tensor-training risk
-        # at `dropout_rate > 0` is documented in README (sibling to D-003 mask-gate doc).
+        # DECISION plan_2026-05-24_ca745a6c/D-005: skip instantiating Dropout at
+        # rate=0.0 -- Dropout.call(training=<symbolic tensor>) raises under
+        # @tf.function even at rate 0.0. See decisions.md.
         self.mlp_drop = (
             keras.layers.Dropout(dropout_rate, name="mlp_dropout")
             if dropout_rate > 0.0
@@ -161,10 +154,8 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         )
         self.mlp_out = keras.layers.Dense(dim, name="mlp_out")
 
-        # LayerScale gamma vectors: per-channel, initialized to
-        # layer_scale_init. `initializer=` and `constraint=None` are both
-        # mandatory here — see the D-005 anchor in
-        # `layers/geometric/clifford_block.py` for the measured reason.
+        # Per-channel LayerScale gamma; initializer= and constraint=None are
+        # both required here, per the D-005 anchor in layers/geometric/clifford_block.py.
         self.gamma_a = LayerScale(
             multiplier_type="CHANNEL",
             initializer=keras.initializers.Constant(self.layer_scale_init),
@@ -202,12 +193,17 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
     def call(
         self, x: keras.KerasTensor, training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        # --- Attention branch (causal) ---
+        """Run the causal-attention and MLP residual branches.
+
+        :param x: Input tensor, shape `(B, T, D)`.
+        :param training: Forwarded to attention and dropout.
+        :return: Output tensor, shape `(B, T, D)`.
+        :rtype: keras.KerasTensor
+        """
         h = self.ln1(x)
         a = self.attn(h, h, use_causal_mask=True, training=training)
         x = x + self.gamma_a(a)
 
-        # --- MLP branch ---
         h = self.ln2(x)
         h = self.mlp_hidden(h)
         if self.mlp_drop is not None:
@@ -219,9 +215,15 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Any,
     ) -> Tuple[Optional[int], ...]:
+        """Return the input shape unchanged."""
         return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "dim": self.dim,
@@ -236,19 +238,56 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.video_jepa.predictor")
 class VideoJEPAPredictor(keras.layers.Layer):
-    """Factorized spatial + causal-temporal Clifford predictor (pixels-only).
+    """Factorized spatial and causal-temporal Clifford predictor, pixels-only.
 
-    :param embed_dim: Latent dimension ``D`` (must equal encoder ``embed_dim``).
-    :param num_frames_max: Maximum window length ``T_max`` for the learned
-        1D temporal PE (usually ``num_frames`` from config).
-    :param patches_per_side: ``H_p = W_p`` — used to build static shapes.
-    :param depth: Number of (spatial, temporal) pairs.
+    Architecture, one of `depth` pairs:
+
+    .. code-block:: text
+
+        z [B, T, H_p, W_p, D]
+        │ reshape
+        ▼
+        z_s [B*T, H_p, W_p, D]
+        │
+        ┌─────▼─────┐
+        │ CliffordNetBlock│  spatial, per-frame
+        └─────┬─────┘
+              ▼  + residual, reshape back
+        z [B, T, H_p, W_p, D]
+        │ transpose + reshape
+        ▼
+        z_t [B*H_p*W_p, T, D]
+        │
+        ┌─────▼─────┐
+        │ CausalSelfAttnMLPBlock│
+        └─────┬─────┘
+              ▼
+        ┌─────────────────────┐
+        │ CausalCliffordNetBlock│  left-context only over T
+        └─────┬───────────────┘
+              ▼  + residual
+        z [B, T, H_p, W_p, D]  transpose + reshape back
+
+    :param embed_dim: Latent dimension `D`, must equal the encoder's `embed_dim`.
+    :type embed_dim: int
+    :param num_frames_max: Maximum window length `T_max` for the learned 1D
+        temporal position embedding.
+    :type num_frames_max: int
+    :param patches_per_side: `H_p = W_p`, used to build static shapes.
+    :type patches_per_side: int
+    :param depth: Number of spatial/temporal pairs.
+    :type depth: int
     :param num_heads: Heads for the temporal self-attention.
-    :param dim_head: Per-head dimension for the temporal MHA.
-    :param mlp_dim: MLP hidden dim inside the temporal block.
+    :type num_heads: int
+    :param dim_head: Per-head dimension for the temporal attention.
+    :type dim_head: int
+    :param mlp_dim: MLP hidden dimension inside the temporal block.
+    :type mlp_dim: int
     :param shifts: Channel-shift offsets for predictor Clifford blocks.
+    :type shifts: Iterable[int]
     :param dropout_rate: Dropout rate inside the temporal block.
-    :param kwargs: passthrough.
+    :type dropout_rate: float
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
     """
 
     def __init__(
@@ -327,7 +366,7 @@ class VideoJEPAPredictor(keras.layers.Layer):
     def build(self, input_shape: Any) -> None:
         """Build sub-layers.
 
-        :param input_shape: ``z_shape = (B, T, H_p, W_p, D)``.
+        :param input_shape: `z_shape = (B, T, H_p, W_p, D)`.
         """
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 5:
             raise ValueError(
@@ -337,7 +376,6 @@ class VideoJEPAPredictor(keras.layers.Layer):
             )
         z_shape = input_shape
 
-        # Learned 1D temporal PE: (1, T_max, D) — expanded on add.
         self.pos_t = self.add_weight(
             name="pos_t",
             shape=(1, self.num_frames_max, self.embed_dim),
@@ -345,96 +383,81 @@ class VideoJEPAPredictor(keras.layers.Layer):
             trainable=True,
         )
 
-        # Spatial blocks consume (B*T, H_p, W_p, D).
         spatial_in = (None, self.patches_per_side, self.patches_per_side,
                       self.embed_dim)
         for blk in self.spatial_blocks:
             blk.build(spatial_in)
 
-        # Attention blocks consume (B*H_p*W_p, T, D).
         attn_in = (None, z_shape[1], self.embed_dim)
         for blk in self.attn_blocks:
             blk.build(attn_in)
 
-        # Causal Clifford blocks consume (B*H_p*W_p, T, D) natively — they are
-        # CausalCliffordNetBlock, i.e. sequence mode (see clifford_block.py).
+        # CausalCliffordNetBlock runs in sequence mode and consumes this
+        # shape natively.
         causal_in = (None, z_shape[1], self.embed_dim)
         for blk in self.causal_blocks:
             blk.build(causal_in)
 
         super().build(input_shape)
 
-    # ------------------------------------------------------------------
     def call(
         self,
         z: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Forward pass.
+        """Run the alternating spatial and causal-temporal pairs.
 
-        :param z: ``(B, T, H_p, W_p, D)`` per-frame patch latents.
+        :param z: `(B, T, H_p, W_p, D)` per-frame patch latents.
         :param training: Forwarded to all sub-layers.
-        :return: ``(B, T, H_p, W_p, D)`` predicted next-frame patch latents.
+        :return: `(B, T, H_p, W_p, D)` predicted next-frame patch latents.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If `z` is a list or tuple; the predictor takes a
+            single tensor.
         """
-        # Backward-compat guard: if a caller passes ``[z]`` or ``[z, c]`` we
-        # raise a clear error rather than silently unpack.
         if isinstance(z, (list, tuple)):
             raise ValueError(
-                "VideoJEPAPredictor now expects a single tensor z "
-                "(B, T, H_p, W_p, D); telemetry conditioning was removed "
-                "in iter-3 (D-013). Got a list/tuple input."
+                "VideoJEPAPredictor expects a single tensor z "
+                "(B, T, H_p, W_p, D). Got a list/tuple input."
             )
 
-        # --- Shapes ---
         shape = ops.shape(z)
         B, T, Hp, Wp, D = shape[0], shape[1], shape[2], shape[3], shape[4]
-        N = Hp * Wp  # patches per frame
+        N = Hp * Wp
 
-        # --- Temporal PE (add once, broadcast over spatial) ---
-        # pos_t : (1, T_max, D) → slice to (1, T, D) → (1, T, 1, 1, D)
-        pos_t = self.pos_t[:, :T, :]                          # (1, T, D)
+        # Temporal PE is added once, before the first pair, and broadcasts
+        # over the spatial axes.
+        pos_t = self.pos_t[:, :T, :]
         pos_t = ops.reshape(pos_t, (1, T, 1, 1, D))
         z = z + pos_t
 
-        # --- Alternating pairs ---
         for i in range(self.depth):
-            # ============ Spatial pass ============
-            # (B, T, H_p, W_p, D) → (B*T, H_p, W_p, D)
             z_s = ops.reshape(z, (B * T, Hp, Wp, D))
-            # Block is transform-only; residual is external (model-level).
             z_s = z_s + self.spatial_blocks[i](z_s, training=training)
             z = ops.reshape(z_s, (B, T, Hp, Wp, D))
 
-            # ============ Temporal pass ============
-            # (B, T, H_p, W_p, D) → transpose → (B, H_p, W_p, T, D)
             z_t = ops.transpose(z, (0, 2, 3, 1, 4))
-            # → reshape (B*H_p*W_p, T, D)
             z_t = ops.reshape(z_t, (B * N, T, D))
 
-            # Causal self-attention + MLP block (identity at init via
-            # LayerScale γ=1e-5).
             z_t = self.attn_blocks[i](z_t, training=training)
-
-            # Block is transform-only; residual is external (causal-safe add).
-            # Consumes/returns (B*N, T, D) — sequence mode, no reshape needed.
             z_t = z_t + self.causal_blocks[i](z_t, training=training)
 
-            # → reshape (B*N, T, D) → (B, H_p, W_p, T, D) →
-            #   transpose to (B, T, H_p, W_p, D).
             z_t = ops.reshape(z_t, (B, Hp, Wp, T, D))
             z = ops.transpose(z_t, (0, 3, 1, 2, 4))
 
         return z
 
-    # ------------------------------------------------------------------
     def compute_output_shape(
         self, input_shape: Any
     ) -> Tuple[Optional[int], ...]:
-        """Output matches ``z_shape``."""
+        """Return `z_shape` unchanged."""
         return tuple(input_shape)
 
-    # ------------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "embed_dim": self.embed_dim,

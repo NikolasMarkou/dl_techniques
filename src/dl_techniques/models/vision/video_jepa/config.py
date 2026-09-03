@@ -1,17 +1,11 @@
 """Video-JEPA-Clifford configuration dataclass.
 
-Defaults chosen for RTX 4070 (12 GB) smoke training on synthetic drone
-footage. Every field is overridable via :meth:`from_dict`.
-
-Decisions anchored here:
-- D-001 hybrid encoder: ``encoder_clifford_depth`` + ``encoder_shifts``.
-- D-002 factorized predictor: ``predictor_depth`` (pairs of spatial+temporal).
-- D-005 middle SIGReg placement: ``sigreg_*`` fields + weight.
-- D-006 positional embeddings: ``patch_size``, ``embed_dim``.
-- D-007 streaming: ``history_size_k``.
-- D-013 (iter-3, 2026-04-22) telemetry conditioning removed: the
-  predictor is now a pixels-only architecture with a plain causal
-  self-attn + MLP temporal block. See plans/plan_2026-04-22_4f29c76f.
+`VideoJEPAConfig` holds every construction and training-loss parameter for
+the Video-JEPA-Clifford model: patch/embedding sizes, encoder and predictor
+depths and channel shifts, SIGReg regularization, tube-masking, multi-horizon
+prediction weights, and the EMA target-encoder schedule. Every field is
+overridable via :meth:`from_dict`, and defaults are tuned for a 12 GB GPU
+smoke run on synthetic drone footage.
 """
 
 from __future__ import annotations
@@ -25,53 +19,76 @@ class VideoJEPAConfig:
     """Configuration for the Video-JEPA-Clifford model.
 
     :param img_size: Square input edge length in pixels.
+    :type img_size: int
     :param img_channels: Number of pixel channels.
-    :param patch_size: Non-overlapping patch edge length. Must divide ``img_size``.
-    :param embed_dim: Patch embedding dimension ``D``.
-    :param num_frames: Default training window length ``T``.
-    :param history_size_k: Streaming rolling-buffer window length ``K``
-        (D-007). Typically ``K = num_frames``.
-    :param encoder_clifford_depth: Number of stacked ``CliffordNetBlock``
-        layers after patch embed (D-001). 2–4 recommended.
-    :param encoder_shifts: Channel-shift offsets fed to the encoder
-        Clifford blocks.
-    :param predictor_depth: Number of *pairs* of (spatial-Clifford, temporal-
-        Clifford) blocks (D-002).
-    :param predictor_num_heads: Number of attention heads in the
-        temporal causal self-attention block.
+    :type img_channels: int
+    :param patch_size: Non-overlapping patch edge length. Must divide `img_size`.
+    :type patch_size: int
+    :param embed_dim: Patch embedding dimension `D`.
+    :type embed_dim: int
+    :param num_frames: Default training window length `T`.
+    :type num_frames: int
+    :param history_size_k: Streaming rolling-buffer window length `K`.
+        Typically equal to `num_frames`.
+    :type history_size_k: int
+    :param encoder_clifford_depth: Number of stacked `CliffordNetBlock`
+        layers after patch embed. 2-4 recommended.
+    :type encoder_clifford_depth: int
+    :param encoder_shifts: Channel-shift offsets fed to the encoder Clifford blocks.
+    :type encoder_shifts: Tuple[int, ...]
+    :param predictor_depth: Number of pairs of (spatial-Clifford,
+        temporal-Clifford) blocks.
+    :type predictor_depth: int
+    :param predictor_num_heads: Attention heads in the temporal causal
+        self-attention block.
+    :type predictor_num_heads: int
     :param predictor_dim_head: Per-head dimension for the temporal MHA.
+    :type predictor_dim_head: int
     :param predictor_mlp_dim: Hidden dimension of the temporal MLP block.
+    :type predictor_mlp_dim: int
     :param predictor_shifts: Channel-shift offsets for predictor Clifford
-        blocks (spatial + causal-temporal).
-    :param sigreg_knots: Integration knots for :class:`SIGRegLayer` (D-005).
-    :param sigreg_num_proj: Number of random projections for
-        :class:`SIGRegLayer`. Smoke default 64 (LeWM precedent).
-    :param sigreg_weight: Weight applied to SIGReg loss when added via
-        ``add_loss`` (D-005).
-    :param dropout_rate: Dropout rate used inside the temporal attention block.
-    :param mask_prediction_enabled: If True, V-JEPA-style tube-masked latent
-        prediction runs alongside next-frame prediction (iter-2, D-008/D-009).
-        When False, the model degrades to iter-1-equivalent two-loss behavior
-        (next-frame MSE + SIGReg). Regression-guard flag.
+        blocks, spatial and causal-temporal.
+    :type predictor_shifts: Tuple[int, ...]
+    :param sigreg_knots: Integration knots for `SIGRegLayer`.
+    :type sigreg_knots: int
+    :param sigreg_num_proj: Number of random projections for `SIGRegLayer`.
+    :type sigreg_num_proj: int
+    :param sigreg_weight: Weight applied to the SIGReg loss via `add_loss`.
+    :type sigreg_weight: float
+    :param dropout_rate: Dropout rate inside the temporal attention block.
+    :type dropout_rate: float
+    :param mask_prediction_enabled: If `True`, V-JEPA-style tube-masked
+        latent prediction runs alongside next-frame prediction. If `False`,
+        only next-frame MSE and SIGReg are used.
+    :type mask_prediction_enabled: bool
     :param mask_ratio: Fraction of spatial patch positions masked per sample
-        in the tube mask (iter-2, D-011). ``0.0 <= mask_ratio < 1.0`` strict.
-        0.5–0.75 typical for V-JEPA; 0.6 default.
-    :param lambda_next_frame: Scalar weight applied to the next-frame
-        prediction loss via ``add_loss`` (iter-2, D-012).
-    :param lambda_mask: Scalar weight applied to the mask-prediction loss
-        via ``add_loss`` (iter-2, D-012).
-    :param predict_horizons: Tuple of strictly-positive prediction horizons
-        ``(h1, h2, ...)`` in frames. For each ``h``, the model learns
-        ``MSE(pred_head_h(pred[:, :-h]), z[:, h:])``. Must be sorted ascending,
-        unique, all positive, and ``max(predict_horizons) < num_frames``.
-        Default ``(1,)`` preserves the legacy single-horizon t+1 behavior.
-        See ``plan_2026-05-23_0b664700/D-001``.
+        in the tube mask. Strict range `[0.0, 1.0)`; 0.5-0.75 is typical.
+    :type mask_ratio: float
+    :param lambda_next_frame: Weight applied to the next-frame prediction
+        loss via `add_loss`.
+    :type lambda_next_frame: float
+    :param lambda_mask: Weight applied to the mask-prediction loss via `add_loss`.
+    :type lambda_mask: float
+    :param predict_horizons: Strictly positive prediction horizons `(h1, h2,
+        ...)` in frames. For each `h`, the model learns
+        `MSE(pred_head_h(pred[:, :-h]), z[:, h:])`. Must be sorted ascending,
+        unique, all positive, and `max(predict_horizons) < num_frames`.
+        Default `(1,)` is the single-horizon t+1 case.
+    :type predict_horizons: Tuple[int, ...]
+
+    :param ema_momentum: EMA momentum for the target encoder update:
+        `target_w <- m * target_w + (1 - m) * encoder_w`. `0.996` is the
+        V-JEPA/BYOL default; `0.0` snaps the target to the encoder every
+        step. Strict range `[0.0, 1.0)`.
+    :type ema_momentum: float
+    :param ema_schedule: One of `"none"` or `"cosine"`. `"cosine"` ramps
+        momentum from `ema_momentum` to `1.0` across training.
+    :type ema_schedule: str
 
     .. note::
-       Invariant: ``img_size % patch_size == 0``. Invariant:
-       ``0.0 <= mask_ratio < 1.0`` (strict upper bound; a mask
-       ratio of 1.0 would leave the next-frame loss undefined).
-       Invariant: ``lambda_next_frame >= 0.0`` and ``lambda_mask >= 0.0``.
+       Invariants: `img_size % patch_size == 0`; `0.0 <= mask_ratio < 1.0`
+       (a ratio of 1.0 would leave the next-frame loss undefined);
+       `lambda_next_frame >= 0.0` and `lambda_mask >= 0.0`.
     """
 
     # --- Vision / patches ---
@@ -103,27 +120,17 @@ class VideoJEPAConfig:
     # --- Dropout / regularization ---
     dropout_rate: float = 0.0
 
-    # --- Iter-2: V-JEPA-style tube-masked latent prediction (D-008..D-012) ---
+    # --- Tube-masked latent prediction ---
     mask_prediction_enabled: bool = True
     mask_ratio: float = 0.6
     lambda_next_frame: float = 1.0
     lambda_mask: float = 1.0
 
-    # --- Multi-horizon prediction (plan_2026-05-23_0b664700/D-001) ---
+    # --- Multi-horizon prediction ---
     predict_horizons: Tuple[int, ...] = (1,)
 
-    # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
-    # Momentum for the V-JEPA-style EMA target encoder weight update:
-    #   target_w <- m * target_w + (1 - m) * encoder_w
-    # 0.996 is the V-JEPA / BYOL default. Set 0.0 to make the target
-    # snap to the encoder every step (degenerate; equivalent to "live
-    # target", retained only as a debug knob). Strict upper bound at
-    # 1.0 keeps the target frozen-at-init only when ``ema_schedule="none"``.
+    # --- EMA target encoder ---
     ema_momentum: float = 0.996
-    # One of {"none", "cosine"}. "cosine" ramps momentum from
-    # ``ema_momentum`` to ``1.0`` across training; the model exposes
-    # the current value as a metric ``ema_m`` and a non-trainable
-    # step counter persists across save/load.
     ema_schedule: str = "none"
 
     # ------------------------------------------------------------------
@@ -152,7 +159,7 @@ class VideoJEPAConfig:
             raise ValueError(
                 f"predictor_depth must be >= 1, got {self.predictor_depth}"
             )
-        # --- Iter-2 invariants (D-008..D-012) ---
+        # --- Tube-masking invariants ---
         if not (0.0 <= self.mask_ratio < 1.0):
             raise ValueError(
                 f"mask_ratio must be in [0.0, 1.0), got {self.mask_ratio}. "
@@ -168,7 +175,7 @@ class VideoJEPAConfig:
             raise ValueError(
                 f"lambda_mask must be >= 0.0, got {self.lambda_mask}"
             )
-        # --- predict_horizons invariants (plan_2026-05-23_0b664700/D-001) ---
+        # --- predict_horizons invariants ---
         # Normalize list → tuple (tolerates JSON round-trips that arrive
         # as lists when callers pass through to_dict/from_dict).
         if isinstance(self.predict_horizons, list):
@@ -210,7 +217,7 @@ class VideoJEPAConfig:
                 f"max(predict_horizons)={max(self.predict_horizons)} must be "
                 f"strictly less than num_frames={self.num_frames}."
             )
-        # --- EMA target encoder invariants (plan_2026-05-23_15151c75/D-001) ---
+        # --- EMA target encoder invariants ---
         if not (0.0 <= self.ema_momentum < 1.0):
             raise ValueError(
                 f"ema_momentum must be in [0.0, 1.0), got {self.ema_momentum}. "
@@ -257,17 +264,14 @@ class VideoJEPAConfig:
     def from_dict(cls, d: Dict[str, Any]) -> "VideoJEPAConfig":
         """Construct a config from a dict produced by :meth:`to_dict`."""
         d = dict(d)
-        # Tolerate legacy keys dropped in iter-3 (telemetry removal).
+        # Tolerate legacy keys from older checkpoints.
         for legacy_key in ("cond_dim", "telemetry_dim"):
             d.pop(legacy_key, None)
         for k in ("encoder_shifts", "predictor_shifts", "predict_horizons"):
             if k in d and isinstance(d[k], list):
                 d[k] = tuple(d[k])
-        # Drop any keys not recognized by the dataclass — keeps
-        # forward-compat with checkpoints written by future versions
-        # that add fields, and backward-compat is automatic via dataclass
-        # defaults for missing keys (e.g. ema_momentum / ema_schedule on
-        # pre-plan_2026-05-23_15151c75 checkpoints).
+        # Drop keys the dataclass does not recognize, for forward-compat with
+        # checkpoints written by future versions that add fields.
         import dataclasses as _dc
         valid = {f.name for f in _dc.fields(cls)}
         d = {k: v for k, v in d.items() if k in valid}

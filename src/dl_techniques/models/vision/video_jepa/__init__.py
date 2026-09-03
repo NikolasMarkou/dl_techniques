@@ -6,8 +6,8 @@ streaming. Core components:
 - :class:`VideoJEPAConfig` — dataclass config (:mod:`.config`).
 - :class:`VideoJEPACliffordEncoder` — hybrid PatchEmbedding + Clifford blocks
   (:mod:`.encoder`).
-- :class:`VideoJEPAPredictor` — factorized spatial/causal-temporal predictor
-  (pixels-only, iter-3 / D-013) (:mod:`.predictor`).
+- :class:`VideoJEPAPredictor` — factorized spatial/causal-temporal predictor,
+  pixels-only (:mod:`.predictor`).
 - :class:`VideoJEPA` — top-level model with streaming inference API
   (:mod:`.model`).
 - :func:`create_video_jepa` — module-level convenience factory.

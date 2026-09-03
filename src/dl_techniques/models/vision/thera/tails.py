@@ -1,47 +1,23 @@
-"""THERA feature-refiner "tails" as Keras layers + a size-keyed builder.
+"""THERA feature-refiner "tails" as Keras layers, plus a size-keyed builder.
 
-THERA (Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields)
-refines the sampled field output with one of three optional *tails* selected by
-a model-size key. The reference JAX/Flax dispatcher (THERA ``model/tail.py``)::
+`build_thera_tail` returns one of three optional feature refiners for THERA's
+sampled field output, selected by a model-size key: `TheraTailAir` (identity),
+`TheraTailPlus` (a depthwise ConvNeXt stack with a 1x1 projection inserted at
+each channel-width change), or `TheraTailPro` (a SwinIR body: `conv_first`,
+a long-residual stack of RSTBs, `conv_after_body`, `conv_before_upsample`).
+Swin and ConvNeXt internals are reused from their existing layers rather than
+reimplemented here.
 
-    def build_tail(size):
-        if size == 'air':
-            return lambda x, _: x                                  # identity
-        elif size == 'plus':
-            blocks = [(64, 3, True)] * 6 + [(96, 3, True)] * 7 + [(128, 3, True)] * 3
-            return ConvNeXt(blocks)                                # n_dims/k/depthwise
-        elif size == 'pro':
-            return SwinIR(depths=[7, 6], num_heads=[6, 6])         # embed_dim=180, ...
+The `pro` tail reflect-pads `H, W` up to the next multiple of `window_size`
+before the Swin stack and crops back afterwards, so any spatial size is
+accepted and the output spatial shape always matches the input's.
 
-- ``air``  -> identity passthrough (no refinement).
-- ``plus`` -> a ``ConvNeXt`` stack. The reference inserts a ``Projection``
-  (``LayerNorm`` -> ``Conv1x1(n_dims)``) whenever a block changes the channel
-  count, then a depthwise ConvNeXt block. Output channels = last block dim (128).
-- ``pro``  -> a ``SwinIR`` body: ``conv_first(3x3)`` -> a long-residual stack of
-  RSTBs (each = ``depth`` Swin blocks + a ``3x3`` conv bypass + residual) ->
-  ``conv_after_body(3x3)`` (+ long residual) -> ``conv_before_upsample(3x3)`` +
-  leaky-relu, returning ``num_feat`` channels. Spatial size is preserved.
-
-REUSE (no Swin/ConvNeXt internals are reimplemented here):
-- ``ConvNextV1Block`` (depthwise conv + LN + 4x inverted-bottleneck MLP)
-  is THERA's ``group_features=True`` ConvNeXt block. Its depthwise conv operates
-  at a fixed channel width (output channels == ``filters``), so the ConvNeXt tail
-  stack runs at one working width per block group; a ``_Projection`` 1x1 conv
-  adapts the channel count at each group transition.
-- ``SwinTransformerBlock`` consumes/returns NHWC ``(B, H, W, C)``, infers ``H, W``
-  dynamically, and builds its own (shifted) window attention mask. No patch
-  embed/unembed is needed.
-
-Edge case E1 (non-window-divisible / non-square input into ``pro``): the Swin
-window attention requires ``H`` and ``W`` to be multiples of ``window_size``. The
-``pro`` tail reflect-pads ``H, W`` up to the next multiple before the Swin stack
-and crops back to the exact original ``H, W`` afterwards, so any spatial size is
-handled and the output spatial shape always equals the input's.
-
-Reference:
-    Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
-    Neural Heat Fields"; Liu et al., "Swin Transformer" (ICCV 2021); Liu et al.,
-    "A ConvNet for the 2020s" (ConvNeXt, CVPR 2022); Liang et al., "SwinIR".
+References:
+    - Becker et al. Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
+      Neural Heat Fields.
+    - Liu et al., 2021. Swin Transformer. ICCV 2021.
+    - Liu et al., 2022. A ConvNet for the 2020s. CVPR 2022.
+    - Liang et al. SwinIR.
 """
 
 import keras
@@ -83,23 +59,19 @@ LEAKY_RELU_SLOPE: float = 0.2
 
 @register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailAir(keras.layers.Layer):
-    """The ``air`` tail: an identity feature refiner (passthrough).
+    """The `air` tail: an identity feature refiner, no-op passthrough.
 
-    **Intent**: Give THERA's ``air`` size (no refinement, ``lambda x, _: x``) a
-    uniform serializable Keras interface matching the ``plus``/``pro`` tails, so
-    the builder returns the same layer type regardless of size.
+    A registered layer rather than a bare lambda, so `build_thera_tail`
+    returns the same serializable interface regardless of size.
 
-    **Architecture**::
+    Architecture:
 
-        Input (B, H, W, C) --> [identity] --> Output (B, H, W, C)
+    .. code-block:: text
 
-    THERA's ``air`` size applies no refinement (``lambda x, _: x``). This is a
-    tiny registered layer rather than a bare lambda so the builder returns a
-    uniform serializable interface across the three sizes.
-
-    The tail accepts a second ignored positional argument (THERA passes the
-    query scale / a placeholder to every tail; the hypernetwork calls
-    ``tail(x, training)``).
+        x [B, H, W, C]
+        │
+        ▼ (identity)
+        x [B, H, W, C]
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -129,28 +101,27 @@ class TheraTailAir(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.thera.tails")
 class _Projection(keras.layers.Layer):
-    """THERA ``Projection``: ``LayerNorm`` -> ``Conv2D(n_dims, 1x1)``.
+    """Channel-count adapter: `LayerNorm` then a 1x1 `Conv2D`.
 
-    **Intent**: Provide the channel-count adapter the ``plus`` tail inserts
-    before a ConvNeXt block on a channel change. The ConvNeXt tail block stack
-    operates at a fixed channel width: the reused depthwise ``ConvNextV1Block``
-    keeps the channel count fixed at ``filters`` throughout the block, so a 1x1
-    projection is needed to adapt the running channel count (e.g. the backbone's
-    64-ch feature map) to the next block group's working width.
+    Inserted by the `plus` tail before a ConvNeXt block whenever the channel
+    count changes, since the reused depthwise `ConvNextV1Block` runs at a
+    fixed channel width and cannot itself change the channel count.
 
-    **Architecture**::
+    Architecture:
 
-        Input (B, H, W, C_in)
-              |
-        LayerNorm(epsilon=1e-6)
-              |
-        Conv2D(n_dims, kernel=1, padding=same)   # 1x1 channel projection
-              |
-        Output (B, H, W, n_dims)                 # spatial size preserved
+    .. code-block:: text
 
-    Inserted by the ``plus`` tail before a ConvNeXt block whenever the channel
-    count changes (a depthwise ConvNeXt block runs at a fixed channel width and
-    cannot itself change the channel count). Spatial size is preserved.
+        x [B, H, W, C_in]
+        │
+        ┌─────▼─────┐
+        │ layernorm  │
+        └─────┬─────┘
+              ▼
+        ┌─────────────┐
+        │ conv 1x1      │  n_dims channels
+        └─────┬───────┘
+              ▼
+        x [B, H, W, n_dims]
     """
 
     def __init__(self, n_dims: int, **kwargs: Any) -> None:
@@ -199,51 +170,43 @@ class _Projection(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailPlus(keras.layers.Layer):
-    """The ``plus`` tail: a depthwise-ConvNeXt feature refiner.
+    """The `plus` tail: a depthwise-ConvNeXt feature refiner.
 
-    **Intent**: Provide THERA's ``plus``-size feature refiner as a single
-    serializable Keras layer that grows the sampled field's channels through a
-    ConvNeXt stack. Sub-layers are created in ``__init__`` from the static
-    ``block_defs`` (guide Pitfall 1: never create sub-layers in ``build``);
-    ``build`` only propagates shapes so the ``.keras`` weight structure is fixed
-    at construction time and round-trips byte-identically.
+    For each `(dims, k)` in `block_defs`, inserts a `_Projection(dims)`
+    whenever `dims` differs from the running channel count, then a
+    `ConvNextV1Block(kernel_size=k, filters=dims)`. Sub-layers are created in
+    `__init__` from the static `block_defs`, not in `build`, so the `.keras`
+    weight structure is fixed at construction time.
 
-    **Architecture**::
+    Architecture:
 
-        Input (B, H, W, C_in)  [C_in == block_defs[0][0], i.e. 64 for THERA]
-              |
-              v
-        for (dims, k) in block_defs:           # THERA default: 16 blocks
-            if dims != current_dim:
-                _Projection(dims)              # LayerNorm -> Conv1x1(dims)
-            ConvNextV1Block(kernel_size=k, filters=dims)   # depthwise + 4x MLP + residual
-              |
-              v
-        Output (B, H, W, block_defs[-1][0])    [128 for THERA default]
+    .. code-block:: text
 
-    Assembles the THERA ``ConvNeXt(block_defs)`` stack: for each ``(dims, k)``
-    block def, if ``dims`` differs from the running channel count a
-    ``_Projection(dims)`` (LayerNorm + 1x1 conv) is inserted first, then a
-    ``ConvNextV1Block(kernel_size=k, filters=dims)`` is applied. Output channels
-    equal the last block's ``dims`` (128 for the THERA default).
+        x [B, H, W, C_in]
+        │
+        ▼
+        for (dims, k) in block_defs:
+            ┌──────────────┐
+            │ _Projection    │  (optional) only if dims changed
+            └──────┬───────┘
+                   ▼
+            ┌──────────────┐
+            │ ConvNextV1Block│  depthwise + 4x MLP + residual
+            └──────┬───────┘
+        │
+        ▼
+        x [B, H, W, block_defs[-1][0]]
 
-    :param block_defs: Sequence of ``(n_dims, kernel_size)`` tuples. Defaults to
-        THERA's ``[(64, 3)] * 6 + [(96, 3)] * 7 + [(128, 3)] * 3``.
-    :param in_channels: Input channel count, used only to decide whether the very
-        first block needs a leading ``_Projection``. Defaults to ``None``, which
-        assumes the input matches ``block_defs[0][0]`` (THERA backbones always
-        emit 64 = the first ``plus`` block dim, so no leading projection).
-        **Contract**: when constructing this tail MANUALLY for a backbone that
-        does NOT emit 64 channels (``!= block_defs[0][0]``), you MUST pass
-        ``in_channels=<backbone output channels>`` so the leading 1x1
-        ``_Projection`` (in_channels -> 64) is created here in ``__init__``;
-        otherwise :meth:`build` raises ``ValueError``.
-
-    .. note::
-        The :func:`build_thera` factory derives the backbone's output channel
-        count and passes ``in_channels`` for you, so the manual-construction
-        contract above only applies when you instantiate this tail (or
-        :func:`build_thera_tail`) yourself.
+    :param block_defs: Sequence of ``(n_dims, kernel_size)`` tuples.
+    :type block_defs: Optional[Sequence[Tuple[int, int]]]
+    :param in_channels: Input channel count, used only to decide whether the
+        first block needs a leading `_Projection`. If ``None``, assumes the
+        input matches ``block_defs[0][0]``. When constructing this tail for a
+        backbone whose output channels differ from ``block_defs[0][0]``, pass
+        ``in_channels`` explicitly or :meth:`build` raises ``ValueError``.
+        :func:`build_thera_tail` does not need this if the caller passes it through.
+    :type in_channels: Optional[int]
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
     """
 
     def __init__(
@@ -267,17 +230,9 @@ class TheraTailPlus(keras.layers.Layer):
             None if in_channels is None else int(in_channels)
         )
 
-        # Sub-layers are created HERE (guide Pitfall 1: never in build()). The
-        # projection-insertion logic depends only on consecutive block dims
-        # (static); the first block's projection depends on in_channels, which
-        # defaults to block_defs[0][0] (THERA backbones emit 64 = first block dim,
-        # so no leading projection). build() only propagates shapes.
-        #
-        # INV (.keras round-trip): the creation ORDER and per-sub-layer name
-        # (proj_{i} / convnext_{i}, i = block index) are byte-identical to the
-        # former build()-time loop so existing saved weights reload unchanged.
+        # Sub-layers are created here, not in build(), so the creation order and
+        # per-sub-layer name (proj_{i} / convnext_{i}) stay stable for .keras reload.
         self._sublayers: List[keras.layers.Layer] = []
-        # Parallel list of out_dims so build() can propagate shapes.
         self._sublayer_out_dims: List[int] = []
 
         current = (
@@ -298,15 +253,16 @@ class TheraTailPlus(keras.layers.Layer):
             self._sublayer_out_dims.append(dims)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # Sub-layers already exist (created in __init__); build() ONLY propagates
-        # shapes (Keras-3 four-strike build ordering: every sub-layer must be
-        # built with the right propagated channel shape for .keras weight reload).
-        #
-        # The leading-projection decision was made in __init__ from `in_channels`
-        # (default: block_defs[0][0]). If the actual input width disagrees, the
-        # pre-created sub-layer stack would silently feed wrong channels into the
-        # first ConvNeXt block. Fail loud and direct the caller to pass
-        # `in_channels` at construction (so the leading _Projection is created).
+        """Propagate shapes to the sub-layers created in `__init__`.
+
+        Fails loudly if the actual input width disagrees with the
+        `in_channels`/`block_defs[0][0]` assumption baked into the pre-created
+        sub-layer stack, rather than silently feeding wrong channels forward.
+
+        :param input_shape: Input shape, channels-last.
+        :raises ValueError: If the actual input channel count does not match
+            the constructed `in_channels` (or `block_defs[0][0]`).
+        """
         in_ch = input_shape[-1]
         expected_in = (
             self.in_channels if self.in_channels is not None
@@ -358,57 +314,61 @@ class TheraTailPlus(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.thera.tails")
 class TheraTailPro(keras.layers.Layer):
-    """The ``pro`` tail: a SwinIR (RSTB) feature refiner.
+    """The `pro` tail: a SwinIR (RSTB) feature refiner.
 
-    **Intent**: Provide THERA's ``pro``-size feature refiner as a single
-    serializable Keras layer: a SwinIR body (long-residual RSTB stack) that
-    refines the sampled field while preserving spatial size and handling
-    arbitrary (non-window-divisible, non-square) inputs via reflect-pad/crop.
+    A `conv_first` lifts the input to `embed_dim`, a long-residual stack of
+    RSTBs (each a run of Swin blocks with alternating shift, plus a conv
+    bypass and residual) refines it, then `conv_after_body` and
+    `conv_before_upsample` produce the `num_feat`-channel output. `H, W` are
+    reflect-padded up to a multiple of `window_size` before the Swin stack and
+    cropped back afterwards, so any spatial size is accepted and the output
+    shape matches the input's.
 
-    **Architecture**::
+    Architecture:
 
-        Input (B, H, W, C)
-              |
-        conv_first(3x3) -> embed_dim ; res = x
-              |
-        reflect-pad H,W up to next multiple of window_size (E1)
-              |
-        for stage in depths:                 # one RSTB per depth
-            res2 = x
-            depth x SwinTransformerBlock(shift = 0 / window//2 alternating)
-            rstb_conv(3x3) ; x = x + res2
-              |
-        x = conv_after_body(3x3) + res       # long residual
-        crop back to original H,W (E1)
-              |
-        x = leaky_relu(conv_before_upsample(3x3) -> num_feat)
-              |
-        Output (B, H, W, num_feat)
+    .. code-block:: text
 
-    Forward (THERA ``SwinIR`` body, spatial-shape-preserving)::
+        x [B, H, W, C]
+        │
+        ┌─────▼─────┐
+        │ conv 3x3    │  = res
+        └─────┬─────┘
+              ▼
+        reflect-pad H, W to a window_size multiple
+              ├─────────────────────────────┐ (long residual)
+              ▼                              │
+        ┌─────────────┐                      │
+        │ RSTB x len(depths)│                  │  each: Swin blocks, conv, residual
+        └─────┬───────┘                      │
+              ▼                              │
+        ┌─────────────┐                      │
+        │ conv 3x3      │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+             add  ◄──────────────────────────┘
+              ▼
+        crop back to original H, W
+              ▼
+        ┌─────────────┐
+        │ conv 3x3      │  -> num_feat
+        └─────┬───────┘
+              ▼
+        leaky_relu
+              ▼
+        x [B, H, W, num_feat]
 
-        x = conv_first(x)                       # 3x3 -> embed_dim
-        res = x
-        for d in depths:                        # one RSTB per depth
-            x = rstb_d(x)                        # depth Swin blocks + 3x3 bypass + residual
-        x = conv_after_body(x) + res            # 3x3, long residual
-        x = leaky_relu(conv_before_upsample(x)) # 3x3 -> num_feat
-        return x                                 # (B, H, W, num_feat)
-
-    Each RSTB = ``res2 = x; for i in range(depth): SwinBlock(shift = 0 if i even
-    else window // 2)(x); x = conv(x); return x + res2``.
-
-    Edge case E1: ``H, W`` are reflect-padded up to a multiple of
-    ``window_size`` before the Swin stack and cropped back to the original
-    ``H, W`` afterwards, so non-window-divisible / non-square inputs are handled
-    and the output spatial shape exactly matches the input's.
-
-    :param embed_dim: Swin working width. Default 180.
-    :param depths: Swin blocks per RSTB. Default ``(7, 6)``.
-    :param num_heads: Attention heads per RSTB. Default ``(6, 6)``.
-    :param window_size: Attention window side length. Default 8.
-    :param mlp_ratio: Swin MLP expansion ratio. Default 2.0.
-    :param num_feat: Output channel count after ``conv_before_upsample``. Default 64.
+    :param embed_dim: Swin working width.
+    :type embed_dim: int
+    :param depths: Swin blocks per RSTB.
+    :type depths: Sequence[int]
+    :param num_heads: Attention heads per RSTB.
+    :type num_heads: Sequence[int]
+    :param window_size: Attention window side length.
+    :type window_size: int
+    :param mlp_ratio: Swin MLP expansion ratio.
+    :type mlp_ratio: float
+    :param num_feat: Output channel count after `conv_before_upsample`.
+    :type num_feat: int
     """
 
     def __init__(
@@ -449,13 +409,9 @@ class TheraTailPro(keras.layers.Layer):
             filters=self.embed_dim, kernel_size=3, padding="same", name="conv_first"
         )
 
-        # RSTB stack. The Swin blocks are stored in a FLAT list (not a nested
-        # list-of-lists): Keras reliably tracks AND restores layers held in a
-        # flat attribute list, but a nested List[List[Layer]] silently fails to
-        # round-trip each inner block's weights through .keras (the inner blocks
-        # are tracked for trainable_weights yet their weights are NOT restored
-        # on reload -> verified 100% output mismatch). Stage boundaries are
-        # recovered from self.depths.
+        # Swin blocks are stored in a flat list, not a nested list-of-lists: a
+        # nested List[List[Layer]] fails to round-trip weights through .keras.
+        # Stage boundaries are recovered from self.depths.
         self.swin_blocks: List[SwinTransformerBlock] = []
         self.rstb_convs: List[keras.layers.Conv2D] = []
         for stage, (depth, heads) in enumerate(zip(self.depths, self.num_heads)):
@@ -488,10 +444,11 @@ class TheraTailPro(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # Explicit sublayer builds (Keras-3 four-strike ordering): every sublayer
-        # must be built with the right propagated NHWC shape so .keras reload
-        # restores its weights. Spatial dims may be padded at call time, so build
-        # with dynamic (None) spatial dims; channels are what matter for weights.
+        """Build every sublayer explicitly, for reload-safe weights.
+
+        Spatial dims may be padded at call time, so sublayers build with
+        dynamic (`None`) spatial dims; only channels matter for their weights.
+        """
         embed_shape = (input_shape[0], None, None, self.embed_dim)
 
         self.conv_first.build(input_shape)
@@ -513,65 +470,28 @@ class TheraTailPro(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Run the Swin stack over a window-size-aligned reflect pad.
 
-        Args:
-            x: Input tensor of shape (B, H, W, C).
-            training: Whether to run the sub-layers in training mode.
-
-        Returns:
-            Output tensor of shape (B, H, W, num_feat).
-
-        Raises:
-            ValueError: If a statically-known spatial extent is so small that
-                the reflect pad up to the next multiple of ``window_size``
-                would be at least as large as the extent itself (the smallest
-                accepted extent is ``window_size // 2 + 1``). Skipped for a
-                dynamic (``None``) extent. See the D-004 block below.
+        :param x: Input tensor of shape `(B, H, W, C)`.
+        :param training: Whether to run the sub-layers in training mode.
+        :return: Output tensor of shape `(B, H, W, num_feat)`.
+        :rtype: keras.KerasTensor
+        :raises ValueError: If a statically known spatial extent is too small
+            for its reflect pad (the smallest accepted extent is
+            `window_size // 2 + 1`). Skipped for a dynamic (`None`) extent.
         """
-        # Original spatial dims for the post-stack crop (E1).
+        # Original spatial dims for the post-stack crop.
         shape = ops.shape(x)
         h, w = shape[1], shape[2]
 
         x = self.conv_first(x, training=training)
 
-        # DECISION plan_2026-06-11_f662207d/D-007: the pro tail reflect-pads H,W
-        # up to a window-size multiple, runs the Swin stack, then crops back to
-        # the exact original H,W (E1). Do NOT assert divisibility / require
-        # window-aligned inputs instead -- THERA's hypernetwork feeds arbitrary
-        # crop sizes here, and the reference SwinIR pads-then-crops. Do NOT
-        # reimplement Swin/ConvNeXt internals: SwinTransformerBlock /
-        # ConvNextV1Block are reused verbatim (Plus inserts a LayerNorm+1x1
-        # _Projection only on channel change). See decisions.md D-007.
-        # Reflect-pad H, W up to a multiple of window_size (E1). The Swin window
-        # attention requires divisibility; conv-first output keeps NHWC layout.
+        # DECISION plan_2026-06-11_f662207d/D-007: reflect-pad H,W to a window
+        # multiple, run the Swin stack, crop back to the original H,W -- do not
+        # require window-aligned inputs, since callers feed arbitrary crop sizes. See decisions.md.
         ws = self.window_size
 
-        # DECISION plan-2026-07-31T210633-b63a35aa/D-004
-        # `mode="reflect"` below is not total. TensorFlow's `MirrorPad` requires
-        # every pad amount to be STRICTLY LESS than the dimension it pads, so a
-        # small enough H or W dies inside the op with a raw, site-free
-        # `InvalidArgumentError: paddings must be less than the dimension size
-        # [Op:MirrorPad]`. Measured on TF 2.18 / CPU: `TheraTailPro` raised at
-        # `ws=8, H in {4,3,2,1}` and worked at `H=5`; at `ws=64, H=8` it raised
-        # and at `H=80` it worked; and `ws=8, (H,W) = (5,3)` raised on the W
-        # axis alone, so both axes need the check. Because the pad is
-        # `(-H) % ws`, the boundary is exactly `ws // 2 + 1`.
-        #
-        # WHAT NOT TO DO, and why:
-        #   * Do NOT fall back to a two-stage pad or `mode="symmetric"`. The
-        #     reflected border is real data to `rstb_convs` / `conv_after_body`
-        #     (this stack has no padding mask), so a fallback silently invents
-        #     content for a geometry that today fails loudly.
-        #   * Do NOT share this with `models/vision/image_restoration/scunet/model.py`, which carries the
-        #     identical constraint. Two sites duplicate; a THIRD triggers
-        #     promotion. See decisions.md D-004.
-        #   * Do NOT make it a runtime (`ops`) check. `pad_h`/`pad_w` below are
-        #     SYMBOLIC on purpose (D-007: THERA's hypernetwork feeds arbitrary
-        #     crop sizes and every block is built with `(B, None, None, C)`), so
-        #     this guard is STATIC-ONLY and skips a `None` extent by design. A
-        #     dynamic build must stay legal.
-        # BACKEND SCOPE: measured only on the TensorFlow backend (CPU). It is a
-        # `MirrorPad` op constraint; another backend may not share it.
-        # See decisions.md D-004 (plan-2026-07-31T210633-b63a35aa).
+        # DECISION plan-2026-07-31T210633-b63a35aa/D-004: TF's MirrorPad requires
+        # every pad amount strictly less than the dimension it pads, so a small
+        # enough H or W raises; this static-only check catches it before the op does. See decisions.md.
         for axis_name, extent in (("height", x.shape[1]), ("width", x.shape[2])):
             if extent is None:
                 continue
@@ -644,24 +564,21 @@ def build_thera_tail(
 ) -> keras.layers.Layer:
     """Build the THERA feature-refiner tail for a model-size key.
 
-    Mirrors THERA's ``build_tail(size)`` dispatcher.
-
-    :param size: One of ``'air'`` (identity), ``'plus'`` (ConvNeXt), or
-        ``'pro'`` (SwinIR/RSTB).
-    :param in_channels: Input channel count from the backbone; forwarded to the
-        ``plus`` tail so it creates the leading 1x1 projection when the backbone
-        does not emit 64 channels. Ignored by ``air``/``pro``.
+    :param size: One of `'air'` (identity), `'plus'` (ConvNeXt), or `'pro'`
+        (SwinIR/RSTB).
+    :type size: str
+    :param in_channels: Input channel count from the backbone; forwarded to
+        the `plus` tail so it creates the leading 1x1 projection when the
+        backbone does not emit 64 channels. Ignored by `air`/`pro`.
+    :type in_channels: Optional[int]
     :return: The corresponding tail layer.
-    :raises ValueError: If ``size`` is not one of the three known keys.
+    :rtype: keras.layers.Layer
+    :raises ValueError: If `size` is not one of the three known keys.
 
     .. note::
-        **Contract (``plus`` tail)**: when building the ``plus`` tail MANUALLY
-        for a backbone that does NOT emit 64 channels (i.e. ``!=
-        block_defs[0][0]``), you MUST pass ``in_channels=<backbone output
-        channels>`` so the leading 1x1 ``_Projection`` (in_channels -> 64) is
-        created in ``__init__``; otherwise :meth:`TheraTailPlus.build` raises
-        ``ValueError``. The :func:`build_thera` factory does this automatically
-        (it derives the backbone's output channels and passes them).
+        For the `plus` tail with a backbone that does not emit 64 channels,
+        pass `in_channels` explicitly or :meth:`TheraTailPlus.build` raises
+        `ValueError`.
     """
     if size == "air":
         return TheraTailAir(name="thera_tail_air")

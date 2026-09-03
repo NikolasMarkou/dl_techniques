@@ -384,23 +384,17 @@ class VAE(keras.Model):
     def _build_model(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
         """Build the complete VAE model architecture.
 
-        Args:
-            inputs: Input tensor
-
-        Returns:
-            Dictionary containing all VAE outputs
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :return: Dict with keys ``z``, ``z_mean``, ``z_log_var``, ``reconstruction``.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Build encoder
         z_mean, z_log_var = self._build_encoder(inputs)
 
-        # DECISION plan_2026-06-04_d4ef81f1/D-004: the sampler layer is named
-        # "vae_sampling" in EVERY mode. self.decoder is extracted by this exact
-        # layer name (see __init__: self.get_layer("vae_sampling").output), and
-        # HypersphereSampling emits [B, latent_dim] just like Sampling, so the
-        # extraction is shape-safe for both modes. Do NOT rename the sampler
-        # per-mode or branch the decoder-extraction line: that would add surface
-        # to the one code path the whole decode()/sample() API depends on. See
-        # decisions.md D-004.
+        # DECISION plan_2026-06-04_d4ef81f1/D-004: sampler layer is named
+        # "vae_sampling" in every mode; __init__ extracts self.decoder by that
+        # exact name. Do not rename it or branch the extraction per mode. See decisions.md.
         if self.sampling_type == "gaussian":
             # Baseline diagonal-Gaussian reparameterization over [B, D].
             z = create_sampling_layer("gaussian", name="vae_sampling")(
@@ -422,11 +416,8 @@ class VAE(keras.Model):
         # Build decoder
         reconstruction = self._build_decoder(z)
 
-        # NOTE: for sampling_type == "vmf" the "z_log_var" slot carries the
-        # strictly-positive concentration kappa[B, 1] (NOT a log-variance);
-        # for "hypersphere" it is the radius log-variance[B, 1]; for "gaussian"
-        # it is the diagonal log-variance[B, latent_dim]. The slot is reused
-        # (shape-only contract; see I7 / create_vae assertion).
+        # z_log_var carries a different quantity per mode: vmf concentration
+        # kappa [B, 1], hypersphere radius logvar [B, 1], gaussian logvar [B, latent_dim].
         return {
             "z": z,
             "z_mean": z_mean,
@@ -439,11 +430,10 @@ class VAE(keras.Model):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Build the encoder network with ResNet blocks.
 
-        Args:
-            inputs: Input tensor
-
-        Returns:
-            Tuple of (z_mean, z_log_var) tensors
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :return: ``(z_mean, z_log_var)`` tensors.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         x = inputs
 
@@ -482,25 +472,14 @@ class VAE(keras.Model):
             name="encoder_z_mean",
         )(x)
 
-        # The second latent head emits the full latent_dim for the gaussian mode
-        # (diagonal-Gaussian posterior), but a single scalar per sample [B, 1]
-        # for hypersphere (radius-shell log-variance) and vmf (vMF concentration
-        # kappa). For gaussian/hypersphere the head is a raw (possibly negative)
-        # log-variance with bias Constant(-2.0) so the shell / variance starts
-        # thin. For vmf the head must be STRICTLY POSITIVE (kappa > 0), so a
-        # softplus is applied. The bias is initialized HIGH (Constant(12.0)) and
-        # the kernel to zeros so kappa STARTS at softplus(12) ~= 12 (an
-        # informative concentration) and is PREDICTABLE at init (not swamped by
-        # W.h). The same kappa tensor flows BOTH into VMFSampling AND into the
-        # vmf KL (vmf_kl_divergence) -- they must agree, so this single head is
-        # the sole source of kappa. The head still learns per-sample kappa after
-        # init (the zeros kernel only fixes the t=0 value).
+        # The second head emits the full latent_dim for gaussian, or a single
+        # per-sample scalar [B, 1] for hypersphere (radius logvar) and vmf
+        # (concentration kappa, via softplus so it stays strictly positive).
+        # The same kappa tensor feeds both VMFSampling and vmf_kl_divergence.
         if self.sampling_type == "vmf":
-            # DECISION plan_2026-06-04_6196678d/D-007: higher init kappa (~12) +
-            # zeros kernel breaks the posterior-collapse trap (z informative from
-            # step 0); see decisions.md D-006/D-007. Do NOT revert to
-            # bias="zeros" (softplus(0)~=0.69 -> uniform latent -> decoder
-            # ignores z -> kappa driven to 0 -> recon stalls at the data mean).
+            # DECISION plan_2026-06-04_6196678d/D-007: bias=12.0 + zeros kernel so
+            # kappa starts informative (~12), not at softplus(0)~=0.69 which drives
+            # posterior collapse (decoder ignores z, kappa -> 0). See decisions.md.
             kappa_raw = layers.Dense(
                 units=1,
                 use_bias=self.use_bias,
@@ -509,9 +488,7 @@ class VAE(keras.Model):
                 kernel_regularizer=self.kernel_regularizer,
                 name="encoder_kappa",
             )(x)
-            # Softplus -> strictly positive concentration kappa[B, 1]. This is the
-            # value carried in the "z_log_var" output-dict slot for vmf (it is the
-            # concentration kappa, NOT a log-variance; see get_config / I7).
+            # Softplus keeps kappa strictly positive; carried in the z_log_var slot.
             z_log_var = layers.Activation(
                 "softplus", name="encoder_kappa_softplus"
             )(kappa_raw)
@@ -524,13 +501,12 @@ class VAE(keras.Model):
             else "encoder_z_log_var"
         )
 
+        # Bias starts at -2.0 so the initial variance is small.
         z_log_var = layers.Dense(
             units=log_var_units,
             use_bias=self.use_bias,
             kernel_initializer=keras.initializers.RandomNormal(mean=0.0, stddev=0.01),
-            bias_initializer=keras.initializers.Constant(
-                -2.0
-            ),  # Initialize to small variance
+            bias_initializer=keras.initializers.Constant(-2.0),
             kernel_regularizer=self.kernel_regularizer,
             name=log_var_name,
         )(x)
@@ -540,15 +516,7 @@ class VAE(keras.Model):
     def _build_encoder_stage(
         self, x: keras.KerasTensor, stage_idx: int
     ) -> keras.KerasTensor:
-        """Build a single encoder stage with downsampling and residual blocks.
-
-        Args:
-            x: Input tensor
-            stage_idx: Index of the stage
-
-        Returns:
-            Output tensor from the stage
-        """
+        """Build a single encoder stage: downsample, then residual blocks."""
         num_filters = self.filters[stage_idx]
 
         # Downsampling layer
@@ -582,16 +550,7 @@ class VAE(keras.Model):
     def _build_residual_block(
         self, x: keras.KerasTensor, filters: int, prefix: str
     ) -> keras.KerasTensor:
-        """Build a residual block.
-
-        Args:
-            x: Input tensor
-            filters: Number of filters
-            prefix: Name prefix for layers
-
-        Returns:
-            Output tensor with residual connection
-        """
+        """Build one conv-conv residual block with a skip connection."""
         residual = x
 
         # First convolution
@@ -639,15 +598,8 @@ class VAE(keras.Model):
         return x
 
     def _build_decoder(self, z: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the decoder network with ResNet blocks.
-
-        Args:
-            z: Latent tensor
-
-        Returns:
-            Reconstructed image tensor
-        """
-        # Calculate feature map size after all downsampling
+        """Build the decoder network with ResNet blocks."""
+        # Feature map size after all downsampling.
         height, width, channels = self._input_shape
         feature_height = height // (2**self.depths)
         feature_width = width // (2**self.depths)
@@ -703,15 +655,7 @@ class VAE(keras.Model):
     def _build_decoder_stage(
         self, x: keras.KerasTensor, stage_idx: int
     ) -> keras.KerasTensor:
-        """Build a single decoder stage with upsampling and residual blocks.
-
-        Args:
-            x: Input tensor
-            stage_idx: Index of the stage
-
-        Returns:
-            Output tensor from the stage
-        """
+        """Build a single decoder stage: upsample, then residual blocks."""
         num_filters = self.filters[stage_idx]
 
         # Upsampling layer
@@ -757,25 +701,23 @@ class VAE(keras.Model):
     ) -> "VAE":
         """Create a VAE model from a predefined variant.
 
-        Args:
-            variant: String, one of "micro", "small", "medium", "large", "xlarge"
-            input_shape: Tuple, input image shape (H, W, C)
-            latent_dim: Integer, latent dimension. If None, uses variant default
-            **kwargs: Additional arguments passed to the constructor
+        :param variant: One of ``"micro"``, ``"small"``, ``"medium"``, ``"large"``,
+            ``"xlarge"``.
+        :type variant: str
+        :param input_shape: Input image shape ``(H, W, C)``.
+        :type input_shape: Tuple[int, int, int]
+        :param latent_dim: Latent dimension. Uses the variant default if ``None``.
+        :type latent_dim: Optional[int]
+        :param kwargs: Overrides passed to the constructor.
+        :return: A configured model.
+        :rtype: VAE
+        :raises ValueError: If ``variant`` is not recognized.
 
-        Returns:
-            VAE model instance
+        :Example:
 
-        Raises:
-            ValueError: If variant is not recognized
-
-        Example:
-            >>> # MNIST VAE
-            >>> model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
-            >>> # CIFAR-10 VAE
-            >>> model = VAE.from_variant("medium", input_shape=(32, 32, 3), latent_dim=128)
-            >>> # High-resolution VAE
-            >>> model = VAE.from_variant("large", input_shape=(128, 128, 3))
+        >>> model = VAE.from_variant("small", input_shape=(28, 28, 1), latent_dim=64)
+        >>> model = VAE.from_variant("medium", input_shape=(32, 32, 3), latent_dim=128)
+        >>> model = VAE.from_variant("large", input_shape=(128, 128, 3))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -792,16 +734,9 @@ class VAE(keras.Model):
         logger.info(f"Creating VAE-{variant.upper()} model")
         logger.info(f"Input shape: {input_shape}, Latent dim: {latent_dim}")
 
-        # Let an explicit caller-supplied kl_loss_weight (e.g. train_vae's
-        # --kl-loss-weight for the vMF beta-sweep) override the variant default;
-        # otherwise fall back to the variant's configured weight.
-        # Variant values are DEFAULTS — an explicit caller kwarg (e.g. train_vae's
-        # --depths / --steps-per-depth / --filters) overrides them. depths and
-        # filters must stay consistent (filters length == depths), so they move
-        # together: fall back to the variant pair only when the caller overrides
-        # NEITHER. If the caller passes depths alone, the constructor
-        # auto-generates filters = [32*2**i for i in range(depths)]; if filters
-        # alone, depths is derived from its length. (DECISION plan_2026-06-05_56b39171/D-004)
+        # DECISION plan_2026-06-05_56b39171/D-004: depths and filters move together
+        # since filters length must equal depths; fall back to the variant pair only
+        # when the caller overrides neither. See decisions.md.
         kwargs.setdefault("kl_loss_weight", config["kl_loss_weight"])
         kwargs.setdefault("steps_per_depth", config["steps_per_depth"])
         if "depths" not in kwargs and "filters" not in kwargs:
@@ -830,8 +765,8 @@ class VAE(keras.Model):
         `kl_loss_weight` is a different regularization strength at a different
         input resolution.
 
-        Returns:
-            `kl_loss_weight * prod(input_shape)`.
+        :return: ``kl_loss_weight * prod(input_shape)``.
+        :rtype: float
         """
         pixels = 1
         for dim in self._input_shape:
@@ -852,11 +787,10 @@ class VAE(keras.Model):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Encode inputs to latent parameters.
 
-        Args:
-            inputs: Input tensor to encode
-
-        Returns:
-            Tuple of (z_mean, z_log_var) tensors
+        :param inputs: Input tensor to encode.
+        :type inputs: keras.KerasTensor
+        :return: ``(z_mean, z_log_var)`` tensors.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         outputs = self(inputs, training=False)
         return outputs["z_mean"], outputs["z_log_var"]
@@ -864,28 +798,24 @@ class VAE(keras.Model):
     def decode(self, z: keras.KerasTensor) -> keras.KerasTensor:
         """Decode latent samples to reconstructions.
 
-        Args:
-            z: Latent tensor to decode
-
-        Returns:
-            Reconstructed tensor
+        :param z: Latent tensor to decode.
+        :type z: keras.KerasTensor
+        :return: Reconstructed tensor.
+        :rtype: keras.KerasTensor
         """
         return self.decoder(z)
 
     def _sample_prior(self, num_samples: int) -> keras.KerasTensor:
-        """Draw latent samples from this mode's TRUE prior.
+        """Draw latent samples from this mode's true prior.
 
-        Args:
-            num_samples: Number of latent vectors to draw
-
-        Returns:
-            Latent tensor of shape ``(num_samples, latent_dim)``
+        :param num_samples: Number of latent vectors to draw.
+        :type num_samples: int
+        :return: Latent tensor of shape ``(num_samples, latent_dim)``.
+        :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-06-04_7ff8ea8b/D-001: hypersphere modes were trained
-        # with a uniform-on-sphere latent of the layer radius, so their prior is
-        # NOT N(0, I). Drawing N(0, I) here (the old behavior) decodes the wrong
-        # prior and makes the contribution look broken. Branch on sampling_type:
-        # gaussian -> N(0, I); hypersphere_* -> Marsaglia uniform-on-sphere * radius.
+        # DECISION plan_2026-06-04_7ff8ea8b/D-001: hypersphere modes train on a
+        # uniform-on-sphere latent, not N(0, I) -- drawing N(0, I) here decodes
+        # the wrong prior. Branch on sampling_type. See decisions.md.
         if self.sampling_type == "gaussian":
             return keras.random.normal(shape=(num_samples, self.latent_dim))
 
@@ -914,26 +844,23 @@ class VAE(keras.Model):
     def sample(self, num_samples: int) -> keras.KerasTensor:
         """Generate samples from the latent space.
 
-        Decodes latents drawn from this mode's TRUE prior (N(0, I) for gaussian,
-        uniform-on-sphere of the layer radius for hypersphere modes).
+        Decodes latents drawn from this mode's true prior: ``N(0, I)`` for
+        gaussian, uniform-on-sphere of the layer radius for the hypersphere modes.
 
-        Args:
-            num_samples: Number of samples to generate
-
-        Returns:
-            Generated samples tensor
+        :param num_samples: Number of samples to generate.
+        :type num_samples: int
+        :return: Generated samples tensor.
+        :rtype: keras.KerasTensor
         """
         z = self._sample_prior(num_samples)
         return self.decode(z)
 
     def train_step(self, data) -> Dict[str, keras.KerasTensor]:
-        """Custom training step with VAE losses.
+        """Run one training step, computing reconstruction and KL losses.
 
-        Args:
-            data: Training data (can be tuple or single tensor)
-
-        Returns:
-            Dictionary of loss values
+        :param data: Training data, a tuple or a single tensor.
+        :return: Dict of ``total_loss``, ``reconstruction_loss``, ``kl_loss``.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different data formats
         if isinstance(data, tuple):
@@ -967,46 +894,24 @@ class VAE(keras.Model):
             # ctor kl_loss_weight unless a warmup callback is ramping it).
             total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
-            # Add regularization losses
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # `add_loss` terms carry `compute_dtype` (float16 under
-            # `mixed_float16`) while the running total is float32. Cast the
-            # AUX SUM UP; never reduce the objective in half precision.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: add_loss terms carry
+            # compute_dtype (float16 under mixed_float16); cast the sum up before
+            # adding to the float32 running total. See decisions.md.
             if self.losses:
                 total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
-            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
-            # `tape.gradient` differentiates; the UNSCALED loss stays what is
-            # reported. Do NOT "simplify" this back to a gradient of the unscaled
-            # loss: under `mixed_float16` Keras wraps the optimizer in a
-            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
-            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
-            # divides the WHOLE weight update by the loss scale, with no warning of
-            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
-            # returns its argument unless `loss_scale_factor` is set. MEASURED here
-            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
-            # BEFORE f32 9.680747e+01 vs fp16 1.549095e-03, ratio 6.249e+04.
-            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
-            # (D-036).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089: scale_loss must run
+            # inside the tape and the scaled value is what tape.gradient differentiates
+            # -- under mixed_float16 the LossScaleOptimizer divides every gradient by
+            # the loss scale regardless, so skipping this shrinks the whole update. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(total_loss)
 
         # Compute and clip gradients
         trainable_weights = self.trainable_weights
         gradients = tape.gradient(scaled_loss, trainable_weights)
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-089
-        # The elementwise clip must be expressed IN THE SCALED DOMAIN, because
-        # `gradients` above are gradients of the SCALED loss and the optimizer
-        # divides them by the same factor afterwards. Do NOT write a bare
-        # `ops.clip(grad, -1.0, 1.0)` here: with a `LossScaleOptimizer` in play
-        # that saturates EVERY gradient component at 1.0 and the subsequent
-        # unscale turns the whole update into lr/32768 -- MEASURED, the
-        # per-element |dW| collapsed to exactly 3.051758e-06 == 0.1 * 2**-15 and
-        # the fp16/float32 ratio read 64.8 with the `scale_loss` call already
-        # in place. `Optimizer.scale_loss(1.0)` returns the CURRENT loss scale,
-        # and returns exactly 1.0 for a plain optimizer, so this restores the
-        # documented "clip the true gradient at 1.0" semantics in both regimes
-        # using only the same public API the scaling itself uses.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-089: the clip limit must be in
+        # the SCALED domain (optimizer.scale_loss(1.0), not a bare 1.0) since these
+        # gradients are of the scaled loss and get unscaled afterwards. See decisions.md.
         clip_limit = self.optimizer.scale_loss(1.0)
         gradients = [
             ops.clip(grad, -clip_limit, clip_limit) if grad is not None else None
@@ -1028,13 +933,11 @@ class VAE(keras.Model):
         }
 
     def test_step(self, data) -> Dict[str, keras.KerasTensor]:
-        """Custom test step with VAE losses.
+        """Run one evaluation step, computing reconstruction and KL losses.
 
-        Args:
-            data: Test data (can be tuple or single tensor)
-
-        Returns:
-            Dictionary of loss values
+        :param data: Test data, a tuple or a single tensor.
+        :return: Dict of ``total_loss``, ``reconstruction_loss``, ``kl_loss``.
+        :rtype: Dict[str, keras.KerasTensor]
         """
         # Handle different data formats
         if isinstance(data, tuple):
@@ -1051,8 +954,8 @@ class VAE(keras.Model):
         kl_loss = self._compute_kl_loss(outputs["z_mean"], outputs["z_log_var"])
         total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
-        # Add regularization losses
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `train_step`).
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast add_loss terms up
+        # to float32 before summing. See `train_step` and decisions.md.
         if self.losses:
             total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
 
@@ -1072,12 +975,12 @@ class VAE(keras.Model):
     ) -> keras.KerasTensor:
         """Compute reconstruction loss with numerical stability.
 
-        Args:
-            y_true: True values
-            y_pred: Predicted values
-
-        Returns:
-            Reconstruction loss value
+        :param y_true: True values.
+        :type y_true: keras.KerasTensor
+        :param y_pred: Predicted values.
+        :type y_pred: keras.KerasTensor
+        :return: Reconstruction loss value.
+        :rtype: keras.KerasTensor
         """
         # Ensure shapes match
         if y_true.shape != y_pred.shape:
@@ -1085,15 +988,9 @@ class VAE(keras.Model):
                 f"Shape mismatch: y_true {y_true.shape}, y_pred {y_pred.shape}"
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # float32 is a NUMERICS requirement here, not plumbing. The clip below
-        # is the module's stated defence against `log(0)`, and in float16 it
-        # DOES NOT WORK in either direction: `1e-7` is far below the smallest
-        # normal float16 (6.10e-5) and `1.0 - 1e-7` rounds to exactly `1.0`, so
-        # the upper clamp is a no-op and `binary_crossentropy` reaches
-        # `log(0) = -inf`. Casting also removes the
-        # `AddV2 float16 vs float32` raise at `train_step`'s
-        # `reconstruction_loss + self.kl_weight * kl_loss` (step 5.8).
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: float32 is required here,
+        # not plumbing -- the 1e-7 clip below is a no-op in float16 (below its
+        # smallest normal), so log(0) reaches -inf without this cast. See decisions.md.
         y_true = ops.cast(y_true, "float32")
         y_pred = ops.cast(y_pred, "float32")
 
@@ -1104,25 +1001,9 @@ class VAE(keras.Model):
         # Clip predictions to avoid log(0)
         y_pred_clipped = ops.clip(y_pred_flat, 1e-7, 1.0 - 1e-7)
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-028: this reduction is a MEAN
-        # over pixels while `_compute_kl_loss`'s gaussian branch SUMS over latents,
-        # so `kl_loss_weight` is `beta / prod(input_shape)`, not `beta`. That is
-        # KNOWN and MEASURED (micro/small 7.84, medium/large 3.92, xlarge 0.784 at
-        # 28x28x1; 30.72 / 15.36 / 3.072 at 32x32x3 -- 3.92x from resolution alone),
-        # and it is deliberately LEFT AS IS rather than switched to a sum. Do not
-        # "fix" it in passing. Switching to a sum multiplies the whole objective by
-        # `prod(input_shape)` (784-3072x) and changes what every shipped
-        # `MODEL_VARIANTS` weight and every saved config MEANS; keeping the mean but
-        # dividing the KL by the pixel count needs new per-variant defaults, and no
-        # resolution-independent default can reproduce today's behaviour at more
-        # than one resolution -- the two goals are mutually exclusive. Choosing a
-        # re-tuned target requires training runs this repair could not do. What IS
-        # fixed is the confusion: `effective_kl_beta` computes the real beta,
-        # `summary()` logs it, the module docstring states the convention, and
-        # `TestVAEEffectiveBeta` pins the arithmetic so a silent change is caught.
-        # See decisions.md D-028.
-        #
-        # Binary crossentropy for better numerical stability
+        # DECISION plan-2026-08-18T140459-7991552f/D-028: this mean-over-pixels
+        # reduction stays as is even though it makes kl_loss_weight != beta (a
+        # switch to sum would rescale every shipped variant's meaning; see effective_kl_beta). See decisions.md.
         reconstruction_loss = ops.mean(
             keras.losses.binary_crossentropy(y_true_flat, y_pred_clipped)
         )
@@ -1134,41 +1015,26 @@ class VAE(keras.Model):
     ) -> keras.KerasTensor:
         """Compute KL divergence loss with numerical stability.
 
-        Args:
-            z_mean: Mean of latent distribution
-            z_log_var: Log variance of latent distribution
+        The formula depends on ``sampling_type``: a vmf closed-form divergence,
+        a 1-D radius KL for hypersphere, or the standard diagonal-Gaussian KL.
 
-        Returns:
-            KL divergence loss value
+        :param z_mean: Mean of the latent distribution.
+        :type z_mean: keras.KerasTensor
+        :param z_log_var: Log-variance, radius log-variance, or kappa depending
+            on ``sampling_type``.
+        :type z_log_var: keras.KerasTensor
+        :return: KL divergence loss value.
+        :rtype: keras.KerasTensor
         """
-        # DECISION plan_2026-06-04_d4ef81f1/D-003: for hypersphere the Gaussian KL
-        # is the WRONG prior for a sphere. It is REPLACED by a simplified
-        # radius-variance KL (the 1-D Gaussian-Gaussian KL on the radius noise):
-        # kl = mean(0.5 * (exp(rlv) - rlv - 1)). There is NO direction-KL term
-        # (the direction has an implicit uniform-sphere prior; the radius mean is
-        # fixed at 1.0 by the sampler). Do NOT "restore" the Gaussian KL here and
-        # do NOT derive a full vMF S-VAE KL: this simplified regularizer is
-        # user-locked scope and is float32-stable under [-20, 20] clipping. See
-        # decisions.md D-003.
-        # DECISION plan_2026-06-04_6196678d/D-003: vMF closed-form KL (depends on
-        # kappa + latent_dim only); reuses the verified vmf_kl_divergence helper.
-        # z_log_var carries the strictly-positive concentration kappa[B, 1] (NOT a
-        # log-variance) -- do NOT clip/exp it or substitute the Gaussian/radius KL;
-        # vmf_kl_divergence is the orchestrator-verified analytic vMF->uniform KL
-        # (per-row >= 0). See decisions.md D-003.
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-        # The whole KL runs in float32 regardless of `compute_dtype`, and that
-        # is a NUMERICS requirement, not plumbing tidiness. Every branch below
-        # clips its log-variance to [-20, 20] and then exponentiates:
-        # `exp(20) == 4.85e8`, which is finite in float32 and **+inf in
-        # float16** (max 65504). Under `mixed_float16` the inputs arrive as
-        # float16, so without this cast the clip's own stated safety margin is
-        # a lie and the KL can silently become `inf`/`nan`. It also removes the
-        # `AddV2 float32 vs float16` raise at `train_step`'s
-        # `reconstruction_loss + self.kl_weight * kl_loss` (the
-        # `binary_crossentropy` reconstruction term is already float32), which
-        # is what made every VAE unrunnable under mixed precision (step 5.8).
-        # Do NOT instead cast the reconstruction term DOWN to float16.
+        # DECISION plan_2026-06-04_d4ef81f1/D-003: hypersphere replaces the Gaussian
+        # KL with a 1-D radius KL and no direction term (implicit uniform-sphere
+        # prior). Do not restore the Gaussian KL or derive a full vMF S-VAE KL. See decisions.md.
+        # DECISION plan_2026-06-04_6196678d/D-003: vmf uses the closed-form
+        # vmf_kl_divergence helper on kappa + latent_dim. Do not clip/exp z_log_var
+        # here or substitute the Gaussian/radius KL. See decisions.md.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-011: the whole KL runs in float32
+        # regardless of compute_dtype -- exp(20) is +inf in float16 (max 65504), so
+        # without this cast the clip below's safety margin is a lie. See decisions.md.
         z_mean = ops.cast(z_mean, "float32")
         z_log_var = ops.cast(z_log_var, "float32")
 
@@ -1199,8 +1065,8 @@ class VAE(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization.
 
-        Returns:
-            Configuration dictionary
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -1227,11 +1093,10 @@ class VAE(keras.Model):
     def from_config(cls, config: Dict[str, Any]) -> "VAE":
         """Create model from configuration.
 
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            VAE model instance
+        :param config: Configuration dictionary.
+        :type config: Dict[str, Any]
+        :return: A new model instance.
+        :rtype: VAE
         """
         # Deserialize complex objects
         if config.get("kernel_initializer"):
@@ -1279,33 +1144,30 @@ def create_vae(
     learning_rate: float = 0.001,
     **kwargs,
 ) -> VAE:
-    """Convenience function to create and compile VAE models.
+    """Create and compile a VAE model.
 
-    Args:
-        input_shape: Tuple representing (height, width, channels) of input
-        latent_dim: Integer, dimensionality of the latent space
-        variant: String, model variant ("micro", "small", "medium", "large", "xlarge")
-        optimizer: String name or optimizer instance. Default is "adam"
-        learning_rate: Float, learning rate for optimizer. Default is 0.001
-        **kwargs: Additional arguments passed to the model constructor
+    :param input_shape: Input shape ``(height, width, channels)``.
+    :type input_shape: Tuple[int, int, int]
+    :param latent_dim: Dimensionality of the latent space.
+    :type latent_dim: int
+    :param variant: One of ``"micro"``, ``"small"``, ``"medium"``, ``"large"``,
+        ``"xlarge"``.
+    :type variant: str
+    :param optimizer: Optimizer name or instance.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate applied to the optimizer.
+    :type learning_rate: float
+    :param kwargs: Forwarded to the model constructor.
+    :return: A compiled model, ready for training.
+    :rtype: VAE
 
-    Returns:
-        Compiled VAE model ready for training
+    :Example:
 
-    Example:
-        >>> # MNIST VAE
-        >>> model = create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small")
-        >>>
-        >>> # CIFAR-10 VAE
-        >>> model = create_vae(input_shape=(32, 32, 3), latent_dim=128, variant="medium")
-        >>>
-        >>> # Custom learning rate
-        >>> model = create_vae(
-        ...     input_shape=(64, 64, 3),
-        ...     latent_dim=256,
-        ...     variant="large",
-        ...     learning_rate=0.0005
-        ... )
+    >>> model = create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small")
+    >>> model = create_vae(input_shape=(32, 32, 3), latent_dim=128, variant="medium")
+    >>> model = create_vae(
+    ...     input_shape=(64, 64, 3), latent_dim=256, variant="large", learning_rate=0.0005
+    ... )
     """
     # Create the model
     model = VAE.from_variant(
@@ -1320,32 +1182,14 @@ def create_vae(
     else:
         optimizer_instance = optimizer
 
-    # DECISION plan_2026-06-04_6196678d/D-005: disable XLA jit for the vmf
-    # sampler. VMFSampling uses keras.random.beta, which lowers to
-    # StatelessRandomGammaV3 -- an op with NO XLA_GPU_JIT kernel in TF 2.18
-    # (tf2xla conversion fails under the GPU multi_step_on_iterator path). Do
-    # NOT try to make the Wood/Ulrich rejection sampler XLA-clean or globally
-    # force jit_compile=False (gaussian/hypersphere keep XLA). See decisions.md D-005.
+    # DECISION plan_2026-06-04_6196678d/D-005: disable XLA jit for vmf. Its sampler
+    # lowers to an op with no XLA_GPU_JIT kernel in TF 2.18; gaussian/hypersphere keep XLA. See decisions.md.
     jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
     model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
 
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does NOT
-    # self-test. It used to run `keras.random.uniform((2,) + input_shape)`
-    # through the model and `assert` on three output shapes. Three reasons that
-    # was wrong, and do NOT restore it:
-    #   1. `assert` is stripped by `python -O`, so the "validation" was already
-    #      absent in exactly the deployment that most needs it.
-    #   2. It ran a full forward pass on every construction -- cost paid by
-    #      every caller, including the ones that only want the compiled shell.
-    #      (It ALSO drew from the global seed stream via `keras.random.uniform`,
-    #      but do not reach for that as the test: weight initialization draws
-    #      from the same stream, so a seed-stream comparison cannot isolate the
-    #      factory's own draw. That confound killed the first version of the
-    #      test below; the shipped one counts `VAE.call` invocations instead.)
-    #   3. It is a test. It now lives in
-    #      `tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes`,
-    #      where it runs over all three sampling types instead of whichever one
-    #      the caller happened to ask for.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does not
+    # self-test with a forward pass on every construction. The check now lives in
+    # tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes. See decisions.md.
     logger.info(f"Created VAE-{variant.upper()} for input shape {input_shape}")
     logger.info(f"Latent dim: {latent_dim}, Parameters: {model.count_params():,}")
 
@@ -1357,25 +1201,27 @@ def create_vae_from_config(
     optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
     learning_rate: float = 0.001,
 ) -> VAE:
-    """Create VAE from configuration dictionary.
+    """Create a VAE from a configuration dictionary.
 
-    Args:
-        config: Configuration dictionary containing VAE parameters
-        optimizer: String name or optimizer instance
-        learning_rate: Float, learning rate for optimizer
+    :param config: Configuration dictionary of VAE constructor arguments.
+    :type config: Dict[str, Any]
+    :param optimizer: Optimizer name or instance.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate applied to the optimizer.
+    :type learning_rate: float
+    :return: A compiled model.
+    :rtype: VAE
 
-    Returns:
-        Compiled VAE model
+    :Example:
 
-    Example:
-        >>> config = {
-        ...     "latent_dim": 128,
-        ...     "input_shape": (64, 64, 3),
-        ...     "depths": 3,
-        ...     "filters": [32, 64, 128],
-        ...     "kl_loss_weight": 0.01
-        ... }
-        >>> model = create_vae_from_config(config)
+    >>> config = {
+    ...     "latent_dim": 128,
+    ...     "input_shape": (64, 64, 3),
+    ...     "depths": 3,
+    ...     "filters": [32, 64, 128],
+    ...     "kl_loss_weight": 0.01,
+    ... }
+    >>> model = create_vae_from_config(config)
     """
     # Create the model
     model = VAE(**config)

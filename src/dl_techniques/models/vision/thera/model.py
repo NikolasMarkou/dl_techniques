@@ -1,52 +1,23 @@
-# DECISION plan_2026-06-11_f662207d/D-009
-# The Thera model is a PURE RESIDUAL-FIELD predictor. Several choices are
-# deliberate and must NOT be "simplified" / "completed":
-#
-#  1. The model outputs the RAW heat-field residual `(B, Hq, Wq, out_dim)`. The
-#     MEAN/VAR denormalization and the `+ source_nearest` residual add live in
-#     the TRAINER (run_train.py / step 11), NOT here. Do NOT add denorm or the
-#     nearest-neighbour add inside `call`: the trainer owns the data statistics
-#     and the upsampled-source term, and baking them in would double-apply them.
-#  2. `from_variant` enumerates SIX real architectural configs
-#     (backbone {edsr-baseline, rdn} x tail {air, plus, pro}). This is genuine
-#     taxonomy (INV-8), not a cosmetic alias table: each pair is a distinct
-#     network. Do NOT collapse it to a single config with flags.
-#  3. backbone + tail are serialized via `keras.saving.serialize_keras_object`
-#     inside `get_config` (and rebuilt via `deserialize_keras_object` in
-#     `from_config`). Do NOT store only their string keys: a caller may pass a
-#     custom backbone/tail instance to the ctor that no key would reconstruct.
-#  4. backbone, tail, hypernetwork are FLAT attributes (no nested lists). Nested
-#     layer lists silently fail to restore their weights through `.keras` reload
-#     (LESSONS iter-1) -- the per-weight round-trip in the test is the oracle.
-#
-# See decisions.md D-009.
-"""THERA model: backbone -> tail -> hypernetwork heat-field decoder.
+# DECISION plan_2026-06-11_f662207d/D-009: the model outputs the raw heat-field
+# residual only; denormalization and the source-nearest add belong to the trainer,
+# and backbone/tail/hypernetwork stay flat attributes for .keras reload. See decisions.md.
+"""THERA model: backbone, tail, hypernetwork heat-field decoder.
 
-This module assembles the THERA (Aliasing-Free Arbitrary-Scale Super-Resolution
-with Neural Heat Fields) model from the step 4-7 components into a single
-:class:`keras.Model`, plus a :func:`build_thera` factory and the six-config
-:meth:`Thera.from_variant` taxonomy.
+`Thera` assembles a feature backbone, an optional refiner tail, and
+`TheraHypernetwork` into one `keras.Model`, plus a `build_thera` factory and
+the six-config `Thera.from_variant` taxonomy (`{edsr-baseline, rdn}` backbone
+times `{air, plus, pro}` tail). The backbone extracts features at the input
+resolution; the tail optionally refines them; the hypernetwork evaluates a
+per-pixel neural heat field at arbitrary query coordinates, so one trained
+model decodes any target resolution.
 
-Pipeline (reference ``model/thera.py`` ``apply`` = ``apply_encoder`` then
-``apply_decoder``)::
+The model returns the raw residual field `(B, Hq, Wq, out_dim)`. Mean/variance
+denormalization and the nearest-neighbour source add happen in the trainer,
+not in this model.
 
-    encoding = tail(backbone(source))                 # apply_encoder
-    field    = hypernetwork.decode(encoding, coords, t)  # apply_decoder
-
-The ``backbone`` is an EDSR-baseline or RDN feature extractor (spatial-shape
-preserving, no upsampling); the ``tail`` optionally refines those features
-(identity / ConvNeXt / SwinIR); the :class:`TheraHypernetwork` turns the
-encoding, at each query coordinate, into a per-pixel neural heat field and
-evaluates it. Arbitrary-scale super-resolution falls out of the continuous
-``coords`` grid: the SAME trained model decodes any query resolution.
-
-The model output is the RAW residual field ``(B, Hq, Wq, out_dim)`` (see the
-D-009 anchor): the MEAN/VAR denormalization and the ``+ source_nearest``
-residual add are performed by the TRAINER, not the model.
-
-Reference:
-    Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
-    Neural Heat Fields" (original JAX/Flax ``model/thera.py``).
+References:
+    - Becker et al. Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
+      Neural Heat Fields.
 """
 
 import keras
@@ -83,66 +54,63 @@ _VALID_SIZES: Tuple[str, ...] = ("air", "plus", "pro")
 
 @register_dl_technique("dl_techniques.models.thera.model")
 class Thera(keras.Model):
-    """THERA arbitrary-scale super-resolution model (pure residual-field predictor).
+    """THERA arbitrary-scale super-resolution model.
 
-    Assembles a feature ``backbone`` (EDSR-baseline or RDN), an optional feature
-    ``tail`` (air / plus / pro), and a :class:`TheraHypernetwork` neural-heat-field
-    decoder. The model is called on a 3-tuple ``(source, coords, t)`` and returns
-    the raw heat-field residual at the query coordinates.
+    Assembles a feature `backbone` (EDSR-baseline or RDN), an optional feature
+    `tail` (air / plus / pro), and a :class:`TheraHypernetwork` decoder. The
+    model is called on a 3-tuple `(source, coords, t)` and returns the raw
+    heat-field residual at the query coordinates; the trainer performs
+    denormalization and adds the nearest-neighbour upsampled source.
 
-    Output is the RAW residual field (see the module D-009 anchor): the trainer
-    performs MEAN/VAR denormalization and adds the nearest-neighbour upsampled
-    source -- the model does NOT.
+    Architecture:
 
-    **Intent**: Provide a single ``keras.Model`` that performs aliasing-free
-    arbitrary-scale super-resolution by predicting a continuous neural heat
-    field. A LOW-resolution ``source`` is encoded once; the field is then sampled
-    at an arbitrary query grid ``coords`` (any ``Hq x Wq``), so one trained model
-    upscales to any target resolution. The model emits ONLY the raw residual
-    field; denormalization and the nearest-neighbour add belong to the trainer.
+    .. code-block:: text
 
-    **Architecture**::
+        source [B, Hs, Ws, 3]
+        │
+        ┌─────▼─────┐
+        │ backbone    │  EDSR-baseline | RDN, shape-preserving
+        └─────┬─────┘
+              ▼
+        ┌─────────────┐
+        │ tail          │  air: identity | plus: ConvNeXt | pro: SwinIR
+        └─────┬───────┘
+              ▼
+        encoding                    coords [B, Hq, Wq, 2]    t [B, 1]
+              │                              │                    │
+              └──────────────┬───────────────┴────────────────────┘
+                              ▼
+                    ┌───────────────────┐
+                    │ hypernetwork.decode │
+                    └─────────┬─────────┘
+                               ▼
+              raw residual field [B, Hq, Wq, out_dim]
 
-        source (B,Hs,Ws,3)
-              |
-              v
-        backbone  (EDSR-baseline | RDN, spatial-shape preserving)
-              |
-              v
-        tail = encoding  (air: identity | plus: ConvNeXt | pro: SwinIR)
-              |
-              v
-        hypernetwork.decode(encoding, coords, t)   # query at coords, time t
-              |
-              v
-        raw residual field (B,Hq,Wq,out_dim)
-
-    Args:
-        hidden_dim: Heat-field hidden width ``N`` (frequency-component count).
-            ``32`` for the THERA "air" size, ``512`` otherwise. Must be positive.
-        out_dim: Output channel count (e.g. 3 for an RGB residual). Defaults to 3.
-        backbone: A built-or-buildable feature-backbone LAYER instance
-            (:class:`EDSRBackbone` or :class:`RDNBackbone`), shape-preserving
-            ``(B, H, W, C_in) -> (B, H, W, C_feat)``.
-        tail: A feature-refiner tail LAYER instance (air / plus / pro) consuming
-            and (spatially) preserving the backbone features. If you pass a
-            manually-built ``plus`` tail (:class:`TheraTailPlus`) and your
-            backbone does not emit 64 channels, construct it as
-            ``build_thera_tail('plus', in_channels=<backbone_out>)`` so the
-            leading 1x1 projection is created -- otherwise its ``build()`` raises
-            ``ValueError`` (see :class:`TheraTailPlus` for the in_channels
-            contract).
-        k_init: Initial heat-conductivity scalar ``k`` forwarded to the
-            hypernetwork. Defaults to the THERA reference
-            ``sqrt(log 4) / (2*pi^2)`` when ``None``.
-        components_init_scale: Frequency-disk scale forwarded to the heat-field
-            ``components`` init. Defaults to ``16.0`` when ``None``.
-        **kwargs: Forwarded to :class:`keras.Model`.
+    :param hidden_dim: Heat-field hidden width, the frequency-component count.
+        `32` for the `air` size, `512` otherwise. Must be positive.
+    :type hidden_dim: int
+    :param out_dim: Output channel count, e.g. 3 for an RGB residual.
+    :type out_dim: int
+    :param backbone: A built-or-buildable feature-backbone layer instance
+        (:class:`EDSRBackbone` or :class:`RDNBackbone`), shape-preserving.
+    :type backbone: keras.layers.Layer
+    :param tail: A feature-refiner tail layer instance (air / plus / pro). A
+        manually built `plus` tail for a backbone that does not emit 64
+        channels needs `build_thera_tail('plus', in_channels=<backbone_out>)`,
+        or its `build()` raises `ValueError`.
+    :type tail: keras.layers.Layer
+    :param k_init: Initial heat-conductivity scalar forwarded to the
+        hypernetwork. Uses the THERA reference default when `None`.
+    :type k_init: Optional[float]
+    :param components_init_scale: Frequency-disk scale forwarded to the
+        heat-field `components` init. Defaults to `16.0` when `None`.
+    :type components_init_scale: Optional[float]
+    :param kwargs: Forwarded to :class:`keras.Model`.
 
     Input:
         A 3-tuple ``(source, coords, t)``:
             - ``source``: ``(B, Hs, Ws, C_in)`` low-resolution image.
-            - ``coords``: ``(B, Hq, Wq, 2)`` query coordinates (THERA pixel-center
+            - ``coords``: ``(B, Hq, Wq, 2)`` query coordinates (pixel-center
               convention, channel order ``[h, w]``).
             - ``t``: heat-diffusion time, broadcastable to ``(B, 1)``.
 
@@ -210,12 +178,10 @@ class Thera(keras.Model):
         )
 
     def build(self, input_shape: Any) -> None:
-        # Keras-3 four-strike build-ordering (CRITICAL for the SC-8 .keras
-        # round-trip): explicitly build every sublayer with the correctly
-        # propagated shape BEFORE super().build(), so a reload restores all
-        # weights and no unbuilt-sublayer warning fires (LESSONS.md).
-        #
-        # input_shape is the 3-input list [source_shape, coords_shape, t_shape].
+        """Build every sublayer explicitly before `super().build()`.
+
+        :param input_shape: The 3-input list `[source_shape, coords_shape, t_shape]`.
+        """
         source_shape, coords_shape, t_shape = (
             input_shape[0],
             input_shape[1],
@@ -246,14 +212,12 @@ class Thera(keras.Model):
         source: Any,
         training: Optional[bool] = None,
     ) -> Any:
-        """THERA ``apply_encoder``: ``tail(backbone(source))`` -> encoding.
+        """Run `tail(backbone(source))` to produce the encoding.
 
-        Args:
-            source: Low-resolution input image ``(B, Hs, Ws, C_in)``.
-            training: Forwarded to the backbone and tail.
-
-        Returns:
-            Encoding feature map ``(B, Hs, Ws, C_feat)``.
+        :param source: Low-resolution input image, shape `(B, Hs, Ws, C_in)`.
+        :param training: Forwarded to the backbone and tail.
+        :return: Encoding feature map, shape `(B, Hs, Ws, C_feat)`.
+        :rtype: Any
         """
         feats = self.backbone(source, training=training)
         return self.tail(feats, training=training)
@@ -266,22 +230,19 @@ class Thera(keras.Model):
         return_jac: bool = False,
         training: Optional[bool] = None,
     ) -> Any:
-        """THERA ``apply_decoder``: evaluate the heat field at the query coords.
+        """Evaluate the heat field at the query coordinates.
 
-        Args:
-            encoding: Backbone+tail encoding ``(B, Hs, Ws, C_feat)``.
-            coords: Query coordinates ``(B, Hq, Wq, 2)`` (pixel-center, ``[h, w]``).
-            t: Heat-diffusion time, broadcastable to ``(B, 1)``.
-            return_jac: When ``True``, also return the exact per-pixel spatial
-                Jacobian ``d(field)/d(rel_coords)`` evaluated at ``t=0`` (THERA's
-                ``apply_decoder(..., return_jac=True)`` branch, step-9 Jacobian-TV
-                aliasing regularizer). See D-010.
-            training: Forwarded to the hypernetwork.
-
-        Returns:
-            Raw residual field ``(B, Hq, Wq, out_dim)`` when ``return_jac`` is
-            ``False``; otherwise ``(out, jac)`` where ``jac`` has shape
-            ``(B, Hq, Wq, out_dim, 2)``.
+        :param encoding: Backbone+tail encoding, shape `(B, Hs, Ws, C_feat)`.
+        :param coords: Query coordinates, shape `(B, Hq, Wq, 2)`, pixel-center
+            convention, channel order `[h, w]`.
+        :param t: Heat-diffusion time, broadcastable to `(B, 1)`.
+        :param return_jac: When `True`, also return the exact per-pixel
+            spatial Jacobian `d(field)/d(rel_coords)` at `t=0`.
+        :param training: Forwarded to the hypernetwork.
+        :return: Raw residual field `(B, Hq, Wq, out_dim)` when `return_jac`
+            is `False`; otherwise `(out, jac)` with `jac` shape
+            `(B, Hq, Wq, out_dim, 2)`.
+        :rtype: Any
         """
         if return_jac:
             return self.hypernetwork.decode_with_jac(
@@ -295,19 +256,16 @@ class Thera(keras.Model):
         training: Optional[bool] = None,
         return_jac: bool = False,
     ) -> Any:
-        """Forward pass: ``inputs = (source, coords, t)`` -> residual field.
+        """Forward pass: `inputs = (source, coords, t)` to residual field.
 
-        Args:
-            inputs: 3-tuple ``(source, coords, t)``.
-            training: Forwarded to the backbone, tail, and hypernetwork.
-            return_jac: When ``True``, also return the exact spatial Jacobian
-                ``d(field)/d(rel_coords)`` at ``t=0`` (step-9 Jacobian-TV). Kept
-                default ``False`` so existing forward/serialization paths are
-                unaffected.
-
-        Returns:
-            Raw residual field ``(B, Hq, Wq, out_dim)`` when ``return_jac`` is
-            ``False``; otherwise ``(out, jac)``.
+        :param inputs: 3-tuple `(source, coords, t)`.
+        :param training: Forwarded to the backbone, tail, and hypernetwork.
+        :param return_jac: When `True`, also return the exact spatial Jacobian
+            `d(field)/d(rel_coords)` at `t=0`. Defaults to `False` so existing
+            forward and serialization paths are unaffected.
+        :return: Raw residual field `(B, Hq, Wq, out_dim)` when `return_jac`
+            is `False`; otherwise `(out, jac)`.
+        :rtype: Any
         """
         source, coords, t = inputs
         encoding = self.apply_encoder(source, training=training)
@@ -316,21 +274,18 @@ class Thera(keras.Model):
         )
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
-        """Output shape of ``call((source, coords, t))``.
+        """Output shape of `call((source, coords, t))`.
 
-        The query height/width are dictated by the ``coords`` input (NOT by the
-        low-resolution ``source``): THERA decodes at the resolution of the query
-        grid, so the output spatial extent equals ``coords``'s ``(Hq, Wq)`` and
-        the channel count is the stored ``out_dim``.
+        The query height and width are set by `coords`, not by the
+        low-resolution `source`: decoding runs at the resolution of the query
+        grid.
 
-        Args:
-            input_shape: 3-element list ``[source_shape, coords_shape, t_shape]``,
-                each a shape tuple. ``coords_shape`` is ``(B, Hq, Wq, 2)``.
-
-        Returns:
-            ``(B, Hq, Wq, out_dim)``.
+        :param input_shape: 3-element list `[source_shape, coords_shape,
+            t_shape]`, each a shape tuple. `coords_shape` is `(B, Hq, Wq, 2)`.
+        :return: `(B, Hq, Wq, out_dim)`.
+        :rtype: Tuple[Optional[int], ...]
         """
-        coords_shape = input_shape[1]  # (B, Hq, Wq, 2)
+        coords_shape = input_shape[1]
         return (coords_shape[0], coords_shape[1], coords_shape[2], self.out_dim)
 
     # -----------------------------------------------------------------
@@ -339,21 +294,14 @@ class Thera(keras.Model):
     def from_variant(cls, variant: str, **overrides: Any) -> "Thera":
         """Build one of the six THERA configs by name.
 
-        The six configs are the real ``backbone x tail`` taxonomy (D-009):
-        ``{edsr,rdn}-{air,plus,pro}``.
-
-        Args:
-            variant: One of ``MODEL_VARIANTS`` keys
-                (``edsr-air``, ``edsr-plus``, ``edsr-pro``, ``rdn-air``,
-                ``rdn-plus``, ``rdn-pro``).
-            **overrides: Forwarded to :func:`build_thera` (e.g. ``out_dim``,
-                ``k_init``, ``components_init_scale``).
-
-        Returns:
-            A constructed :class:`Thera` model.
-
-        Raises:
-            ValueError: If ``variant`` is not a known config name.
+        :param variant: One of `MODEL_VARIANTS` keys (`edsr-air`, `edsr-plus`,
+            `edsr-pro`, `rdn-air`, `rdn-plus`, `rdn-pro`).
+        :type variant: str
+        :param overrides: Forwarded to :func:`build_thera`, e.g. `out_dim`,
+            `k_init`, `components_init_scale`.
+        :return: A constructed :class:`Thera` model.
+        :rtype: Thera
+        :raises ValueError: If `variant` is not a known config name.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -367,14 +315,19 @@ class Thera(keras.Model):
     # -----------------------------------------------------------------
 
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments for serialization.
+
+        :return: Configuration dictionary. Serializes the actual `backbone`
+            and `tail` instances, not string keys, since a caller may have
+            passed a custom layer no key could reconstruct.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "hidden_dim": self.hidden_dim,
             "out_dim": self.out_dim,
             "k_init": self.k_init,
             "components_init_scale": self.components_init_scale,
-            # Serialize the actual backbone/tail instances (D-009): a caller may
-            # have passed a custom layer no string key could reconstruct.
             "backbone": keras.saving.serialize_keras_object(self.backbone),
             "tail": keras.saving.serialize_keras_object(self.tail),
         })
@@ -382,6 +335,12 @@ class Thera(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "Thera":
+        """Create a model from a configuration dictionary.
+
+        :param config: Configuration dictionary.
+        :return: A new model instance.
+        :rtype: Thera
+        """
         config = dict(config)
         config["backbone"] = keras.saving.deserialize_keras_object(
             config["backbone"]
@@ -402,25 +361,25 @@ def build_thera(
     k_init: Optional[float] = None,
     components_init_scale: Optional[float] = None,
 ) -> Thera:
-    """Build a THERA model from a backbone key + size key (THERA ``build_thera``).
+    """Build a THERA model from a backbone key and a size key.
 
-    Args:
-        out_dim: Output channel count (3 for RGB residual). Defaults to 3.
-        backbone: ``"edsr-baseline"`` (EDSR feature extractor) or ``"rdn"``
-            (Residual Dense Network). Defaults to ``"edsr-baseline"``.
-        size: ``"air"`` (identity tail, ``hidden_dim=32``), ``"plus"`` (ConvNeXt
-            tail), or ``"pro"`` (SwinIR tail). ``hidden_dim`` is ``512`` for
-            ``plus``/``pro``. Defaults to ``"pro"``.
-        k_init: Heat-conductivity init forwarded to the model. ``None`` -> THERA
-            reference default.
-        components_init_scale: Frequency-disk scale forwarded to the model.
-            ``None`` -> ``16.0``.
-
-    Returns:
-        A constructed :class:`Thera` model.
-
-    Raises:
-        ValueError: If ``backbone`` or ``size`` is not a known key.
+    :param out_dim: Output channel count, 3 for an RGB residual.
+    :type out_dim: int
+    :param backbone: `"edsr-baseline"` (EDSR feature extractor) or `"rdn"`
+        (Residual Dense Network).
+    :type backbone: str
+    :param size: `"air"` (identity tail, `hidden_dim=32`), `"plus"` (ConvNeXt
+        tail), or `"pro"` (SwinIR tail). `hidden_dim` is `512` for `plus`/`pro`.
+    :type size: str
+    :param k_init: Heat-conductivity init forwarded to the model. Uses the
+        THERA reference default when `None`.
+    :type k_init: Optional[float]
+    :param components_init_scale: Frequency-disk scale forwarded to the
+        model. Defaults to `16.0` when `None`.
+    :type components_init_scale: Optional[float]
+    :return: A constructed :class:`Thera` model.
+    :rtype: Thera
+    :raises ValueError: If `backbone` or `size` is not a known key.
     """
     if backbone not in _VALID_BACKBONES:
         raise ValueError(
@@ -461,24 +420,20 @@ def create_thera(
 ) -> Thera:
     """Create a THERA model from one of the six named configs.
 
-    House-shape alias over :meth:`Thera.from_variant`. ``build_thera`` is the
-    older, still-supported entry point taking ``backbone``/``size`` keys
-    separately and has existing callers; this factory names the same six
-    combinations as single variant strings.
+    An alias over :meth:`Thera.from_variant`. `build_thera` remains a
+    separate, still-supported entry point taking `backbone`/`size` keys
+    individually.
 
-    Args:
-        variant: One of ``Thera.MODEL_VARIANTS`` (``edsr-air``, ``edsr-plus``,
-            ``edsr-pro``, ``rdn-air``, ``rdn-plus``, ``rdn-pro``).
-        **overrides: Forwarded to :func:`build_thera` (e.g. ``out_dim``,
-            ``k_init``, ``components_init_scale``).
+    :param variant: One of `Thera.MODEL_VARIANTS` (`edsr-air`, `edsr-plus`,
+        `edsr-pro`, `rdn-air`, `rdn-plus`, `rdn-pro`).
+    :type variant: str
+    :param overrides: Forwarded to :func:`build_thera`, e.g. `out_dim`,
+        `k_init`, `components_init_scale`.
+    :return: A constructed :class:`Thera` model.
+    :rtype: Thera
+    :raises ValueError: If `variant` is not a known config name.
 
-    Returns:
-        A constructed :class:`Thera` model.
-
-    Raises:
-        ValueError: If ``variant`` is not a known config name.
-
-    Example:
+    :Example:
         >>> model = create_thera("edsr-air", out_dim=3)
     """
     return Thera.from_variant(variant, **overrides)

@@ -1,38 +1,16 @@
-"""Hybrid Video-JEPA-Clifford encoder (D-001).
+"""Hybrid Video-JEPA-Clifford per-frame encoder.
 
-Forward path (per-frame):
+`VideoJEPACliffordEncoder` patchifies a batch of frames, adds a 2D sine
+position embedding, and refines the result through a stack of
+`CliffordNetBlock` layers. No time dimension is introduced here: callers
+reshape `(B, T, H, W, C)` to `(B*T, H, W, C)` before calling, and time is
+handled by the predictor instead.
 
-.. code-block:: text
-
-    pixels_flat : (B*T, H, W, C)
-            │
-            ▼  PatchEmbedding2D(patch=P, embed_dim=D)
-    tokens    : (B*T, N, D)                    [N = H_p * W_p]
-            │
-            ▼  reshape
-    grid      : (B*T, H_p, W_p, D)
-            │
-            ▼  + PositionEmbeddingSine2D (channels-first → last, broadcast)
-    grid_pe   : (B*T, H_p, W_p, D)
-            │
-            ▼  N_enc × CliffordNetBlock(channels=D, shifts=encoder_shifts)
-    latents   : (B*T, H_p, W_p, D)
-
-A time dimension is not introduced here; callers reshape
-``(B, T, H, W, C) → (B*T, H, W, C)`` before calling. See
-:meth:`VideoJEPA.encode_frames`.
-
-Notes
------
-* ``PositionEmbeddingSine2D`` emits channels-first ``(B, 2*num_pos_feats, H_p,
-  W_p)``. We transpose to channels-last and assert the feature dim is ``D``
-  (requires ``num_pos_feats = D // 2``). The constructor enforces
-  ``D % 4 == 0``, not merely ``D % 2 == 0``: ``num_pos_feats = D // 2`` must
-  ITSELF be even, because the sine layer splits it between its sine and cosine
-  halves. ``D = 10`` passed the old evenness check and built an encoder that
-  could never run a forward pass.
-* ``CliffordNetBlock`` uses ``BatchNormalization`` inside the context stream;
-  smoke tests **must** use batch size ``B*T >= 2`` (plan § Hard constraints).
+`embed_dim` must be a multiple of 4, not merely even: `PositionEmbeddingSine2D`
+receives `num_pos_feats = embed_dim // 2` and splits that value between its
+sine and cosine halves, so it must itself be even. `CliffordNetBlock` uses
+batch normalization inside its context stream, so a batch size of at least 2
+is required.
 """
 
 from __future__ import annotations
@@ -53,21 +31,53 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.video_jepa.encoder")
 class VideoJEPACliffordEncoder(keras.layers.Layer):
-    """Hybrid per-frame encoder: PatchEmbedding2D → sine2D PE → N × CliffordNetBlock.
+    """Hybrid per-frame encoder: patch embed, sine position embed, Clifford blocks.
 
-    :param embed_dim: Embedding dimension ``D``. Must be a positive multiple
-        of 4: ``num_pos_feats = D // 2`` is handed to
+    Architecture:
+
+    .. code-block:: text
+
+        pixels_flat [B*T, H, W, C]
+        │
+        ┌─────▼─────┐
+        │ PatchEmbedding2D│  patch=P, embed_dim=D
+        └─────┬───────┘
+              ▼
+        tokens [B*T, N, D]  (N = H_p * W_p)
+              │ reshape
+              ▼
+        grid [B*T, H_p, W_p, D]
+              ├─────────────────────────────┐
+              ▼                              │
+        ┌─────────────────────┐              │
+        │ PositionEmbeddingSine2D│              │
+        └─────┬───────────────┘              │
+              ▼                              │
+             add ◄───────────────────────────┘
+              ▼
+        ┌─────────────────────┐
+        │ CliffordNetBlock x N  │  channels=D, shifts=shifts
+        └─────┬───────────────┘  identity residual added per block
+              ▼
+        latents [B*T, H_p, W_p, D]
+
+    :param embed_dim: Embedding dimension `D`. Must be a positive multiple
+        of 4: `num_pos_feats = D // 2` is handed to
         :class:`PositionEmbeddingSine2D`, and that value must itself be even.
-    :param patch_size: Non-overlapping patch edge length ``P``.
-    :param img_size: Square input edge length ``H = W``. Must be divisible
-        by ``P``.
-    :param img_channels: Number of pixel channels ``C``.
-    :param depth: Number of stacked :class:`CliffordNetBlock` layers
-        (``encoder_clifford_depth`` in config).
+    :type embed_dim: int
+    :param patch_size: Non-overlapping patch edge length `P`.
+    :type patch_size: int
+    :param img_size: Square input edge length `H = W`. Must be divisible by `P`.
+    :type img_size: int
+    :param img_channels: Number of pixel channels `C`.
+    :type img_channels: int
+    :param depth: Number of stacked :class:`CliffordNetBlock` layers.
+    :type depth: int
     :param shifts: Channel-shift offsets for the encoder Clifford blocks.
-    :param dropout_rate: Dropout rate applied to the post-patch-embed features
-        (kept as a layer for potential future use; 0.0 by default).
-    :param kwargs: passthrough to :class:`keras.layers.Layer`.
+    :type shifts: Iterable[int]
+    :param dropout_rate: Dropout rate applied to the post-patch-embed features.
+    :type dropout_rate: float
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
     """
 
     def __init__(
@@ -82,14 +92,9 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        # DECISION plan-2026-08-28T181715-3870472c/D-007
-        # The constraint is `% 4`, NOT `% 2`. Do not "relax" this back to
-        # evenness: `embed_dim // 2` is handed to `PositionEmbeddingSine2D` as
-        # `num_pos_feats`, and THAT value must itself be even because the layer
-        # splits it between its sine and cosine halves. `embed_dim = 10` passed
-        # the old `% 2` check, produced `num_pos_feats = 5`, and built a
-        # position encoder that could never complete a forward pass. See
-        # decisions.md D-007.
+        # DECISION plan-2026-08-28T181715-3870472c/D-007: the constraint is % 4,
+        # not % 2 -- embed_dim=10 passed the old % 2 check and built a position
+        # encoder that could never complete a forward pass. See decisions.md.
         if embed_dim <= 0 or embed_dim % 4 != 0:
             raise ValueError(
                 f"embed_dim ({embed_dim}) must be a positive multiple of 4, "
@@ -119,7 +124,6 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         self._patches_per_side = img_size // patch_size
         self._num_patches = self._patches_per_side ** 2
 
-        # --- Sub-layers (created in __init__ per modern Keras 3 pattern) ---
         self.patch_embed = PatchEmbedding2D(
             patch_size=patch_size,
             embed_dim=embed_dim,
@@ -150,7 +154,7 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build sub-layers in dependency order.
 
-        :param input_shape: ``(B_total, H, W, C)`` where ``B_total = B*T``.
+        :param input_shape: `(B_total, H, W, C)` where `B_total = B*T`.
         """
         if len(input_shape) != 4:
             raise ValueError(
@@ -159,11 +163,8 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
             )
 
         self.patch_embed.build(input_shape)
-        # PositionEmbeddingSine2D expects 4D input and emits channels-first;
-        # we build it with a dummy shape matching what it would receive had
-        # we called it on the post-patch-embed 4D tensor — but in our call()
-        # we synthesise positions from H_p, W_p directly, so PE2D.build just
-        # needs a 4D shape.
+        # PositionEmbeddingSine2D just needs a 4D shape here: call() synthesizes
+        # positions from H_p, W_p directly, ignoring this shape's content.
         pe_input_shape = (
             input_shape[0], self._patches_per_side, self._patches_per_side,
             self.embed_dim,
@@ -186,49 +187,48 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Encode a flat pixel batch to a 4D patch grid.
 
-        :param pixels_flat: ``(B_total, H, W, C)`` where
-            ``B_total = B * T`` for training or ``B * 1`` for streaming.
-        :param training: Forwarded to dropout and Clifford BN.
-        :return: ``(B_total, H_p, W_p, D)`` patch-grid latents.
+        :param pixels_flat: `(B_total, H, W, C)`, where `B_total = B * T`
+            for training or `B * 1` for streaming.
+        :param training: Forwarded to dropout and Clifford batch normalization.
+        :return: `(B_total, H_p, W_p, D)` patch-grid latents.
+        :rtype: keras.KerasTensor
         """
-        # 1. Patchify: (B_total, H, W, C) → (B_total, N, D)
         tokens = self.patch_embed(pixels_flat, training=training)
 
-        # 2. Reshape to 4D grid: (B_total, N, D) → (B_total, H_p, W_p, D)
         B_total = ops.shape(tokens)[0]
         Hp = self._patches_per_side
         grid = ops.reshape(tokens, (B_total, Hp, Hp, self.embed_dim))
 
-        # 3. Positional embedding. PositionEmbeddingSine2D outputs channels-
-        #    first (B, 2*num_pos_feats, H_p, W_p). We transpose to channels-
-        #    last and add. Note: PE2D.call only uses the input shape to
-        #    derive B/H/W — the content is ignored, so any 4D tensor with
-        #    the right spatial layout will do.
-        pe_cf = self.pos_embed(grid)  # (B_total, D, H_p, W_p)
-        pe_cl = ops.transpose(pe_cf, (0, 2, 3, 1))  # → (B_total, H_p, W_p, D)
+        # PositionEmbeddingSine2D outputs channels-first; transpose to
+        # channels-last before adding. Its call() only reads the input shape
+        # to derive B/H/W, so any 4D tensor with the right spatial layout works.
+        pe_cf = self.pos_embed(grid)
+        pe_cl = ops.transpose(pe_cf, (0, 2, 3, 1))
         grid = grid + pe_cl
 
         if self.dropout is not None:
             grid = self.dropout(grid, training=training)
 
-        # 4. Stacked CliffordNetBlocks. Blocks are transform-only now; the
-        #    identity residual is owned here at the model level (shape-preserving).
+        # Blocks are transform-only; the identity residual is added here.
         for blk in self.blocks:
             grid = grid + blk(grid, training=training)
 
         return grid
 
-    # ------------------------------------------------------------------
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
-        """``(B_total, H_p, W_p, D)``."""
+        """Return `(B_total, H_p, W_p, D)`."""
         B_total = input_shape[0]
         return (B_total, self._patches_per_side, self._patches_per_side,
                 self.embed_dim)
 
-    # ------------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
+        """Return the constructor arguments for serialization.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
+        """
         config = super().get_config()
         config.update({
             "embed_dim": self.embed_dim,
@@ -243,19 +243,16 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "VideoJEPACliffordEncoder":
-        """Rebuild from a config, tolerating a pre-``% 4`` stored ``embed_dim``.
+        """Rebuild from a config, tolerating a pre-`% 4` stored `embed_dim`.
 
-        Guide section 6.3 migration path. The constructor's multiple-of-4 rule
-        is a NEW rejection of a value the old ``% 2`` check accepted, so an
-        archive written before it must still load. A non-conforming
-        ``embed_dim`` is rounded UP here with a warning, never raised on.
-        Rounding up rather than down preserves capacity, and the width change
-        cannot break anything that previously worked: such an encoder's
-        position encoding could never complete a forward pass, so no model
-        carrying one was ever trainable or servable.
+        A non-conforming `embed_dim` is rounded up with a warning rather than
+        raised on, so an archive from before the multiple-of-4 rule still
+        loads. Such an encoder's position encoding could never complete a
+        forward pass, so no model carrying one was ever trainable.
 
         :param config: Serialized configuration.
         :return: The reconstructed encoder.
+        :rtype: VideoJEPACliffordEncoder
         """
         config = dict(config)
         embed_dim = config.get("embed_dim")

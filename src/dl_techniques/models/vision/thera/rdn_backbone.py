@@ -1,61 +1,21 @@
 """THERA's RDN (Residual Dense Network) feature backbone as a Keras layer.
 
-This ports the **feature extractor** of the Residual Dense Network used by THERA
-(Aliasing-Free Arbitrary-Scale Super-Resolution with Neural Heat Fields). It is
-the RDN body *without* the upsampling tail: it maps an input image
-``(B, H, W, n_colors)`` to a dense feature map ``(B, H, W, growth_rate_0)`` that
-downstream THERA components (tails / hypernetwork) consume. There is **no**
-spatial resolution change here.
+`RDNBackbone` is the RDN feature extractor without its upsampling tail: it
+maps an input image `(B, H, W, n_colors)` to a dense feature map
+`(B, H, W, growth_rate_0)` at the input resolution, for downstream THERA
+components to resample. `RDBConv` and `RDB` are the building blocks: dense
+per-unit channel concatenation inside each block, collapsed back to
+`growth_rate_0` by a 1x1 local-fusion convolution, plus a block-level residual.
 
-The reference JAX/Flax implementation (THERA ``model/rdn.py``, instantiated as
-``RDN()`` with defaults ``G0=64, RDNconfig='B'``) is::
+Channel growth through the dense concatenation is closed-form rather than
+data-dependent, so every inner `Conv2D` is built with an explicitly computed
+input-channel shape in `build()` instead of an eager dummy forward.
 
-    class RDB_Conv(nn.Module):           # growRate, kSize=3
-        def __call__(self, x):
-            out = Sequential([Conv(growRate, (kSize, kSize),
-                                   padding=(kSize - 1) // 2), relu])(x)
-            return concatenate((x, out), -1)        # channel-growing dense concat
-
-    class RDB(nn.Module):                # growRate0, growRate, nConvLayers
-        def __call__(self, x):
-            res = x
-            for c in range(nConvLayers):
-                x = RDB_Conv(growRate)(x)
-            x = Conv(growRate0, (1, 1))(x)          # local feature fusion (1x1)
-            return x + res
-
-    class RDN(nn.Module):                # G0=64, RDNkSize=3, RDNconfig='B'
-        def __call__(self, x, _=None):
-            D, C, G = {'A': (20, 6, 32),
-                       'B': (16, 8, 64)}[RDNconfig]
-            f_1 = Conv(G0, (k, k))(x)
-            x   = Conv(G0, (k, k))(f_1)
-            RDBs_out = []
-            for i in range(D):
-                x = RDB(G0, G, C)(x); RDBs_out.append(x)
-            x = concatenate(RDBs_out, -1)           # global dense feature fusion
-            x = Sequential([Conv(G0, (1, 1)),
-                            Conv(G0, (k, k))])(x)    # global feature fusion
-            x = x + f_1
-            return x                                 # features, NO upsampling
-
-Channel bookkeeping (the load-bearing detail for explicit Keras builds)
------------------------------------------------------------------------
-The dense concat inside each RDB grows the channel count deterministically:
-entering an RDB the tensor has ``G0`` channels; after the ``c``-th
-:class:`RDBConv` (1-indexed) it has ``G0 + c * G`` channels. The local-fusion
-1x1 conv collapses ``G0 + C * G`` channels back down to ``G0`` so the residual
-``x + res`` is shape-consistent. Because this growth is closed-form (not
-data-dependent), every inner ``Conv2D`` is built with an explicitly computed
-input-channel shape in ``build()`` -- no eager dummy forward is required.
-
-THERA's ``padding=(kSize - 1) // 2`` for odd ``kSize`` is exactly Keras
-``padding="same"``; the 1x1 fusion convs also use ``"same"`` (a no-op pad).
-
-Reference:
-    Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
-    Neural Heat Fields" (original JAX/Flax ``model/rdn.py``); Zhang et al.,
-    "Residual Dense Network for Image Super-Resolution" (CVPR 2018).
+References:
+    - Becker et al. Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
+      Neural Heat Fields.
+    - Zhang et al., 2018. Residual Dense Network for Image Super-Resolution.
+      CVPR 2018.
 """
 
 import keras
@@ -78,32 +38,35 @@ _RDN_CONFIGS: Dict[str, Tuple[int, int, int]] = {
 class RDBConv(keras.layers.Layer):
     """Single dense-connected conv unit of a Residual Dense Block.
 
-    Applies a ``(kernel_size, kernel_size)`` convolution (``padding="same"``)
-    followed by ReLU, then **concatenates** the result onto the input along the
-    channel axis. The output therefore has ``C_in + growth_rate`` channels,
-    where ``C_in`` is the number of input channels.
+    Applies a `(kernel_size, kernel_size)` convolution with ReLU, then
+    concatenates the result onto the input along the channel axis, so the
+    output has `C_in + growth_rate` channels.
 
-    **Intent**: Provide the atomic dense-growth building block of an RDB: a
-    conv-ReLU whose output is concatenated back onto its input so that each
-    successive unit sees an ever-wider feature stack (densely-connected growth),
-    while keeping channel bookkeeping closed-form for explicit, reload-safe
-    ``build()`` of the inner convolution.
+    Architecture:
 
-    **Architecture**:
-    ```
-    x  -->  Conv(growRate, kxk, same)  -->  relu  -->  out
-    │                                                    │
-    └──────────────────  concat([x, out], axis=-1)  ─────┘
-                                 ↓
-            (channels grow by growRate: C_in -> C_in + growRate)
-    ```
+    .. code-block:: text
 
-    Args:
-        growth_rate: Integer, number of feature maps produced by the inner
-            convolution (the channel growth per unit). Must be positive.
-        kernel_size: Integer, spatial size of the (square) convolution kernel.
-            Defaults to ``3``.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`.
+        x [B, H, W, C_in]
+        │
+        ├──────────────────────────┐
+        ▼                          │
+        ┌────────────────┐          │
+        │ conv kxk + relu │          │
+        └────────┬────────┘          │
+                  ▼                  │
+                 out                 │
+                  │                  │
+                  └────► concat ◄────┘
+                           │
+                           ▼
+              [B, H, W, C_in + growth_rate]
+
+    :param growth_rate: Number of feature maps produced by the inner
+        convolution, the channel growth per unit. Must be positive.
+    :type growth_rate: int
+    :param kernel_size: Spatial size of the square convolution kernel.
+    :type kernel_size: int
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
     Input shape:
         4D tensor ``(batch, height, width, C_in)`` (NHWC).
@@ -135,8 +98,7 @@ class RDBConv(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # Build the inner conv with the propagated NHWC input shape BEFORE
-        # super().build() so that a `.keras` reload restores its weights.
+        """Build the inner conv before `super().build()`, for reload-safe weights."""
         self.conv.build(input_shape)
         super().build(input_shape)
 
@@ -165,41 +127,44 @@ class RDBConv(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.thera.rdn_backbone")
 class RDB(keras.layers.Layer):
-    """Residual Dense Block: ``C`` dense conv units + local fusion + residual.
+    """Residual Dense Block: `C` dense conv units, local fusion, residual.
 
-    Runs ``num_conv_layers`` :class:`RDBConv` units (each growing the channel
-    count by ``growth_rate``), fuses the densely-concatenated stack back to
-    ``growth_rate_0`` channels with a 1x1 convolution (local feature fusion),
-    and adds the block input as a residual. Input and output both have
-    ``growth_rate_0`` channels.
+    Runs `num_conv_layers` :class:`RDBConv` units, each growing the channel
+    count by `growth_rate`, fuses the densely concatenated stack back to
+    `growth_rate_0` channels with a 1x1 convolution, and adds the block input
+    as a residual. Input and output both have `growth_rate_0` channels.
 
-    **Intent**: Assemble the RDB of the Residual Dense Network -- a contiguous
-    memory mechanism where ``C`` dense conv units accumulate features, a 1x1
-    local-fusion conv adaptively collapses the wide stack back to ``G0``, and a
-    local residual connection stabilises training and preserves the block's
-    input/output channel contract.
+    Architecture:
 
-    **Architecture**:
-    ```
-    x ──────────────────────────────────────────────┐ (local residual)
-    │                                                 │
-    └─> [ RDBConv x C ]  (dense growth: G0 -> G0+C*G) │
-              ↓                                        │
-        Conv(G0, 1x1, same)  (local feature fusion)    │
-              ↓                                        │
-              + x  <───────────────────────────────────┘
-              ↓
-            output (G0 channels)
-    ```
+    .. code-block:: text
 
-    Args:
-        growth_rate_0: Integer, the block's input/output channel count ``G0``
-            (the local-fusion conv collapses the dense stack back to this).
-        growth_rate: Integer, per-unit channel growth ``G``.
-        num_conv_layers: Integer, number of :class:`RDBConv` units ``C``.
-        kernel_size: Integer, conv kernel size for the dense units. Defaults to
-            ``3``.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`.
+        x [B, H, W, G0]
+        │
+        ├────────────────────────────────┐ (residual)
+        ▼                                │
+        ┌────────────────────┐            │
+        │ RDBConv x C          │            │  dense growth: G0 -> G0+C*G
+        └──────────┬──────────┘            │
+                    ▼                      │
+        ┌────────────────────┐            │
+        │ conv 1x1, same       │            │  local feature fusion -> G0
+        └──────────┬──────────┘            │
+                    ▼                      │
+                   add ◄────────────────────┘
+                    │
+                    ▼
+            output [B, H, W, G0]
+
+    :param growth_rate_0: The block's input/output channel count `G0`; the
+        local-fusion conv collapses the dense stack back to this.
+    :type growth_rate_0: int
+    :param growth_rate: Per-unit channel growth `G`.
+    :type growth_rate: int
+    :param num_conv_layers: Number of :class:`RDBConv` units `C`.
+    :type num_conv_layers: int
+    :param kernel_size: Conv kernel size for the dense units.
+    :type kernel_size: int
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
     Input shape:
         4D tensor ``(batch, height, width, growth_rate_0)``.
@@ -244,10 +209,11 @@ class RDB(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # Track channel growth through the dense concat explicitly. Entering the
-        # block the tensor has G0 channels (== input_shape[-1]); after the c-th
-        # RDBConv it has G0 + c*G channels. Build each sublayer with the exact
-        # input shape it will see, BEFORE super().build(), for reload-safe weights.
+        """Build each sublayer with its exact propagated shape, for reload-safe weights.
+
+        Entering the block the tensor has `G0` channels; after the `c`-th
+        `RDBConv` it has `G0 + c*G` channels.
+        """
         shape = list(input_shape)
         running_channels = shape[-1]
         for unit in self.conv_units:
@@ -288,52 +254,56 @@ class RDB(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.thera.rdn_backbone")
 class RDNBackbone(keras.layers.Layer):
-    """THERA's RDN feature backbone (no upsampling).
+    """THERA's RDN feature backbone, with no upsampling.
 
-    Two shallow convs produce ``f_1`` and the first RDB input; ``D`` stacked
-    :class:`RDB` blocks each emit a ``G0``-channel feature map; all ``D`` outputs
-    are concatenated (global dense feature fusion) and fused back to ``G0`` via a
-    1x1 then a kxk conv (global feature fusion); finally the shallow feature
-    ``f_1`` is added back. The result is a ``(B, H, W, growth_rate_0)`` feature
-    map at the **input resolution** (no upsampling tail).
+    Two shallow convs produce `f_1` and the first RDB input; `D` stacked
+    :class:`RDB` blocks each emit a `G0`-channel feature map; all `D` outputs
+    are concatenated and fused back to `G0` by a 1x1 then a kxk convolution;
+    the shallow feature `f_1` is added back. The result is a feature map at
+    the input resolution, for a downstream arbitrary-scale component to resample.
 
-    **Intent**: Provide THERA's deep RDN feature extractor as a single reusable
-    Keras layer -- shallow feature extraction, ``D`` residual dense blocks with
-    global hierarchical feature fusion, and a global residual to the shallow
-    features -- yielding a resolution-preserving feature map for downstream
-    THERA tails/hypernetwork, deliberately omitting the upsampling tail so
-    arbitrary-scale components own the resampling.
+    Architecture:
 
-    **Architecture**:
-    ```
-    x
-    ↓
-    Conv(G0, kxk, same) = f_1 ───────────────────────┐ (global residual)
-    ↓                                                 │
-    Conv(G0, kxk, same)                               │
-    ↓                                                 │
-    [ RDB x D ]  (collect each block output)          │
-    ↓                                                 │
-    concat(RDB_out[0..D-1], axis=-1)  (D*G0 channels) │
-    ↓                                                 │
-    Conv(G0, 1x1, same)  ─┐                           │
-    ↓                     ├─ global feature fusion     │
-    Conv(G0, kxk, same)  ─┘                           │
-    ↓                                                 │
-    + f_1  <──────────────────────────────────────────┘
-    ↓
-    features (B, H, W, G0)   # input resolution, no upsampling
-    ```
+    .. code-block:: text
 
-    Args:
-        growth_rate_0: Integer, base channel width ``G0`` (also the output
-            channel count). Defaults to ``64``.
-        kernel_size: Integer, kxk conv kernel size for the shallow/global convs
-            and the RDB dense units. Defaults to ``3``.
-        config: String in ``{"A", "B"}`` selecting the RDN depth/width preset.
-            ``"A" -> (D=20, C=6, G=32)``, ``"B" -> (D=16, C=8, G=64)``. THERA's
-            default is ``"B"``. Defaults to ``"B"``.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`.
+        x [B, H, W, n_colors]
+        │
+        ┌─────▼─────┐
+        │ conv kxk    │  = f_1
+        └─────┬─────┘
+              ├─────────────────────────────┐ (residual)
+              ▼                              │
+        ┌─────────────┐                      │
+        │ conv kxk      │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+        ┌─────────────┐                      │
+        │ RDB x D       │  collect each output │
+        └─────┬───────┘                      │
+              ▼                              │
+        concat(D outputs)  [D*G0 channels]     │
+              ▼                              │
+        ┌─────────────┐                      │
+        │ conv 1x1      │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+        ┌─────────────┐                      │
+        │ conv kxk      │                      │
+        └─────┬───────┘                      │
+              ▼                              │
+             add  ◄──────────────────────────┘
+              ▼
+        features [B, H, W, G0]
+
+    :param growth_rate_0: Base channel width `G0`, also the output channel count.
+    :type growth_rate_0: int
+    :param kernel_size: kxk conv kernel size for the shallow/global convs and
+        the RDB dense units.
+    :type kernel_size: int
+    :param config: One of `"A"`, `"B"`, selecting the RDN depth/width preset:
+        `"A"` is `(D=20, C=6, G=32)`, `"B"` is `(D=16, C=8, G=64)`.
+    :type config: str
+    :param kwargs: Forwarded to :class:`keras.layers.Layer`.
 
     Input shape:
         4D tensor ``(batch, height, width, n_colors)`` (NHWC).
@@ -341,9 +311,8 @@ class RDNBackbone(keras.layers.Layer):
     Output shape:
         4D tensor ``(batch, height, width, growth_rate_0)``.
 
-    Raises:
-        ValueError: If ``config`` is not one of ``{"A", "B"}``, or if
-            ``growth_rate_0`` / ``kernel_size`` are non-positive.
+    :raises ValueError: If ``config`` is not one of ``{"A", "B"}``, or if
+        ``growth_rate_0`` / ``kernel_size`` are non-positive.
     """
 
     def __init__(
