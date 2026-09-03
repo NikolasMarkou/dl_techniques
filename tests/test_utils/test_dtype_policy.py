@@ -30,11 +30,13 @@ import keras
 import ml_dtypes
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from dl_techniques.utils import dtype_policy
 from dl_techniques.utils.dtype_policy import (
     accumulation_dtype,
     mask_sentinel,
+    statistics_dtype,
     stability_floor,
 )
 
@@ -592,6 +594,176 @@ class TestAccumulationDtypeNeverNarrows:
 
 
 # ---------------------------------------------------------------------
+# statistics_dtype: equivalence with the symbol it replaces.
+# ---------------------------------------------------------------------
+
+#: The measured promotion table: ``keras.backend.result_type(name, "float32")``
+#: for every dtype in Keras's own ``ALLOWED_DTYPES``, executed live at
+#: 2026-09-03 on keras 3.x / TF 2.18 and PASTED here as data. The integer,
+#: unsigned and boolean rows are the surprising ones -- the plan that
+#: commissioned ``statistics_dtype`` assumed ``int64`` promotes to ``float64``
+#: and it does not.
+MEASURED_RESULT_TYPE_AGAINST_FLOAT32 = (
+    ("float16", "float32"),
+    ("bfloat16", "float32"),
+    ("float32", "float32"),
+    ("float64", "float64"),
+    ("int8", "float32"),
+    ("int16", "float32"),
+    ("int32", "float32"),
+    ("int64", "float32"),
+    ("uint8", "float32"),
+    ("uint16", "float32"),
+    ("uint32", "float32"),
+    ("uint64", "float32"),
+    ("bool", "float32"),
+    ("complex64", "complex64"),
+    ("complex128", "complex128"),
+)
+
+#: The dtypes Keras refuses to promote against float32 at all -- measured, both
+#: sides must raise.
+MEASURED_UNPROMOTABLE = ("string", "float8_e4m3fn", "float8_e5m2")
+
+
+def _spellings_of(name: str) -> List[Tuple[str, object]]:
+    """Every way ``name`` can arrive at the eight ``layers/norms/`` call sites.
+
+    The backend ``DType`` is not decoration: spying on
+    ``keras.backend.result_type`` through a live ``RMSNorm`` forward pass showed
+    that a ``tf.DType`` is what ``inputs.dtype`` ALWAYS is there -- a plain
+    string never once reached the call.
+    """
+    spellings: List[Tuple[str, object]] = [("str", name)]
+    backend_dtype = getattr(tf, name, None)
+    if backend_dtype is not None:
+        spellings.append(("tf.DType", backend_dtype))
+    if name == "bfloat16":
+        spellings.append(("np.dtype", np.dtype(ml_dtypes.bfloat16)))
+    else:
+        try:
+            spellings.append(("np.dtype", np.dtype(name)))
+        except TypeError:  # pragma: no cover - every listed name has one
+            pass
+    return spellings
+
+
+class TestStatisticsDtypeIsTheResultTypeItReplaces:
+    """SC5: the equivalence, against the LIVE symbol, not against a second copy.
+
+    ``keras.backend.result_type`` is banned under ``src/`` and still present in
+    the installed Keras, so this file is where the equivalence can be -- and
+    permanently is -- established: ``tests/`` is deliberately out of the ban's
+    scope, precisely so a removed symbol can go on being an oracle.
+
+    That matters more than usual here. A "reference implementation" written by
+    the same hand as the code under test has produced false confidence three
+    times in this repository; Keras's own function is the strongest oracle
+    available for this claim, so it is the one used, on every run, forever.
+    """
+
+    def test_the_pasted_table_still_matches_the_live_symbol(self):
+        """The data above is a MEASUREMENT; this arm is its expiry check."""
+        for name, expected in MEASURED_RESULT_TYPE_AGAINST_FLOAT32:
+            assert keras.backend.result_type(name, "float32") == expected, name
+        for name in MEASURED_UNPROMOTABLE:
+            with pytest.raises(ValueError):
+                keras.backend.result_type(name, "float32")
+
+    def test_the_table_covers_every_dtype_keras_allows(self):
+        """Exhaustive means exhaustive: no dtype may be missing from the table."""
+        from keras.src.backend.common import dtypes as keras_dtypes
+
+        covered = {name for name, _ in MEASURED_RESULT_TYPE_AGAINST_FLOAT32}
+        covered |= set(MEASURED_UNPROMOTABLE)
+        assert covered == set(keras_dtypes.ALLOWED_DTYPES)
+
+    @pytest.mark.parametrize(
+        ("name", "expected"), MEASURED_RESULT_TYPE_AGAINST_FLOAT32
+    )
+    def test_it_agrees_with_the_symbol_on_every_spelling(self, name, expected):
+        for label, spelling in _spellings_of(name):
+            assert statistics_dtype(spelling) == expected, f"{name} as {label}"
+            try:
+                reference = keras.backend.result_type(spelling, "float32")
+            except (TypeError, ValueError):
+                # The spelling is outside the SYMBOL's domain (it takes no
+                # policy object). The helper is a superset there by design.
+                continue
+            assert statistics_dtype(spelling) == reference, f"{name} as {label}"
+
+    def test_the_number_of_pairs_compared(self):
+        """Recorded, so a table that quietly shrinks is visible in the diff."""
+        pairs = sum(
+            len(_spellings_of(name))
+            for name, _ in MEASURED_RESULT_TYPE_AGAINST_FLOAT32
+        )
+        assert pairs == 45
+
+    def test_a_float16_input_is_PROMOTED_not_kept(self):
+        """The narrowing case: statistics in float16 are the defect."""
+        assert statistics_dtype("float16") == "float32"
+        assert statistics_dtype(tf.float16) == "float32"
+        assert statistics_dtype("bfloat16") == "float32"
+
+    def test_a_float64_input_is_NOT_narrowed_to_float32(self):
+        """The widening case. The float64 RMS gap this protects is 1.5e-08."""
+        assert statistics_dtype("float64") == "float64"
+        assert statistics_dtype(tf.float64) == "float64"
+
+    def test_a_dtype_policy_resolves_to_its_compute_dtype(self):
+        assert statistics_dtype("mixed_float16") == "float32"
+        assert statistics_dtype(keras.DTypePolicy("mixed_bfloat16")) == "float32"
+
+    def test_none_means_the_current_floatx(self, floatx_float16):
+        assert statistics_dtype(None) == "float32"
+        assert statistics_dtype() == statistics_dtype(None)
+
+    @pytest.mark.parametrize("name", MEASURED_UNPROMOTABLE)
+    def test_an_unpromotable_dtype_is_rejected_naming_the_argument(self, name):
+        with pytest.raises(ValueError, match=r"dtype="):
+            statistics_dtype(name)
+
+    @pytest.mark.parametrize("bad", ["not-a-dtype", 3, object()])
+    def test_a_non_dtype_is_rejected(self, bad):
+        with pytest.raises(ValueError):
+            statistics_dtype(bad)
+
+    def test_the_integer_rows_are_in_contract_on_purpose(self):
+        """An int tensor really does reach the eight call sites.
+
+        ``RMSNorm()(tf.constant([[1, 2]], dtype=tf.int32))`` runs today -- Keras
+        autocasts only floating inputs -- and the symbol answers ``float32``
+        there. A helper that RAISED on a non-floating dtype (which is what the
+        commissioning plan specified, on the false premise that ``int64``
+        promotes to ``float64``) would therefore have been a behaviour change
+        wearing a substitution's clothes.
+        """
+        for name in ("int32", "int64", "uint8", "bool"):
+            assert statistics_dtype(name) == "float32" == keras.backend.result_type(
+                name, "float32"
+            )
+
+    def test_the_table_would_reject_a_plausible_wrong_implementation(self):
+        """Anti-vacuity, in-process: the arms above must not pass for anything.
+
+        The plausible wrong implementation is the one the house exemplar
+        actually shipped once -- an unconditional ``"float32"``. It must
+        disagree with the symbol on at least one row, or the equivalence arm is
+        decoration.
+        """
+
+        def always_float32(_dtype) -> str:
+            return "float32"
+
+        disagreements = [
+            name
+            for name, expected in MEASURED_RESULT_TYPE_AGAINST_FLOAT32
+            if always_float32(name) != expected
+        ]
+        assert sorted(disagreements) == ["complex128", "complex64", "float64"]
+
+# ---------------------------------------------------------------------
 # SC1: the module's public surface.
 # ---------------------------------------------------------------------
 
@@ -617,7 +789,7 @@ class TestTheModuleSurfaceStaysPureFunctions:
             pathlib.Path(dtype_policy.__file__).read_text(encoding="utf-8")
         )
 
-    def test_exactly_three_public_module_level_functions(self):
+    def test_exactly_four_public_module_level_functions(self):
         public = [
             node.name
             for node in self._tree().body
@@ -628,6 +800,7 @@ class TestTheModuleSurfaceStaysPureFunctions:
             "accumulation_dtype",
             "mask_sentinel",
             "stability_floor",
+            "statistics_dtype",
         ]
 
     def test_no_classes(self):
@@ -656,7 +829,12 @@ class TestTheModuleSurfaceStaysPureFunctions:
             assert module != "keras.ops", "use `keras.ops.x`, not `from keras import ops`"
 
     def test_every_function_is_importable_from_the_package_path(self):
-        for function in (mask_sentinel, stability_floor, accumulation_dtype):
+        for function in (
+            mask_sentinel,
+            stability_floor,
+            accumulation_dtype,
+            statistics_dtype,
+        ):
             assert callable(function)
             assert function.__doc__
 
@@ -669,3 +847,4 @@ def test_no_warning_is_emitted_on_the_common_paths():
             mask_sentinel(name)
             stability_floor(name, 1e-8)
             accumulation_dtype(name)
+            statistics_dtype(name)

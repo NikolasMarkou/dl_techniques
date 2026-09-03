@@ -11,6 +11,11 @@ them from the target dtype's own ``finfo`` rather than from a per-dtype table:
 - :func:`accumulation_dtype` -- the dtype a precision-sensitive reduction should
   be computed in, for the ADDITIVE ``value + eps`` shape, where a coarsened
   epsilon biases every input rather than only the degenerate ones.
+- :func:`statistics_dtype` -- the dtype a normalization layer's statistics must
+  be accumulated in, given the dtype of the tensor arriving at it. Same answer
+  as :func:`accumulation_dtype` on every floating dtype; it exists separately
+  because its contract is TOTAL over the dtypes a live tensor can carry
+  (integer, boolean and complex inputs included) rather than raising on them.
 
 **Which of the last two a site needs** is decided by the SHAPE of the guard, and
 getting it wrong is not a style question -- it was MEASURED to cost up to
@@ -105,6 +110,19 @@ def _resolve_dtype_name(dtype: _DTypeLike) -> str:
             raise ValueError(
                 f"{dtype!r} is not a dtype or dtype-policy name."
             ) from exc
+
+    # A backend dtype object -- a ``tf.DType`` -- carries its dtype name on
+    # ``.name``, and that is what a live tensor's ``.dtype`` actually IS on
+    # every real call path into this module (measured by spying on all eight
+    # ``layers/norms/`` sites: four distinct ``tf.DType`` values, never a str).
+    # ``np.dtype(tf.float32)`` raises, so without this branch a tensor's own
+    # dtype is rejected. Same idiom as the sibling helper in
+    # ``models/vision_language/bit_diffusion/sde.py``, resolved here once
+    # instead of per call site; ``str`` alone is not enough, because a
+    # ``tf.DType`` stringifies as "<dtype: 'float64'>".
+    backend_name = getattr(dtype, "name", None)
+    if isinstance(backend_name, str):
+        return backend_name
 
     try:
         return np.dtype(dtype).name
@@ -302,6 +320,117 @@ def accumulation_dtype(dtype: _DTypeLike = None) -> str:
     if info.nmant < _dtype_facts("float32")[1].nmant:
         return "float32"
     return name
+
+
+#: Dtypes whose promotion against float32 answers with THEMSELVES -- returning
+#: "float32" for one of these would NARROW it. Measured over Keras's own
+#: ``ALLOWED_DTYPES``, not assumed from the name.
+_WIDER_THAN_FLOAT32 = frozenset({"float64", "complex64", "complex128"})
+
+#: Dtypes Keras refuses to promote against float32 at all, raising instead.
+_UNPROMOTABLE_AGAINST_FLOAT32 = frozenset(
+    {"string", "float8_e4m3fn", "float8_e5m2"}
+)
+
+#: The rest of Keras's dtypes -- every one of them answers "float32". The
+#: integer, unsigned and boolean rows are the surprising ones and are the
+#: reason this function does not raise on a non-floating dtype; see
+#: :func:`statistics_dtype`.
+_PROMOTES_TO_FLOAT32 = frozenset(
+    {
+        "float16", "bfloat16", "float32", "bool",
+        "int8", "int16", "int32", "int64",
+        "uint8", "uint16", "uint32", "uint64",
+    }
+)
+
+
+def statistics_dtype(dtype: _DTypeLike = None) -> str:
+    """Return the dtype a normalization layer's statistics must be computed in.
+
+    This is the 1-argument replacement for the
+    ``keras.backend.result_type(inputs.dtype, "float32")`` line that the eight
+    ``layers/norms/`` classes carry verbatim. It answers exactly what that call
+    answered, for every dtype a tensor can arrive with, and it exists because
+    that Keras-2-era symbol has NO Keras 3 replacement: ``keras.config`` does
+    not expose ``result_type`` and ``keras.ops.result_type`` does not exist.
+
+    **The table, measured against the symbol it replaces.** Every row is
+    ``keras.backend.result_type(row, "float32")`` executed live, not derived
+    from the promotion rules by hand; the equivalence is re-asserted on every
+    run by ``tests/test_utils/test_dtype_policy.py``, which keeps comparing
+    against the real symbol while it still exists.
+
+    .. code-block:: text
+
+        input dtype                          -> statistics dtype
+        -------------------------------------------------------
+        float16, bfloat16                    -> float32   (promoted: the point)
+        float32                              -> float32   (identity)
+        float64                              -> float64   (NOT narrowed)
+        int8/16/32/64, uint8/16/32/64, bool  -> float32
+        complex64                            -> complex64
+        complex128                           -> complex128
+        string, float8_e4m3fn, float8_e5m2   -> ValueError
+
+    The two rows that carry the whole point are the first and the third: a
+    float16 tensor must have its statistics accumulated WIDER than itself, and
+    a float64 tensor must NOT be narrowed to float32 on the way -- the float64
+    RMS gap that pins this is ``1.5e-08``, which no shape assertion can see.
+
+    **Integers are in contract, deliberately, and this contradicts the plan
+    that commissioned the function.** That plan assumed
+    ``result_type(int64, "float32")`` promotes to float64 and therefore had
+    this function RAISE on any non-floating dtype. Measured, it promotes to
+    **float32**, and an integer tensor really does reach these layers -- a
+    ``RMSNorm()`` called on an ``int32`` tensor runs today, because Keras
+    autocasts only floating inputs. Raising would therefore have been a
+    behaviour change dressed as a substitution, so the symbol won and the
+    carve-out was dropped.
+
+    Accepted spellings are the module's usual set plus one more: a backend
+    dtype object such as ``tf.float32``, which is what ``inputs.dtype`` in fact
+    is on every one of the eight call sites.
+
+    :param dtype: the dtype of the tensor whose statistics are about to be
+        accumulated. A dtype name, a ``mixed_*`` policy name, a
+        ``keras.DTypePolicy``, a numpy dtype, a backend ``DType``, or ``None``
+        for ``keras.config.floatx()``.
+    :return: a plain dtype name, never narrower than ``dtype``.
+    :raises ValueError: if ``dtype`` names nothing, or names a dtype Keras
+        refuses to promote against float32.
+
+    References:
+        - Keras 3 dtype promotion:
+          https://keras.io/api/mixed_precision/ and
+          ``keras.src.backend.common.dtypes`` (``ALLOWED_DTYPES``, the source of
+          the table above).
+        - Decision D-002 of ``plans/plan-2026-09-03T033750-9bdf25f4``.
+    """
+    # DECISION plan-2026-09-03T033750-9bdf25f4/D-002
+    # Do NOT "simplify" this to `accumulation_dtype(dtype)`, and do NOT restore
+    # a raise on a non-floating dtype. The two functions agree on every
+    # floating dtype but NOT elsewhere: `accumulation_dtype` is finfo-driven
+    # and rejects int/bool/complex, which the symbol this one replaces accepts
+    # and which a live tensor can genuinely carry. Do NOT generalize it to a
+    # two-argument `promote(a, b)` either -- that is a promotion lattice with
+    # one call shape, and `keras.backend.result_type` is banned tree-wide, so
+    # there would be nothing left to check it against. See decisions.md D-002.
+    name = _resolve_dtype_name(dtype)
+
+    if name in _WIDER_THAN_FLOAT32:
+        return name
+    if name in _PROMOTES_TO_FLOAT32:
+        return "float32"
+    if name in _UNPROMOTABLE_AGAINST_FLOAT32:
+        raise ValueError(
+            f"dtype={dtype!r} resolves to {name!r}, which Keras refuses to "
+            f"promote against float32; statistics cannot be accumulated for it."
+        )
+    raise ValueError(
+        f"dtype={dtype!r} resolves to {name!r}, which is not a Keras dtype."
+    )
+
 
 
 def stability_floor(dtype: _DTypeLike, requested: float) -> float:
