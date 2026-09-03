@@ -50,6 +50,20 @@ apps = [
     "streamlit>=1.40,<2.0",
     "streamlit-webrtc>=0.62,<1.0"
 ]
+# Tokenizer/dataset-loader modules import these at module level:
+# dl_techniques/utils/tokenizer.py, models/language/colbert/tokenization.py
+# (tiktoken); datasets/{nlp,universal_dataset_loader}.py (datasets);
+# datasets/vision/{coco,imagenet}.py (tensorflow-datasets);
+# datasets/vision/coco_multitask_local.py (Pillow); datasets/time_series/utils.py
+# (requests). The core install does not need them; importing one of those
+# specific modules without this extra raises ModuleNotFoundError.
+data = [
+    "tiktoken",
+    "datasets",
+    "tensorflow-datasets",
+    "Pillow",
+    "requests"
+]
 
 [tool.setuptools]
 # Tells setuptools the source code is in src/
@@ -58,6 +72,9 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 # Actually find packages in these directories
 where = ["src"]
+# Only ship the core library. applications/ and train/ live in the same repo
+# but are not part of the redistributable dl_techniques package.
+include = ["dl_techniques*"]
 
 [tool.pytest.ini_options]
 pythonpath = [

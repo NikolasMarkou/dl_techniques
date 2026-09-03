@@ -142,6 +142,10 @@ This library is a comprehensive suite of tools organized into five key pillars, 
     ```bash
     pip install ".[apps]"
     ```
+    The tokenizer utilities and the HuggingFace/`tensorflow-datasets`-backed loaders under `dl_techniques.datasets` need their own extra:
+    ```bash
+    pip install ".[data]"
+    ```
 
 5.  **Verify Installation:**
     ```bash
