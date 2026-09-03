@@ -1,9 +1,7 @@
 """FastVLM — public API re-exports.
 
-``FastVLM.MODEL_VARIANTS`` already carried the canonical spelling; only the
-module-level ``create_fastvlm`` factory and these exports were missing.
-``AttentionBlockVLM`` is re-exported because it is this package's own block,
-not a shared layer.
+Exports the ``FastVLM`` model, its ``create_fastvlm`` factory, and
+``AttentionBlockVLM``, the package's own attention block.
 """
 from dl_techniques.models.vision_language.fastvlm.components import AttentionBlockVLM
 from dl_techniques.models.vision_language.fastvlm.model import FastVLM, create_fastvlm

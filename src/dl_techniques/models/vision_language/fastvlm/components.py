@@ -2,141 +2,111 @@ import keras
 from keras import ops
 from typing import Optional, Tuple, Dict, Any
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.utils.keras_registration import register_dl_technique
-# NOTE: LayerScale is no longer instantiated here — TransformerLayer owns it so
-# that gamma is applied inside the residual branch rather than to the block's
-# whole output. See AttentionBlockVLM.__init__.
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.fastvlm.components")
 class AttentionBlockVLM(keras.layers.Layer):
     """
-    Attention block with vision_heads-specific adaptations.
+    Attention over a spatial feature map, via flatten-to-sequence and back.
 
-    This layer wraps the TransformerLayer with
-    vision_heads-specific configurations and preprocessing to work effectively with
-    spatial feature maps from convolutional layers.
+    Wraps :class:`~dl_techniques.layers.transformers.TransformerLayer` for
+    convolutional feature maps: it flattens ``[H, W, C]`` to a sequence,
+    runs one transformer block, and reshapes the result back to ``[H, W,
+    C]``. Layer scale is applied inside the transformer's own residual
+    branches, not to the block's output as a whole.
 
-    **Intent**: Provide a vision_heads-optimized attention mechanism that leverages
-    the powerful TransformerLayer from dl_techniques while adding spatial
-    awareness and efficient processing for vision_heads tasks.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input(shape=[H, W, C])
-           ↓
-    Spatial Flatten: [H*W, C]
-           ↓
-    TransformerLayer(attention + FFN)
-           ↓
-    Spatial Reshape: [H, W, C]
-           ↓
-    LayerScale (optional)
-           ↓
-    Output(shape=[H, W, C])
-    ```
+    .. code-block:: text
 
-    **Design Features**:
-    - Spatial-to-sequence conversion for transformer processing
-    - Configurable attention mechanism (multi-head, window, etc.)
-    - Optional layer scaling for training stability
-    - Preserves spatial dimensions through reshape operations
+        input [B, H, W, C]
+               │
+               ▼
+        flatten to [B, H*W, C]
+               │
+               ▼
+        ┌─────────────────────┐
+        │  TransformerLayer    │  attention + FFN, layer
+        │                      │  scale inside residuals
+        └──────────┬───────────┘
+                    ▼
+        reshape to [B, H, W, C]
+               │
+               ▼
+        output [B, H, W, C]
 
-    Args:
-        dim: Integer, feature dimension. Must be positive and divisible by num_heads.
-        num_heads: Integer, number of attention heads. Must be positive and divide dim.
-            Defaults to 8.
-        mlp_ratio: Float, expansion ratio for the MLP in transformer.
-            Must be positive. Defaults to 4.0.
-        attention_type: String, type of attention mechanism to use, forwarded to
-            TransformerLayer. Options: 'multi_head', 'window', 'group_query'
-            (see dl_techniques.layers.attention.factory.AttentionType).
-            Defaults to 'multi_head' -- WHICH CARRIES NO POSITIONAL
-            INFORMATION. This block flattens the spatial grid and adds no
-            positional embedding, and TransformerLayer's 'multi_head' branch
-            builds MultiHeadAttention with no RoPE and no relative bias, so a
-            'multi_head' block is EXACTLY permutation-equivariant over the grid
-            (MEASURED: max|f(Px) - Pf(x)| = 5.36e-07 on |y|max 4.45, the float32
-            floor). `FastVLM` therefore defaults to 'group_query' instead
-            (D-044); this constructor default is left alone only so that
-            existing direct callers keep their weight paths. Prefer
-            'group_query'.
-        normalization_position: String, position of normalization layers.
-            Options: 'pre', 'post'. Defaults to 'pre'.
-        dropout_rate: Float, ordinary elementwise dropout rate applied by the
-            internal TransformerLayer (FFN output + attention probabilities).
-            Must be between 0 and 1. Defaults to 0.0.
-        use_stochastic_depth: Boolean, whether the internal TransformerLayer
-            applies true per-sample stochastic depth (residual-path dropping)
-            on its attention and FFN branches. Independent of `dropout_rate`.
-            Defaults to False (matching TransformerLayer's own default).
-        stochastic_depth_rate: Float, drop-path rate used when
-            `use_stochastic_depth` is True. Must be < 1.0 (StochasticDepth
-            raises otherwise). Defaults to 0.1 (matching TransformerLayer).
-        max_seq_len: Integer, RoPE table length. ONLY consumed when
-            `attention_type` is 'group_query' (other types do not declare the
-            key and the attention factory raises on undeclared kwargs). Must be
-            at least the flattened grid size H*W or RoPE raises at call time.
-            Defaults to 2048 (a 45x45 grid).
-        use_layer_scale: Boolean, whether to apply learnable layer scaling.
-            Defaults to True.
-        layer_scale_init: Float, initial value for layer scale parameters.
-            Must be positive. Defaults to 1e-4.
-        **kwargs: Additional keyword arguments for Layer base class.
+    :param dim: Feature dimension. Must be positive and divisible by
+        ``num_heads``.
+    :type dim: int
+    :param num_heads: Number of attention heads. Defaults to ``8``.
+    :type num_heads: int
+    :param mlp_ratio: Expansion ratio for the transformer's FFN. Defaults
+        to ``4.0``.
+    :type mlp_ratio: float
+    :param attention_type: Attention variant forwarded to
+        ``TransformerLayer`` (``'multi_head'``, ``'window'``,
+        ``'group_query'``, see
+        :class:`~dl_techniques.layers.attention.factory.AttentionType`).
+        Defaults to ``'multi_head'``, which carries no positional
+        information: with no positional embedding added before this
+        block, a ``'multi_head'`` block is exactly permutation-equivariant
+        over the spatial grid (measured: max\\|f(Px) - Pf(x)\\| = 5.36e-07).
+        :class:`FastVLM` itself defaults to ``'group_query'`` instead; this
+        constructor keeps ``'multi_head'`` as its own default only so
+        existing direct callers keep their weight paths.
+    :type attention_type: str
+    :param normalization_position: ``'pre'`` or ``'post'``. Defaults to
+        ``'pre'``.
+    :type normalization_position: str
+    :param dropout_rate: Elementwise dropout rate applied by the internal
+        transformer (FFN output and attention probabilities), in
+        ``[0, 1]``. Defaults to ``0.0``.
+    :type dropout_rate: float
+    :param use_stochastic_depth: Whether the internal transformer applies
+        per-sample stochastic depth on its attention and FFN branches,
+        independent of ``dropout_rate``. Defaults to ``False``.
+    :type use_stochastic_depth: bool
+    :param stochastic_depth_rate: Drop-path rate when
+        ``use_stochastic_depth`` is ``True``. Must be below ``1.0``.
+        Defaults to ``0.1``.
+    :type stochastic_depth_rate: float
+    :param max_seq_len: RoPE table length, consumed only when
+        ``attention_type`` is ``'group_query'`` (other attention types do
+        not declare this key). Must be at least the flattened grid size
+        ``H * W``. Defaults to ``2048`` (a 45x45 grid, covering inputs up
+        to roughly 720px at this block's stage-3 downsampling). Fixed
+        rather than derived from an input shape, so a non-trainable
+        weight's shape does not vary with resolution and weights transfer
+        across resolutions.
+    :type max_seq_len: int
+    :param use_layer_scale: Whether to apply learnable layer scaling.
+        Defaults to ``True``.
+    :type use_layer_scale: bool
+    :param layer_scale_init: Initial value for layer scale parameters.
+        Must be positive. Defaults to ``1e-4``.
+    :type layer_scale_init: float
+    :param kwargs: Additional keyword arguments for the ``Layer`` base
+        class.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
+        4D tensor with shape: ``(batch_size, height, width, channels)``
 
     Output shape:
-        4D tensor with same shape as input: `(batch_size, height, width, channels)`
+        4D tensor with same shape as input.
 
-    Attributes:
-        transformer: TransformerLayer instance for attention computation. It
-            owns the LayerScale (applied inside its residual branches) when
-            ``use_layer_scale`` is set.
-        height: Height dimension extracted from input shape.
-        width: Width dimension extracted from input shape.
+    :ivar transformer: The internal ``TransformerLayer`` doing attention
+        and FFN, and owning layer scale when enabled.
+    :ivar height: Height extracted from the input shape at build time.
+    :ivar width: Width extracted from the input shape at build time.
 
     Example:
-        ```python
-        # Basic attention block
-        attn = AttentionBlockVLM(dim=256, num_heads=8)
-        inputs = keras.Input(shape=(14, 14, 256))
-        outputs = attn(inputs)  # Shape: (None, 14, 14, 256)
+        .. code-block:: python
 
-        # With window attention for efficiency
-        attn = AttentionBlockVLM(
-            dim=512,
-            num_heads=16,
-            attention_type='window',
-            mlp_ratio=6.0
-        )
-
-        # With custom dropout and layer scaling
-        attn = AttentionBlockVLM(
-            dim=768,
-            num_heads=12,
-            dropout_rate=0.1,
-            use_layer_scale=True,
-            layer_scale_init=1e-5
-        )
-
-        # In a vision_heads model pipeline
-        x = ConvolutionalStem(64)(image_input)  # [H/4, W/4, 64]
-        x = RepMixerBlock(64)(x)                # Local feature mixing
-        x = AttentionBlockVLM(64, num_heads=4)(x)  # Global attention
-        ```
-
-    Note:
-        The spatial flatten/reshape operations preserve the spatial structure
-        while allowing transformer processing. This is more efficient than
-        using 2D positional encodings for vision_heads tasks.
+            attn = AttentionBlockVLM(dim=256, num_heads=8)
+            inputs = keras.Input(shape=(14, 14, 256))
+            outputs = attn(inputs)  # (None, 14, 14, 256)
     """
 
     def __init__(
@@ -189,35 +159,10 @@ class AttentionBlockVLM(keras.layers.Layer):
         self.height = None
         self.width = None
 
-        # CREATE transformer layer with vision_heads-optimized settings.
-        #
-        # LayerScale is delegated to TransformerLayer, which applies gamma
-        # INSIDE each residual branch (transformer.py:926-928, 937-939:
-        # ``x = layer_scale(x); out = x + residual``).
-        #
-        # It used to be a standalone LayerScale applied to this block's
-        # whole output in call(), AFTER the transformer had already added its
-        # own residuals — i.e. ``x = gamma * f(x)`` with no skip path at all.
-        # With the default layer_scale_init=1e-4 and FastVLM stacking these as
-        # ``x = stage3(x)`` (model.py:400-402, no external residual), the stage
-        # output was attenuated by 1e-4 PER BLOCK: ~1e-24 over the 6 blocks of
-        # the `base` variant, so the classifier saw zeros. Shape, finiteness and
-        # gradient-existence checks all still passed at that magnitude.
-        # DECISION plan-2026-08-18T140459-7991552f/D-043: `max_seq_len` is
-        # forwarded through `attention_args` (which `TransformerLayer` merges
-        # OVER its own defaults) because the default `attention_type` is now
-        # `'group_query'`, whose RoPE tables are precomputed to `max_seq_len`
-        # and which RAISES on a longer sequence. The stage-3 grid is
-        # `(H/16) * (W/16)`, so the 2048 default covers inputs up to ~720px
-        # (a 45x45 grid). Raise it for higher-resolution encoders. It is
-        # deliberately NOT derived from the model's `input_shape`: that would
-        # make a NON-TRAINABLE weight's SHAPE resolution-dependent and break
-        # weight transfer between resolutions, which is a capability a
-        # convolutional VLM encoder is supposed to have.
-        # The key is passed ONLY for `'group_query'`: since 2026-08-17 the
-        # attention factory RAISES on any kwarg the target type does not
-        # declare, so handing `max_seq_len` to `'multi_head'` would be a hard
-        # construction failure rather than a harmless extra.
+        # Layer scale is delegated to TransformerLayer, applied inside each
+        # residual branch rather than to this block's whole output.
+        # DECISION plan-2026-08-18T140459-7991552f/D-043: max_seq_len is forwarded
+        # only for 'group_query' -- the attention factory raises on an undeclared kwarg for other types. See decisions.md.
         attention_args = (
             {'max_seq_len': self.max_seq_len}
             if attention_type == 'group_query' else None
@@ -251,17 +196,14 @@ class AttentionBlockVLM(keras.layers.Layer):
         if channels != self.dim:
             raise ValueError(f"Input channels ({channels}) must match dim ({self.dim})")
 
-        # Store spatial dimensions
         self.height = height
         self.width = width
 
-        # Calculate sequence length for transformer
         if height is not None and width is not None:
             seq_length = height * width
         else:
             seq_length = None
 
-        # Build transformer with flattened input shape
         transformer_input_shape = (batch_size, seq_length, channels)
         self.transformer.build(transformer_input_shape)
 
@@ -273,20 +215,15 @@ class AttentionBlockVLM(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through attention block."""
-        # Get input shape
         input_shape = ops.shape(inputs)
         batch_size = input_shape[0]
         height = input_shape[1] if self.height is None else self.height
         width = input_shape[2] if self.width is None else self.width
 
-        # Flatten spatial dimensions: [B, H, W, C] -> [B, H*W, C]
+        # [B, H, W, C] -> [B, H*W, C]
         x = ops.reshape(inputs, (batch_size, height * width, self.dim))
-
-        # Apply transformer
         x = self.transformer(x, training=training)
-
-        # Reshape back to spatial: [B, H*W, C] -> [B, H, W, C]
-        # LayerScale already ran inside the transformer's residual branches.
+        # [B, H*W, C] -> [B, H, W, C]. Layer scale already ran inside the transformer.
         x = ops.reshape(x, (batch_size, height, width, self.dim))
 
         return x

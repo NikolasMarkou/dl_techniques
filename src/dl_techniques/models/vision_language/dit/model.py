@@ -1,62 +1,27 @@
-"""The class-conditional latent Diffusion Transformer (DiT) itself.
+"""The class-conditional latent Diffusion Transformer (DiT), built by the
+``DiT`` class.
 
-This module assembles the pieces the rest of the package already owns into the
-model of Peebles & Xie: patchify a latent, add a **frozen** 2-D sin-cos table,
-build one conditioning vector ``c = t_emb + y_emb``, run ``depth`` adaLN-Zero
-blocks, read out through a zero-initialised final layer, and unpatchify back to
-the latent grid. It writes no attention, no FFN, no normalization, no patch
-embedding and no label embedding of its own -- every one of those is an existing
-``dl_techniques`` asset.
+The model patchifies a latent, adds a frozen 2-D sin-cos position table,
+builds one conditioning vector from the timestep and class label, runs
+``depth`` adaLN-Zero transformer blocks, reads out through a zero-initialized
+final layer, and unpatchifies back to the latent grid. Every block and the
+final layer start as an exact identity, so a 28-block stack trains from a
+well-behaved starting point; the model output is exactly ``0.0`` at
+initialization, which is expected, not a defect.
 
-**Channels-last, everywhere.** Upstream is PyTorch NCHW: its input is
-``(N, C, H, W)``, its unpatchify einsum is ``'nhwpqc->nchpwq'`` and its
-classifier-free-guidance split slices ``model_out[:, :3]`` on axis 1. This port
-takes ``(B, H, W, C)`` and returns ``(B, H, W, out_channels)``, so every one of
-those had to be re-derived on the channel axis rather than transcribed. The
-permutation is a property of the layout contract; the arithmetic underneath is
-unchanged. See :func:`unpatchify_tokens` for the derivation, written out.
-
-**The model emits exactly ``0.0`` at initialisation.** The modulation ``Dense``
-of every block and the whole final layer are zero-initialised, so each block is
-an exact identity and the read-out projection is the zero map. This is what
-makes a 28-block stack trainable and it is not a defect: any test asserting
-"the untrained model changes its input" is wrong here.
-
-Initialisation follows upstream's ``initialize_weights`` term by term:
-
-.. code-block:: text
-
-    upstream initialize_weights()          this port
-    ─────────────────────────────────────  ────────────────────────────────────
-    xavier_uniform_ on every nn.Linear     Keras' "glorot_uniform" default on
-                                           every Dense (the same distribution)
-    patch_embed like nn.Linear             flattened_linear_xavier() -- NOT the
-      (flattened [out, in*k*k] view)       Keras conv default (see D-013)
-    normal_(label table, std=0.02)         embeddings_initializer=
-                                             RandomNormal(stddev=0.02)
-    normal_(t_embedder mlp, std=0.02)      TimestepEmbedding(kernel_stddev=0.02)
-    constant_(adaLN[-1], 0) per block      AdaLayerNormZero's zero-init Dense
-    constant_(final_layer.*, 0)            DiTFinalLayer's zero-init Dense pair
-    pos_embed <- 2-D sin-cos, frozen       add_weight(trainable=False,
-                                             initializer=Constant(table))
+This port is channels-last throughout: input is ``(B, H, W, C)`` and output
+is ``(B, H, W, out_channels)``, unlike the upstream PyTorch implementation's
+``(N, C, H, W)``. See :func:`unpatchify_tokens` for the axis derivation this
+layout change requires.
 
 References:
     - Peebles, W. and Xie, S. "Scalable Diffusion Models with Transformers."
       arXiv:2212.09748, 2022. https://arxiv.org/abs/2212.09748
     - Ho, J., Jain, A. and Abbeel, P. "Denoising Diffusion Probabilistic
       Models." arXiv:2006.11239, 2020. https://arxiv.org/abs/2006.11239
-      (the diffusion process this model parameterizes, and the ``t`` the
-      timestep embedder encodes).
     - He, K. et al. "Masked Autoencoders Are Scalable Vision Learners."
-      arXiv:2111.06377, 2021. https://arxiv.org/abs/2111.06377 -- the origin of
-      the fixed 2-D sin-cos positional table
-      (``facebookresearch/mae/util/pos_embed.py``), which upstream DiT copies
-      verbatim and which this repo now owns in
-      :mod:`dl_techniques.layers.embedding.sincos_pos_embed_2d`.
-    - Upstream ``fast-DiT`` reference copy staged under the plan's
-      ``reference/models.py`` (``class DiT``: ``__init__``,
-      ``initialize_weights``, ``unpatchify``, ``forward``,
-      ``forward_with_cfg``), the arbiter for every claim above.
+      arXiv:2111.06377, 2021. https://arxiv.org/abs/2111.06377 (origin of
+      the fixed 2-D sin-cos positional table this model uses).
 """
 
 import math
@@ -64,10 +29,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import numpy as np
-
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
@@ -82,28 +43,18 @@ from dl_techniques.models.vision_language.dit.config import (
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 
-# ---------------------------------------------------------------------
-# Contract constants
-# ---------------------------------------------------------------------
-
 #: The three positional inputs :meth:`DiT.call` takes, in order. Named so the
 #: model, its error messages and the tests agree on the tuple layout instead of
 #: each spelling out indices.
 MODEL_INPUT_NAMES: Tuple[str, ...] = ("x", "t", "y")
 
-#: Number of leading output channels classifier-free guidance is applied to.
-#:
-#: THREE, not ``in_channels``. See :meth:`DiT.forward_with_cfg`.
+#: Number of leading output channels classifier-free guidance is applied
+#: to: three, not ``in_channels``. See :meth:`DiT.forward_with_cfg`.
 CFG_GUIDED_CHANNELS: int = 3
 
 #: Standard deviation of the label-table initializer, from upstream's
 #: ``nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)``.
 LABEL_TABLE_INIT_STDDEV: float = 0.02
-
-
-# ---------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------
 
 
 def flattened_linear_xavier(
@@ -147,16 +98,16 @@ def unpatchify_tokens(
 
     Interface contract: pure, backend-agnostic, no weights. ``tokens`` is
     ``(B, grid_height * grid_width, patch_size ** 2 * channels)`` with the token
-    axis in ROW-MAJOR order over the grid and the payload axis in row-major
+    axis in row-major order over the grid and the payload axis in row-major
     order over ``(patch_row, patch_col, channel)``. The result is
     ``(B, grid_height * patch_size, grid_width * patch_size, channels)``.
     Non-square grids are supported here even though :class:`DiT` itself only
     builds square ones -- that is what lets a test detect a transposed
     interleave, which is invisible on a square grid.
 
-    **The derivation, not a transcription.** Upstream's einsum
-    ``'nhwpqc->nchpwq'`` targets NCHW and is not the answer here. Reshaping
-    ``tokens`` to ``(B, h, w, p, q, c)`` gives an element indexed
+    The derivation, not a transcription of upstream's einsum
+    ``'nhwpqc->nchpwq'`` (which targets NCHW and is not the answer here):
+    reshaping ``tokens`` to ``(B, h, w, p, q, c)`` gives an element indexed
     ``[b, i, j, pi, pj, ci]`` where ``i, j`` select the patch and ``pi, pj``
     the pixel inside it. Its destination pixel is::
 
@@ -164,7 +115,7 @@ def unpatchify_tokens(
         column = j * p + pj
 
     A single ``reshape`` produces exactly that pairing when the two source axes
-    of each destination axis are ADJACENT and in that order, i.e. when the axis
+    of each destination axis are adjacent and in that order, i.e. when the axis
     order is ``(b, i, pi, j, pj, ci)``. That is the permutation
     ``(0, 1, 3, 2, 4, 5)`` -- it swaps ``w`` past ``p`` and nothing else.
 
@@ -182,7 +133,7 @@ def unpatchify_tokens(
         image [B, h*p, w*p, c]
 
     The transposed alternative ``(0, 2, 4, 1, 3, 5)`` produces a tensor of the
-    IDENTICAL shape on a square grid and passes every shape assertion, so the
+    identical shape on a square grid and passes every shape assertion, so the
     guard for this function is a delta-impulse at an asymmetric patch
     coordinate whose destination index is computed independently.
 
@@ -247,11 +198,6 @@ def _unpack_triple(value: Any, owner: str, kind: str) -> Tuple[Any, Any, Any]:
             f"{len(value) if isinstance(value, (list, tuple)) else 'n/a'}."
         )
     return value[0], value[1], value[2]
-
-
-# ---------------------------------------------------------------------
-# The model
-# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.models.dit.model")
@@ -331,8 +277,8 @@ class DiT(keras.Model):
     patch size, not by the scale, so ``DiT-XL/2`` and ``DiT-XL/8`` have almost
     the same parameter count and wildly different attention cost.
 
-    :param input_size: Side of the square latent grid (``H == W``). This is the
-        LATENT resolution, not the pixel resolution.
+    :param input_size: Side of the square latent grid (``H == W``). This is
+        the latent resolution, not the pixel resolution.
     :type input_size: int
     :param patch_size: Patch side ``p``. Must divide ``input_size``.
     :type patch_size: int
@@ -380,13 +326,9 @@ class DiT(keras.Model):
     """
 
     #: House-contract alias for the variant registry (``models/CLAUDE.md``
-    #: § House Model Module Shape, and the repo-wide guard
-    #: ``test_package_api_contract.py::TestModelVariantsArePresent``, which
-    #: requires ``from_variant`` to resolve a ``MODEL_VARIANTS`` reachable from
-    #: the class). This is an ALIAS bound to the same object, not a copy: the
-    #: table is owned by
-    #: :data:`~dl_techniques.models.vision_language.dit.config.DIT_VARIANTS`
-    #: and a second dict here would be twelve rows kept in lockstep by hand.
+    #: § House Model Module Shape). Bound to the same object as
+    #: :data:`~dl_techniques.models.vision_language.dit.config.DIT_VARIANTS`,
+    #: not a copy, so the two never drift out of sync.
     MODEL_VARIANTS: Dict[str, Dict[str, int]] = DIT_VARIANTS
 
     def __init__(
@@ -469,8 +411,8 @@ class DiT(keras.Model):
         self.grid_size = self.input_size // self.patch_size
         self.num_patches = self.grid_size * self.grid_size
 
-        # CREATE every sub-layer here, each with an explicit name so the weight
-        # paths are stable across a `.keras` round trip.
+        # Every sub-layer is created with an explicit name so weight paths
+        # stay stable across a .keras round trip.
         self.x_embedder = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.hidden_size,
@@ -492,9 +434,8 @@ class DiT(keras.Model):
             num_classes=self.num_classes,
             hidden_size=self.hidden_size,
             dropout_rate=self.class_dropout_rate,
-            # The override is MANDATORY. The house default is "uniform";
-            # upstream is normal(std=0.02). A wrong table init has no shape, no
-            # count and no round-trip symptom -- it just trains differently.
+            # Override required: the house default is "uniform", upstream is
+            # normal(std=0.02); a wrong table init has no shape/count/round-trip symptom.
             embeddings_initializer=keras.initializers.RandomNormal(
                 stddev=LABEL_TABLE_INIT_STDDEV
             ),
@@ -538,8 +479,6 @@ class DiT(keras.Model):
             self.num_patches,
             self.out_channels,
         )
-
-    # -- shape plumbing ---------------------------------------------------
 
     def _input_shapes(
         self, input_shape: Any
@@ -616,8 +555,6 @@ class DiT(keras.Model):
             self.depth,
         )
 
-    # -- forward path -----------------------------------------------------
-
     def unpatchify(self, tokens: Any) -> Any:
         """``(B, T, p*p*out_channels)`` -> ``(B, H, W, out_channels)``.
 
@@ -683,11 +620,11 @@ class DiT(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass with the batched classifier-free-guidance trick.
 
-        The caller stacks a conditional half and an unconditional half into ONE
+        The caller stacks a conditional half and an unconditional half into one
         batch: ``y[:B//2]`` are real labels and ``y[B//2:]`` are the null-row
-        index ``num_classes``. This method takes the FIRST half of ``x``,
+        index ``num_classes``. This method takes the first half of ``x``,
         duplicates it so both halves see identical latents, runs one forward
-        pass, mixes the two epsilon halves and returns a FULL-batch tensor whose
+        pass, mixes the two epsilon halves and returns a full-batch tensor whose
         two halves are identical in the guided channels.
 
         .. code-block:: text
@@ -701,7 +638,7 @@ class DiT(keras.Model):
              ▼  self(...)
             model_out [B, H, W, out_channels]
              │
-             ├── eps  = model_out[..., :3]     ◄── THREE channels, see below
+             ├── eps  = model_out[..., :3]     ◄── three channels, see below
              └── rest = model_out[..., 3:]
                    │
             cond_eps, uncond_eps = split(eps, 2, axis=0)
@@ -800,8 +737,6 @@ class DiT(keras.Model):
         """
         return cls(**config)
 
-    # -- variants ---------------------------------------------------------
-
     @classmethod
     def _download_weights(cls, variant: str) -> str:
         """Pretrained-weights stub. Always raises.
@@ -854,7 +789,7 @@ class DiT(keras.Model):
         canonical = normalize_variant_name(variant)
 
         if pretrained is True:
-            # Raised BEFORE anything is allocated, so a caller who asked for
+            # Raised before anything is allocated, so a caller who asked for
             # trained weights never receives a randomly initialized model.
             cls._download_weights(canonical)
 

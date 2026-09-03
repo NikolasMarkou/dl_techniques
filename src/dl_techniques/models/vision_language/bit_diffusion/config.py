@@ -1,41 +1,25 @@
-"""Geometry and constants of the BiT/BiB text<->image bridge.
+"""Geometry and constants of the BiT/BiB text<->image bridge, held by the
+``BridgeConfig`` dataclass and its named presets in ``BRIDGE_PRESETS``.
 
-The bridge is the single tensor both modalities are forced to share. A caption
-is a sequence of token embeddings; an image is a VAE latent map. Neither can be
-diffused into the other until they are the *same object*, so the port fixes one
-shape -- a latent-sized tensor ``(H, W, C)`` -- and requires the token sequence
-to be a lossless repacking of exactly that many numbers. `BridgeConfig` is the
-arithmetic that makes the two views commensurable, and `validate` is what stops
-a preset whose two views merely look plausible.
+A caption is a sequence of token embeddings; an image is a VAE latent map.
+Neither can be diffused into the other until they share one shape, so this
+module fixes a latent-sized bridge tensor ``(H, W, C)`` and requires the
+token sequence to be a lossless repacking of exactly that many numbers.
+``BridgeConfig.validate`` checks that a preset's two views describe the
+same count of numbers, not merely a plausible one.
 
-The invariant that carries the whole design is `token_flat_dim ==
-bridge_flat_dim`. Once it holds, "how many patches does one token occupy" is not
-a free parameter: it is forced, and so is the patch grid. That is why the
-presets below look over-determined -- they are.
-
-This module is channels-last. Upstream's ``TokenBridgeConfig`` stores
-``bridge_shape`` as ``(C, H, W)`` because PyTorch convolutions are channels-first;
-here the same field is ``(H, W, C)``. The derived quantities are unchanged, but
-the field order is not, and reading an upstream preset into this class without
-permuting it would produce a config that validates and is wrong.
+This module is channels-last: the bridge shape is ``(H, W, C)``, where an
+upstream PyTorch implementation would store ``(C, H, W)``.
 
 References:
-    - Upstream ``token_bridge.py`` (staged verbatim under the plan's
-      ``reference/`` directory), from which every constant here is ported.
+    - Upstream ``token_bridge.py``, from which every constant here is
+      ported.
 """
 
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
-# ---------------------------------------------------------------------
-# Local Imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.utils.logger import logger
-
-# ---------------------------------------------------------------------
-# Module constants
-# ---------------------------------------------------------------------
 
 #: Endpoint clamp for every time sampler. ``C(0, t, t)`` and ``C(t, 1, 1)`` are
 #: exactly zero at ``t = 0`` / ``t = 1``, so the score targets divide by zero
@@ -74,8 +58,8 @@ class BridgeConfig:
     :type token_seq_len: int
     :param token_emb_dim: Width of a single token embedding.
     :type token_emb_dim: int
-    :param bridge_shape: Bridge tensor shape as ``(height, width, channels)``.
-        **Channels-last**, unlike upstream's ``(C, H, W)``.
+    :param bridge_shape: Bridge tensor shape as ``(height, width, channels)``,
+        channels-last, unlike upstream's ``(C, H, W)``.
     :type bridge_shape: Tuple[int, int, int]
     :param patch_size: Side of the square patch the bridge is tiled into.
     :type patch_size: int
@@ -97,8 +81,6 @@ class BridgeConfig:
     image_as_noise: bool = False
     latent_scale: float = SD_LATENT_SCALE
     latent_shift: float = SD_LATENT_SHIFT
-
-    # -- bridge geometry ------------------------------------------------
 
     @property
     def height(self) -> int:
@@ -131,8 +113,6 @@ class BridgeConfig:
         """Numbers carried by one patch: ``C * p * p``."""
         return self.channels * self.patch_size * self.patch_size
 
-    # -- token geometry -------------------------------------------------
-
     @property
     def patches_per_token(self) -> int:
         """How many patches one token embedding fills."""
@@ -150,8 +130,6 @@ class BridgeConfig:
     def token_scale(self) -> float:
         """``sqrt(token_emb_dim)``; real token embeddings are unit-norm once divided by it."""
         return float(self.token_emb_dim) ** 0.5
-
-    # -- validation -----------------------------------------------------
 
     def validate(self) -> "BridgeConfig":
         """Raise :class:`ValueError` unless the two views describe the same numbers.
@@ -175,12 +153,8 @@ class BridgeConfig:
                 f"({self.height} * {self.width} * {self.channels} = "
                 f"{self.bridge_flat_dim}); the packing cannot be a bijection otherwise"
             )
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-008
-        # Do NOT add a fourth `token_emb_dim % patch_payload_dim == 0` check here.
-        # Given the divisibility check above, any two of {flat-dim equality, this
-        # patches_per_token check, exact payload divisibility} imply the third, so a
-        # fourth check is one that can never fire -- and a check that cannot fail is
-        # not a guard, it is a claim no test can falsify. See decisions.md D-008.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-008: no fourth "payload divisible"
+        # check -- given the check above, any two of the three conditions imply the third, so a fourth check could never fire. See decisions.md.
         if self.token_seq_len * self.patches_per_token != self.num_patches:
             raise ValueError(
                 f"token_seq_len * patches_per_token "
@@ -193,14 +167,9 @@ class BridgeConfig:
         return self
 
 
-# ---------------------------------------------------------------------
-# Presets
-# ---------------------------------------------------------------------
-#
-#   sd   : 64 tokens x 64 dims  = 4096  ==  32 * 32 * 4  = 4096
-#   flux : 128 tokens x 128 dims = 16384 == 32 * 32 * 16 = 16384
-#   tiny : 8 tokens x 32 dims   = 256   ==  8 *  8 * 4   = 256   (tests only)
-
+# sd   : 64 tokens x 64 dims   = 4096  == 32 * 32 * 4  = 4096
+# flux : 128 tokens x 128 dims = 16384 == 32 * 32 * 16 = 16384
+# tiny : 8 tokens x 32 dims    = 256   == 8 * 8 * 4     = 256 (tests only)
 BRIDGE_PRESETS: Dict[str, BridgeConfig] = {
     "sd": BridgeConfig(
         token_seq_len=64,

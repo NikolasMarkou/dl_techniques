@@ -5,10 +5,9 @@ machinery around it: a lossless channels-last token<->bridge packing, the SDE
 base processes and their direction-specific score-matching targets, the sampler,
 and a decoder that reads text back out of a sampled bridge tensor.
 
-Currently exported: the bridge geometry, the packing bijection, the four SDE
-base processes, the `DiTXA` model and the `SharedTokenDecoder` that reads text
-back out of a sampled bridge tensor. `blocks.py` is deliberately NOT exported --
-its layers are implementation detail of `DiTXA`, not a public surface.
+Exports the bridge geometry, the packing bijection, the four SDE base
+processes, the `DiTXA` model, and the `SharedTokenDecoder`. `blocks.py` is
+not exported: its layers are implementation detail of `DiTXA`.
 
     from dl_techniques.models.vision_language.bit_diffusion import (
         BRIDGE_PRESETS, PeriodicVolatilitySDE, token_flat_to_bridge,
