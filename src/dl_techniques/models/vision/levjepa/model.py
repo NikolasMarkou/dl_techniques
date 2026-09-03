@@ -1,10 +1,10 @@
-"""
-LeVJEPA scale table, variant registry and factory function.
+"""LeVJEPA scale table, variant registry, and factory functions.
 
-Reproduces the LeVJEPA PyTorch reference's ``vit_tiny`` .. ``vit_gigantic``
-factory functions as a data table (``SCALE_CONFIGS``), mirroring
-``models/vision/vit/model.py:113-1212``'s ``SCALE_CONFIGS`` /
-``MODEL_VARIANTS`` / ``from_variant`` / ``create_*`` shape.
+Defines :data:`SCALE_CONFIGS`, :func:`from_variant`, and
+:func:`create_levjepa`, reproducing the LeVJEPA PyTorch reference's
+``vit_tiny`` through ``vit_gigantic`` factory functions as a data table,
+in the same shape as ``models/vision/vit/model.py``'s ``SCALE_CONFIGS`` /
+``MODEL_VARIANTS`` / ``from_variant`` / ``create_*``.
 
 References:
     - LeVJEPA PyTorch reference, ``module.py::vit_tiny`` .. ``vit_gigantic``

@@ -1,62 +1,15 @@
-"""
-``LeVJEPATrainingModel``: the LeVJEPA multiview training wrapper.
+"""``LeVJEPATrainingModel``: the LeVJEPA multiview training wrapper.
 
-Ports the LeVJEPA PyTorch reference's ``multiview_forward`` (``main.py``,
-quoted verbatim in this plan's Step 6 prompt), minus the two
-``rearrange(..., "b t c h w -> b c t h w")`` calls that only exist because the
-reference is channels-first end to end -- this repo's video tensors are
-channels-last (``B, T, H, W, C``) at every call site, so those two lines are
-DROPPED rather than ported (see the ``DECISION`` note below):
+Ports the LeVJEPA PyTorch reference's ``multiview_forward``, minus the two
+``rearrange`` calls that convert between channels-first and channels-last
+layouts: this repo's video tensors are already channels-last (``B, T, H, W,
+C``) at every call site, so those two lines are dropped rather than ported.
 
-.. code-block:: python
-
-    def multiview_forward(self, batch, stage):
-        global_frame = to_float_normalized(batch["global_frame"])   # (B, T, H, W, C)
-        local_frames = to_float_normalized(batch["local_frames"])   # (B, V_local, T, H, W, C)
-        batch_size = global_frame.shape[0]
-
-        global_tokens = self.encoder(global_frame)                  # (B, 1+N, D), CLS at index 0
-        global_cls = global_tokens[:, 0].unsqueeze(1)                # (B, 1, D)
-
-        local_tokens = self.encoder(reshape(local_frames, "(b v) t h w c"))
-        local_cls = rearrange(local_tokens[:, 0], "(b v) d -> b v d", b=batch_size)
-
-        embeddings = self.projector(concat([global_cls, local_cls], axis=1))  # (B, 1+V_local, D)
-        global_emb = embeddings[:, :1]
-
-        pred_loss = mean((global_emb - embeddings) ** 2)
-        sigreg_loss = self.sigreg(transpose(embeddings, "b v d -> v b d"))
-        loss = pred_loss + self.sigreg_weight * sigreg_loss
-        return {"pred_loss": pred_loss, "sigreg_loss": sigreg_loss, "loss": loss}
-
-Trains under ``self.add_loss(...)`` inside ``call()`` (mirroring
-``models/vision/lewm/model.py`` and ``models/vision/dino/training.py``) so a
-stock ``model.compile(loss=None)`` + ``model.fit()`` trains correctly -- no
-custom ``train_step`` anywhere in this plan.
-
-Architecture:
-    .. code-block:: text
-
-        {"global_frame": (B,T,H,W,C), "local_frames": (B,V,T,H,W,C)}
-                            │
-              encoder(global_frame)           encoder(reshape local_frames -> (B*V,T,H,W,C))
-              -> (B, 1+N, D)                   -> (B*V, 1+N, D)
-                            │                                  │
-                    CLS at index 0                     CLS at index 0, reshape -> (B, V, D)
-                            │                                  │
-                            └───────────── concat(axis=1) ─────┘
-                                            (B, 1+V, D)
-                                                  │
-                                              projector
-                                                  ▼
-                                       embeddings: (B, 1+V, D)
-                                        /                    \\
-                              global_emb = embeddings[:, :1]   sigreg(transpose -> (1+V, B, D))
-                                        \\                    /
-                          pred_loss = mean((global_emb - embeddings)**2)   sigreg_loss
-                                        \\                    /
-                              loss = pred_loss + sigreg_weight * sigreg_loss
-                                        (both added via self.add_loss)
+Runs the shared encoder over a global view and every local view, projects
+the CLS tokens with :class:`LeVJEPAProjector`, and adds two loss terms
+(prediction and SIGReg) via ``self.add_loss(...)`` inside :meth:`call`, so
+the model trains under a stock ``model.compile(loss=None)`` plus
+``model.fit()``, with no custom ``train_step``.
 
 References:
     - LeVJEPA PyTorch reference, ``main.py::multiview_forward`` (pasted
@@ -78,23 +31,10 @@ from dl_techniques.regularizers.sigreg import SIGRegLayer
 
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-09-03T113223-2a714a91/D-017
-# The reference's `multiview_forward` opens with
-# `global_frame = to_float_normalized(batch["global_frame"])`, a full
-# ImageNet-style mean/std normalization. This port's data source
-# (`synthetic_drone_video_dataset` / `bdd100k_video_dataset`, both documented
-# "float32 in [0, 1]") and the new `multi_crop_video.py` transform (Part B)
-# both already emit float32 tensors in a bounded, well-conditioned range --
-# there is no un-normalized uint8 or arbitrary-range input reaching this
-# model. WHAT NOT TO DO: do not add a hard-coded ImageNet mean/std subtraction
-# here "to match the reference" -- this repo has no canonical mean/std
-# constant for LeVJEPA's own (possibly synthetic) data domain, and inventing
-# one would silently miscalibrate a smoke run against data it was never
-# measured on. `to_float_normalized` is therefore implemented as a plain
-# `ops.cast(x, "float32")` -- a real simplification, not a bug: a future plan
-# training on a domain that needs mean/std normalization should add it at the
-# DATASET boundary (where the domain's statistics are known), not inside this
-# training-only wrapper. See decisions.md D-017.
+# DECISION plan-2026-09-03T113223-2a714a91/D-017: `to_float_normalized` is a
+# plain cast to float32, not ImageNet mean/std normalization -- this port's data
+# sources already emit float32 in [0, 1]. Add mean/std at the dataset boundary
+# if a future domain needs it. See decisions.md.
 
 
 @register_dl_technique("dl_techniques.models.levjepa.training")
@@ -109,7 +49,32 @@ class LeVJEPATrainingModel(keras.Model):
     inside :meth:`call`, so the model trains under a stock
     ``model.compile(loss=None)`` + ``model.fit()``.
 
-    :param encoder: A (built or unbuilt) :class:`LeVJEPAEncoder` in VIDEO mode
+    Architecture:
+
+    .. code-block:: text
+
+        {"global_frame": [B,T,H,W,C], "local_frames": [B,V,T,H,W,C]}
+            |                                    |
+        encoder(global_frame)          encoder(reshape local_frames -> [B*V,T,H,W,C])
+        -> [B, 1+N, D]                  -> [B*V, 1+N, D]
+            |                                    |
+        CLS at index 0                  CLS at index 0, reshape -> [B, V, D]
+            +----------------- concat(axis=1) ---+
+                                |
+                            [B, 1+V, D]
+                                |
+                            projector
+                                |
+                    embeddings [B, 1+V, D]
+                       /                    \\
+        global_emb = embeddings[:, :1]   sigreg(transpose -> [1+V, B, D])
+                       \\                    /
+        pred_loss = mean((global_emb - embeddings)**2)   sigreg_loss
+                       \\                    /
+                loss = pred_loss + sigreg_weight * sigreg_loss
+                        (both added via self.add_loss)
+
+    :param encoder: A (built or unbuilt) :class:`LeVJEPAEncoder` in video mode
         (``num_frames > 1``), run on both the global and every local view.
         Passing an already-constructed encoder (e.g. from
         :func:`~dl_techniques.models.vision.levjepa.model.create_levjepa` or
@@ -141,7 +106,7 @@ class LeVJEPATrainingModel(keras.Model):
     :ivar sigreg: The :class:`SIGRegLayer` regularizer, ``normalize_by_n=True``.
     :ivar pred_loss_tracker: ``keras.metrics.Mean`` over the unweighted
         prediction loss, created in :meth:`build`.
-    :ivar sigreg_loss_tracker: ``keras.metrics.Mean`` over the WEIGHTED SIGReg
+    :ivar sigreg_loss_tracker: ``keras.metrics.Mean`` over the weighted SIGReg
         term, created in :meth:`build`.
 
     Input shape:
@@ -221,7 +186,7 @@ class LeVJEPATrainingModel(keras.Model):
         self.sigreg_weight = float(sigreg_weight)
 
         # Created in build(): the EMA shadow weights (one non-trainable
-        # variable per encoder weight, AFTER the encoder is built so shapes
+        # variable per encoder weight, after the encoder is built so shapes
         # are known -- see the update_ema_shadow docstring for why this
         # cannot be deferred to first-call) and the two loss trackers.
         self._ema_shadow_weights: list = []
@@ -259,30 +224,14 @@ class LeVJEPATrainingModel(keras.Model):
         self.projector.build((None, None, embed_dim))
         self.sigreg.build((None, None, embed_dim))
 
-        # EMA shadow: one non-trainable variable per encoder weight, the
-        # VARIABLES created HERE (not lazily inside update_ema_shadow) --
-        # Keras 3's StatelessScope forbids adding new state after
-        # built=True, the same trap Step 5's EMAShadowCallback docstring
-        # documents.
+        # EMA shadow: one non-trainable variable per encoder weight, created
+        # here (not lazily inside update_ema_shadow) since Keras 3's
+        # StatelessScope forbids adding new state after built=True.
         #
-        # DECISION plan-2026-09-03T113223-2a714a91/D-020
-        # Their VALUES are seeded with plain zeros here, not the live
-        # encoder's initial weight values. WHAT NOT TO DO: do not read
-        # `ops.convert_to_numpy(w)` here to seed a `Constant` initializer --
-        # MEASURED, `build()` runs inside `model.fit()`'s tracing context
-        # (not always eager: a real `.fit()` call traces `build` under a
-        # non-eager scope), so `ops.convert_to_numpy` raises
-        # `NotImplementedError: numpy() is only available when eager
-        # execution is enabled` there, even though the identical code path
-        # succeeds when the model is called directly in a pytest's eager
-        # context. Reproducing the encoder's live values into the shadow
-        # therefore happens the way the EMAShadowCallback docstring already
-        # specifies -- "the model owns the shadow's storage and is
-        # responsible for lazily initializing it ... on its own first call"
-        # -- via a one-shot copy-not-blend on `update_ema_shadow`'s FIRST
-        # invocation (`self._ema_shadow_seeded`, set below), which runs from
-        # `on_train_batch_end`, a genuinely eager callback context. See
-        # decisions.md D-020.
+        # DECISION plan-2026-09-03T113223-2a714a91/D-020: seeded with plain zeros,
+        # not the encoder's live weights -- `ops.convert_to_numpy` raises inside
+        # `build()`'s tracing context. The shadow is copy-seeded instead on
+        # `update_ema_shadow`'s first call, a genuinely eager context. See decisions.md.
         self._ema_shadow_weights = [
             self.add_weight(
                 name=f"ema_shadow_{i}",
@@ -393,19 +342,14 @@ class LeVJEPATrainingModel(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration for serialization.
 
-        # DECISION plan-2026-09-03T113223-2a714a91/D-018
-        # `LeVJEPATrainingModel` wraps `self.encoder` BY REFERENCE, so its
-        # config carries the encoder's own full config (via
-        # `keras.saving.serialize_keras_object`) rather than duplicating its
-        # constructor arguments. This gives a genuine, working
-        # `get_config()`/`from_config()` round trip for the wrapper -- unlike
-        # D-007's initial framing (a training-only wrapper's round trip
-        # "may be harder"), this one IS meaningful: the encoder is the only
-        # sub-model needing full reconstruction (`projector`/`sigreg` are
-        # plain Layers Keras already tracks and reconstructs through the
-        # standard build-then-load-weights path). See decisions.md D-018.
         :return: Dictionary holding every ``__init__`` parameter.
         :rtype: Dict[str, Any]
+
+        Note:
+            DECISION plan-2026-09-03T113223-2a714a91/D-018: the config carries the
+            encoder's own full config via `keras.saving.serialize_keras_object`,
+            not duplicated constructor arguments -- `projector`/`sigreg` are plain
+            Layers Keras already reconstructs through build-then-load-weights. See decisions.md.
         """
         config = super().get_config()
         config.update(
