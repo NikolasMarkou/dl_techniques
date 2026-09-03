@@ -19,9 +19,29 @@ This module offers nine specialized initializers that go beyond standard random 
 
 ## Orthonormal Initializer
 
-Generates a weight matrix where each row is a unit vector and is orthogonal to all other rows. This is achieved by applying QR decomposition to a random Gaussian matrix. Such matrices preserve signal norm (isometry), which helps prevent gradients from vanishing or exploding during backpropagation.
+Generates a weight matrix where each row is a unit vector orthogonal to every other row, by applying
+QR decomposition to a random Gaussian matrix. Such matrices preserve signal norm (isometry), which
+helps prevent gradients from vanishing or exploding during backpropagation.
 
-**Mathematical Constraint:** It is impossible to create more than `d` orthogonal vectors in a `d`-dimensional space. This initializer will raise a `ValueError` if the number of output vectors (e.g., `units` in a `Dense` layer) exceeds the feature dimensionality.
+**Orientation — read this before using it on a `Dense` layer.** The shape is
+`(n_clusters, feature_dims)`: the FIRST axis counts the vectors and the LAST is the space they live
+in. A Keras `Dense` kernel is `(input_dim, units)`, so the constraint is **`input_dim <= units`** —
+only a *widening* layer qualifies. This is a codebook / centroid initializer whose contract is
+orthonormal **rows**; for a narrowing `Dense` or any `Conv2D`, use `keras.initializers.Orthogonal`
+or `OrthogonalHypersphereInitializer` instead.
+
+**Mathematical constraint:** it is impossible to create more than `d` orthogonal vectors in a
+`d`-dimensional space, so `n_clusters > feature_dims` raises `ValueError`. So does a non-2D shape:
+a 4-D convolution kernel raises rather than being silently reinterpreted, which
+`tests/test_layers/test_convnext_v1_block.py` pins as a contract.
+
+**Sign convention:** `Q *= sign(diag(R))`, the unique factorization with a positive `R` diagonal —
+the same convention `HeOrthonormalInitializer` and `OrthogonalHypersphereInitializer` use, and the
+one `keras.initializers.Orthogonal` uses. It canonicalizes across LAPACK / cuSOLVER / JAX builds
+*and* preserves the Haar distribution. It replaced a convention keyed on `Q`'s first row, which was
+equally deterministic but folded that row into the positive orthant on every draw: measured over
+4000 seeds at `d=64`, `P(any entry of row 0 < 0)` was `0.000` and the mean cosine of row 0 to the
+all-ones direction was **`0.801`**.
 
 ### Usage
 
@@ -29,19 +49,19 @@ Generates a weight matrix where each row is a unit vector and is orthogonal to a
 import keras
 from dl_techniques.initializers import OrthonormalInitializer
 
-# Create 64 orthonormal vectors in a 128-dimensional space
+# A codebook: 64 orthonormal vectors in a 128-dimensional space
 initializer = OrthonormalInitializer(seed=42)
 weights = initializer(shape=(64, 128))
 
-# Use in a Dense layer
-layer = keras.layers.Dense(
-    units=64,
-    input_dim=128,
-    kernel_initializer=OrthonormalInitializer(seed=123)
-)
+# gain scales the rows; sqrt(2) is the conventional choice for a ReLU stack.
+scaled = OrthonormalInitializer(gain=2.0 ** 0.5, seed=42)(shape=(64, 128))
 
-# This will raise a ValueError because 128 > 64
-# invalid_layer = keras.layers.Dense(128, input_dim=64, kernel_initializer=initializer)
+# In a Dense layer the kernel is (input_dim, units), so only a WIDENING layer fits:
+widening = keras.layers.Dense(units=128, kernel_initializer=initializer)
+widening.build((None, 64))     # kernel (64, 128): 64 <= 128, fine
+
+# narrowing = keras.layers.Dense(units=64, kernel_initializer=initializer)
+# narrowing.build((None, 128)) # kernel (128, 64): raises ValueError
 ```
 
 ## He Orthonormal Initializer
@@ -439,14 +459,18 @@ from dl_techniques.initializers import (
 
 model = keras.Sequential([
     keras.layers.Input(shape=(784,)),
+    # NOTE both of these are WIDENING layers on purpose: a Dense kernel is
+    # (input_dim, units), and both classes require input_dim <= units. A
+    # narrowing layer raises ValueError -- an earlier version of this example
+    # narrowed 784 -> 256 -> 128 and could not run.
     keras.layers.Dense(
-        256,
+        1024,
         # Use HeOrthonormal for a ReLU-based network
         kernel_initializer=HeOrthonormalInitializer(seed=1)
     ),
     keras.layers.ReLU(),
     keras.layers.Dense(
-        128,
+        2048,
         # Use standard Orthonormal for subsequent layers
         kernel_initializer=OrthonormalInitializer(seed=2)
     ),

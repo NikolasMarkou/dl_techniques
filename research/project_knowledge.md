@@ -254,14 +254,14 @@ class Conv2D(BaseConv):
     -   **Type**: Keras Initializer
     -   **Description**: Generates a set of orthonormal vectors (orthogonal and unit length) using QR decomposition on a random matrix. This is useful for initializing layers where decorrelated features are desired, such as clustering centroids or weights in deep networks to mitigate gradient issues.
     -   **Key Parameters (`__init__`)**:
+        -   `gain` (float): Positive scale for the rows; 1.0 leaves them unit norm.
         -   `seed` (Optional[int]): A random seed for reproducibility.
     -   **Core Logic (`call` method)**:
-        1.  Validates that the requested `shape` is 2D and that the number of vectors does not exceed the feature dimensionality.
-        2.  Generates a random square matrix of shape `(feature_dims, feature_dims)` using `numpy.random.RandomState`.
-        3.  Converts the numpy matrix to a tensor using `ops.convert_to_tensor`.
-        4.  Computes the QR decomposition using `ops.linalg.qr`.
-        5.  Applies a sign correction based on the first row of the `Q` matrix to ensure deterministic output for a given seed.
-        6.  Extracts the first `n_clusters` rows from the corrected `Q` matrix to get the final set of orthonormal vectors.
+        1.  Validates that the requested `shape` is 2D and that the number of vectors does not exceed the feature dimensionality. This runs BEFORE any backend call, so a bad shape raises `ValueError` and not a backend error type.
+        2.  Draws a random THIN `(feature_dims, n_clusters)` matrix with `keras.random.normal` — only the vectors actually requested, `O(d*k^2)` rather than the `O(d^3)` of the square factorization it replaced.
+        3.  Computes the QR decomposition using `keras.ops.qr`.
+        4.  Applies the canonical sign correction `Q *= sign(diag(R))` — the unique factorization with a positive `R` diagonal, matching `HeOrthonormalInitializer` and `keras.initializers.Orthogonal`. An earlier version keyed on the first row of `Q` instead, which folded that row into the positive orthant on every draw (measured mean cosine 0.801 to the all-ones direction).
+        5.  Transposes, giving `n_clusters` orthonormal rows, and scales by `gain`.
 
 ### Layers
 

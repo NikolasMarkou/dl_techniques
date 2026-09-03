@@ -8,8 +8,11 @@ mathematical principles from linear algebra, signal processing, and statistical
 learning theory.
 
 Available Initializers:
--   `OrthonormalInitializer`: Generates weight matrices with orthonormal rows,
-    ideal for preserving signal norm and mitigating gradient issues.
+-   `OrthonormalInitializer`: Generates weight matrices with orthonormal rows
+    (optionally scaled by `gain`), ideal for preserving signal norm and
+    mitigating gradient issues. Shape is `(n_clusters, feature_dims)`, so on a
+    Dense kernel the constraint is `input_dim <= units`; it is a
+    codebook/centroid initializer, not a general Dense/Conv2D one.
 -   `HeOrthonormalInitializer`: Combines He normal variance scaling with
     orthonormalization, providing a well-conditioned starting point for
     ReLU-based networks.

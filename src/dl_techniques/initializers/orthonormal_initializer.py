@@ -11,27 +11,51 @@ Architecture and Mathematical Foundations:
 The generation of the orthonormal matrix relies on QR decomposition, a
 standard procedure in linear algebra. The conceptual process is as follows:
 
-1.  A random square matrix `A` is sampled from a Gaussian distribution. The
-    dimensionality of this matrix corresponds to the feature dimension of the
-    weights (`feature_dims x feature_dims`).
+1.  A random `(feature_dims, n_clusters)` matrix `A` is sampled from a
+    Gaussian distribution. Only the `n_clusters` vectors actually requested
+    are factorized -- a THIN QR, `O(feature_dims * n_clusters**2)`. Building
+    the full `feature_dims x feature_dims` square instead is `O(d**3)` and was
+    measured at 9.08 s and a 67.1 MB buffer for a 64-vector codebook in 4096
+    dimensions, against 0.16 s for the thin factorization.
 
 2.  This random matrix `A` undergoes QR decomposition, factorizing it into
-    `A = QR`, where `Q` is an orthogonal matrix and `R` is an upper
-    triangular matrix. An orthogonal matrix `Q` has the defining property
-    that its columns (and rows) form an orthonormal basis. That is, for
-_   any two column vectors `q_i` and `q_j` from `Q`, their dot product is
+    `A = QR`, where `Q` has orthonormal columns and `R` is upper triangular.
+    For any two column vectors `q_i` and `q_j` of `Q`, their dot product is
     `q_i · q_j = δ_ij`, where `δ_ij` is the Kronecker delta.
 
-3.  The final weight matrix is constructed by taking a subset of the rows
-    from the resulting orthogonal matrix `Q`.
+3.  The final weight matrix is `Q` transposed, whose rows are then the
+    requested orthonormal vectors.
 
 A key mathematical constraint is that the number of vectors being initialized
 (e.g., `n_clusters` or `units`) cannot exceed the dimensionality of the
 vector space (`feature_dims`). It is mathematically impossible to construct
 more than `d` mutually orthogonal vectors in a `d`-dimensional space. This
-initializer enforces this constraint. To ensure reproducibility for a given
-seed, a sign-flipping convention is applied to `Q`, as QR decomposition is
-only unique up to the signs of its columns.
+initializer enforces this constraint, and it is 2-D only: a 4-D convolution
+kernel raises `ValueError` rather than being silently reinterpreted (pinned by
+`tests/test_layers/test_convnext_v1_block.py::test_unsupported_repo_initializers_raise`).
+For a `Dense` or `Conv2D` weight in the other orientation, use
+`keras.initializers.Orthogonal` or `OrthogonalHypersphereInitializer`; this
+class is a codebook / centroid initializer whose contract is orthonormal ROWS.
+
+The sign convention
+-------------------
+QR is unique only up to the signs of `Q`'s columns, and different LAPACK /
+cuSOLVER / JAX builds may return different ones for the same `A`, so a
+canonical choice is applied: `Q *= sign(diag(R))`, which yields the unique
+factorization with a positive `R` diagonal. This is the same convention
+`he_orthonormal_initializer.py` and `hypersphere_orthogonal_initializer.py`
+use.
+
+It replaces a convention keyed on the FIRST ROW of `Q`, which was also
+deterministic but folded that row into the positive orthant on every draw.
+Measured over 4000 seeds at `d=64`: `P(any entry of row 0 < 0)` was 0.000 and
+`E[entry of row 0]` was `+0.10010`, matching the theoretical `sqrt(2/(pi*d)) =
+0.09974` for a half-normal fold, giving row 0 a mean cosine of `0.801` to the
+all-ones direction. Rows 1 and beyond were unbiased, so the damage was
+concentrated entirely on the first vector -- i.e. on centroid 0 of every
+codebook this initializes. Under `sign(diag(R))` the same measurement reads
+`P = 1.000`, `E = -0.00002`, cosine `-0.0002`, and `keras.initializers.Orthogonal`
+measures the same, because that convention preserves the Haar distribution.
 
 References:
     - Saxe, A. M., McClelland, J. L., & Ganguli, S. (2013). *Exact
@@ -57,6 +81,140 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+# shared validation
+#
+# `HeOrthonormalInitializer` carried a verbatim copy of both of these, error
+# strings included. Two homes for one rule is a hand-maintained lockstep
+# invariant, so they live here and are imported there: one edit now reddens
+# both suites.
+# ---------------------------------------------------------------------
+
+
+def validate_orthonormal_seed(seed: Optional[int], class_name: str) -> Optional[int]:
+    """Validate a seed argument and coerce it to a Python ``int``.
+
+    Parameters
+    ----------
+    seed : int, optional
+        The seed to validate. ``numpy`` integers are accepted and coerced;
+        ``bool`` is rejected, since ``isinstance(True, int)`` is ``True`` and
+        ``seed=True`` would silently behave as ``seed=1``.
+    class_name : str
+        Owning class name, used in error messages.
+
+    Returns
+    -------
+    int or None
+        The coerced seed.
+
+    Raises
+    ------
+    ValueError
+        If seed is not None and not a non-negative integer.
+    """
+    del class_name  # messages are shared verbatim between the two classes
+    if seed is None:
+        return None
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)):
+        raise ValueError(f"Seed must be an integer, got {type(seed).__name__}")
+    if seed < 0:
+        raise ValueError(f"Seed must be non-negative, got {seed}")
+    return int(seed)
+
+
+def validate_orthonormal_shape(
+    shape: Tuple[int, ...], class_name: str
+) -> Tuple[int, int]:
+    """Validate a ``(n_clusters, feature_dims)`` shape for a row-orthonormal set.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        The requested tensor shape. Entries may be any integer type; they are
+        coerced with ``int()`` rather than type-checked, because a shape that
+        has been through ``TensorShape`` or a config round trip carries
+        ``np.int64``, which is NOT an ``int`` subclass and used to be rejected
+        here with a misleading "must be integers".
+    class_name : str
+        Owning class name, used in the rank error message.
+
+    Returns
+    -------
+    tuple of int
+        ``(n_clusters, feature_dims)``.
+
+    Raises
+    ------
+    ValueError
+        If the shape is not 2-D, holds a non-positive or non-integral
+        dimension, or requests more vectors than dimensions.
+    """
+    if len(shape) != 2:
+        # Stays a ValueError, and stays OUTSIDE any try/except: a 4-D
+        # convolution kernel reaching this initializer must raise ValueError
+        # specifically, which is pinned by
+        # tests/test_layers/test_convnext_v1_block.py and its v2 twin.
+        raise ValueError(
+            f"{class_name} requires a 2D shape (n_clusters, feature_dims), "
+            f"got shape with {len(shape)} dimensions: {shape}"
+        )
+
+    try:
+        n_clusters, feature_dims = (int(d) for d in shape)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"Shape dimensions must be integers, got {tuple(type(d).__name__ for d in shape)}"
+        ) from error
+
+    if n_clusters <= 0 or feature_dims <= 0:
+        raise ValueError(
+            f"Shape dimensions must be positive, got n_clusters={n_clusters}, "
+            f"feature_dims={feature_dims}"
+        )
+
+    if n_clusters > feature_dims:
+        raise ValueError(
+            f"Cannot create {n_clusters} orthogonal vectors in "
+            f"{feature_dims}-dimensional space. n_clusters ({n_clusters}) must be "
+            f"<= feature_dims ({feature_dims})"
+        )
+
+    return n_clusters, feature_dims
+
+
+def orthonormal_rows_from_qr(matrix: Any, dtype: str) -> Any:
+    """Sign-corrected orthonormal rows from a ``(feature_dims, n_clusters)`` matrix.
+
+    Parameters
+    ----------
+    matrix : tensor
+        The Gaussian seed matrix, TALL: ``(feature_dims, n_clusters)``.
+    dtype : str
+        Compute dtype of ``matrix``.
+
+    Returns
+    -------
+    tensor
+        ``(n_clusters, feature_dims)`` with orthonormal rows.
+    """
+    q, r = keras.ops.qr(matrix, mode="reduced")
+
+    # Canonicalize on diag(R): the unique factorization with a positive R
+    # diagonal. Keying on Q's first row instead is equally deterministic but
+    # folds that row into the positive orthant -- measured E[row 0] = +0.10010
+    # against 0 under this convention.
+    signs = keras.ops.sign(keras.ops.diagonal(r))
+    # sign(0) is 0, which would zero a column; a Gaussian makes that a
+    # measure-zero event, but the clamp costs nothing.
+    signs = keras.ops.where(
+        keras.ops.equal(signs, keras.ops.cast(0.0, dtype)),
+        keras.ops.ones_like(signs),
+        signs,
+    )
+    return keras.ops.transpose(q * keras.ops.expand_dims(signs, axis=0))
+
+
+# ---------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.initializers.orthonormal_initializer")
@@ -69,9 +227,14 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
     Parameters
     ----------
+    gain : float, optional
+        Positive multiplicative scale for the orthonormal rows. Defaults to 1.0
+        (unit norm); ``sqrt(2)`` is conventional for a ReLU stack.
     seed : int, optional
-        Random seed for reproducible initialization. If None, the initialization
-        will be non-deterministic.
+        Random seed for reproducible initialization. Following the Keras
+        contract an instance replays the same tensor at every matching shape
+        whether or not a seed is given; a seedless instance resolves one from
+        the global RNG state, so ``keras.utils.set_random_seed`` controls it.
 
     Raises
     ------
@@ -81,41 +244,62 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
     Examples
     --------
-    >>> # Basic usage with a Dense layer
-    >>> initializer = OrthonormalInitializer(seed=42)
-    >>> layer = keras.layers.Dense(64, kernel_initializer=initializer)
-
-    >>> # Direct tensor creation
+    >>> # A codebook / centroid matrix: 10 orthonormal vectors in 50-D
     >>> initializer = OrthonormalInitializer(seed=123)
-    >>> orthonormal_matrix = initializer((10, 50))  # 10 orthonormal vectors in 50D space
+    >>> orthonormal_matrix = initializer((10, 50))
+
+    >>> # A Dense kernel is (input_dim, units), so the CONSTRAINT IS
+    >>> # input_dim <= units -- i.e. only a widening layer qualifies.
+    >>> layer = keras.layers.Dense(64, kernel_initializer=OrthonormalInitializer())
+    >>> _ = layer.build((None, 32))     # kernel (32, 64): 32 <= 64, fine
+    >>> # layer.build((None, 128))      # kernel (128, 64): raises ValueError
+    >>> # For a narrowing Dense or any Conv2D use keras.initializers.Orthogonal
+    >>> # or OrthogonalHypersphereInitializer instead.
     """
 
-    def __init__(self, seed: Optional[int] = None) -> None:
+    def __init__(self, gain: float = 1.0, seed: Optional[int] = None) -> None:
         """Initialize the orthonormal initializer.
 
         Parameters
         ----------
+        gain : float, optional
+            Multiplicative scale applied to the orthonormal rows. Must be
+            positive and finite. ``1.0`` (the default) leaves them unit norm;
+            ``sqrt(2)`` is the conventional choice for a ReLU stack, matching
+            ``keras.initializers.Orthogonal(gain=...)``.
         seed : int, optional
             Random seed for reproducible initialization.
         """
         super().__init__()
-        self.seed = seed
-        self._validate_seed()
-        logger.info(f"Initialized OrthonormalInitializer with seed={seed}")
+
+        if not np.isfinite(gain):
+            raise ValueError(f"gain must be finite, got {gain}")
+        if gain <= 0:
+            raise ValueError(f"gain must be positive, got {gain}")
+
+        self.gain = float(gain)
+        self.seed = validate_orthonormal_seed(seed, type(self).__name__)
+
+        # Mirrors keras.initializers.RandomNormal: the config keeps what the
+        # caller passed, a resolved seed drives the draw. np.random is seeded by
+        # keras.utils.set_random_seed, so a seedless instance is reproducible
+        # under a global seed -- np.random.RandomState(None) was not.
+        self._draw_seed = self.seed if self.seed is not None else int(
+            np.random.randint(0, 2 ** 30)
+        )
+
+        logger.debug(
+            f"Initialized OrthonormalInitializer(gain={self.gain}, seed={self.seed})"
+        )
 
     def _validate_seed(self) -> None:
-        """Validate the seed parameter.
+        """Validate the stored seed.
 
-        Raises
-        ------
-        ValueError
-            If seed is not None and not a non-negative integer.
+        Retained as a method because the constructor used to expose it and the
+        test suite asserts it exists; the rule itself lives in
+        :func:`validate_orthonormal_seed`.
         """
-        if self.seed is not None:
-            if not isinstance(self.seed, int):
-                raise ValueError(f"Seed must be an integer, got {type(self.seed).__name__}")
-            if self.seed < 0:
-                raise ValueError(f"Seed must be non-negative, got {self.seed}")
+        validate_orthonormal_seed(self.seed, type(self).__name__)
 
     def _validate_shape(self, shape: Tuple[int, ...]) -> Tuple[int, int]:
         """Validate and extract dimensions from the shape.
@@ -135,66 +319,13 @@ class OrthonormalInitializer(keras.initializers.Initializer):
         ValueError
             If shape is invalid or if n_clusters > feature_dims.
         """
-        if len(shape) != 2:
-            raise ValueError(
-                f"OrthonormalInitializer requires a 2D shape (n_clusters, feature_dims), "
-                f"got shape with {len(shape)} dimensions: {shape}"
-            )
-
-        n_clusters, feature_dims = shape
-
-        if not isinstance(n_clusters, int) or not isinstance(feature_dims, int):
-            raise ValueError(
-                f"Shape dimensions must be integers, got {type(n_clusters).__name__} "
-                f"and {type(feature_dims).__name__}"
-            )
-
-        if n_clusters <= 0 or feature_dims <= 0:
-            raise ValueError(
-                f"Shape dimensions must be positive, got n_clusters={n_clusters}, "
-                f"feature_dims={feature_dims}"
-            )
-
-        if n_clusters > feature_dims:
-            raise ValueError(
-                f"Cannot create {n_clusters} orthogonal vectors in "
-                f"{feature_dims}-dimensional space. n_clusters ({n_clusters}) must be "
-                f"<= feature_dims ({feature_dims})"
-            )
-
-        return n_clusters, feature_dims
-
-    def _extract_diagonal(self, matrix: Any) -> Any:
-        """Extract diagonal elements from a square matrix.
-
-        This is a helper method to extract diagonal elements using available keras.ops.
-        Since keras.ops doesn't have a direct diagonal extraction function, we use
-        a loop-based approach to extract diagonal elements.
-
-        Parameters
-        ----------
-        matrix : tensor
-            A square matrix from which to extract diagonal elements.
-
-        Returns
-        -------
-        tensor
-            A 1D tensor containing the diagonal elements.
-        """
-        matrix_shape = keras.ops.shape(matrix)
-        min_dim = keras.ops.numpy.minimum(matrix_shape[0], matrix_shape[1])
-
-        # Extract diagonal elements one by one and stack them
-        diagonal_elements = []
-        for i in range(int(keras.ops.convert_to_numpy(min_dim))):
-            diagonal_elements.append(matrix[i, i])
-
-        return keras.ops.stack(diagonal_elements)
+        return validate_orthonormal_shape(shape, type(self).__name__)
 
     def __call__(
         self,
         shape: Tuple[int, ...],
-        dtype: Optional[Union[str, Any]] = None
+        dtype: Optional[Union[str, Any]] = None,
+        **kwargs: Any,
     ) -> Any:
         """Generate orthonormal vectors using QR decomposition.
 
@@ -203,14 +334,17 @@ class OrthonormalInitializer(keras.initializers.Initializer):
         shape : tuple of int
             Desired shape of the output tensor (n_clusters, feature_dims).
         dtype : str or dtype, optional
-            Desired data type of the output tensor. If None, uses the default
-            Keras dtype.
+            Desired data type of the output tensor. If None, uses
+            ``keras.config.floatx()``.
+        **kwargs
+            Additional arguments (unused).
 
         Returns
         -------
         tensor
-            Orthonormal vectors of shape (n_clusters, feature_dims). Each row
-            is a unit vector, and all rows are mutually orthogonal.
+            Orthonormal vectors of shape (n_clusters, feature_dims), scaled by
+            ``gain``. Each row is a unit vector times ``gain``, and all rows are
+            mutually orthogonal.
 
         Raises
         ------
@@ -219,77 +353,45 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
         Notes
         -----
-        The algorithm works as follows:
-        1. Generate a random matrix of shape (feature_dims, feature_dims)
-        2. Apply QR decomposition: A = QR
-        3. Ensure deterministic results by using a simple sign convention
-        4. Extract the first n_clusters rows from Q
+        1. Draw a random ``(feature_dims, n_clusters)`` matrix -- THIN, only the
+           requested vectors, ``O(d * k**2)`` rather than the ``O(d**3)`` of a
+           full square factorization.
+        2. Apply QR: ``A = QR``, so ``Q`` has orthonormal columns.
+        3. Canonicalize the column signs on ``sign(diag(R))``.
+        4. Transpose, giving ``n_clusters`` orthonormal rows.
 
-        This guarantees orthonormality up to numerical precision.
+        Validation runs BEFORE any backend call and is not wrapped, so a bad
+        shape raises ``ValueError`` and not some backend error type.
         """
+        # Deliberately ahead of every backend call: see validate_orthonormal_shape.
         n_clusters, feature_dims = self._validate_shape(shape)
 
         if dtype is None:
             dtype = keras.config.floatx()
+        dtype = getattr(dtype, "name", None) or str(dtype)
 
-        # Ensure dtype is a string for consistency
-        if hasattr(dtype, 'name'):
-            dtype = dtype.name
+        # Half precision has no QR kernel (bfloat16 raises outright in TF, and
+        # float16 "works" while degrading orthonormality to ~1.1e-03 against
+        # 1.8e-07 in float32), so the decomposition runs in float32 and the
+        # result is cast.
+        compute_dtype = dtype if dtype in ("float32", "float64") else "float32"
 
         logger.debug(
             f"Generating {n_clusters} orthonormal vectors in {feature_dims}D space "
             f"with dtype {dtype}"
         )
 
-        try:
-            # Create random matrix using numpy for consistent seeding
-            rng = np.random.RandomState(self.seed)
+        random_matrix = keras.random.normal(
+            shape=(feature_dims, n_clusters),
+            dtype=compute_dtype,
+            seed=self._draw_seed,
+        )
+        vectors = orthonormal_rows_from_qr(random_matrix, compute_dtype)
 
-            # Use the target dtype for the random matrix
-            if dtype.startswith('float64') or dtype == 'double':
-                np_dtype = np.float64
-            else:
-                np_dtype = np.float32
+        if self.gain != 1.0:
+            vectors = vectors * keras.ops.cast(self.gain, compute_dtype)
 
-            random_matrix = rng.randn(feature_dims, feature_dims).astype(np_dtype)
-
-            # Convert to tensor for keras.ops compatibility
-            random_tensor = keras.ops.convert_to_tensor(random_matrix, dtype=dtype)
-
-            # Compute QR decomposition using keras.ops
-            q, r = keras.ops.linalg.qr(random_tensor, mode="reduced")
-
-            # Ensure deterministic results by applying a simple sign convention
-            # We'll make the first element of each column have a consistent sign
-            # This is simpler and avoids complex indexing operations
-
-            # Get the first row of Q matrix
-            first_row = q[0, :]  # Shape: (feature_dims,)
-
-            # Create sign corrections based on the first row
-            signs = keras.ops.where(
-                keras.ops.numpy.greater_equal(first_row, keras.ops.cast(0.0, dtype)),
-                keras.ops.ones_like(first_row),
-                keras.ops.cast(-1.0, dtype) * keras.ops.ones_like(first_row)
-            )
-
-            # Apply sign corrections to each column
-            q_corrected = q * keras.ops.expand_dims(signs, axis=0)
-
-            # Extract the first n_clusters rows to get desired number of vectors
-            orthonormal_vectors = q_corrected[:n_clusters, :]
-
-            # Ensure the result has the correct dtype
-            result = keras.ops.cast(orthonormal_vectors, dtype)
-
-            logger.debug(f"Successfully generated orthonormal vectors with shape {keras.ops.shape(result)}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Failed to generate orthonormal vectors: {str(e)}")
-            raise RuntimeError(
-                f"Failed to generate orthonormal vectors for shape {shape}: {str(e)}"
-            ) from e
+        return keras.ops.cast(vectors, dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration of the initializer.
@@ -302,6 +404,7 @@ class OrthonormalInitializer(keras.initializers.Initializer):
         """
         config = super().get_config()
         config.update({
+            "gain": self.gain,
             "seed": self.seed,
         })
         return config
@@ -324,11 +427,11 @@ class OrthonormalInitializer(keras.initializers.Initializer):
 
     def __repr__(self) -> str:
         """Return a string representation of the initializer."""
-        return f"OrthonormalInitializer(seed={self.seed})"
+        return f"OrthonormalInitializer(gain={self.gain}, seed={self.seed})"
 
     def __str__(self) -> str:
         """Return a human-readable string representation."""
-        return f"OrthonormalInitializer with seed={self.seed}"
+        return f"OrthonormalInitializer with gain={self.gain}, seed={self.seed}"
 
 # ---------------------------------------------------------------------
 

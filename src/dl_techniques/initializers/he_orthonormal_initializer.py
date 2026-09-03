@@ -55,6 +55,10 @@ from typing import Optional, Any, Tuple, Dict, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers.orthonormal_initializer import (
+    validate_orthonormal_seed,
+    validate_orthonormal_shape,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -109,18 +113,14 @@ class HeOrthonormalInitializer(keras.initializers.Initializer):
         logger.info(f"Initialized HeOrthonormalInitializer with seed={seed}")
 
     def _validate_seed(self) -> None:
-        """Validate the seed parameter.
+        """Validate the stored seed.
 
-        Raises
-        ------
-        ValueError
-            If seed is not None and not a non-negative integer.
+        The rule itself lives in
+        :func:`dl_techniques.initializers.orthonormal_initializer.validate_orthonormal_seed`,
+        which this class and ``OrthonormalInitializer`` share. It used to be a
+        verbatim copy here, error strings included.
         """
-        if self.seed is not None:
-            if not isinstance(self.seed, int):
-                raise ValueError(f"Seed must be an integer, got {type(self.seed).__name__}")
-            if self.seed < 0:
-                raise ValueError(f"Seed must be non-negative, got {self.seed}")
+        self.seed = validate_orthonormal_seed(self.seed, type(self).__name__)
 
     def _validate_shape(self, shape: Tuple[int, ...]) -> Tuple[int, int]:
         """Validate and extract dimensions from the shape.
@@ -140,34 +140,7 @@ class HeOrthonormalInitializer(keras.initializers.Initializer):
         ValueError
             If shape is invalid or if n_clusters > feature_dims.
         """
-        if len(shape) != 2:
-            raise ValueError(
-                f"HeOrthonormalInitializer requires a 2D shape (n_clusters, feature_dims), "
-                f"got shape with {len(shape)} dimensions: {shape}"
-            )
-
-        n_clusters, feature_dims = shape
-
-        if not isinstance(n_clusters, int) or not isinstance(feature_dims, int):
-            raise ValueError(
-                f"Shape dimensions must be integers, got {type(n_clusters).__name__} "
-                f"and {type(feature_dims).__name__}"
-            )
-
-        if n_clusters <= 0 or feature_dims <= 0:
-            raise ValueError(
-                f"Shape dimensions must be positive, got n_clusters={n_clusters}, "
-                f"feature_dims={feature_dims}"
-            )
-
-        if n_clusters > feature_dims:
-            raise ValueError(
-                f"Cannot create {n_clusters} orthogonal vectors in "
-                f"{feature_dims}-dimensional space. n_clusters ({n_clusters}) must be "
-                f"<= feature_dims ({feature_dims})"
-            )
-
-        return n_clusters, feature_dims
+        return validate_orthonormal_shape(shape, type(self).__name__)
 
     def __call__(
         self,

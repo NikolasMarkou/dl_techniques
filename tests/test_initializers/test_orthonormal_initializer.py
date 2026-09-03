@@ -13,6 +13,8 @@ Tests cover proper orthogonality and normalization, reproducibility, and integra
 """
 
 import pytest
+import time
+
 import numpy as np
 import keras
 from keras import ops
@@ -606,3 +608,215 @@ class TestEdgeCases:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTheSignConventionAndThinQR:
+    """Single-claim guards for the defects this file's review found.
+
+    Measured against the previous implementation:
+
+    * the sign convention keyed on the FIRST ROW of Q rather than diag(R),
+      forcing row 0 into the positive orthant on every draw. Over 4000 seeds at
+      d=64: P(any entry of row 0 < 0) = 0.000, E[entry] = +0.10010 (the
+      theoretical half-normal fold sqrt(2/(pi*d)) = 0.09974), and a mean cosine
+      of 0.801 to the all-ones direction. Rows 1+ were unbiased, so the whole
+      distortion landed on centroid 0 of every codebook.
+    * a full d x d QR was computed even when k << d: 9.08 s and a 67.1 MB buffer
+      for k=64, d=4096, against 0.16 s for the thin factorization.
+    * np.random.RandomState(None) bypassed keras.utils.set_random_seed.
+    * np.int64 shape dims and seeds were rejected with a misleading message,
+      while seed=True was accepted and behaved as seed=1.
+    * half precision degraded orthonormality to 1.1e-03 (float16) or raised an
+      InvalidArgumentError masked as RuntimeError (bfloat16).
+    """
+
+    def test_row_zero_is_not_folded_into_the_positive_orthant(self):
+        """The headline defect: row 0 had every entry non-negative, always."""
+        rows = np.stack([
+            keras.ops.convert_to_numpy(OrthonormalInitializer(seed=s)((3, 64)))[0]
+            for s in range(400)
+        ])
+
+        # Under the old convention this was 0.000.
+        assert (rows < 0).any(axis=1).mean() > 0.95
+        # Under the old convention this was +0.10010 against a target of 0.
+        assert abs(float(rows.mean())) < 0.01
+
+        cosines = rows @ np.ones(64) / np.sqrt(64)
+        # Under the old convention this was 0.801.
+        assert abs(float(cosines.mean())) < 0.1
+
+    def test_the_convention_matches_keras_orthogonal(self):
+        """sign(diag(R)) is the house and Keras convention, not a local choice.
+
+        Anti-vacuity: the same statistic is computed for
+        keras.initializers.Orthogonal, which must land in the same place. A test
+        that only checked "close to zero" could pass on a constant tensor.
+        """
+        def row_zero_stats(factory):
+            rows = np.stack([
+                np.asarray(keras.ops.convert_to_numpy(factory(s)))[0]
+                for s in range(400)
+            ])
+            return float(rows.mean()), float((rows < 0).any(axis=1).mean())
+
+        mine = row_zero_stats(lambda s: OrthonormalInitializer(seed=s)((3, 64)))
+        theirs = row_zero_stats(lambda s: keras.initializers.Orthogonal(seed=s)((3, 64)))
+
+        assert abs(mine[0] - theirs[0]) < 0.02
+        assert abs(mine[1] - theirs[1]) < 0.05
+
+    def test_rows_beyond_the_first_were_always_unbiased(self):
+        """The control that localizes the defect to row 0.
+
+        Haar measure is invariant under column sign flips, so E[q_ij *
+        sign(q_0j)] = 0 for i > 0 -- row 1 measured -0.00014 under the OLD
+        convention too. Without this arm the test above could be read as
+        evidence that the old code was broken everywhere, which it was not.
+        """
+        rows = np.stack([
+            keras.ops.convert_to_numpy(OrthonormalInitializer(seed=s)((3, 64)))[1]
+            for s in range(400)
+        ])
+        assert abs(float(rows.mean())) < 0.01
+
+    def test_the_qr_is_thin(self):
+        """Only the requested vectors are factorized, O(d*k^2) not O(d^3).
+
+        A wall-clock bound is a blunt instrument, but the gap here is three
+        orders of magnitude: the square factorization measured 9.08 s at
+        k=64, d=4096 and the thin one 0.033 s.
+        """
+        start = time.time()
+        vectors = OrthonormalInitializer(seed=0)((64, 4096))
+        elapsed = time.time() - start
+
+        assert tuple(vectors.shape) == (64, 4096)
+        assert elapsed < 2.0, f"took {elapsed:.2f}s; a full 4096x4096 QR takes ~9s"
+
+    def test_a_seedless_instance_honours_the_global_seed(self):
+        """np.random.RandomState(None) ignored keras.utils.set_random_seed."""
+        keras.utils.set_random_seed(1234)
+        a = keras.ops.convert_to_numpy(OrthonormalInitializer()((4, 16)))
+        keras.utils.set_random_seed(1234)
+        b = keras.ops.convert_to_numpy(OrthonormalInitializer()((4, 16)))
+        np.testing.assert_array_equal(a, b)
+
+        keras.utils.set_random_seed(4321)
+        c = keras.ops.convert_to_numpy(OrthonormalInitializer()((4, 16)))
+        assert not np.allclose(a, c)
+
+    def test_numpy_integer_shapes_are_accepted(self):
+        """isinstance(np.int64(10), int) is False; a TensorShape carries np.int64."""
+        vectors = OrthonormalInitializer(seed=0)((np.int64(4), np.int64(16)))
+        assert tuple(vectors.shape) == (4, 16)
+
+    def test_numpy_integer_seeds_are_accepted_but_bool_is_not(self):
+        """seed=True passed isinstance(True, int) and silently acted as seed=1."""
+        assert OrthonormalInitializer(seed=np.int64(3)).seed == 3
+
+        with pytest.raises(ValueError, match="Seed must be an integer"):
+            OrthonormalInitializer(seed=True)
+
+    @pytest.mark.parametrize("dtype", ["float64", "float32", "float16", "bfloat16"])
+    def test_half_precision_is_decomposed_in_float32(self, dtype):
+        """The QR runs in float32 and the result is cast.
+
+        bfloat16 previously raised InvalidArgumentError from TF ("Value for attr
+        'T' of bfloat16 is not in the list of allowed values"), masked as
+        RuntimeError; float16 "worked" at 1.1e-03 orthonormality against 1.8e-07
+        for float32.
+        """
+        vectors = OrthonormalInitializer(seed=0)((8, 64), dtype=dtype)
+        assert keras.backend.standardize_dtype(vectors.dtype) == dtype
+
+        matrix = np.asarray(keras.ops.convert_to_numpy(vectors)).astype("float64")
+        gram = matrix @ matrix.T
+        np.fill_diagonal(gram, 0.0)
+        # Bounded by the OUTPUT dtype's resolution, not by the decomposition's.
+        tolerance = {"float64": 1e-12, "float32": 1e-6}.get(dtype, 5e-3)
+        assert np.abs(gram).max() < tolerance
+
+    @pytest.mark.parametrize("gain", [1.0, 2.0, np.sqrt(2.0)])
+    def test_gain_scales_the_rows(self, gain):
+        """There was no way to express the conventional ReLU gain=sqrt(2)."""
+        matrix = np.asarray(keras.ops.convert_to_numpy(
+            OrthonormalInitializer(gain=gain, seed=0)((4, 16))))
+        np.testing.assert_allclose(
+            np.linalg.norm(matrix, axis=1), gain, rtol=1e-5, atol=1e-5
+        )
+
+    @pytest.mark.parametrize("gain", [0.0, -1.0, float("nan")])
+    def test_an_invalid_gain_is_rejected(self, gain):
+        with pytest.raises(ValueError, match="gain must be"):
+            OrthonormalInitializer(gain=gain)
+
+    def test_gain_roundtrips_through_config(self):
+        original = OrthonormalInitializer(gain=2.0, seed=5)
+        restored = OrthonormalInitializer.from_config(original.get_config())
+
+        assert restored.gain == 2.0
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(original((4, 16))),
+            keras.ops.convert_to_numpy(restored((4, 16))),
+        )
+
+    def test_the_dead_diagonal_helper_is_gone(self):
+        """_extract_diagonal had no callers and its docstring was false.
+
+        It claimed "keras.ops doesn't have a direct diagonal extraction
+        function"; keras.ops.diagonal and keras.ops.diag both exist, and the
+        correct sign convention needs exactly that operation.
+        """
+        assert not hasattr(OrthonormalInitializer(), "_extract_diagonal")
+        assert hasattr(keras.ops, "diagonal")
+
+    def test_a_bad_shape_raises_value_error_not_runtime_error(self):
+        """Validation runs before any backend call and is not wrapped.
+
+        The blanket `except Exception -> RuntimeError` turned an OOM, a
+        dtype-unsupported backend error and a genuine bug into one type. The
+        4-D case in particular must stay a ValueError: it is pinned by
+        tests/test_layers/test_convnext_v1_block.py and its v2 twin.
+        """
+        for shape in [(3, 3, 64, 1), (10,), (10, 5), (0, 5), (5, -1)]:
+            with pytest.raises(ValueError):
+                OrthonormalInitializer(seed=0)(shape)
+
+    def test_call_accepts_extra_kwargs(self):
+        vectors = OrthonormalInitializer(seed=0)((4, 16), None, partition_shape=None)
+        assert tuple(vectors.shape) == (4, 16)
+
+
+class TestTheValidatorsAreShared:
+    """The two orthonormal initializers must not drift apart again.
+
+    HeOrthonormalInitializer carried a verbatim copy of both validators, error
+    strings included. They now live in one module and are imported there, so a
+    single edit reddens both suites.
+    """
+
+    def test_both_classes_use_the_same_validator_objects(self):
+        from dl_techniques.initializers import he_orthonormal_initializer as he
+        from dl_techniques.initializers import orthonormal_initializer as orth
+
+        assert he.validate_orthonormal_seed is orth.validate_orthonormal_seed
+        assert he.validate_orthonormal_shape is orth.validate_orthonormal_shape
+
+    @pytest.mark.parametrize("bad_shape", [(10,), (2, 2, 2), (10, 5), (0, 5)])
+    def test_both_classes_reject_the_same_shapes(self, bad_shape):
+        from dl_techniques.initializers import HeOrthonormalInitializer
+
+        with pytest.raises(ValueError):
+            OrthonormalInitializer(seed=0)(bad_shape)
+        with pytest.raises(ValueError):
+            HeOrthonormalInitializer(seed=0)(bad_shape)
+
+    def test_the_rank_message_names_the_owning_class(self):
+        """The one place the shared validator must not flatten the two."""
+        from dl_techniques.initializers import HeOrthonormalInitializer
+
+        with pytest.raises(ValueError, match="OrthonormalInitializer requires"):
+            OrthonormalInitializer(seed=0)((2, 2, 2))
+        with pytest.raises(ValueError, match="HeOrthonormalInitializer requires"):
+            HeOrthonormalInitializer(seed=0)((2, 2, 2))
