@@ -1,81 +1,24 @@
 """
-A gated MLP block built from 1x1 convolutions.
+A gated MLP block built from 1x1 convolutions, implemented by ``GatedMLP``.
 
-This layer gates one projection of the input with another projection of the
-same input. Both projections are 1x1 convolutions. A 1x1 convolution is a
-dense layer applied at every spatial position, with the weights shared across
-positions.
-
-The forward pass has four stages:
-
-1.  **Parallel projections**. The input feeds two independent 1x1
-    convolutions. One produces the gate, the other the value.
-2.  **Activation**. The gate and the value both go through
-    ``attention_activation``.
-3.  **Gating**. The activated gate multiplies the activated value element by
-    element. Where the gate is large the value passes through. Where it is
-    near zero the value is suppressed.
-4.  **Output projection**. A third 1x1 convolution maps the gated tensor to
-    ``filters`` channels, then ``output_activation`` is applied.
-
-**Mathematics:**
-For the feature vector ``x_ij`` at spatial position ``(i, j)``:
-
-    g_ij = activation_attn(W_g @ x_ij + b_g)
-    v_ij = activation_attn(W_v @ x_ij + b_v)
-    h_ij = g_ij * v_ij
-    y_ij = activation_out(W_d @ h_ij + b_d)
-
-``*`` is the element-wise product. ``W_g``, ``W_v`` and ``W_d`` are the
-kernels of the gate, up and down convolutions. All three are shared across
-every spatial position, so the whole block is three convolutions and one
-multiply.
-
-**This is not the gMLP block from the paper.** Every convolution here is 1x1,
-so nothing mixes information across spatial positions: output position
-``(i, j)`` depends only on input position ``(i, j)``. The part of gMLP that
-replaces attention is its Spatial Gating Unit, which projects along the token
-axis. That projection is absent here. What this layer implements is a Gated
-Linear Unit over channels, applied position-wise. If you need token mixing,
-use a layer that has it. This one cannot learn any. MEASURED on a
-``(1, 5, 5, 4)`` input with ``filters=8``: perturbing one pixel changes the
-output at that pixel and at no other, with an off-pixel delta of exactly 0.0.
-
-**The three convolutions draw from independent initializers.** Each one is
-given its own clone of ``kernel_initializer`` and ``bias_initializer``, so
-two convolutions of the same shape do not start from the same weights. This
-matters because the combine ``g * v`` is symmetric in the gate and the
-value: if the two started bit-identical their gradients would be equal too
-and they would never diverge, leaving the layer computing
-``attn(conv(x))**2`` rather than a gate times a value. That was the
-behaviour before the clones were added, MEASURED at ``max|delta|`` 0.0 at
-build and still 0.0 after 5 epochs of SGD(0.1) for the kernels and the
-biases; with the clones it is 1.1475 at build for ``filters=8`` on a
-``(1, 5, 5, 4)`` input, and 0.0432 for the biases after the same 5 epochs.
-The default ``bias_initializer`` is 'zeros', so the biases still agree at
-build - zeros are zeros - and separate only once the kernels differ.
-Passing a SEEDED initializer restores the tie on purpose: a clone of
-``GlorotUniform(seed=7)`` draws the same tensor twice, which is what a
-caller asking for a seed asked for.
+Two 1x1 convolutions read the input to produce a gate and a value; both pass
+through the same activation, the gate multiplies the value element by
+element, and a third 1x1 convolution maps the product to the output width.
+Every convolution is 1x1, so nothing mixes across spatial positions: this is
+a Gated Linear Unit over channels, applied position-wise, not the gMLP block
+from the paper (that block's token-mixing Spatial Gating Unit is absent
+here). Each of the three convolutions gets its own clone of the kernel and
+bias initializers, so same-shape convolutions do not start from identical
+weights, which would otherwise leave the gate and value equal at every step.
 
 References:
--   Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). Language
-    Modeling with Gated Convolutional Networks. In Proceedings of the 34th
-    International Conference on Machine Learning (ICML). This is the gating
-    mechanism the layer actually implements.
--   Liu, H., Dai, Z., So, D. R., & Le, Q. V. (2021). Pay Attention to MLPs.
-    In Advances in Neural Information Processing Systems (NeurIPS). This is
-    the architecture the layer is named after; see the paragraph above for
-    what is missing.
-
+    - Dauphin et al., 2017. Language Modeling with Gated Convolutional
+      Networks.
+    - Liu et al., 2021. Pay Attention to MLPs.
 """
 
 import keras
 from typing import Optional, Union, Tuple, Literal, Any, Callable
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import (
@@ -84,7 +27,6 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.gated_mlp")
 class GatedMLP(keras.layers.Layer):
@@ -105,7 +47,7 @@ class GatedMLP(keras.layers.Layer):
     no information moves between positions. See the module docstring for how
     this differs from the published gMLP block.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -140,7 +82,7 @@ class GatedMLP(keras.layers.Layer):
         F = filters. Shapes are for data_format='channels_last';
         the fork below gives the 'channels_first' layout.
 
-    **Gate and value split (block internals):**
+    Gate and value split (block internals):
 
     .. code-block:: text
 
@@ -152,11 +94,11 @@ class GatedMLP(keras.layers.Layer):
                                                    ▼
                                         h = g * v  [B, H, W, F]
 
-        The SAME activation runs on both branches, so neither
+        The same activation runs on both branches, so neither
         branch is the linear one. This differs from SwiGLU-style
         gating, where only the gate is non-linear.
 
-    **The data_format fork:**
+    The data_format fork:
 
     .. code-block:: text
 
@@ -225,14 +167,14 @@ class GatedMLP(keras.layers.Layer):
     :vartype kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :ivar bias_regularizer: The resolved bias regularizer, or ``None``.
     :vartype bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :ivar attention_activation: The activation NAME, still a string. Only the
+    :ivar attention_activation: The activation name, still a string. Only the
         five names above pass validation, and ``deserialize_activation``
         returns a string unchanged, so this attribute is never a callable.
         ``get_config()`` stores it.
     :vartype attention_activation: str
     :ivar output_activation: The output activation name, same rule.
     :vartype output_activation: str
-    :ivar data_format: The RESOLVED layout. Never ``None``, even when ``None``
+    :ivar data_format: The resolved layout. Never ``None``, even when ``None``
         was passed.
     :vartype data_format: str
     :ivar conv_gate: The 1x1 convolution producing the gate.
@@ -278,7 +220,7 @@ class GatedMLP(keras.layers.Layer):
         Each convolution receives its own clone of ``kernel_initializer`` and
         ``bias_initializer``, so ``conv_gate`` and ``conv_up`` are two
         different functions at fresh init even though they have the same
-        shape. See the module docstring for the measurement. A SEEDED
+        shape. See the module docstring for the measurement. A seeded
         initializer still gives both the same weights, which is what asking
         for a seed means.
     """
@@ -310,11 +252,9 @@ class GatedMLP(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         if filters <= 0:
             raise ValueError(f"filters must be positive, got {filters}")
 
-        # Store ALL configuration parameters
         self.filters = filters
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -325,13 +265,11 @@ class GatedMLP(keras.layers.Layer):
         self.output_activation = deserialize_activation(output_activation)
         self.data_format = data_format or keras.config.image_data_format()
 
-        # Validate data format
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(
                 f"data_format must be 'channels_first' or 'channels_last', got {self.data_format}"
             )
 
-        # Validate activation functions
         valid_activations = {"relu", "gelu", "swish", "silu", "linear"}
         if attention_activation not in valid_activations:
             raise ValueError(
@@ -342,13 +280,8 @@ class GatedMLP(keras.layers.Layer):
                 f"output_activation must be one of {valid_activations}, got {output_activation}"
             )
 
-        # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
-        # DECISION plan-2026-08-29T043546-e97b34d8/D-004 -- clone_initializer per
-        # convolution. Do NOT pass the shared ``self.kernel_initializer``/
-        # ``self.bias_initializer`` instances here: one shared seedless instance
-        # drew bit-identical weights for conv_gate and conv_up (MEASURED
-        # max|delta| = 0.0 at build and still 0.0 after 5 epochs of SGD(0.1)),
-        # so the symmetric product ``g * v`` had no gate to speak of.
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-004: clone_initializer per
+        # convolution, never the shared instance -- a shared instance drew bit-identical gate/up weights. See decisions.md.
         self.conv_gate = keras.layers.Conv2D(
             filters=self.filters,
             kernel_size=(1, 1),
@@ -397,7 +330,6 @@ class GatedMLP(keras.layers.Layer):
             name="conv_down"
         )
 
-        # Get activation functions
         self.attention_activation_fn = self._get_activation(attention_activation)
         self.output_activation_fn = self._get_activation(output_activation)
 
@@ -435,11 +367,9 @@ class GatedMLP(keras.layers.Layer):
         if self.built:
             return
 
-        # Build sub-layers in computational order for robust serialization
         self.conv_gate.build(input_shape)
         self.conv_up.build(input_shape)
 
-        # Calculate intermediate shape after gate/up convolutions
         input_shape_list = list(input_shape)
         if self.data_format == "channels_last":
             intermediate_shape = tuple(input_shape_list[:-1] + [self.filters])
@@ -447,10 +377,8 @@ class GatedMLP(keras.layers.Layer):
             # channels_first: the channel axis is 1, not -1.
             intermediate_shape = tuple([input_shape_list[0], self.filters] + input_shape_list[2:])
 
-        # Build down convolution with intermediate shape
         self.conv_down.build(intermediate_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -469,18 +397,14 @@ class GatedMLP(keras.layers.Layer):
         :return: Output tensor after applying the Gated MLP operations.
         :rtype: keras.KerasTensor
         """
-        # Gate branch: Conv1x1 + Activation
         x_gate = self.conv_gate(inputs, training=training)
         x_gate = self.attention_activation_fn(x_gate)
 
-        # Up branch: Conv1x1 + Activation
         x_up = self.conv_up(inputs, training=training)
         x_up = self.attention_activation_fn(x_up)
 
-        # Gating mechanism: element-wise multiplication
         x_gated = keras.ops.multiply(x_gate, x_up)
 
-        # Down projection: Conv1x1 + Activation
         x_output = self.conv_down(x_gated, training=training)
         output = self.output_activation_fn(x_output)
 

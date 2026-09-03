@@ -1,90 +1,36 @@
 """
-A Dense-like projection scored by Tversky's contrast model of similarity.
+A Dense-like projection, ``TverskyProjectionLayer``, scored by Tversky's
+contrast model of similarity instead of a dot product.
 
-A Dense layer scores an input against each of its output units with a dot
-product, which is symmetric. This layer scores it with a differentiable form
-of Tversky's contrast model instead, which is not. Asymmetry is the point: it
-lets the layer say that `a` resembles `b` more than `b` resembles `a`.
-
-**This layer takes rank-2 input only**, shape `(batch_size, input_dim)`.
-`build()` raises `ValueError` on any other rank. Wrap it in `TimeDistributed`
-to apply it per token or per pixel.
-
-Three weight groups
--------------------
-- `prototypes`, shape `(units, input_dim)`. One per output unit. This is the
-  analogue of a Dense kernel.
-- `feature_bank`, shape `(num_features, input_dim)`. A learned set of feature
-  directions, shared by inputs and prototypes.
-- `theta`, `alpha`, `beta`. Three learnable scalars.
-
-A vector "has" feature `i` when its dot product with `feature_bank[i]` is
-positive. That dot product is also the feature's salience for that vector.
-This is the bridge from continuous vectors to Tversky's set logic, and it is
-what makes the whole thing differentiable.
-
-The score
----------
-For input `a` and prototype `p`, with `A` and `B` the feature sets they have:
-
-    S(a, p) = theta * f(A n B) - alpha * f(A - B) - beta * f(B - A)
-
-`f(A n B)` sums a per-feature combination of the two saliences over the
-features both have. `intersection_reduction` picks the combination: the
-product, the minimum, or the mean.
-
-Both reduction names are checked by `__init__`, which raises `ValueError`
-on a bad one before any weight exists. `create_ffn_layer('tversky', ...)`
-checks them too, against the SAME two frozensets: `validate_ffn_config`
-imports `VALID_INTERSECTION_REDUCTIONS` and `VALID_DIFFERENCE_REDUCTIONS`
-from this module rather than keeping its own copy, so the two guards cannot
-drift apart.
-
-`f(A - B)` and `f(B - A)` depend on `difference_reduction`, and the two
-settings do not measure the same thing:
-
-- `'ignorematch'` is the literal set difference. `f(A - B)` sums `a`'s
-  salience over the features `a` has and `p` does not.
-- `'subtractmatch'`, the DEFAULT, does not look at one-sided features at all.
-  It sums the salience GAP over the features both have: `f(A - B)` sums
-  `sal_a - sal_p` over the common features where `a` scores higher.
-
-Read the class docstring's block-internals diagram for the exact expressions.
-All three `f(.)` terms are non-negative; the sign of the total comes from the
-three learnable scalars, which are unconstrained.
+A Dense layer scores an input against each output unit with a symmetric dot
+product. This layer scores it with a differentiable form of Tversky's
+contrast model, which is asymmetric, so it can say that `a` resembles `b`
+more than `b` resembles `a`: `S(a, p) = theta * f(A n B) - alpha * f(A - B)
+- beta * f(B - A)`, where `A` and `B` are the feature sets `a` and a learned
+prototype `p` have, and a vector has feature `i` when its dot product with a
+learned feature bank row is positive. `intersection_reduction` picks how the
+two saliences combine on a shared feature (product, min, or mean);
+`difference_reduction` picks whether the one-sided terms measure literal set
+difference (`'ignorematch'`) or the salience gap on shared features
+(`'subtractmatch'`, the default). This layer takes rank-2 input only, shape
+`(batch_size, input_dim)`; wrap it in `TimeDistributed` for higher ranks.
 
 References:
     - Tversky, A. (1977). Features of similarity. Psychological Review.
-    - Doumbouya, M. K. B., et al. (2025). Tversky Neural Networks. arXiv.
+    - Doumbouya et al., 2025. Tversky Neural Networks.
 """
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
-
-# DECISION plan-2026-08-29T043546-e97b34d8/D-010
-# These two frozensets are the SINGLE source of the valid reduction names.
-# `factory.py`'s `validate_ffn_config` imports them from here; it does NOT
-# keep its own copy. Do not re-inline the literal sets into the factory "so
-# the factory has no import" -- that is the spelling this file shipped with,
-# and it left the layer's if/elif chains and the factory's guard hand-synced,
-# so adding a reduction to one silently disagreed with the other. The import
-# direction is fixed: factory.py already imports TverskyProjectionLayer from
-# this module, so factory -> layer is an edge that exists; layer -> factory
-# exists nowhere in the package and is a cycle risk. See decisions.md D-002,
-# D-010.
+# DECISION plan-2026-08-29T043546-e97b34d8/D-010: these two frozensets are the
+# only source of valid reduction names; factory.py imports them, never a copy. See decisions.md.
 VALID_INTERSECTION_REDUCTIONS = frozenset({'product', 'min', 'mean'})
 VALID_DIFFERENCE_REDUCTIONS = frozenset({'ignorematch', 'subtractmatch'})
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.tversky_projection")
 class TverskyProjectionLayer(keras.layers.Layer):
@@ -104,12 +50,12 @@ class TverskyProjectionLayer(keras.layers.Layer):
         every other rank, including rank 3. Wrap it in ``TimeDistributed`` to
         apply it per token or per pixel.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
         ┌────────────────────────────────────────┐
-        │  Input [B, D]   (rank 2 ONLY)          │
+        │  Input [B, D]   (rank 2 only)          │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
@@ -138,15 +84,15 @@ class TverskyProjectionLayer(keras.layers.Layer):
         B = batch, D = input_dim, U = units,
         NF = num_features.
 
-    **Intersection and difference reduction (block internals):**
+    Intersection and difference reduction (block internals):
 
     .. code-block:: text
 
         a = input_dots[b, :]   one input row,     [NF]
         p = proto_dots[u, :]   one prototype row, [NF]
-        in_A = a > 0           the input HAS the feature
-        in_B = p > 0           the prototype HAS the feature
-        both = in_A AND in_B
+        in_A = a > 0           the input has the feature
+        in_B = p > 0           the prototype has the feature
+        both = in_A and in_B
 
         intersection_reduction, summed over `both`:
             'product'  f(A n B) = sum a * p
@@ -154,16 +100,16 @@ class TverskyProjectionLayer(keras.layers.Layer):
             'mean'     f(A n B) = sum (a + p) / 2
 
         difference_reduction = 'ignorematch':
-            f(A - B) = sum over (in_A AND NOT in_B) of a
-            f(B - A) = sum over (in_B AND NOT in_A) of p
+            f(A - B) = sum over (in_A and not in_B) of a
+            f(B - A) = sum over (in_B and not in_A) of p
 
-        difference_reduction = 'subtractmatch'  (DEFAULT):
-            f(A - B) = sum over (both AND a > p) of (a - p)
-            f(B - A) = sum over (both AND p > a) of (p - a)
+        difference_reduction = 'subtractmatch'  (default):
+            f(A - B) = sum over (both and a > p) of (a - p)
+            f(B - A) = sum over (both and p > a) of (p - a)
 
         S[b, u] = θ*f(AnB) - α*f(A-B) - β*f(B-A)
 
-        The two difference leaves read DIFFERENT feature sets.
+        The two difference leaves read different feature sets.
         'ignorematch' scores features only one side has.
         'subtractmatch' ignores those and scores the gap on
         features both sides have. Every f(.) is a sum of
@@ -285,7 +231,7 @@ class TverskyProjectionLayer(keras.layers.Layer):
 
         Every argument is documented on the class. No weight exists yet; all
         five weight attributes are set to ``None`` and created in ``build()``.
-        Both reduction names ARE validated here, against the module-level
+        Both reduction names are validated here, against the module-level
         frozensets ``validate_ffn_config`` also reads.
 
         :raises ValueError: If ``units`` or ``num_features`` is not positive.
@@ -294,14 +240,12 @@ class TverskyProjectionLayer(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
-        # Validate inputs
         if units <= 0:
             raise ValueError(f"`units` must be positive, got {units}")
         if num_features <= 0:
             raise ValueError(f"`num_features` must be positive, got {num_features}")
 
-        # Validate the two reduction names against the shared frozensets
-        # above, so a typo fails HERE rather than inside call().
+        # Fail here rather than inside call().
         if intersection_reduction not in VALID_INTERSECTION_REDUCTIONS:
             raise ValueError(
                 f"intersection_reduction must be one of "
@@ -315,7 +259,6 @@ class TverskyProjectionLayer(keras.layers.Layer):
                 f"got '{difference_reduction}'"
             )
 
-        # Store ALL configuration for serialization
         self.units = units
         self.num_features = num_features
         self.intersection_reduction = intersection_reduction
@@ -324,7 +267,6 @@ class TverskyProjectionLayer(keras.layers.Layer):
         self.feature_initializer = keras.initializers.get(feature_initializer)
         self.contrast_initializer = keras.initializers.get(contrast_initializer)
 
-        # Initialize weight attributes - they will be created in build()
         self.prototypes = None
         self.feature_bank = None
         self.theta = None
@@ -347,8 +289,7 @@ class TverskyProjectionLayer(keras.layers.Layer):
         if self.built:
             return
 
-        # The set-operation broadcasting below is rank-2 only. Fail loud rather
-        # than silently produce mismatched-rank broadcasts for higher-rank inputs.
+        # The set-operation broadcasting below is rank-2 only.
         if len(input_shape) != 2:
             raise ValueError(
                 "`TverskyProjectionLayer` operates on rank-2 inputs "
@@ -364,7 +305,6 @@ class TverskyProjectionLayer(keras.layers.Layer):
                 "must be defined. Found `None`."
             )
 
-        # Create the learnable prototype bank
         self.prototypes = self.add_weight(
             name='prototypes',
             shape=(self.units, input_dim),
@@ -372,7 +312,6 @@ class TverskyProjectionLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create the learnable feature universe
         self.feature_bank = self.add_weight(
             name='feature_bank',
             shape=(self.num_features, input_dim),
@@ -380,14 +319,8 @@ class TverskyProjectionLayer(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create the Tversky contrast model scalar parameters.
-        # Each takes its OWN clone of contrast_initializer; see the rule and
-        # the mechanism at glu_ffn.py, decisions.md D-008. The three are all
-        # shape (), so no configuration separates them: with one shared
-        # instance a random contrast_initializer gave theta == alpha == beta
-        # (MEASURED max|delta| = 0.0 with an unseeded RandomNormal()).
-        # prototypes and feature_bank are NOT part of this: they already
-        # take two different initializer objects (MEASURED 1.1362).
+        # Each scalar takes its own clone of contrast_initializer, since all
+        # three share shape () and a shared instance would draw identically.
         self.theta = self.add_weight(
             name='theta',
             shape=(),
@@ -436,23 +369,17 @@ class TverskyProjectionLayer(keras.layers.Layer):
             ``layer.intersection_reduction`` after construction bypasses the
             constructor check and can still trigger them.
         """
-        # Compute dot products to get feature presence scores.
-        # inputs shape: (batch_size, input_dim)
-        # feature_bank shape: (num_features, input_dim)
-        # -> input_dots shape: (batch_size, num_features)
+        # input_dots: (batch_size, num_features).
         input_dots = keras.ops.matmul(inputs, keras.ops.transpose(self.feature_bank))
 
-        # prototypes shape: (units, input_dim)
-        # -> proto_dots shape: (units, num_features)
+        # proto_dots: (units, num_features).
         proto_dots = keras.ops.matmul(self.prototypes, keras.ops.transpose(self.feature_bank))
 
-        # Create boolean masks for set operations (feature is present if dot > 0).
+        # A feature is present where its dot product is positive.
         input_mask = input_dots > 0
         proto_mask = proto_dots > 0
 
-        # Reshape for broadcasting:
-        # (batch, 1, num_features) vs (1, units, num_features)
-        # -> results will have shape: (batch, units, num_features)
+        # Broadcast to (batch, units, num_features).
         input_dots_b = keras.ops.expand_dims(input_dots, axis=1)
         input_mask_b = keras.ops.expand_dims(input_mask, axis=1)
         proto_dots_b = keras.ops.expand_dims(proto_dots, axis=0)
@@ -541,5 +468,3 @@ class TverskyProjectionLayer(keras.layers.Layer):
             'contrast_initializer': keras.initializers.serialize(self.contrast_initializer),
         })
         return config
-
-# ---------------------------------------------------------------------

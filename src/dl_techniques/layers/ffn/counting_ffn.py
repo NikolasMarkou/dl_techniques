@@ -1,87 +1,32 @@
 """
-A feed-forward network that counts features across a sequence.
+A feed-forward network, ``CountingFFN``, that counts features across a
+sequence and blends the counts back into each position.
 
-This layer adds frequency information to each token. It first learns which
-"events" are worth counting, then aggregates how often they occur, then
-blends that count back into each position. Use it when repetition,
-enumeration or relative position matters.
-
-**Architecture Overview:**
-Three stages:
-
-1.  **Event identification**. ``key_projection`` is a Dense layer with a
-    sigmoid, applied to every token. It learns ``count_dim`` abstract
-    features. Its output at a position is how strongly that event is present
-    there, between 0 and 1.
-
-2.  **Count aggregation**. The events are summed along the sequence axis.
-    ``counting_scope`` picks how:
-    - 'global': one sum over the whole sequence, broadcast back to every
-      position. Every token sees the same totals.
-    - 'causal': a cumulative sum from the start. Position ``t`` sees only
-      positions 1..t, so this is safe for autoregressive models.
-    - 'local': a forward cumulative sum concatenated with a backward one.
-      Position ``t`` sees counts before AND after it, so this looks ahead.
-      This is the default, and it doubles the aggregated width.
-
-3.  **Gated integration**. ``count_transform`` is a Dense layer with an
-    activation that maps the aggregated counts to ``output_dim``. A separate
-    sigmoid gate, computed from the original input, decides how much of that
-    to use. When ``output_dim`` equals the input width the gate interpolates
-    between the input and the transformed counts, which is a residual-style
-    blend. Otherwise the gate just scales the transformed counts.
-
-**Mathematics:**
-Let ``x_t`` be the input vector at position ``t``, and ``T`` the sequence
-length.
-
-1.  The event vector:
-    ``k_t = sigmoid(W_k @ x_t + b_k)``
-    Each element of ``k_t`` is the soft occurrence of one feature.
-
-2.  The aggregated count depends on the scope:
-    - Global: ``C_t = sum_{i=1..T} k_i``
-    - Causal: ``C_t = sum_{i=1..t} k_i``
-    - Local:  ``C_t = concat[sum_{i=1..t} k_i, sum_{i=t..T} k_i]``
-
-3.  The gate and the transformed counts:
-    ``g_t = sigmoid(W_g @ x_t + b_g)``
-    ``C'_t = activation(W_c @ C_t + b_c)``
-
-4.  The output, when ``output_dim`` equals the input width:
-    ``y_t = g_t * C'_t + (1 - g_t) * x_t``
-    and otherwise:
-    ``y_t = g_t * C'_t``
-
-So the network learns both what to count and how much the counts should
-change its view of the sequence.
+A Dense-plus-sigmoid layer learns which abstract "events" are worth
+counting at each token, a scope-dependent sum aggregates how often they
+occur ('global' sums the whole sequence, 'causal' sums up to each position
+for autoregressive use, 'local' concatenates forward and backward sums and
+looks both ways), and a sigmoid gate blends the transformed counts back
+into each position. Counting reduces over axis 1, so the input must carry
+the sequence there. When ``output_dim`` equals the input width the gate
+interpolates between the input and the transformed counts; otherwise it
+only scales the transformed counts, and ``build()`` logs a warning for
+that case.
 
 References:
-The gating comes from recurrent architectures such as LSTMs and GRUs, which
-use gates to control information flow. Cumulative sums as a sequence-modeling
-primitive appear in recent non-attentional long-range architectures.
-
-- Hochreiter, S., & Schmidhuber, J. (1997). Long short-term memory. Neural
-  Computation.
-- He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for
-  Image Recognition. CVPR.
-- Poli, M., et al. (2023). Hyena Hierarchy: Towards Larger Convolutional
-  Language Models. ICML.
-
+    - Hochreiter & Schmidhuber, 1997. Long Short-Term Memory.
+    - He et al., 2016. Deep Residual Learning for Image Recognition.
+    - Poli et al., 2023. Hyena Hierarchy: Towards Larger Convolutional
+      Language Models.
 """
 
 import keras
 from typing import Literal, Tuple, Optional, Union, Any, Dict
 
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
-
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.ffn.counting_ffn")
 class CountingFFN(keras.layers.Layer):
@@ -97,7 +42,7 @@ class CountingFFN(keras.layers.Layer):
     The counting happens on axis 1, so the input must be a sequence with the
     sequence on that axis.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -135,7 +80,7 @@ class CountingFFN(keras.layers.Layer):
         The input x reaches the blend directly, but only on the
         residual leaf of the fork.
 
-    **The counting_scope fork:**
+    The counting_scope fork:
 
     .. code-block:: text
 
@@ -153,18 +98,18 @@ class CountingFFN(keras.layers.Layer):
              ▼              ▼              ▼
          [B, T, C]      [B, T, C]      [B, T, 2C]
 
-        'local' is the DEFAULT, and it is the only scope that
+        'local' is the default, and it is the only scope that
         doubles the width. That is why count_transform is built
         on 2C for 'local' and on C for the other two.
 
         'global' gives every position the same vector. 'causal'
         gives position t the sum over 1..t, so it never looks
         ahead. 'local' concatenates the forward prefix sum with
-        the suffix sum from t to T, so it looks BOTH ways. Do not
+        the suffix sum from t to T, so it looks both ways. Do not
         use 'local' in an autoregressive model - it leaks the
         future into every position.
 
-    **The output blend fork:**
+    The output blend fork:
 
     .. code-block:: text
 
@@ -215,7 +160,7 @@ class CountingFFN(keras.layers.Layer):
     :param bias_regularizer: Regularizer for the biases. Defaults to None.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
-        ``dtype``, and so on). A ``max_count`` key is accepted and DISCARDED
+        ``dtype``, and so on). A ``max_count`` key is accepted and discarded
         for backward compatibility with older configs; it changes nothing.
     :type kwargs: Any
 
@@ -286,7 +231,7 @@ class CountingFFN(keras.layers.Layer):
         ``count_transform`` and ``gate`` start as two different functions even
         at the shapes where they coincide - which happens whenever the
         aggregated width equals the input width, for example ``count_dim=8``
-        with a 16-wide input under the 'local' default. A SEEDED initializer
+        with a 16-wide input under the 'local' default. A seeded initializer
         still gives them the same weights, which is what asking for a seed
         means.
     """
@@ -315,11 +260,9 @@ class CountingFFN(keras.layers.Layer):
             positive, or if ``counting_scope`` is not one of 'global',
             'local', 'causal'.
         """
-        # Pop 'max_count' if it exists to avoid passing it to super(), for test compatibility
         kwargs.pop("max_count", None)
         super().__init__(**kwargs)
 
-        # Validate inputs
         if output_dim <= 0:
             raise ValueError(f"output_dim must be positive, got {output_dim}")
         if count_dim <= 0:
@@ -330,7 +273,6 @@ class CountingFFN(keras.layers.Layer):
                 f"but got {counting_scope}"
             )
 
-        # Store configuration parameters
         self.output_dim = output_dim
         self.count_dim = count_dim
         self.counting_scope = counting_scope
@@ -345,14 +287,8 @@ class CountingFFN(keras.layers.Layer):
         # self.activation instead; only the build() log line reads this.
         self._activation_identifier = activation
 
-        # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        # DECISION plan-2026-08-29T043546-e97b34d8/D-005 -- clone_initializer
-        # per Dense. Do NOT hand the shared ``self.kernel_initializer`` /
-        # ``self.bias_initializer`` instances to these three layers: one
-        # seedless instance drew bit-identical weights for count_transform
-        # and gate whenever their shapes coincide (MEASURED max|delta| = 0.0
-        # at output_dim=16, count_dim=8, 'local', over a 16-wide input).
-        # Layer to identify "countable events"
+        # DECISION plan-2026-08-29T043546-e97b34d8/D-005: clone_initializer per
+        # Dense, never the shared instance -- a shared instance drew bit-identical weights when shapes coincide. See decisions.md.
         self.key_projection = keras.layers.Dense(
             self.count_dim,
             activation="sigmoid",
@@ -364,12 +300,8 @@ class CountingFFN(keras.layers.Layer):
             name="key_projection",
         )
 
-        # Layer to transform aggregated counts with configurable activation.
-        # Its INPUT width depends on counting_scope -- 2 * count_dim for
-        # 'local', which concatenates forward and backward counts, and
-        # count_dim for 'global' and 'causal'. That rule is written down once,
-        # in build()'s count_input_dim, which is where the width is actually
-        # needed; a Dense layer takes only its output width here.
+        # count_transform's input width (2*count_dim for 'local', count_dim
+        # otherwise) is resolved once in build()'s count_input_dim.
         self.count_transform = keras.layers.Dense(
             self.output_dim,
             activation=self.activation,
@@ -381,7 +313,6 @@ class CountingFFN(keras.layers.Layer):
             name="count_transform",
         )
 
-        # Gating layer to blend count info with original input
         self.gate = keras.layers.Dense(
             self.output_dim,
             activation="sigmoid",
@@ -408,7 +339,6 @@ class CountingFFN(keras.layers.Layer):
         if self.built:
             return
 
-        # Validate input shape
         if len(input_shape) < 2:
             raise ValueError(
                 f"Input must be at least 2D, got {len(input_shape)}D: {input_shape}"
@@ -417,10 +347,8 @@ class CountingFFN(keras.layers.Layer):
         if input_dim is None:
             raise ValueError("Input feature dimension must be specified")
 
-        # Capture the static feature dim so call() can decide the residual-vs-gated
-        # branch with a Python int comparison instead of branching on a dynamic
-        # keras.ops.shape() tensor (graph-unsafe under @tf.function). Derived from
-        # input_shape -> not serialized in get_config.
+        # Captured as a Python int so call() branches without a dynamic
+        # keras.ops.shape() tensor, which is graph-unsafe under @tf.function.
         self._input_last_dim = int(input_dim)
 
         logger.info(
@@ -435,14 +363,9 @@ class CountingFFN(keras.layers.Layer):
                 "The layer will use gated count transformation instead of residual-style blending."
             )
 
-        # Build sub-layers in computational order for robust serialization
-        # 1. Build key projection (takes original input)
         self.key_projection.build(input_shape)
-
-        # 2. Build gate (takes original input)
         self.gate.build(input_shape)
 
-        # 3. Build count transform (takes aggregated counts)
         count_input_dim = self.count_dim
         if self.counting_scope == "local":
             # Forward and backward counts are concatenated.
@@ -451,7 +374,6 @@ class CountingFFN(keras.layers.Layer):
         count_transform_input_shape = tuple(input_shape[:-1]) + (count_input_dim,)
         self.count_transform.build(count_transform_input_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -470,52 +392,32 @@ class CountingFFN(keras.layers.Layer):
         :return: Output tensor with shape (batch_size, sequence_length, output_dim).
         :rtype: keras.KerasTensor
         """
-        # 1. Identify what to count for each token
-        # Shape: (batch, seq, count_dim)
         countable_events = self.key_projection(inputs, training=training)
 
-        # 2. Aggregate counts based on the specified scope
         if self.counting_scope == "global":
-            # Sum across the sequence and broadcast back
             global_sum = keras.ops.sum(countable_events, axis=1, keepdims=True)
             aggregated_counts = keras.ops.broadcast_to(
                 global_sum, keras.ops.shape(countable_events)
             )
         elif self.counting_scope == "causal":
-            # Count everything up to the current token
             aggregated_counts = keras.ops.cumsum(countable_events, axis=1)
         else:
-            # 'local' scope.
-            # Forward pass: count up to current token
             forward_counts = keras.ops.cumsum(countable_events, axis=1)
-            # Backward pass: count from current token to the end
             reversed_events = keras.ops.flip(countable_events, axis=1)
             backward_counts_rev = keras.ops.cumsum(reversed_events, axis=1)
             backward_counts = keras.ops.flip(backward_counts_rev, axis=1)
-            # Combine both directions
             aggregated_counts = keras.ops.concatenate(
                 [forward_counts, backward_counts], axis=-1
             )
 
-        # 3. Transform the aggregated counts with configurable activation
-        # Shape: (batch, seq, output_dim)
         transformed_counts = self.count_transform(aggregated_counts, training=training)
-
-        # 4. Create a gate to blend the information
-        # Shape: (batch, seq, output_dim)
         gate_values = self.gate(inputs, training=training)
 
-        # 5. Blend the count information based on dimensions compatibility.
-        # Decided at build time from the static feature dim (graph-safe: Python
-        # int vs Python int, no branch on a dynamic ops.shape() tensor).
+        # Decided from the static feature dim captured in build(), not a
+        # dynamic ops.shape() tensor.
         if self.output_dim == self._input_last_dim:
-            # When dimensions match, perform residual-style blending with original input
-            # The gate decides how much count information vs original input to use
             output = (gate_values * transformed_counts) + ((1 - gate_values) * inputs)
         else:
-            # When dimensions don't match, we can't blend with original input
-            # Instead, gate controls how much of the transformed counts to use
-            # Gate of 1.0 = full transformed counts, gate of 0.0 = zeros
             output = gate_values * transformed_counts
 
         return output
@@ -551,5 +453,3 @@ class CountingFFN(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
-
-# ---------------------------------------------------------------------
