@@ -1,79 +1,26 @@
 """
-Foundational building block of a Transformer network, implementing a highly
-configurable and serializable encoder/decoder layer.
+TransformerLayer, a configurable transformer block, plus the two helper
+functions that build its attention and FFN sub-layer configs.
 
-This layer encapsulates the two primary sub-components of a standard Transformer
-architecture: a multi-head self-attention mechanism and a position-wise
-feed-forward network. Each sub-component is enclosed within a residual
-connection followed by layer normalization, a crucial design pattern that
-enables the stable training of deep sequential models.
+TransformerLayer wires a self-attention layer and a feed-forward layer around
+residual connections, with the normalization position (pre or post) and every
+sub-component's type chosen at construction time through factory functions
+instead of hard-coded classes. One class this way covers many attention
+variants (multi-head, windowed, differential, group-query, and more), many
+FFN variants (MLP, SwiGLU, mixture-of-experts, and more), and every
+normalization type the norm factory supports.
 
-**Intent**: To provide a robust, production-ready, and flexible Transformer
-layer that serves as a fundamental building block for a wide range of sequence
-modeling tasks. It is designed to be highly configurable, allowing for easy
-swapping of attention, FFN, and normalization components for architectural
-research and experimentation, while strictly adhering to modern Keras 3 best
-practices for serialization and composite layer construction.
+Dropout is applied once, to the FFN branch only, never after attention.
+Attention-internal dropout is a separate ``attention_dropout_rate`` argument
+forwarded into the attention sub-layer itself. Setting ``moe_config`` replaces
+the FFN with a Mixture-of-Experts layer; ``intermediate_size`` still supplies
+the fallback expert hidden size for six FFN types even then.
 
-**Architecture**: The layer processes an input sequence through two main blocks,
-with the exact data flow determined by `normalization_position`.
-
-**1. Pre-Normalization (`normalization_position='pre'`)**:
-```
-Input
-  |
-  +-- Norm → Attention → [StochasticDepth] → [LayerScale] --+
-  |                                                          |
-  +--------------------------- Add --------------------------+
-                                |
-  +-- Norm → FFN/MoE → Dropout → [StochasticDepth] → [LayerScale] --+
-  |                                                                 |
-  +------------------------------ Add ------------------------------+
-                                |
-                              Output
-```
-
-**2. Post-Normalization (`normalization_position='post'`)**:
-```
-Input
-  |
-  +-- Attention → [StochasticDepth] → [LayerScale] → Add → Norm --+
-                                                                  |
-  +-- FFN/MoE → Dropout → [StochasticDepth] → [LayerScale] → Add → Norm --+
-                                                                    |
-                                                                  Output
-```
-
-Note the asymmetry, which is deliberate and MEASURED, not a drawing shortcut:
-``self.dropout`` (the ``dropout_rate`` layer) is applied to the FFN sub-block
-ONLY -- it is invoked exactly once per forward pass, at both normalization
-positions, and its input is the FFN output. There is NO dropout step after
-attention. ``attention_dropout_rate`` is a different thing entirely: it is
-forwarded to the attention sub-layer's own attention-weight dropout
-constructor argument -- ``dropout_rate`` for most types, ``attn_dropout_rate``
-for ``attention_type='beit'``, whose layer spells the two dropouts separately
--- i.e. dropout applied inside the attention layer, not an output dropout
-applied here. The bracketed steps are optional and present
-only when ``use_stochastic_depth`` / ``use_layer_scale`` are enabled.
-
-**Mathematical Operations**:
-1.  **Multi-Head Self-Attention (MHSA)**:
-    -   Computes context-aware representations using scaled dot-product attention:
-        `Attention(Q, K, V) = softmax( (Q @ K.T) / sqrt(d_k) ) @ V`
-    -   Uses multiple "heads" to attend to different representational subspaces
-        in parallel, enhancing the model's ability to capture complex relationships.
-
-2.  **Position-wise Feed-Forward Network (FFN)**:
-    -   Applies a non-linear transformation independently at each sequence position.
-    -   Typically a two-layer MLP: `FFN(x) = activation(x @ W₁ + b₁) @ W₂ + b₂`
-    -   This component can be replaced by more advanced structures like SwiGLU or
-        a Mixture of Experts (MoE) layer.
-
-**References**:
-    - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS*.
-    - Ba, J. L., et al. (2016). Layer Normalization. *arXiv preprint*.
-    - Xiong, R., et al. (2020). On Layer Normalization in the Transformer
-      Architecture. *ICML*. (Analysis of Pre-LN vs. Post-LN).
+References:
+    - Vaswani et al., 2017. Attention Is All You Need. (https://arxiv.org/abs/1706.03762)
+    - Ba et al., 2016. Layer Normalization. (https://arxiv.org/abs/1607.06450)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. (https://arxiv.org/abs/2002.04745)
 """
 
 import keras
@@ -104,18 +51,18 @@ NormalizationPositionType = Literal['post', 'pre']
 
 
 # ---------------------------------------------------------------------
-# The transformer family's ONE FFN parameter-injection policy
+# The transformer family's one FFN parameter-injection policy
 # ---------------------------------------------------------------------
 
-#: FFN types whose defining feature is a FIXED nonlinearity or gate, so the
-#: wrapper's single generic ``activation`` must NOT be forwarded even though the
+#: FFN types whose defining feature is a fixed nonlinearity or gate, so the
+#: wrapper's single generic ``activation`` is never forwarded even though the
 #: registry accepts an ``activation`` key for some of them.
 #:
 #: * ``squared_relu`` -- fixed ``relu(x) ** 2``; the registry has no
 #:   ``activation`` param at all, so this entry is documentation.
-#: * ``reglu`` / ``bilinear`` -- ``GLUFFN`` aliases whose whole identity is the
-#:   fixed relu / linear gate. They DO accept ``activation``, so the pre-filter
-#:   would happily let it through; withholding it must be explicit. (D-005)
+#: * ``reglu`` / ``bilinear`` -- ``GLUFFN`` aliases whose identity is the
+#:   fixed relu / linear gate. They do accept ``activation``, so withholding
+#:   it must be explicit. (D-005)
 _FFN_TYPES_WITH_FIXED_ACTIVATION: Tuple[str, ...] = (
     'squared_relu', 'reglu', 'bilinear',
 )
@@ -137,45 +84,38 @@ def build_transformer_ffn_config(
 ) -> Dict[str, Any]:
     """Build the FFN factory config for a transformer encoder/decoder block.
 
-    Interface contract (2 call sites: :meth:`TransformerLayer._get_ffn_config`
-    and :meth:`TransformerDecoderLayer._get_ffn_config`; the two producing the
-    IDENTICAL dict for every registry type is the reason this exists):
+    Shared by :meth:`TransformerLayer._get_ffn_config` and
+    :meth:`TransformerDecoderLayer._get_ffn_config`, so both blocks produce the
+    identical config dict for every registry type.
 
-    * Emits the block's generic conveniences (dims derived from
-      ``hidden_size``/``intermediate_size``, plus ``activation``,
-      ``dropout_rate`` and the initializers), applies the three per-type POLICY
-      adjustments below, then hands the result to
-      :func:`~dl_techniques.layers.ffn.factory.assemble_ffn_config`, which
-      intersects it with what ``ffn_type`` actually accepts and merges
-      ``ffn_args`` on top UNFILTERED.
-    * Returns a config carrying ``type`` and ``name``, ready for
-      ``create_ffn_from_config``.
-    * Raises ``ValueError`` for an unregistered ``ffn_type``.
+    Emits the block's generic conveniences (dims derived from
+    ``hidden_size``/``intermediate_size``, plus ``activation``,
+    ``dropout_rate`` and the initializers), applies the three per-type policy
+    adjustments below, then hands the result to
+    :func:`~dl_techniques.layers.ffn.factory.assemble_ffn_config`, which
+    intersects it with what ``ffn_type`` actually accepts and merges
+    ``ffn_args`` on top unfiltered. Returns a config carrying ``type`` and
+    ``name``, ready for ``create_ffn_from_config``; raises ``ValueError`` for
+    an unregistered ``ffn_type``.
 
-    The three policy adjustments -- the only things the registry intersection
-    cannot express, and therefore the only per-type branching left here:
+    Per-type policy adjustments (the only branching this function does, since
+    the registry intersection above cannot express them):
 
-    1. ``swiglu`` sizes ITSELF (2/3 rule from ``ffn_expansion_factor``, rounded
-       to ``ffn_multiple_of``) and lists ``hidden_dim`` as OPTIONAL, so passing
-       the block's ``intermediate_size`` would silently override that
-       derivation. Withheld, and the two expansion knobs are supplied instead.
-    2. ``differential`` RENAMES: ``DifferentialFFN`` takes ``branch_activation``,
-       not ``activation`` (D-016). ``gate_activation`` is deliberately not
-       forwarded -- the sigmoid gate is the layer's defining feature.
+    1. ``swiglu`` sizes itself (a 2/3 rule from ``ffn_expansion_factor``,
+       rounded to ``ffn_multiple_of``) and treats ``hidden_dim`` as optional,
+       so the block's ``intermediate_size`` is withheld rather than silently
+       overriding that derivation; the two expansion knobs are supplied
+       instead.
+    2. ``differential`` renames ``activation`` to ``branch_activation``
+       (``DifferentialFFN``'s own parameter name, D-016); ``gate_activation``
+       is never forwarded, since the sigmoid gate is the layer's fixed
+       feature.
     3. ``_FFN_TYPES_WITH_FIXED_ACTIVATION`` withholds ``activation`` (D-005).
-    4. ``swiglu`` also withholds ``use_bias``
-       (plan-2026-08-19-a616f581/D-006, see the branch below).
+    4. ``swiglu`` also withholds ``use_bias`` (D-006, see the branch below).
 
-    # DECISION plan-2026-07-30T140922-8af1028f/D-018
-    Do NOT re-inline this table into either caller. Two independently
-    hand-maintained copies of it are exactly what produced the D-016 defect
-    (`differential` silently losing its activation on the decoder for the whole
-    life of that file) and five further decoder-only coverage gaps (`lowrank`,
-    `monarch`, `squared_relu`, `reglu`, `bilinear` raised on the decoder while
-    the encoder handled them). Pinned by
-    ``TestEncoderDecoderFFNConfigParity`` in
-    ``tests/test_layers/test_transformers/test_transformer.py``, which compares
-    both dispatchers over every ``FFN_REGISTRY`` key.
+    # DECISION plan-2026-07-30T140922-8af1028f/D-018: this table stays here,
+    # never re-inlined into either caller. Two hand-maintained copies once
+    # produced a silent activation drop plus 5 decoder-only coverage gaps. See decisions.md.
 
     :param ffn_type: An ``FFN_REGISTRY`` key.
     :type ffn_type: str
@@ -192,20 +132,20 @@ def build_transformer_ffn_config(
     :param kernel_initializer: The block's kernel initializer.
     :type kernel_initializer: Any
     :param output_kernel_initializer: Optional initializer for the FFN's
-        OUTPUT/contracting projection alone (the residual-path projection).
+        output/contracting projection alone (the residual-path projection).
         Emitted into the wrapper config only when not ``None``, so it is
         subject to the same registry intersection as every other wrapper
-        convenience -- only ``'mlp'`` declares it. The caller is responsible
-        for rejecting the combination earlier if a silent drop would be wrong;
-        ``TransformerLayer`` does exactly that.
+        convenience — only ``'mlp'`` declares it. The caller (``TransformerLayer``)
+        is responsible for rejecting the combination earlier if a silent drop
+        would be wrong.
     :type output_kernel_initializer: Any
     :param bias_initializer: The block's bias initializer.
     :type bias_initializer: Any
     :param use_bias: The block's bias switch. Forwarded to every registry type
-        that declares a ``use_bias`` key EXCEPT ``swiglu`` (policy 4); types
+        that declares a ``use_bias`` key except ``swiglu`` (policy 4); types
         that declare none (``kan``, ``tversky``) drop it in the pre-filter.
     :type use_bias: bool
-    :param ffn_args: The caller's explicit FFN args; merged LAST and NEVER
+    :param ffn_args: The caller's explicit FFN args; merged last and never
         filtered, so a caller key the type does not accept still reaches
         ``create_ffn_layer``.
     :type ffn_args: Optional[Dict[str, Any]]
@@ -231,20 +171,9 @@ def build_transformer_ffn_config(
     if ffn_type == 'swiglu':
         del config['hidden_dim']
         del config['activation']
-        # DECISION plan-2026-08-19T070627-a616f581/D-006: `swiglu` is the ONE registry
-        # type whose own `use_bias` default is False (measured: every other
-        # bias-declaring type defaults True), because a bias-free gated FFN is
-        # SwiGLUFFN's defining LLaMA-style design. The block's `use_bias`
-        # therefore must NOT be forwarded here. Do NOT "make it uniform" by
-        # deleting this line: `TransformerLayer`'s own `use_bias` default is
-        # True, so forwarding would ADD `gate_proj/bias`, `up_proj/bias` and
-        # `down_proj/bias` (measured) to every swiglu block of every model that
-        # never asked for them -- vit_siglip, tiny_recursive_model,
-        # qwen3_embeddings, nano_vlm, dino v2/v3 giant and the HRM family all
-        # default to `ffn_type='swiglu'` with `use_bias` at its True default,
-        # so their `.keras` files would all stop matching. A caller who really
-        # wants biased swiglu passes `ffn_args={'use_bias': True}`, which the
-        # pre-filter never touches. See decisions.md D-006.
+        # DECISION plan-2026-08-19T070627-a616f581/D-006: never forward the block's
+        # `use_bias` here; swiglu defaults it False and forwarding True adds 3 bias tensors to every consumer's swiglu blocks.
+        # A caller wanting biased swiglu passes `ffn_args={'use_bias': True}`. See decisions.md.
         del config['use_bias']
         config['ffn_expansion_factor'] = 4
         config['ffn_multiple_of'] = 256
@@ -258,11 +187,10 @@ def build_transformer_ffn_config(
 
 # ---------------------------------------------------------------------
 
-#: Default ``window_size`` for ``attention_type='window'``. Read by BOTH
-#: :meth:`TransformerLayer.__init__` (as its signature default) and
-#: :func:`build_transformer_attention_required_params` (as the fallback for a
-#: block that has no dedicated ``window_size`` constructor parameter, i.e.
-#: ``TransformerDecoderLayer``).
+#: Default ``window_size`` for ``attention_type='window'``. Read by both
+#: :meth:`TransformerLayer.__init__` and
+#: :func:`build_transformer_attention_required_params`, as the fallback for a
+#: block with no dedicated ``window_size`` constructor parameter (``TransformerDecoderLayer``).
 _DEFAULT_ATTENTION_WINDOW_SIZE: int = 8
 
 #: Default ``lambda_init`` for ``attention_type='differential'``. Same two
@@ -271,10 +199,7 @@ _DEFAULT_ATTENTION_LAMBDA_INIT: float = 0.8
 
 #: MoE expert FFN types whose ``hidden_dim`` falls back to
 #: ``TransformerLayer.intermediate_size`` when the caller's
-#: ``moe_config.expert_config.ffn_config`` omits it. Defined once and read by
-#: BOTH the fallback itself and the ``moe_config`` warning text, so the warning
-#: cannot drift away from the behaviour again (F-17: it previously claimed
-#: ``intermediate_size`` was ignored while this fallback consulted it).
+#: ``moe_config.expert_config.ffn_config`` omits it. Read by both the fallback and the warning text below, so they cannot drift apart.
 _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE: Tuple[str, ...] = (
     'mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp',
 )
@@ -289,40 +214,29 @@ def build_transformer_attention_required_params(
         num_kv_heads: Optional[int] = None,
         lambda_init: float = _DEFAULT_ATTENTION_LAMBDA_INIT,
 ) -> Dict[str, Any]:
-    """The params the attention factory REQUIRES beyond ``dim``/``num_heads``.
+    """The params the attention factory requires beyond ``dim``/``num_heads``.
 
-    Interface contract (2 call sites:
-    :meth:`TransformerLayer._get_attention_params` and
-    :meth:`TransformerDecoderLayer._self_attention_params`; the two agreeing on
-    every type is the reason this exists):
+    Shared by :meth:`TransformerLayer._get_attention_params` and
+    :meth:`TransformerDecoderLayer._self_attention_params`, so both blocks
+    agree on every type.
 
-    * Returns ONLY the type-specific keys that
-      ``dl_techniques.layers.attention.factory`` lists as REQUIRED and that are
-      not already covered by ``dim``/``num_heads`` — never the generic
-      conveniences (``dropout_rate``, ``use_bias``, initializers), which the two
-      blocks legitimately differ on.
-    * Returns an EMPTY dict for every type with no such extra requirement
-      (``multi_head``, ``multi_head_cross``, ``anchor``, ``lighthouse``,
-      ``fnet``), and for an unknown type — validating the type is the FACTORY's
-      job, and this function must not turn a factory error into a different one.
-    * Never raises.
+    Returns only the type-specific keys that
+    ``dl_techniques.layers.attention.factory`` lists as required and not
+    already covered by ``dim``/``num_heads`` — never the generic conveniences
+    (``dropout_rate``, ``use_bias``, initializers), which the two blocks
+    legitimately differ on. Returns an empty dict for every type with no such
+    extra requirement (``multi_head``, ``multi_head_cross``, ``anchor``,
+    ``lighthouse``, ``fnet``) and for an unknown type — validating the type is
+    the factory's job, not this function's. Never raises.
 
-    # DECISION plan-2026-07-31T132403-b3f540cb/D-015
-    Do NOT re-inline this table into either caller. Two hand-maintained copies of
-    the per-type attention parameter table are exactly what F-07 was: the
-    decoder's copy listed no type-specific params at all, so ``window``,
-    ``group_query``, ``differential`` and ``multi_head_latent`` were
-    unconstructable on the decoder (``ValueError: ... Required parameters:
-    ['dim', 'window_size', 'num_heads']``) while ``TransformerLayer`` handled all
-    four. This is the SAME defect class as D-018 (the FFN table, whose two copies
-    produced the ``differential``/``activation`` silent drop plus five
-    decoder-only coverage gaps), in the same pair of files, one method over.
+    The four default values here are the encoder's, verbatim, so a block
+    without a dedicated constructor parameter (the decoder has none of
+    ``window_size`` / ``n_kv_head`` / ``lambda_init``) gets the same answer
+    the encoder would give. A caller's ``attention_args`` still overrides
+    everything, since both callers merge it last.
 
-    The four default VALUES here are the encoder's, verbatim, so a block without
-    a dedicated constructor parameter (the decoder has none of ``window_size`` /
-    ``n_kv_head`` / ``lambda_init``) gets the same answer the encoder would give.
-    A caller's ``attention_args`` still overrides everything, since both callers
-    merge it last.
+    # DECISION plan-2026-07-31T132403-b3f540cb/D-015: this table stays here,
+    # never re-inlined into either caller — a decoder-side copy once made 4 types unconstructable there. See decisions.md.
 
     :param attention_type: An ``ATTENTION_REGISTRY`` key.
     :type attention_type: str
@@ -330,9 +244,14 @@ def build_transformer_attention_required_params(
     :type hidden_size: int
     :param num_heads: The block's head count.
     :type num_heads: int
-    :param window_size: ``'window'`` and ``'beit'`` only. The spatial window
-        edge length for ``'window'``; the ``(Wh, Ww)`` patch grid for
-        ``'beit'`` (an ``int`` there meaning the square grid ``(W, W)``).
+    :param window_size: ``'window'``/``'window_zigzag'``/``'window_band'``/
+        ``'beit'`` only, and read differently by each: a scalar spatial edge
+        length ``W`` for ``'window'``/``'window_zigzag'`` (windows of
+        ``W*W`` tokens); a 1-D half-width in tokens for ``'window_band'``
+        (query ``i`` attends key ``j`` iff ``abs(i - j) <= window_size``, no
+        grid); the ``(Wh, Ww)`` patch grid for ``'beit'`` (an ``int`` meaning
+        the square grid ``(W, W)``, sequence length must be ``Wh*Ww + 1``
+        including the cls token).
     :type window_size: Union[int, Tuple[int, int]]
     :param num_kv_heads: ``'group_query'`` only. ``None`` means ``num_heads``
         (i.e. degrade to plain MHA), matching ``TransformerLayer.n_kv_head``.
@@ -343,21 +262,15 @@ def build_transformer_attention_required_params(
     :rtype: Dict[str, Any]
     """
     if attention_type in ('window', 'window_zigzag', 'window_band', 'beit'):
-        # All four require a 'window_size', and this is the SAME table entry on
-        # purpose (D-015) — but they read the value differently:
-        # 'window'/'window_zigzag' take a scalar spatial edge length W and attend
-        # within W*W-token windows; 'window_band' takes a 1-D HALF-WIDTH IN
-        # TOKENS (query i attends key j iff abs(i - j) <= window_size, no grid,
-        # no square padding); 'beit' takes the PATCH GRID and expects a sequence
-        # of exactly Wh*Ww + 1 tokens (the +1 being the cls token).
-        # A scalar reaching 'beit' is normalized to the square grid (W, W).
+        # One table entry for all four; see this function's window_size
+        # docstring entry for how each type reads the value differently.
         return {'window_size': window_size}
     if attention_type == 'group_query':
         return {'num_kv_heads': num_kv_heads if num_kv_heads is not None else num_heads}
     if attention_type == 'differential':
         return {'head_dim': hidden_size // num_heads, 'lambda_init': lambda_init}
     if attention_type == 'multi_head_latent':
-        # MLA requires kv_latent_dim and NEITHER block has a dedicated ctor
+        # MLA requires kv_latent_dim; neither block has a dedicated ctor
         # param for it, so this documented default is the only source.
         return {'kv_latent_dim': max(1, hidden_size // 4)}
     return {}
@@ -371,16 +284,16 @@ class TransformerLayer(keras.layers.Layer):
     """
     Generic transformer layer with configurable attention, FFN, and normalization.
 
-    Implements a standard transformer block consisting of multi-head
-    self-attention followed by a position-wise feed-forward network, each
-    wrapped in residual connections and normalization. The exact data flow
-    is determined by ``normalization_position`` (pre or post). All core
-    sub-components (attention, FFN, normalization) are constructed via
-    factory functions, enabling easy architectural exploration.
+    Implements a standard transformer block: multi-head self-attention
+    followed by a position-wise feed-forward network, each wrapped in a
+    residual connection and normalization. The data flow is determined by
+    ``normalization_position`` (pre or post). Every sub-component (attention,
+    FFN, normalization) is built through a factory function, so swapping
+    architectures is a constructor argument, not a subclass.
 
     ``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V``
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -408,42 +321,42 @@ class TransformerLayer(keras.layers.Layer):
     :type hidden_size: int
     :param num_heads: Number of attention heads.
     :type num_heads: int
-    :param intermediate_size: FFN intermediate dimension. NOT ignored when
+    :param intermediate_size: FFN intermediate dimension. Not ignored when
         ``moe_config`` is provided: it is then used as the fallback for the
         expert FFN's ``hidden_dim`` whenever
         ``moe_config.expert_config.ffn_config`` omits that key and the expert
         type is one of ``{'mlp', 'differential', 'glu', 'geglu', 'residual',
         'swin_mlp'}``. It is only genuinely unused when ``moe_config`` is set
-        AND the expert config already carries its own ``hidden_dim`` (or the
+        and the expert config already carries its own ``hidden_dim`` (or the
         expert type is not one of those six).
     :type intermediate_size: int
     :param attention_type: Attention mechanism type. Default: ``'multi_head'``.
 
-        **The annotation is wider than the implementation.** ``AttentionType`` is
-        the full 33-key ``ATTENTION_REGISTRY`` literal, but ``_build_attention``
-        implements TEN branches and its ``else`` raises
+        The ``AttentionType`` annotation is wider than what this layer
+        implements. It is the full 33-key ``ATTENTION_REGISTRY`` literal, but
+        ``_build_attention`` handles ten of them and its ``else`` raises
         ``ValueError: Unknown attention type``. Measured 2026-08-27, one
         ``TransformerLayer`` per registry key on a ``(2, 16, 32)`` input:
 
-        * **usable (10):** ``anchor``, ``differential``, ``fnet``,
+        * usable (10): ``anchor``, ``differential``, ``fnet``,
           ``group_query``, ``lighthouse``, ``multi_head``, ``multi_head_latent``,
           ``window``, ``window_band``, ``window_zigzag``.
-        * **raise ``Unknown attention type`` (22):** every other key. Some are
-          legitimately inapplicable here -- ``cbam``/``channel``/``spatial`` are
-          4-D convolutional attentions and ``multi_head_cross`` is
-          cross-attention -- but ``linear``, ``performer``, ``gated``, ``ring``,
-          ``rpc``, ``hopfield``, ``energy``, ``single_window`` and ``wave_field``
-          are drop-in self-attention mechanisms that simply have no branch.
+        * raise ``Unknown attention type`` (22): every other key. Some are
+          inapplicable here — ``cbam``/``channel``/``spatial`` are 4-D
+          convolutional attentions and ``multi_head_cross`` is cross-attention
+          — but ``linear``, ``performer``, ``gated``, ``ring``, ``rpc``,
+          ``hopfield``, ``energy``, ``single_window`` and ``wave_field`` are
+          drop-in self-attention mechanisms with no branch here.
         * ``beit`` constructs but raises on sequence length unless
-          ``seq_len == Wh*Ww + 1``; that is its own documented constraint, not a
-          missing branch.
+          ``seq_len == Wh*Ww + 1``; that is its own documented constraint, not
+          a missing branch.
 
-        Additionally, ``attention_type='anchor'`` runs in STANDARD
-        self-attention mode here. ``AnchorAttention``'s hierarchical bottleneck is
-        selected by ``num_anchor_tokens``, a ``call()`` argument this block does
-        not forward, and ``None`` means standard attention by that layer's own
-        documented contract. Passing it through ``attention_args`` raises, because
-        it is not a constructor parameter.
+        ``attention_type='anchor'`` runs in standard self-attention mode
+        here. ``AnchorAttention``'s hierarchical bottleneck is selected by
+        ``num_anchor_tokens``, a ``call()`` argument this block does not
+        forward; ``None`` means standard attention by that layer's own
+        contract, and passing it through ``attention_args`` raises since it
+        is not a constructor parameter.
     :type attention_type: AttentionType
     :param attention_args: Custom arguments forwarded to the attention factory.
     :type attention_args: Optional[Dict[str, Any]]
@@ -458,22 +371,22 @@ class TransformerLayer(keras.layers.Layer):
     :param ffn_type: FFN architecture type. Default: ``'mlp'``.
     :type ffn_type: FFNType
     :param ffn_args: Custom arguments for the FFN factory. These are the
-        CALLER's explicit keys and are merged LAST, after this layer's own
-        generic conveniences have been intersected with what ``ffn_type``
-        accepts. They are never pre-filtered, so they always reach
-        ``create_ffn_layer`` -- including a misdirected or misspelled one,
+        caller's explicit keys, merged last, after this layer's own generic
+        conveniences have been intersected with what ``ffn_type`` accepts.
+        They are never pre-filtered, so they always reach
+        ``create_ffn_layer`` — including a misdirected or misspelled one,
         which the factory reports rather than this layer swallowing it.
     :type ffn_args: Optional[Dict[str, Any]]
     :param moe_config: Mixture-of-Experts configuration replacing the FFN.
     :type moe_config: Optional[Union[MoEConfig, Dict[str, Any]]]
-    :param dropout_rate: FFN output dropout rate. This is the ONLY dropout this
-        layer applies itself, and it is applied to the FFN sub-block only --
-        never after attention (see the architecture note above). Default: 0.1.
+    :param dropout_rate: FFN output dropout rate. This is the only dropout
+        this layer applies itself, applied to the FFN sub-block only — never
+        after attention (see the architecture note above). Default: 0.1.
     :type dropout_rate: float
-    :param attention_dropout_rate: Attention-INTERNAL (weight) dropout rate.
-        Not an output dropout: this value is forwarded verbatim as the
-        attention sub-layer's own ``dropout_rate`` constructor argument (e.g.
-        ``MultiHeadAttention(dropout_rate=...)``), so it acts on the attention
+    :param attention_dropout_rate: Attention-internal (weight) dropout rate,
+        not an output dropout: forwarded verbatim as the attention
+        sub-layer's own ``dropout_rate`` constructor argument (e.g.
+        ``MultiHeadAttention(dropout_rate=...)``), acting on the attention
         probabilities inside that layer. Default: 0.1.
     :type attention_dropout_rate: float
     :param use_stochastic_depth: Enable stochastic depth. Default: False.
@@ -486,16 +399,16 @@ class TransformerLayer(keras.layers.Layer):
     :type use_bias: bool
     :param kernel_initializer: Kernel weight initializer.
     :type kernel_initializer: Union[str, initializers.Initializer]
-    :param residual_output_kernel_initializer: Optional initializer applied to
-        the block's TWO residual-path output projections ONLY -- the attention
-        output projection and the FFN's contracting projection -- leaving Q/K/V
-        and the FFN expansion on ``kernel_initializer``. ``None`` (the default)
-        means every projection keeps ``kernel_initializer``, i.e. the behaviour
-        of every consumer written before 2026-08-22. It exists for GPT-2's
-        residual-init rule (std scaled by ``1/sqrt(2 * n_layer)``, HF
-        ``modeling_gpt2.py::_init_weights``); it is only accepted by
-        ``attention_type`` in ``{'multi_head', 'multi_head_cross'}`` and
-        ``ffn_type == 'mlp'``, and any other combination RAISES from the
+    :param residual_output_kernel_initializer: Optional initializer applied
+        only to the block's two residual-path output projections — the
+        attention output projection and the FFN's contracting projection —
+        leaving Q/K/V and the FFN expansion on ``kernel_initializer``.
+        ``None`` (the default) means every projection keeps
+        ``kernel_initializer``. It exists for GPT-2's residual-init rule
+        (std scaled by ``1/sqrt(2 * n_layer)``, HF
+        ``modeling_gpt2.py::_init_weights``); accepted only when
+        ``attention_type`` is ``'multi_head'``/``'multi_head_cross'`` and
+        ``ffn_type == 'mlp'`` — any other combination raises from the
         respective factory rather than ignoring it.
     :type residual_output_kernel_initializer: Optional[Union[str, initializers.Initializer]]
     :param bias_initializer: Bias weight initializer.
@@ -521,29 +434,10 @@ class TransformerLayer(keras.layers.Layer):
         creation fails due to incompatible parameters.
     """
 
-    # DECISION plan_2026-06-12_0bb1729b/D-001: attention types whose factory
-    # layer `call` signature does NOT accept an `attention_mask` argument.
-    # `call()` must invoke these WITHOUT passing `attention_mask`, or the
-    # sub-layer raises TypeError. Verified empirically (signatures):
-    #   - 'fnet'       -> FNetFourierTransform.call(inputs, training)
-    #   - 'anchor'     -> AnchorAttention.call(x, num_anchor_tokens=None, training)
-    #   - 'lighthouse' -> LighthouseAttention.call(inputs, training)
-    # 'multi_head_latent' DOES accept attention_mask and stays on the standard
-    # branch. Do NOT add a type here unless its `call` genuinely rejects mask.
-    #
-    # DECISION plan-2026-07-31T132403-b3f540cb/D-016
-    # Do NOT add 'window' here. It was CONSIDERED and REFUTED BY MEASUREMENT
-    # (G-07, 2026-07-31): `WindowAttention` (the layer behind the 'window' key)
-    # both accepts AND genuinely honours a rank-3 causal keep-mask -- perturbing
-    # the last token moved every earlier position by exactly 0.0, against an
-    # unmasked control of 1.97e+02 -- whenever `seq_len == window_size ** 2`,
-    # and raises a loud ValueError at any other length. Adding it here would
-    # convert that into a SILENT non-causal block: the dead-component probe for
-    # this decision added 'window' to this very frozenset and measured
-    # `TransformerDecoderLayer` leaking the future by 3.713046e+00 at the exact
-    # geometry where it is otherwise bit-exactly causal. "Accepts the kwarg" is
-    # not the test either way -- 'fnet' accepts it and then dies on a shape
-    # mismatch. See decisions.md D-016 and `TestWindowSelfAttentionIsMaskedNotMaskless`.
+    # DECISION plan_2026-06-12_0bb1729b/D-001: these 3 types' `call` signatures
+    # reject an `attention_mask` argument; call() must invoke them without one. See decisions.md.
+    # DECISION plan-2026-07-31T132403-b3f540cb/D-016: never add 'window' here;
+    # it genuinely honours a causal mask and adding it would make masking silently non-causal. See decisions.md.
     _MASKLESS_ATTENTION_TYPES = frozenset({'fnet', 'anchor', 'lighthouse'})
 
     def __init__(
@@ -580,7 +474,6 @@ class TransformerLayer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # --- Input Validation (early) ---
         if hidden_size <= 0:
             raise ValueError(f"hidden_size must be positive, got {hidden_size}")
         if num_heads <= 0:
@@ -593,17 +486,13 @@ class TransformerLayer(keras.layers.Layer):
             raise ValueError(
                 f"intermediate_size must be positive when moe_config is None, got {intermediate_size}"
             )
-        # `call()` dispatches on `== 'pre'` with an unguarded `else` for post-norm,
-        # so without this check ANY other spelling ('Pre', 'PRE', 'postt', '')
-        # silently ran the POST-norm branch -- a typo became a different
-        # architecture with no error. Same check, same message, as the sibling
-        # `TransformerDecoderLayer.__init__`.
+        # call() dispatches on `== 'pre'` with an unguarded else for post-norm,
+        # so a typo like 'Pre' would silently run the wrong branch. Same check as `TransformerDecoderLayer.__init__`.
         if normalization_position not in ('pre', 'post'):
             raise ValueError(
                 f"normalization_position must be 'pre' or 'post', got {normalization_position}"
             )
 
-        # --- Configuration Storage ---
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
@@ -639,7 +528,6 @@ class TransformerLayer(keras.layers.Layer):
         if self.residual_output_kernel_initializer is not None:
             self._reject_unsupported_residual_output_init()
 
-        # --- Handle MoE Configuration ---
         # Convert dict to MoEConfig if needed
         if isinstance(self.moe_config, dict):
             self.moe_config = MoEConfig.from_dict(self.moe_config)
@@ -669,19 +557,13 @@ class TransformerLayer(keras.layers.Layer):
             elif 'output_dim' not in ffn_config:
                 ffn_config['output_dim'] = self.hidden_size
 
-            # If expert_config is for an MLP-like FFN and doesn't have its intermediate size set,
-            # use TransformerLayer's intermediate_size as a sensible default.
-            # This block is UNCONDITIONAL (it is not gated by the warning's `if`
-            # above), which is why the warning must not claim intermediate_size
-            # is ignored. The type list lives in exactly one place --
-            # `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` -- which the warning
-            # text above interpolates, so the two cannot drift.
+            # This block runs unconditionally, not gated by the warning's own
+            # `if` above; the type list lives in one place, `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE`, which the warning text also reads.
             ffn_type = ffn_config.get('type')
             if ffn_type in _MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE:
                 if 'hidden_dim' not in ffn_config:
                     ffn_config['hidden_dim'] = self.intermediate_size
 
-        # --- Create Sub-layers (unbuilt) ---
         # Per Keras best practices, all sub-layers are created in __init__.
         # They will be built with their weights in the build() method.
 
@@ -711,11 +593,8 @@ class TransformerLayer(keras.layers.Layer):
                 name='ffn_stochastic_depth'
             )
 
-        # LayerScale (CaiT, Touvron et al. 2021): a per-channel learnable scale
-        # applied to each residual *branch* output before the add, initialized
-        # small. It keeps the pre-norm residual stream from blowing up across
-        # deep stacks (without it a 12-layer ViT's activation std grew 2 -> 23,
-        # which the final LayerNorm then compresses, starving downstream layers).
+        # LayerScale (CaiT, Touvron et al. 2021): a small per-channel scale on
+        # each residual branch output, keeping a deep pre-norm stack's activation std from growing unbounded (12-layer ViT without it: 2 -> 23).
         self.attention_layer_scale = None
         self.ffn_layer_scale = None
         if self.use_layer_scale:
@@ -758,7 +637,7 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _required_attention_params(self) -> Dict[str, Any]:
-        """This block's type-specific REQUIRED attention params.
+        """This block's type-specific required attention params.
 
         Thin binding of :func:`build_transformer_attention_required_params` to
         this layer's own constructor parameters. It exists so that
@@ -794,28 +673,11 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif self.attention_type in ('window', 'window_zigzag', 'window_band'):
-            # All three keys are wrappers around the SAME class,
-            # `WindowAttention`, differing only in the `partition_mode` they pin
-            # ('grid' / 'zigzag' / 'band'), so they share one branch by
-            # construction rather than by three copies. Only `window_size`'s
-            # MEANING differs, and that is resolved in
-            # `_required_attention_params` above, not here.
+            # All three keys wrap the same class, WindowAttention, differing
+            # only in partition_mode; window_size's meaning is resolved above.
             #
-            # DECISION plan-2026-08-19T070627-a616f581/D-005: the block's `use_bias`
-            # MUST be forwarded here, and it is spelled `qkv_bias`/`proj_bias`
-            # -- NOT `use_bias`. The 'window' registry entry
-            # (attention/factory.py, key 'window') declares exactly those two
-            # names under `optional_params`, BOTH DEFAULTING TO True. Do NOT
-            # "simplify" this to `'use_bias': self.use_bias` to match the
-            # 'multi_head'/'group_query'/'anchor' branches: since D-011 the
-            # factory RAISES on undeclared keys, so that spelling is a
-            # construction failure, and before this branch forwarded anything
-            # at all the two `True` defaults silently won -- ModernBERT (all
-            # three variants set `use_bias: False`) carried `qkv/bias` and
-            # `proj/bias` on every one of its ~68% local layers. This is a
-            # weight-SET change: it removes 2 of the 5 tensors in a local
-            # layer's attention subtree at `use_bias=False`, so any pre-fix
-            # `.keras` built that way will not load. See decisions.md D-005.
+            # DECISION plan-2026-08-19T070627-a616f581/D-005: forward `use_bias`
+            # spelled `qkv_bias`/`proj_bias`, never `use_bias` -- that spelling raises, and before this branch existed ModernBERT loaded 2 stray bias tensors per layer. See decisions.md.
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -826,21 +688,9 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif self.attention_type == 'beit':
-            # NOT a copy of the 'window' branch: `BeitAttention` declares no
-            # `dropout_rate`, it declares `attn_dropout_rate` /
-            # `proj_dropout_rate`. HISTORICAL, and the reason for the rename
-            # SURVIVES the change: `create_attention_layer` used to FILTER kwargs
-            # to the registry's declared names and DROP the rest SILENTLY, so
-            # passing 'dropout_rate' here would have looked correct, raised
-            # nothing, and left the attention probabilities undropped at 0.0
-            # forever. Since 2026-08-17 (plan-2026-08-17T183311-79c63e38/D-011)
-            # that factory RAISES instead, so the same mistake would now be a
-            # loud construction failure rather than a silent one -- still a
-            # mistake, just a findable one. The block's
-            # `attention_dropout_rate` is routed to the attention-probability
-            # dropout, matching every other branch's intent; `proj_dropout_rate`
-            # is deliberately left at the layer default so the block's own
-            # `self.dropout` (applied to the residual branch) is not doubled.
+            # Not a copy of the 'window' branch: BeitAttention declares
+            # `attn_dropout_rate`/`proj_dropout_rate`, not `dropout_rate`.
+            # `proj_dropout_rate` is left at the layer default so it does not double up with self.dropout on the residual branch.
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
@@ -865,11 +715,8 @@ class TransformerLayer(keras.layers.Layer):
                 'dropout_rate': self.attention_dropout_rate,
                 'name': name
             }
-        # --- DECISION plan_2026-06-12_0bb1729b/D-001: additionally-wired
-        # self-attention factory types. Each accepts a standard
-        # `(inputs, attention_mask=..., training=...)` self-attention call
-        # (except 'fnet', see _MASKLESS_ATTENTION_TYPES). Added additively to
-        # keep the 4 branches above byte-identical (regression invariant). ---
+        # DECISION plan_2026-06-12_0bb1729b/D-001: branches below were added
+        # additively, keeping the 4 branches above byte-identical. See decisions.md.
         elif self.attention_type == 'multi_head_latent':
             # MLA requires kv_latent_dim; TransformerLayer has no dedicated
             # ctor param for it, so a documented default is used and any
@@ -903,43 +750,12 @@ class TransformerLayer(keras.layers.Layer):
         else:
             raise ValueError(f"Unknown attention type: {self.attention_type}")
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        # Merged HERE, at the same precedence as `attention_args`, and NOT into
-        # each per-type `default_params` branch. That placement is the point:
-        # `create_attention_layer` RAISES on a keyword the chosen type does not
-        # declare, and only 'multi_head'/'multi_head_cross' declare
-        # `output_kernel_initializer`, so asking for a residual-scaled init on
-        # (say) 'window' or 'differential' is a LOUD construction failure
-        # instead of a silently dropped request. Do NOT "fix" that raise by
-        # filtering the key out here -- a silently-ignored initializer scaling
-        # is precisely the defect class this parameter was added to remove.
-        # See decisions.md D-160.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160: merged here, at
+        # attention_args's own precedence, never into each branch -- only 2 of 9 types declare output_kernel_initializer, so an unsupported type raises loudly instead of silently dropping the request. See decisions.md.
         params = {**default_params, **self.attention_args}
 
-        # DECISION plan-2026-08-23T091307-9a110062/D-600
-        # The block's `kernel_initializer` is forwarded HERE, once, gated on the
-        # chosen type's OWN registry declaration -- not by a line repeated in
-        # each branch above. Before this, exactly ONE of the nine branches
-        # ('multi_head') forwarded it, while EIGHT of the nine attention types
-        # DECLARE `kernel_initializer` in their registry entry. The consequence
-        # was silent, because the attention layer then falls back to its own
-        # `glorot_uniform`: MEASURED on `models/vision/beit`, whose whole point is
-        # `TruncatedNormal(stddev=initializer_range)`, the attention q/k/v/proj
-        # kernels drew at realized std 0.125238 (glorot at dim=64) while every
-        # other kernel in the same model drew at 0.017609 (= 0.02 * 0.87964).
-        # A dropped initializer raises nothing and shows up only as a training
-        # curve, so do NOT "simplify" this back into the branches: a tenth
-        # attention type added without its line would silently rejoin the defect.
-        # `setdefault` AFTER the `attention_args` merge is deliberate -- an
-        # explicit `attention_args={'kernel_initializer': ...}` still wins.
-        # `clone_initializer` is REQUIRED, not defensive: a seedless Keras
-        # initializer instance REPLAYS its draw, and callers hand ONE instance
-        # to every block (models/vision/beit/model.py:409), so forwarding it raw would
-        # make all N blocks bit-identical -- the D-540/D-560 defect, traded for
-        # this one. The 'multi_head' branch keeps its own uncloned line: it is
-        # pre-existing behaviour whose consumers' seeded draws are pinned, and
-        # `setdefault` leaves it untouched.
-        # See decisions.md D-600.
+        # DECISION plan-2026-08-23T091307-9a110062/D-600: forward kernel_initializer
+        # here once, gated on the type's own registry declaration, not per-branch -- 8 of 9 types declare it but only 'multi_head' forwarded it, silently falling back to glorot_uniform. clone_initializer avoids replaying one shared draw across blocks. See decisions.md.
         if 'kernel_initializer' in ATTENTION_REGISTRY[self.attention_type].get(
             'optional_params', {}
         ):
@@ -977,21 +793,15 @@ class TransformerLayer(keras.layers.Layer):
             )
 
     def _reject_unsupported_residual_output_init(self) -> None:
-        """Raise unless BOTH sub-layer types can honour a residual-only init.
+        """Raise unless both sub-layer types can honour a residual-only init.
 
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        This exists because the two channels the initializer travels on fail
-        DIFFERENTLY, and one of them fails silently. The FFN side goes through
-        ``assemble_ffn_config``, which INTERSECTS the wrapper's config with the
-        target type's declared params and drops the remainder without a word
-        (correct in general -- those are the wrapper's own defaults). So
-        ``ffn_type='swiglu'`` would accept
-        ``residual_output_kernel_initializer=...`` and build an entirely
-        UNSCALED residual projection with no error anywhere. A
-        silently-ignored initializer request is precisely the defect class this
-        parameter was added to remove, so the combination is rejected HERE,
-        naming this class's own parameter rather than the forwarded spelling.
-        Do NOT relax this to a warning. See decisions.md D-160.
+        The FFN side goes through ``assemble_ffn_config``, which intersects
+        the wrapper's config with the target type's declared params and
+        drops the remainder silently — so an unsupported ``ffn_type`` would
+        otherwise build an unscaled residual projection with no error.
+
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160: reject the combination
+        # here, naming this class's own parameter, rather than let the FFN factory silently drop it. See decisions.md.
 
         :raises ValueError: If ``ffn_type`` or ``attention_type`` does not
             declare ``output_kernel_initializer``.
@@ -1036,31 +846,10 @@ class TransformerLayer(keras.layers.Layer):
         :return: Parameter dictionary for the FFN factory.
         :rtype: Dict[str, Any]
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-070
-        # The FFN gets a CLONE of the block's initializer, the attention keeps
-        # the stored instance. One shared seedless instance reaching both means
-        # the attention OUTPUT projection and the FFN EXPAND projection are the
-        # same flat draw whenever their shapes coincide -- MEASURED on
-        # `RELGT(embedding_dim=32, ffn_dim=32)`:
-        # `LocalTransformer/attention/cross_attention/proj/kernel ==
-        # LocalTransformer/ffn/fc1/kernel` at (32, 32). Attention output and FFN
-        # input are different architectural roles, which is the D-057 test. The
-        # clone is applied on the FFN side so `_get_attention_params` and
-        # `get_config` still report the instance the caller passed.
-        # See decisions.md D-070.
-        # DECISION plan-2026-08-22T035419-a11304c8/D-160
-        # `output_kernel_initializer` rides the WRAPPER channel (a named
-        # parameter of `build_transformer_ffn_config`), NOT `ffn_args`. The
-        # tempting alternative -- injecting it into `ffn_args` so the strict
-        # factory raises for an `ffn_type` that cannot honour it -- is exactly
-        # what `TestModelBuiltFFNKwargDictSweep::
-        # test_no_raw_self_built_dict_meets_a_dynamic_ffn_type` forbids (D-017/
-        # D-023: a model-injected key on the unfiltered channel makes the
-        # factory blame the USER for a name the model chose), and it was tried
-        # here and measured RED. The silent-drop hazard that routing creates is
-        # closed EARLIER instead, by `_reject_unsupported_residual_output_init`
-        # in `__init__`, which raises naming THIS class's own parameter. Do not
-        # move this back. See decisions.md D-160.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-070: the FFN gets a clone
+        # of the block's initializer, attention keeps the stored instance -- a shared instance drew bit-identical attention-output and FFN-expand kernels. See decisions.md.
+        # DECISION plan-2026-08-22T035419-a11304c8/D-160: output_kernel_initializer
+        # rides the wrapper channel, never ffn_args -- injecting it there was measured to make the factory blame the caller for a model-chosen key. See decisions.md.
         return build_transformer_ffn_config(
             ffn_type=self.ffn_type,
             name=name,
@@ -1145,18 +934,17 @@ class TransformerLayer(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional attention mask.
 
-            **SILENTLY DISCARDED for three attention types.**
+            Discarded with no warning for three attention types.
             ``_MASKLESS_ATTENTION_TYPES`` is ``{'fnet', 'anchor', 'lighthouse'}``,
-            whose sub-layers accept no mask argument at all, so this parameter is
-            dropped for them with no warning. Measured 2026-08-27,
-            ``max|y_masked - y_unmasked|`` with a ``(B, T)`` keep-mask zeroing the
-            tail half:
+            whose sub-layers accept no mask argument at all. Measured
+            2026-08-27, ``max|y_masked - y_unmasked|`` with a ``(B, T)``
+            keep-mask zeroing the tail half:
 
-            * ``anchor``, ``fnet``, ``lighthouse``: **exactly 0.0** -- the mask
+            * ``anchor``, ``fnet``, ``lighthouse``: exactly 0.0 — the mask
               does nothing;
             * every other usable type: 0.165 to 1.679.
 
-            Padding a batch and passing a mask therefore produces silently wrong
+            Padding a batch and passing a mask produces silently wrong
             results for those three. See each layer's own docstring for the
             measured cost of its missing mask.
         :type attention_mask: Optional[keras.KerasTensor]
@@ -1170,7 +958,6 @@ class TransformerLayer(keras.layers.Layer):
         residual = inputs
 
         if self.normalization_position == 'pre':
-            # --- Pre-Normalization: Normalize -> SubLayer -> Add ---
             # 1. Attention block
             x = self.attention_norm(inputs, training=training)
             if self.attention_type == 'differential':
@@ -1196,7 +983,6 @@ class TransformerLayer(keras.layers.Layer):
                 x = self.ffn_layer_scale(x, training=training)
             layer_output = x + residual
         else:
-            # --- Post-Normalization: SubLayer -> Add -> Normalize ---
             # 1. Attention block
             if self.attention_type == 'differential':
                 x = self.attention(

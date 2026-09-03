@@ -1,54 +1,26 @@
 """
-Free Transformer Layer with integrated Variational Autoencoder components.
+FreeTransformerLayer, an injection block for Fleuret's Free Transformer, plus
+its BinaryMapper sampler and two KL-loss helper functions.
 
-This module implements "The Free Transformer" architecture proposed by François Fleuret
-(arXiv:2510.17558v1). It extends the standard decoder Transformer by conditioning its
-generative process on random latent variables learned without supervision through a
-variational procedure.
+A standard decoder infers everything about the sequence being generated
+implicitly, from already-generated tokens. The Free Transformer instead
+splits a decoder stack in half and, at the middle layer, has an encoder
+infer a discrete latent ``Z`` from the sequence during training (or sample
+it uniformly at inference), then conditions the rest of the stack on it
+through a variational objective. ``BinaryMapper`` turns the encoder's ``H``
+bit logits into a one-hot ``Z`` of ``2^H`` categories with a
+straight-through gradient estimator.
 
-The Free Transformer addresses limitations of purely auto-regressive models by allowing
-the model to make explicit latent decisions about the structure of the sequence being
-generated, rather than implicitly inferring these decisions from already-generated tokens.
-
-Architecture Overview:
----------------------
-The Free Transformer splits a standard decoder into two halves and injects a latent
-variable Z at the middle layer:
-
-1. **First Half**: Standard causal transformer blocks (layers 0 to L/2-1)
-
-2. **Injection Layer** (layer L/2):
-   - During training: An encoder infers Z from the sequence
-   - During inference: Z is sampled uniformly from a categorical distribution
-   - Z is projected and added to the key/value inputs of this layer's attention
-
-3. **Second Half**: Standard causal transformer blocks (layers L/2+1 to L-1)
-
-Encoder Architecture:
---------------------
-The encoder (only active during training or KV cache pre-filling) consists of:
-- A learned constant query vector ζ (zeta) replicated across the sequence
-- One non-causal transformer block receiving ζ as queries and the first-half
-  output as keys/values
-- A linear readout producing H bit logits per token
-- A Binary Mapper that samples Z as a one-hot vector of dimension 2^H
-
-Mathematical Foundation:
------------------------
-The model learns to maximize P(S) = ∫ P(S|Z=z)P(Z=z)dz through a VAE objective:
-
-    Loss = CrossEntropy(S) + β * max(0, KL(Q(Z|S) || P(Z)) - κ)
-
-where:
-- Q(Z|S) is the encoder's posterior distribution
-- P(Z) is a uniform prior over 2^H categories
-- κ is a "free bits" threshold to prevent KL collapse
-- β is a weighting coefficient
+The training loss is ``CrossEntropy(S) + beta * max(0, KL(Q(Z|S) || P(Z)) - kappa)``,
+where ``Q(Z|S)`` is the encoder's posterior and ``P(Z)`` a uniform prior over
+``2^H`` categories; ``compute_kl_divergence_uniform_prior`` and
+``compute_free_bits_kl_loss`` compute the two halves of that KL term.
+``FreeTransformerLayer`` falls back to a plain ``TransformerLayer`` when
+``use_free_transformer=False``.
 
 References:
------------
-- Fleuret, F. (2025). The Free Transformer. arXiv:2510.17558v1.
-- Kingma, D. P., & Welling, M. (2013). Auto-Encoding Variational Bayes. arXiv:1312.6114.
+    - Fleuret, 2025. The Free Transformer. (https://arxiv.org/abs/2510.17558)
+    - Kingma & Welling, 2013. Auto-Encoding Variational Bayes. (https://arxiv.org/abs/1312.6114)
 """
 
 import keras
@@ -84,17 +56,14 @@ class BinaryMapper(keras.layers.Layer):
     pass-through adds ``G - stop_gradient(G)`` to the one-hot output,
     providing gradients without altering forward values.
 
-    **Cost warning -- the pass-through is O(B * T * 2^H).**
-    Per eq. 8, ``G`` is a full ``(B, T, 2^H)`` tensor with one entry per
-    category, so the training path materializes a second tensor the size of
-    the one-hot output and performs a ``(B, T, H) x (H, 2^H)`` matmul against
-    a constant ``(2^H, H)`` bit-pattern table built once in :meth:`build`.
-    At the ``FreeTransformerLayer`` default ``num_latent_bits=16`` the table
-    is ~4.2 MB (fp32) and the per-call matmul is ``B * T * 16 * 65536 * 2``
-    FLOPs. MEASURED on an RTX 4070 (float32, ``tf.function``, training-path
-    forward + backward, peak GPU memory via
-    ``tf.config.experimental.get_memory_info``), scalar-broadcast -> this
-    implementation:
+    Cost: the pass-through is ``O(B * T * 2^H)``. Per eq. 8, ``G`` is a full
+    ``(B, T, 2^H)`` tensor with one entry per category, so the training path
+    materializes a second tensor the size of the one-hot output via a
+    ``(B, T, H) x (H, 2^H)`` matmul against a constant ``(2^H, H)``
+    bit-pattern table built once in :meth:`build`. At the default
+    ``num_latent_bits=16`` the table is ~4.2 MB (fp32). Measured on an RTX
+    4070 (float32, ``tf.function``, training-path forward and backward,
+    scalar-broadcast baseline vs. this implementation):
 
     .. code-block:: text
 
@@ -107,23 +76,18 @@ class BinaryMapper(keras.layers.Layer):
           (B,T)=(8,256)   17.2 ms ->  31.3 ms (1.8x)    896 MB -> 1984 MB (2.2x)
 
     Peak memory doubles because ``G`` is exactly the size of the one-hot
-    output; note that the default was ALREADY ``2^H``-dominated before this
-    change (the one-hot and ``post_sampler_fc`` both are), so this is a 2x on
-    a cost that was large to begin with, not a new order of magnitude. Budget
-    for it, or lower ``num_bits``: ``H=8`` costs 1/256th of the ``H=16``
-    activation. The ``num_bits <= 20`` constructor cap remains the hard stop
-    (a ``H=20`` table alone is ~84 MB).
+    output, on top of a cost that was already ``2^H``-dominated. Lower
+    ``num_bits`` to cut it: ``H=8`` costs 1/256th of the ``H=16`` activation.
+    The ``num_bits <= 20`` constructor cap is the hard stop (a ``H=20`` table
+    alone is ~84 MB).
 
-    **Precision note.** ``G`` is a product of ``H`` probabilities, so its
-    typical magnitude is ``2^-H``; at ``H=16`` that is ~1.5e-05, which is
-    close to the float16 minimum normal (6.1e-05). Under a ``float16``
-    compute policy the smaller entries flush to zero and their gradients
-    vanish. This exposure is unchanged from the previous scalar
-    implementation (the scalar was one entry of the same vector), but it is
-    now spread across all ``2^H`` slots. Run this layer in ``float32`` or
-    ``bfloat16`` if ``H`` is large.
+    Precision: ``G`` is a product of ``H`` probabilities, typical magnitude
+    ``2^-H``; at ``H=16`` that is ~1.5e-05, close to the float16 minimum
+    normal (6.1e-05). Under a ``float16`` compute policy the smaller entries
+    flush to zero and their gradients vanish. Run this layer in ``float32``
+    or ``bfloat16`` if ``H`` is large.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -174,19 +138,18 @@ class BinaryMapper(keras.layers.Layer):
         self._bit_patterns = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Materialize the constant ``(2^H, H)`` bit-pattern table ONCE.
+        """Materialize the constant ``(2^H, H)`` bit-pattern table once.
 
         ``U[d, h]`` is the ``h``-th bit of category index ``d``, 0-indexed to
         match :meth:`call`'s ``pow2 = [2**i]`` binary-to-integer convention.
 
-        The table is kept as a HOST (numpy) array, deliberately neither a
-        backend tensor nor a non-trainable weight:
+        The table is kept as a host (numpy) array, neither a backend tensor
+        nor a non-trainable weight:
 
         * A backend tensor built here is captured by whichever graph happens
           to be tracing at build time and then raises ``TypeError: ... is out
-          of scope and cannot be used here`` in every OTHER graph. That is not
-          hypothetical -- it is what ``test_graph_trace_training`` caught when
-          this table was first written that way.
+          of scope and cannot be used here`` in every other graph —
+          ``test_graph_trace_training`` caught exactly this.
         * A non-trainable weight would be graph-safe, but it would change this
           layer's ``.keras`` checkpoint layout (and add ~4.2 MB of saved
           bytes at ``num_bits=16``) to store a value that is fully determined
@@ -219,27 +182,24 @@ class BinaryMapper(keras.layers.Layer):
 
             .. warning::
 
-               A genuinely **symbolic** (traced) ``training`` tensor is NOT
-               supported and will RAISE. Inside a ``tf.function`` the branch
+               A genuinely symbolic (traced) ``training`` tensor is not
+               supported and raises. Inside a ``tf.function`` the branch
                below raises ``OperatorNotAllowedInGraphError`` ("Using a
-               symbolic ``tf.Tensor`` as a Python ``bool`` is not allowed") --
-               MEASURED, and deliberate: the alternative was the previous
-               ``is True`` identity test, under which a tensor ``training``
-               silently compared ``False`` and the eq. 8 pass-through was
-               dropped with no error at all. ``fit``/``predict``/
-               ``jit_compile=True`` all resolve ``training`` to a Python bool
-               before tracing, so only a hand-written train step that threads a
-               ``tf.Tensor`` into ``training=`` can reach this.
+               symbolic ``tf.Tensor`` as a Python ``bool`` is not allowed").
+               The prior ``is True`` identity test let a tensor ``training``
+               silently compare ``False`` and drop the eq. 8 pass-through
+               with no error. ``fit``/``predict``/``jit_compile=True`` all
+               resolve ``training`` to a Python bool before tracing, so only
+               a hand-written train step that threads a ``tf.Tensor`` into
+               ``training=`` can reach this.
         :type training: Optional[bool]
         :return: One-hot tensor ``(B, T, 2^num_bits)``.
         :rtype: keras.KerasTensor
         """
-        # Step 1: Compute bit probabilities
-        # P(B_h = 1) = sigmoid(logit_h)
+        # Bit probabilities: P(B_h = 1) = sigmoid(logit_h).
         probs = keras.ops.sigmoid(bit_logits)
 
-        # Step 2: Sample bits using reparameterization trick
-        # Sample uniform values and threshold by probability
+        # Sample bits via the reparameterization trick: threshold a uniform draw by probability.
         uniform_sample = keras.random.uniform(
             keras.ops.shape(probs),
             dtype=probs.dtype
@@ -249,50 +209,21 @@ class BinaryMapper(keras.layers.Layer):
             dtype='int32'
         )
 
-        # Step 3: Convert binary vector to integer index
-        # index = Σ(B_h * 2^h) for h in [0, H-1]
-        # Using einsum for efficient computation: (B, T, H) @ (H,) -> (B, T)
+        # index = sum_h(B_h * 2^h), via einsum (B, T, H) @ (H,) -> (B, T).
         pow2 = keras.ops.cast(keras.ops.array([2**i for i in range(self.num_bits)]), "int32")
         indices = keras.ops.einsum('bth,h->bt', sampled_bits, pow2)
 
-        # Step 4: Create one-hot encoding
-        # Shape: (batch_size, sequence_length, 2^H)
         z_one_hot = keras.ops.one_hot(
             indices,
             num_classes=self.num_categories,
             dtype=self.compute_dtype
         )
 
-        # Step 5: Gradient pass-through (Equation 8 in paper)
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-020
-        # Plain truthiness, NOT `if training is True:`. `tf.constant(True) is
-        # True` is Python False, so the identity test made an EAGER tensor
-        # `training` skip the pass-through silently. Do NOT restore it, and do
-        # NOT try to rescue the symbolic case with `ops.where`/`tf.cond`: the
-        # two branches here differ in the GRAPH they build, not just in their
-        # values, so a blend would compute the whole (B,T,2^H) contraction on
-        # every inference call. See D-020 and the `:param training:` warning.
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-020: plain truthiness,
+        # never `is True` -- that identity test let an eager tensor `training` skip the pass-through silently. See decisions.md.
         if training:
-            # DECISION plan-2026-07-31T132403-b3f540cb/D-004
-            # G_{t,d} = P(B_t = U(d)) for EVERY category d, per eq. 8 -- not
-            # the single scalar of the SAMPLED category broadcast across all
-            # 2^H slots. The scalar form (what this used to do) leaves the
-            # forward value untouched, so nothing crashes, but it hands every
-            # category an IDENTICAL gradient instead of routing one per
-            # category through `post_sampler_fc`'s columns.
-            #
-            # Do NOT compute this by broadcasting bit_logits against the table
-            # into a (B, T, 2^H, H) rank-4 intermediate and reducing over h:
-            # at the shipped H=16 that is B*T*65536*16 elements (~50 MB for a
-            # (2,6) probe). The contraction below is algebraically identical
-            # and never leaves rank 3:
-            #     log G_{t,d} = sum_h [U_dh log p_h + (1-U_dh) log(1-p_h)]
-            #                 = (L_t @ U^T)[d] - sum_h softplus(L_th)
-            # using log sigmoid(L) - log sigmoid(-L) == L exactly. VERIFIED
-            # against a 60-digit mpmath brute-force oracle at H=3: <= 8.2e-15
-            # relative (37 x float64 eps) over moderate, |L|<=30 and |L|=88
-            # logits. See D-004; the two-matmul form
-            # `U @ log p + (1-U) @ log(1-p)` is the documented fallback.
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-004: G_{t,d} is
+            # P(B_t = U(d)) for every category d (eq. 8), not one scalar broadcast -- the scalar form gave every category an identical gradient. See decisions.md.
             logits = keras.ops.cast(bit_logits, self.compute_dtype)
             u_table = keras.ops.convert_to_tensor(self._bit_patterns)
             log_g = keras.ops.matmul(
@@ -302,13 +233,8 @@ class BinaryMapper(keras.layers.Layer):
             )
             g_td = keras.ops.exp(log_g)  # (B, T, 2^H)
 
-            # DECISION plan-2026-07-31T132403-b3f540cb/D-013
-            # Group the subtraction: `z + (G - sg(G))`, never `z + G - sg(G)`.
-            # `G - sg(G)` is EXACTLY 0.0 in floating point, so the forward
-            # value is bit-exact. The left-to-right form rounds `(1 + g) - g`
-            # off the exact one-hot by 1 ulp for ~25 % of g values (MEASURED:
-            # 1.11e-16 float64 / 5.96e-08 float32, hot slot only) -- a real,
-            # pre-existing 1-ulp error in the old scalar code.
+            # DECISION plan-2026-07-31T132403-b3f540cb/D-013: group the
+            # subtraction as `z + (G - sg(G))`, never `z + G - sg(G)` -- the left-to-right form rounds ~25% of values off the exact one-hot by 1 ulp. See decisions.md.
             z_one_hot = z_one_hot + (g_td - keras.ops.stop_gradient(g_td))
 
         return z_one_hot
@@ -357,7 +283,7 @@ class FreeTransformerLayer(TransformerLayer):
     The training loss is:
     ``L = CE(S) + beta * max(0, KL(Q(Z|S) || P(Z)) - kappa)``
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -405,11 +331,7 @@ class FreeTransformerLayer(TransformerLayer):
     :type num_latent_bits: int
     :param encoder_attention_type: Encoder attention type. Default:
         ``'multi_head_cross'`` (the encoder is a cross-attention block: Q=zeta,
-        K/V=sequence). This docstring previously said ``'multi_head'``, which
-        never matched the code; the mismatch mattered because ``'multi_head'``
-        declares neither ``bias_initializer`` nor ``bias_regularizer``, so the
-        DOCUMENTED default was the configuration this layer's own generic
-        defaults broke once ``create_attention_layer`` became strict.
+        K/V=sequence).
     :type encoder_attention_type: AttentionType
     :param encoder_ffn_type: Encoder FFN type. Default: ``'swiglu'``.
     :type encoder_ffn_type: FFNType
@@ -469,33 +391,10 @@ class FreeTransformerLayer(TransformerLayer):
         # Zeta weight is created in build() via add_weight
         self.zeta = None
 
-        # ---------------------------------------------------------------------
-        # Encoder sublayers (created here; built in build())
-        # ---------------------------------------------------------------------
-
-        # The encoder is a cross-attention block (Q=zeta, K/V=sequence); it is
-        # inherently non-causal, so no causal flag is needed.
-        # DECISION plan-2026-08-17T183311-79c63e38/D-011
-        # Pre-filter OUR OWN generic defaults to the ones this
-        # `encoder_attention_type` accepts, exactly as the FFN bundle below
-        # does (D-013). These eight are this layer's conveniences, not the
-        # caller's expressed intent, so filtering them is correct.
-        #
-        # This was live at the DOCUMENTED default. The class docstring names
-        # `'multi_head'` as the default `encoder_attention_type`;
-        # `'multi_head'` declares neither `bias_initializer` nor
-        # `bias_regularizer`, so both were handed to the factory and discarded
-        # without a word -- and once `create_attention_layer` raises (D-011),
-        # that same configuration becomes a hard construction failure. The code
-        # default is `'multi_head_cross'`, which accepts both, which is why no
-        # test in the tree ever saw it. Do NOT "fix" this by declaring the two
-        # keys on `'multi_head'`'s registry entry: `MultiHeadAttention` does not
-        # accept them either.
-        #
-        # As at the FFN site: this pre-filter deliberately does NOT cover the
-        # caller's own `encoder_attention_args`, which `assemble_attention_config`
-        # merges on top VERBATIM and which therefore still reaches the factory's
-        # raise -- that is how a misspelled key stays findable.
+        # Encoder sublayers, created here, built in build(). The encoder is a
+        # cross-attention block (Q=zeta, K/V=sequence), inherently non-causal.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-011: pre-filter these
+        # generic defaults to what `encoder_attention_type` accepts, same as the FFN bundle below (D-013) -- an unfiltered default once reached the factory and was silently dropped. See decisions.md.
         encoder_attn_config = assemble_attention_config(
             self.encoder_attention_type,
             {
@@ -528,34 +427,8 @@ class FreeTransformerLayer(TransformerLayer):
             name='encoder_attention_dropout'
         )
 
-        # DECISION plan-2026-07-30T081929-1645aa52/D-013
-        # Pre-filter OUR OWN generic defaults to the ones this `encoder_ffn_type`
-        # accepts, exactly as `gated_linear_attention_block.py` does at its own FFN
-        # site. These are this layer's conveniences, not the caller's explicit
-        # intent, so filtering them is correct -- and without it they reach
-        # `create_ffn_layer`, which drops them silently.
-        #
-        # This was live at the encoder path's own default: `encoder_ffn_type`
-        # defaults to 'swiglu', which does not accept `activation`, so the bundle
-        # below handed swiglu an `activation` that was discarded without a word.
-        # Measured across an instrumented 1634-test run, this was one of only two
-        # (site, ffn_type) pairs in the repo that armed the drop. A strict factory
-        # would break this site at 12 of 21 ffn_types.
-        #
-        # NOTE, as at the GLA site: this pre-filter deliberately does NOT cover the
-        # caller's own `encoder_ffn_args`, which is merged AFTER it and reaches
-        # `create_ffn_layer` verbatim -- that factory RAISES on a key the type does
-        # not accept (D-023), which is exactly how a misspelled `encoder_ffn_args`
-        # key becomes findable. Filtering it here would silently swallow the typo
-        # again. The narrow `set(kwargs) - valid_param_names` predicate in
-        # `layers/ffn/factory.py` is what tells an explicit caller key apart from
-        # one of our defaults; the two are NOT indistinguishable.
-        #
-        # The dict-comprehension pre-filter below is a hand-rolled copy of
-        # `layers/ffn/factory.py::assemble_ffn_config`, kept here (as at the GLA
-        # site) because both already measure 0 dropped keys across all 21 registry
-        # types, so migrating is pure de-duplication with no behaviour to fix.
-        # Named as a follow-up at step 4, not an accepted permanent divergence.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-013: pre-filter these
+        # generic defaults to what `encoder_ffn_type` accepts -- the default `'swiglu'` rejects `activation`, which reached create_ffn_layer and was dropped silently. See decisions.md.
         encoder_ffn_config = {
             'hidden_dim': self.intermediate_size,
             'output_dim': self.hidden_size,
@@ -686,9 +559,9 @@ class FreeTransformerLayer(TransformerLayer):
             predicate of rank 2 ``(B, S)``, rank 3 ``(B, T, S)`` or rank 4
             ``(B, heads, T, S)``. It is forwarded verbatim to the causal
             self-attention. The non-causal encoder cross-attention instead
-            receives a **key-validity** reduction of it (``max`` over every
+            receives a key-validity reduction of it (``max`` over every
             query-side axis), so it honours padding without inheriting
-            causality -- see the D-005 anchor in ``call``. Any other rank
+            causality — see the D-005 anchor in ``call``. Any other rank
             raises ``ValueError``.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index for differential attention.
@@ -699,29 +572,25 @@ class FreeTransformerLayer(TransformerLayer):
 
             .. warning::
 
-               A genuinely **symbolic** (traced) ``training`` tensor is NOT
-               supported by this layer and will RAISE, rather than being
-               handled. In graph mode it is refused TWICE, and the first
-               refusal is not even this layer's: Keras' own ``Dropout.call``
-               does ``if training and self.rate > 0`` and raises
-               ``OperatorNotAllowedInGraphError`` at the attention-sub-block
-               dropout above, before the encoder/inference branch is reached
-               (MEASURED). The branch itself raises the same error for the same
-               reason. This is deliberate -- the previous ``is True`` identity
-               test made an EAGER tensor ``training=True`` run the INFERENCE
-               path silently: no encoder sub-network, zero ``bit_logits``, no
-               KL signal, and no error. ``fit``/``predict``/``jit_compile``
+               A genuinely symbolic (traced) ``training`` tensor is not
+               supported and raises. In graph mode it is refused twice: Keras'
+               own ``Dropout.call`` raises ``OperatorNotAllowedInGraphError``
+               at the attention-sub-block dropout above, before the
+               encoder/inference branch is even reached; that branch raises
+               the same error for the same reason. The prior ``is True``
+               identity test let an eager tensor ``training=True`` silently
+               run the inference path — no encoder, zero ``bit_logits``, no
+               KL signal, no error. ``fit``/``predict``/``jit_compile``
                resolve ``training`` to a Python bool before tracing, so only a
                hand-written train step can reach this.
         :type training: Optional[bool]
         :return: If ``use_free_transformer`` is False, the output ``(B, T, D)``.
-            If True, ALWAYS the tuple ``(output, bit_logits)`` -- in both training
-            and inference (the structure does not depend on ``training``). At
-            inference ``bit_logits`` are zeros (the uniform prior). This matches
-            ``compute_output_shape`` in every mode.
+            If True, always the tuple ``(output, bit_logits)``, in both
+            training and inference. At inference ``bit_logits`` are zeros
+            (the uniform prior). This matches ``compute_output_shape`` in
+            every mode.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
-        # Standard transformer behavior when Free Transformer is disabled
         if not self.use_free_transformer:
             return super().call(
                 inputs,
@@ -730,34 +599,10 @@ class FreeTransformerLayer(TransformerLayer):
                 training=training
             )
 
-        # ---------------------------------------------------------------------
-        # Free Transformer Forward Pass
-        # ---------------------------------------------------------------------
+        bit_logits = None  # Populated during training.
 
-        bit_logits = None  # Will be populated during training
-
-        # DECISION plan-2026-07-31T042809-ddc92265/D-005
-        # Derive the encoder's KEY-VALIDITY mask from the caller's mask.
-        #
-        # The encoder cross-attention (Q = learned zeta, K/V = the sequence S)
-        # is DELIBERATELY non-causal -- that is the whole point of a posterior
-        # Q(Z|S) that sees the entire sequence. So:
-        #
-        #   * do NOT keep passing ``attention_mask=None`` (the pre-fix
-        #     behaviour): on a padded batch the posterior then pools over PAD
-        #     keys and values, and because ``z_projected`` is added to
-        #     ``attention_output`` BEFORE the FFN, PAD content reaches the
-        #     layer output at every REAL position -- silently, finite, plausible.
-        #   * do NOT forward the caller's rank-3/rank-4 mask VERBATIM either:
-        #     that mask is typically causal, and the encoder would silently
-        #     inherit causality it is designed not to have.
-        #
-        # What the encoder wants is only "which KEYS exist", so reduce every
-        # query-side axis with ``max``: a key is valid iff SOME query may attend
-        # to it. That maps a pure causal mask to all-ones (correct -- no key is
-        # padding) and a causal+padding mask to the padding mask (correct). The
-        # reduction is a union, so any genuinely per-query structure a caller
-        # encoded in a rank-3 mask is intentionally discarded here.
+        # DECISION plan-2026-07-31T042809-ddc92265/D-005: derive the encoder's
+        # key-validity mask via max over query axes -- forwarding the caller's mask verbatim would make the non-causal encoder inherit causality, and None would let it pool over PAD keys. See decisions.md.
         if attention_mask is None:
             encoder_key_mask = None
         else:
@@ -831,22 +676,11 @@ class FreeTransformerLayer(TransformerLayer):
 
             attention_output = self.attention_norm(x + residual, training=training)
 
-        # ---------------------------------------------------------------------
-        # Step 2: Encoder path (training/prefill) or uniform sampling (inference)
-        # ---------------------------------------------------------------------
-
-        # DECISION plan-2026-07-31T132403-b3f540cb/D-020
-        # Plain truthiness, NOT `if training is True:`. Do NOT restore the
-        # identity test (an eager tensor `training=True` then silently runs the
-        # inference path below -- no encoder, zero bit_logits, VAE never
-        # trains), and do NOT replace this with `ops.where`/`tf.cond` to make a
-        # symbolic `training` work: the two branches run structurally DIFFERENT
-        # sub-networks (cross-attention + FFN + readout + sampling vs a bare
-        # `keras.random.uniform`), so a blend pays for both on every call.
-        # The symbolic case is documented as unsupported in `:param training:`.
+        # Encoder path (training/prefill) or uniform sampling (inference).
+        # DECISION plan-2026-07-31T132403-b3f540cb/D-020: plain truthiness,
+        # never `is True` -- an eager `training=True` under the identity test silently ran the inference path with zero bit_logits. See decisions.md.
         if training:
-            # === Encoder Path (Training) ===
-            # Run the non-causal encoder block to infer Z from the sequence
+            # Encoder path: run the non-causal encoder block to infer Z.
 
             # Tile learned query zeta to match sequence length
             # Shape: (1, 1, D) → (batch, seq_len, D)
@@ -864,15 +698,10 @@ class FreeTransformerLayer(TransformerLayer):
             # Normalize queries
             zeta_norm = self.encoder_attention_norm(zeta_queries, training=training)
 
-            # Cross-attention: Q = learned zeta queries, K/V = ``attention_output``
-            # (the first-half sequence representation S). This makes the posterior
-            # Q(Z|S) genuinely conditional on the sequence. ``encoder_attention`` is a
-            # cross-attention layer ('multi_head_cross') taking ``kv_input`` separately.
-            #
-            # ``encoder_key_mask`` is the rank-2 key-validity predicate derived
-            # above (see the D-005 anchor at the top of this branch): non-causal
-            # over real tokens, PAD keys excluded. ``None`` when the caller
-            # supplied no mask, which restores full attention exactly.
+            # Q = learned zeta queries, K/V = attention_output (the first-half
+            # sequence), making the posterior Q(Z|S) conditional on the whole
+            # sequence. encoder_key_mask is the rank-2 key-validity predicate
+            # derived above (D-005); None restores full attention.
             encoder_attn_out = self.encoder_attention(
                 zeta_norm,
                 kv_input=attention_output,
@@ -899,8 +728,7 @@ class FreeTransformerLayer(TransformerLayer):
             z_one_hot = self.binary_mapper(bit_logits, training=training)
 
         else:
-            # === Inference Path ===
-            # Sample Z uniformly from categorical distribution
+            # Inference path: sample Z uniformly from the categorical distribution.
             batch_size = keras.ops.shape(inputs)[0]
             seq_len = keras.ops.shape(inputs)[1]
 
@@ -931,29 +759,10 @@ class FreeTransformerLayer(TransformerLayer):
                 dtype=self.compute_dtype
             )
 
-        # ---------------------------------------------------------------------
-        # Step 3: Condition on Z by injecting into keys/values
-        # ---------------------------------------------------------------------
-        # Project Z: 2^H → D
+        # Project Z (2^H -> D) and add to attention_output: R = Linear(Z),
+        # the paper's Algorithm 2 injection before the FFN.
         z_projected = self.post_sampler_fc(z_one_hot, training=training)
-
-        # Add to attention output to create conditioned representation
-        # This creates the "R" tensor from the paper: R = Linear(Z)
-        # The next operations will use attention_output + R as keys/values
         conditioned_kv = attention_output + z_projected
-
-        # ---------------------------------------------------------------------
-        # Step 4: FFN sub-layer (second sub-layer)
-        # ---------------------------------------------------------------------
-        # Note: According to Algorithm 2, the injection happens BEFORE the FFN.
-        # The paper states: "block B/2 + 1 gets in_q=x, in_kv=x+r"
-        # But since we're implementing this as a single layer, we interpret this
-        # as: the attention already happened, now we just need to condition
-        # the representation before FFN.
-        #
-        # For a more literal implementation, you would need to modify the
-        # attention mechanism itself to accept separate query and key/value inputs.
-        # For simplicity, we condition the representation directly.
 
         residual = conditioned_kv
 
@@ -978,14 +787,8 @@ class FreeTransformerLayer(TransformerLayer):
 
             layer_output = self.output_norm(x + residual, training=training)
 
-        # ---------------------------------------------------------------------
-        # Return (output, bit_logits)
-        # ---------------------------------------------------------------------
-        # The output STRUCTURE depends only on ``use_free_transformer`` (a
-        # construction-time flag), never on ``training`` -- so it matches
-        # ``compute_output_shape`` in both modes. During training ``bit_logits``
-        # are the encoder readout (for the KL term); at inference they are the
-        # uniform-prior zeros set above.
+        # Output structure depends only on use_free_transformer, never on
+        # training, matching compute_output_shape in both modes.
         return layer_output, bit_logits
 
     def compute_output_shape(
@@ -1013,11 +816,10 @@ class FreeTransformerLayer(TransformerLayer):
         return output_shape, bit_logits_shape
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get layer configuration for serialization.
+        """Return configuration dictionary for serialization.
 
-        Returns:
-            Configuration dictionary with all parameters.
+        :return: Configuration dictionary with all parameters.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -1042,43 +844,37 @@ def compute_kl_divergence_uniform_prior(
         num_bits: int,
         axis: int = -1
 ) -> keras.KerasTensor:
-    """
-    Compute KL divergence between encoder posterior Q(Z|S) and uniform prior P(Z).
+    """Compute KL divergence between encoder posterior Q(Z|S) and uniform prior P(Z).
 
-    For the Free Transformer, the prior P(Z) is uniform over 2^H categories:
-        P(Z_t = z) = 1 / 2^H  for all z ∈ {0, ..., 2^H - 1}
+    Architecture:
 
-    The encoder outputs H independent bit logits, defining a factorized posterior:
-        Q(Z_t = z | S) = ∏_{h=1}^H Q(B_h = U_h(z))
-        where U(z) is the binary encoding of z.
+    .. code-block:: text
 
-    **Computation Flow**:
-    ```
-    Input: Bit Logits (B, T, H)
-           ↓
-    Sigmoid → p_h = σ(logit_h)
-           ↓
-    Clip probabilities: p_h ∈ [1e-7, 1-1e-7]
-           ↓
-    Binary Entropy: H(p_h) = -[p_h·log(p_h) + (1-p_h)·log(1-p_h)]
-           ↓
-    KL per bit: log(2) - H(p_h)
-           ↓
-    Sum over bits (axis=-1)
-           ↓
-    Output: KL Divergence (B, T)
-    ```
+        bit logits (B, T, H)
+              │
+              ▼
+        sigmoid -> p_h
+              │
+              ▼
+        clip to [1e-7, 1-1e-7]
+              │
+              ▼
+        binary entropy H(p_h)
+              │
+              ▼
+        per-bit KL: log(2) - H(p_h)
+              │
+              ▼
+        sum over bits (axis)
+              │
+              ▼
+        KL divergence (B, T)
 
-    The KL divergence can be computed as (Equation 4 in paper):
-        KL(Q(Z_t|S) || P(Z_t)) = H*log(2) + Σ_z Q(z|S) log Q(z|S)
-
-    However, computing this sum over 2^H categories is expensive. Instead, we use
-    the fact that for independent bits, the KL can be computed per-bit:
-        KL = Σ_h KL(Q(B_h|S) || Uniform(B_h))
-
-    For a Bernoulli with probability p:
-        KL(Bernoulli(p) || Uniform) = H(1/2) - H(p)
-                                     = log(2) - [p*log(p) + (1-p)*log(1-p)]
+    Computing the exact KL (eq. 4), ``H*log(2) + sum_z Q(z|S) log Q(z|S)``,
+    sums over ``2^H`` categories. Since the posterior factorizes over
+    independent bits, it decomposes into a per-bit sum instead:
+    ``KL = sum_h KL(Q(B_h|S) || Uniform(B_h))``, and for a Bernoulli with
+    probability ``p``: ``KL(Bernoulli(p) || Uniform) = log(2) - [p*log(p) + (1-p)*log(1-p)]``.
 
     :param bit_logits: Tensor of shape (batch, sequence, num_bits) containing
         logits for each independent bit.
@@ -1118,17 +914,14 @@ def compute_free_bits_kl_loss(
         kappa: float = 0.5,
         reduction: str = 'mean'
 ) -> keras.KerasTensor:
-    """
-    Compute KL divergence loss with free bits thresholding.
+    """Compute KL divergence loss with free bits thresholding.
 
     The free bits method (Kingma et al., 2016) prevents KL collapse by only
-    penalizing KL divergence above a threshold κ (kappa):
-
-        KL_loss = (1/T) * Σ_t max(0, KL(Q(Z_t|S) || P(Z_t)) - κ)
-
+    penalizing KL divergence above a threshold kappa:
+    ``KL_loss = (1/T) * sum_t max(0, KL(Q(Z_t|S) || P(Z_t)) - kappa)``,
     where T is the sequence length.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 

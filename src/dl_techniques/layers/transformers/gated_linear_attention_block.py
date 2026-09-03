@@ -1,53 +1,26 @@
 """
-A gated linear-attention block: a recurrent, linear-complexity sequence mixer.
+GatedLinearAttentionBlock, a recurrent, linear-complexity sequence mixer.
 
-The block keeps one matrix-valued state ``S`` per head and rewrites it once per
-timestep with a gated outer product::
+The block keeps one matrix-valued state ``S`` per head and rewrites it once
+per timestep with a gated outer product::
 
     S_t   = alpha_t * S_{t-1} + beta_t * (k_t v_t^(1)T)
     out_t = q_t^T S_t + v_t^(2)
 
-``alpha_t`` (how much of the previous state survives) and ``beta_t`` (how
-strongly the current key/value pair is written) are *per-head scalars*, obtained
-by applying a ``Dense(num_heads)`` projection and a sigmoid to the raw block
-input -- they bypass the normalization, convolution and activation that ``q``,
-``k`` and ``v`` go through.
+Unlike quadratic self-attention, cost is one ``head_dim x head_dim`` outer
+product plus one vector-matrix product per timestep per head, growing
+linearly with sequence length. ``alpha_t`` and ``beta_t`` are per-head
+scalars from a ``Dense(num_heads)`` + sigmoid on the raw block input,
+bypassing the normalization, convolution and activation ``q``/``k``/``v`` go
+through. The state transition is a plain per-head scalar rescaling: no
+error-correction term, no projection built from ``k_t``.
 
-The read-out multiplies ``S_t``, the state *after* the current step's write, so
-the equivalent closed form is inclusive in ``j = t``::
-
-    out_t = sum_{j<=t} (prod_{l=j+1..t} alpha_l) * beta_j * (q_t . k_j) * v_j^(1)
-            + v_t^(2)
-
-The state transition is a plain per-head scalar rescaling. There is no
-error-correction term -- the state is never asked to subtract what it already
-predicts for ``k_t``, and the transition is not a projection built from
-``k_t``. This module implements exactly the two recurrence lines above and
-claims nothing beyond them.
-
-Arithmetic cost is one ``head_dim x head_dim`` outer product plus one
-vector-matrix product per timestep per head, i.e. it grows linearly with
-sequence length rather than quadratically.
-
-Two implementations compute this same function, and ``gated_linear_scan``
-dispatches between them on whether the sequence length is statically known:
-
-* **Chunked** (``_chunked_scan``, used whenever the length is a static
-  ``int`` -- the ordinary case). Splits the sequence into ``chunk_size``-wide
-  blocks. Only the block-to-block state hand-off stays sequential, so the
-  sequential depth drops to ``ceil(seq_len / chunk_size)``; everything within a
-  block is one batched matmul. Measured on an RTX 4070, float32,
-  ``num_heads=4, head_dim=8, chunk_size=64``: **15.2 ms vs 746 ms at
-  ``seq_len=128`` (49x), and 33.3 ms vs 2972 ms at ``seq_len=512`` (89x)**.
-* **Sequential** (``_sequential_scan``, used when the length is symbolic).
-  One ``ops.while_loop`` iteration per timestep. It is also the reference the
-  chunked path is tested against.
-
-The two agree to floating-point reassociation, never bitwise. Measured across
-``seq_len in {1, 7, 63, 64, 65, 128, 257} x num_heads in {1, 4} x head_dim in
-{8, 32}``: worst-case absolute difference ``4.4e-13`` at float64, and
-``1.6`` TF32 ulps of output scale at float32 (``4.7e-06`` relative with TF32
-disabled).
+``gated_linear_scan`` computes this recurrence two ways depending on whether
+the sequence length is statically known at trace time: a chunked, mostly
+parallel form for a static length (the ordinary case), and a step-by-step
+``ops.while_loop`` form for a symbolic length. The two agree to
+floating-point reassociation, never bitwise; see each method's own docstring
+for the dispatch rule and measured tolerances.
 """
 
 import keras
@@ -72,27 +45,24 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 
 def _inclusive_causal_mask(size: int, dtype: str) -> keras.KerasTensor:
-    """Return the causal **keep** mask as a float multiplier, diagonal INCLUDED.
+    """Return the causal keep mask as a float multiplier, diagonal included.
 
     ``mask[i, j] = 1`` iff ``j <= i``, else ``0``. The diagonal must be
     included: the ``j = t`` term of the closed-form sum is the current step's
-    own write, and the read-out sees it because it reads the state *after* that
+    own write, and the read-out sees it because it reads the state after that
     write. Dropping it would make the read-out exclusive and wrong.
 
-    This is a **polarity + dtype adapter** over the canonical
+    This is a polarity and dtype adapter over the canonical
     :meth:`~dl_techniques.utils.masking.MaskFactory.create_causal_mask`, not a
-    reimplementation -- the triangle logic lives there and only there. The
-    canonical helper returns a *boolean block* mask (``True`` where a position
-    must be suppressed, i.e. ``j > i``); the scan needs the complementary
-    *keep* mask as a float it can multiply by. Inverting at the call site is the
-    house convention for this family: the caller supplies the keep predicate
-    because polarity is per-site.
+    reimplementation — the triangle logic lives there and only there. The
+    canonical helper returns a boolean block mask (``True`` where a position
+    must be suppressed, i.e. ``j > i``); the scan needs the complementary keep
+    mask as a float it can multiply by.
 
-    Do NOT swap this for ``keras.ops.tril`` (nor ``ops.triu``, which shares the
-    same implementation and the same trap): ``ops.tril`` raises
-    ``TypeError: pred must not be a Python bool`` when traced into a graph on
-    this Keras/TF version, which broke every ``Model``-level path (``fit``,
-    ``predict``, ``jit_compile``, save/load) while eager tests stayed green.
+    ``keras.ops.tril``/``ops.triu`` raise ``TypeError: pred must not be a
+    Python bool`` when traced into a graph on this Keras/TF version, breaking
+    every ``Model``-level path (``fit``, ``predict``, ``jit_compile``,
+    save/load) while eager tests stayed green.
 
     :param size: Side length of the square mask.
     :type size: int
@@ -120,81 +90,75 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     ``ops.while_loop`` needs a compile-time iteration bound, a hard
     ``max_seq_len`` is required.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
-        ┌───────────────────────────────────────────────────────────────────────────┐
-        │          GatedLinearAttentionBlock -- gated outer-product state           │
-        │                                                                           │
-        │  Input [B, S, dim]                                                        │
-        │    │                                                                      │
-        │    ├───────────────┬───────────────┬───────────────┐                      │
-        │    ▼               ▼               ▼               ▼                      │
-        │  q_proj          k_proj          v_proj          alpha_proj / beta_proj   │
-        │  [B,S,qk_dim]    [B,S,qk_dim]    [B,S,2*qk_dim]  Dense(num_heads) on the  │
-        │    ▼               ▼               ▼             RAW block input, then    │
-        │  q_norm          k_norm          v_norm          sigmoid. No norm, no     │
-        │  PER-HEAD,       PER-HEAD,       WHOLE-TENSOR,   conv, no activation on   │
-        │  over head_dim   over head_dim   over 2*qk_dim   this path.               │
-        │    ▼               ▼               ▼               ▼                      │
-        │  q_conv          k_conv          v_conv          a_t, b_t  [B,S,H]        │
-        │  causal depthwise Conv1D (groups = channels),    one scalar per head      │
-        │  then `activation` (default 'silu')                                       │
-        │    ▼               ▼               ▼                                      │
-        │  [B,S,H,d]       [B,S,H,d]       [B,S,H,2d]                               │
-        │    │               │               │  ops.split(2, axis=-1),              │
-        │    │               │               │  WITHIN each head                    │
-        │    │               │               └───┬───────────────────┐              │
-        │    │               │                   ▼                   ▼              │
-        │    │               │                v1_t [.,d]          v2_t [.,d]        │
-        │    └───────┬───────┘                   │                   │              │
-        │            ▼                           ▼                   │              │
-        │    gated_linear_scan -- dispatches on shape staticness:      │             │
-        │      static seq_len -> _chunked_scan  (chunk_size-wide blocks)│            │
-        │      symbolic       -> _sequential_scan (one step per t)     │             │
-        │      S_t   = a_t * S_{t-1} + b_t * (k_t ⊗ v1_t)             │             │
-        │      out_t = q_t · S_t  +  v2_t  ◄──────────────────────────┘             │
-        │      out_t reads S_t, i.e. AFTER this step's write.                       │
-        │                            ▼                                              │
-        │                  reshape [B, S, qk_dim]                                   │
-        │                            ▼                                              │
-        │    ffn_type is None (default): p = output_proj(x)                         │
-        │                                y = sigmoid(output_gate_linear(p)) * p     │
-        │    ffn_type set:               y = output_ffn(x)                          │
-        │                            ▼                                              │
-        │                     Output [B, S, dim]                                    │
-        └───────────────────────────────────────────────────────────────────────────┘
+        Input [B, S, dim]
+          │
+          ├──────────┬──────────┬──────────────┐
+          ▼          ▼          ▼              ▼
+        q_proj     k_proj     v_proj      alpha_proj / beta_proj
+        (Dense)    (Dense)    (Dense)     Dense(num_heads)+sigmoid
+          │          │       [.,2*qk]     on the raw input (no
+          ▼          ▼          ▼         norm/conv/activation)
+        q_norm     k_norm     v_norm            │
+        (per head) (per head) (whole tensor)     ▼
+          ▼          ▼          ▼          a_t, b_t [B,S,H]
+        q_conv     k_conv     v_conv       (one scalar per head)
+        (causal depthwise, then `activation`)
+          ▼          ▼          ▼
+        [B,S,H,d]  [B,S,H,d]  [B,S,H,2d] -> split -> v1_t, v2_t
+          └────┬─────┘             │            │
+               ▼                   ▼            │
+             gated_linear_scan (see below)◄──────┘
+               │
+               ▼
+        reshape [B, S, qk_dim]
+               │
+               ├─ ffn_type=None: p=output_proj(x); y=sigmoid(gate(p))*p
+               └─ ffn_type set:  y=output_ffn(x)
+               ▼
+        Output [B, S, dim]
+
+    Block internals, ``gated_linear_scan``:
+
+    .. code-block:: text
+
+        S_t   = a_t * S_{t-1} + b_t * (k_t ⊗ v1_t)
+        out_t = q_t . S_t + v2_t     (reads S_t, after this step's write)
+
+        static seq_len -> _chunked_scan (chunk_size-wide blocks)
+        symbolic        -> _sequential_scan (one step per t)
 
     .. note::
-        **The value projection is split in two, and the second half is not an
-        identity residual.** ``v_proj`` emits ``v_dim = 2 * num_heads * head_dim``
-        channels, twice as many as ``q_proj``/``k_proj``. After the reshape to
+        The value projection is split in two, and the second half is not an
+        identity residual. ``v_proj`` emits ``v_dim = 2 * num_heads * head_dim``
+        channels, twice ``q_proj``/``k_proj``. After the reshape to
         ``(batch, seq, num_heads, 2 * head_dim)``, ``ops.split(v_t, 2, axis=-1)``
         divides each head's channels in half: the first ``head_dim`` of that
         head's channels (``v_t^(1)``) is what the outer-product write puts into
         the state, and the second ``head_dim`` (``v_t^(2)``) is added straight
-        onto the read-out. The split is therefore *interleaved per head* in the
-        flat ``v_dim`` axis -- head ``h``'s write half is flat channel range
+        onto the read-out. The split is interleaved per head in the flat
+        ``v_dim`` axis — head ``h``'s write half is flat channel range
         ``[2*h*head_dim, 2*h*head_dim + head_dim)``, not the leading
         ``num_heads * head_dim`` block (verified by construction and by an
         executed probe).
 
-        The caveat that matters: ``v_t^(2)`` is **not** a plain identity or
-        skip connection over the block input. It is a slice of the *same*
-        processed tensor as ``v_t^(1)`` -- it has already been through
-        ``v_proj``, ``v_norm``, the causal ``v_conv`` and the activation (SiLU by
-        default). It carries no un-transformed copy of the input, and it is
-        outside the recurrence: it depends only on timestep ``t``, never on the
-        state. Read it as "half of V bypasses the state" rather than "the block
-        has a residual connection".
+        ``v_t^(2)`` is not a plain identity or skip connection over the block
+        input. It is a slice of the same processed tensor as ``v_t^(1)`` — it
+        has already been through ``v_proj``, ``v_norm``, the causal ``v_conv``
+        and the activation (SiLU by default). It carries no un-transformed
+        copy of the input, and it is outside the recurrence: it depends only
+        on timestep ``t``, never on the state. Read it as "half of V bypasses
+        the state" rather than "the block has a residual connection".
 
     :param dim: Model dimension size. Must be positive.
     :type dim: int
     :param num_heads: Number of attention heads. Must be positive.
     :type num_heads: int
     :param max_seq_len: Declared upper bound on the sequence length. Must be
-        positive. **Advisory only** -- see the note below. It shapes no weight and
+        positive. Advisory only — see the note below. It shapes no weight and
         bounds no loop; exceeding it is computed correctly, and logs a warning at
         build time when the length is statically known.
     :type max_seq_len: int
@@ -210,12 +174,12 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :param normalization_type: Type of normalization for Q, K, V. Defaults to
         'zero_centered_rms_norm'.
 
-        **Q and K are normalized per head**: the tensor is reshaped to
+        Q and K are normalized per head: the tensor is reshaped to
         ``(batch, seq, num_heads, head_dim)``, normalized over ``head_dim``, and
         reshaped back before the causal convolution. The scale weight is therefore
-        ``(head_dim,)`` and is shared across heads -- the standard QK-Norm
-        convention. **V is deliberately normalized whole-tensor** over the full
-        ``v_dim`` axis; that is an intentional asymmetry, not an oversight.
+        ``(head_dim,)`` and is shared across heads — the standard QK-Norm
+        convention. V is normalized whole-tensor over the full ``v_dim`` axis,
+        an intentional asymmetry.
 
         This assumes the chosen normalization reduces over the last axis only.
         Measured for the 18 factory types on a rank-4 input: 14 reduce over the
@@ -242,16 +206,12 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         share.
 
         .. note::
-            **An unrecognized key here RAISES**, naming the key. This dict is
-            passed to ``create_ffn_layer`` verbatim -- the pre-filter below
-            covers only this layer's OWN generic defaults -- and that factory
-            is strict as of ``plan-2026-07-30T140922-8af1028f``/D-023. So
-            ``ffn_args={'hiden_dim': 512}`` fails at construction instead of
-            silently building the FFN at its default width, which is what it
-            used to do. Pinned by
-            ``test_unknown_ffn_args_key_RAISES_naming_the_key``. This now
-            matches the sibling factory: ``q_norm_args`` and friends have
-            always raised on an unknown key.
+            An unrecognized key here raises, naming the key. This dict
+            reaches ``create_ffn_layer`` verbatim — the pre-filter below
+            covers only this layer's own generic defaults — so
+            ``ffn_args={'hiden_dim': 512}`` fails at construction rather than
+            silently building the FFN at its default width. Pinned by
+            ``test_unknown_ffn_args_key_RAISES_naming_the_key``.
     :type ffn_args: Optional[Dict[str, Any]]
     :param intermediate_size: Intermediate size for standard FFNs. Defaults to
         dim * 4 if not provided.
@@ -282,28 +242,15 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     :raises ValueError: At construction, if any parameter is outside its
         admissible range (including ``intermediate_size <= 0`` when given).
     .. note::
-        **``max_seq_len`` is advisory. Neither scan branch truncates.**
+        ``max_seq_len`` is advisory. Neither scan branch truncates:
         ``_sequential_scan`` runs under
         ``ops.while_loop(..., maximum_iterations=seq_len)`` and
         ``_chunked_scan``'s loop is bounded by the chunk count, so a sequence
         longer than ``max_seq_len`` is computed exactly. Exceeding it costs
-        compute, not correctness; ``build()`` logs a warning when the length is
-        statically known, because the declared value is then probably wrong.
-
-        This is the third revision of this note and the history is worth keeping,
-        because the first two were both wrong in the same direction. Originally
-        the loop carried ``maximum_iterations=self.max_seq_len``, so an over-long
-        sequence really did return zeros past the cap, and ``build()``/``call()``
-        raised on a statically known over-long length. D-010 then observed that
-        the CHUNKED branch has no such cap and moved the raise into
-        ``_sequential_scan`` -- which was still wrong, because with
-        ``keras.Input(shape=(None, dim))`` TF relaxes the trace signature after a
-        second distinct length and dispatches to the sequential branch with a
-        SYMBOLIC length, where no static check can fire. Measured at that
-        revision: ``max_seq_len=8`` returned 52 of 60 timesteps all-zero, with no
-        raise and no warning. D-018 removed the cap itself, which is the only fix
-        that closes the symbolic case -- ``keras.ops`` offers no portable way to
-        raise from inside a traced graph, so no guard-based approach ever could.
+        compute, not correctness; ``build()`` logs a warning when the length
+        is statically known, because the declared value is then probably
+        wrong. ``keras.ops`` offers no portable way to raise from inside a
+        traced graph, so a symbolic-length overrun cannot be guarded either.
     """
 
     def __init__(
@@ -494,19 +441,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
     def _warn_if_seq_len_exceeds_declared(self, seq_len: int) -> None:
         """Warn -- never raise -- when a static length exceeds ``max_seq_len``.
 
-        # DECISION plan-2026-07-30T081929-1645aa52/D-018
-        ``max_seq_len`` shapes no weight in this layer and, since D-018, bounds
-        no loop: both scan branches are bounded by the ACTUAL sequence length, so
-        a longer input is computed correctly rather than truncated. The value is
-        therefore advisory -- a declaration of intent that is useful for catching
-        a config mistake, and nothing more.
-
-        It used to RAISE, correctly, because the sequential branch really did
-        truncate to `maximum_iterations=max_seq_len` and return zeros past the
-        cap. Do not restore the raise: it would reject inputs this layer now
-        handles exactly (measured against a NumPy oracle), and it never protected
-        the case that actually mattered -- a symbolic sequence axis, where no
-        portable `keras.ops` raise is possible at all (prior plan's D-002).
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018: never restore a raise
+        # here -- both scan branches are bounded by the actual sequence length, so max_seq_len is advisory only. See decisions.md.
 
         :param seq_len: Statically known sequence length.
         :type seq_len: int
@@ -658,27 +594,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         if seq_len is not None:
             self._warn_if_seq_len_exceeds_declared(int(seq_len))
         else:
-            # DECISION plan-2026-07-29T173132-adbe605f/D-002
-            # The overflow guard is STATIC-ONLY, deliberately. Do NOT "fix" this
-            # branch by raising here (it would break every legitimate
-            # `keras.Input(shape=(None, dim))` model) and do NOT replace it with
-            # a graph-time assert: `keras.ops` has no portable way to raise from
-            # inside a traced graph, and a backend-specific `tf.debugging.assert`
-            # would make this layer non-portable for a guarantee we then could
-            # not state uniformly.
-            #
-            # SUPERSEDED IN PART by D-018 of plan-2026-07-30T081929-1645aa52:
-            # the thing this branch could not guard -- silent truncation under a
-            # symbolic axis -- no longer exists. `maximum_iterations` is now the
-            # actual `seq_len`, so nothing truncates and there is nothing here to
-            # raise about. The reasoning above still stands as the reason a
-            # graph-time raise was never viable.
-            #
-            # DECISION plan-2026-07-30T081929-1645aa52/D-018
-            # There is no raise anywhere any more, on either branch. D-010 moved
-            # it into `_sequential_scan`; D-018 then removed the truncation that
-            # justified it. `max_seq_len` is advisory -- see
-            # `_warn_if_seq_len_exceeds_declared`.
+            # DECISION plan-2026-07-29T173132-adbe605f/D-002: never raise here
+            # for a symbolic axis -- keras.ops has no portable graph-time raise, and it would break every legitimate keras.Input(shape=(None, dim)) model. See decisions.md.
+            # DECISION plan-2026-07-30T081929-1645aa52/D-018: no raise on
+            # either branch any more -- max_seq_len is advisory. See _warn_if_seq_len_exceeds_declared and decisions.md.
             logger.debug(
                 "GatedLinearAttentionBlock '%s' built with an unknown "
                 "(symbolic/dynamic) sequence axis, so the declared "
@@ -706,15 +625,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         q_shape = (batch_size, seq_len, self.qk_dim)
         k_shape = (batch_size, seq_len, self.qk_dim)
         v_shape = (batch_size, seq_len, self.v_dim)
-        # DECISION plan-2026-07-29T173132-adbe605f/D-003
-        # q_norm/k_norm are built on the PER-HEAD shape (batch, seq, heads, head_dim),
-        # not on the flat (batch, seq, qk_dim). Their scale weight is therefore
-        # (head_dim,), shared across heads -- the standard QK-Norm convention.
-        # Do NOT "simplify" this back to `q_shape`: a last-axis RMS statistic taken
-        # over the concatenated qk_dim mixes every head into one denominator, which
-        # is the defect this step exists to close (measured: perturbing head 0's
-        # input moved head 1's output by 1.03 at rank 3, by exactly 0.0 at rank 4).
-        # v_norm stays WHOLE-TENSOR on purpose -- see the class docstring.
+        # DECISION plan-2026-07-29T173132-adbe605f/D-003: build q_norm/k_norm on
+        # the per-head shape, never the flat q_shape -- a flat last-axis statistic mixed heads (measured: head 0 perturbation moved head 1's output by 1.03). See decisions.md.
         qk_head_shape = (batch_size, seq_len, self.num_heads, self.head_dim)
         self.q_norm.build(qk_head_shape)
         self.k_norm.build(qk_head_shape)
@@ -755,14 +667,20 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         * :meth:`_chunked_scan` -- blockwise, ``ceil(seq_len / chunk_size)``
           sequential steps. Chosen whenever the sequence length is a static
-          Python ``int``, which is the ordinary eager/compiled case.
+          Python ``int``, which is the ordinary eager/compiled case. Measured
+          on an RTX 4070, float32, ``num_heads=4, head_dim=8, chunk_size=64``:
+          15.2 ms vs 746 ms at ``seq_len=128`` (49x) against the sequential
+          form, and 33.3 ms vs 2972 ms at ``seq_len=512`` (89x).
         * :meth:`_sequential_scan` -- one step per timestep. Chosen when the
           sequence length is symbolic, because the chunked form needs a concrete
           length to lay out its chunk grid. Also the reference implementation the
           chunked path is tested against.
 
-        The two agree to floating-point reassociation only, never bitwise; see
-        the class docstring's note on the equivalence tolerances.
+        The two agree to floating-point reassociation only, never bitwise.
+        Measured across ``seq_len in {1, 7, 63, 64, 65, 128, 257} x num_heads
+        in {1, 4} x head_dim in {8, 32}``: worst-case absolute difference
+        ``4.4e-13`` at float64, and 1.6 TF32 ulps of output scale at float32
+        (``4.7e-06`` relative with TF32 disabled).
 
         ``alpha`` is expected in ``(0, 1]`` -- a persistence gate, which is what
         ``call()`` always supplies (a sigmoid). The two branches agree on that
@@ -842,13 +760,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-07-30T081929-1645aa52/D-018
-        # No `max_seq_len` guard here any more, and none anywhere else either.
-        # D-010 moved the raise into this branch on the grounds that this branch
-        # truncates; D-018 removed the truncation itself, so there is nothing
-        # left to guard and the old message ("every timestep from index N onwards
-        # would be silently zero") became false. See the `maximum_iterations`
-        # note below.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018: no max_seq_len guard
+        # here or anywhere else -- see the maximum_iterations note below. See decisions.md.
         batch_size, seq_len, _, _ = ops.shape(q)
 
         i = ops.convert_to_tensor(0, dtype="int32")
@@ -887,28 +800,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
             cond=condition,
             body=body,
             loop_vars=(i, initial_state, outputs_transposed),
-            # DECISION plan-2026-07-30T081929-1645aa52/D-018
-            # Bound by the ACTUAL sequence length, not by `max_seq_len`.
-            #
-            # `condition` is already `i < seq_len` and `outputs_transposed` is
-            # already allocated at `seq_len`, so `maximum_iterations` was never
-            # load-bearing for correctness -- it was a self-imposed cap, and
-            # `max_seq_len` shapes no weight anywhere in this layer. When a
-            # sequence exceeded it, the loop simply stopped early and the
-            # remaining rows of the zero-initialized buffer were returned as
-            # real output: a SILENT wrong answer.
-            #
-            # Measured at HEAD before this change: `max_seq_len=8` behind
-            # `keras.Input(shape=(None, 32))` returned 52 of 60 timesteps
-            # all-zero, with no raise and no warning -- and a length that worked
-            # on the first call (L=40, chunked) started truncating once TF relaxed
-            # the trace signature and dispatched to this branch. That is the
-            # variable-length serving path, i.e. exactly the Qwen3-Next scenario.
-            #
-            # With the bound tied to `seq_len` the truncation cannot occur on
-            # either branch, which is strictly better than guarding it: the
-            # symbolic case could never be guarded (no portable way to raise
-            # inside a traced graph -- prior plan's D-002).
+            # DECISION plan-2026-07-30T081929-1645aa52/D-018: bound by the
+            # actual seq_len, never max_seq_len -- the old cap silently returned zeros for 52 of 60 timesteps once a variable-length input exceeded it. See decisions.md.
             maximum_iterations=seq_len,
         )
         return ops.transpose(final_outputs, [1, 0, 2, 3])
@@ -949,21 +842,18 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         Sequences shorter than a whole number of chunks are padded up to a chunk
         boundary and the output is sliced back.
 
-        **What makes the padding safe is the causal mask plus that final slice --
-        NOT the particular values padded in.** The pad occupies the TAIL of the
-        last chunk, so it is causally downstream of every real timestep: no real
-        row can read it, and the state it would contribute to is never consumed.
-        Measured: padding ``alpha`` with 1.0, 0.5 or 0.0 gives BIT-IDENTICAL
-        output, and padding ``q``/``k``/``v``/``beta`` with 1e30 does too. The
-        ``alpha = 1`` constant below is therefore a readability choice (it keeps
-        the cumulative log-gate flat, so an intermediate dump is easier to read),
-        not a correctness requirement -- do not describe it as "gate-neutral for
-        correctness", and do not rely on that framing when editing.
+        The padding is safe because of the causal mask plus that final slice,
+        not because of the particular values padded in. The pad occupies the
+        tail of the last chunk, causally downstream of every real timestep,
+        so no real row can read it. Measured: padding ``alpha`` with 1.0, 0.5
+        or 0.0 gives bit-identical output, and padding ``q``/``k``/``v``/``beta``
+        with 1e30 does too — the ``alpha = 1`` constant below is a readability
+        choice, not a correctness requirement.
 
-        The one real constraint is that pads must be **FINITE**. ``NaN``/``inf``
-        DOES reach real rows, because the mask is applied multiplicatively and
-        ``NaN * 0 = NaN`` (equally ``inf * 0``). That is why ``alpha`` is floored
-        before ``log`` and why the decay exponent is masked BEFORE the ``exp``
+        The one real constraint is that pads must be finite. ``NaN``/``inf``
+        reaches real rows, because the mask is applied multiplicatively and
+        ``NaN * 0 = NaN`` (equally ``inf * 0``) — why ``alpha`` is floored
+        before ``log`` and the decay exponent is masked before the ``exp``
         (D-009) rather than clamped after it.
 
         :param q: Query tensor of shape (batch, seq, heads, head_dim).
@@ -985,31 +875,9 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
         # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
         compute_dtype = getattr(q.dtype, "name", None) or str(q.dtype)
-        # DECISION plan-2026-07-29T173132-adbe605f/D-012
-        # Every gate factor below is exp() of a DIFFERENCE of cumulative
-        # log-gates. FOR alpha <= 1 -- the regime `call()` produces, since the
-        # gate is a sigmoid -- each argument is <= 0 and every factor lies in
-        # (0, 1], which is what makes the reciprocal-free form below safe.
-        #
-        # NOTE (D-009, this plan): the public `gated_linear_scan` also accepts
-        # alpha > 1, where these arguments turn POSITIVE and the factors exceed 1.
-        # That is handled correctly and the two branches agree there, but the
-        # bounded-by-construction guarantee stated in this paragraph does NOT
-        # extend to it: the recurrence is genuinely growing, so float32 overflows
-        # to inf for large alpha*seq_len. See `gated_linear_scan`'s docstring.
-        # Do NOT "simplify" this into the textbook two-vector form
-        #     q~ = q * exp(D),   k~ = k * exp(-D) * beta
-        # which is algebraically identical but materializes the unbounded
-        # reciprocal exp(-D_j). Measured: that form OVERFLOWS float32 at
-        # chunk_size=64 for alpha=0.1, and random-init sigmoid alpha already
-        # reaches 0.0111, so it breaks at initialization -- not just in a
-        # contrived corner. The pairwise-difference form below never forms a
-        # reciprocal; underflow to 0 is the numerically correct answer there
-        # (a gate that has decayed by 1e-60 contributes nothing).
-        #
-        # float32 is a FLOOR for the gate arithmetic, not a target: fp16/bf16
-        # are promoted (a float16 log/exp cannot carry a cumulative sum
-        # spanning hundreds of nats), but float64 must NOT be demoted.
+        # DECISION plan-2026-07-29T173132-adbe605f/D-012: never simplify to
+        # the textbook two-vector form q~=q*exp(D), k~=k*exp(-D)*beta -- it overflows float32 at chunk_size=64, alpha=0.1 (random init already reaches 0.0111). See decisions.md.
+        # float32 is a floor for gate arithmetic, not a target: fp16/bf16 promote here, float64 stays float64.
         gate_dtype = "float64" if compute_dtype == "float64" else "float32"
 
         batch_size = ops.shape(q)[0]
@@ -1057,26 +925,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         beta_g = ops.transpose(beta_g, [0, 3, 1, 2])
 
         causal = _inclusive_causal_mask(chunk, gate_dtype)
-        # DECISION plan-2026-07-30T081929-1645aa52/D-009
-        # Select BEFORE the exp, do not clamp after it.
-        #
-        # The exponent is only meaningful where `causal` keeps the entry; above
-        # the diagonal it is a positive number whose exp() would be +inf for a
-        # long chunk, and `inf * 0` is NaN, not 0. The old form suppressed that
-        # by clamping the exponent with `ops.minimum(., 0.0)`. That works only
-        # because `alpha <= 1` makes `cum` non-increasing, so the KEPT entries
-        # are already <= 0 and the clamp is a no-op on them.
-        #
-        # For `alpha > 1` the sign flips: `cum` increases, the kept entries turn
-        # POSITIVE, and the clamp silently saturates them to exp(0)=1 -- inside
-        # the causal region, where the value matters. That made this branch
-        # disagree with `_sequential_scan`, which has no such clamp: measured
-        # 2.59 at alpha=1.05 and 3.59e+04 at alpha=2.0, with the sequential
-        # branch matching a NumPy oracle exactly.
-        #
-        # Masking the exponent instead of the result is exact for alpha <= 1
-        # (bit-identical -- verified against a float64 23-cell reference grid)
-        # and correct for alpha > 1, and it removes the inf*0 NaN path entirely.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-009: select before the
+        # exp, never clamp after it -- clamping silently saturated alpha>1 entries to exp(0)=1, disagreeing with _sequential_scan by up to 3.59e+04. See decisions.md.
         exponent = ops.where(
             causal > 0,
             ops.expand_dims(cum, -1) - ops.expand_dims(cum, -2),
@@ -1090,11 +940,7 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         )
         intra = ops.matmul(ops.cast(weighted, compute_dtype), v_c)
 
-        # No mask multiplies this term, so there is no inf*0 path to suppress
-        # and the clamp had no protective role here -- see D-009 above. For
-        # `alpha <= 1` the argument is already <= 0 (cum is non-increasing, so
-        # cum_last <= cum_t), making removal bit-identical; for `alpha > 1` the
-        # clamp was silently saturating a genuinely growing carry weight.
+        # No mask multiplies this term, so there is no inf*0 path here (see D-009 above).
         write_weight = ops.exp(cum_last - cum) * beta_g
         k_weighted = k_c * ops.expand_dims(
             ops.cast(write_weight, compute_dtype), -1
@@ -1160,24 +1006,22 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
 
         :param inputs: Input tensor of shape (batch, seq_len, dim).
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional **rank-2** ``(batch, seq_len)`` padding
+        :param attention_mask: Optional rank-2 ``(batch, seq_len)`` padding
             mask, ``1 = keep`` / ``0 = PAD`` (the house keep-predicate
-            convention). ``None`` (the default) is the historical behaviour and
-            is bit-identical to it.
+            convention). ``None`` (the default) is bit-identical to the
+            unmasked path.
 
-            **Scope: EDGE padding only -- PADs contiguous at the start
-            (left) and/or the end (right) of a row.** For those, a masked row's
-            real-position outputs equal the same real tokens run alone, to
-            floating-point reassociation (the padded row is chunked
-            differently). **Interior padding is NOT supported**: a PAD between
+            Scope: edge padding only — PADs contiguous at the start and/or
+            end of a row. For those, a masked row's real-position outputs
+            equal the same real tokens run alone, to floating-point
+            reassociation. Interior padding is not supported: a PAD between
             two real tokens still consumes ``conv_kernel_size`` worth of the
             causal convolution's receptive field, so the second real token's
-            convolution sees a zero where the shorter sequence would have seen
-            its predecessor, and no gating choice can recover that. This is not
-            detected and does not raise -- a data-dependent check cannot raise
-            from inside a traced graph on any portable ``keras.ops`` path (the
-            same constraint documented for ``max_seq_len`` above). Do not pass
-            an interior-padded mask and expect the equivalence.
+            convolution sees a zero where the shorter sequence would have
+            seen its predecessor. This is not detected and does not raise —
+            a data-dependent check cannot raise from inside a traced graph on
+            any portable ``keras.ops`` path (the same constraint documented
+            for ``max_seq_len`` above).
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Boolean indicating training mode.
         :type training: Optional[bool]
@@ -1186,61 +1030,12 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :rtype: keras.KerasTensor
         :raises ValueError: If ``attention_mask`` is given and is not rank 2.
         """
-        # DECISION plan-2026-07-30T081929-1645aa52/D-018
-        # No length check here, and none in `_sequential_scan` either: since
-        # D-018 neither branch truncates, so there is nothing to reject.
-        # `max_seq_len` is advisory only.
+        # DECISION plan-2026-07-30T081929-1645aa52/D-018: no length check here
+        # or in _sequential_scan -- neither branch truncates, max_seq_len is advisory only. See decisions.md.
         batch_size, seq_len, _ = ops.shape(inputs)
 
-        # DECISION plan-2026-07-31T042809-ddc92265/D-004
-        # The padding mask is applied at THREE places, and the placement is the
-        # whole content of this feature -- there are no attention logits here to
-        # add a -inf bias to.
-        #
-        # (1) PRE-CONVOLUTION, on q/k/v. Do NOT move this to after the scan.
-        #     `q_conv`/`k_conv`/`v_conv` are CAUSAL depthwise convolutions with
-        #     a `conv_kernel_size`-wide receptive field, so a PAD step's content
-        #     leaks forward into the next `conv_kernel_size - 1` REAL timesteps.
-        #     Masking after the scan would zero the PAD rows of the output while
-        #     leaving that leak inside every real row -- a mask that looks
-        #     applied and is not. It has to be zeroed BEFORE the conv, and
-        #     zeroing (rather than dropping) is what reproduces the shorter
-        #     sequence exactly: `padding='causal'` left-pads with ZEROS, so a
-        #     zeroed left-PAD is indistinguishable from the conv's own implicit
-        #     pad (measured bit-identical at float64, with a nonzero-pad control
-        #     that moves by 1.27).
-        # (2) The conv carries a BIAS, and `silu(bias) != 0`, so the PAD rows
-        #     come back non-zero after `q_conv`/`activation_layer`. They are
-        #     re-zeroed below, after the activation, or the scan would write
-        #     `beta * (k_pad (x) v_pad)` into the state.
-        # (3) `alpha = 1` at PAD steps. MEASURED, and the measurement says
-        #     something narrower than the obvious claim, so state it precisely.
-        #
-        #     It is NOT what makes the padded/unpadded equivalence hold. The
-        #     PAD alphas cancel on their own: the weight linking real j to real
-        #     t is `exp(sum_{l=j+1..t} log alpha_l)`, no PAD lies between two
-        #     real steps of an EDGE-padded row, and `_chunked_scan`'s `cum` is
-        #     a PER-CHUNK cumsum consumed only inside differences, so the
-        #     shared PAD offset cancels numerically too. Measured at float64,
-        #     max|diff| of a masked padded row's real positions against the
-        #     same tokens run alone (tolerances 2.2e-13 / 5.4e-13):
-        #         alpha at PAD      pad=5/len=18   pad=35/len=48
-        #         = 1               2.776e-17      2.776e-17
-        #         left untouched    2.776e-17      2.776e-17
-        #         = 0               2.082e-17      2.776e-17
-        #     -- indistinguishable. Do NOT restate the prior plan's falsified
-        #     "gate-neutral, therefore required" framing on the strength of
-        #     that table.
-        #
-        #     What it IS load-bearing for is EXACT isolation. Left untouched,
-        #     `alpha` at a PAD step is `sigmoid(alpha_proj(PAD content))`, so
-        #     PAD content reaches the real-position outputs through the gate
-        #     arithmetic: perturbing only the PAD inputs then moves them by
-        #     6.722e-17 (~1 ulp) instead of exactly 0.0. Pinned by
-        #     `test_pad_content_cannot_influence_real_outputs`, which fails if
-        #     this line is deleted. That, plus being the correct statement of
-        #     intent ("a PAD step must not age the state"), is why it stays.
-        # See decisions.md D-004.
+        # DECISION plan-2026-07-31T042809-ddc92265/D-004: the padding mask is
+        # applied at 3 places (pre-convolution zeroing, post-activation re-zeroing since the conv bias makes PAD rows non-zero, and forcing alpha=1 at PAD steps for exact gradient isolation, pinned by test_pad_content_cannot_influence_real_outputs). See decisions.md.
         keep = None
         if attention_mask is not None:
             keep = ops.cast(attention_mask, self.compute_dtype)
@@ -1260,14 +1055,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         k = self.k_proj(inputs, training=training)
         v = self.v_proj(inputs, training=training)
 
-        # DECISION plan-2026-07-29T173132-adbe605f/D-003
-        # Per-head Q/K normalization. Only the SCOPE of the statistic changes; the
-        # pipeline order `proj -> norm -> conv -> activation` is deliberately kept.
-        # Moving the norm after the head reshape in the pipeline would also move it
-        # after the causal conv and the SiLU -- a second, unrequested change to what
-        # the norm sees. So we reshape to per-head, normalize, and reshape straight
-        # back so the conv's input layout is unchanged.
-        # v_norm is deliberately NOT per-head (whole-tensor, over v_dim).
+        # DECISION plan-2026-07-29T173132-adbe605f/D-003: reshape to per-head,
+        # normalize, reshape back, keeping the proj->norm->conv->activation order unchanged. v_norm stays whole-tensor. See decisions.md.
         q_heads_pre = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
         k_heads_pre = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
         q_norm = ops.reshape(
@@ -1301,33 +1090,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         k_heads = ops.reshape(k_conv, (batch_size, seq_len, self.num_heads, self.head_dim))
         v_heads = ops.reshape(v_conv, (batch_size, seq_len, self.num_heads, 2 * self.head_dim))
 
-        # DECISION plan-2026-07-30T140922-8af1028f/D-033
-        # THIS EXPRESSION CLOSES THE `alpha > 1` TRAINING-QUALITY QUESTION.
-        #
-        # "What is the training-quality impact of the exponent-masking fix that
-        # corrected `alpha > 1` behaviour in `_chunked_scan`?" is not merely
-        # unevidenced -- it is UNANSWERABLE BY CONSTRUCTION, and no amount of
-        # checkpoint scanning or training can change the answer.
-        #
-        # `ops.sigmoid` has range (0, 1), strictly less than 1. This line is the
-        # ONLY place `alpha` is produced on the layer's forward path: `call()`
-        # computes it here and passes it straight to `gated_linear_scan` below;
-        # the only other assignment to the name `alpha` in this module is the
-        # `ops.pad` of that same tensor inside `_chunked_scan`, which cannot make
-        # a value exceed 1. No constructor argument, `get_config` key, or public
-        # attribute of this layer feeds `alpha`. So the `alpha > 1` arithmetic is
-        # UNREACHABLE from any real model, and a training run would exercise
-        # exactly the `alpha <= 1` path the fix did not change.
-        #
-        # The fix was still correct and worth making, for a path that is NOT
-        # closed: `gated_linear_scan` is PUBLIC and takes `alpha` as an argument,
-        # so an external caller can hand it `alpha > 1` (only test code does so
-        # today -- zero `src/` callers besides the line below). The closure above
-        # applies to the LAYER path only. See `gated_linear_scan`'s docstring for
-        # what `alpha > 1` then means numerically (a growing recurrence).
-        #
-        # Do NOT reopen this as "needs a checkpoint scan" or "needs an A/B
-        # training run": neither instrument can observe an unreachable branch.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-033: this sigmoid is the
+        # only place this layer produces alpha, so alpha>1 is unreachable on the layer path -- the exponent-masking fix in _chunked_scan matters only for the public gated_linear_scan API, not for training quality here. See decisions.md.
         alpha = ops.sigmoid(self.alpha_proj(inputs, training=training))
         beta = ops.sigmoid(self.beta_proj(inputs, training=training))
 
