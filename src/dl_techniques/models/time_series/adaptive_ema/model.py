@@ -1,66 +1,24 @@
 """
-An EMA-slope regime filter expressed as a trainable model, with a learnable
-threshold band and an optional quantile head over the slope.
+EMA-slope regime filter as a trainable Keras model, with a learnable threshold
+band and an optional quantile head over the slope.
 
-The underlying object is a classical trading rule. An exponential moving average
-smooths a price series with an infinite-impulse-response low pass,
-`EMA_t = a * x_t + (1 - a) * EMA_{t-1}` with `a = 2 / (period + 1)`, and its
-`L`-bar finite difference `slope_t = EMA_t - EMA_{t-L}` estimates the local drift of
-the smoothed level. The rule then partitions the slope into three regimes against a
-band: strongly rising, strongly falling, and the quiet interval between. The
-empirical claim behind the rule is that the middle regime — not the directional ones
-— is where the risk-adjusted edge sits, which is why `signal_between` is a
-first-class output and not the leftover case.
+An exponential moving average smooths a price series,
+`EMA_t = a * x_t + (1 - a) * EMA_{t-1}`, and its `L`-bar difference
+`slope_t = EMA_t - EMA_{t-L}` estimates local drift. The model partitions that
+slope into three regimes against a band (above, below, between), parameterized
+as `upper = m + softplus(r)`, `lower = m - softplus(r)` so `lower <= upper`
+holds for any value the optimizer reaches, with no clipping or projection
+needed. Only the band is learnable; the EMA smoothing coefficient is fixed by
+`ema_period`.
 
-The word "adaptive" here refers to the DECISION BAND, not the smoothing coefficient.
-`a` is fixed by `ema_period` and is never trained; what gradient descent can move is
-where the two thresholds sit. Choosing that band by hand is the weakest part of the
-classical rule, since it is expressed in raw price units and does not transfer across
-instruments or volatility regimes. Parameterizing the band by a midpoint and a
-half-width lets it be fitted, and the specific parameterization matters:
-
-`upper = m + softplus(r)`, `lower = m - softplus(r)`
-
-Because `softplus` is strictly positive, `lower <= upper` cannot be violated by any
-value the optimizer reaches, so the constraint needs no clipping, no projection and
-no penalty. The map is injective in `(m, r)`, so the two raw scalars are identifiable
-rather than trading off against each other, and `r` is initialized by inverting
-`softplus` at the requested half-width so the model starts exactly at the configured
-band. The two threshold weights are stored in float32 regardless of the compute
-policy and cast to the slope's dtype at use — they are two scalars whose absolute
-precision sets every decision boundary, and there is nothing to gain from holding
-them in half precision.
-
-A hard comparison has zero gradient everywhere, so a trainable band needs a
-relaxation. Under `training=True` the three signals become sigmoid memberships with
-temperature `slope_softness`, small values approaching the step and large values
-flattening it. Under `training=False` the exact comparisons return, and the three
-outputs form a genuine partition (`above + below + between == 1` pointwise). This is
-a deliberate train/serve asymmetry: the model is optimized through a smooth surrogate
-and served as the crisp rule it actually is. The soft branch does not preserve the
-partition — `signal_between` there is a product of two sigmoids and the three values
-do not sum to one — so anything downstream that relies on normalization must use the
-inference branch.
-
-The slope shift prepends `L` zeros rather than rolling the sequence. A roll would
-wrap the tail of the series into its head and leak future values into the earliest
-slopes; the zeros instead make the first `L` slopes deliberately meaningless and
-leave that visible to the caller.
-
-The optional quantile path answers a different question from the signals: not "which
-regime is this" but "what is the distribution of the slope". A raw slope is one
-scalar per step and gives a quantile head nothing to condition on, so a causal Conv1D
-with GELU featurizes a short window of slope history first — causal padding, so the
-head never sees ahead. When that head is attached, multi-feature inputs are REJECTED
-rather than accepted: the Conv1D would otherwise mix independent channels into one
-representation silently, and a loud error is preferable to a quietly wrong model. The
-constructor also warns when `learnable_thresholds=True` is combined with no quantile
-head, since that configuration leaves a model with exactly two trainable scalars and
-usually indicates a misconfigured experiment rather than an intent.
-
-With both options off the model has zero trainable parameters and is a pure rule
-evaluated on the graph — a legitimate configuration, useful as the baseline the
-learned variants are measured against.
+Under `training=True` the three signals are sigmoid memberships, a smooth
+surrogate for the hard rule; under `training=False` they are exact 0/1 values
+that partition pointwise (`above + below + between == 1`). With
+`learnable_thresholds=False` and no quantile head, the model has zero
+trainable parameters and is a pure rule evaluated on the graph. The optional
+quantile head runs a causal Conv1D over the slope before
+`QuantileSequenceHead`, and refuses multi-feature inputs when attached, since
+the Conv1D would otherwise mix independent channels into one representation.
 
 References:
     - LeBeau, 1992. Computer Analysis of the Futures Markets. McGraw-Hill.
@@ -107,8 +65,8 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
     ``keras.Model`` for adaptive EMA slope filtering with optional learnable
     thresholds and an optional probabilistic slope-quantile head.
 
-    Architecture overview
-    ---------------------
+    Architecture:
+
     .. code-block:: text
 
         Input: price = (batch, time)  or  (batch, time, features)
@@ -131,33 +89,27 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             ▼                          QuantileSequenceHead → (B,T,K)
        signal_{above,below,between}
 
-    Trainable surface
-    -----------------
-    * ``learnable_thresholds=False`` + ``quantile_head_config=None`` ⇒ **zero**
-      trainable parameters. The model is a pure rule.
-    * ``learnable_thresholds=True`` ⇒ **2** trainable scalars (``midpoint_var``,
-      ``log_half_range_var``).
-    * ``quantile_head_config`` set ⇒ additional parameters from the Conv1D
-      featurizer + the ``QuantileSequenceHead`` projection.
+    Trainable surface:
 
-    Signal semantics
-    ----------------
+    * ``learnable_thresholds=False`` + ``quantile_head_config=None``: no
+      trainable parameters. The model is a pure rule.
+    * ``learnable_thresholds=True``: 2 trainable scalars (``midpoint_var``,
+      ``log_half_range_var``).
+    * ``quantile_head_config`` set: additional parameters from the Conv1D
+      featurizer and the ``QuantileSequenceHead`` projection.
+
+    Signal semantics:
+
     * ``training=True``: soft signals via sigmoid, all in ``[0, 1]``.
     * ``training=False`` (inference): hard 0/1 signals, partition exact
       (``above + below + between == 1``).
 
-    Hard- vs soft-mode mutual exclusivity
-    -------------------------------------
-    The two threshold modes — rule-based hard thresholds (``output_mode``
-    style ``above``/``below``/``between`` signals) and the learned soft
-    ``slope_quantiles`` head — are produced from the *same* slope tensor and
-    are mutually independent at the dict level (both can be active in one
-    forward pass). However they answer different questions and should not be
-    used together in a downstream classifier without an explicit fusion
-    policy: the hard signals are deterministic membership indicators of a
-    threshold band; ``slope_quantiles`` is a distributional forecast of the
-    slope itself. Treat them as alternatives, not as a single conditioned
-    output.
+    The hard threshold signals and the ``slope_quantiles`` head both come
+    from the same slope tensor and can both be active in one forward pass,
+    but they answer different questions: the signals are deterministic
+    membership indicators of a threshold band, and ``slope_quantiles`` is a
+    distributional forecast of the slope itself. Treat them as alternatives
+    rather than combining them without an explicit fusion step.
 
     :param ema_period: Period for the underlying ``ExponentialMovingAverage``.
         Must be ``>= 1``.
@@ -220,10 +172,8 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
                 f"slope_feature_kernel must be > 0, got {slope_feature_kernel}"
             )
 
-        # I-19: surface the easy-to-misconfigure case where the user asked
-        # for learnable thresholds but did NOT attach a quantile head — the
-        # model then has only 2 trainable scalars and no head to project
-        # them through, which usually indicates a misconfigured experiment.
+        # I-19: warn when thresholds are learnable but no quantile head is
+        # attached, since the model then has only 2 trainable scalars.
         if learnable_thresholds and quantile_head_config is None:
             logger.warning(
                 "AdaptiveEMASlopeFilterModel: learnable_thresholds=True "
@@ -244,15 +194,13 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         self.slope_feature_dim = slope_feature_dim
         self.slope_feature_kernel = slope_feature_kernel
 
-        # EMA layer
         self.ema_layer = ExponentialMovingAverage(
             period=ema_period,
             adjust=adjust_ema,
             name="ema",
         )
 
-        # Optional quantile head with a learned causal Conv1D featurizer
-        # (I-2b: the head is no longer fed a raw scalar slope).
+        # I-2b: the quantile head is fed Conv1D features, not a raw scalar slope.
         if quantile_head_config is not None:
             if "num_quantiles" not in quantile_head_config:
                 raise ValueError(
@@ -308,24 +256,14 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             dtype="float32",
         )
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-041
-        # Build EXACTLY the sub-layers `call()` runs, and no others. I-9 used to
-        # read "do NOT manually build sub-layers -- Keras builds them lazily on
-        # first call", which is true only for a class that does NOT override
-        # `build`. Because this one does, `keras.Model.build_from_config` takes
-        # the `self.build(input_shape)` branch instead of the build-by-run
-        # branch, so on `load_model` the sub-layers did not exist when weights
-        # were restored and any `quantile_head_config` model could not be
-        # reloaded. Do NOT add `quantile_head` when it is None, and do NOT
-        # build anything `call()` skips: an unused sub-layer creates weights
-        # the lazy path never created, silently changing the `.keras` layout.
-        # See decisions.md D-041 and plans/SYSTEM.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-041: build exactly the
+        # sub-layers call() runs; an unused one changes the .keras layout.
+        # This class overrides build(), so load_model takes this path, not
+        # Keras's lazy build-by-run path. See decisions.md.
         self.ema_layer.build(input_shape)
 
         if self.quantile_head is not None:
-            # `call()` always feeds the featurizer a single-channel slope:
-            # rank-2 input is expanded to (B, T, 1), and rank-3 input with more
-            # than one feature is refused in `call()`.
+            # call() always feeds the featurizer a single-channel slope.
             featurizer_input_shape = (input_shape[0], input_shape[1], 1)
             self.slope_featurizer.build(featurizer_input_shape)
             self.quantile_head.build(
@@ -342,11 +280,9 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         training: Optional[bool] = None,
     ) -> Dict[str, keras.KerasTensor]:
         """Compute EMA, slope, threshold signals, and optionally slope quantiles."""
-        # Compute EMA.
         ema = self.ema_layer(inputs)
 
-        # I-8: static-shape slope shift. ``...`` ellipsis handles both
-        # ``(B, T)`` and ``(B, T, F)`` cases.
+        # I-8: the `...` ellipsis handles both (B, T) and (B, T, F) shapes.
         L = self.lookback_period
         ema_lagged = ops.concatenate(
             [ops.zeros_like(ema[:, :L, ...]), ema[:, :-L, ...]],
@@ -354,8 +290,7 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         )
         slope = ema - ema_lagged
 
-        # I-5: upper/lower from midpoint ± softplus(log_half_range). Cast to
-        # the slope's compute dtype (I-10 runtime cast).
+        # I-5, I-10: midpoint +/- softplus(log_half_range), cast to compute dtype.
         midpoint = ops.cast(self.midpoint_var, slope.dtype)
         half_range = ops.softplus(ops.cast(self.log_half_range_var, slope.dtype))
         upper = midpoint + half_range
@@ -391,13 +326,10 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             "lower_threshold": lower,
         }
 
-        # Optional quantile head — Conv1D causal featurization first (I-2b).
         if self.quantile_head is not None:
             ndim = len(inputs.shape)
-            # DECISION plan_2026-05-12_5f0e087c/D-002:
-            # Reject multi-feature inputs when a quantile head is attached
-            # rather than silently mixing features through the Conv1D
-            # featurizer. Documented as L-7 in README §11.
+            # DECISION plan_2026-05-12_5f0e087c/D-002: reject multi-feature
+            # inputs here rather than mix channels through the Conv1D. See decisions.md.
             if (
                 ndim == 3
                 and inputs.shape[-1] is not None
@@ -424,15 +356,16 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        """Static-shape map of the dict output (I-14).
+        """Return the static shape of every key :meth:`call` can return.
 
         :param input_shape: Shape of ``inputs``, either ``(B, T)`` or
             ``(B, T, F)``.
-        :return: Dict mirroring the keys returned by :meth:`call`.
-            ``ema``, ``slope``, and the three signal tensors take the
-            full input shape. ``upper_threshold`` and ``lower_threshold``
-            are scalars. ``slope_quantiles`` (if the head is enabled) is
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: ``ema``, ``slope`` and the three signal tensors take the
+            full input shape. ``upper_threshold`` and ``lower_threshold`` are
+            scalars. ``slope_quantiles``, if the head is enabled, is
             ``(B, T, K)`` where ``K = num_quantiles``.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
         """
         shapes: Dict[str, Tuple[Optional[int], ...]] = {
             "ema": tuple(input_shape),

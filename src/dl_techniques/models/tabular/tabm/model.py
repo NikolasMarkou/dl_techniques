@@ -793,15 +793,13 @@ def create_tabm_plain(
 ) -> TabMModel:
     """Create a plain MLP baseline without ensembling.
 
-    Args:
-        n_num_features: Number of numerical features.
-        cat_cardinalities: List of cardinalities for categorical features.
-        n_classes: Number of output classes (None for regression).
-        hidden_dims: List of hidden layer dimensions.
-        **kwargs: Additional model arguments.
-
-    Returns:
-        Plain MLP model for baseline comparison.
+    :param n_num_features: Number of numerical features.
+    :param cat_cardinalities: Cardinality of each categorical feature.
+    :param n_classes: Number of output classes, or ``None`` for regression.
+    :param hidden_dims: Width of each backbone hidden layer.
+    :param kwargs: Additional arguments forwarded to :func:`create_tabm_model`.
+    :return: A plain ``TabMModel`` with no ensembling.
+    :rtype: TabMModel
     """
     return create_tabm_model(
         n_num_features=n_num_features,
@@ -823,18 +821,16 @@ def create_tabm_ensemble(
         hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
-    """Create a TabM model with full efficient ensemble.
+    """Create a TabM model with the full per-layer efficient ensemble (``arch_type='tabm'``).
 
-    Args:
-        n_num_features: Number of numerical features.
-        cat_cardinalities: List of cardinalities for categorical features.
-        n_classes: Number of output classes (None for regression).
-        k: Number of ensemble members.
-        hidden_dims: List of hidden layer dimensions.
-        **kwargs: Additional model arguments.
-
-    Returns:
-        Full TabM ensemble model with LinearEfficientEnsemble.
+    :param n_num_features: Number of numerical features.
+    :param cat_cardinalities: Cardinality of each categorical feature.
+    :param n_classes: Number of output classes, or ``None`` for regression.
+    :param k: Number of ensemble members.
+    :param hidden_dims: Width of each backbone hidden layer.
+    :param kwargs: Additional arguments forwarded to :func:`create_tabm_model`.
+    :return: A configured ``TabMModel``.
+    :rtype: TabMModel
     """
     return create_tabm_model(
         n_num_features=n_num_features,
@@ -856,18 +852,16 @@ def create_tabm_mini(
         hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
-    """Create a TabM-mini model with minimal ensemble adapter.
+    """Create a TabM model with only the input-side ScaleEnsemble adapter (``arch_type='tabm-mini'``).
 
-    Args:
-        n_num_features: Number of numerical features.
-        cat_cardinalities: List of cardinalities for categorical features.
-        n_classes: Number of output classes (None for regression).
-        k: Number of ensemble members.
-        hidden_dims: List of hidden layer dimensions.
-        **kwargs: Additional model arguments.
-
-    Returns:
-        TabM-mini model with ScaleEnsemble input diversity.
+    :param n_num_features: Number of numerical features.
+    :param cat_cardinalities: Cardinality of each categorical feature.
+    :param n_classes: Number of output classes, or ``None`` for regression.
+    :param k: Number of ensemble members.
+    :param hidden_dims: Width of each backbone hidden layer.
+    :param kwargs: Additional arguments forwarded to :func:`create_tabm_model`.
+    :return: A configured ``TabMModel``.
+    :rtype: TabMModel
     """
     return create_tabm_model(
         n_num_features=n_num_features,
@@ -886,43 +880,30 @@ def ensemble_predict(
         x_data: Union[Tuple, Dict, Any],
         method: Literal['mean', 'best', 'greedy'] = 'mean'
 ) -> np.ndarray:
-    """Make predictions using ensemble model with aggregation.
+    """Predict with a TabM model and aggregate the ensemble axis.
 
-    Provides different ensemble aggregation strategies for balancing
-    performance and computational requirements.
-
-    Args:
-        model: Trained TabM model with ensemble capability.
-        x_data: Input data in supported format.
-        method: Aggregation strategy:
-            - 'mean': Simple ensemble averaging (recommended)
-            - 'best': Best single member (requires validation data)
-            - 'greedy': Greedy selection (requires validation data)
-
-    Returns:
-        Aggregated predictions with uncertainty estimates.
-        Shape: (batch_size, n_outputs) for final predictions.
-
-    Note:
-        'best' and 'greedy' methods require external validation data
-        to determine optimal aggregation and currently fall back to 'mean'.
+    :param model: A trained TabM model.
+    :type model: TabMModel
+    :param x_data: Input data in any format the model's ``call`` accepts.
+    :type x_data: Union[Tuple, Dict, Any]
+    :param method: ``'mean'`` averages across members. ``'best'`` and
+        ``'greedy'`` are not implemented and fall back to ``'mean'`` with a
+        warning; both need external validation data to select members.
+    :type method: Literal['mean', 'best', 'greedy']
+    :return: Aggregated predictions, shape ``(batch_size, n_outputs)``.
+    :rtype: np.ndarray
+    :raises ValueError: If ``method`` is not one of the three above.
     """
-    # Get ensemble predictions: (batch_size, k, n_outputs)
     predictions = model.predict(x_data)
 
     if method == 'mean':
-        # Simple ensemble averaging - most robust approach
         return np.mean(predictions, axis=1)
 
     elif method == 'best':
-        # Return predictions from the best single ensemble member
-        # Note: This would require validation data to determine the best member
         logger.warning("Best member selection requires validation data. Using mean instead.")
         return np.mean(predictions, axis=1)
 
     elif method == 'greedy':
-        # Greedy ensemble selection (simplified version)
-        # Note: Full implementation would require validation data and iterative selection
         logger.warning("Greedy selection requires validation data. Using mean instead.")
         return np.mean(predictions, axis=1)
 
@@ -941,23 +922,25 @@ def create_tabm_for_dataset(
         hidden_dims: Sequence[int] = (256, 256),
         **kwargs: Any
 ) -> TabMModel:
-    """Create a TabM model automatically configured for a specific dataset.
+    """Infer the problem type and feature layout from a dataset, then build a TabM model.
 
-    Analyzes dataset characteristics to determine optimal model configuration,
-    including problem type detection and feature organization.
-
-    Args:
-        X_train: Training features array with shape (n_samples, n_features).
-        y_train: Training labels/targets array.
-        categorical_indices: List of indices for categorical features in X_train.
-        categorical_cardinalities: List of cardinalities for categorical features.
-        arch_type: Architecture variant to use.
-        k: Number of ensemble members.
-        hidden_dims: Hidden layer architecture.
-        **kwargs: Additional model arguments.
-
-    Returns:
-        Configured TabM model optimized for the dataset.
+    :param X_train: Training features, shape ``(n_samples, n_features)``.
+    :type X_train: np.ndarray
+    :param y_train: Training targets.
+    :type y_train: np.ndarray
+    :param categorical_indices: Indices of categorical columns in ``X_train``.
+    :type categorical_indices: Optional[List[int]]
+    :param categorical_cardinalities: Cardinality of each categorical feature.
+    :type categorical_cardinalities: Optional[List[int]]
+    :param arch_type: See :class:`TabMModel`'s Variants table.
+    :type arch_type: str
+    :param k: Number of ensemble members.
+    :type k: int
+    :param hidden_dims: Width of each backbone hidden layer.
+    :type hidden_dims: Sequence[int]
+    :param kwargs: Additional arguments forwarded to :func:`create_tabm_model`.
+    :return: A ``TabMModel`` sized for the given dataset.
+    :rtype: TabMModel
 
     Example:
         >>> import numpy as np
@@ -982,27 +965,21 @@ def create_tabm_for_dataset(
         >>> # Model ready for compilation and training
         >>> model.compile(optimizer='adam', loss='sparse_categorical_crossentropy')
     """
-    # Determine problem type from target distribution
     if len(y_train.shape) == 1:
         unique_labels = np.unique(y_train)
         if len(unique_labels) == 2 and set(unique_labels) == {0, 1}:
-            # Binary classification
             n_classes = 2
             problem_type = "Binary classification"
         elif len(unique_labels) > 2 and np.all(unique_labels == np.arange(len(unique_labels))):
-            # Multi-class classification
             n_classes = len(unique_labels)
             problem_type = f"{n_classes}-class classification"
         else:
-            # Regression
             n_classes = None
             problem_type = "Regression"
     else:
-        # Multi-output classification or regression
         n_classes = y_train.shape[1]
         problem_type = f"Multi-output ({n_classes} outputs)"
 
-    # Determine feature organization
     if categorical_indices is None:
         categorical_indices = []
     if categorical_cardinalities is None:
@@ -1012,7 +989,6 @@ def create_tabm_for_dataset(
     n_categorical = len(categorical_indices)
     n_numerical = n_total_features - n_categorical
 
-    # Log dataset analysis
     logger.info("Dataset Analysis for TabM Configuration:")
     logger.info(f"  - Total samples: {X_train.shape[0]:,}")
     logger.info(f"  - Total features: {n_total_features}")
