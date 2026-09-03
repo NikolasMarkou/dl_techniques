@@ -1,74 +1,16 @@
-"""
-``LeVJEPAEncoder``: the LeVJEPA Vision Transformer encoder.
+"""``LeVJEPAEncoder``: the LeVJEPA Vision Transformer encoder.
 
-Ports the LeVJEPA PyTorch reference's ``VisionTransformer.forward`` (minus its
-multi-output-features ``out_layers`` branch, which LeVJEPA's own training
-consumer never needs -- see the ``DECISION`` note in ``__init__``):
+Ports the LeVJEPA PyTorch reference's ``VisionTransformer.forward``, minus
+its multi-output-features ``out_layers`` branch, which LeVJEPA's own
+training consumer never needs (see the ``DECISION`` note in ``__init__``).
 
-.. code-block:: python
-
-    def forward(self, x):
-        # x: (B, C, T, H, W) or (B, C, H, W)  [this port is channels-last]
-        pos_embed = self.pos_embed  # frozen sincos, or None when use_rope
-        x = self.patch_embed(x)
-        if pos_embed is not None: x = x + patch_pos_embed
-        x, token_ids = random_token_drop(x, self.token_drop_rate, training)
-        cls_token = self.cls_token.expand(B, -1, -1)
-        if pos_embed is not None: cls_token = cls_token + cls_pos_embed
-        x = torch.cat([cls_token, x], dim=1)
-        attn_mask = build_block_causal_mask(...) if attn_mode == "block_causal" else None
-        for blk in self.blocks:
-            x = blk(x, T=T, H_patches=H_patches, W_patches=W_patches,
-                     token_ids=token_ids, attn_mask=attn_mask)
-        x = self.norm(x)
-        return x
-
-Dispatches patch embedding to :class:`~dl_techniques.layers.embedding.patch_embed_3d.PatchEmbed3D`
-for video (``num_frames > 1``) or
-:class:`~dl_techniques.layers.embedding.patch_embedding.PatchEmbedding2D` for a
-still image (``num_frames == 1``), per plan.md Assumption A1.
-
-Architecture:
-    .. code-block:: text
-
-        Input: (B, T, H, W, C) video  or  (B, H, W, C) image
-                            │
-              PatchEmbed3D  │  PatchEmbedding2D
-              (num_frames>1)│  (num_frames==1)
-                            ▼
-                    x: (B, N, D)   N = T'*H'*W'
-                            │
-            use_rope=False  │  use_rope=True
-            + frozen 3D     │  (no additive pos_embed;
-              sincos table  │   VideoRoPE3D rotates inside
-                            │   each LeVJEPABlock instead)
-                            ▼
-              random_token_drop(x, token_drop_rate, training)
-              -> (x, token_ids)   [identity when drop_rate<=0 or not training]
-                            │
-                            ▼
-              prepend cls_token (+ cls pos_embed row, if not use_rope)
-                            │
-                            ▼
-              build_block_causal_mask(...) if attn_mode == "block_causal"
-              else None (full/unmasked attention)
-                            │
-                            ▼
-              LeVJEPABlock × depth  (each forwarded T/H'/W'/token_ids/attn_mask)
-                            │
-                            ▼
-              final LayerNorm(eps=1e-6)
-                            │
-                            ▼
-              (B, 1 + N_kept, D), CLS at index 0
-
-Foundational Mathematics:
-    Identical in kind to a standard ViT encoder (Dosovitskiy et al., 2020),
-    extended with a temporal axis (tubelet embedding, per Tong et al. 2022's
-    VideoMAE), an optional 3-axis rotary position embedding in place of an
-    additive one, and an optional block-causal (bidirectional-within-frame,
-    causal-across-frame) attention mask for autoregressive-over-time
-    pretraining.
+Patch embedding dispatches to :class:`PatchEmbed3D` for video
+(``num_frames > 1``) or :class:`PatchEmbedding2D` for a still image
+(``num_frames == 1``). The encoder is a standard ViT extended with a
+temporal axis (tubelet embedding, per VideoMAE), an optional 3-axis rotary
+position embedding used in place of an additive one, and an optional
+block-causal attention mask (bidirectional within a frame, causal across
+frames) for autoregressive-over-time pretraining.
 
 References:
     - LeVJEPA PyTorch reference, ``module.py::VisionTransformer`` (pasted
@@ -109,22 +51,44 @@ class LeVJEPAEncoder(keras.Model):
     Dispatches to a tubelet (:class:`PatchEmbed3D`) or 2D
     (:class:`PatchEmbedding2D`) patch embedding depending on ``num_frames``,
     prepends a learnable CLS token, adds a frozen 3D sincos positional table
-    OR rotates q/k with :class:`~dl_techniques.layers.embedding.video_rope.VideoRoPE3D`
+    or rotates q/k with :class:`~dl_techniques.layers.embedding.video_rope.VideoRoPE3D`
     inside each block (mutually exclusive -- see the ``use_rope`` parameter),
     optionally drops a fraction of patch tokens at train time, and optionally
     gates attention with a block-causal mask before running the
     :class:`~dl_techniques.models.vision.levjepa.blocks.LeVJEPABlock` stack.
 
-    **Scope simplifications from the reference** (both deliberate, not
-    gaps -- see the ``DECISION`` notes in ``__init__``):
+    Two simplifications from the reference, both intentional (see the
+    ``DECISION`` notes in ``__init__``): there is no ``out_layers``
+    multi-feature-map output, since LeVJEPA only ever consumes the final CLS
+    token; and there is no dynamic positional-embedding interpolation, since
+    the frozen sincos table is built once for the configured
+    ``input_shape``/``num_frames`` and a mismatched call raises rather than
+    resampling the table.
 
-    * No ``out_layers`` multi-feature-map output: LeVJEPA only ever consumes
-      the final CLS token, so only the last layer's normalized sequence is
-      returned.
-    * No dynamic positional-embedding interpolation: the frozen sincos table
-      is built once for the configured ``input_shape``/``num_frames``, and a
-      call with a mismatched spatial/temporal size raises rather than
-      resampling the table.
+    Architecture:
+
+    .. code-block:: text
+
+        input [B, T, H, W, C] video  or  [B, H, W, C] image
+            |
+        PatchEmbed3D (num_frames > 1)  or  PatchEmbedding2D (num_frames == 1)
+            |
+        x [B, N, D]   N = T'*H'*W'
+            |
+        + frozen 3D sincos table            (use_rope=False)
+        or rotate inside each block instead  (use_rope=True)
+            |
+        random_token_drop(x, token_drop_rate, training) -> (x, token_ids)
+            |  (identity when drop_rate <= 0 or not training)
+        prepend cls_token (+ cls pos_embed row, if not use_rope)
+            |
+        build_block_causal_mask(...) if attn_mode == "block_causal" else None
+            |
+        LeVJEPABlock x depth  (each forwarded T/H'/W'/token_ids/attn_mask)
+            |
+        LayerNorm(eps=1e-6)
+            |
+        [B, 1 + N_kept, D], CLS at index 0
 
     :param input_shape: Spatial input shape ``(height, width, channels)``.
         Must be divisible by ``patch_size``. Defaults to ``(224, 224, 3)``.
@@ -151,14 +115,14 @@ class LeVJEPAEncoder(keras.Model):
         Defaults to ``True``.
     :type qkv_bias: bool
     :param use_rope: Whether to use :class:`VideoRoPE3D` rotation instead of
-        an additive frozen sincos positional table. ``True`` builds NO
+        an additive frozen sincos positional table. ``True`` builds no
         ``pos_embed`` weight at all (``self.pos_embed is None``); ``False``
         (default) builds the frozen sincos table and every block runs
         without RoPE. There is no separate toggle to request both: the
         reference's own ``VisionTransformer.__init__`` has exactly one
         ``use_rope`` flag and no independent ``pos_embed`` argument to
-        conflict with it, so the two mechanisms are mutually exclusive BY
-        CONSTRUCTION rather than by a runtime check -- see the ``DECISION``
+        conflict with it, so the two mechanisms are mutually exclusive by
+        construction rather than by a runtime check -- see the ``DECISION``
         note in ``__init__`` resolving plan.md Success Criterion 6 against
         this fact.
     :type use_rope: bool
@@ -295,26 +259,9 @@ class LeVJEPAEncoder(keras.Model):
                 f"attention_dropout_rate must be in [0, 1], got {attention_dropout_rate}"
             )
 
-        # DECISION plan-2026-09-03T113223-2a714a91/D-013
-        # Resolving plan.md Success Criterion 6 ("LeVJEPAEncoder(...,
-        # use_rope=True, pos_embed=<non-None>) raises ValueError") against the
-        # ACTUAL reference constructor, which has exactly one `use_rope: bool`
-        # flag and NO separate `pos_embed` argument
-        # (`if self.use_rope: self.pos_embed = None else: self.pos_embed =
-        # <frozen sincos weight>`). There is therefore no way for a caller of
-        # THIS port to pass both `use_rope=True` and a non-None `pos_embed` --
-        # the public API the reference specifies simply does not expose that
-        # combination, so the criterion is satisfied BY CONSTRUCTION, not by a
-        # runtime raise. Inventing a separate `pos_embed=` constructor
-        # parameter the reference does not have, purely to give the raise
-        # somewhere to fire, would ship a knob nobody asked for and that no
-        # other part of this plan uses. Resolution taken: `use_rope: bool` is
-        # the ONLY toggle (matching the reference exactly), and
-        # `test_encoder.py` pins the mutual exclusion as
-        # `use_rope=True -> encoder.pos_embed is None` after build, which is
-        # the observable form of "the two mechanisms cannot coexist" that
-        # actually applies to this constructor's real surface. See
-        # decisions.md D-013.
+        # DECISION plan-2026-09-03T113223-2a714a91/D-013: no separate `pos_embed=`
+        # constructor argument; `use_rope: bool` is the only toggle, matching the
+        # reference. `test_encoder.py` pins `use_rope=True -> pos_embed is None`. See decisions.md.
         self.input_shape_config = tuple(input_shape)
         self.num_frames = int(num_frames)
         self.patch_size = int(patch_size)
@@ -429,7 +376,7 @@ class LeVJEPAEncoder(keras.Model):
 
         if not self.use_rope:
             # Pure NumPy table -> Constant initializer -> add_weight, computed
-            # ONCE here. NEVER add_weight(zeros) + .assign(): StatelessScope
+            # once here. Never add_weight(zeros) + .assign(): StatelessScope
             # discards the assign and the table stays all zeros (see the
             # sincos_pos_embed_3d.py / _2d.py module docstrings).
             if self.is_video:
@@ -456,7 +403,7 @@ class LeVJEPAEncoder(keras.Model):
             # weight broadcasts over any batch size at `x + patch_pos_embed`
             # / `cls_token + cls_pos_embed` below -- a bare (N, D) weight
             # indexed with the same `[:, 1:, :]` slicing used at call time
-            # would slice the WRONG axis (index 2 into a rank-2 tensor).
+            # would slice the wrong axis (index 2 into a rank-2 tensor).
             table = table[None, ...]
             self.pos_embed = self.add_weight(
                 name="pos_embed",
@@ -483,7 +430,7 @@ class LeVJEPAEncoder(keras.Model):
             ``is_video``.
         :type inputs: keras.KerasTensor
         :param training: Standard Keras training flag. Token dropping is a
-            no-op unless ``training`` is exactly truthy AND
+            no-op unless ``training`` is exactly truthy and
             ``token_drop_rate > 0``.
         :type training: Optional[bool]
         :return: ``(batch, 1 + num_patches_kept, embed_dim)``, CLS at index 0.
@@ -533,7 +480,7 @@ class LeVJEPAEncoder(keras.Model):
         """Compute the output shape.
 
         Token dropping makes the exact kept-token count a runtime quantity;
-        this reports the UPPER BOUND (no dropping).
+        this reports the upper bound (no dropping).
 
         :param input_shape: Input shape.
         :type input_shape: Tuple[Optional[int], ...]
