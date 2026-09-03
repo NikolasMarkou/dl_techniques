@@ -1,3 +1,16 @@
+"""Building blocks for DarkIR: gating, frequency-domain MLP, and dilated convolution.
+
+Defines three layers used by ``darkir/model.py``: :class:`SimpleGate`, a
+parameter-free multiplicative gate that halves channel width; :class:`FreMLP`,
+which processes the FFT magnitude of a feature map through a small MLP while
+leaving phase untouched; and :class:`DilatedBranch`, one scale of a parallel
+dilated-convolution bank.
+
+``FreMLP`` runs its FFT and inverse FFT in float32 regardless of the layer's
+compute dtype, because TensorFlow has no float16 kernel for ``fft2``/``ifft2``;
+only the 1x1-conv MLP between them runs at ``compute_dtype``.
+"""
+
 import keras
 from typing import List, Optional, Tuple, Dict, Any
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -34,7 +47,7 @@ class SimpleGate(keras.layers.Layer):
     multiplicative nonlinearity at ZERO parameter cost. This is NAFNet's gate,
     and it is what makes the surrounding blocks parameter-frugal.
 
-    **Operation:**
+    Operation:
 
     .. code-block:: text
 
@@ -51,14 +64,14 @@ class SimpleGate(keras.layers.Layer):
                         ▼
         ┌───────────────────────────────┐
         │  Output [B, H, W, C]          │
-        │  channels are HALVED          │
+        │  channels are halved          │
         └───────────────────────────────┘
 
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     Input shape:
         4D tensor ``(batch, height, width, channels)``. ``channels`` must be
-        EVEN.
+        even.
 
     Output shape:
         4D tensor ``(batch, height, width, channels // 2)``.
@@ -127,15 +140,15 @@ class FreMLP(keras.layers.Layer):
     Global feature modeling in the frequency domain, magnitude only.
 
     Every output bin of an FFT depends on every input pixel, so a pointwise
-    operation on the spectrum is a GLOBAL operation at ``O(HW log HW)`` with no
+    operation on the spectrum is a global operation at ``O(HW log HW)`` with no
     ``HW x HW`` matrix anywhere. This layer transforms to the frequency domain,
-    passes only the MAGNITUDE through a two-layer 1x1-conv MLP, and reattaches
+    passes only the magnitude through a two-layer 1x1-conv MLP, and reattaches
     the original phase by rescaling the unit phasor ``freq / |freq|``.
     Magnitude carries the illumination and contrast envelope while phase carries
     structure, so editing magnitude alone relights an image without displacing
     its edges.
 
-    **Operation:**
+    Operation:
 
     .. code-block:: text
 
@@ -144,7 +157,7 @@ class FreMLP(keras.layers.Layer):
                 ▼
         ┌──────────────────────────────────────┐
         │  cast float32, NHWC → NCHW           │
-        │  fft2 over the LAST TWO axes         │
+        │  fft2 over the last two axes         │
         │  (keras.ops has no rfft2 / angle /   │
         │   complex, so the full complex       │
         │   transform is used)                 │
@@ -153,7 +166,7 @@ class FreMLP(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────┐
         │  mag = √(real² + imag²)              │
-        │  phase is NOT extracted; it survives │
+        │  phase is not extracted; it survives │
         │  as the unit phasor freq / |freq|    │
         └───────────────┬──────────────────────┘
                         ▼
@@ -167,11 +180,11 @@ class FreMLP(keras.layers.Layer):
                         ▼
         ┌──────────────────────────────────────┐
         │  out = mag' · (freq / max(|freq|, ε))│
-        │  ORIGINAL phase, NEW magnitude       │
+        │  original phase, new magnitude       │
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
-        │  ifft2 → keep the REAL part          │
+        │  ifft2, keep the real part          │
         │  valid because a 1×1 conv acts       │
         │  identically on both members of      │
         │  every conjugate-pair bin, so        │
@@ -182,7 +195,7 @@ class FreMLP(keras.layers.Layer):
         │  Output [B, H, W, C]  (shape kept)   │
         └──────────────────────────────────────┘
 
-    **Mixed-precision island:**
+    Mixed-precision island:
 
     .. code-block:: text
 
@@ -298,23 +311,14 @@ class FreMLP(keras.layers.Layer):
         :return: Output tensor of the same shape.
         :rtype: keras.KerasTensor
         """
-        # NOTE: keras.ops exposes a complex-as-(real, imag)-tuple FFT API
-        # (fft2/ifft2) and transforms the LAST TWO axes. There is no rfft2/
-        # irfft2/angle/complex in keras.ops, so we use full-spectrum fft2 over
-        # the spatial (H, W) dims by moving them last: NHWC -> NCHW.
+        # keras.ops has no rfft2/irfft2/angle/complex, so this uses full-spectrum
+        # fft2 as a (real, imag) tuple, moving the spatial dims last: NHWC -> NCHW.
 
         # 1. FFT over spatial dimensions (H, W). Input is real -> zero imag part.
         #
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
-        # The whole spectral section (steps 1, 2, 4 and 5) is a float32 ISLAND.
-        # TensorFlow has no float16 kernel for ``fft2``/``ifft2``, so under
-        # ``mixed_float16`` this raised ``TypeError: the `real` and `imag`
-        # components have incorrect types: float16 float16``. Only step 3 -- the
-        # 1x1-conv MLP, whose weights autocast -- runs at ``compute_dtype``, so
-        # the magnitude is cast DOWN before the convs and back UP after them.
-        # Do NOT collapse the two casts by running the convs in float32: that
-        # would silently opt the layer's only matmuls out of mixed precision.
-        # See decisions.md D-054.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054: steps 1, 2, 4, 5 run in
+        # float32 because TensorFlow has no float16 kernel for fft2/ifft2. Only
+        # step 3's conv runs at compute_dtype. See decisions.md.
         x_t = keras.ops.transpose(keras.ops.cast(x, "float32"), (0, 3, 1, 2))  # (B, C, H, W)
         freq_real, freq_imag = keras.ops.fft2((x_t, keras.ops.zeros_like(x_t)))
 
@@ -386,7 +390,7 @@ class DilatedBranch(keras.layers.Layer):
     field at no parameter cost, and the depthwise grouping keeps the branch
     cheap enough that several can run in parallel.
 
-    **Receptive field per branch (3x3 kernel):**
+    Receptive field per branch (3x3 kernel):
 
     .. code-block:: text
 
@@ -396,8 +400,8 @@ class DilatedBranch(keras.layers.Layer):
         d = 4   █···█···█   11 × 11    mid-range structure
         d = 9   █········█  19 × 19    blur-kernel support
 
-        all three from the SAME 3×3 parameter count; the caller
-        SUMS them, so the channel width does not grow and the
+        all three share the same 3x3 parameter count; the caller
+        sums them, so the channel width does not grow and the
         cost is linear in the number of branches
 
     :param channels: Number of input channels. Must be positive. Output width

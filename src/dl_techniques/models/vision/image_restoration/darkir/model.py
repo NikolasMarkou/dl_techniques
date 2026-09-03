@@ -1,73 +1,22 @@
-"""
-DarkIR low-light image restoration, a fully convolutional U-Net with parallel
+"""DarkIR low-light image restoration: a convolutional U-Net with parallel
 dilated branches and a Fourier-domain modulation path.
 
-Low-light photographs arrive with three degradations entangled at once: the scene
-is under-exposed, the sensor noise that was always present is now comparable to
-the signal, and the long exposure that produced the image also produced motion
-blur. Restoring them separately does not work, because brightening amplifies the
-noise and deblurring sharpens it. The architectural problem this creates is one
-of receptive field under a compute budget: blur removal needs to see far enough
-to find the blur kernel's support, and exposure correction needs a *global* view
-of the image to decide how much to lift, yet self-attention over a full-resolution
-restoration feature map costs `O(H^2 W^2)`.
+Defines :class:`DarkIREncoderBlock`, :class:`DarkIRDecoderBlock`, and the
+``create_darkir_model`` builder that assembles them into a U-Net.
 
-This model resolves the two halves with two different cheap mechanisms rather
-than one expensive one. Spatially, a set of parallel depthwise convolutions with
-different dilation rates is summed:
+Low-light photographs need both local repair (denoising, deblurring) and a
+global adjustment (relighting), but self-attention over a full-resolution
+feature map costs ``O(H^2 W^2)``. DarkIR replaces attention with two cheap
+mechanisms instead: a bank of parallel dilated depthwise convolutions summed
+together for local receptive field, and :class:`FreMLP` (in ``components.py``)
+for the global view, which processes only the FFT magnitude of a feature map
+through a small MLP and reattaches the original phase. Every block scales its
+two residual branches by zero-initialized per-channel weights (``beta``,
+``gamma``), so a fresh block starts as an identity and the network trains
+without warmup.
 
-`z = sum_d DWConv3x3_d(x)`
-
-Since a 3x3 kernel at dilation `d` spans `3 + 2*(d - 1)` pixels, the default
-rates `[1, 4, 9]` give 3x3, 11x11 and 19x19 supports from the same 3x3 parameter
-count, and summing rather than concatenating keeps the channel width fixed so
-the cost is linear in the number of branches. Globally, the Fourier transform is
-used in place of attention: every output bin of an FFT already depends on every
-input pixel, so a pointwise operation on the spectrum is a global operation in
-`O(HW log HW)`, with no `H*W`-by-`H*W` matrix anywhere.
-
-`FreMLP` is where that idea is implemented, and it is deliberately narrower than
-"an MLP on the spectrum". It transforms to the frequency domain, processes only
-the *magnitude* through a two-layer 1x1-conv MLP, and reattaches the original
-phase by rescaling the unit phasor `freq / |freq|`. Magnitude carries the
-illumination and contrast envelope while phase carries the structure, so editing
-magnitude alone is what lets the layer relight an image without displacing its
-edges. Two implementation facts about it are not obvious from the concept.
-`keras.ops` has no `rfft2`, `angle` or `complex`, so the layer runs the
-full complex `fft2` over the last two axes and therefore transposes NHWC to NCHW
-and back around the transform; and the real output is valid only because a 1x1
-convolution acts identically on the two members of every conjugate-pair bin, so
-the processed spectrum retains the Hermitian symmetry of a real signal and the
-imaginary part of the inverse transform can be discarded rather than needing a
-projection.
-
-Everything else in a block is parameter-frugal by the same instinct. `SimpleGate`
-replaces the activation function with a channel split and an element-wise
-product, `x1 * x2`, contributing a multiplicative nonlinearity at zero parameter
-cost; the channel-attention branch is NAFNet's *simplified* channel attention,
-a global average pool followed by a single 1x1 convolution with **no sigmoid**,
-so it is an unbounded per-channel rescaling rather than a gate in `[0, 1]`.
-
-The encoder block and the decoder block share the dilated first path but differ
-in their second path and in one ordering detail. The encoder's second path is
-`FreMLP`, and it is applied *multiplicatively*: the frequency output modulates
-the running signal, `out = y + gamma * (y * FreMLP(Norm(y)))`, so the frequency
-branch scales the spatial features rather than being added alongside them. The
-decoder's second path is an ordinary gated inverted FFN (expand 1x1, SimpleGate,
-project 1x1) added in the usual way. The ordering detail is that the optional
-extra depthwise convolution sits *before* the channel-expanding 1x1 in the
-encoder and *after* it in the decoder -- and because the decoder's version keeps
-`groups=channels` while operating on `channels * dw_expand` maps, that layer is
-a grouped convolution with `dw_expand` channels per group, not a true depthwise
-convolution as its name suggests.
-
-Both blocks scale each of their two residual branches by a learnable per-channel
-weight, `beta` for the spatial path and `gamma` for the second path, and both are
-initialized to **zeros**. Every block therefore begins training as an exact
-identity and the whole tower starts as the global residual connection alone.
-This is the LayerScale/ReZero idea and it is what allows a deep restoration
-tower to be trained without warmup tricks: the network cannot destroy its input
-before it has learned anything worth adding.
+``create_darkir_model`` returns ``keras.Model(inputs, outputs)``, not a
+``keras.Model`` subclass. No pretrained weights are included.
 
 References:
     - Feijoo et al., 2025. DarkIR: Robust Low-Light Image Restoration. CVPR 2025.
@@ -108,25 +57,25 @@ class DarkIREncoderBlock(keras.layers.Layer):
 
     Two residual paths. The first is the multi-scale spatial path: normalize,
     optional depthwise convolution, expand with a 1x1, run the parallel dilated
-    bank and SUM it, gate, rescale per channel with NAFNet's sigmoid-free
+    bank and sum it, gate, rescale per channel with NAFNet's sigmoid-free
     simplified channel attention, project back. The second is
-    :class:`FreMLP`, applied MULTIPLICATIVELY -- the frequency output scales the
+    :class:`FreMLP`, applied multiplicatively: the frequency output scales the
     running signal rather than being added alongside it. Both branch scales
     (``beta``, ``gamma``) are zero-initialized, so a fresh block is an exact
     identity.
 
-    **Block structure:**
+    Block structure:
 
     .. code-block:: text
 
         Input x [B, H, W, C]
               │
         ┌─────┴────────────────────────────────────────────┐
-        │  PATH 1: multi-scale spatial                     │
+        │  path 1: multi-scale spatial                     │
         │                                                  │
         │  LayerNorm                                       │
         │       ▼                                          │
-        │  [DWConv 3×3]  ◄── extra_depth_wise, BEFORE the  │
+        │  [DWConv 3×3]  <- extra_depth_wise, before the  │
         │       ▼            1×1 in the encoder            │
         │  Conv1×1 → C·dw_expand                           │
         │       ▼                                          │
@@ -134,7 +83,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         │       ▼                                          │
         │  SimpleGate → C·dw_expand/2                      │
         │       ▼                                          │
-        │  GAP → Conv1×1 → multiply   (NO sigmoid:         │
+        │  GAP -> Conv1x1 -> multiply   (no sigmoid:         │
         │       ▼                      unbounded rescale)  │
         │  Conv1×1 → C                                     │
         └─────┬────────────────────────────────────────────┘
@@ -142,11 +91,11 @@ class DarkIREncoderBlock(keras.layers.Layer):
         y = x + β ⊙ (path 1)          β zero-init, per channel
               │
         ┌─────┴────────────────────────────────────────────┐
-        │  PATH 2: frequency modulation                    │
+        │  path 2: frequency modulation                    │
         │                                                  │
         │  LayerNorm → FreMLP → multiply by y              │
-        │  (MULTIPLICATIVE, not additive: the spectrum     │
-        │   SCALES the spatial features)                   │
+        │  (multiplicative, not additive: the spectrum      │
+        │   scales the spatial features)                   │
         └─────┬────────────────────────────────────────────┘
               ▼
         out = y + γ ⊙ (y ⊙ FreMLP(Norm(y)))
@@ -165,7 +114,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         ``[1, 4, 9]``.
     :type dilations: List[int]
     :param extra_depth_wise: Whether to insert an extra depthwise convolution
-        BEFORE the channel-expanding 1x1. Note this is the opposite ordering
+        before the channel-expanding 1x1. Note this is the opposite ordering
         from :class:`DarkIRDecoderBlock`. Defaults to False.
     :type extra_depth_wise: bool
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
@@ -180,8 +129,8 @@ class DarkIREncoderBlock(keras.layers.Layer):
         4D tensor ``(batch, height, width, channels)``; the residual structure
         preserves dimensionality.
 
-    :ivar beta: Learnable PER-CHANNEL scale of shape ``(1, 1, 1, channels)`` on
-        the spatial path, zero-initialized. NOT a scalar, despite how the
+    :ivar beta: Learnable per-channel scale of shape ``(1, 1, 1, channels)`` on
+        the spatial path, zero-initialized. Not a scalar, despite how the
         equations read: the multiply broadcasts over N, H, W only.
     :vartype beta: keras.Variable
     :ivar gamma: The same, for the frequency path.
@@ -450,26 +399,26 @@ class DarkIRDecoderBlock(keras.layers.Layer):
 
     Shares the encoder's multi-scale spatial path but replaces :class:`FreMLP`
     with an ordinary gated inverted FFN (expand 1x1, SimpleGate, project 1x1)
-    added in the usual way, and moves the optional extra convolution AFTER the
+    added in the usual way, and moves the optional extra convolution after the
     channel-expanding 1x1. Because that convolution keeps ``groups=channels``
-    while operating on ``channels * dw_expand`` maps, it is a GROUPED
+    while operating on ``channels * dw_expand`` maps, it is a grouped
     convolution with ``dw_expand`` channels per group, not a true depthwise
     convolution as its name suggests.
 
-    **Block structure:**
+    Block structure:
 
     .. code-block:: text
 
         Input x [B, H, W, C]
               │
         ┌─────┴────────────────────────────────────────────┐
-        │  PATH 1: multi-scale spatial                     │
+        │  path 1: multi-scale spatial                     │
         │                                                  │
         │  LayerNorm                                       │
         │       ▼                                          │
         │  Conv1×1 → C·dw_expand                           │
         │       ▼                                          │
-        │  [grouped Conv 3×3]  ◄── extra_depth_wise, AFTER │
+        │  [grouped Conv 3×3]  <- extra_depth_wise, after  │
         │       ▼                  the 1×1 here; groups=C  │
         │                          over C·dw_expand maps   │
         │  Σ over dilated branches [d₁, d₂, ..., dₙ]       │
@@ -484,13 +433,13 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         y = x + β ⊙ (path 1)          β zero-init, per channel
               │
         ┌─────┴────────────────────────────────────────────┐
-        │  PATH 2: gated inverted FFN                      │
+        │  path 2: gated inverted FFN                      │
         │                                                  │
         │  LayerNorm → Conv1×1 → C·ffn_expand              │
         │       ▼                                          │
         │  SimpleGate₂ → C·ffn_expand/2                    │
         │       ▼                                          │
-        │  Conv1×1 → C          (ADDITIVE, unlike the      │
+        │  Conv1x1 -> C           (additive, unlike the     │
         └─────┬─────────────────  encoder's multiplicative │
               ▼                   frequency path)          │
         out = y + γ ⊙ (path 2)
@@ -512,7 +461,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         resolves to ``[1]``. Must be non-empty and all positive.
     :type dilations: List[int]
     :param extra_depth_wise: Whether to insert the extra grouped convolution
-        AFTER the channel-expanding 1x1. Note this is the opposite ordering
+        after the channel-expanding 1x1. Note this is the opposite ordering
         from :class:`DarkIREncoderBlock`. Defaults to False.
     :type extra_depth_wise: bool
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
@@ -526,15 +475,15 @@ class DarkIRDecoderBlock(keras.layers.Layer):
     Output shape:
         4D tensor ``(batch, height, width, channels)``.
 
-    :ivar beta: Learnable PER-CHANNEL scale of shape ``(1, 1, 1, channels)`` on
-        the spatial path, zero-initialized. NOT a scalar: the multiply
+    :ivar beta: Learnable per-channel scale of shape ``(1, 1, 1, channels)`` on
+        the spatial path, zero-initialized. Not a scalar: the multiply
         broadcasts over N, H, W only.
     :vartype beta: keras.Variable
     :ivar gamma: The same, for the FFN path.
     :vartype gamma: keras.Variable
     :ivar sg1: SimpleGate on the spatial path.
     :vartype sg1: SimpleGate
-    :ivar sg2: A SEPARATE SimpleGate instance on the FFN path.
+    :ivar sg2: A separate SimpleGate instance on the FFN path.
     :vartype sg2: SimpleGate
 
     Example:
@@ -832,7 +781,7 @@ def create_darkir_model(
 ) -> keras.Model:
     """Build the DarkIR model for low-light image restoration.
 
-    A functional builder, NOT a subclass: it returns
+    A functional builder, not a subclass: it returns
     ``keras.Model(inputs, outputs)`` over a ``(None, None, img_channels)``
     input, so the model is fully convolutional and resolution-agnostic at call
     time. Encoder stages downsample with a stride-2 2x2 convolution; decoder
@@ -840,7 +789,7 @@ def create_darkir_model(
     add the matching encoder skip. A global residual carries the input to the
     output, so the network learns only the correction to apply.
 
-    **Architecture Overview:**
+    Architecture Overview:
 
     .. code-block:: text
 
@@ -866,7 +815,7 @@ def create_darkir_model(
         └──────────┬───────────┘            │      │      │
               Conv 2×2 /2                   │      │      │
         ┌──────────▼───────────────────────┐│      │      │
-        │  MIDDLE                          ││      │      │
+        │  middle                          ││      │      │
         │   middle_blk_num_enc × EBlock    ││      │      │
         │        ▼                         ││      │      │
         │      x_light  ──────────────────────► side_out  │
@@ -894,11 +843,11 @@ def create_darkir_model(
         └───────────────┬──────────────────────┘
                         ▼
         ┌──────────────────────────────────────┐
-        │  Add(input)   GLOBAL RESIDUAL        │
+        │  Add(input)   global residual        │
         │  → Output [B, H, W, img_channels]    │
         └──────────────────────────────────────┘
 
-    **Upsample channel arithmetic (why chan·2, not chan·4):**
+    Upsample channel arithmetic (why chan·2, not chan·4):
 
     .. code-block:: text
 
@@ -912,12 +861,12 @@ def create_darkir_model(
         mismatched the chan/2 skip; never caught because the model
         was dead-on-forward via the nonexistent DepthToSpace (D-002)
 
-    **Size constraint:**
+    Size constraint:
 
     .. code-block:: text
 
         the stride-2 downsample uses padding='valid', so a dimension
-        that is not a multiple of 2^len(enc_blk_nums) TRUNCATES on the
+        that is not a multiple of 2^len(enc_blk_nums) truncates on the
         way down and the skip Add fails on mismatched shapes
 
         enc_blk_nums=[1,2,3]  →  8× downsampling  →  H, W % 8 == 0
@@ -954,7 +903,7 @@ def create_darkir_model(
     :type extra_depth_wise: bool
     :param use_side_loss: Whether to return an intermediate output for deep
         supervision. When True the model returns ``[main_output, side_output]``
-        and the side output is at BOTTLENECK resolution
+        and the side output is at bottleneck resolution
         (``H / 2**len(enc_blk_nums)``), not full resolution. A caller that
         compiles a single full-resolution loss against both outputs will build
         fine and die at the first ``fit()`` step on a shape mismatch; the target
@@ -1038,15 +987,9 @@ def create_darkir_model(
         raise ValueError(f"width must be positive, got {width}")
     if middle_blk_num_enc < 0:
         raise ValueError(f"middle_blk_num_enc must be non-negative, got {middle_blk_num_enc}")
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-126
-    # `>= 1`, not `>= 0`: at 0 the middle decoder loop never runs, so `x` is
-    # still `x_light` when `layers.Add(name="middle_residual")([x, x_light])`
-    # fires and the "residual" is EXACTLY `2 * x_light` -- MEASURED 2026-08-21,
-    # max|middle_residual - 2*x_light| = 0.0 against a 2*x_light of magnitude
-    # 4.427. Do NOT relax this back to non-negative for symmetry with
-    # `middle_blk_num_enc`, which is genuinely 0-safe (at 0, `x_light` is just
-    # the encoder output and the residual is still a real one). See
-    # decisions.md D-126.
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-126: >= 1, not >= 0 — at 0 the
+    # residual add degenerates to exactly 2 * x_light (measured, max diff 0.0).
+    # `middle_blk_num_enc` stays 0-safe; do not relax this one. See decisions.md.
     if middle_blk_num_dec < 1:
         raise ValueError(
             "middle_blk_num_dec must be >= 1, got "
@@ -1139,9 +1082,8 @@ def create_darkir_model(
             use_bias=False,
             name=f"up_conv_{i}"
         )(x)
-        # DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace
-        # does not exist in Keras 3.8; PixelShuffle2D is the NHWC depth->space
-        # replacement (inverse of PixelUnshuffle2D). See decisions.md D-002.
+        # DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace does
+        # not exist in Keras 3.8; PixelShuffle2D is the NHWC replacement. See decisions.md.
         x = PixelShuffle2D(block_size=2, name=f"pixel_shuffle_{i}")(x)
 
         # Halve channels (due to 2x spatial increase)
@@ -1174,14 +1116,8 @@ def create_darkir_model(
     # === Optional Side Loss ===
     if use_side_loss:
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-044: the tap stays at
-        # bottleneck resolution and the TRAINER downsamples the target to meet
-        # it. Do NOT "fix" this by upsampling `side_out` to full resolution so
-        # that a single full-resolution loss happens to apply: that would make
-        # the auxiliary gradient pass through an interpolation the main path
-        # does not use, and it would still not be the paper's mechanism (a
-        # separate full-resolution low-light branch, see the module docstring).
-        # A caller wiring this flag must produce a matching downsampled target;
-        # `src/train/darkir/train_darkir.py --side-loss` does exactly that.
+        # bottleneck resolution; the trainer downsamples the target to match, not
+        # the other way around (`train_darkir.py --side-loss`). See decisions.md.
         side_out = keras.layers.Conv2D(
             img_channels,
             kernel_size=3,
