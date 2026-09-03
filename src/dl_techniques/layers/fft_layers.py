@@ -1,21 +1,17 @@
 """
-FFT / IFFT spectral-transform layers.
-=====================================
+``FFTLayer`` and ``IFFTLayer`` move real-valued spatial feature maps to and
+from the 2D frequency domain, used by the Fourier token mixer in PW-FNet.
 
-A complementary pair of backend-agnostic layers that move real-valued spatial
-feature maps to/from the 2D frequency domain, used by the Fourier token mixer in
-PW-FNet.
+``FFTLayer`` applies a 2D FFT to a real input ``[B, H, W, C]`` and returns the
+real and imaginary spectra concatenated along the channel axis, shape
+``[B, H, W, 2*C]``. ``IFFTLayer`` inverts that representation, taking
+``[B, H, W, 2*C]`` back to ``[B, H, W, C]`` (the real part of the inverse
+transform). Both are stateless and built on ``keras.ops.fft2`` / ``ifft2``,
+which operate on the last two axes, so inputs are transposed to
+channels-first for the transform and back afterwards.
 
-Key Features:
-------------
-- ``FFTLayer``: applies a 2D FFT to a real input ``[B, H, W, C]`` and returns the
-  real and imaginary spectra concatenated along the channel axis ``[B, H, W, 2*C]``.
-- ``IFFTLayer``: inverts that representation, taking ``[B, H, W, 2*C]`` back to the
-  spatial domain ``[B, H, W, C]`` (real part of the inverse transform).
-- Fully ``keras.ops``-based (``fft2`` / ``ifft2``); both layers are stateless.
-
-The spatial transform operates on the last two axes, so inputs are permuted to
-channels-first for the transform and permuted back afterwards.
+Both layers run the transform in a float32 island regardless of the compute
+dtype policy: neither `fft2` nor `ifft2` has a float16 kernel.
 """
 
 import keras
@@ -40,7 +36,7 @@ class FFTLayer(keras.layers.Layer):
     [batch, H, W, 2*C] with float32 dtype. This is a core component of the
     Fourier-based token mixer in PW-FNet.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -92,33 +88,20 @@ class FFTLayer(keras.layers.Layer):
             representing concatenated real and imaginary frequency components.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-054
-        # The FFT runs on a float32 ISLAND, not at ``compute_dtype``.
-        # TensorFlow ships no float16 kernel for ``fft2``: under
-        # ``mixed_float16`` this call raised ``TypeError: the `real` and `imag`
-        # components have incorrect types: float16 float16 ... must be one of
-        # [tf.float32, tf.float64]``. Do NOT "fix" this by removing the cast and
-        # letting the autocast dtype through, and do NOT declare the layer
-        # float32-only -- the island costs one cast in and one cast out and the
-        # float32 result is bit-identical. See decisions.md D-054.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-054: run fft2 in a float32
+        # island, not at compute_dtype -- TensorFlow ships no float16 kernel for it. See decisions.md.
         x_permuted = keras.ops.transpose(
             keras.ops.cast(inputs, "float32"), [0, 3, 1, 2]
         )
 
-        # Keras FFT requires a tuple of (real, imag)
-        # Input is real, so imag part is zero
         real_part = x_permuted
         imag_part = keras.ops.zeros_like(real_part)
 
-        # Apply 2D FFT along spatial dimensions (last two)
         fft_real, fft_imag = keras.ops.fft2((real_part, imag_part))
 
-        # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
         fft_real_permuted = keras.ops.transpose(fft_real, [0, 2, 3, 1])
         fft_imag_permuted = keras.ops.transpose(fft_imag, [0, 2, 3, 1])
 
-        # Concatenate real and imaginary parts along the channel axis, back at
-        # the layer's own compute dtype (a no-op under the float32 policy).
         return keras.ops.cast(
             keras.ops.concatenate(
                 [fft_real_permuted, fft_imag_permuted], axis=-1
@@ -165,7 +148,7 @@ class IFFTLayer(keras.layers.Layer):
     performs the inverse operation of ``FFTLayer``, taking input of shape
     [batch, H, W, 2*C] and producing output of shape [batch, H, W, C].
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -215,21 +198,16 @@ class IFFTLayer(keras.layers.Layer):
             spatial domain.
         :rtype: keras.KerasTensor
         """
-        # Input is a concatenation of real and imaginary parts.
-        # Same float32 island as ``FFTLayer.call`` -- ``ifft2`` has no float16
-        # kernel either. See the DECISION comment there and decisions.md D-054.
+        # Same float32 island as FFTLayer.call -- ifft2 has no float16 kernel either. See decisions.md D-054.
         real_part, imag_part = keras.ops.split(
             keras.ops.cast(inputs, "float32"), 2, axis=-1
         )
 
-        # Permute: (batch, height, width, channels) -> (batch, channels, height, width)
         real_permuted = keras.ops.transpose(real_part, [0, 3, 1, 2])
         imag_permuted = keras.ops.transpose(imag_part, [0, 3, 1, 2])
 
-        # Apply 2D IFFT along spatial dimensions (last two)
         ifft_real, _ = keras.ops.ifft2((real_permuted, imag_permuted))
 
-        # Permute back: (batch, channels, height, width) -> (batch, height, width, channels)
         ifft_permuted = keras.ops.transpose(ifft_real, [0, 2, 3, 1])
 
         return keras.ops.cast(ifft_permuted, self.compute_dtype)

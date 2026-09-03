@@ -1,38 +1,13 @@
 """
-Downsample feature maps by merging patches to create a hierarchical representation.
+``PatchMerging`` halves the spatial resolution of a feature map and doubles
+its channel depth, the downsampling step used between stages of the Swin
+Transformer to build a hierarchical, multi-scale representation.
 
-This layer implements the patch merging strategy introduced in the Swin
-Transformer, a key component for building hierarchical Vision Transformers.
-While standard Vision Transformers maintain a fixed sequence length of
-patches throughout the network, this layer provides a mechanism analogous to
-pooling in Convolutional Neural Networks (CNNs), enabling the model to
-create multi-scale feature maps. This hierarchical structure allows the
-network to learn features at various granularities, from fine-grained details
-to global context, which is crucial for complex vision tasks.
-
-Architecturally, the layer performs a learned spatial downsampling. It takes an
-input feature map of shape `(H, W, C)` and produces an output of shape
-`(H/2, W/2, 2*C)`. This is accomplished through a two-step process:
-
-1.  **Patch Concatenation:** The input feature map is first partitioned into
-    non-overlapping 2x2 patches. The features from these four adjacent
-    spatial locations are then concatenated along the channel dimension. For
-    an input patch at `(2i, 2j)`, this combines information from its
-    neighbors at `(2i+1, 2j)`, `(2i, 2j+1)`, and `(2i+1, 2j+1)`. This step
-    halves the spatial dimensions while quadrupling the channel depth to `4*C`,
-    critically preserving all the information from the input, unlike lossy
-    pooling operations.
-
-2.  **Linear Projection:** A trainable linear layer (a Dense layer) then
-    projects the resulting `4*C`-dimensional feature vectors down to `2*C`
-    dimensions. This projection allows the model to learn the most effective
-    way to combine and summarize the features from the local 2x2 neighborhood.
-    A Layer Normalization is applied before this projection to stabilize the
-    training dynamics.
-
-The overall operation is a powerful, data-driven alternative to fixed
-downsampling functions like max or average pooling, forming the backbone of
-the feature pyramid structure in the Swin Transformer architecture.
+Unlike max or average pooling, it preserves every input value: it groups each
+non-overlapping 2x2 patch into a `4*C`-channel vector by concatenation, then
+projects that down to `2*C` channels with a normalized, trainable Dense
+layer. Input shape ``(H, W, C)`` maps to ``(H/2, W/2, 2*C)``; odd spatial
+dimensions are padded by one before extraction.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
@@ -59,7 +34,7 @@ class PatchMerging(keras.layers.Layer):
     analogous to strided pooling in CNNs but fully learnable. For odd
     spatial dimensions the layer automatically pads before extraction.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -122,11 +97,9 @@ class PatchMerging(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if dim <= 0:
             raise ValueError(f"dim must be positive, got {dim}")
 
-        # Store ALL configuration parameters
         self.dim = dim
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -134,7 +107,6 @@ class PatchMerging(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
         self.norm = layers.LayerNormalization(
             epsilon=1e-5,
             name="norm"
@@ -168,7 +140,6 @@ class PatchMerging(keras.layers.Layer):
         self.norm.build(merged_shape)
         self.reduction.build(merged_shape)
 
-        # Always call parent build at the end (MUST be last)
         super().build(input_shape)
 
     def call(
@@ -186,23 +157,20 @@ class PatchMerging(keras.layers.Layer):
         :rtype: keras.KerasTensor"""
         B, H, W, C = ops.shape(inputs)[0], ops.shape(inputs)[1], ops.shape(inputs)[2], ops.shape(inputs)[3]
 
-        # Handle odd dimensions by padding
         if H % 2 == 1 or W % 2 == 1:
             pad_h = H % 2
             pad_w = W % 2
             inputs = ops.pad(inputs, [[0, 0], [0, pad_h], [0, pad_w], [0, 0]])
             H, W = H + pad_h, W + pad_w
 
-        # Extract 2x2 patches and concatenate
-        x0 = inputs[:, 0::2, 0::2, :]  # Top-left
-        x1 = inputs[:, 1::2, 0::2, :]  # Bottom-left
-        x2 = inputs[:, 0::2, 1::2, :]  # Top-right
-        x3 = inputs[:, 1::2, 1::2, :]  # Bottom-right
+        # Top-left, bottom-left, top-right, bottom-right of each 2x2 patch.
+        x0 = inputs[:, 0::2, 0::2, :]
+        x1 = inputs[:, 1::2, 0::2, :]
+        x2 = inputs[:, 0::2, 1::2, :]
+        x3 = inputs[:, 1::2, 1::2, :]
 
-        # Concatenate patches: (B, H//2, W//2, 4*C)
         x = ops.concatenate([x0, x1, x2, x3], axis=-1)
 
-        # Apply normalization and projection
         x = self.norm(x, training=training)
         x = self.reduction(x, training=training)
 

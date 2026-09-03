@@ -1,26 +1,20 @@
 """
-Lossless 4D spatial-to-depth downsampling (pixel-unshuffle) with optional projection.
+``PixelUnshuffle2D`` (space-to-depth) and ``PixelShuffle2D`` (depth-to-space)
+downsample and upsample ``(B, H, W, C)`` feature maps by rearranging blocks
+between the spatial and channel dimensions.
 
-Implements the inverse of the standard pixel-shuffle (depth-to-space) on
-``(B, H, W, C)`` feature maps: a stride-``s`` non-overlapping rearrangement
-that reduces each spatial dimension by ``s`` while multiplying the channel
-dimension by ``s**2``. The rearrangement is parameter-free and information-
-preserving (no aliasing, no learnable kernel). When ``out_channels`` is set,
-a 1x1 ``Conv2D`` projects the ``s**2 * C`` output back to a target channel
-count, producing the canonical "pixel-unshuffle + 1x1" anti-alias-free
-downsample used as the gradient-highway skip path in axis B of the
-Clifford-algebra-compliant downsampling design space
-(``analyses/analysis_2026-04-30_41b5e415/summary.md``).
-
-The pre-existing ``PixelShuffle`` layer in this library operates on 3-D ViT
-token tensors ``(B, 1+H*W, C)`` and is therefore not interchangeable with
-this layer.
+Both rearrangements are parameter-free and lossless: no value is dropped,
+no kernel is learned. ``PixelUnshuffle2D`` reduces each spatial dimension by
+a factor ``s`` while multiplying channels by ``s**2``, optionally followed by
+a 1x1 ``Conv2D`` that projects back to a target channel count.
+``PixelShuffle2D`` is its exact inverse. A separate ``PixelShuffle`` layer in
+this library operates on 3-D ViT token tensors ``(B, 1+H*W, C)`` and is not
+interchangeable with either class here.
 
 References:
-    - Shi et al. (2016). "Real-Time Single Image and Video Super-Resolution
-      Using an Efficient Sub-Pixel Convolutional Neural Network".
-      https://arxiv.org/abs/1609.05158 (introduces depth-to-space; this is
-      the inverse transform).
+    - Shi et al., 2016. Real-Time Single Image and Video Super-Resolution
+      Using an Efficient Sub-Pixel Convolutional Neural Network.
+      (https://arxiv.org/abs/1609.05158)
 """
 
 import keras
@@ -47,7 +41,7 @@ class PixelUnshuffle2D(keras.layers.Layer):
     every input value. When ``out_channels`` is provided, a learnable 1x1
     ``Conv2D`` projects the rearranged tensor to ``out_channels``.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -219,14 +213,9 @@ class PixelUnshuffle2D(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-# DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace and
-# keras.ops(.nn).depth_to_space do NOT exist in Keras 3.8; this is the NHWC
-# pixel-shuffle (depth->space), the exact inverse of PixelUnshuffle2D. Do NOT
-# replace this with keras.layers.DepthToSpace / keras.ops.nn.depth_to_space
-# (neither symbol exists in this build) nor with a Lambda (breaks .keras
-# round-trip). The reshape->transpose(0,1,3,2,4,5)->reshape order is the
-# inverse of PixelUnshuffle2D.call and is pinned by the round-trip test in
-# tests/test_layers/test_pixel_shuffle_2d.py. See decisions.md D-002.
+# DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace does not
+# exist in Keras 3.8; do not replace this reshape/transpose/reshape with it,
+# with keras.ops.nn.depth_to_space, or a Lambda (breaks .keras round-trip). See decisions.md.
 @register_dl_technique("dl_techniques.layers.pixel_unshuffle")
 class PixelShuffle2D(keras.layers.Layer):
     """Lossless depth-to-space upsampling (pixel-shuffle), NHWC.

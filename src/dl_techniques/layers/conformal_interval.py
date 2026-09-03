@@ -1,45 +1,18 @@
 """
-Non-trainable conformal prediction-interval layer with frozen calibration.
+``ConformalIntervalLayer`` expands a point estimate into a split-conformal
+prediction interval using a fixed, non-trainable radius.
 
-This layer embodies the principle of baking a post-hoc statistical guarantee
-into a deployable graph, a design paradigm that separates the fitting of a
-calibration constant from its application at inference. The core idea comes from
-split conformal prediction: given any point predictor, however complex or
-opaque, a distribution-free coverage guarantee can be attached to it by
-measuring residuals on held-out data and taking an appropriate quantile as an
-interval radius. The predictor need not be probabilistic, well-specified, or even
-understood; only exchangeability between calibration and test data is required.
-
-The consequence for implementation is that this layer learns nothing. The radius
-`q` is a scalar fit host-side on a calibration split and then assigned into a
-frozen weight, so the layer's forward pass is a pure affine expansion of a point
-estimate into an interval:
-
-`mu_c = clip(mu, domain_min, domain_max)`
-`lower = mu_c - q`
-`upper = mu_c + q`
-
-Architecturally, the layer is constructed with `trainable=False` and its single
-weight `conformal_q` is created non-trainable, so no gradient ever reaches it.
-Calibration happens through an explicit `calibrate()` method that performs an
-`.assign()` outside `call()`, which keeps the statistical fitting procedure out
-of the training graph entirely. The practical payoff is packaging: appending this
-layer to a frozen denoiser yields a single `denoiser -> ConformalIntervalLayer`
-Functional model that exports a calibrated interval predictor as one `.keras`
-artifact, with the coverage guarantee travelling inside the file rather than
-alongside it as a loose constant.
-
-A single scalar radius encodes exactly one deployment noise regime.
-Conformal calibration is conditional on the distribution it was fit against, so a
-graph carrying one `q` is valid at one noise level. Per-sigma (Mondrian)
-deployment within a single graph would require a second `sigma` input and an
-index lookup against a noise grid, and is deliberately out of scope.
-
-The calibrated value is carried in `get_config` in addition to the weights
-archive. This is redundant by design: a config-only reload path such as
-`from_config` or `clone_model` bypasses the archive, and recovering an
-uncalibrated radius of zero would produce degenerate zero-width intervals that
-look valid.
+Split conformal prediction attaches a distribution-free coverage guarantee to
+any point predictor by measuring residuals on held-out data and taking a
+quantile of them as an interval radius. That radius ``q`` is fit host-side and
+assigned into a frozen weight, so the layer's forward pass is a pure affine
+expansion: ``mu_c = clip(mu, domain_min, domain_max)``, then
+``lower = mu_c - q`` and ``upper = mu_c + q``. No gradient reaches ``q``; a
+separate ``calibrate()`` method assigns the fitted value outside `call()`.
+Appending this layer to a frozen denoiser yields a single Functional model
+that exports a calibrated interval predictor as one ``.keras`` file. A single
+radius covers exactly one deployment noise regime; per-sigma (Mondrian)
+calibration within one graph is out of scope.
 
 References:
     - Vovk et al., 2005. Algorithmic Learning in a Random World. Springer.
@@ -88,17 +61,20 @@ class ConformalIntervalLayer(keras.layers.Layer):
     and that it also carries the calibrated ``q`` through ``get_config`` (see
     D-004 below).
 
-    Args:
-        q_init: Initial scalar radius used as the weight's ``Constant``
-            initializer. Defaults to ``0.0`` (uncalibrated). The real value is
-            fit host-side and either passed here or applied later via
-            :meth:`calibrate`.
-        domain_min: Lower clip bound for ``mu``. Defaults to ``0.0``.
-        domain_max: Upper clip bound for ``mu``. Defaults to ``1.0``.
-        return_mu: If ``True`` (default), ``call`` returns the 3-tuple
-            ``(mu_c, lower, upper)``; otherwise the 2-tuple ``(lower, upper)``.
-        **kwargs: Forwarded to :class:`keras.layers.Layer`. ``trainable`` is
-            forced to ``False``.
+    :param q_init: Initial scalar radius used as the weight's ``Constant``
+        initializer. Defaults to ``0.0`` (uncalibrated). The real value is
+        fit host-side and either passed here or applied later via
+        :meth:`calibrate`.
+    :type q_init: float
+    :param domain_min: Lower clip bound for ``mu``. Defaults to ``0.0``.
+    :type domain_min: float
+    :param domain_max: Upper clip bound for ``mu``. Defaults to ``1.0``.
+    :type domain_max: float
+    :param return_mu: If ``True`` (default), ``call`` returns the 3-tuple
+        ``(mu_c, lower, upper)``; otherwise the 2-tuple ``(lower, upper)``.
+    :type return_mu: bool
+    :param kwargs: Additional keyword arguments for the Layer base class.
+        ``trainable`` is forced to ``False``.
 
     Example:
         >>> import keras
@@ -108,18 +84,13 @@ class ConformalIntervalLayer(keras.layers.Layer):
         >>> model.layers[-1].calibrate(0.0488)  # radius from calibrate_per_sigma
 
     Note:
-        Per-sigma (Mondrian) deployment in ONE graph is a future extension; this
+        Per-sigma (Mondrian) deployment in one graph is a future extension; this
         layer intentionally carries a single scalar radius (one noise regime per
         exported graph).
     """
 
-    # DECISION plan_2026-07-12_e56909cd/D-001: the denoiser domain is [0, 1] and
-    # these defaults are its only statement here. Do NOT add a compat branch, a
-    # `pixel_domain` kwarg, or a from_config migration shim for models saved with
-    # the legacy [-0.5, +0.5] bounds: a bias-free (degree-1 homogeneous) denoiser
-    # cannot be domain-shifted post hoc, so such a graph is invalid end-to-end and
-    # a shim would only make it silently wrong instead of loudly wrong. Rebuild the
-    # graph around a [0, 1] denoiser. See decisions.md D-001 (INV-4, no-compat).
+    # DECISION plan_2026-07-12_e56909cd/D-001: denoiser domain is [0, 1], no compat
+    # branch or migration shim for the legacy [-0.5, +0.5] bounds -- rebuild the graph instead. See decisions.md.
     def __init__(
             self,
             q_init: float = 0.0,
@@ -145,8 +116,7 @@ class ConformalIntervalLayer(keras.layers.Layer):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the non-trainable scalar radius weight.
 
-        Args:
-            input_shape: Shape of the incoming point estimate ``mu``.
+        :param input_shape: Shape of the incoming point estimate ``mu``.
         """
         self.q = self.add_weight(
             name="conformal_q",
@@ -167,13 +137,10 @@ class ConformalIntervalLayer(keras.layers.Layer):
     ]:
         """Clip ``mu`` to the calibrated domain and emit the conformal interval.
 
-        Args:
-            mu: Point estimate (already unwrapped; deep-supervision index-0
-                unwrap stays the caller's job). Shape ``(..., domain)``.
-            training: Unused; present for the Keras call contract.
-
-        Returns:
-            ``(mu_c, mu_c - q, mu_c + q)`` when ``return_mu`` is ``True``,
+        :param mu: Point estimate (already unwrapped; deep-supervision index-0
+            unwrap stays the caller's job). Shape ``(..., domain)``.
+        :param training: Unused; present for the Keras call contract.
+        :return: ``(mu_c, mu_c - q, mu_c + q)`` when ``return_mu`` is ``True``,
             otherwise ``(mu_c - q, mu_c + q)``.
         """
         mu_c = keras.ops.clip(mu, self.domain_min, self.domain_max)
@@ -190,10 +157,9 @@ class ConformalIntervalLayer(keras.layers.Layer):
         deployment noise level) or
         :func:`~dl_techniques.utils.conformal_denoiser_intervals.conformal_quantile`.
         This method only ``.assign()``\\ s that fitted scalar into the
-        non-trainable graph weight, OUTSIDE ``call()``.
+        non-trainable graph weight, outside ``call()``.
 
-        Args:
-            q_value: The fitted scalar conformal radius.
+        :param q_value: The fitted scalar conformal radius.
         """
         self.q.assign(float(q_value))
         logger.info(f"ConformalIntervalLayer '{self.name}' calibrated q={float(q_value):.6g}")
@@ -210,13 +176,10 @@ class ConformalIntervalLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the serialization config.
 
-        Storing the CURRENT calibrated ``q`` (not just the construction-time
-        ``q_init``) is a deliberate belt-and-suspenders deviation from the
-        ``ConformalQuantileHead`` precedent, whose ``get_config`` omits the
-        calibrated value and relies solely on the ``.keras`` weights archive.
-        See decisions.md D-004: carrying ``q`` in the config too lets any
-        config-only reload path (e.g. ``from_config`` / ``clone_model``) recover
-        the fitted radius even when it bypasses the weights archive.
+        Stores the current calibrated ``q``, not just the construction-time
+        ``q_init``, so a config-only reload path (``from_config`` /
+        ``clone_model``) recovers the fitted radius even without the
+        ``.keras`` weights archive. See decisions.md D-004.
         """
         config = super().get_config()
         config.update({

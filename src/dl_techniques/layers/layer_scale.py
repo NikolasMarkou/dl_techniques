@@ -1,54 +1,21 @@
 """
-Learnable element-wise scaling for adaptive feature and pathway weighting.
+``LayerScale`` multiplies its input element-wise by a trainable parameter
+``gamma``: ``output = gamma * input``.
 
-This layer embodies the principle of minimal parameterized gating, a design
-paradigm that inserts the smallest possible learnable transformation into a
-computation graph in order to let the network modulate signal magnitude without
-altering its content. The core idea is that many architectural decisions
-normally hard-coded as fixed constants, how much of a residual branch to admit,
-how strongly to weight a feature map, are better left to gradient descent, and
-that a single multiplicative parameter is sufficient to express them. Unlike a
-`Dense` layer, no mixing occurs across positions or channels; the operation is
-purely a rescaling, so the layer can only attenuate or amplify what is already
-present.
+Two modes set the shape of ``gamma``. In ``GLOBAL`` mode ``gamma`` is a single
+scalar, uniformly scaling the whole tensor -- the form used to gate how much
+of a residual branch to admit. In ``CHANNEL`` mode ``gamma`` has one value per
+channel, giving each feature map its own static, input-independent weight.
+``gamma`` defaults to ones, so the layer starts as an identity and any
+deviation is learned rather than imposed at initialization. It defaults to a
+non-negative constraint, so it can only scale, never flip sign.
 
-Architecturally, the layer applies a trainable parameter `gamma` element-wise:
-
-`output = gamma * input`
-
-Two modes determine the shape of `gamma` and therefore the granularity of
-control:
-
-1.  **GLOBAL.** A single scalar broadcast across the entire tensor. All features
-    are scaled uniformly, so the parameter expresses one importance score for
-    the whole pathway. This is the form used to gate a residual branch, where
-    the quantity being learned is how much of the branch to contribute.
-2.  **CHANNEL.** A vector of length equal to the last dimension, with each
-    channel scaled independently. This lets the network re-weight feature maps
-    relative to one another, which amounts to a static, input-independent form
-    of channel attention.
-
-Two defaults are chosen specifically for training stability rather than
-generality. Initializing `gamma` to ones makes the layer an exact identity at
-step zero, so inserting it into an existing network leaves forward signal
-propagation and gradient magnitudes unchanged; any deviation from identity is
-something the network chose rather than something imposed at initialization.
-Constraining `gamma` to be non-negative prevents the layer from inverting the
-sign of a feature, which restricts it to the semantics of a soft gate: the
-parameter answers how much, never in which direction. Both defaults are
-overridable when a signed or non-identity scale is genuinely wanted.
-
-One implementation detail is load-bearing under mixed precision. Keras stores
-`gamma` in float32 even when the compute policy is `mixed_float16`, so the
-multiplication is cast to the input's compute dtype before it is applied.
-Without the cast, the float32-weight against float16-activation pairing is
-rejected by XLA during gradient computation as disallowed mixed precision. The
-cast is a no-op on the pure float32 path.
-
-Conceptually this is the standalone form of the learnable `gamma` found inside
-`BatchNormalization` and `LayerNormalization`, separated from any normalization
-statistics so that the scaling can be placed independently of where activations
-are normalized.
+Under a ``mixed_float16`` policy, ``gamma`` is stored in float32; `call()`
+casts it to the input's compute dtype before multiplying, since XLA rejects
+an uncast float32-weight times float16-activation multiply during the
+gradient pass. This is the standalone form of the learnable scale inside
+``BatchNormalization`` and ``LayerNormalization``, usable anywhere in a graph
+independent of a normalization layer.
 
 References:
     - Ioffe and Szegedy, 2015. Batch Normalization: Accelerating Deep Network
@@ -133,7 +100,7 @@ class LayerScale(keras.layers.Layer):
     multiplication is element-wise. The layer defaults to identity
     initialization (``ones``) and non-negative constraint for stable training.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -179,13 +146,11 @@ class LayerScale(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate and store configuration parameters
         self.multiplier_type = MultiplierType.from_string(multiplier_type)
         self.initializer = keras.initializers.get(initializer)
         self.regularizer = keras.regularizers.get(regularizer)
         self.constraint = keras.constraints.get(constraint)
 
-        # Initialize weight attribute - created in build()
         self.gamma = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -195,12 +160,9 @@ class LayerScale(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is incompatible with multiplier type.
         """
-        # Determine weight shape based on multiplier type
         if self.multiplier_type == MultiplierType.GLOBAL:
-            # Global multiplier: single scalar value broadcasted across entire tensor
             weight_shape = (1,)
         elif self.multiplier_type == MultiplierType.CHANNEL:
-            # Per-channel multiplier: one weight per channel (last dimension)
             if len(input_shape) < 2:
                 raise ValueError(
                     f"CHANNEL multiplier requires input with at least 2 dimensions, "
@@ -208,10 +170,8 @@ class LayerScale(keras.layers.Layer):
                 )
             weight_shape = (input_shape[-1],)
         else:
-            # This should never happen due to enum validation, but defensive programming
             raise ValueError(f"Invalid multiplier_type: {self.multiplier_type}")
 
-        # Create the trainable multiplier weight
         self.gamma = self.add_weight(
             name="gamma",
             shape=weight_shape,
@@ -222,7 +182,6 @@ class LayerScale(keras.layers.Layer):
             dtype=self.dtype
         )
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -241,11 +200,8 @@ class LayerScale(keras.layers.Layer):
         :return: Scaled tensor with same shape as input.
         :rtype: keras.KerasTensor
         """
-        # Element-wise multiplication using Keras ops for backend compatibility.
-        # Cast gamma (stored fp32, including under a mixed_float16 policy) to the input's
-        # compute dtype so fp16 activations multiply an fp16 scale. Without the cast the
-        # fp32-weight x fp16-activation mismatch is rejected by XLA in the gradient
-        # ("mixed precision disallowed"). No-op when dtypes already match (fp32 path).
+        # Cast gamma to the input's compute dtype; under mixed_float16 it is
+        # stored in fp32 and an uncast multiply is rejected by XLA in the gradient pass.
         return ops.multiply(inputs, ops.cast(self.gamma, inputs.dtype))
 
     def compute_output_shape(

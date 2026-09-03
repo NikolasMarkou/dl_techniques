@@ -1,52 +1,16 @@
 """
-Pixel Shuffle Layer Implementation for Vision Transformers.
+``PixelShuffle`` reduces the number of spatial tokens in a vision transformer
+sequence by folding them into the channel dimension.
 
-This module implements a pixel shuffle operation specifically designed for reducing the number
-of spatial tokens in vision_heads transformers while preserving spatial information by rearranging
-it into channel dimensions. This technique is crucial for efficient vision_heads-language models
-and multi-scale vision_heads processing.
+The input is a token sequence ``[CLS, spatial_tokens]``. The layer separates
+the CLS token, reshapes the spatial tokens into a square grid, groups each
+``scale_factor x scale_factor`` block into the channel dimension, and
+re-flattens the result into a shorter, wider-channel sequence. The CLS token
+is zero-padded to match the new channel width and re-attached. The operation
+is lossless and fully differentiable.
 
-Mathematical Foundation
------------------------
-
-The pixel shuffle operation performs a space-to-depth transformation on vision_heads transformer
-tokens arranged as [CLS_token, spatial_tokens]. Given an input with spatial dimensions
-H×W and C channels, the operation:
-
-1. Separates the CLS token from spatial tokens
-2. Reshapes spatial tokens from [B, H*W, C] to [B, H, W, C]
-3. Groups scale_factor × scale_factor spatial blocks into channel dimensions
-4. Reduces spatial dimensions by scale_factor in each direction
-5. Increases channel dimensions by scale_factor²
-
-Mathematical transformation:
-- Input:  [B, 1 + H*W, C]
-- Output: [B, 1 + (H/s)*(W/s), C*s²]
-
-where s is the scale_factor and B is batch size.
-
-Key Features
-------------
-
-- **Token-aware design**: Handles CLS tokens separately from spatial tokens
-- **Efficient processing**: Reduces computational complexity for subsequent layers
-- **Information preservation**: No information loss, only spatial rearrangement
-- **Flexible scaling**: Configurable scale factors for different reduction needs
-- **Runtime validation**: Optional validation of spatial dimension compatibility
-
-Use Cases in Vision Transformers
----------------------------------
-
-Vision-Language Models: Reducing spatial tokens before cross-attention with text
-Hierarchical Processing: Creating multi-scale representations
-Computational Efficiency: Reducing tokens before expensive operations
-
-Implementation Details
-----------------------
-
-The layer assumes spatial tokens are arranged in row-major order representing
-a square spatial grid. For scale_factor=2, each 2×2 spatial block becomes 4 channels.
-The operation preserves all information while changing memory layout.
+Spatial tokens must form a perfect square and the grid side must be evenly
+divisible by ``scale_factor``. ``scale_factor=1`` is the identity.
 """
 
 import keras
@@ -75,7 +39,7 @@ class PixelShuffle(keras.layers.Layer):
     ``scale_factor``. The CLS token is zero-padded to match the new channel
     width. The operation is lossless and fully differentiable.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -134,13 +98,11 @@ class PixelShuffle(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # Validate inputs
         if not isinstance(scale_factor, int) or scale_factor <= 0:
             raise ValueError(
                 f"scale_factor must be a positive integer, got {scale_factor}"
             )
 
-        # Store ALL configuration
         self.scale_factor = scale_factor
         self.validate_spatial_dims = validate_spatial_dims
 
@@ -149,16 +111,14 @@ class PixelShuffle(keras.layers.Layer):
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]"""
-        # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(
                 f"Expected 3D input (batch, seq_len, channels), got shape {input_shape}"
             )
 
-        # Validate spatial dimensions if enabled and known at build time
         if self.validate_spatial_dims and input_shape[1] is not None:
             seq_len = input_shape[1]
-            spatial_len = seq_len - 1  # Subtract CLS token
+            spatial_len = seq_len - 1
 
             if spatial_len <= 0:
                 raise ValueError(
@@ -166,7 +126,6 @@ class PixelShuffle(keras.layers.Layer):
                     f"got {seq_len}"
                 )
 
-            # Check if spatial_len is a perfect square
             h_float = spatial_len ** 0.5
             h = int(h_float)
             if h * h != spatial_len:
@@ -175,14 +134,12 @@ class PixelShuffle(keras.layers.Layer):
                     f"got {spatial_len} tokens"
                 )
 
-            # Check if spatial dimensions are divisible by scale_factor
             if h % self.scale_factor != 0:
                 raise ValueError(
                     f"Spatial dimension ({h}) must be divisible by scale_factor "
                     f"({self.scale_factor})"
                 )
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -198,48 +155,39 @@ class PixelShuffle(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Shuffled tensor ``[batch, 1+(H/s)*(W/s), C*s^2]``.
         :rtype: keras.KerasTensor"""
-        # Identity operation for scale_factor=1
         if self.scale_factor == 1:
             return inputs
 
-        # Get dynamic shapes
         input_shape = ops.shape(inputs)
         batch_size = input_shape[0]
         seq_len = input_shape[1]
-        channels = inputs.shape[-1]  # Known at build time
+        channels = inputs.shape[-1]
 
-        # Separate CLS token and spatial tokens
-        cls_token = inputs[:, 0:1, :]  # [batch, 1, channels]
-        spatial_tokens = inputs[:, 1:, :]  # [batch, H*W, channels]
+        cls_token = inputs[:, 0:1, :]
+        spatial_tokens = inputs[:, 1:, :]
 
-        # Calculate spatial dimensions (assuming square)
+        # Spatial tokens are assumed to form a square grid.
         spatial_len = seq_len - 1
         h_float = ops.sqrt(ops.cast(spatial_len, "float32"))
         h = ops.cast(h_float, "int32")
-        w = h  # Assume square spatial arrangement
+        w = h
 
-        # Reshape spatial tokens to 2D spatial format
         spatial_tokens = ops.reshape(spatial_tokens, [batch_size, h, w, channels])
 
-        # Apply pixel shuffle (space-to-depth operation)
         new_h = h // self.scale_factor
         new_w = w // self.scale_factor
         new_c = channels * (self.scale_factor ** 2)
 
-        # Rearrange pixels: group scale_factor x scale_factor blocks into channels
-        # [B, H, W, C] -> [B, H//s, s, W//s, s, C] -> [B, H//s, W//s, s, s, C] -> [B, H//s, W//s, s*s*C]
         shuffled = ops.reshape(spatial_tokens, [
             batch_size, new_h, self.scale_factor, new_w, self.scale_factor, channels
         ])
         shuffled = ops.transpose(shuffled, [0, 1, 3, 2, 4, 5])
         shuffled = ops.reshape(shuffled, [batch_size, new_h * new_w, new_c])
 
-        # Pad CLS token to match the new channel dimension
         padding_amount = new_c - channels
         paddings = [[0, 0], [0, 0], [0, padding_amount]]
         cls_token_expanded = ops.pad(cls_token, paddings)
 
-        # Concatenate CLS token back
         return ops.concatenate([cls_token_expanded, shuffled], axis=1)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

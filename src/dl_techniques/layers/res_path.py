@@ -1,74 +1,24 @@
 """
-A residual path to bridge the semantic gap in U-Net skip connections.
+``ResPath`` refines U-Net encoder features before they reach the decoder, to
+narrow the semantic gap in a skip connection.
 
-This layer provides a sophisticated feature refinement mechanism for the skip
-connections in U-Net-like architectures. It addresses a common challenge in
-encoder-decoder models known as the "semantic gap." This gap arises because
-features from early encoder layers are rich in low-level spatial detail but
-semantically weak, while features in the corresponding decoder layer are
-semantically strong but spatially coarse. Simply concatenating these disparate
-feature maps can lead to a semantic mismatch and hinder model performance.
-
-Architecture and Core Concepts:
-
-The ResPath layer is inserted into the skip connection path. Instead of passing
-encoder features directly to the decoder, it first processes them through a
-series of `num_blocks` identical residual blocks. The number of blocks is
-typically chosen based on the depth of the skip connection; connections from
-earlier in the encoder (with a larger semantic gap) receive more residual
+Early encoder features carry fine spatial detail but weak semantics; the
+matching decoder features carry strong semantics but coarse spatial detail.
+Concatenating them directly mismatches the two. ``ResPath`` closes that gap by
+running the skip connection through ``num_blocks`` residual blocks -- each a
+3x3 convolution, batch norm, Squeeze-and-Excitation channel recalibration, and
+a LeakyReLU activation, with an identity shortcut around the block
+(``y = F(x) + x``) -- before the features reach the decoder. Connections from
+earlier encoder stages, where the semantic gap is larger, typically use more
 blocks.
 
-Each residual block in the path is designed to progressively enrich the
-semantic content of the feature maps while preserving their high-resolution
-spatial information. A block consists of:
-
-1.  **Convolutional Layer:** A standard 3x3 convolution extracts local
-    features.
-2.  **Squeeze-and-Excitation (SE) Block:** This is a crucial component for
-    adaptive feature recalibration. The SE block learns to model
-    interdependencies between channels, selectively amplifying informative
-    feature channels while suppressing less useful ones for the given input.
-3.  **Residual Connection:** An identity shortcut adds the input of the block
-    to its output. This allows for the stable training of a deep stack of
-    blocks, ensuring that gradients can flow easily and preventing the
-    degradation of feature quality.
-
-By stacking these blocks, the ResPath effectively creates a small, dedicated
-convolutional network within the skip connection itself. This internal network
-learns to transform the low-level encoder features into a more abstract,
-semantically-aligned representation that can be more effectively fused with
-the decoder's feature maps.
-
-Mathematical Foundation:
-
-The core of each block is the residual learning principle. If `x` is the
-input to a block and `F(x)` is the transformation applied by the convolutional
-and SE layers, the output `y` is computed as:
-`y = F(x) + x`
-
-This formulation allows the block to easily learn an identity mapping (`F(x)=0`)
-if no further refinement is needed, which simplifies the optimization landscape
-for very deep models. The Squeeze-and-Excitation block performs a
-channel-wise recalibration by computing a scaling factor for each channel based
-on global information, making the feature maps more discriminative.
-
 References:
-
-The architectural pattern of using stacked residual blocks to refine skip
-connections was notably proposed in:
--   Oktay, O., et al. (2018). "Attention U-Net: Learning Where to Look for
-    the Pancreas." While this paper focused on attention gates, the idea of
-    processing skip connections gained traction.
--   The specific "ResPath" with Squeeze-and-Excitation is inspired by models
-    like ACC-UNet, which integrate advanced attention and context-aware
-    modules into the U-Net framework.
-
-The foundational concepts upon which this layer is built are:
--   Ronneberger, O., et al. (2015). "U-Net: Convolutional Networks for
-    Biomedical Image Segmentation."
--   He, K., et al. (2016). "Deep Residual Learning for Image Recognition."
--   Hu, J., et al. (2018). "Squeeze-and-Excitation Networks."
-
+    - Oktay et al., 2018. Attention U-Net: Learning Where to Look for the
+      Pancreas.
+    - Ronneberger et al., 2015. U-Net: Convolutional Networks for Biomedical
+      Image Segmentation.
+    - He et al., 2016. Deep Residual Learning for Image Recognition.
+    - Hu et al., 2018. Squeeze-and-Excitation Networks.
 """
 
 import keras
@@ -98,7 +48,7 @@ class ResPath(keras.layers.Layer):
     effectively narrowing the representation gap before concatenation
     with decoder features.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -145,21 +95,16 @@ class ResPath(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        # === Parameter Validation ===
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if num_blocks <= 0:
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
 
-        # === Store Configuration ===
         self.channels = channels
         self.num_blocks = num_blocks
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        # === CREATE all sub-layers (unbuilt) ===
-        # This follows the "Create vs. Build" golden rule.
-        # All layers are instantiated here and will be built in the build() method.
         self.conv_blocks: List[keras.layers.Conv2D] = []
         self.bn_blocks: List[keras.layers.BatchNormalization] = []
         self.se_blocks: List[SqueezeExcitation] = []
@@ -169,7 +114,7 @@ class ResPath(keras.layers.Layer):
                 filters=self.channels,
                 kernel_size=3,
                 padding='same',
-                use_bias=False, # Standard practice in blocks with BN
+                use_bias=False,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'conv_block_{i}'
@@ -196,8 +141,7 @@ class ResPath(keras.layers.Layer):
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]"""
-        # Since all internal layers maintain the same shape, we can use
-        # the initial input_shape to build all of them.
+        # All sub-layers preserve the input shape, so the same shape builds each.
         for conv, bn, se in zip(self.conv_blocks, self.bn_blocks, self.se_blocks):
             conv.build(input_shape)
             bn.build(input_shape)
@@ -206,7 +150,6 @@ class ResPath(keras.layers.Layer):
         self.final_se.build(input_shape)
         self.final_bn.build(input_shape)
 
-        # Always call the parent's build() method at the end
         super().build(input_shape)
 
     def call(
@@ -224,7 +167,6 @@ class ResPath(keras.layers.Layer):
         :rtype: keras.KerasTensor"""
         x = inputs
 
-        # Apply residual blocks sequentially
         for i in range(self.num_blocks):
             residual = x
             x = self.conv_blocks[i](x)
@@ -233,7 +175,6 @@ class ResPath(keras.layers.Layer):
             x = self.activation(x)
             x = keras.layers.add([x, residual])
 
-        # Apply final processing steps
         x = self.final_se(x)
         x = self.activation(x)
         x = self.final_bn(x, training=training)
@@ -247,7 +188,7 @@ class ResPath(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]"""
-        return input_shape  # Shape remains unchanged throughout the path
+        return input_shape
 
     def get_config(self) -> dict:
         """Return layer configuration for serialization.

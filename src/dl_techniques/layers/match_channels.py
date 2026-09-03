@@ -1,47 +1,17 @@
 """
-Parameter-free channel-count matching layer.
+``MatchChannels`` coerces an input tensor's last-axis (NHWC) channel count to
+a fixed ``target_channels``, using whichever of three parameter-free
+operations the static channel delta calls for: zero-pad when the input has
+fewer channels, slice when it has more (keeping either the leading or
+trailing channels, via ``slice_side``), or a passthrough when they already
+match.
 
-This module implements `MatchChannels`, a WEIGHTLESS Keras 3 layer that coerces an
-input tensor's channel count (last axis, NHWC) to a fixed `target_channels` using
-one of three parameter-free operations selected at build time from the static
-channel delta:
-
-- **Zero-pad** (when `in_channels < target_channels`): append `target - in` zero
-  channels along the last axis.
-- **Slice** (when `in_channels > target_channels`): keep `target` channels along
-  the last axis. The `slice_side` keyword selects which end is kept: `'head'`
-  (default, current behavior) keeps the LEADING channels (`inputs[..., :target]`);
-  `'tail'` keeps the TRAILING channels (`inputs[..., -target:]`).
-- **Passthrough** (when `in_channels == target_channels`): return the input
-  unchanged.
-
-Motivation
-----------
-
-The bias-free ConvUNeXt denoiser matches channel counts between levels with 1x1
-convolutions (`Conv2D(kernel_size=1, use_bias=False)`). This layer is the
-parameter-free replacement used by the `--zero-pad-channels` variant: zero-pad on
-channel INCREASE (encoder / bottleneck), slice on channel DECREASE (decoder).
-
-Bias-free / homogeneity property
---------------------------------
-
-Both implemented operations are LINEAR and degree-1 (positively) HOMOGENEOUS:
-
-- Zero-padding is concatenation with a constant-zero tensor:
-  `pad(alpha * x) = [alpha * x, 0] = alpha * [x, 0] = alpha * pad(x)`.
-- Slicing is a coordinate projection:
-  `slice(alpha * x) = alpha * slice(x)`.
-
-Neither adds learnable parameters and neither introduces an additive bias /
-offset. Therefore the layer preserves the bias-free, scale-homogeneous invariant
-of the denoiser (`f(alpha * x) = alpha * f(x)`): inserting it leaves whatever
-homogeneity the surrounding network has intact, and it is invisible to a
-`use_bias` / `LayerNormalization.center` / GRN-`beta` bias-free audit because it
-holds no weights at all.
-
-Precedent: `layers/pixel_shuffle.py` uses `keras.ops.pad` for channel padding;
-this layer follows the same backend-agnostic `keras.ops` style.
+The bias-free ConvUNeXt denoiser normally matches channel counts between
+levels with a 1x1 convolution; this layer is the parameter-free replacement
+used by its ``--zero-pad-channels`` variant. Both zero-padding and slicing
+are linear and degree-1 homogeneous (``f(alpha * x) = alpha * f(x)``), and
+neither adds a weight or a bias, so inserting this layer preserves whatever
+bias-free, scale-homogeneous invariant the surrounding network has.
 """
 
 import keras
@@ -57,17 +27,17 @@ class MatchChannels(keras.layers.Layer):
 
     The layer matches the last-axis (NHWC channel) dimension of the input to a
     fixed ``target_channels`` using a parameter-free operation chosen at build
-    time from the static channel delta: zero-pad if the input has FEWER channels,
-    slice if it has MORE (keeping either end via ``slice_side``), passthrough if
+    time from the static channel delta: zero-pad if the input has fewer channels,
+    slice if it has more (keeping either end via ``slice_side``), passthrough if
     equal.
 
-    It holds NO weights and adds NO bias / offset. Both zero-padding and slicing
+    It holds no weights and adds no bias or offset. Both zero-padding and slicing
     are linear and degree-1 homogeneous (``f(alpha * x) = alpha * f(x)``), so the
     layer preserves the bias-free, scale-homogeneous invariant of a denoiser into
     which it is inserted. A tail slice is equally a coordinate projection, so it is
     just as weightless and degree-1 homogeneous as a head slice.
 
-    **Architecture Overview:**
+    Architecture:
 
     .. code-block:: text
 
@@ -97,16 +67,18 @@ class MatchChannels(keras.layers.Layer):
                 │  Output [B, H, W, target_C]   │
                 └───────────────────────────────┘
 
-    Args:
-        target_channels: Positive integer. The desired number of output channels
-            (size of the last axis). Must be ``> 0``.
-        slice_side: Which end to keep when the input has MORE channels than
-            ``target_channels``. ``'head'`` (default) keeps the LEADING channels
-            (``inputs[..., :target]``, the original behavior); ``'tail'`` keeps the
-            TRAILING channels (``inputs[..., -target:]``). Ignored on the zero-pad
-            and passthrough branches. Must be ``'head'`` or ``'tail'``.
-        **kwargs: Standard ``keras.layers.Layer`` keyword arguments (e.g.
-            ``name``, ``dtype``).
+    :param target_channels: Desired number of output channels (size of the
+        last axis). Must be positive.
+    :type target_channels: int
+    :param slice_side: Which end to keep when the input has more channels than
+        ``target_channels``. ``'head'`` (default) keeps the leading channels
+        (``inputs[..., :target]``); ``'tail'`` keeps the trailing channels
+        (``inputs[..., -target:]``). Ignored on the zero-pad and passthrough
+        branches.
+    :type slice_side: str
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :raises ValueError: If ``target_channels <= 0`` or ``slice_side`` is not
+        one of ``'head'`` / ``'tail'``.
 
     Input shape:
         Rank-4 tensor ``(batch, height, width, channels)`` (NHWC). Batch and
@@ -116,10 +88,6 @@ class MatchChannels(keras.layers.Layer):
     Output shape:
         ``(batch, height, width, target_channels)`` — identical to the input
         except the last axis is exactly ``target_channels``.
-
-    Raises:
-        ValueError: If ``target_channels <= 0`` or ``slice_side`` is not one of
-            ``'head'`` / ``'tail'``.
 
     Example:
         >>> import numpy as np, keras
@@ -150,51 +118,33 @@ class MatchChannels(keras.layers.Layer):
 
         self.target_channels = int(target_channels)
         self.slice_side = slice_side
-        # Recorded in build() from the concrete input shape; the channel delta is
-        # static (build-time), so no per-call shape inference of the delta is needed.
+        # Recorded in build() from the concrete input shape.
         self._in_channels: Optional[int] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Record the static input channel count. Creates NO weights.
+        """Record the static input channel count. Creates no weights.
 
-        Args:
-            input_shape: Shape tuple of the input tensor; the last entry is the
-                input channel count and must be known (not ``None``).
+        :param input_shape: Shape tuple of the input tensor; the last entry
+            is the input channel count and must be known (not ``None``).
         """
         self._in_channels = int(input_shape[-1])
-        # Weightless by design: the channel delta is a static integer, so the
-        # pad / slice / passthrough decision needs no trainable state.
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Match channels via zero-pad, slice, or passthrough.
 
-        Args:
-            inputs: Rank-4 NHWC input tensor.
-
-        Returns:
-            Tensor with the last axis resized to ``target_channels``.
+        :param inputs: Rank-4 NHWC input tensor.
+        :return: Tensor with the last axis resized to ``target_channels``.
         """
         if self._in_channels == self.target_channels:
-            # Passthrough: channels already match (no-op).
             return inputs
 
         if self._in_channels < self.target_channels:
-            # Zero-pad the channel axis. delta is a static int; pad amounts are
-            # static while batch/spatial dims stay dynamic (keras.ops.pad handles
-            # dynamic leading dims). Concatenation-with-zeros is degree-1
-            # homogeneous and bias-free.
             delta = self.target_channels - self._in_channels
             return keras.ops.pad(inputs, [[0, 0], [0, 0], [0, 0], [0, delta]])
 
-        # in_channels > target_channels: slice. A coordinate projection is degree-1
-        # homogeneous and bias-free regardless of which end is kept.
-        # DECISION plan_2026-06-26_0ec1a304/D-002: the 'tail' branch is a real,
-        # registered, serialization-safe primitive (not a Lambda closure) because
-        # the bfconvunext --extra-zero-output-channels output must keep the LAST
-        # `output_channels` channels. Do NOT replace this with a Lambda slice (does
-        # not round-trip across processes) nor add a separate SliceLastChannels
-        # layer (duplicates channel-slice logic MatchChannels already owns).
+        # DECISION plan_2026-06-26_0ec1a304/D-002: 'tail' stays a real primitive,
+        # not a Lambda -- a Lambda slice does not round-trip .keras across processes. See decisions.md.
         if self.slice_side == "tail":
             return inputs[..., -self.target_channels :]
         return inputs[..., : self.target_channels]
@@ -204,22 +154,16 @@ class MatchChannels(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         """Replace the last dimension with ``target_channels``.
 
-        Args:
-            input_shape: Input shape tuple.
-
-        Returns:
-            Output shape tuple identical to the input except the last axis is
-            ``target_channels``.
+        :param input_shape: Input shape tuple.
+        :return: Output shape tuple identical to the input except the last
+            axis is ``target_channels``.
         """
         return (*input_shape[:-1], self.target_channels)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the serialization config.
 
-        Returns:
-            Config dict including ``target_channels`` and ``slice_side``.
-            ``_in_channels`` is re-derived in ``build`` from the input shape, so it
-            is not stored.
+        :return: Config dict including ``target_channels`` and ``slice_side``.
         """
         config = super().get_config()
         config.update(
