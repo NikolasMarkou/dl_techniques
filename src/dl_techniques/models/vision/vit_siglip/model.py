@@ -63,188 +63,187 @@ FFNType = Literal['mlp', 'swiglu', 'differential', 'glu', 'geglu', 'residual', '
 
 @register_dl_technique("dl_techniques.models.vit_siglip.model")
 class SigLIPVisionTransformer(keras.Model):
-    """
-    Vision Transformer with a two-stage convolutional patch-embedding stem.
+    """Vision Transformer with a two-stage convolutional patch-embedding stem.
 
-    The `SigLIP` in the name is historical and inaccurate -- SigLIP is a sigmoid
-    contrastive LOSS, not a patch-embedding scheme, and its own tower uses a
-    single-conv stem, no CLS token and a MAP head, none of which this class shares.
-    See the module docstring. What this class builds is a standard pre-norm ViT
-    encoder whose patch embedding is split into two strided convolutions, with every
-    sub-component created through the dl_techniques factories.
+    The `SigLIP` in the name is historical; SigLIP itself is a sigmoid
+    contrastive loss, not a patch-embedding scheme, and its own tower uses a
+    single-conv stem, no CLS token and a MAP head, none of which this class
+    shares (see the module docstring). This class builds a standard pre-norm
+    ViT encoder whose patch embedding is split into two strided
+    convolutions, with every sub-component created through the
+    dl_techniques factories.
 
-    **Intent**: Provide a configurable SigLIP Vision Transformer implementation that leverages
-    the dl_techniques framework's modular components while following modern Keras 3 best
-    practices for robust serialization and deployment.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input Images (batch, height, width, channels)
-           ↓
-    Two-Stage Patch Embedding:
-      Conv2D(embed_dim//2) → LayerNorm → GELU → Conv2D(embed_dim)
-           ↓
-    Reshape to Patches (batch, num_patches, embed_dim)
-           ↓
-    Add CLS Token → (batch, seq_len, embed_dim)
-           ↓
-    PositionalEmbedding + Dropout
-           ↓
-    TransformerLayer × num_layers
-           ↓
-    Final Normalization (only for pre-norm)
-           ↓
-    [Classification Head] OR [Feature Extraction]
-           ↓
-    Output (shape depends on configuration)
-    ```
+    .. code-block:: text
 
-    **Scale Configurations**:
-    - **Tiny**: 192d, 3h, 12L - Efficient for small datasets/mobile deployment
-    - **Small**: 384d, 6h, 12L - Balanced performance and efficiency
-    - **Base**: 768d, 12h, 12L - Standard configuration
-    - **Large**: 1024d, 16h, 24L - High performance for large datasets
-    - **Huge**: 1280d, 16h, 32L - Maximum capacity for demanding tasks
+        ┌──────────────────────────────────────┐
+        │  Input [B, H, W, C]                  │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  Conv2D(embed_dim/2, k=s=patch/2)    │
+        │  → LayerNorm → GELU                  │
+        │  → Conv2D(embed_dim, k=s=2)          │
+        │  patch_size must be even             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  reshape to [B, N, D]                │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  prepend CLS token → [B, N+1, D]     │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  + learned positional embedding      │
+        │  → Dropout(pos_dropout_rate)         │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  TransformerLayer × num_layers       │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  final norm ('pre' only)             │
+        └───────────────┬──────────────────────┘
+                        │
+            ┌───────────┴────────────┐
+            ▼                        ▼
+        include_top=True        include_top=False
+            │                        │
+        ┌───────────────┐   ┌────────────────────────────┐
+        │ x[:, 0]       │   │ pooling='cls'  → x[:, 0]   │
+        │ [Dropout]     │   │ pooling='mean' → mean over │
+        │ Dense(classes)│   │ pooling='max'  → max  over │
+        │               │   │   the whole sequence       │
+        │ → [B, classes]│   │ pooling=None → [B,N+1,D]   │
+        └───────────────┘   └────────────────────────────┘
 
-    **Key Differences from Standard ViT**:
-    - Two-stage patch embedding for better feature extraction
-    - SigLIP-optimized architecture for multimodal learning
-    - Enhanced patch tokenization process
+    Scales:
 
-    Args:
-        input_shape: Tuple[int, int, int], input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-            Example: (224, 224, 3) for ImageNet.
-        num_classes: Integer, number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        scale: SigLIPScale, model scale configuration determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'. Defaults to 'base'.
-        patch_size: Union[int, Tuple[int, int]], size of patches to extract from images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-            Defaults to 16.
-        include_top: Boolean, whether to include classification head.
-            When False, model acts as feature extractor. Defaults to True.
-        pooling: Optional[PoolingMode], pooling strategy for feature extraction.
-            Only used when include_top=False:
-            - 'cls': Use CLS token representation
-            - 'mean': Global average pooling over sequence
-            - 'max': Global max pooling over sequence
-            - None: Return full sequence (batch, seq_len, embed_dim)
-            Defaults to None.
-        dropout_rate: Float, dropout rate for general regularization.
-            Applied in transformer layers and classification head. Defaults to 0.0.
-        attention_dropout_rate: Float, dropout rate for attention weights.
-            Applied within attention mechanisms. Defaults to 0.0.
-        pos_dropout_rate: Float, dropout rate after positional embeddings.
-            Defaults to 0.0.
-        kernel_initializer: Union[str, Initializer], weight initializer for all layers.
-            Defaults to 'glorot_uniform'.
-        kernel_regularizer: Optional[Regularizer], weight regularizer for all layers.
-            Defaults to None.
-        bias_initializer: Union[str, Initializer], bias initializer for all layers.
-            Defaults to 'zeros'.
-        bias_regularizer: Optional[Regularizer], bias regularizer for all layers.
-            Defaults to None.
-        normalization_type: NormalizationType, normalization layer type.
-            Uses factory for consistent creation. Available options:
-            - 'layer_norm': Standard layer normalization (default)
-            - 'rms_norm': Root Mean Square normalization
-            - 'band_rms': Band-constrained RMS normalization
-            - 'dynamic_tanh': Dynamic Tanh normalization
-            Defaults to 'layer_norm'.
-        normalization_position: Literal['pre', 'post'], normalization position in transformer.
-            - 'post': Post-normalization (original Transformer)
-            - 'pre': Pre-normalization (often more stable)
-            Defaults to 'post'.
-        ffn_type: FFNType, feed-forward network type for transformer layers.
-            Uses factory for consistent creation. Available options:
-            - 'mlp': Standard MLP with intermediate expansion (default)
-            - 'swiglu': SwiGLU activation with gating mechanism
-            - 'geglu': GELU-based Gated Linear Unit
-            Defaults to 'mlp'.
-        activation: Union[str, Callable], activation function for FFN.
-            Defaults to 'gelu'.
-        name: Optional[str], model name. Auto-generated if None.
-        **kwargs: Additional arguments for Model base class.
+    .. code-block:: text
+
+        scale     embed_dim   heads   layers   mlp_ratio
+        tiny         192        3       12        4.0
+        small        384        6       12        4.0
+        base         768       12       12        4.0
+        large       1024       16       24        4.0
+        huge        1280       16       32        4.0
+
+    :param input_shape: Input image shape ``(height, width, channels)``. Must
+        have positive dimensions divisible by ``patch_size``. Defaults to
+        ``(224, 224, 3)``.
+    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of output classes. Must be positive. Only used
+        when ``include_top=True``. Defaults to 1000.
+    :type num_classes: int
+    :param scale: Model scale, one of ``'tiny'``, ``'small'``, ``'base'``,
+        ``'large'``, ``'huge'``. Defaults to ``'base'``.
+    :type scale: SigLIPScale
+    :param patch_size: Patch size; an int gives square patches. Must be even
+        in both dimensions and divide the image dimensions. Defaults to 16.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param include_top: Whether to include the classification head. When
+        False the model is a feature extractor. Defaults to True.
+    :type include_top: bool
+    :param pooling: Pooling strategy, used only when ``include_top=False``:
+        ``'cls'`` reads the CLS token, ``'mean'``/``'max'`` pool the whole
+        sequence including the CLS token, ``None`` returns the full
+        sequence. Defaults to None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate, applied in the transformer
+        layers and before the classification head. Defaults to 0.0.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Dropout rate for attention weights.
+        Defaults to 0.0.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Dropout rate after the positional embedding.
+        Defaults to 0.0.
+    :type pos_dropout_rate: float
+    :param kernel_initializer: Weight initializer for every layer. Defaults
+        to ``'glorot_uniform'``.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Weight regularizer for every layer. Defaults
+        to None.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer for every layer. Defaults to
+        ``'zeros'``.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer for every layer. Defaults to
+        None.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier passed to
+        ``create_normalization_layer``. Defaults to ``'layer_norm'``.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'post'`` (default) or ``'pre'``. The
+        final normalization layer is created only when ``'pre'``.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier passed to the factory.
+        Defaults to ``'mlp'``.
+    :type ffn_type: FFNType
+    :param activation: Activation for the FFN. Defaults to ``'gelu'``.
+    :type activation: Union[str, callable]
+    :param name: Model name; auto-generated as
+        ``siglip_vision_transformer_<scale>`` when None.
+    :type name: Optional[str]
+    :param kwargs: Additional keyword arguments for the ``Model`` base class.
+
+    :raises ValueError: If ``input_shape`` is not a positive 3-tuple, if
+        ``patch_size`` is invalid, odd, or does not divide the image
+        dimensions, if ``num_classes`` is not positive, if ``scale`` or
+        ``pooling`` is unrecognized, or if any dropout rate leaves
+        ``[0, 1]``.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`
-
-        Requirements:
-        - height and width must be divisible by corresponding patch dimensions
-        - All dimensions must be positive
-        - Channels typically 1 (grayscale) or 3 (RGB)
+        4D tensor ``(batch_size, height, width, channels)``, with height and
+        width divisible by the corresponding patch dimensions.
 
     Output shape:
-        Depends on configuration:
+        - ``include_top=True``: ``(batch_size, num_classes)``, logits with no
+          softmax applied.
+        - ``include_top=False, pooling='cls'|'mean'|'max'``:
+          ``(batch_size, embed_dim)``.
+        - ``include_top=False, pooling=None``:
+          ``(batch_size, num_patches + 1, embed_dim)``.
 
-        **Classification mode** (include_top=True):
-        - Shape: `(batch_size, num_classes)`
-        - Values: Logits for each class (no softmax applied)
-
-        **Feature extraction mode** (include_top=False):
-        - pooling='cls': `(batch_size, embed_dim)` - CLS token features
-        - pooling='mean': `(batch_size, embed_dim)` - Mean-pooled features
-        - pooling='max': `(batch_size, embed_dim)` - Max-pooled features
-        - pooling=None: `(batch_size, seq_len, embed_dim)` - Full sequence
-
-    Attributes:
-        embed_dim: Integer, embedding dimension determined by scale.
-        num_heads: Integer, number of attention heads determined by scale.
-        num_layers: Integer, number of transformer layers determined by scale.
-        num_patches: Integer, total number of image patches.
-        max_seq_len: Integer, maximum sequence length (num_patches + 1 for CLS).
-        siglip_patch_embed: the two-stage patch-embedding layers. The attribute
-            name keeps the `siglip_` prefix for source compatibility; the scheme is
-            NOT SigLIP's (see the module docstring).
-        pos_embed: PositionalEmbedding layer for sequence position encoding.
-        transformer_layers: List of TransformerLayer instances.
-        norm: Final normalization layer.
-        head: Optional Dense layer for classification.
+    :ivar embed_dim: Embedding dimension, fixed by ``scale``.
+    :vartype embed_dim: int
+    :ivar num_heads: Attention head count, fixed by ``scale``.
+    :vartype num_heads: int
+    :ivar num_layers: Transformer depth, fixed by ``scale``.
+    :vartype num_layers: int
+    :ivar num_patches: Total number of image patches.
+    :vartype num_patches: int
+    :ivar max_seq_len: ``num_patches + 1``, counting the CLS token.
+    :vartype max_seq_len: int
+    :ivar siglip_patch_embed: The two-stage patch-embedding layers. The
+        attribute name keeps the ``siglip_`` prefix for source
+        compatibility; the scheme is not SigLIP's own (see the module
+        docstring).
+    :vartype siglip_patch_embed: keras.Sequential
+    :ivar transformer_layers: The encoder stack.
+    :vartype transformer_layers: list[TransformerLayer]
 
     Example:
-        ```python
-        # Standard SigLIP ViT-Base for ImageNet classification
-        model = SigLIPVisionTransformer(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base'
-        )
+        .. code-block:: python
 
-        # Feature extractor with CLS token
-        feature_model = SigLIPVisionTransformer(
-            input_shape=(224, 224, 3),
-            scale='base',
-            include_top=False,
-            pooling='cls'
-        )
+            model = SigLIPVisionTransformer(
+                input_shape=(224, 224, 3),
+                num_classes=1000,
+                scale='base'
+            )
 
-        # Custom configuration with modern components
-        custom_model = SigLIPVisionTransformer(
-            input_shape=(384, 384, 3),
-            num_classes=10,
-            scale='small',
-            patch_size=16,
-            normalization_type='rms_norm',
-            normalization_position='pre',
-            ffn_type='swiglu',
-            dropout_rate=0.1,
-            attention_dropout_rate=0.1
-        )
-
-        # Compile for training
-        model.compile(
-            optimizer='adamw',
-            loss='sparse_categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        ```
+            feature_model = SigLIPVisionTransformer(
+                input_shape=(224, 224, 3),
+                scale='base',
+                include_top=False,
+                pooling='cls'
+            )
 
     Note:
-        This implementation follows modern Keras 3 patterns with proper serialization
-        support. All sub-components are created using dl_techniques factories for
-        consistency and configurability. The two-stage patch embedding is what
-        differentiates this from a standard ViT -- it is not inherited from SigLIP.
+        The head emits logits, so compile with ``from_logits=True``.
     """
 
     # Scale configurations: [embed_dim, num_heads, num_layers, mlp_ratio]
@@ -311,11 +310,8 @@ class SigLIPVisionTransformer(keras.Model):
             if patch_h <= 0 or patch_w <= 0:
                 raise ValueError(f"patch_size dimensions must be positive, got {patch_size}")
 
-        # The two-stage SigLIP stem is Conv2D(k=s=patch//2) then Conv2D(k=s=2),
-        # so its total stride is 2*(patch//2) -- equal to `patch` only when
-        # `patch` is EVEN. With an odd patch size the stem emits a different
-        # token count than the declared `num_patches`, and `call`'s reshape dies
-        # with an opaque error at the first forward instead of here.
+        # The two-stage stem has total stride 2*(patch//2), which equals patch
+        # only when patch is even; an odd patch size would surface as an opaque reshape error later.
         if patch_h % 2 != 0 or patch_w % 2 != 0:
             raise ValueError(
                 f"patch_size must be even in both dimensions, got {patch_size}: "
@@ -381,8 +377,8 @@ class SigLIPVisionTransformer(keras.Model):
         if self.num_patches <= 0:
             raise ValueError(f"Number of patches must be positive, got {self.num_patches}")
 
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        # Using factories for consistent component creation
+        # Create all sub-layers in __init__; they are unbuilt until build() runs.
+        # Uses factories for consistent component creation.
 
         # Two-stage patch embedding -- this module's own, not SigLIP's (module docstring)
         self.siglip_patch_embed = self._create_siglip_patch_embedding()
@@ -411,17 +407,8 @@ class SigLIPVisionTransformer(keras.Model):
                 attention_dropout_rate=self.attention_dropout_rate,
                 activation=self.activation,
                 use_bias=True,
-                # DECISION plan-2026-08-23T091307-9a110062/D-560
-                # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
-                # "simplify" this back to `self.kernel_initializer`: one seedless
-                # initializer INSTANCE replays its draw, so every same-shape kernel
-                # it reaches is bit-identical. MEASURED at HEAD before this change,
-                # on a seeded 12-layer build: 132 of 264 same-shape kernel pairs at
-                # `max|delta| = 0.0` -- all 12
-                # `transformer_layer_*/attention/cross_attention/qkv/kernel` were
-                # pairwise identical (66 pairs), likewise the 12 `.../proj/kernel`.
-                # `seed=` is not the discriminator; instance identity is.
-                # See decisions.md D-560 (and D-540 for the first three ports).
+                # DECISION plan-2026-08-23T091307-9a110062/D-560: each block gets its own
+                # clone_initializer() copy; a shared instance replays one draw across all blocks. See decisions.md.
                 kernel_initializer=clone_initializer(self.kernel_initializer),
                 bias_initializer=clone_initializer(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
@@ -455,10 +442,8 @@ class SigLIPVisionTransformer(keras.Model):
             )
 
         # Feature-extraction pooling via the shared SequencePooling layer.
-        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling (CLS INCLUDED in
-        # mean/max — no exclude_positions, byte-identical to global_pool(x)); this INTENTIONALLY differs
-        # from vit (which excludes CLS) — divergence preserved + now explicit. Do NOT add
-        # exclude_positions=[0] here (would drop the CLS token and change outputs).
+        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling with the CLS
+        # token included in mean/max (no exclude_positions); adding it would drop CLS from the output. See decisions.md.
         self.pool = None
         if self.pooling == "cls":
             self.pool = SequencePooling(strategy="cls", name="seq_pool")
@@ -472,15 +457,10 @@ class SigLIPVisionTransformer(keras.Model):
         logger.info(f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def _create_siglip_patch_embedding(self) -> keras.Sequential:
-        """
-        Create the two-stage patch embedding (not SigLIP's -- see module docstring).
+        """Build the two-stage patch-embedding stem (see the module docstring).
 
-        The SigLIP approach uses a two-stage convolution:
-        1. First stage: Coarse-grained patching with intermediate dimension
-        2. Second stage: Refinement to final embedding dimension
-
-        Returns:
-            Sequential model implementing two-stage patch embedding.
+        :return: Sequential model implementing the two-stage patch embedding.
+        :rtype: keras.Sequential
         """
         patch_h, patch_w = self.patch_size
 
@@ -498,19 +478,9 @@ class SigLIPVisionTransformer(keras.Model):
                 bias_regularizer=self.bias_regularizer,
                 name='patch_embed_conv1'
             ),
-            # DECISION plan-2026-08-17T183311-79c63e38/D-028
-            # Routed through the factory rather than constructed directly, so
-            # this norm's `epsilon` comes from the SAME source as the model's
-            # final norm (`create_normalization_layer`, which `setdefault`s
-            # 1e-6). Built directly it inherited Keras' `LayerNormalization`
-            # default of 1e-3 — a 100x divergence from the other normalization
-            # in this very file, invisible to every shape and dtype assertion.
-            # WHAT NOT TO DO: do not "simplify" this back to
-            # `layers.LayerNormalization(...)`, and do not restate 1e-6 as a
-            # literal here; the factory is the one place that value lives.
-            # The type is pinned to 'layer_norm' (not `self.normalization_type`)
-            # because that is what this stem shipped with — this decision is
-            # about epsilon only. See decisions.md D-028.
+            # DECISION plan-2026-08-17T183311-79c63e38/D-028: route through the factory,
+            # not layers.LayerNormalization directly; that default eps=1e-3 is a 100x divergence
+            # from the model's final norm (1e-6). See decisions.md.
             create_normalization_layer('layer_norm', name='patch_embed_norm1'),
             layers.Activation('gelu', name='patch_embed_activation1'),
 
@@ -530,10 +500,15 @@ class SigLIPVisionTransformer(keras.Model):
         ], name='siglip_patch_embed')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the model and all its sub-layers.
+        """Create the CLS token and explicitly build every sub-layer.
 
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
+        Each sub-layer is built in computational order rather than left to a
+        lazy first call, so the weight tree materializes on ``.keras``
+        reload.
+
+        :param input_shape: Input shape ``(batch, height, width, channels)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if self.built:
             return
@@ -586,22 +561,24 @@ class SigLIPVisionTransformer(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through the SigLIP Vision Transformer.
+        """Forward pass through the SigLIP Vision Transformer.
 
-        Args:
-            inputs: Input tensor (batch_size, height, width, channels).
-            training: Whether in training mode.
-
-        Returns:
-            Model output tensor. Shape depends on include_top and pooling settings.
+        :param inputs: Input tensor of shape
+            ``(batch_size, height, width, channels)``.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode.
+        :type training: Optional[bool]
+        :return: Model output. ``(batch, num_classes)`` logits with
+            ``include_top=True``; otherwise the pooled features
+            ``(batch, embed_dim)`` or, when ``pooling is None``, the full
+            sequence ``(batch, max_seq_len, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(inputs)[0]
 
-        # Two-stage patch embedding (module docstring: not SigLIP's scheme)
-        x = self.siglip_patch_embed(inputs, training=training)  # (batch_size, patch_h, patch_w, embed_dim)
+        # Shape: (batch_size, patch_h, patch_w, embed_dim).
+        x = self.siglip_patch_embed(inputs, training=training)
 
-        # Reshape to sequence format
         patch_h, patch_w = self.patch_size
         img_h, img_w = self.input_shape_config[:2]
         num_patches_h = img_h // patch_h
@@ -609,73 +586,60 @@ class SigLIPVisionTransformer(keras.Model):
 
         x = ops.reshape(x, [batch_size, num_patches_h * num_patches_w, self.embed_dim])
 
-        # Add CLS token to sequence
+        # Prepend the CLS token: (batch_size, seq_len, embed_dim).
         cls_tokens = ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = ops.concatenate([cls_tokens, x], axis=1)  # (batch_size, seq_len, embed_dim)
+        x = ops.concatenate([cls_tokens, x], axis=1)
 
-        # Add positional embeddings (includes dropout)
+        # Positional embedding includes its own dropout.
         x = self.pos_embed(x, training=training)
 
-        # Apply transformer layers
         for layer in self.transformer_layers:
             x = layer(x, training=training)
 
-        # Apply final normalization (only for pre-norm)
         if self.norm is not None:
             x = self.norm(x, training=training)
 
-        # Handle different output modes
         if self.include_top:
-            # Extract CLS token for classification
-            cls_token = x[:, 0, :]  # (batch_size, embed_dim)
+            cls_token = x[:, 0, :]
             if self.head_dropout is not None:
                 cls_token = self.head_dropout(cls_token, training=training)
-            x = self.head(cls_token)  # (batch_size, num_classes)
+            x = self.head(cls_token)
             return x
         else:
-            # Feature extraction mode
-            # cls / mean / max all route through SequencePooling. Here the pool is built
-            # WITHOUT exclude_positions, so the CLS token is INCLUDED in mean/max
-            # (byte-identical to the previous GlobalAveragePooling1D/GlobalMaxPooling1D over
-            # the full sequence x). This intentionally differs from vit.
+            # cls / mean / max all route through SequencePooling, built without
+            # exclude_positions, so the CLS token is included in mean/max.
             if self.pool is not None:
-                return self.pool(x)  # (batch_size, embed_dim)
-            # pooling is None -> return the full transformer output
-            return x  # (batch_size, seq_len, embed_dim)
+                return self.pool(x)
+            return x
 
     def get_cls_token(self, features: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Extract CLS token from vision_heads features for classification tasks.
+        """Return the CLS token from forward-pass features.
 
-        Args:
-            features: Vision features from forward pass.
-
-        Returns:
-            CLS token of shape [batch_size, embed_dim].
+        :param features: Vision features from the forward pass.
+        :type features: keras.KerasTensor
+        :return: CLS token of shape ``(batch_size, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        return features[:, 0, :]  # First token is CLS
+        return features[:, 0, :]
 
     def get_patch_tokens(self, features: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Extract patch tokens from vision_heads features for dense prediction tasks.
+        """Return the patch tokens from forward-pass features, dropping the CLS token.
 
-        Args:
-            features: Vision features from forward pass.
-
-        Returns:
-            Patch tokens of shape [batch_size, num_patches, embed_dim].
+        :param features: Vision features from the forward pass.
+        :type features: keras.KerasTensor
+        :return: Patch tokens of shape ``(batch_size, num_patches, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
-        return features[:, 1:, :]  # Skip CLS token
+        return features[:, 1:, :]
 
     def get_spatial_features(self, features: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Reshape patch tokens back to spatial format for dense tasks.
+        """Reshape patch tokens back to a spatial grid, for dense prediction tasks.
 
-        Args:
-            features: Vision features from forward pass.
-
-        Returns:
-            Spatial features of shape [batch_size, patch_height, patch_width, embed_dim].
+        :param features: Vision features from the forward pass.
+        :type features: keras.KerasTensor
+        :return: Spatial features of shape
+            ``(batch_size, patch_height, patch_width, embed_dim)``.
+        :rtype: keras.KerasTensor
         """
         patch_tokens = self.get_patch_tokens(features)
         batch_size = ops.shape(patch_tokens)[0]
@@ -691,14 +655,13 @@ class SigLIPVisionTransformer(keras.Model):
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape.
+        """Compute the output shape for a given input shape.
 
-        Args:
-            input_shape: Input tensor shape.
-
-        Returns:
-            Output shape tuple.
+        :param input_shape: Input tensor shape.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape, depending on ``include_top`` and ``pooling``.
+        :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if len(input_shape) < 4:
             raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
@@ -721,25 +684,27 @@ class SigLIPVisionTransformer(keras.Model):
             input_shape: Tuple[int, int, int] = (224, 224, 3),
             **kwargs: Any
     ) -> "SigLIPVisionTransformer":
-        """
-        Create a SigLIP vision transformer from a predefined variant.
+        """Create a SigLIPVisionTransformer model from a predefined variant.
 
-        Args:
-            variant: One of 'tiny', 'small', 'base', 'large', 'huge'.
-            num_classes: Number of output classes.
-            input_shape: Input image shape (height, width, channels).
-            **kwargs: Additional arguments passed to the constructor.
-
-        Returns:
-            SigLIPVisionTransformer model instance.
-
-        Raises:
-            ValueError: If the variant is not recognized.
+        :param variant: One of ``'tiny'``, ``'small'``, ``'base'``,
+            ``'large'``, ``'huge'``.
+        :type variant: str
+        :param num_classes: Number of output classes.
+        :type num_classes: int
+        :param input_shape: Input image shape ``(height, width, channels)``.
+        :type input_shape: Tuple[int, int, int]
+        :param kwargs: Additional keyword arguments for the constructor.
+        :return: A new ``SigLIPVisionTransformer`` instance.
+        :rtype: SigLIPVisionTransformer
+        :raises ValueError: If ``variant`` is not recognized.
 
         Example:
-            >>> model = SigLIPVisionTransformer.from_variant("base", num_classes=1000)
-            >>> model = SigLIPVisionTransformer.from_variant(
-            ...     "small", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
+            .. code-block:: python
+
+                model = SigLIPVisionTransformer.from_variant("base", num_classes=1000)
+                model = SigLIPVisionTransformer.from_variant(
+                    "small", num_classes=10, input_shape=(32, 32, 3), patch_size=4
+                )
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -754,10 +719,13 @@ class SigLIPVisionTransformer(keras.Model):
         )
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Return configuration for serialization.
+        """Return the configuration for serialization.
 
-        CRITICAL: Must include ALL __init__ parameters for proper serialization.
+        Includes every ``__init__`` parameter, which is what makes the round
+        trip lossless.
+
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -777,16 +745,9 @@ class SigLIPVisionTransformer(keras.Model):
             "normalization_type": self.normalization_type,
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
-            # DECISION plan-2026-08-23T091307-9a110062/D-400
-            # D-205 inlined this as a 17-line `isinstance(str)`-guarded
-            # expression at three sites. It is now the single shared pair in
-            # `dl_techniques.utils.activation_serialization`, which ~50 other
-            # classes in this tree also call. Do NOT re-inline it: the string
-            # passthrough is load-bearing (`keras.activations.serialize` REJECTS
-            # a bare string, and many callers store a dl_techniques
-            # activation-factory key such as 'mish' that is not a Keras
-            # activation at all), and a second copy of that rule is exactly the
-            # kind of hand-maintained lockstep this centralisation removes.
+            # DECISION plan-2026-08-23T091307-9a110062/D-400: use the shared
+            # activation_serialization pair, not an inline isinstance(str) check;
+            # keras.activations.serialize rejects a bare dl_techniques key like 'mish'. See decisions.md.
             "activation": serialize_activation(self.activation),
         })
         return config
@@ -797,24 +758,22 @@ class SigLIPVisionTransformer(keras.Model):
             config: Dict[str, Any],
             custom_objects: Optional[Dict[str, Any]] = None
     ) -> "SigLIPVisionTransformer":
-        """
-        Create a model from its configuration.
+        """Recreate a model from its serialized configuration.
 
-        The only key needing explicit handling is ``activation``: ``get_config``
-        writes a serialized form for callables, and it has to be turned back into
-        a callable BEFORE ``__init__`` hands it to ``TransformerLayer``, which
-        resolves it through ``keras.activations.get``. Every other key is either
-        a plain value or already handled by ``initializers.get`` /
-        ``regularizers.get`` inside ``__init__``.
+        The only key needing explicit handling is ``activation``:
+        ``get_config`` writes a serialized form for callables, and it has to
+        turn back into a callable before ``__init__`` hands it to
+        ``TransformerLayer``. Every other key is already resolved by
+        ``initializers.get`` / ``regularizers.get`` inside ``__init__``.
 
-        Args:
-            config: Configuration dictionary from ``get_config``.
-            custom_objects: Optional mapping of names to custom callables, used
-                to resolve an activation that is not registered with
-                ``keras.saving.register_keras_serializable``.
-
-        Returns:
-            A new ``SigLIPVisionTransformer`` instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :param custom_objects: Optional mapping of names to custom callables,
+            used to resolve an activation that is not registered with
+            ``keras.saving.register_keras_serializable``.
+        :type custom_objects: Optional[Dict[str, Any]]
+        :return: A new ``SigLIPVisionTransformer`` instance.
+        :rtype: SigLIPVisionTransformer
         """
         config = dict(config)
         activation = config.get("activation")
@@ -825,11 +784,16 @@ class SigLIPVisionTransformer(keras.Model):
         return cls(**config)
 
     def get_feature_extractor(self) -> "SigLIPVisionTransformer":
-        """
-        Get a feature extractor version of this model.
+        """Return a feature-extractor twin of this model.
 
-        Returns:
-            New SigLIPVisionTransformer instance configured for feature extraction.
+        Copies every configuration value, sets ``include_top=False`` and
+        ``pooling='cls'``. Note this constructs a new, randomly initialized
+        model; it does not transfer this instance's weights.
+
+        :return: New ``SigLIPVisionTransformer`` instance configured for
+            CLS-token feature extraction.
+        :rtype: SigLIPVisionTransformer
+        :raises ValueError: If the model was not properly initialized.
         """
         if not hasattr(self, 'input_shape_config') or not self.input_shape_config:
             raise ValueError("Model must be properly initialized before creating feature extractor")
@@ -913,69 +877,78 @@ def create_siglip_vision_transformer(
         activation: Union[str, callable] = "gelu",
         **kwargs: Any
 ) -> SigLIPVisionTransformer:
-    """
-    Create a SigLIP Vision Transformer model with specified configuration.
+    """Create a SigLIP-style Vision Transformer with a two-stage patch stem.
 
-    This factory function provides parameter validation and sensible defaults
-    for creating SigLIP Vision Transformer models with different scales and configurations.
-    The SigLIP architecture features improved patch embedding through a two-stage approach.
+    Delegates argument validation and construction to
+    :class:`SigLIPVisionTransformer`.
 
-    Args:
-        input_shape: Input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
-        num_classes: Number of output classes for classification.
-            Must be positive. Only used when include_top=True.
-        scale: Model scale determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'.
-        patch_size: Size of patches to extract from input images.
-            If int, uses square patches. Image dimensions must be divisible by patch size.
-        include_top: Whether to include the classification head.
-        pooling: Pooling mode for feature extraction when include_top=False.
-            Available: 'cls', 'mean', 'max', None.
-        dropout_rate: Dropout rate for general regularization.
-        attention_dropout_rate: Dropout rate for attention weights.
-        pos_dropout_rate: Dropout rate for positional embeddings.
-        kernel_initializer: Weight initializer for all layers.
-        kernel_regularizer: Weight regularizer for all layers.
-        bias_initializer: Bias initializer for all layers.
-        bias_regularizer: Bias regularizer for all layers.
-        normalization_type: Type of normalization layer to use.
-        normalization_position: Position of normalization in transformer layers.
-        ffn_type: Type of feed-forward network for transformer layers.
-        activation: Activation function for feed-forward networks.
-        **kwargs: Additional arguments for SigLIPVisionTransformer constructor.
-
-    Returns:
-        SigLIPVisionTransformer model instance.
-
-    Raises:
-        ValueError: If any parameter validation fails.
+    :param input_shape: Input image shape ``(height, width, channels)``; must
+        be compatible with ``patch_size``.
+    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``.
+    :type num_classes: int
+    :param scale: Model scale, one of ``'tiny'``, ``'small'``, ``'base'``,
+        ``'large'``, ``'huge'``.
+    :type scale: SigLIPScale
+    :param patch_size: Patch size; an int gives square patches. Must be even
+        in both dimensions.
+    :type patch_size: Union[int, Tuple[int, int]]
+    :param include_top: Whether to include the classification head.
+    :type include_top: bool
+    :param pooling: Feature-extraction pooling when ``include_top=False``:
+        ``'cls'``, ``'mean'``, ``'max'`` or None.
+    :type pooling: Optional[PoolingMode]
+    :param dropout_rate: General dropout rate.
+    :type dropout_rate: float
+    :param attention_dropout_rate: Attention-weight dropout rate.
+    :type attention_dropout_rate: float
+    :param pos_dropout_rate: Post-positional-embedding dropout rate.
+    :type pos_dropout_rate: float
+    :param kernel_initializer: Weight initializer for every layer.
+    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_regularizer: Weight regularizer for every layer.
+    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param bias_initializer: Bias initializer for every layer.
+    :type bias_initializer: Union[str, keras.initializers.Initializer]
+    :param bias_regularizer: Bias regularizer for every layer.
+    :type bias_regularizer: Optional[keras.regularizers.Regularizer]
+    :param normalization_type: Normalization identifier.
+    :type normalization_type: NormalizationType
+    :param normalization_position: ``'post'`` (default) or ``'pre'``.
+    :type normalization_position: Literal['pre', 'post']
+    :param ffn_type: Feed-forward network identifier.
+    :type ffn_type: FFNType
+    :param activation: FFN activation.
+    :type activation: Union[str, callable]
+    :param kwargs: Additional keyword arguments forwarded to the
+        :class:`SigLIPVisionTransformer` constructor.
+    :return: ``SigLIPVisionTransformer`` model instance.
+    :rtype: SigLIPVisionTransformer
+    :raises ValueError: Propagated from :class:`SigLIPVisionTransformer`'s own
+        validation.
 
     Example:
-        ```python
-        # Create SigLIP ViT-Base for ImageNet
-        model = create_siglip_vision_transformer(
-            input_shape=(224, 224, 3),
-            num_classes=1000,
-            scale='base'
-        )
+        .. code-block:: python
 
-        # Create feature extractor with modern components
-        feature_model = create_siglip_vision_transformer(
-            input_shape=(384, 384, 3),
-            scale='small',
-            include_top=False,
-            pooling='cls',
-            normalization_type='rms_norm',
-            ffn_type='swiglu'
-        )
-        ```
+            model = create_siglip_vision_transformer(
+                input_shape=(224, 224, 3),
+                num_classes=1000,
+                scale='base'
+            )
+
+            feature_model = create_siglip_vision_transformer(
+                input_shape=(384, 384, 3),
+                scale='small',
+                include_top=False,
+                pooling='cls',
+                normalization_type='rms_norm',
+                ffn_type='swiglu'
+            )
     """
-    # Argument validation lives in SigLIPVisionTransformer.__init__ and is NOT
-    # repeated here: this factory used to carry a second, hand-kept copy of the
-    # num_classes / input_shape / patch_size / divisibility checks, which is how
-    # the even-patch_size constraint (C-15) could be added to the constructor and
-    # still be pre-empted by the older duplicate.
+    # Argument validation lives in SigLIPVisionTransformer.__init__, not here;
+    # a second, hand-kept copy is how the even-patch_size constraint (C-15)
+    # could be added to the constructor while an older duplicate pre-empted it.
     model = SigLIPVisionTransformer(
         input_shape=input_shape,
         num_classes=num_classes,
@@ -997,7 +970,8 @@ def create_siglip_vision_transformer(
         **kwargs
     )
 
-    if model.num_patches > 10000:  # Reasonable upper limit
+    # 10000 patches is a practical upper bound before memory becomes a concern.
+    if model.num_patches > 10000:
         logger.warning(
             f"Large number of patches ({model.num_patches}) may cause memory issues"
         )

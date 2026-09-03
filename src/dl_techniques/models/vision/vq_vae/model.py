@@ -1,69 +1,22 @@
-"""
-Vector Quantised Variational AutoEncoder (VQ-VAE) Implementation.
+"""Vector-Quantized VAE: an autoencoder with a discrete latent bottleneck.
 
-This module implements the VQ-VAE model from "Neural Discrete Representation Learning"
-(van den Oord et al., 2017). VQ-VAE learns discrete latent representations by combining
-variational autoencoders with vector quantization, avoiding posterior collapse issues.
+Builds the model from a caller-supplied encoder and decoder plus a
+``VectorQuantizer`` bottleneck between them. The encoder output is snapped
+to the nearest vector in a learned codebook before decoding; a
+straight-through estimator carries gradients through that non-differentiable
+step. This replaces a standard VAE's continuous, Gaussian latent with a
+finite set of codes, avoiding posterior collapse and giving a discrete
+representation an autoregressive prior (PixelCNN, WaveNet) can later be
+trained on.
 
-Reference:
-    van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017).
-    Neural Discrete Representation Learning. NeurIPS 2017.
-    arXiv:1711.00937
+The total loss is reconstruction plus codebook plus commitment, where the
+codebook and commitment terms come from the quantizer's own ``add_loss``
+calls. ``use_ema=True`` updates the codebook by exponential moving average
+instead of by gradient descent.
 
-Architecture Overview:
-
-    Input x                                                     Output x_recon
-      ↓                                                              ↑
-    ┌─────────┐                                                ┌─────────┐
-    │ Encoder │ → z_e(x) [continuous]                          │ Decoder │
-    └─────────┘           ↓                                    └─────────┘
-                    ┌──────────────┐                                ↑
-                    │   Quantize   │ → Find nearest embedding       │
-                    │   (L2 dist)  │   k = argmin ||z_e - e_j||²    │
-                    └──────────────┘                                │
-                          ↓                                         │
-                    Embedding Table                                 │
-                    e = [e_1, ..., e_K]                             │
-                          ↓                                         │
-                    z_q(x) = e_k [discrete] ────────────────────────┘
-
-    Training losses (3 components):
-    1. Reconstruction: log p(x|z_q(x))         - trains decoder & encoder
-    2. Codebook:      ||sg[z_e(x)] - e||²      - trains embeddings
-    3. Commitment:    β||z_e(x) - sg[e]||²     - trains encoder
-
-    where sg[] is stop-gradient operator
-
-Key Features:
-    - Discrete latent space avoids posterior collapse
-    - Straight-through gradient estimator for quantization
-    - Optional exponential moving average (EMA) for codebook updates
-    - Compatible with powerful autoregressive priors (PixelCNN, WaveNet)
-
-Example:
-    >>> # Define encoder and decoder
-    >>> encoder = keras.Sequential([
-    ...     keras.layers.Conv2D(64, 4, strides=2, padding='same', activation='relu'),
-    ...     keras.layers.Conv2D(128, 4, strides=2, padding='same', activation='relu'),
-    ... ])
-    >>>
-    >>> decoder = keras.Sequential([
-    ...     keras.layers.Conv2DTranspose(128, 4, strides=2, padding='same', activation='relu'),
-    ...     keras.layers.Conv2DTranspose(3, 4, strides=2, padding='same', activation='sigmoid'),
-    ... ])
-    >>>
-    >>> # Create VQ-VAE model
-    >>> vqvae = VQVAEModel(
-    ...     encoder=encoder,
-    ...     decoder=decoder,
-    ...     num_embeddings=512,
-    ...     embedding_dim=64,
-    ...     commitment_cost=0.25
-    ... )
-    >>>
-    >>> # Compile and train
-    >>> vqvae.compile(optimizer='adam')
-    >>> vqvae.fit(train_data, epochs=100)
+References:
+    - van den Oord et al., 2017. Neural Discrete Representation Learning.
+      (https://arxiv.org/abs/1711.00937)
 """
 
 import keras
@@ -85,133 +38,112 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.vq_vae.model")
 class VQVAEModel(keras.Model):
-    """
-    Complete VQ-VAE model combining encoder, quantizer, and decoder.
+    """VQ-VAE: an encoder-decoder model with a discrete codebook bottleneck.
 
-    This model implements the full VQ-VAE architecture that learns discrete latent
-    representations. It can be used for various tasks including image generation,
-    compression, and representation learning.
+    Wraps a caller-supplied encoder and decoder around a
+    :class:`~dl_techniques.layers.vector_quantizer.VectorQuantizer`. Loss
+    computation happens inside :meth:`train_step`, so ``compile`` only needs
+    an optimizer.
 
-    **Architecture**:
-    ```
-    ┌─────────────────────────────────────────────────────────────┐
-    │                      VQ-VAE Pipeline                        │
-    ├─────────────────────────────────────────────────────────────┤
-    │                                                             │
-    │  Input x                                                    │
-    │    ↓                                                        │
-    │  ┌──────────┐                                               │
-    │  │ Encoder  │ → z_e(x) [continuous, shape: H×W×D]           │
-    │  └──────────┘                                               │
-    │       ↓                                                     │
-    │  ┌────────────────┐                                         │
-    │  │  Quantizer     │ → z_q(x) [discrete, shape: H×W×D]       │
-    │  │  - Find k* =   │    using codebook of K embeddings       │
-    │  │    argmin||·|| │                                         │
-    │  │  - z_q = e_k*  │                                         │
-    │  └────────────────┘                                         │
-    │       ↓                                                     │
-    │  ┌──────────┐                                               │
-    │  │ Decoder  │ → x_recon [reconstructed input]               │
-    │  └──────────┘                                               │
-    │       ↓                                                     │
-    │  Output x_recon                                             │
-    │                                                             │
-    └─────────────────────────────────────────────────────────────┘
+    Architecture:
 
-    Loss = reconstruction_loss + codebook_loss + commitment_loss
-         = MSE(x, x_recon) + ||sg[z_e] - e||² + β||z_e - sg[e]||²
-    ```
+    .. code-block:: text
 
-    **Training Process**:
-    1. Encoder produces continuous latent z_e(x)
-    2. Quantizer maps z_e to nearest codebook entry z_q
-    3. Decoder reconstructs from z_q
-    4. Three losses train different components:
-       - Reconstruction: trains encoder + decoder
-       - Codebook: trains embeddings
-       - Commitment: trains encoder
+        ┌──────────────────────────────────────┐
+        │  Input x                             │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  encoder → z_e(x), continuous        │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  VectorQuantizer                     │
+        │  k* = argmin ||z_e - e_j||           │
+        │  z_q = e_k*                          │
+        └───────────────┬──────────────────────┘
+                        ▼
+        ┌──────────────────────────────────────┐
+        │  decoder → x_recon                   │
+        └───────────────┬──────────────────────┘
+                        ▼
+                  Output x_recon
 
-    Args:
-        encoder: Encoder network that maps inputs to continuous latents.
-            Should output shape `(..., embedding_dim)`.
-        decoder: Decoder network that reconstructs from quantized latents.
-            Should accept input shape `(..., embedding_dim)`.
-        num_embeddings: Size of discrete codebook (K). Typical values: 128-512.
-        embedding_dim: Dimensionality of embeddings (D). Should match encoder output.
-        commitment_cost: Weight for commitment loss (β). Prevents encoder from growing
-            unbounded. Typical values: 0.25-0.5. Default: 0.25.
-        use_ema: Whether to use EMA for codebook updates instead of gradients.
-            EMA can be more stable but requires tuning. Default: False.
-        ema_decay: Decay rate for EMA updates. Only used if use_ema=True.
-            Default: 0.99.
-        reconstruction_loss_weight: Weight for reconstruction loss. Can be used to
-            balance reconstruction quality vs. codebook learning. Default: 1.0.
-        quantizer_initializer: Initializer for embedding vectors. Default: 'uniform'.
-        **kwargs: Additional arguments for Model base class.
+        loss = MSE(x, x_recon)
+             + ||sg[z_e] - e||^2          (codebook term)
+             + beta * ||z_e - sg[e]||^2   (commitment term)
 
-    Attributes:
-        encoder: The encoder network.
-        decoder: The decoder network.
-        quantizer: The VectorQuantizer layer.
-        total_loss_tracker: Metric tracking total loss.
-        reconstruction_loss_tracker: Metric tracking reconstruction loss.
-        vq_loss_tracker: Metric tracking quantization losses.
+        sg[] is the stop-gradient operator; the codebook and
+        commitment terms come from the quantizer's own add_loss calls.
+
+    :param encoder: Network mapping inputs to continuous latents whose last
+        axis is ``embedding_dim``.
+    :type encoder: keras.Model
+    :param decoder: Network mapping quantized latents back to the input
+        space.
+    :type decoder: keras.Model
+    :param num_embeddings: Codebook size K. Must be positive.
+    :type num_embeddings: int
+    :param embedding_dim: Codebook vector dimension D. Must be positive and
+        match the encoder's output channel count.
+    :type embedding_dim: int
+    :param commitment_cost: Weight beta of the commitment term. Defaults to
+        0.25.
+    :type commitment_cost: float
+    :param use_ema: If True the codebook is updated by exponential moving
+        average instead of gradient descent. Defaults to False.
+    :type use_ema: bool
+    :param ema_decay: EMA decay used when ``use_ema`` is True. Defaults to
+        0.99.
+    :type ema_decay: float
+    :param reconstruction_loss_weight: Weight of the MSE reconstruction
+        term. Must be positive. Defaults to 1.0.
+    :type reconstruction_loss_weight: float
+    :param quantizer_initializer: Initializer for the codebook embeddings.
+        Defaults to ``'uniform'``.
+    :type quantizer_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments for the ``Model`` base
+        class.
+
+    :raises ValueError: If ``num_embeddings``, ``embedding_dim`` or
+        ``reconstruction_loss_weight`` is not positive.
+
+    :ivar encoder: The encoder network.
+    :ivar decoder: The decoder network.
+    :ivar quantizer: The ``VectorQuantizer`` layer.
+    :ivar total_loss_tracker: Metric tracking total loss.
+    :ivar reconstruction_loss_tracker: Metric tracking reconstruction loss.
+    :ivar vq_loss_tracker: Metric tracking codebook and commitment loss.
 
     Example:
-        >>> # Simple 2D convolution example for images
-        >>> encoder = keras.Sequential([
-        ...     keras.layers.Conv2D(64, 4, strides=2, padding='same'),
-        ...     keras.layers.ReLU(),
-        ...     keras.layers.Conv2D(128, 4, strides=2, padding='same'),
-        ...     keras.layers.ReLU(),
-        ...     keras.layers.Conv2D(64, 3, padding='same'),  # embedding_dim=64
-        ... ])
-        >>>
-        >>> decoder = keras.Sequential([
-        ...     keras.layers.Conv2DTranspose(128, 4, strides=2, padding='same'),
-        ...     keras.layers.ReLU(),
-        ...     keras.layers.Conv2DTranspose(64, 4, strides=2, padding='same'),
-        ...     keras.layers.ReLU(),
-        ...     keras.layers.Conv2D(3, 3, padding='same', activation='sigmoid'),
-        ... ])
-        >>>
-        >>> vqvae = VQVAEModel(
-        ...     encoder=encoder,
-        ...     decoder=decoder,
-        ...     num_embeddings=512,
-        ...     embedding_dim=64,
-        ... )
-        >>>
-        >>> # Compile with optimizer only (loss is computed internally)
-        >>> vqvae.compile(optimizer=keras.optimizers.Adam(1e-3))
-        >>>
-        >>> # Train on images
-        >>> vqvae.fit(train_images, epochs=100, batch_size=64)
-        >>>
-        >>> # Reconstruct images
-        >>> reconstructed = vqvae(test_images)
-        >>>
-        >>> # Get discrete codes for prior training
-        >>> z_e = vqvae.encoder(test_images)
-        >>> indices = vqvae.quantizer.get_codebook_indices(z_e)
-        >>>
-        >>> # Generate by sampling from prior and decoding
-        >>> # (assumes you've trained a PixelCNN prior)
-        >>> sampled_indices = prior.sample()
-        >>> z_q = vqvae.quantizer.quantize_from_indices(sampled_indices)
-        >>> generated = vqvae.decoder(z_q)
+        .. code-block:: python
 
-    Notes:
-        - The model handles loss computation internally during training
-        - Use separate encoder/decoder for flexible architectures
-        - After training VQ-VAE, train a prior (PixelCNN, WaveNet) on discrete codes
-        - The reconstruction loss uses MSE by default
-        - Consider normalizing inputs to [0, 1] or [-1, 1]
+            encoder = keras.Sequential([
+                keras.layers.Conv2D(64, 4, strides=2, padding='same', activation='relu'),
+                keras.layers.Conv2D(128, 4, strides=2, padding='same', activation='relu'),
+            ])
+            decoder = keras.Sequential([
+                keras.layers.Conv2DTranspose(128, 4, strides=2, padding='same', activation='relu'),
+                keras.layers.Conv2DTranspose(3, 4, strides=2, padding='same', activation='sigmoid'),
+            ])
+            vqvae = VQVAEModel(
+                encoder=encoder,
+                decoder=decoder,
+                num_embeddings=512,
+                embedding_dim=64,
+                commitment_cost=0.25,
+            )
+            vqvae.compile(optimizer='adam')
+            vqvae.fit(train_data, epochs=100)
+
+    Note:
+        After training, a prior (PixelCNN, WaveNet) can be trained on the
+        discrete codes from :meth:`encode_to_indices`, then sampled and
+        decoded with :meth:`decode_from_indices`.
 
     References:
-        van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017).
-        Neural Discrete Representation Learning. NeurIPS 2017.
+        - van den Oord et al., 2017. Neural Discrete Representation
+          Learning. (https://arxiv.org/abs/1711.00937)
     """
 
     def __init__(
@@ -297,15 +229,15 @@ class VQVAEModel(keras.Model):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """
-        Forward pass through VQ-VAE: encode, quantize, decode.
+        """Forward pass through the VQ-VAE: encode, quantize, decode.
 
-        Args:
-            inputs: Input data to reconstruct.
-            training: Whether in training mode. Affects quantizer EMA updates.
-
-        Returns:
-            Reconstructed outputs with same shape as inputs.
+        :param inputs: Input data to reconstruct.
+        :type inputs: keras.KerasTensor
+        :param training: Whether the model is in training mode; affects the
+            quantizer's EMA updates.
+        :type training: Optional[bool]
+        :return: Reconstructed outputs, same shape as ``inputs``.
+        :rtype: keras.KerasTensor
         """
         z_e = self.encoder(inputs, training=training)
 
@@ -316,16 +248,14 @@ class VQVAEModel(keras.Model):
         return reconstructed
 
     def train_step(self, data: Union[keras.KerasTensor, Tuple]) -> Dict[str, Any]:
-        """
-        Custom training step that computes VQ-VAE losses.
+        """Run one training step, computing and applying the VQ-VAE losses.
 
-        Args:
-            data: Input data. Can be:
-                - Single tensor: inputs (unsupervised)
-                - Tuple: (inputs, targets) or (inputs, targets, sample_weight)
-
-        Returns:
-            Dictionary mapping metric names to their current values.
+        :param data: Input data: a single tensor for unsupervised training,
+            or a tuple ``(inputs, targets)`` / ``(inputs, targets,
+            sample_weight)``.
+        :type data: Union[keras.KerasTensor, Tuple]
+        :return: Mapping from metric name to its current value.
+        :rtype: Dict[str, Any]
         """
         if isinstance(data, tuple):
             x = data[0]
@@ -335,14 +265,9 @@ class VQVAEModel(keras.Model):
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # Reduce the loss in float32. `x` arrives from the dataset at
-            # float32 while `x_recon` is `compute_dtype`; under
-            # `mixed_float16` the subtraction below raised
-            # `TypeError: Input 'y' of 'Sub' has type float16 ...` and no
-            # VQ-VAE could take a single mixed-precision step (step 5.8).
-            # Cast the PREDICTION UP, never the data down: a squared-error
-            # mean accumulated in float16 underflows for small residuals.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the prediction up to
+            # float32, never the data down; under mixed_float16 the subtraction otherwise
+            # raises a dtype TypeError, and a float16 squared-error mean underflows. See decisions.md.
             x_recon = ops.cast(x_recon, "float32")
 
             # Compute reconstruction loss (MSE)
@@ -351,25 +276,12 @@ class VQVAEModel(keras.Model):
                     self.reconstruction_loss_weight * reconstruction_loss
             )
 
-            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
-            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
-            # `self.losses` is the whole model's `add_loss` collection -- it already
-            # CONTAINS the quantizer's codebook + commitment terms, and it
-            # additionally carries every regularizer on the caller-supplied encoder
-            # and decoder. With the narrow form, a BYO encoder built with
-            # `kernel_regularizer=l2(1e-1)` contributed EXACTLY NOTHING: MEASURED at
-            # HEAD, `train_step` reported the identical 0.326447 with and without the
-            # regularizer, while `sum(self.losses)` was 0.912722 against
-            # `sum(self.quantizer.losses)` 0.236841, and the encoder-kernel gradient
-            # differed by max 5.30e-02 between the two objectives. The module's own
-            # architecture diagram already said `total_loss = recon + sum(layer.losses)`;
-            # only the code disagreed. See decisions.md D-026.
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
+            # self.quantizer.losses; the narrow form silently drops regularizers on a
+            # caller-supplied encoder or decoder. See decisions.md.
             aux_losses = self.losses
-            # Sum aux_losses if multiple (e.g. codebook + commitment + regularizers)
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # `add_loss` terms carry `compute_dtype`; the reconstruction term
-            # is float32. Cast the AUX SUM UP so the objective is reduced in
-            # float32 (step 5.8).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the aux-loss sum up to
+            # float32 too, since add_loss terms carry compute_dtype. See decisions.md.
             vq_loss = (
                 ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
                 if aux_losses else 0.0
@@ -377,20 +289,9 @@ class VQVAEModel(keras.Model):
 
             total_loss = reconstruction_loss + vq_loss
 
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
-            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
-            # `tape.gradient` differentiates; the UNSCALED loss stays what is
-            # reported. Do NOT "simplify" this back to a gradient of the unscaled
-            # loss: under `mixed_float16` Keras wraps the optimizer in a
-            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
-            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
-            # divides the WHOLE weight update by the loss scale, with no warning of
-            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
-            # returns its argument unless `loss_scale_factor` is set. MEASURED here
-            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
-            # BEFORE f32 1.380558e+00 vs fp16 4.532856e-05, ratio 3.046e+04.
-            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
-            # (D-036).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089: call scale_loss inside the
+            # tape; under mixed_float16 skipping it divides the whole weight update by the
+            # loss scale with no warning. See decisions.md.
             scaled_loss = self.optimizer.scale_loss(total_loss)
 
         trainable_vars = self.trainable_variables
@@ -408,16 +309,14 @@ class VQVAEModel(keras.Model):
         }
 
     def test_step(self, data: Union[keras.KerasTensor, Tuple]) -> Dict[str, Any]:
-        """
-        Custom test step for evaluation.
+        """Run one evaluation step, reporting the same losses as :meth:`train_step`.
 
-        Args:
-            data: Input data. Can be:
-                - Single tensor: inputs (unsupervised)
-                - Tuple: (inputs, targets) or (inputs, targets, sample_weight)
-
-        Returns:
-            Dictionary mapping metric names to their current values.
+        :param data: Input data: a single tensor for unsupervised training,
+            or a tuple ``(inputs, targets)`` / ``(inputs, targets,
+            sample_weight)``.
+        :type data: Union[keras.KerasTensor, Tuple]
+        :return: Mapping from metric name to its current value.
+        :rtype: Dict[str, Any]
         """
         if isinstance(data, tuple):
             x = data[0]
@@ -430,11 +329,8 @@ class VQVAEModel(keras.Model):
         reconstruction_loss = ops.mean((x - x_recon) ** 2)
         reconstruction_loss = self.reconstruction_loss_weight * reconstruction_loss
 
-        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
-        # `self.quantizer.losses` -- same reason and same measurement as the
-        # anchor in `train_step` above. `test_step` must report the SAME
-        # objective `train_step` optimizes, or val_loss and loss are not
-        # comparable. See decisions.md D-026.
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
+        # self.quantizer.losses, so val_loss stays comparable to the training objective. See decisions.md.
         aux_losses = self.losses
         vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
 
@@ -452,11 +348,10 @@ class VQVAEModel(keras.Model):
 
     @property
     def metrics(self) -> List[keras.metrics.Metric]:
-        """
-        List of metrics tracked by the model.
+        """Return the list of metrics tracked by the model.
 
-        Returns:
-            List of metric objects.
+        :return: The loss trackers.
+        :rtype: List[keras.metrics.Metric]
         """
         return [
             self.total_loss_tracker,
@@ -465,40 +360,35 @@ class VQVAEModel(keras.Model):
         ]
 
     def encode(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Encode inputs to continuous latent representations.
+        """Encode inputs to continuous latent representations.
 
-        Args:
-            inputs: Input data.
-
-        Returns:
-            Continuous latent representations z_e(x).
+        :param inputs: Input data.
+        :type inputs: keras.KerasTensor
+        :return: Continuous latent representations ``z_e(x)``.
+        :rtype: keras.KerasTensor
         """
         return self.encoder(inputs, training=False)
 
     def quantize_latents(self, latents: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Quantize continuous latents to discrete representations.
+        """Quantize continuous latents to discrete representations.
 
-        Renamed from `quantize` to avoid collision with Keras quantization API.
+        Named ``quantize_latents``, not ``quantize``, to avoid colliding
+        with the Keras quantization API.
 
-        Args:
-            latents: Continuous latent representations z_e.
-
-        Returns:
-            Quantized latent representations z_q.
+        :param latents: Continuous latent representations ``z_e``.
+        :type latents: keras.KerasTensor
+        :return: Quantized latent representations ``z_q``.
+        :rtype: keras.KerasTensor
         """
         return self.quantizer(latents, training=False)
 
     def decode(self, latents: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Decode latent representations to reconstructed outputs.
+        """Decode latent representations to reconstructed outputs.
 
-        Args:
-            latents: Quantized latent representations z_q.
-
-        Returns:
-            Reconstructed outputs.
+        :param latents: Quantized latent representations ``z_q``.
+        :type latents: keras.KerasTensor
+        :return: Reconstructed outputs.
+        :rtype: keras.KerasTensor
         """
         return self.decoder(latents, training=False)
 
@@ -506,21 +396,20 @@ class VQVAEModel(keras.Model):
             self,
             inputs: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Encode inputs directly to discrete codebook indices.
+        """Encode inputs directly to discrete codebook indices.
 
         Useful for training autoregressive priors or compressing data.
 
-        Args:
-            inputs: Input data.
-
-        Returns:
-            Integer tensor of codebook indices.
+        :param inputs: Input data.
+        :type inputs: keras.KerasTensor
+        :return: Integer tensor of codebook indices.
+        :rtype: keras.KerasTensor
 
         Example:
-            >>> indices = vqvae.encode_to_indices(images)
-            >>> # Train PixelCNN prior
-            >>> prior.fit(indices, epochs=100)
+            .. code-block:: python
+
+                indices = vqvae.encode_to_indices(images)
+                prior.fit(indices, epochs=100)
         """
         z_e = self.encode(inputs)
         indices = self.quantizer.get_codebook_indices(z_e)
@@ -530,33 +419,30 @@ class VQVAEModel(keras.Model):
             self,
             indices: keras.KerasTensor
     ) -> keras.KerasTensor:
-        """
-        Decode discrete codebook indices to reconstructed outputs.
+        """Decode discrete codebook indices to reconstructed outputs.
 
         Useful for sampling from autoregressive priors.
 
-        Args:
-            indices: Integer tensor of codebook indices.
-
-        Returns:
-            Reconstructed outputs.
+        :param indices: Integer tensor of codebook indices.
+        :type indices: keras.KerasTensor
+        :return: Reconstructed outputs.
+        :rtype: keras.KerasTensor
 
         Example:
-            >>> # Sample from prior
-            >>> sampled_indices = prior.sample(batch_size=16)
-            >>> # Decode to images
-            >>> generated = vqvae.decode_from_indices(sampled_indices)
+            .. code-block:: python
+
+                sampled_indices = prior.sample(batch_size=16)
+                generated = vqvae.decode_from_indices(sampled_indices)
         """
         z_q = self.quantizer.quantize_from_indices(indices)
         reconstructed = self.decode(z_q)
         return reconstructed
 
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for serialization.
+        """Return the configuration for serialization.
 
-        Returns:
-            Dictionary containing all configuration parameters.
+        :return: Configuration dictionary.
+        :rtype: Dict[str, Any]
         """
         config = super().get_config()
         config.update({
@@ -576,14 +462,12 @@ class VQVAEModel(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "VQVAEModel":
-        """
-        Create model from configuration dictionary.
+        """Recreate a model from its serialized configuration.
 
-        Args:
-            config: Configuration dictionary from get_config().
-
-        Returns:
-            New VQVAEModel instance.
+        :param config: Configuration dictionary from :meth:`get_config`.
+        :type config: Dict[str, Any]
+        :return: A new ``VQVAEModel`` instance.
+        :rtype: VQVAEModel
         """
         encoder_config = config.pop("encoder")
         encoder = keras.saving.deserialize_keras_object(encoder_config)
@@ -611,44 +495,49 @@ def create_vq_vae(
         quantizer_initializer: Union[str, initializers.Initializer] = "uniform",
         **kwargs: Any
 ) -> VQVAEModel:
-    """
-    Create a VQ-VAE model over a caller-supplied encoder and decoder.
+    """Create a VQ-VAE model over a caller-supplied encoder and decoder.
 
-    There is no ``MODEL_VARIANTS`` table and none was invented: VQ-VAE is a
-    quantization scheme wrapped around an arbitrary autoencoder, so this package
-    deliberately takes the encoder and decoder as arguments and has no
-    architecture of its own to give named scales to. ``encoder`` and ``decoder``
-    stay required here for the same reason -- inventing a default backbone would
-    silently pick an architecture the paper does not specify.
+    VQ-VAE is a quantization scheme wrapped around an arbitrary autoencoder,
+    with no backbone of its own, so there is no ``MODEL_VARIANTS`` table and
+    ``encoder``/``decoder`` stay required arguments.
 
-    Args:
-        encoder: Network mapping inputs to continuous latents whose last axis
-            is ``embedding_dim``.
-        decoder: Network mapping quantized latents back to the input space.
-        num_embeddings: Codebook size K. Must be positive.
-        embedding_dim: Codebook vector dimension D. Must be positive and match
-            the encoder's output channel count.
-        commitment_cost: Weight beta of the commitment term.
-        use_ema: If True the codebook is updated by EMA rather than gradient.
-        ema_decay: EMA decay used when ``use_ema`` is True.
-        reconstruction_loss_weight: Weight of the MSE reconstruction term.
-            Must be positive.
-        quantizer_initializer: Initializer for the codebook embeddings.
-        **kwargs: Additional arguments forwarded to the model constructor.
-
-    Returns:
-        A configured VQVAEModel instance.
-
-    Raises:
-        ValueError: If ``num_embeddings``, ``embedding_dim`` or
-            ``reconstruction_loss_weight`` is not positive.
+    :param encoder: Network mapping inputs to continuous latents whose last
+        axis is ``embedding_dim``.
+    :type encoder: keras.Model
+    :param decoder: Network mapping quantized latents back to the input
+        space.
+    :type decoder: keras.Model
+    :param num_embeddings: Codebook size K. Must be positive.
+    :type num_embeddings: int
+    :param embedding_dim: Codebook vector dimension D. Must be positive and
+        match the encoder's output channel count.
+    :type embedding_dim: int
+    :param commitment_cost: Weight beta of the commitment term.
+    :type commitment_cost: float
+    :param use_ema: If True the codebook is updated by EMA rather than
+        gradient descent.
+    :type use_ema: bool
+    :param ema_decay: EMA decay used when ``use_ema`` is True.
+    :type ema_decay: float
+    :param reconstruction_loss_weight: Weight of the MSE reconstruction
+        term. Must be positive.
+    :type reconstruction_loss_weight: float
+    :param quantizer_initializer: Initializer for the codebook embeddings.
+    :type quantizer_initializer: Union[str, keras.initializers.Initializer]
+    :param kwargs: Additional keyword arguments forwarded to the model
+        constructor.
+    :return: A configured ``VQVAEModel`` instance.
+    :rtype: VQVAEModel
+    :raises ValueError: If ``num_embeddings``, ``embedding_dim`` or
+        ``reconstruction_loss_weight`` is not positive.
 
     Example:
-        >>> enc = keras.Sequential([keras.layers.Dense(16)])
-        >>> dec = keras.Sequential([keras.layers.Dense(8)])
-        >>> model = create_vq_vae(enc, dec, num_embeddings=32, embedding_dim=16)
-        >>> model(keras.random.normal((2, 8))).shape
-        (2, 8)
+        .. code-block:: python
+
+            enc = keras.Sequential([keras.layers.Dense(16)])
+            dec = keras.Sequential([keras.layers.Dense(8)])
+            model = create_vq_vae(enc, dec, num_embeddings=32, embedding_dim=16)
+            model(keras.random.normal((2, 8))).shape  # (2, 8)
     """
     return VQVAEModel(
         encoder=encoder,

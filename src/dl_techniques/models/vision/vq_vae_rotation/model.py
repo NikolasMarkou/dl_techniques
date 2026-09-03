@@ -1,67 +1,18 @@
-"""
-VQ-VAE model with the Rotation Trick quantizer (Fifty et al., ICLR 2025).
+"""VQ-VAE model using the Rotation Trick quantizer.
 
 Mirrors the shape of ``VQVAEModel`` but routes through
-``VectorQuantizerRotationTrick`` and uses the dl_techniques normalisation
-factory (``create_normalization_layer``) inside its auto-built convolutional
-encoder/decoder. Two construction paths:
-
-1. **Bring-your-own encoder/decoder** — pass two ``keras.Model`` instances.
-2. **Auto-build** — leave ``encoder=None, decoder=None`` and supply
-   ``input_shape``; a small Conv2D encoder/decoder is built internally with
-   the chosen norm type, hidden channel width, downsample factor, and residual
-   block count.
-
-**Architecture Overview:**
-
-.. code-block:: text
-
-    ┌────────────────────────────────────────┐
-    │  Input image x [B, H, W, C_in]         │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Encoder  (BYO  OR  auto-built)        │
-    │  ─ Conv2D(hidden, 4, s=2) × n_down     │
-    │    + Norm (create_normalization_layer) │
-    │    + swish                             │
-    │  ─ ResBlock × num_res_blocks           │
-    │  ─ Conv2D(embedding_dim, 1, 1)         │
-    └──────────────┬─────────────────────────┘
-                   ▼  z_e [B, H/f, W/f, D]
-    ┌────────────────────────────────────────┐
-    │  VectorQuantizerRotationTrick          │
-    │    gradient_mode ∈                     │
-    │      {rotation, reflection,            │
-    │       no_grad_scale, ste}              │
-    │    distance_mode ∈ {euclidean, cosine} │
-    │    num_heads / use_ema / kmeans_init / │
-    │    dead_code_reinit / diversity / orth │
-    │    → aux losses via add_loss()         │
-    └──────────────┬─────────────────────────┘
-                   ▼  z_q [B, H/f, W/f, D]
-    ┌────────────────────────────────────────┐
-    │  Decoder  (BYO  OR  auto-built)        │
-    │  ─ Conv2D(hidden, 1, 1)                │
-    │  ─ ResBlock × num_res_blocks           │
-    │  ─ Conv2DTranspose(hidden, 4, s=2)     │
-    │    × n_down                            │
-    │    + Norm (create_normalization_layer) │
-    │    + swish                             │
-    │  ─ Conv2D(C_in, 3, 1, padding=same)    │
-    └──────────────┬─────────────────────────┘
-                   ▼
-    ┌────────────────────────────────────────┐
-    │  Output x_rec [B, H, W, C_in]          │
-    │  total_loss = recon(x, x_rec)          │
-    │               + sum(layer.losses)      │
-    └────────────────────────────────────────┘
+``VectorQuantizerRotationTrick`` and uses the dl_techniques normalization
+factory inside its auto-built convolutional encoder and decoder. Accepts
+either a caller-supplied ``encoder``/``decoder`` pair, or ``input_shape``
+alone, in which case a small Conv2D encoder and decoder are built
+internally with the chosen normalization type, channel width, downsample
+factor, and residual block count.
 
 References:
-    - Fifty, C., Junkins, R., Duan, D., et al. (2025). Restructuring Vector
-      Quantization with the Rotation Trick. ICLR 2025.
-    - van den Oord, A., Vinyals, O., Kavukcuoglu, K. (2017). Neural Discrete
-      Representation Learning. NeurIPS 2017.
+    - Fifty et al., 2025. Restructuring Vector Quantization with the
+      Rotation Trick. (https://arxiv.org/abs/2410.06424)
+    - van den Oord et al., 2017. Neural Discrete Representation Learning.
+      (https://arxiv.org/abs/1711.00937)
 """
 
 import itertools
@@ -182,12 +133,49 @@ def _build_auto_decoder(
 class VQVAERotationTrick(keras.Model):
     """Rotation Trick VQ-VAE.
 
-    Either:
-      - pass ``encoder`` + ``decoder`` (bring-your-own), OR
-      - leave both ``None`` and pass ``input_shape`` for the auto path.
-
-    All quantizer flags are re-exposed at the model level and forwarded to
+    Either pass ``encoder`` and ``decoder`` (bring-your-own), or leave both
+    ``None`` and pass ``input_shape`` for the auto-built path. All quantizer
+    flags are re-exposed at the model level and forwarded to
     ``VectorQuantizerRotationTrick``.
+
+    Architecture:
+
+    .. code-block:: text
+
+        ┌────────────────────────────────────────┐
+        │  Input image x [B, H, W, C_in]         │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Encoder (bring-your-own or auto-built)│
+        │  Conv2D(hidden, 4, s=2) x n_down       │
+        │    + Norm + swish                      │
+        │  ResBlock x num_res_blocks             │
+        │  Conv2D(embedding_dim, 1, 1)           │
+        └──────────────┬─────────────────────────┘
+                       ▼  z_e [B, H/f, W/f, D]
+        ┌────────────────────────────────────────┐
+        │  VectorQuantizerRotationTrick          │
+        │  gradient_mode: rotation, reflection,  │
+        │    no_grad_scale, or ste               │
+        │  distance_mode: euclidean or cosine    │
+        │  aux losses via add_loss()             │
+        └──────────────┬─────────────────────────┘
+                       ▼  z_q [B, H/f, W/f, D]
+        ┌────────────────────────────────────────┐
+        │  Decoder (bring-your-own or auto-built)│
+        │  Conv2D(hidden, 1, 1)                  │
+        │  ResBlock x num_res_blocks             │
+        │  Conv2DTranspose(hidden, 4, s=2)       │
+        │    x n_down, + Norm + swish            │
+        │  Conv2D(C_in, 3, 1, padding=same)      │
+        └──────────────┬─────────────────────────┘
+                       ▼
+        ┌────────────────────────────────────────┐
+        │  Output x_rec [B, H, W, C_in]          │
+        └────────────────────────────────────────┘
+
+        total_loss = recon(x, x_rec) + sum(layer.losses)
 
     :param encoder: Optional encoder model. If ``None``, auto-built.
     :param decoder: Optional decoder model. If ``None``, auto-built.
@@ -201,10 +189,8 @@ class VQVAERotationTrick(keras.Model):
     :param num_heads: Multi-head codebook count.
     :param kmeans_init: Enable the one-shot k-means codebook warm start. It is
         performed by :meth:`warm_start_codebook`, which :meth:`fit` invokes
-        automatically before the first epoch. It does NOT happen inside the
-        quantizer's ``call``: that ran ``np.asarray`` on a graph tensor, which
-        raises under ``fit()``, and accumulated batches in a Python list mutated
-        inside a traced function.
+        automatically before the first epoch, not inside the quantizer's
+        ``call``, where a graph tensor cannot reach ``np.asarray``.
     :param kmeans_init_steps: Number of batches accumulated before k-means.
     :param kmeans_seed: Deterministic numpy seed for k-means.
     :param dead_code_threshold: Consecutive unused-call count for re-init.
@@ -398,11 +384,8 @@ class VQVAERotationTrick(keras.Model):
         num_steps = self.kmeans_init_steps if steps is None else steps
 
         if isinstance(data, np.ndarray) or tf.is_tensor(data):
-            # A single array. Split it into `num_steps` chunks so that
-            # `kmeans_init_steps` still means what it says. Checked FIRST:
-            # `np.ndarray` also has a `.take`, with entirely different
-            # semantics (flat element selection), so a dataset-style
-            # `hasattr(data, "take")` probe silently mangles arrays.
+            # A single array: split into num_steps chunks. Checked first, since
+            # np.ndarray also has a .take with different (flat) semantics, unlike a dataset's.
             batches = np.array_split(np.asarray(data), num_steps)
         elif hasattr(data, "take") and not isinstance(data, (list, tuple)):
             batches = data.take(num_steps)  # tf.data.Dataset
@@ -435,16 +418,10 @@ class VQVAERotationTrick(keras.Model):
         self.quantizer.warm_start_codebook(collected)
 
     def fit(self, x=None, *args: Any, **kwargs: Any):
-        """`keras.Model.fit`, preceded by the k-means warm start when enabled.
+        """``keras.Model.fit``, preceded by the k-means warm start when enabled.
 
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-040
-        The warm start used to run inside the quantizer's `call()`, where it
-        raised under `fit()` (a graph tensor cannot be converted to numpy) and
-        where its Python-list accumulator collected one TRACE, not
-        `kmeans_init_steps` batches. It is hoisted here because `fit` is the
-        one place that has both the data and an eager context, so
-        `kmeans_init=True` cannot silently do nothing the way a callback the
-        caller forgets to pass would. Do NOT move it back into `call`.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-040: warm start runs here, not
+        # inside the quantizer's call(); fit() is the one place with both the data and an eager context. See decisions.md.
         """
         if self.kmeans_init and not self.quantizer.is_codebook_warm_started:
             self.warm_start_codebook(x)
@@ -454,45 +431,25 @@ class VQVAERotationTrick(keras.Model):
         x = data[0] if isinstance(data, tuple) else data
         with tf.GradientTape() as tape:
             x_recon = self(x, training=True)
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011
-            # Reduce in float32; see the sibling `models/vision/vq_vae`. `x` is
-            # float32 dataset data, `x_recon` is `compute_dtype`, and the
-            # subtraction raised under `mixed_float16`.
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the prediction up to
+            # float32, never the data down; see the sibling models/vision/vq_vae. See decisions.md.
             x_recon = ops.cast(x_recon, "float32")
             recon_loss = ops.mean(ops.square(x - x_recon))
             recon_loss = self.reconstruction_loss_weight * recon_loss
-            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum `self.losses`, NOT
-            # `self.quantizer.losses`. Do NOT narrow this back to the quantizer.
-            # `self.losses` already CONTAINS the quantizer's codebook/commitment/
-            # diversity terms and additionally carries every regularizer on the
-            # caller-supplied encoder and decoder. With the narrow form a BYO encoder
-            # built with `kernel_regularizer=l2(...)` contributed EXACTLY NOTHING to
-            # the gradient (measured on the sibling `models/vision/vq_vae`: identical
-            # reported loss with and without the regularizer). The module's own
-            # architecture diagram at the top of this file already said
-            # `total_loss = recon(x, x_rec) + sum(layer.losses)`; only the code
-            # disagreed. See decisions.md D-026.
+            # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
+            # self.quantizer.losses; the narrow form silently drops regularizers on a
+            # caller-supplied encoder or decoder. See decisions.md.
             aux_losses = self.losses
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-011 (see `models/vision/vq_vae`).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the aux-loss sum up to
+            # float32 too, since add_loss terms carry compute_dtype. See decisions.md.
             vq_loss = (
                 ops.cast(ops.sum(ops.stack(aux_losses)), "float32")
                 if aux_losses else 0.0
             )
             total = recon_loss + vq_loss
-            # DECISION plan-2026-08-19T163559-499b6f0e/D-089
-            # `scale_loss` MUST be INSIDE the tape, and the SCALED value is what
-            # `tape.gradient` differentiates; the UNSCALED loss stays what is
-            # reported. Do NOT "simplify" this back to a gradient of the unscaled
-            # loss: under `mixed_float16` Keras wraps the optimizer in a
-            # `LossScaleOptimizer` whose `apply()` DIVIDES every gradient by
-            # `dynamic_scale` (2**15 initially) UNCONDITIONALLY, so omitting the call
-            # divides the WHOLE weight update by the loss scale, with no warning of
-            # any kind. In float32 it is a provable no-op -- `Optimizer.scale_loss`
-            # returns its argument unless `loss_scale_factor` is set. MEASURED here
-            # (SGD lr=0.1, 5 steps, total |dW| over TRAINABLE weights, GPU 1):
-            # BEFORE f32 9.799837e-01 vs fp16 2.713639e-05, ratio 3.611e+04.
-            # See decisions.md D-089; same ruling at `masked_autoencoder/mae.py`
-            # (D-036).
+            # DECISION plan-2026-08-19T163559-499b6f0e/D-089: call scale_loss inside the
+            # tape; under mixed_float16 skipping it divides the whole weight update by the
+            # loss scale with no warning. See decisions.md.
             scaled_total = self.optimizer.scale_loss(total)
         grads = tape.gradient(scaled_total, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -510,10 +467,8 @@ class VQVAERotationTrick(keras.Model):
         x_recon = self(x, training=False)
         recon_loss = ops.mean(ops.square(x - x_recon))
         recon_loss = self.reconstruction_loss_weight * recon_loss
-        # DECISION plan-2026-08-18T140459-7991552f/D-026: `self.losses`, not
-        # `self.quantizer.losses` -- same reason as the anchor in `train_step`
-        # above. `test_step` must report the SAME objective `train_step`
-        # optimizes. See decisions.md D-026.
+        # DECISION plan-2026-08-18T140459-7991552f/D-026: sum self.losses, not
+        # self.quantizer.losses, so val_loss stays comparable to the training objective. See decisions.md.
         aux_losses = self.losses
         vq_loss = ops.sum(ops.stack(aux_losses)) if aux_losses else 0.0
         total = recon_loss + vq_loss
