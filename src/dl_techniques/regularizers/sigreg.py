@@ -13,6 +13,11 @@ The statistic is
        + (\\overline{\\sin(t_k (Z A)_j)})^2
     \\big] \\cdot N
 
+The trailing :math:`\\cdot N` factor is applied only when the layer is
+constructed with ``normalize_by_n=True``; the default, ``False``, omits it
+(see :class:`SIGRegLayer`'s constructor for the naming caveat relative to
+the upstream reference).
+
 where :math:`Z \\in \\mathbb{R}^{N \\times D}` is a batch of feature vectors,
 :math:`A \\in \\mathbb{R}^{D \\times P}` is a freshly sampled, column-normalized
 Gaussian projection matrix, :math:`t_k \\in [0, 3]` are integration knots,
@@ -116,6 +121,24 @@ class SIGRegLayer(keras.layers.Layer):
         ``None`` re-samples each call without a fixed seed, matching upstream's
         use of ``torch.randn`` with the global generator.
     :type seed: int or None
+    :param normalize_by_n: If ``True``, multiply the statistic by ``N``, the
+        sample-axis size (``proj.shape[-2]``), before the final mean over
+        ``num_proj``. Defaults to ``False``, which preserves this layer's
+        original, unscaled behavior (both existing consumers, ``lewm`` and
+        ``video_jepa``, rely on this default and do not pass this argument).
+        **Naming is intentionally inverted from the upstream PyTorch
+        reference**: the reference's own ``normalize_by_n`` flag, when
+        ``True``, *skips* the ``* N`` multiplication (``if
+        self.normalize_by_n: statistic = err @ self.weights`` — no
+        multiply), and applies it only when ``normalize_by_n=False``. Here,
+        ``normalize_by_n=True`` means "apply the ``* N`` scaling" — the
+        natural reading of the name — because this layer's pre-existing
+        default (no multiplication) already matched the reference's
+        ``normalize_by_n=True`` state before this parameter existed, and
+        that default must not silently change. Set ``True`` to reproduce the
+        reference's *shipped config* magnitude (``normalize_by_n: false`` in
+        its ``conf/config.yaml``).
+    :type normalize_by_n: bool
     :param kwargs: Passed through to ``keras.layers.Layer``.
 
     :ivar knots: The knot count.
@@ -124,6 +147,10 @@ class SIGRegLayer(keras.layers.Layer):
     :vartype num_proj: int
     :ivar seed: The seed as passed by the caller.
     :vartype seed: int or None
+    :ivar normalize_by_n: Whether the statistic is scaled by the sample-axis
+        size ``N``. See the constructor parameter above for the naming
+        caveat relative to the upstream reference.
+    :vartype normalize_by_n: bool
     :ivar t: The integration grid buffer, created in :meth:`build`.
     :ivar phi: The target window buffer, created in :meth:`build`.
     :ivar weights_: The pre-windowed trapezoidal weights, created in
@@ -155,6 +182,7 @@ class SIGRegLayer(keras.layers.Layer):
         knots: int = 17,
         num_proj: int = 1024,
         seed: Optional[int] = None,
+        normalize_by_n: bool = False,
         **kwargs: Any,
     ) -> None:
         """Validate the grid settings and store them.
@@ -165,6 +193,11 @@ class SIGRegLayer(keras.layers.Layer):
         :type num_proj: int
         :param seed: Optional seed for the projection draw.
         :type seed: int or None
+        :param normalize_by_n: If ``True``, scale the statistic by the
+            sample-axis size ``N`` before the final mean. See the class
+            docstring for the naming caveat relative to the upstream
+            reference. Defaults to ``False``, preserving prior behavior.
+        :type normalize_by_n: bool
         :param kwargs: Passed through to ``keras.layers.Layer``.
         :raises ValueError: If ``knots < 2`` or ``num_proj < 1``.
         """
@@ -179,6 +212,7 @@ class SIGRegLayer(keras.layers.Layer):
         self.knots = knots
         self.num_proj = num_proj
         self.seed = seed
+        self.normalize_by_n = normalize_by_n
         self._seed_gen = (
             keras.random.SeedGenerator(seed) if seed is not None else None
         )
@@ -295,6 +329,14 @@ class SIGRegLayer(keras.layers.Layer):
         # Weighted sum over knots gives (..., num_proj).
         statistic = ops.matmul(err, self.weights_)
 
+        if self.normalize_by_n:
+            # Reintroduces the * N scaling removed in commit 13e1ac626 for
+            # lewm's own unrelated reason, gated behind this flag so lewm's
+            # and video_jepa's unmodified construction (normalize_by_n
+            # defaults to False) stays byte-identical. See D-003.
+            n = ops.cast(ops.shape(proj)[-2], proj.dtype)
+            statistic = statistic * n
+
         return ops.mean(statistic)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple:
@@ -310,8 +352,8 @@ class SIGRegLayer(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the constructor arguments for serialization.
 
-        :return: The base layer config plus ``knots``, ``num_proj`` and
-            ``seed``.
+        :return: The base layer config plus ``knots``, ``num_proj``,
+            ``seed`` and ``normalize_by_n``.
         :rtype: dict
         """
         config = super().get_config()
@@ -320,6 +362,7 @@ class SIGRegLayer(keras.layers.Layer):
                 "knots": self.knots,
                 "num_proj": self.num_proj,
                 "seed": self.seed,
+                "normalize_by_n": self.normalize_by_n,
             }
         )
         return config
