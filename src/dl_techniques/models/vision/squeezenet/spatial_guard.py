@@ -1,35 +1,16 @@
-"""
-Spatial-extent validation shared by the two SqueezeNet model families.
+"""``validate_spatial_extent`` and ``minimum_spatial_extent``, spatial-size guards shared by the two SqueezeNet model families.
 
-Both :class:`SqueezeNetV1` and :class:`SqueezeNoduleNetV2` downsample with
-``padding='valid'`` at every stage: a strided stem convolution followed by three
-``pool_size=3, strides=2`` max-pooling stages. Under valid padding a spatial axis
-of length ``n`` becomes ``(n - k) // s + 1``, which reaches **zero** for small
-inputs -- and Keras 3.8 does not raise on a zero-length spatial axis. The model
-still produces a correctly *shaped* tensor, filled entirely with ``NaN`` (a
-``Conv2D`` head over an empty map feeds ``GlobalAveragePooling2D`` a ``0/0``,
-and the final softmax propagates it).
+Both `SqueezeNetV1` and `SqueezeNoduleNetV2` downsample with
+`padding='valid'` at every stage, so a spatial axis of length `n` becomes
+`(n - k) // s + 1` and can reach zero on a small input. Keras does not
+raise on a zero-length spatial axis; the model still produces a
+correctly shaped tensor, filled with NaN. This module walks the same
+downsampling arithmetic ahead of construction, so the failure is a named
+`ValueError` instead of a silent all-NaN forward pass.
 
-This module walks that same arithmetic ahead of construction so the failure is a
-named ``ValueError`` at call time instead of a silent all-NaN forward pass.
-
-Interface contract
-------------------
-``validate_spatial_extent(spatial, variant_config, model_label)``
-    ``spatial`` is the tuple of spatial axis lengths (channels excluded);
-    ``variant_config`` is an entry of a model's ``MODEL_VARIANTS`` (it is read
-    for ``conv1_kernel``, ``conv1_stride`` and ``pool_indices`` only, so it works
-    unchanged for 2D and 3D variants). Returns ``None`` on success and raises
-    ``ValueError`` naming the first collapsing stage, the axis, and the computed
-    minimum legal extent for that exact variant. ``model_label`` only decorates
-    the message.
-
-``minimum_spatial_extent(variant_config)``
-    Returns the smallest per-axis length that survives every downsampling stage
-    of ``variant_config``. It is *computed*, never tabulated: the two shipped
-    stem families differ (35 for the 7x7/stride-2 stem with pools after fire4 and
-    fire8; 31 for SqueezeNet "1.1"'s 3x3 stem with pools after fire3 and fire5),
-    and a hard-coded constant would be wrong for one of them.
+`minimum_spatial_extent` computes the smallest legal input length by
+simulating every downsampling stage, rather than a hard-coded constant,
+since the two shipped stem families collapse at different sizes.
 """
 
 from typing import Any, Dict, List, Sequence, Tuple
@@ -51,11 +32,11 @@ def _conv_out(size: int, kernel: int, stride: int, same_padding: bool) -> int:
 def _downsampling_stages(
         variant_config: Dict[str, Any]
 ) -> List[Tuple[str, int, int, bool]]:
-    """
-    Reconstruct the ordered downsampling stages of a variant.
+    """Reconstruct the ordered downsampling stages of a variant.
 
-    Returns a list of ``(stage_name, kernel, stride, same_padding)`` mirroring
-    exactly what ``_build_stem`` and ``_build_fire_modules`` emit.
+    :param variant_config: A `MODEL_VARIANTS` entry.
+    :return: List of `(stage_name, kernel, stride, same_padding)`, mirroring
+        what `_build_stem` and `_build_fire_modules` emit.
     """
     conv1_stride = variant_config["conv1_stride"]
     pool_indices = variant_config["pool_indices"]
@@ -73,7 +54,12 @@ def _downsampling_stages(
 
 
 def minimum_spatial_extent(variant_config: Dict[str, Any]) -> int:
-    """Smallest per-axis input length that keeps every stage output >= 1."""
+    """Compute the smallest per-axis input length that keeps every stage output >= 1.
+
+    :param variant_config: A `MODEL_VARIANTS` entry.
+    :return: The smallest legal per-axis extent.
+    :raises ValueError: If no input up to `_MAX_SEARCH_EXTENT` survives.
+    """
     stages = _downsampling_stages(variant_config)
     for size in range(1, _MAX_SEARCH_EXTENT + 1):
         current = size
@@ -94,17 +80,13 @@ def validate_spatial_extent(
         variant_config: Dict[str, Any],
         model_label: str,
 ) -> None:
-    """
-    Raise ``ValueError`` if any spatial axis collapses to zero length.
+    """Raise `ValueError` if any spatial axis collapses to zero length.
 
-    Args:
-        spatial: Spatial axis lengths of the input, channels excluded.
-        variant_config: A ``MODEL_VARIANTS`` entry.
-        model_label: Class name used in the error message.
-
-    Raises:
-        ValueError: If a downsampling stage would produce a zero-length axis.
-            The message names the stage, the axis, and the computed minimum.
+    :param spatial: Spatial axis lengths of the input, channels excluded.
+    :param variant_config: A `MODEL_VARIANTS` entry.
+    :param model_label: Class name used in the error message.
+    :raises ValueError: If a downsampling stage would produce a zero-length
+        axis. The message names the stage, the axis, and the computed minimum.
     """
     stages = _downsampling_stages(variant_config)
 

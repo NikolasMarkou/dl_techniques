@@ -1,57 +1,15 @@
-"""
-SqueezeNet architecture for efficient classification.
+"""``SqueezeNet`` (v1.0/v1.1), a parameter-efficient CNN built from Fire modules, plus the ``create_squeezenet_v1`` factory.
 
-This model encapsulates the SqueezeNet architecture, a convolutional neural
-network designed to achieve AlexNet-level accuracy on ImageNet with
-approximately 50 times fewer parameters. The design centers on a novel
-building block, the "Fire module," which systematically reduces the
-parameter count while preserving representational power.
+A Fire module squeezes to a narrow 1x1 bottleneck, then expands through
+parallel 1x1 and 3x3 convolutions concatenated together, so the costly 3x3
+convolution runs on fewer input channels than the block's own width. The
+network also delays downsampling to later layers, keeping activation maps
+larger for longer, and optionally adds ResNet-style bypass connections
+around Fire modules for gradient flow in deeper variants.
 
-Architectural Overview:
-    SqueezeNet's macro-architecture consists of a standalone convolutional
-    layer (the "stem"), followed by a series of eight Fire modules, and
-    concludes with a final convolutional layer and global pooling (the
-    "head"). Max-pooling layers are strategically placed after the stem and
-    certain Fire modules to downsample feature maps.
-
-    The core innovation is the Fire module, which comprises two stages:
-    1.  A "squeeze" stage: This consists of a convolutional layer with only
-        1x1 filters. Its purpose is to reduce the channel dimensionality of
-    its input tensor, acting as a bottleneck.
-    2.  An "expand" stage: This stage takes the output of the squeeze layer
-        and feeds it into two parallel convolutional layers—one with 1x1
-        filters and another with 3x3 filters. The outputs of these two
-        layers are then concatenated along the channel dimension.
-
-    This model also supports the integration of residual "bypass"
-    connections, similar to those in ResNet. These connections are added
-    around certain Fire modules to improve gradient flow and enable the
-    training of deeper SqueezeNet variants.
-
-Foundational Principles and Intuition:
-    The architecture is guided by three primary strategies for creating a
-    parameter-efficient CNN:
-
-    1.  Replace 3x3 filters with 1x1 filters: A significant portion of the
-        computation and parameters in a CNN is in its 3x3 convolutions.
-        A 1x1 filter has 9 times fewer parameters than a 3x3 filter,
-        providing a direct and effective way to reduce model size. The
-        Fire module's expand layer heavily utilizes 1x1 convolutions.
-
-    2.  Decrease input channels to 3x3 filters: The number of parameters
-        in a convolutional layer is calculated as `(input_channels) *
-        (output_channels) * (kernel_height * kernel_width)`. The "squeeze"
-        layer's primary function is to reduce the `input_channels` term
-        for the subsequent 3x3 convolution in the "expand" layer. This
-        bottleneck design is the most critical factor in SqueezeNet's
-        parameter efficiency.
-
-    3.  Downsample late in the network: The authors postulate that larger
-        activation maps (achieved by delaying pooling) can lead to higher
-        classification accuracy by preserving more spatial information.
-        SqueezeNet performs max-pooling later in the network compared to
-        its predecessors, allowing representations to develop over a larger
-        spatial extent before being downsampled.
+Kernel initializers are transcribed from the official Caffe prototxts, not
+Keras defaults: see `caffe_reference_init.py` for why `glorot_uniform`
+would be a different distribution.
 
 References:
     -   Iandola et al., "SqueezeNet: AlexNet-level accuracy with 50x fewer
@@ -90,31 +48,41 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 @register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v1")
 class FireModule(keras.layers.Layer):
-    """
-    Fire module - the fundamental building block of SqueezeNet.
+    """The fundamental building block of SqueezeNet: squeeze, then expand and concatenate.
 
-    A Fire module consists of a squeeze convolution layer (1x1 filters) feeding into
-    an expand layer that has a mix of 1x1 and 3x3 convolution filters. This design
-    significantly reduces the number of parameters while maintaining representational power.
+    Architecture:
 
-    **Architecture**:
-    ```
-    Input → Squeeze(1x1) → ReLU → Expand(1x1 + 3x3) → ReLU → Concatenate → Output
-    ```
+    .. code-block:: text
 
-    Args:
-        s1x1: Number of filters in squeeze layer (all 1x1).
-        e1x1: Number of 1x1 filters in expand layer.
-        e3x3: Number of 3x3 filters in expand layer.
-        kernel_regularizer: Regularizer for convolution kernels.
-        kernel_initializer: Initializer for convolution kernels.
-        **kwargs: Additional arguments for Layer base class.
+        input  [B, H, W, C]
+           |
+           v
+        Conv2D 1x1 -> ReLU   (squeeze, s1x1 filters)
+           |
+        +--+--+
+        |     |
+        v     v
+      Conv2D 1x1  Conv2D 3x3   (expand, e1x1 / e3x3 filters)
+        |     |
+        +--+--+
+           |
+        Concatenate
+           |
+           v
+        output  [B, H, W, e1x1 + e3x3]
+
+    :param s1x1: Number of 1x1 filters in the squeeze layer.
+    :param e1x1: Number of 1x1 filters in the expand layer.
+    :param e3x3: Number of 3x3 filters in the expand layer.
+    :param kernel_regularizer: Regularizer for convolution kernels.
+    :param kernel_initializer: Initializer for convolution kernels.
+    :param kwargs: Passthrough to `keras.layers.Layer`.
 
     Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
+        4D tensor `(batch_size, height, width, channels)`.
 
     Output shape:
-        4D tensor with shape: `(batch_size, height, width, e1x1 + e3x3)`.
+        4D tensor `(batch_size, height, width, e1x1 + e3x3)`.
     """
 
     def __init__(
@@ -158,7 +126,7 @@ class FireModule(keras.layers.Layer):
         self.expand_3x3 = layers.Conv2D(
             filters=e3x3,
             kernel_size=3,
-            padding='same',  # Maintain spatial dimensions
+            padding='same',
             activation='relu',
             kernel_regularizer=kernel_regularizer,
             kernel_initializer=kernel_initializer,
@@ -168,7 +136,7 @@ class FireModule(keras.layers.Layer):
         self.concat = layers.Concatenate(axis=-1)
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the Fire module by building all sub-layers."""
+        """Build the squeeze, expand, and concatenate sub-layers."""
         self.squeeze.build(input_shape)
 
         squeeze_output_shape = self.squeeze.compute_output_shape(input_shape)
@@ -218,44 +186,49 @@ class FireModule(keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.squeezenet.squeezenet_v1")
 class SqueezeNetV1(keras.Model):
-    """
-    SqueezeNet V1 model implementation.
+    """SqueezeNet V1: a stem, eight Fire modules, and a classification head.
 
-    A highly efficient CNN architecture that achieves AlexNet-level accuracy
-    with 50x fewer parameters through strategic use of Fire modules and
-    architectural design choices.
+    Architecture:
 
-    Args:
-        num_classes: Integer, number of output classes for classification.
-        variant_config: Dictionary defining the Fire module configurations.
-        use_bypass: Boolean, string or None, whether to use bypass connections.
-            Can be False, 'simple', or 'complex'. ``None`` (the default) defers
-            to the variant's own setting; an explicit ``False`` overrides it and
-            disables the bypass even for a bypass variant.
-        dropout_rate: Float, dropout rate after final Fire module.
-        kernel_regularizer: Regularizer for all convolution kernels.
-        kernel_initializer: Initializer for all convolution kernels.
-        include_top: Boolean, whether to include the classification head.
-        input_shape: Tuple, input shape (height, width, channels).
-        **kwargs: Additional arguments for Model base class.
+    .. code-block:: text
 
-    Raises:
-        ValueError: If invalid configuration is provided, or if the input's
-            spatial extent is below the variant's minimum (see
-            `spatial_guard.minimum_spatial_extent`): every downsampling stage
-            uses `padding='valid'`, and a stage that collapses an axis to length
-            zero yields an all-NaN output of the correct shape. The minimum is
-            35 for the "1.0"/"1.0_bypass" stem family and 31 for "1.1"; both are
-            computed from the variant, never hard-coded.
+        image  [B, H, W, C]
+           |
+           v
+        Conv2D -> ReLU -> MaxPool   (stem)
+           |
+           v
+        FireModule x 8   (pooled after fire4 & fire8, or fire3 & fire5 for "1.1")
+           |  (optional bypass connections around some modules)
+           v
+        Dropout -> Conv2D 1x1 -> ReLU -> GlobalAvgPool
+           |
+           v
+        class probabilities  [num_classes]
 
-    Example:
-        >>> # Create standard SqueezeNet for ImageNet
-        >>> model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
-        >>>
-        >>> # Create SqueezeNet with simple bypass for CIFAR-sized inputs
-        >>> # (upsampled to 64 px: the "1.0" stem family cannot accept 32 px)
-        >>> model = SqueezeNetV1.from_variant("1.0_bypass", num_classes=10,
-        >>>                                    input_shape=(64, 64, 3))
+    :param num_classes: Number of output classes.
+    :param variant_config: A `MODEL_VARIANTS` entry defining the Fire module configs.
+    :param use_bypass: `False`, `'simple'`, `'complex'`, or `None` to defer to
+        the variant's own setting; an explicit `False` disables bypass even
+        for a bypass variant.
+    :param dropout_rate: Dropout rate after the final Fire module.
+    :param kernel_regularizer: Regularizer for all convolution kernels.
+    :param kernel_initializer: Initializer for all convolution kernels.
+    :param include_top: Whether to include the classification head.
+    :param input_shape: Input shape `(height, width, channels)`.
+    :param kwargs: Passthrough to `keras.Model`.
+    :raises ValueError: If the configuration is invalid, or the input's
+        spatial extent is below the variant's minimum (35 for the "1.0"
+        stem family, 31 for "1.1", computed from the variant, never
+        hard-coded) — every downsampling stage uses `padding='valid'`, and
+        a collapsed axis would otherwise yield an all-NaN output of the
+        correct shape.
+
+    Example::
+
+        model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
+        # "1.0_bypass" needs at least 64px input; the "1.0" stem cannot accept 32px.
+        small = SqueezeNetV1.from_variant("1.0_bypass", num_classes=10, input_shape=(64, 64, 3))
     """
 
     MODEL_VARIANTS = {
@@ -312,26 +285,8 @@ class SqueezeNetV1(keras.Model):
         }
     }
 
-    # Architecture constants
-    # DECISION plan-2026-08-23T091307-9a110062/D-481
-    # Transcribed from the official Caffe prototxt, NOT inherited from Keras.
-    # `STEM_INITIALIZER` is `conv1`'s `weight_filler { type: "xavier" }` and
-    # `HEAD_INITIALIZER` is `conv10`'s
-    # `weight_filler { type: "gaussian" mean: 0.0 std: 0.01 }`.
-    # https://github.com/forresti/SqueezeNet/blob/master/SqueezeNet_v1.0/train_val.prototxt
-    #
-    # Do NOT collapse these two to one value and do NOT put `glorot_uniform`
-    # back. They are DIFFERENT fillers in the reference -- 25 convolutions
-    # xavier, `conv10` alone gaussian -- and Caffe's xavier normalizes by
-    # `fan_in`, which is `lecun_uniform` here, not `glorot_uniform`. The full
-    # measured derivation is in `caffe_reference_init.py`'s docstring.
-    # `HEAD_INITIALIZER` is a serialized CONFIG dict, not an `Initializer`
-    # instance: Keras resolves a config to a FRESH instance per consumer, while
-    # one shared seedless instance replays its draw (D-072). Consumers copy it
-    # with `dict(...)` at the call site -- a class attribute aliasing a
-    # module-level mutable is the same object under two names, which is what
-    # `test_package_api_contract.py::TestNoMutableDefaults` exists to catch.
-    # See decisions.md D-481.
+    # DECISION plan-2026-08-23T091307-9a110062/D-481: keep STEM_INITIALIZER and HEAD_INITIALIZER distinct; do not collapse to one value or glorot_uniform.
+    # They transcribe different Caffe fillers (25 xavier convs vs conv10's gaussian); see caffe_reference_init.py. HEAD_INITIALIZER stays a serialized config so consumers get a fresh instance. See decisions.md.
     STEM_INITIALIZER = CAFFE_XAVIER_INITIALIZER
     HEAD_INITIALIZER = CAFFE_HEAD_INITIALIZER
 
@@ -355,21 +310,14 @@ class SqueezeNetV1(keras.Model):
         if not 0 <= dropout_rate < 1:
             raise ValueError("dropout_rate must be in range [0, 1)")
 
-        # DECISION plan-2026-08-17T183311-79c63e38/D-020
-        # Validate here, in __init__, NOT in build(): input_shape is a required
-        # constructor argument already resolved to concrete ints before
-        # _build_model runs, and this class calls super().__init__(inputs=...,
-        # outputs=...) -- by the time a functional Model's build() would run the
-        # all-NaN graph has already been assembled. Do NOT move this to build().
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020: validate here, in __init__, not in build().
+        # By the time a functional Model's build() would run, the all-NaN graph is already assembled from super().__init__(inputs=..., outputs=...). See decisions.md.
         validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
 
         self.num_classes = num_classes
         self.variant_config = variant_config
-        # DECISION plan-2026-08-17T183311-79c63e38/D-020
-        # `is None` sentinel, not truthiness: `use_bypass if use_bypass else ...`
-        # made an explicit `use_bypass=False` fall through to the variant's own
-        # value, so from_variant("1.0_bypass", use_bypass=False) built the
-        # bypass anyway. Do NOT "simplify" this back to a truthiness test.
+        # DECISION plan-2026-08-17T183311-79c63e38/D-020: use an "is None" sentinel, not truthiness, for use_bypass.
+        # Truthiness made an explicit use_bypass=False fall through to the variant's own value instead of disabling bypass. See decisions.md.
         self.use_bypass = (
             variant_config.get("use_bypass", False) if use_bypass is None else use_bypass
         )
@@ -540,34 +488,24 @@ class SqueezeNetV1(keras.Model):
             input_shape: Tuple[int, int, int] = (224, 224, 3),
             **kwargs: Any
     ) -> "SqueezeNetV1":
-        """
-        Create a SqueezeNet model from a predefined variant.
+        """Create a SqueezeNet model from a predefined variant.
 
-        Args:
-            variant: String, one of "1.0", "1.1", "1.0_bypass"
-            num_classes: Integer, number of output classes
-            input_shape: Tuple, input shape (height, width, channels)
-            **kwargs: Additional arguments passed to the constructor. A
-                non-None ``weights`` here raises NotImplementedError; no
-                pretrained checkpoints are distributed with this package.
+        :param variant: One of `"1.0"`, `"1.1"`, `"1.0_bypass"`.
+        :param num_classes: Number of output classes.
+        :param input_shape: Input shape `(height, width, channels)`.
+        :param kwargs: Passthrough to the constructor. A non-`None` `weights`
+            here raises `NotImplementedError`.
+        :return: A configured `SqueezeNetV1` instance.
+        :raises NotImplementedError: If a non-`None` `weights` is passed.
+        :raises ValueError: If `variant` is not recognized, or `input_shape`'s
+            spatial extent is below the variant's computed minimum (35 for
+            "1.0"/"1.0_bypass", 31 for "1.1").
 
-        Returns:
-            SqueezeNetV1 model instance
+        Example::
 
-        Raises:
-            NotImplementedError: If a non-None ``weights`` is passed.
-            ValueError: If variant is not recognized, or if `input_shape`'s
-                spatial extent is below the variant's computed minimum (35 for
-                "1.0"/"1.0_bypass", 31 for "1.1").
-
-        Example:
-            >>> # Standard SqueezeNet for ImageNet
-            >>> model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
-            >>>
-            >>> # SqueezeNet 1.1 for CIFAR-10. 32 px clears the "1.1" floor of
-            >>> # 31; the "1.0" stem family would raise here (its floor is 35).
-            >>> model = SqueezeNetV1.from_variant("1.1", num_classes=10,
-            >>>                                   input_shape=(32, 32, 3))
+            model = SqueezeNetV1.from_variant("1.0", num_classes=1000)
+            # 32px clears "1.1"'s floor of 31; the "1.0" stem family's floor is 35.
+            small = SqueezeNetV1.from_variant("1.1", num_classes=10, input_shape=(32, 32, 3))
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -621,13 +559,8 @@ class SqueezeNetV1(keras.Model):
                 config['kernel_initializer']
             )
 
-        # DECISION plan-2026-08-19T163559-499b6f0e/D-129
-        # Drop only the Functional-graph keys that ``__init__`` rebuilds. Do NOT
-        # add 'name' back to this list: dropping it renamed a nested backbone
-        # from 'backbone' to 'squeeze_net_v1' on reload, and
-        # ``utils/weight_transfer.py`` keys its layer map by ``layer.name``, so
-        # the whole backbone landed in missing_in_source and kept its random
-        # init while the call still returned normally.
+        # DECISION plan-2026-08-19T163559-499b6f0e/D-129: drop only the Functional-graph keys __init__ rebuilds; never add 'name' to this list.
+        # Dropping 'name' too renamed a nested backbone on reload, so weight_transfer.py's name-keyed layer map silently left it at random init. See decisions.md.
         for key in ('layers', 'input_layers', 'output_layers'):
             config.pop(key, None)
 
@@ -666,36 +599,23 @@ def create_squeezenet_v1(
         weights: Optional[str] = None,
         **kwargs: Any
 ) -> SqueezeNetV1:
-    """
-    Convenience function to create SqueezeNet V1 models.
+    """Create a SqueezeNet V1 model.
 
-    Args:
-        variant: String, model variant ("1.0", "1.1", "1.0_bypass")
-        num_classes: Integer, number of output classes
-        input_shape: Tuple, input shape (height, width, channels)
-        weights: Unsupported; any non-None value raises NotImplementedError.
-        **kwargs: Additional arguments passed to the model constructor
+    :param variant: Model variant: `"1.0"`, `"1.1"`, `"1.0_bypass"`.
+    :param num_classes: Number of output classes.
+    :param input_shape: Input shape `(height, width, channels)`.
+    :param weights: Unsupported; any non-`None` value raises `NotImplementedError`.
+    :param kwargs: Passthrough to the model constructor.
+    :return: A configured `SqueezeNetV1` instance.
+    :raises NotImplementedError: If `weights` is not `None`.
+    :raises ValueError: If `input_shape`'s spatial extent is below the
+        variant's computed minimum (35 for "1.0"/"1.0_bypass", 31 for "1.1").
 
-    Returns:
-        SqueezeNetV1 model instance
+    Example::
 
-    Raises:
-        NotImplementedError: If `weights` is not None.
-        ValueError: If `input_shape`'s spatial extent is below the variant's
-            computed minimum (35 for "1.0"/"1.0_bypass", 31 for "1.1").
-
-    Example:
-        >>> # Create SqueezeNet 1.0 for ImageNet
-        >>> model = create_squeezenet_v1("1.0", num_classes=1000)
-        >>>
-        >>> # Create SqueezeNet 1.1 for CIFAR-10 (32 px clears the "1.1" floor
-        >>> # of 31; "1.0" and "1.0_bypass" require at least 35)
-        >>> model = create_squeezenet_v1("1.1", num_classes=10,
-        >>>                              input_shape=(32, 32, 3))
-        >>>
-        >>> # Create SqueezeNet with bypass for custom dataset
-        >>> model = create_squeezenet_v1("1.0_bypass", num_classes=100,
-        >>>                              input_shape=(64, 64, 3))
+        model = create_squeezenet_v1("1.0", num_classes=1000)
+        # 32px clears "1.1"'s floor of 31; "1.0"/"1.0_bypass" need at least 35.
+        cifar = create_squeezenet_v1("1.1", num_classes=10, input_shape=(32, 32, 3))
     """
     return SqueezeNetV1.from_variant(
         variant=variant,
