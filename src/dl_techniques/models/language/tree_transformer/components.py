@@ -45,11 +45,7 @@ class PositionalEncoding(keras.layers.Layer):
     model to understand the order of tokens in a sequence. It uses a fixed,
     non-trainable sinusoidal function.
 
-    **Intent**: To provide a standard, non-learnable method for incorporating
-    sequence order into token representations, essential for self-attention
-    mechanisms which are otherwise permutation-invariant.
-
-    **Architecture**:
+    Architecture:
     .. code-block:: text
 
         Input(shape=[batch, seq_len, hidden_size])
@@ -63,7 +59,7 @@ class PositionalEncoding(keras.layers.Layer):
                ▼
         Output(shape=[batch, seq_len, hidden_size])
 
-    **Mathematical Operation**:
+    Formula:
         :math:`PE(pos, 2i) = \\sin(pos / 10000^{2i/d_{model}})`
         :math:`PE(pos, 2i+1) = \\cos(pos / 10000^{2i/d_{model}})`
         :math:`output = dropout(input + PE_{slice})`
@@ -76,15 +72,14 @@ class PositionalEncoding(keras.layers.Layer):
     :type max_len: int
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
-    **Input shape**:
+    Input shape:
         3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
 
-    **Output shape**:
+    Output shape:
         3D tensor with the same shape as input: `(batch_size, sequence_length, hidden_size)`.
 
-    **Attributes**:
-        pe: Non-trainable weight matrix of shape `(1, max_len, hidden_size)`.
-        dropout: `keras.layers.Dropout` layer.
+    :ivar pe: Non-trainable weight matrix of shape `(1, max_len, hidden_size)`.
+    :ivar dropout: `keras.layers.Dropout` layer.
     """
 
     def __init__(
@@ -169,11 +164,7 @@ class GroupAttention(keras.layers.Layer):
     two attention distributions: `neibor_attn` (break probability between adjacent
     tokens) and `g_attn` (probability of tokens belonging to the same syntactic group).
 
-    **Intent**: To learn soft, hierarchical constituency trees directly from text
-    without explicit syntactic supervision. The computed `g_attn` serves as a
-    structural prior for the subsequent multi-head attention layer.
-
-    **Architecture**:
+    Architecture:
     .. code-block:: text
 
         Input(context, mask, prior)
@@ -199,23 +190,18 @@ class GroupAttention(keras.layers.Layer):
     :type hidden_size: int
     :param normalization_type: The type of normalization layer to use (e.g., "layer_norm").
     :type normalization_type: str
-    :param layer_norm_eps: Epsilon for this layer's own normalization. Defaults to
-        1e-12, matching :class:`TreeTransformerBlock`'s default.
-        **Numerics change (2026-08-19, decisions.md D-007):** this parameter did
-        not exist before, so ``self.norm`` ran at ``create_normalization_layer``'s
-        ``1e-6`` default and there was no channel through which the enclosing
-        block's ``layer_norm_eps`` could reach it. Weight shapes are unchanged --
-        existing ``.keras`` files still load -- but forward values move slightly.
+    :param layer_norm_eps: Epsilon for this layer's own normalization. Defaults
+        to 1e-12, matching :class:`TreeTransformerBlock`'s default.
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
-    **Input shape**:
+    Input shape:
         A tuple of three tensors:
         - `context`: `(batch_size, sequence_length, hidden_size)`
         - `mask`: `(batch_size, 1, sequence_length)`
         - `prior`: Scalar tensor or `(batch_size, sequence_length, sequence_length)`
 
-    **Output shape**:
+    Output shape:
         A tuple of two tensors, both with shape: `(batch_size, sequence_length, sequence_length)`
         - `g_attn`: Group attention probabilities.
         - `neibor_attn`: Neighbor attention probabilities (break probabilities).
@@ -238,20 +224,9 @@ class GroupAttention(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.layer_norm_eps = layer_norm_eps
 
-        # DECISION plan-2026-08-19T070627-a616f581/D-007
-        # `layer_norm_eps` is a NEW constructor parameter. Before it existed this
-        # call was a bare `create_normalization_layer(normalization_type)`, so
-        # `self.norm` silently took the factory's `epsilon=1e-6` default while
-        # the enclosing `TreeTransformerBlock`'s `norm1`/`norm2` ran at its own
-        # `layer_norm_eps` (1e-12 by default) -- and the block had NO channel to
-        # pass its knob down, so no guard over call sites could ever have seen
-        # it. This is the "unreachable from the assembled model" class, a PRODUCT
-        # gap, not a dropped keyword.
-        # WHAT NOT TO DO: do not remove this parameter to "simplify" the
-        # signature -- deleting it re-opens the gap invisibly, since the factory
-        # default makes the wrong value look deliberate. It is serialized in
-        # `get_config` so a round trip preserves it.
-        # See decisions.md D-007.
+        # DECISION plan-2026-08-19T070627-a616f581/D-007: layer_norm_eps must be
+        # a real constructor parameter, not left at the factory's 1e-6 default while the enclosing
+        # block runs at 1e-12. See decisions.md.
         self.norm = create_normalization_layer(
             normalization_type, epsilon=layer_norm_eps
         )
@@ -392,11 +367,7 @@ class TreeMHA(keras.layers.Layer):
     with a key modification: the final attention weights are element-wise
     multiplied by the `group_prob` matrix from the `GroupAttention` layer.
 
-    **Intent**: To bias the self-attention mechanism to focus on tokens within
-    the same learned syntactic constituents, integrating the induced tree
-    structure directly into the representation learning process.
-
-    **Architecture**:
+    Architecture:
     .. code-block:: text
 
         Input(query, key, value, group_prob, mask)
@@ -424,13 +395,13 @@ class TreeMHA(keras.layers.Layer):
     :type attention_dropout_rate: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
-    **Input shape**:
+    Input shape:
         A tuple of tensors:
         - `query`, `key`, `value`: `(batch_size, sequence_length, hidden_size)`
         - `group_prob`: `(batch_size, sequence_length, sequence_length)`
         - `mask`: `(batch_size, 1, sequence_length)`
 
-    **Output shape**:
+    Output shape:
         3D tensor with shape: `(batch_size, sequence_length, hidden_size)`.
     """
 
@@ -560,10 +531,7 @@ class TreeTransformerBlock(keras.layers.Layer):
     and processing through a feed-forward network. It uses a Pre-LayerNorm
     architecture for improved training stability.
 
-    **Intent**: To provide a modular, repeatable building block for constructing
-    the full Tree Transformer encoder stack.
-
-    **Architecture (Pre-LN)**:
+    Architecture (pre-norm):
     .. code-block:: text
 
         Input(x, mask, group_prob_prior)
@@ -605,10 +573,10 @@ class TreeTransformerBlock(keras.layers.Layer):
     :type layer_norm_eps: float
     :param kwargs: Additional keyword arguments for `keras.layers.Layer`.
 
-    **Input shape**:
+    Input shape:
         Tuple of `(x, mask, group_prob_prior)` as defined in `GroupAttention`.
 
-    **Output shape**:
+    Output shape:
         Tuple of `(x_out, group_prob_out, break_prob)`.
     """
 
@@ -654,11 +622,8 @@ class TreeTransformerBlock(keras.layers.Layer):
         self.layer_norm_eps = layer_norm_eps
 
         # Create all sub-layers in __init__
-        # DECISION plan-2026-08-19T070627-a616f581/D-007
-        # `layer_norm_eps` reached `norm1`/`norm2` below but had no channel into
-        # `GroupAttention`, whose own norm therefore ran at the factory's 1e-6
-        # default. `GroupAttention` gained the parameter for exactly this wiring;
-        # do not drop it here. See decisions.md D-007.
+        # DECISION plan-2026-08-19T070627-a616f581/D-007: pass layer_norm_eps into
+        # GroupAttention too, not just norm1/norm2, or its own norm runs at the factory's 1e-6 default. See decisions.md.
         self.group_attn = GroupAttention(
             hidden_size=hidden_size,
             normalization_type=normalization_type,
@@ -669,14 +634,8 @@ class TreeTransformerBlock(keras.layers.Layer):
             hidden_size=hidden_size,
             attention_dropout_rate=attention_dropout_rate,
         )
-        # DECISION plan-2026-07-30T140922-8af1028f/D-022
-        # See `models/neural_computer/nam/cell.py` for the full reasoning. In short: this
-        # block's own generic `activation`/`dropout_rate` are pre-filtered
-        # against what `ffn_type` accepts, because `create_ffn_layer` now
-        # RAISES on a key it would have to drop; and `hidden_act` is DISCARDED
-        # rather than renamed to `branch_activation` for `differential`,
-        # because this site never enumerated FFN types. Route through
-        # `build_transformer_ffn_config` if that rename is ever wanted here.
+        # DECISION plan-2026-07-30T140922-8af1028f/D-022: pre-filter activation/dropout_rate
+        # against what ffn_type accepts; create_ffn_layer raises on a key it would drop. See decisions.md, nam/cell.py.
         self.ffn = create_ffn_layer(
             ffn_type=ffn_type,
             name="ffn",

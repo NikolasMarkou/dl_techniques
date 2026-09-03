@@ -1,50 +1,29 @@
 """
-Tree Transformer, a transformer encoder that induces a soft constituency tree
-and uses it to constrain its own attention.
+Tree Transformer, a transformer encoder that induces a soft constituency
+tree and uses it to constrain its own attention.
 
-This model embodies the principle that language is hierarchical and a flat
-attention matrix has no way to say so. Standard self-attention scores every
-token pair independently; nothing in the architecture prefers "the old man" to
-"man who is" as a unit, so the model must rediscover phrase structure from data
-at every layer, from scratch, with no inductive bias helping it. Supervised
-parsers do have that bias but need treebanks, which exist for a handful of
-languages. Tree Transformer takes the third route: it makes constituency an
-unsupervised byproduct of ordinary language-model training by giving attention
-a structural prior it must learn to satisfy.
+Standard self-attention scores every token pair independently, with
+nothing preferring "the old man" as a unit over "man who is". Tree
+Transformer instead computes, for each adjacent token pair, a break
+probability that a constituent boundary falls between them, and derives
+from those neighbor scores the probability that each span is a single
+constituent, via a dynamic-programming recurrence expressed as matrix
+products rather than enumerating spans. That span matrix multiplies the
+usual attention weights element-wise, so attention on a token pair the
+model believes straddles a boundary is attenuated, without ever being
+hard-masked. Each block passes its group probabilities to the next as a
+prior, so boundaries persist and constituents grow with depth; every
+block's break probabilities are collected and returned with shape
+`[batch, num_layers, seq_len, seq_len]`, the induced grammar.
 
-The mechanism is Group Attention. For each adjacent token pair the model
-computes a *break probability* -- how likely a constituent boundary falls
-between them -- and from those neighbour scores derives, for every span, the
-probability that the span is a single constituent. The derivation is the
-non-obvious part: rather than enumerating `O(L^2)` spans explicitly, the
-constituent probability of a span is obtained from the break probabilities
-inside it by a dynamic-programming recurrence expressed as matrix products, so
-the whole span table costs a few matmuls. The resulting matrix multiplies the
-standard scaled-dot-product attention weights element-wise, so a token pair
-that the model believes to straddle a boundary has its attention attenuated.
-Attention is thus biased toward learned constituents without ever being
-hard-masked by them.
-
-The tree is built jointly across depth, not per layer. Each block passes its
-computed group probabilities to the next as a prior, so boundaries agreed on by
-lower layers persist and constituents grow monotonically with depth -- the
-hierarchy emerges from the layer stack itself rather than being decoded at the
-end. Every block's break probabilities are also collected and returned, shape
-`[batch, num_layers, seq_len, seq_len]`, which is the induced grammar and the
-artifact a grammar-induction evaluation consumes.
-
-Each block is Pre-LN for training stability, ordering
-`GroupAttention -> TreeMHA -> FFN` with residual connections throughout. The
-`lm_head` is part of the foundation model and is always built; for pure-encoder
-downstream use that is wasted weight, and the pretraining script saves a
-separate encoder-only artifact. Four preset variants span tiny through large.
-
-No pretrained weights are distributed with this package. `pretrained=True`
-raises `NotImplementedError` rather than warning and returning a randomly
-initialized model, which is a deliberate choice: the previous behaviour held a
-table of unreachable weight URLs and swallowed the download failure, making an
-unavailable checkpoint silently indistinguishable from a successful load. Pass
-a local `.keras` path to `pretrained` instead.
+Each block is Pre-LN, ordering `GroupAttention -> TreeMHA -> FFN` with
+residual connections throughout. `lm_head` is always built as part of the
+foundation model; the pretraining script saves a separate encoder-only
+artifact for pure-encoder use. Four preset variants span tiny through
+large. No pretrained weights are distributed with this package;
+`pretrained=True` raises `NotImplementedError` rather than returning a
+random model with a download-failure warning. Pass a local `.keras` path
+to `pretrained` instead.
 
 References:
     - Wang et al., 2019. Tree Transformer: Integrating Tree Structures into
@@ -104,7 +83,7 @@ class TreeTransformer(keras.Model):
     dictionary containing 'last_hidden_state', 'logits' (from LM head), and
     'break_probs' from all layers.
 
-    **Architecture Overview**:
+    Architecture:
     .. code-block:: text
 
         Input({"input_ids": [B, L]})
@@ -450,16 +429,8 @@ class TreeTransformer(keras.Model):
         )
         logger.info(report.summary_string())
 
-    # `_download_weights` raises instead of falling back to random init. This
-    # class used to carry a `PRETRAINED_WEIGHTS` table of placeholder URLs on a
-    # non-existent host; `from_variant` caught the resulting download failure,
-    # logged a warning and returned a randomly-initialized model, so
-    # `pretrained=True` silently produced untrained weights. The B-5 fix emptied
-    # the table and this method has raised since; the empty dict itself was then
-    # dead machinery that could never succeed, so it is gone too. Do NOT
-    # reinstate either the table or a warn-and-return branch -- the except clause
-    # in `from_variant` is deliberately narrow (see the D-001 anchor) so this
-    # NotImplementedError reaches the caller.
+    # No public pretrained weights exist for TreeTransformer, so this raises
+    # instead of falling back to random init; see the D-001 anchor in from_variant.
     @staticmethod
     def _download_weights(
         variant: str, dataset: str = "uncased", cache_dir: Optional[str] = None
@@ -489,23 +460,13 @@ class TreeTransformer(keras.Model):
     ) -> "TreeTransformer":
         """Creates a TreeTransformer model from a predefined variant.
 
-        Args:
-            variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``,
-                ``"base"``, ``"large"``).
-            pretrained: ``False`` (default) for random init. ``True`` to attempt
-                downloading hosted weights — this currently raises
-                :class:`NotImplementedError` because no public Tree Transformer
-                weights are hosted. A string path is treated as a local
-                ``.keras`` / ``.weights.h5`` file to load.
-            weights_dataset: Dataset key for hosted weights (kept for API
-                parity with BERT / DistilBERT / ResNet — currently unused since
-                no public weights are hosted).
-            cache_dir: Optional cache directory for downloaded weights.
-            **kwargs: Forwarded to ``TreeTransformer.__init__``.
+        :param variant: One of ``cls.MODEL_VARIANTS`` (e.g. ``"tiny"``, ``"small"``, ``"base"``, ``"large"``).
+        :param pretrained: ``False`` (default) for random init. ``True`` to attempt downloading hosted weights — this currently raises :class:`NotImplementedError` because no public Tree Transformer weights are hosted. A string path is treated as a local ``.keras`` / ``.weights.h5`` file to load.
+        :param weights_dataset: Dataset key for hosted weights (kept for API parity with BERT / DistilBERT / ResNet — currently unused since no public weights are hosted).
+        :param cache_dir: Optional cache directory for downloaded weights.
+        :param kwargs: Forwarded to ``TreeTransformer.__init__``.
 
-        Raises:
-            NotImplementedError: If ``pretrained=True``. Use
-                ``pretrained="path/to/weights.keras"`` to load local weights.
+        :raises NotImplementedError: If ``pretrained=True``. Use ``pretrained="path/to/weights.keras"`` to load local weights.
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -521,13 +482,8 @@ class TreeTransformer(keras.Model):
             if isinstance(pretrained, str):
                 load_weights_path = pretrained
             else:
-                # DECISION plan_2026-05-11_0a5779e8/D-001
-                # Narrow the except clause so NotImplementedError raised by
-                # _download_weights (no public Tree Transformer weights are
-                # hosted) propagates to the caller. Previously this was caught
-                # by `except Exception`, silently random-initializing the
-                # model and misleading users into believing they got
-                # pretrained weights. Only catch genuine network/disk errors.
+                # DECISION plan_2026-05-11_0a5779e8/D-001: catch only I/O errors here,
+                # not Exception, or NotImplementedError gets swallowed into a silent random-init. See decisions.md.
                 try:
                     load_weights_path = cls._download_weights(
                         variant, weights_dataset, cache_dir
@@ -625,25 +581,14 @@ def create_tree_transformer(
     across the model zoo: a thin module-level factory that delegates to
     :meth:`TreeTransformer.from_variant`.
 
-    Args:
-        variant: String, model variant ("tiny", "small", "base", "large").
-        vocab_size: Optional integer; override the variant default vocabulary
-            size. Passing a value different from
-            :attr:`TreeTransformer.DEFAULT_VOCAB_SIZE` while ``pretrained=True``
-            will skip loading vocab-dependent layers (embeddings, LM head).
-        pretrained: Boolean or string. If ``True``, attempts to load pretrained
-            weights for the chosen ``weights_dataset`` (currently raises
-            :class:`NotImplementedError` — no public Tree Transformer weights
-            are hosted). If a string, treated as a path to a local
-            ``.keras`` / ``.weights.h5`` file.
-        weights_dataset: String, dataset key for pretrained weights (kept for
-            API parity with other foundation models).
-        cache_dir: Optional string, directory to cache downloaded weights.
-        **kwargs: Additional arguments forwarded to ``TreeTransformer.__init__``
-            (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
+    :param variant: String, model variant ("tiny", "small", "base", "large").
+    :param vocab_size: Optional integer; override the variant default vocabulary size. Passing a value different from :attr:`TreeTransformer.DEFAULT_VOCAB_SIZE` while ``pretrained=True`` will skip loading vocab-dependent layers (embeddings, LM head).
+    :param pretrained: Boolean or string. If ``True``, attempts to load pretrained weights for the chosen ``weights_dataset`` (currently raises :class:`NotImplementedError` — no public Tree Transformer weights are hosted). If a string, treated as a path to a local ``.keras`` / ``.weights.h5`` file.
+    :param weights_dataset: String, dataset key for pretrained weights (kept for API parity with other foundation models).
+    :param cache_dir: Optional string, directory to cache downloaded weights.
+    :param kwargs: Additional arguments forwarded to ``TreeTransformer.__init__`` (e.g. ``hidden_dropout_rate``, ``max_len``, ``pad_token_id``).
 
-    Returns:
-        TreeTransformer encoder instance.
+    :return: TreeTransformer encoder instance.
 
     Example:
         >>> # Create a Tree Transformer base encoder with random init
