@@ -1218,7 +1218,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         # numerically inert.
         causal_mask = ops.cast(
             ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
-            keras.backend.floatx(),
+            keras.config.floatx(),
         )
         # Expand to the (1, S, S) full-mask form the attention layers expect.
         causal_mask = ops.expand_dims(causal_mask, 0)

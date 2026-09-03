@@ -173,7 +173,10 @@ def _accumulation_dtype(*dtypes: Any) -> str:
     for dtype in dtypes:
         if dtype is None:
             continue
-        if keras.backend.standardize_dtype(dtype) == "float64":
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        if (getattr(dtype, "name", None) or str(dtype)) == "float64":
             return "float64"
     return "float32"
 

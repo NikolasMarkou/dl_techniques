@@ -1050,7 +1050,10 @@ class PRISMTimeTree(keras.layers.Layer):
             :meth:`_split_with_overlap`.
         :rtype: Tuple[int, int, int]
         """
-        float_type = np.dtype(keras.backend.standardize_dtype(dtype)).type
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        float_type = np.dtype(getattr(dtype, "name", None) or str(dtype)).type
         overlap_size = int(
             float_type(seq_len)
             * float_type(overlap_ratio)

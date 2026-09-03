@@ -105,7 +105,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # DECISION plan-2026-08-26T061816-c515641a/D-017: soft assignments never give a cluster
 # EXACTLY zero mass, so "dead" needs a threshold, set by the mechanism and not by a
 # semantic story. The EMA target below is
-# `mean * m/(m + keras.backend.epsilon())`; at eps=1e-7 that factor is a smooth sigmoid
+# `mean * m/(m + keras.config.epsilon())`; at eps=1e-7 that factor is a smooth sigmoid
 # in log-mass with no knee (measured 0.469 at m=8.8e-8, 0.500 at 1e-7, 0.909 at 1e-6,
 # 0.999 at 1e-4). NOT 1e-3: uniform mass is `N/K`, and 1e-3 measurably freezes 1024/1024
 # and 65536/65536 of a VQ codebook at batch 1. 1e-6 clears eps by 11.4x and the worst of
@@ -460,7 +460,7 @@ class KMeansLayer(BaseMixtureLayer):
         squared_distances = keras.ops.sum(keras.ops.square(centroid_diffs), axis=-1)
 
         # Add small epsilon to prevent division by zero on diagonal
-        distances = keras.ops.sqrt(squared_distances + keras.backend.epsilon())
+        distances = keras.ops.sqrt(squared_distances + keras.config.epsilon())
 
         # Soft threshold at min_distance -> (n_clusters, n_clusters)
         repulsion_weights = keras.ops.maximum(
@@ -470,7 +470,7 @@ class KMeansLayer(BaseMixtureLayer):
 
         # (n_clusters, n_clusters, 1)
         repulsion_scale = keras.ops.expand_dims(
-            self.repulsion_strength * repulsion_weights / (distances + keras.backend.epsilon()),
+            self.repulsion_strength * repulsion_weights / (distances + keras.config.epsilon()),
             axis=-1
         )
 
@@ -513,7 +513,7 @@ class KMeansLayer(BaseMixtureLayer):
 
         # (n_clusters, features)
         target_centroids = sum_weighted_points / (
-            cluster_mass + keras.backend.epsilon()
+            cluster_mass + keras.config.epsilon()
         )
 
         # DECISION plan-2026-08-26T061816-c515641a/D-006 (threshold superseded by D-017):

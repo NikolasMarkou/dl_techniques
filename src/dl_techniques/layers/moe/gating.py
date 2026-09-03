@@ -33,7 +33,7 @@ def _min_temperature(dtype: Any) -> float:
     """Return the smallest softmax temperature that is safe in ``dtype``.
 
     # DECISION plan-2026-08-26T100331-f3744602/D-008
-    The floor is derived from ``dtype``, NOT from ``keras.backend.epsilon()``.
+    The floor is derived from ``dtype``, NOT from ``keras.config.epsilon()``.
     Do not "simplify" this back to a single float32-scale constant. Cosine
     similarities are bounded in ``[-1, 1]``, so dividing by ``t`` yields logits
     bounded by ``1 / t``. Two dtype-dependent ceilings must be respected:
@@ -45,7 +45,7 @@ def _min_temperature(dtype: Any) -> float:
 
     The floor is therefore chosen so that ``1 / t <= |_mask_neg_inf(dtype)| / 10``,
     i.e. ``1e-3`` for float16/bfloat16 and ``1e-8`` for float32 -- with the
-    float32 branch further tightened to ``keras.backend.epsilon()`` (``1e-7``),
+    float32 branch further tightened to ``keras.config.epsilon()`` (``1e-7``),
     which is stricter, so float32 behaviour is unchanged. MEASURED at HEAD under
     ``mixed_float16``: ``temperature_param = 1e-6`` -- a no-op for the old
     ``epsilon()`` floor -- produced ``gate_logits min/max: -inf inf`` and 80/80
@@ -57,7 +57,7 @@ def _min_temperature(dtype: Any) -> float:
     :rtype: float
     """
     sentinel_headroom = 10.0 / abs(_mask_neg_inf(dtype))
-    return max(sentinel_headroom, keras.backend.epsilon())
+    return max(sentinel_headroom, keras.config.epsilon())
 
 # ---------------------------------------------------------------------
 

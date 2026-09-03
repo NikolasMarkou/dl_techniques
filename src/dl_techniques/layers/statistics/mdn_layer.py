@@ -654,7 +654,7 @@ class MDNLayer(keras.layers.Layer):
         mix_weights = keras.activations.softmax(out_pi, axis=-1)
         gumbel_noise = -ops.log(-ops.log(
             keras.random.uniform(ops.shape(out_pi), seed=pi_seed)))
-        selected_logits = ops.log(mix_weights + keras.backend.epsilon()) + gumbel_noise
+        selected_logits = ops.log(mix_weights + keras.config.epsilon()) + gumbel_noise
         selected_components = ops.argmax(selected_logits, axis=-1)
 
         one_hot = ops.one_hot(selected_components, num_classes=self.num_mix)

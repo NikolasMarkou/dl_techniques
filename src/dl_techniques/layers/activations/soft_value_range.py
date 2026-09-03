@@ -262,7 +262,10 @@ def soft_value_range(
     # caller and move its error by ~7 orders of magnitude with every test still
     # green. Idiom and prior measurement: `sparsemax.py:232-241`, repo decision
     # plan-2026-07-29T070705-9bfc04c5/D-007.
-    input_dtype = keras.backend.standardize_dtype(x.dtype)
+    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+    # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+    # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+    input_dtype = getattr(x.dtype, "name", None) or str(x.dtype)
     compute_dtype = (
         "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
     )

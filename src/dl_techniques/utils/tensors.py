@@ -651,7 +651,7 @@ def length(vectors) -> Any:
     Returns:
         Length of vectors with shape [...]
     """
-    return ops.sqrt(ops.sum(ops.square(vectors), axis=-1) + keras.backend.epsilon())
+    return ops.sqrt(ops.sum(ops.square(vectors), axis=-1) + keras.config.epsilon())
 
 # ---------------------------------------------------------------------
 

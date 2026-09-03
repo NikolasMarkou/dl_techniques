@@ -25,7 +25,7 @@ Both metrics:
 - Implement the full contract: ``update_state``, ``result``, ``reset_state``,
   ``get_config``.
 - Accept ``sample_weight``.
-- Use ``keras.backend.epsilon()`` for numeric stability of the ``result``
+- Use ``keras.config.epsilon()`` for numeric stability of the ``result``
   denominator.
 """
 
@@ -120,7 +120,7 @@ class BrierScore(keras.metrics.Metric):
             )
 
     def result(self):
-        return self.sum_squared_error / (self.count + keras.backend.epsilon())
+        return self.sum_squared_error / (self.count + keras.config.epsilon())
 
     def reset_state(self):
         self.sum_squared_error.assign(0.0)
@@ -237,7 +237,7 @@ class CategoricalBrierScore(keras.metrics.Metric):
             )
 
     def result(self):
-        return self.sum_brier / (self.count + keras.backend.epsilon())
+        return self.sum_brier / (self.count + keras.config.epsilon())
 
     def reset_state(self):
         self.sum_brier.assign(0.0)

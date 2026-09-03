@@ -310,7 +310,7 @@ class AnyLoss(keras.losses.Loss):
             Tuple containing (TN, FN, FP, TP) confusion matrix entries,
             each with epsilon added for numerical stability.
         """
-        epsilon = keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
 
         if self.from_logits:
             y_pred_sigmoid = keras.activations.sigmoid(y_pred)

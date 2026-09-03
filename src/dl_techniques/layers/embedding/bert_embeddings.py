@@ -494,7 +494,10 @@ class BertEmbeddings(keras.layers.Layer):
         # autocasts its output, so the two disagree and the sum raises
         # `InvalidArgumentError: cannot compute AddV2 as input #1 was expected to
         # be a half tensor but is a float tensor`. See decisions.md D-016.
-        variable_dtype = keras.backend.standardize_dtype(self.variable_dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        variable_dtype = getattr(self.variable_dtype, "name", None) or str(self.variable_dtype)
         compute_precision = "float64" if variable_dtype == "float64" else "float32"
 
         positions = ops.cast(position_ids, compute_precision)
@@ -625,7 +628,10 @@ class BertEmbeddings(keras.layers.Layer):
         else:
             position_embeds = self._sinusoidal_position_embeddings(
                 position_ids,
-                keras.backend.standardize_dtype(word_embeds.dtype)
+                # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+                # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+                # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+                getattr(word_embeds.dtype, "name", None) or str(word_embeds.dtype)
             )
 
         embeddings = word_embeds + position_embeds

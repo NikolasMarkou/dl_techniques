@@ -1,3 +1,4 @@
+import keras
 import numpy as np
 import tensorflow as tf
 from typing import Optional, Union
@@ -70,14 +71,14 @@ def rayleigh(
             uniform_samples = tf.random.stateless_uniform(
                 shape=final_shape,
                 seed=seed_tensor,
-                minval=tf.keras.backend.epsilon(),
+                minval=keras.config.epsilon(),
                 maxval=1.0,
                 dtype=dtype
             )
         else:
             uniform_samples = tf.random.uniform(
                 shape=final_shape,
-                minval=tf.keras.backend.epsilon(),
+                minval=keras.config.epsilon(),
                 maxval=1.0,
                 dtype=dtype
             )

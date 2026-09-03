@@ -106,7 +106,7 @@ def _accumulate_cross_entropy(
     if from_logits:
         y_pred = keras.ops.softmax(y_pred, axis=-1)
 
-    epsilon = keras.backend.epsilon()
+    epsilon = keras.config.epsilon()
     y_pred = keras.ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
     y_true_int = keras.ops.cast(y_true, "int32")

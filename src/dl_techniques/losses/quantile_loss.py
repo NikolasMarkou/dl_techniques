@@ -164,7 +164,7 @@ class QuantileLoss(keras.losses.Loss):
 
         # Store quantiles as a tensor shaped for broadcasting against (batch, time, quantiles)
         # Shape: (1, 1, num_quantiles)
-        self.quantiles_tensor = keras.ops.convert_to_tensor(quantiles, dtype=keras.backend.floatx())
+        self.quantiles_tensor = keras.ops.convert_to_tensor(quantiles, dtype=keras.config.floatx())
         self.quantiles_tensor = keras.ops.reshape(self.quantiles_tensor, (1, 1, len(quantiles)))
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:

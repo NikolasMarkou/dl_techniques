@@ -67,7 +67,7 @@ class PsnrMetric(keras.metrics.Metric):
 
         # PSNR = 10 * log10(max_val^2 / MSE)
         # Use clamp to avoid log(0) when MSE is zero
-        mse_clamped = ops.maximum(mse_per_image, keras.backend.epsilon())
+        mse_clamped = ops.maximum(mse_per_image, keras.config.epsilon())
         psnr_per_image = 10.0 * ops.log10(self.max_val ** 2 / mse_clamped)
 
         self.psnr_sum.assign_add(ops.sum(psnr_per_image))

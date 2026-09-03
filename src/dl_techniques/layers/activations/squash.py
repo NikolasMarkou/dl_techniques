@@ -86,7 +86,7 @@ class SquashLayer(keras.layers.Layer):
         it. Defaults to -1, the last axis.
     :type axis: int
     :param epsilon: Small constant added under the square root so a zero
-        vector does not divide by zero. If None, ``keras.backend.epsilon()``
+        vector does not divide by zero. If None, ``keras.config.epsilon()``
         is used, which is 1e-7. Must be positive.
     :type epsilon: Optional[float]
     :param kwargs: Additional keyword arguments passed to the Layer base class,
@@ -119,7 +119,7 @@ class SquashLayer(keras.layers.Layer):
         :param axis: Axis holding each capsule vector.
         :type axis: int
         :param epsilon: Small constant for numerical stability. If None,
-            ``keras.backend.epsilon()`` (1e-7) is used. Must be positive.
+            ``keras.config.epsilon()`` (1e-7) is used. Must be positive.
         :type epsilon: Optional[float]
         :param kwargs: Additional keyword arguments for the Layer base class.
         :raises ValueError: If ``axis`` is not an ``int``, or if ``epsilon``
@@ -135,7 +135,7 @@ class SquashLayer(keras.layers.Layer):
         self.axis = axis
         # Resolve None to a number here rather than at call time, so
         # get_config() records the value the layer was actually built with.
-        self.epsilon = epsilon if epsilon is not None else keras.backend.epsilon()
+        self.epsilon = epsilon if epsilon is not None else keras.config.epsilon()
 
         logger.debug(f"Initialized SquashLayer with axis={axis}, epsilon={self.epsilon}")
 

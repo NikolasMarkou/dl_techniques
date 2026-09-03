@@ -849,7 +849,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # The sigmoid, the clip, the masks and the whole tree accumulation all
         # run at ``tree_dtype``; they must agree or the widening is undone by
         # an implicit promotion. Recorded as L-30 in the owning plan.
-        incoming_dtype = keras.backend.standardize_dtype(decision_logits.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        incoming_dtype = getattr(decision_logits.dtype, "name", None) or str(decision_logits.dtype)
         tree_dtype = (
             "float32" if incoming_dtype in ("float16", "bfloat16")
             else incoming_dtype

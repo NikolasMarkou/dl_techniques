@@ -234,7 +234,10 @@ class Sparsemax(keras.layers.Layer):
         # unchanged, read off `inputs.dtype` (not `self.compute_dtype`). Do NOT
         # hard-code "float32": that silently narrowed float64 and moved worst-case
         # error 1.31e-15 -> 1.99e-08 with every test green. See decisions.md D-007.
-        input_dtype = keras.backend.standardize_dtype(inputs.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        input_dtype = getattr(inputs.dtype, "name", None) or str(inputs.dtype)
         reduction_dtype = (
             "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
         )

@@ -99,7 +99,7 @@ class GaussianFilter(keras.layers.Layer):
             raise ValueError(f"padding must be 'valid' or 'same', got {padding}")
 
         # Process data_format
-        self.data_format = keras.backend.image_data_format() if data_format is None else data_format
+        self.data_format = keras.config.image_data_format() if data_format is None else data_format
         if self.data_format not in {"channels_first", "channels_last"}:
             raise ValueError(f"data_format must be 'channels_first' or 'channels_last', got {data_format}")
 

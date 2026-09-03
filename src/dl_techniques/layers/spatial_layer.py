@@ -289,7 +289,10 @@ def interpolate_grid(
     # true.
     coords = keras.ops.cast(keras.ops.convert_to_tensor(coords), "float32")
     grid = keras.ops.convert_to_tensor(grid)
-    if not str(keras.backend.standardize_dtype(grid.dtype)).startswith("float"):
+    # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+    # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+    # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+    if not (getattr(grid.dtype, "name", None) or str(grid.dtype)).startswith("float"):
         grid = keras.ops.cast(grid, "float32")
     value_dtype = grid.dtype
 

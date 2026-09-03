@@ -550,12 +550,12 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     """Return ``ELU(x) + 1 + epsilon``, which is strictly positive.
 
     ``ELU`` is bounded below by -1, so adding 1 gives a non-negative result
-    and adding ``keras.backend.epsilon()`` lifts it clear of zero. Use it for
+    and adding ``keras.config.epsilon()`` lifts it clear of zero. Use it for
     a rate or scale parameter that has to stay positive, such as the lambda
     of an exponential distribution.
 
     Measured over 20001 points spanning ``x`` in ``[-100, 5]``: the minimum
-    output is 1e-07, exactly ``keras.backend.epsilon()``, and no output is
+    output is 1e-07, exactly ``keras.config.epsilon()``, and no output is
     zero or negative. That floor is the whole guarantee -- it does not stay
     ahead of zero by any margin larger than ``epsilon``.
 
@@ -564,7 +564,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: Tensor of the same shape as ``x``, every element greater than 0.
     :rtype: keras.KerasTensor
     """
-    return keras.ops.elu(x) + 1.0 + keras.backend.epsilon()
+    return keras.ops.elu(x) + 1.0 + keras.config.epsilon()
 
 
 @register_dl_technique("dl_techniques.layers.activations.expanded_activations")
@@ -589,7 +589,7 @@ class EluPlusOne(BaseActivation):
                       ▼
                 y  [..., F],  y > 0
 
-    ``epsilon`` is ``keras.backend.epsilon()``, read at call time, so
+    ``epsilon`` is ``keras.config.epsilon()``, read at call time, so
     changing it globally changes this layer's floor.
     """
 

@@ -1835,7 +1835,10 @@ class CliffordNetBlock(keras.layers.Layer):
         # output verified BIT-IDENTICAL, `np.array_equal` True).
         # Widen only NARROWER-than-float32 dtypes: a float64 input must stay
         # float64, so it is computed in float64, never downcast to float32.
-        input_dtype = keras.backend.standardize_dtype(x.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        input_dtype = getattr(x.dtype, "name", None) or str(x.dtype)
         compute_dtype = (
             "float32" if input_dtype in ("float16", "bfloat16") else input_dtype
         )

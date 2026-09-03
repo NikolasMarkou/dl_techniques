@@ -981,7 +981,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         :return: Output tensor of shape (batch, seq, heads, head_dim).
         :rtype: keras.KerasTensor
         """
-        compute_dtype = keras.backend.standardize_dtype(q.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        compute_dtype = getattr(q.dtype, "name", None) or str(q.dtype)
         # DECISION plan-2026-07-29T173132-adbe605f/D-012
         # Every gate factor below is exp() of a DIFFERENCE of cumulative
         # log-gates. FOR alpha <= 1 -- the regime `call()` produces, since the

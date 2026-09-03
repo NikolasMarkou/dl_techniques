@@ -106,7 +106,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
         if self.base_loss_name == 'binary_crossentropy':
             # Manual element-wise BCE to ensure no implicit reduction occurs
             # before we want it to.
-            epsilon = keras.backend.epsilon()
+            epsilon = keras.config.epsilon()
             y_pred_safe = ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
             # BCE = -[y * log(p) + (1-y) * log(1-p)]
@@ -258,7 +258,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
             y_pred = ops.sigmoid(y_pred)
 
         # Clip predictions to prevent log(0) and log(1)
-        epsilon = keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
         y_pred = ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
         # Ensure consistent types
@@ -438,7 +438,7 @@ def create_multilabel_segmentation_loss(
                 pos_weight = 10.0  # Fallback cap for stability
 
             # Clip for numerical stability
-            epsilon = keras.backend.epsilon()
+            epsilon = keras.config.epsilon()
             y_pred_safe = ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
             # Weighted BCE formula

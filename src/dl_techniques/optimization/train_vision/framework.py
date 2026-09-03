@@ -1271,7 +1271,7 @@ class TrainingPipeline:
 
         # Clean up memory
         gc.collect()
-        keras.backend.clear_session()
+        keras.utils.clear_session()
 
         return model, self.training_history
 

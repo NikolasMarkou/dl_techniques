@@ -360,7 +360,10 @@ class GoodhartAwareLoss(keras.losses.Loss):
         # bare clip(y, self.epsilon, ...) floors to 0.0 and log() gives -inf on
         # any float16 y_pred -- reached via dtype= ON THIS LOSS or a direct
         # call, NOT via the global policy. Do not restore the literal.
-        dtype = keras.backend.standardize_dtype(y_pred.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        dtype = getattr(y_pred.dtype, "name", None) or str(y_pred.dtype)
         floor = max(self.epsilon, float(np.finfo(dtype).tiny))
         probs = keras.ops.clip(y_pred, floor, 1.0)
         probs = probs / keras.ops.sum(probs, axis=-1, keepdims=True)

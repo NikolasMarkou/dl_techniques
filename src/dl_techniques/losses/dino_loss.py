@@ -1165,7 +1165,10 @@ class KoLeoLoss(keras.losses.Loss):
         # inside a model's own `call()`. float64 is left alone (never
         # downcast); this is the same defect class as D-020 in `DINOHead`.
         features = ops.convert_to_tensor(y_pred)
-        input_dtype = keras.backend.standardize_dtype(features.dtype)
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>". D-007.
+        input_dtype = getattr(features.dtype, "name", None) or str(features.dtype)
         safe_dtype = (
             'float32' if input_dtype in ('float16', 'bfloat16') else input_dtype
         )

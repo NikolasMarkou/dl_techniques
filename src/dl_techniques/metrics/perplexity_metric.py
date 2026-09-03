@@ -227,7 +227,7 @@ class Perplexity(keras.metrics.Metric):
 
         # Compute sparse categorical crossentropy
         # Add small epsilon to prevent log(0)
-        epsilon = keras.backend.epsilon()
+        epsilon = keras.config.epsilon()
         y_pred = keras.ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
         # Convert y_true to int32 for indexing
@@ -316,7 +316,7 @@ def perplexity(
         y_pred = keras.ops.softmax(y_pred, axis=-1)
 
     # Add small epsilon to prevent log(0)
-    epsilon = keras.backend.epsilon()
+    epsilon = keras.config.epsilon()
     y_pred = keras.ops.clip(y_pred, epsilon, 1.0 - epsilon)
 
     # Convert y_true to int32 for indexing

@@ -178,7 +178,7 @@ class GatedMLP(keras.layers.Layer):
         compute_output_shape() put `filters` on axis -1 or on
         axis 1. `mid` is the width conv_down is built for.
         data_format=None resolves at __init__ time through
-        keras.backend.image_data_format().
+        keras.config.image_data_format().
 
     :param filters: Number of output channels for all three convolutions.
         Must be positive.
@@ -204,7 +204,7 @@ class GatedMLP(keras.layers.Layer):
         five choices. Defaults to 'linear', which is the identity.
     :type output_activation: str
     :param data_format: 'channels_last' or 'channels_first'. Defaults to None,
-        which reads ``keras.backend.image_data_format()``.
+        which reads ``keras.config.image_data_format()``.
     :type data_format: Optional[str]
     :param kwargs: Extra arguments for ``keras.layers.Layer`` (``name``,
         ``dtype``, and so on).
@@ -323,7 +323,7 @@ class GatedMLP(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.attention_activation = deserialize_activation(attention_activation)
         self.output_activation = deserialize_activation(output_activation)
-        self.data_format = data_format or keras.backend.image_data_format()
+        self.data_format = data_format or keras.config.image_data_format()
 
         # Validate data format
         if self.data_format not in {"channels_first", "channels_last"}:

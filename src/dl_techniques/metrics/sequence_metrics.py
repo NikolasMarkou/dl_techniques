@@ -88,7 +88,7 @@ class SequenceAccuracy(keras.metrics.Metric):
 
     def result(self) -> keras.KerasTensor:
         """Compute final sequence accuracy."""
-        return self.correct / (self.total + keras.backend.epsilon())
+        return self.correct / (self.total + keras.config.epsilon())
 
     def reset_state(self) -> None:
         self.correct.assign(0.0)
@@ -145,7 +145,7 @@ class BitErrorRate(keras.metrics.Metric):
 
     def result(self) -> keras.KerasTensor:
         """Compute bit error rate."""
-        return self.errors / (self.total + keras.backend.epsilon())
+        return self.errors / (self.total + keras.config.epsilon())
 
     def reset_state(self) -> None:
         self.errors.assign(0.0)
